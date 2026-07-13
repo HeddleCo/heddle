@@ -2,6 +2,29 @@
 use super::*;
 
 #[test]
+fn native_capture_excludes_git_admin_storage_created_after_init() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("source.txt"), "one\n").unwrap();
+    heddle(&["capture", "-m", "one"], Some(temp.path())).unwrap();
+
+    init_git_repo(temp.path());
+    std::fs::write(temp.path().join("source.txt"), "two\n").unwrap();
+    heddle(&["capture", "-m", "two"], Some(temp.path())).unwrap();
+
+    let patch = heddle(&["diff", "HEAD~1", "HEAD", "--patch"], Some(temp.path())).unwrap();
+    assert!(patch.contains("source.txt"));
+    assert!(
+        !patch.contains(".git/"),
+        "Git admin files leaked into Native history: {patch}"
+    );
+
+    let status = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
+    let status: Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["changed_path_count"], 0, "{status}");
+}
+
+#[test]
 fn status_text_counts_dirty_worktree_paths() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();

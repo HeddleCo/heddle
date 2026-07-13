@@ -1761,9 +1761,7 @@ fn validate_git_commit_preconditions_extended(
 
     if merge_paths.is_empty() {
         blockers.push(
-            "merge produced no changed paths — git commit would be empty (use heddle merge \
-             without --git-commit when nothing changes)"
-                .to_string(),
+            "integration produced no changed paths — no Git commit is needed".to_string(),
         );
     }
 
@@ -3065,8 +3063,8 @@ mod tests {
         );
     }
 
-    /// Empty merge-paths case: `write_git_commit` errors with "merge
-    /// produced no changed paths" inside `git_commit.rs`, which only
+    /// Empty merge-paths case: `write_git_commit` rejects an empty
+    /// integration commit inside `git_commit.rs`, which only
     /// surfaces AFTER `snapshot_merge_with_attribution` has advanced
     /// heddle. The up-front check catches it before snapshot.
     #[test]
@@ -3076,7 +3074,7 @@ mod tests {
         assert!(
             blockers
                 .iter()
-                .any(|b| b.contains("merge produced no changed paths")),
+                .any(|b| b.contains("integration produced no changed paths")),
             "empty merge_paths must surface as a blocker: {blockers:?}"
         );
     }

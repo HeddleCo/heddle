@@ -13,7 +13,8 @@ use objects::{
     object::{ActionId, ContentHash, StateAttachment, StateId},
     store::ObjectStore,
 };
-use repo::Repository;
+use refs::RefExpectation;
+use repo::{CollaborationStore, CollaborationWriteDisposition, Repository};
 use wire::{
     GitLaneTransferIntent, ObjectId, ObjectType, PlannedObject, RepositoryTransferPlan,
     StateClosureOptions,
@@ -127,6 +128,39 @@ impl LocalSync {
         )?;
         for object in &transfer_plan.partitions.sidecar_objects {
             self.copy_planned_sidecar(target, object)?;
+        }
+        copied += self.copy_collaboration(target)?;
+        Ok(copied)
+    }
+
+    fn copy_collaboration(&self, target: &Repository) -> Result<usize> {
+        let source = CollaborationStore::open(self.source.heddle_dir())?;
+        let target = CollaborationStore::open(target.heddle_dir())?;
+        let mut copied = 0;
+        for id in source.operation_ids()? {
+            let operation = source
+                .read_operation(&id)?
+                .ok_or_else(|| anyhow!("Collaboration operation {id} not found in source"))?;
+            let bytes = operation.operation.encode()?;
+            if target.write_operation_bytes(&bytes)?.disposition
+                == CollaborationWriteDisposition::Created
+            {
+                copied += 1;
+            }
+        }
+        Ok(copied)
+    }
+
+    pub fn fetch_markers(&self, target: &Repository) -> Result<usize> {
+        let mut copied = 0;
+        for (name, state) in self.list_markers()? {
+            copied += self.fetch_state(target, &state)?;
+            let name = objects::object::MarkerName::new(name);
+            let current = target.refs().get_marker(&name)?;
+            if current != Some(state) {
+                let expected = current.map_or(RefExpectation::Missing, RefExpectation::Value);
+                target.refs().set_marker_cas(&name, expected, &state)?;
+            }
         }
         Ok(copied)
     }

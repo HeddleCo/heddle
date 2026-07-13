@@ -20,6 +20,7 @@ use heddle_core::{
     is_native_transport_mismatch, list_plain_git_remotes, list_remotes, local_pull_changed,
     plan_pull, pull_should_materialize, show_plain_git_remote, show_remote,
 };
+use heddle_git_projection::credential::EmbeddingSafeCredentialProvider;
 // Re-export under the historical crate-local names for sibling modules.
 pub(crate) use heddle_core::{resolve_default_remote_name, resolved_default_remote_name};
 use objects::{
@@ -33,8 +34,7 @@ use sley::{
     ConfigEdit, ConfigEditPlan, ConfigEditScope, HeadUpdateOptions, RefChange, ReferenceTarget,
     RemoteConfigRefusal, RemoteConfigRemove, RemoteConfigSet, Repository as SleyRepository,
     remote::{
-        CredentialHelperProvider, FetchOptions, PackGenerationProgress,
-        ProgressSink as SleyProgressSink, TransferProgress,
+        FetchOptions, PackGenerationProgress, ProgressSink as SleyProgressSink, TransferProgress,
     },
 };
 
@@ -229,7 +229,15 @@ pub async fn cmd_pull(
     insecure: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
-    let has_default_remote = resolved_default_remote_name(&repo)?.is_some();
+    let default_remote = resolved_default_remote_name(&repo)?;
+    let has_default_remote = default_remote.is_some();
+    let configured_remote_name = match remote.as_deref() {
+        Some(name) => RemoteConfig::open(&repo)
+            .ok()
+            .and_then(|config| config.get(name).ok())
+            .map(|_| name.to_string()),
+        None => default_remote,
+    };
     let pull_uses_hosted_network = super::push_target_is_hosted_network(&repo, remote.as_deref());
     // Match preflight_native_remote_transport: overlay capability never
     // treats a git URL as a native-transport mismatch.
@@ -278,9 +286,9 @@ pub async fn cmd_pull(
                 &path,
                 remote_thread,
                 local_thread_name,
+                configured_remote_name.as_deref(),
                 &plan,
                 cli,
-                plan.lazy,
             )
             .await?;
         }
@@ -395,11 +403,12 @@ fn pull_git_overlay(
         received_bytes: 0,
         received_objects: 0,
     };
-    let mut credentials = CredentialHelperProvider::new(Some(&git_config));
+    let mut credentials = EmbeddingSafeCredentialProvider::new(&git_config);
+    let fetch_refspecs = vec![remote_ref.clone(), "+refs/notes/*:refs/notes/*".to_string()];
     let outcome = git
         .fetch(
             &remote_name,
-            std::slice::from_ref(&remote_ref),
+            &fetch_refspecs,
             git_pull_fetch_options(&remote_branch),
             &mut credentials,
             &mut sley_progress,
@@ -475,29 +484,28 @@ fn pull_git_overlay(
             materialized,
         )?;
     }
-    if old_state.as_ref() != Some(&new_state) {
-        if let Err(error) = repo
+    if old_state.as_ref() != Some(&new_state)
+        && let Err(error) = repo
             .refs()
             .set_thread(&ThreadName::new(local_branch), &new_state)
-        {
-            let rollback = changed.then(|| {
-                rollback_git_pull_branch(
-                    repo,
-                    &git,
-                    &git_config,
-                    &local_ref,
-                    old_oid,
-                    new_oid,
-                    materialized,
-                )
-            });
-            return Err(git_pull_metadata_publish_advice(
-                local_branch,
-                changed,
-                &error,
-                rollback.as_ref().and_then(|result| result.as_ref().err()),
-            ));
-        }
+    {
+        let rollback = changed.then(|| {
+            rollback_git_pull_branch(
+                repo,
+                &git,
+                &git_config,
+                &local_ref,
+                old_oid,
+                new_oid,
+                materialized,
+            )
+        });
+        return Err(git_pull_metadata_publish_advice(
+            local_branch,
+            changed,
+            &error,
+            rollback.as_ref().and_then(|result| result.as_ref().err()),
+        ));
     }
     let changed_paths = changed_paths_between_states(repo, old_state.as_ref(), Some(&new_state))?;
     let output = PullOutput {
@@ -869,11 +877,11 @@ async fn pull_local(
     source_path: &std::path::Path,
     remote_thread: &str,
     local_thread: Option<&str>,
+    configured_remote_name: Option<&str>,
     plan: &PullPlan,
     cli: &Cli,
-    lazy: bool,
 ) -> Result<()> {
-    if lazy {
+    if plan.lazy {
         return Err(map_pull_failure(PullFailure::LocalLazyUnsupported {
             source_path: source_path.display().to_string(),
         }));
@@ -901,7 +909,7 @@ async fn pull_local(
         .get_thread(&ThreadName::new(remote_thread))?
         .context(format!("Thread {} not found in source", remote_thread))?;
 
-    let objects_copied = source.fetch_state(repo, &state_id)?;
+    let objects_copied = source.fetch_state(repo, &state_id)? + source.fetch_markers(repo)?;
 
     let track_to_update = local_thread.unwrap_or(remote_thread);
     let track_tn = ThreadName::new(track_to_update);
@@ -939,6 +947,14 @@ async fn pull_local(
     } else {
         repo.refs().set_thread(&track_tn, &state_id)?;
     }
+    if let Some(remote_name) = configured_remote_name {
+        repo.refs()
+            .set_remote_thread(remote_name, &ThreadName::new(remote_thread), &state_id)?;
+    }
+
+    let remote_label = configured_remote_name
+        .map(str::to_string)
+        .unwrap_or_else(|| source_path.display().to_string());
 
     if should_output_json(cli, Some(repo.config())) {
         let summary = LocalTransferSummary {
@@ -948,7 +964,7 @@ async fn pull_local(
         let output = heddle_pull_output_from_local(
             Some(plan),
             changed,
-            source_path.display().to_string(),
+            remote_label.clone(),
             track_to_update.to_string(),
             &summary,
             build_repository_verification_state(repo),
@@ -962,24 +978,13 @@ async fn pull_local(
         let output = heddle_pull_output_from_local(
             Some(plan),
             changed,
-            source_path.display().to_string(),
+            remote_label,
             remote_thread.to_string(),
             &summary,
             build_repository_verification_state(repo),
         );
         let text = format_pull_outcome_text(&output.outcome, 8);
-        println!(
-            "{} pulled {} from {} ({})",
-            style::ok_marker(),
-            style::state_id(&state_id.short().to_string()),
-            style::bold(remote_thread),
-            style::count(objects_copied, "object")
-        );
-        debug_assert!(
-            text.headline.contains(remote_thread) || text.headline.contains("pulled"),
-            "domain headline: {}",
-            text.headline
-        );
+        println!("{} {}", style::ok_marker(), text.headline);
         // Domain detail lines (e.g. hosted state field when objects omitted).
         for line in &text.detail_lines {
             if let Some(state) = line.strip_prefix("state: ") {
@@ -1363,10 +1368,7 @@ fn remove_git_overlay_remote(git: &SleyRepository, name: &str) -> Result<()> {
         }
         if let Some(path) = &source.target_path {
             if !git_owns_config_path(git, path) {
-                anyhow::bail!(
-                    "Remote '{name}' is defined outside this repository's Git config; refusing to edit {}",
-                    path.display()
-                );
+                return Err(git_remote_external_config_advice(name, path));
             }
             if paths.contains(path) {
                 continue;

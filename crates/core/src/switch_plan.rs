@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Pure `heddle switch` planning (no FS I/O).
+//! Pure thread-switch planning (no FS I/O).
 //!
 //! One plan type for verify + HEAD alias + success line. State resolution
 //! and materialization stay CLI-owned.

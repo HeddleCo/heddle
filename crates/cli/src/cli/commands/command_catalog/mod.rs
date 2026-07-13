@@ -3405,10 +3405,10 @@ fn side_effect_class(contract: CommandContract) -> &'static str {
         "initialize"
     } else if contract.writes_hooks {
         "hook_mutation"
-    } else if contract.writes_config {
-        "config_mutation"
     } else if contract.network_io {
         "network_mutation"
+    } else if contract.writes_config {
+        "config_mutation"
     } else if contract.daemon_process {
         "daemon_process"
     } else if contract.external_command {

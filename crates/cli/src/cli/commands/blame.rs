@@ -272,7 +272,7 @@ fn state_fallback_line_info(
 ) -> LineInfo {
     let (principal, agent) = attribution_parts(&state.attribution);
     LineInfo {
-        state_id: state_id,
+        state_id,
         attribution: state.attribution.clone(),
         extra_origins: 0,
         timestamp: display_ts.to_string(),

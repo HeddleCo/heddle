@@ -21,10 +21,10 @@ use super::{
         build_repository_verification_state,
         build_repository_verification_state_with_worktree_status,
         git_overlay_mutation_preflight_advice_with_worktree_status,
-        repository_verification_blocked_advice,
+        raw_git_operation_mutation_advice, repository_verification_blocked_advice,
     },
 };
-use crate::git_projection_engine::git_core::{
+use heddle_git_projection::git_core::{
     git_config_identity_with_global_fallback, principal_is_default_unknown,
 };
 
@@ -60,6 +60,9 @@ fn preflight_checkpoint_like_with_worktree_status(
     action: &str,
     worktree_status: &GitOverlayWorktreeStatus,
 ) -> Result<()> {
+    if let Some(advice) = raw_git_operation_mutation_advice(repo, action)? {
+        return Err(anyhow!(advice));
+    }
     preflight_checkpoint_ref_update_with_worktree_status(repo, action, worktree_status)?;
     if let Some(advice) = git_overlay_mutation_preflight_advice_with_worktree_status(
         repo,

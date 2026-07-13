@@ -1969,9 +1969,9 @@ mod tests {
                                 tool_call_id: tool_call_id.to_string(),
                             }),
                             status: "succeeded".to_string(),
-                            before_state: vec![before; 16],
-                            after_state: vec![after; 16],
-                            capture_state: vec![after; 16],
+                            before_state: vec![before; 32],
+                            after_state: vec![after; 32],
+                            capture_state: vec![after; 32],
                             capture_oplog_batch_id: Some(finished_at_ms as u64),
                             changed: true,
                             touched_paths: vec![format!("src/{step_id}.rs")],
@@ -2065,7 +2065,7 @@ mod tests {
                                 tool_call_id: "call-1".to_string(),
                             }),
                             tool_name: "shell".to_string(),
-                            before_state: vec![1; 16],
+                            before_state: vec![1; 32],
                             payload: None,
                             started_at_ms: 1_700_000_000_000,
                         },
@@ -2113,7 +2113,7 @@ mod tests {
             .into_inner();
         assert_eq!(status.current_branch_id, "tlb-main");
         assert_eq!(status.current_step_id, "tls-step-2");
-        assert_eq!(status.current_state.unwrap().state_id, vec![3; 16]);
+        assert_eq!(status.current_state.unwrap().state_id, vec![3; 32]);
         assert_eq!(status.step_count, 2);
 
         let listed = service
@@ -2161,7 +2161,7 @@ mod tests {
         assert_eq!(moved.operation.unwrap().kind, "cursor_moved");
         let moved_status = moved.status.unwrap();
         assert_eq!(moved_status.current_step_id, "tls-step-1");
-        assert_eq!(moved_status.current_state.unwrap().state_id, vec![2; 16]);
+        assert_eq!(moved_status.current_state.unwrap().state_id, vec![2; 32]);
 
         let moved = service
             .seek_to_native_tool_call(Request::new(SeekTimelineToNativeToolCallRequest {
@@ -2179,7 +2179,7 @@ mod tests {
             .into_inner();
         let moved_status = moved.status.unwrap();
         assert_eq!(moved_status.current_step_id, "tls-step-2");
-        assert_eq!(moved_status.current_state.unwrap().state_id, vec![3; 16]);
+        assert_eq!(moved_status.current_state.unwrap().state_id, vec![3; 32]);
     }
 
     #[tokio::test]
@@ -2214,7 +2214,7 @@ mod tests {
         assert_eq!(summary.step_id, "tls-step-2");
         assert_eq!(summary.native.as_ref().unwrap().harness, "opencode");
         assert_eq!(summary.native.as_ref().unwrap().tool_call_id, "call-2");
-        assert_eq!(current.cursor_state, vec![3; 16]);
+        assert_eq!(current.cursor_state, vec![3; 32]);
     }
 
     #[tokio::test]

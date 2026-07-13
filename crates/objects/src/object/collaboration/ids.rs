@@ -212,6 +212,28 @@ pub struct LegacySourceLocator {
     pub blob_hash: ContentHash,
 }
 
+impl LegacySourceLocator {
+    pub fn new(
+        state_id: StateId,
+        attachment_id: StateAttachmentId,
+        blob_hash: ContentHash,
+    ) -> Self {
+        Self {
+            state_id,
+            attachment_id,
+            blob_hash,
+        }
+    }
+
+    pub fn identity_bytes(&self) -> [u8; 96] {
+        let mut bytes = [0; 96];
+        bytes[..32].copy_from_slice(self.state_id.as_bytes());
+        bytes[32..64].copy_from_slice(self.attachment_id.as_hash().as_bytes());
+        bytes[64..].copy_from_slice(self.blob_hash.as_bytes());
+        bytes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,27 +256,5 @@ mod tests {
         assert_eq!(&bytes[..32], &[1; 32]);
         assert_eq!(&bytes[32..64], &[2; 32]);
         assert_eq!(&bytes[64..], &[3; 32]);
-    }
-}
-
-impl LegacySourceLocator {
-    pub fn new(
-        state_id: StateId,
-        attachment_id: StateAttachmentId,
-        blob_hash: ContentHash,
-    ) -> Self {
-        Self {
-            state_id,
-            attachment_id,
-            blob_hash,
-        }
-    }
-
-    pub fn identity_bytes(&self) -> [u8; 96] {
-        let mut bytes = [0; 96];
-        bytes[..32].copy_from_slice(self.state_id.as_bytes());
-        bytes[32..64].copy_from_slice(self.attachment_id.as_hash().as_bytes());
-        bytes[64..].copy_from_slice(self.blob_hash.as_bytes());
-        bytes
     }
 }

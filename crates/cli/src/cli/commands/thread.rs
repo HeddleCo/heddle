@@ -1988,10 +1988,10 @@ pub(crate) fn cmd_thread_switch(
         if repo.capability() == repo::RepositoryCapability::GitOverlay
             && repo.root().join(".git").exists()
         {
-            let mut bridge = crate::git_projection_engine::GitProjection::new(repo);
+            let mut bridge = heddle_git_projection::GitProjection::new(repo);
             match bridge.write_through_thread_checkout(&name)? {
-                crate::git_projection_engine::WriteThroughOutcome::Wrote(_) => {}
-                crate::git_projection_engine::WriteThroughOutcome::Skipped(reason) => {
+                heddle_git_projection::WriteThroughOutcome::Wrote(_) => {}
+                heddle_git_projection::WriteThroughOutcome::Skipped(reason) => {
                     return Err(anyhow!(thread_switch_git_checkout_skipped_advice(
                         &name,
                         reason.to_string()

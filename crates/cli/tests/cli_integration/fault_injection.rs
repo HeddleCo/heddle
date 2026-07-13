@@ -218,7 +218,7 @@ fn crash_capture_at(repo: &std::path::Path, checkpoint: &str, message: &str) {
 
 fn crash_goto_at(repo: &std::path::Path, checkpoint: &str, target: &str) {
     let crashed = heddle_output_with_env(
-        &["switch", target],
+        &["thread", "switch", target],
         Some(repo),
         &[("HEDDLE_FAULT_INJECT", checkpoint)],
     )
@@ -326,6 +326,7 @@ fn snapshot_atomicity_after_commit_crash_recovers_once() {
 #[ignore = "fault-injection: spawns child processes with HEDDLE_FAULT_INJECT"]
 fn goto_after_commit_crash_recovers_detached_head_once() {
     let (temp, baseline_tip) = init_repo_with_baseline();
+    heddle(&["thread", "create", "baseline"], Some(temp.path())).expect("create baseline thread");
 
     std::fs::write(temp.path().join("base.txt"), "second").unwrap();
     heddle(&["capture", "-m", "second"], Some(temp.path())).expect("second snapshot");
@@ -338,7 +339,7 @@ fn goto_after_commit_crash_recovers_detached_head_once() {
     crash_goto_at(
         temp.path(),
         "goto_after_oplog_commit_before_ref_publish",
-        &baseline_tip,
+        "baseline",
     );
 
     let recovered_head = current_head_tip(temp.path());
@@ -355,6 +356,52 @@ fn goto_after_commit_crash_recovers_detached_head_once() {
         current_main_tip(temp.path()),
         second_tip,
         "goto recovery must not move the source thread ref",
+    );
+}
+
+#[test]
+#[ignore = "fault-injection: spawns child processes with HEDDLE_FAULT_INJECT"]
+fn adopt_crash_before_authority_flip_preserves_overlay_and_rerun_converges() {
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let work = temp.path().join("work");
+    let origin_repo = SleyRepository::init_bare(&origin).expect("init origin");
+    let blob = origin_repo.write_blob(b"seed\n").unwrap();
+    let empty = git_empty_tree_oid(&origin_repo);
+    let mut tree_editor = origin_repo.edit_tree(&empty).expect("tree editor");
+    tree_editor.upsert("seed.txt", EntryKind::Blob, blob);
+    let tree = origin_repo.write_tree(tree_editor).unwrap();
+    git_commit_with_tree(&origin_repo, Some("refs/heads/main"), tree, "seed", &[]);
+
+    heddle(
+        &["clone", origin.to_str().unwrap(), work.to_str().unwrap()],
+        Some(temp.path()),
+    )
+    .expect("clone overlay");
+
+    let crashed = heddle_output_with_env(
+        &["adopt"],
+        Some(&work),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "adopt_after_import_before_authority_flip",
+        )],
+    )
+    .expect("spawn adopt");
+    assert_intentional_snapshot_crash(crashed, "adopt_after_import_before_authority_flip");
+
+    let repo = Repository::open(&work).expect("open after crash");
+    assert_eq!(
+        repo.source_authority(),
+        repo::RepositorySourceAuthority::GitOverlay
+    );
+    drop(repo);
+
+    heddle(&["adopt"], Some(&work)).expect("rerun adopt");
+    let repo = Repository::open(&work).expect("open adopted repo");
+    assert_eq!(
+        repo.source_authority(),
+        repo::RepositorySourceAuthority::Native
     );
 }
 

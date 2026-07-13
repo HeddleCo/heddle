@@ -1,6 +1,6 @@
 # heddle#451 — On-disk schema-versioning policy + per-format audit
 
-**Status:** spike deliverable (decision doc). **Motivated by:** the #449 brick — the
+**Status:** accepted policy, refreshed for repository format v3 on 2026-07-13. **Motivated by:** the #449 brick — the
 oplog `OpRecord` payload schema changed with no version discriminator; the new reader
 silently misparsed legacy bytes and bricked pre-cutover repos. **Scope:** every on-disk
 format a v0.3.0 binary writes, audited against the discipline below; the bump/migration
@@ -15,15 +15,11 @@ cannot point at the row of §2 it updates and the rule of §3 it follows is not 
 
 ## 1. Verdict
 
-**v0.3.0 may ship after one XS fast-follow lands: enforce `[repository] version` at
-`Repository::open`.** Today that field is written at init
-(`crates/repo/src/repo_config.rs:429`, struct at `repo_config.rs:240-242`) and **read by
-nothing** — a dead stamp. Every *container* format is individually versioned and refuses
-newer versions, so nothing silently corrupts today; but the object-store record payloads
-(State/Tree/Action) carry **no version discriminator**, and the planned #593 change
-would otherwise force either probe-decoding (the #449 anti-pattern) or bricking.
-Enforcing the repo-level version turns every future bump into a clean
-refuse-with-advice for older binaries and a ledgered migration for newer ones.
+**Repository format v3 is the enforced compatibility gate.** `Repository::open`
+refuses both newer formats and pre-v3 repositories before reading incompatible
+state or ref bytes. The refusal leaves the repository unchanged and directs users
+to recreate it or re-adopt its Git history. Container formats retain their own
+version checks beneath that coarse repository boundary.
 
 ## 2. Version-stamp inventory
 
@@ -36,14 +32,14 @@ to do with today’s bytes.
 | 1 | **oplog container** `oplog.bin` | binary | `LMOPLOG\0` magic + `version: u32`; v4 = latest, v2/v3 decode-only migration sources | refuse: `unsupported oplog version {n}` from `load()` dispatch; eager atomic (temp+rename) migration of v2/v3/stale-v4 on open via `ensure_latest` | `crates/oplog/src/oplog/packed_oplog.rs:28` (magic), `:59-62` (sealed `V2/V3/V4`, `Latest = V4`), `:1018-1028` (`load()` refusal), `:247-276` (`ensure_latest` migrate + `write_file_atomic`), `:284-302` (`read_head_id` refuses non-latest) |
 | 2 | **OpRecord payload schema** (entries inside #1) | rmp-serde, positional | `record_schema_version: u32` in the v4 header; sealed decode-only schema types v1 (`pre-atomic-v1`), v2 (`atomic-no-head-v2`), v3 (`current-v3`) | refuse: `unsupported OpRecord schema version {n}` (`schema_version_from_u32`); reader selects decode path by stored version, never probes — except the legacy `parse_unversioned_entry` path reachable only from v2/v3 containers | `crates/oplog/src/oplog/op_record_codec.rs:9-18` (invariant), `:20-25` (#352 exception, §6), `packed_oplog.rs:122-157` (v4 decode selects by header schema), `:1513-1527` (probe path, v2/v3 only) |
 | 3 | **oplog EOF index footer** | binary | `LMOPIDX\0` + `INDEX_VERSION = 1` | refuse (`unsupported oplog index version`) | `packed_oplog.rs:29-30,905` |
-| 4 | **packfiles** `objects/packs/*.pack` | binary | `LMPK` magic + `version = 2` + blake3 trailer | refuse: `Unsupported pack version` / `Pack checksum mismatch`; unknown entry `ObjectType`/id-tag byte also refuses | `crates/objects/src/store/pack/mod.rs:41-46` (spec), `shared.rs:100-129` (`verify_container`), `mod.rs:48-58` (`ObjectType::from_u8` → `None` → error), `shared.rs:62-64` (unknown id tag) |
+| 4 | **packfiles** `objects/packs/*.pack` | binary | `LMPK` magic + `version = 3` + blake3 trailer; object type 5 is `StateAttachment` | refuse: `Unsupported pack version` / `Pack checksum mismatch`; unknown entry `ObjectType`/id-tag byte also refuses | `crates/objects/src/store/pack/mod.rs` (`pack_container_spec`, `ObjectType`), `shared.rs` (`verify_container`) |
 | 5 | **pack index** `*.idx` | binary | `LMI\0` + `INDEX_VERSION = 2` | refuse | `pack_index.rs:6-7,69-78` |
 | 6 | **loose-object compression envelope** (all of blobs/trees/states/actions) | 1 tag byte + u64 size + payload | tag byte is `CompressionType` 0/1/2, not a format version; `is_compressed` *sniffs* (zstd magic check), short inputs “assume uncompressed” | unknown tag → `InvalidType` error; the sniffing is in-band heuristic, not a stamp | `crates/objects/src/store/compression/mod.rs:14-40,238-262,289-298` |
 | 7 | **State objects** `objects/states/**` (also embedded in packs) | rmp-serde, **positional** | **NONE.** Implicit convention only: tail-append optional fields with `#[serde(default)]`, documented on the struct | **accidental refuse**: rmp positional decode of a longer tuple fails `LengthMismatch` (verified empirically — even when the new tail fields are `None`, because rmp serializes `None` as nil, not absent); a same-arity *type* change fails with a type error both directions. Never silent-misparse for struct changes, but the error is a raw serialization error with zero advice, and nothing selects a decode path | `crates/objects/src/object/state_core.rs:187-200` (tail invariant doc), `:215` (tail marker); writer `crates/objects/src/store/fs/fs_impl.rs:719` (`rmp_serde::to_vec(state)`); reader validates only the embedded id, not bytes: `fs_impl.rs:70-79` |
 | 8 | **Tree objects** `objects/trees/**` | rmp-serde, positional | **NONE.** `TreeEntry` = 4 required fields | same accidental-refuse class as #7. NOTE: tree/state IDs are **custom hash framings, not hashes of the rmp bytes** (`ContentHash::compute_typed_with_len("tree", …)`), so re-encoding bytes is ID-stable — store migrations are possible without rewriting history | `crates/objects/src/object/tree.rs:122-127` (entry), `:270-277` (framing hash); `fs_impl.rs:56-68` (load recomputes framing hash, catches corruption) |
 | 9 | **Action objects** `objects/actions/**` | rmp-serde, positional | **NONE** | same class; load recomputes `compute_id` | `fs_impl.rs:86-101` |
 | 10 | **Versioned sidecar blobs** (provenance, risk signals, review signatures, discussions, structured conflict, visibility sidecars) — content-addressed, referenced by hash from State tail fields | rmp-serde | `format_version: u8` per blob via `versioned_msgpack_blob!`; provenance hand-rolls the same | refuse: `unsupported … version {n}` (strict `!=` for most; risk-signal/op-index use `>` reject-newer) | `crates/objects/src/object/versioned_blob.rs:14-19,50-51` (macro), `state_provenance.rs:64,84-86`, `structured_conflict.rs:28-34,158-160`, `risk_signal.rs:28-42` |
-| 11 | **HEAD** + loose refs `refs/threads/*`, `refs/markers/*`, remotes | bare text (`ref: <thread>` / hex ChangeId) | NONE | parse-error refuse (`HeadParseError` / `ChangeIdTextError`) — no silent misread, no advice | `crates/refs/src/refs/head.rs:19-30`, `text.rs:10-13` |
+| 11 | **HEAD** + loose refs `refs/threads/*`, `refs/markers/*`, remotes | bare text (`ref: <thread>` / 32-byte `StateId`) | protected by repository format v3 | parse-error refuse (`HeadParseError` / `StateIdTextError`) | `crates/refs/src/refs/head.rs`, `text.rs` |
 | 12 | **packed-refs** | git-style text | NONE (comment header only) | ⚠️ **silently skips** unparseable/unknown lines (`continue`) — a future line-format extension would silently vanish refs from an old binary’s view. The one surface today whose failure mode is silent-drop rather than refuse | `crates/refs/src/refs/packed_model.rs:24-46` |
 | 13 | **ref summary index** (cache) | text | `heddle-ref-summary-v1` first line, strict match | refuse → callers fall back to enumerating storage; rebuilt on write | `crates/refs/src/refs/ref_summary_index.rs:14,107-110`; fallback `refs_manager.rs:621-625` |
 | 14 | **operation log index** `cache/operation_index/buckets/*` (cache) | rmp-serde | `format_version: u8 = 1` per bucket; rejects **newer only** | refuse newer; cache — rebuildable | `crates/refs/src/refs/operation_index.rs:38,151-157,279,297` |
@@ -51,7 +47,7 @@ to do with today’s bytes.
 | 16 | **commit graph** `LMGRAPH\0` (cache) | binary | `GRAPH_VERSION = 1` | refuse → warn + rebuild empty | `crates/repo/src/commit_graph_persistence.rs:17-18,128-130`; `commit_graph.rs:50-78` |
 | 17 | **thread records** `thread_records/*.json` + `Thread` JSON | serde_json (named) | NONE — but self-describing; `#[serde(default)]` throughout, unknown fields ignored | additive changes tolerated both directions; renames/type changes refuse | `crates/repo/src/thread_storage.rs:24-60`, `thread_record_store.rs` |
 | 18 | **thread manifest** `manifest.toml` | TOML | `SCHEMA_VERSION: u32 = 3`, strict `!=` refuse | refuse, with the **model error message**: “manifest at … uses schema {x} but this binary speaks {y}” | `crates/repo/src/thread_manifest.rs:48,346-356` |
-| 19 | **repo config** `config.toml` | TOML | `[repository] version = 1` — **written, never read** | ⚠️ blind-proceed: an old binary opening a hypothetical version-2 repo checks nothing | `crates/repo/src/repo_config.rs:240-242` (field), `:429` (default write); zero read sites (grep `repository.version`) |
+| 19 | **repo config** `config.toml` | TOML | `[repository] version = 3`, enforced on open | refuse newer with `RepositoryFormatTooNew`; refuse older with `RepositoryFormatMigrationRequired`; neither path rewrites the config | `crates/repo/src/repo_config.rs`, `repository.rs` |
 | 20 | **migration ledger** `state/schema_versions.toml` | TOML set of applied migration ids | self-describing | declarative forward-only migration framework, idempotent, atomic save; 1 registered migration | `crates/repo/src/migration.rs:1-30,119-153,163-168` |
 | 21 | **JSON state sidecars**: stash, sessions, merge state, `REBASE_STATE`/`BISECT_*` etc. | serde_json (named) | NONE | additive-tolerant; ⚠️ list paths skip unreadable entries silently (`let Ok(..) else continue`) | `crates/repo/src/stash.rs:67,91`, `session_storage.rs:125,150`, `merge_state.rs:190,213` |
 | 22 | **identity** `identity.toml` / `device-identity.toml`; agents `agents/*.toml`; `fsmonitor.toml`; `lazy-hydrator.toml`; `shallow` (text id list); worktree `objectstore` pointer (text path) | TOML/text | NONE | tolerant / parse-error refuse; agents are ephemeral runtime state | `identity.rs:188-319`, `agent_registry.rs:4`, `shallow.rs:22-25` |
@@ -86,6 +82,8 @@ caller-visible fallback (the `repository_tree.rs:230-236` pattern), not an accid
 `config.toml [repository] version` is THE coarse gate protecting surfaces that are
 impractical to stamp per-record (rows 7–9, 11–12, 21–24). Rules:
 - `Repository::open` MUST refuse `version > SUPPORTED_REPO_FORMAT` with advice (R3).
+- `Repository::open` MUST also refuse older repositories before decoding any
+  unstamped state or ref payload whose format changed.
 - Any format change that older binaries could otherwise *silently* mishandle — or that
   changes unstamped-surface bytes — MUST bump the repo version as part of its
   migration, so older binaries refuse the whole repo instead of tripping mid-operation.
@@ -151,7 +149,7 @@ next refs-format touch.
 
 | Change | Surfaces hit | Under current stamping | Required treatment |
 |---|---|---|---|
-| **#593** Principal `String`→`Vec<u8>` (fidelity epic #564/#568) | rows 7, 19 | **Would brick**: new binary cannot decode any existing State (type error, §2 ground truth); no version exists to select a legacy decode path — naive impl forces probe-decoding (#449 anti-pattern) | Bump: repo version → 2 with an eager, ledgered store migration rewriting all states (ID-stable). 0.3 binaries then refuse migrated repos cleanly **iff the R2 gate shipped in 0.3** |
+| **v3 identity cutover** (including the former #593 work) | rows 4, 7, 11, 19 | State identity and ref widths changed incompatibly | Repository version 3 is a pre-alpha replacement boundary: v2 is refused unchanged; users recreate or re-adopt instead of probe-decoding legacy state |
 | **#575** first-class annotated-tag objects | rows 4, 7, 11 | New pack `ObjectType` → 0.3 refuses *any* pack containing a tag entry (opaque error mid-sync); loose layout addition is invisible/harmless; marker→tag-object reference is a new ref payload shape | Pack version bump (or tag-bearing packs only) + repo-version bump; sync/hosted transfer must negotiate or refuse old clients |
 | **#606** verbatim nonstandard tree modes | row 8 + tree hash framing | Safe **only** as a trailing `skip_serializing_if` sparse field (standard trees stay byte-identical; only nonstandard-mode trees refuse on 0.3) + absence-preserving hash framing (R4). A plain-default tail would make every new tree unreadable by 0.3 | Additive under R4; conformance fixtures (§5); ledger entry; no repo-version bump needed if sparse |
 | **#618** oplog truncation recovery | rows 1, 3 (+ new `.oplog.recovery` sidecar) | No format change; pure robustness win (today a <120-byte tail truncation makes the whole oplog unreadable — `packed_oplog.rs:136`, `FOOTER_LEN:34`) | Additive; recovery sidecar gets a version field at birth (R1) |
@@ -195,9 +193,6 @@ change follows §3 in full.
 
 ## 7. Recommended follow-up issues (for the orchestrator to file on approval)
 
-- **F1 (pre-0.3 fast-follow, XS, blocks confident 0.3):** enforce
-  `config.repository.version` at `Repository::open` — refuse newer with R3 advice;
-  test: handcrafted `version = 99` config refuses with the advice string.
 - **F2 (S):** `HeddleError::FormatTooNew` + migrate the refusal sites
   (rows 1–5, 13–16, 18) to it.
 - **F3 (M):** golden-bytes format-lock CI guard per §5.3.

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 use heddle_core::{AdoptPlanError, AdoptPlanOptions, plan_adopt};
+use objects::lock::RepositoryLockExt;
 use repo::{Repository, RepositoryCapability, RepositorySourceAuthority};
 use serde::Serialize;
 use sley::Repository as SleyRepository;
@@ -41,10 +42,6 @@ struct AdoptOutput {
     already_in_sync: bool,
     recommended_action: Option<String>,
     recommended_action_template: Option<ActionTemplate>,
-    // Adopt is a one-time bootstrap, not a per-mutation hot path, so it
-    // keeps the verification block (PR B's serialize-skip applies only to
-    // recurring mutations). Agents adopting a repo need to know whether
-    // the post-adoption state is verified or still requires follow-up.
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
@@ -91,6 +88,11 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
         );
     }
 
+    let _adopt_lock = repo
+        .locker()
+        .write()
+        .map_err(|error| anyhow!("failed to lock repository for adoption: {error}"))?;
+
     let scope = if plan.import_all_refs {
         "all local branches and tags".to_string()
     } else {
@@ -104,6 +106,7 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
     let import_ms = import_start.elapsed().as_millis();
     progress.begin_ref_write();
     progress.finish();
+    objects::fault_inject::maybe_panic_at("adopt_after_import_before_authority_flip");
     repo.transition_source_authority(
         RepositorySourceAuthority::GitOverlay,
         RepositorySourceAuthority::Native,
@@ -194,7 +197,9 @@ fn import_ingest_for_adopt(
     progress: &mut ImportProgress,
 ) -> Result<AdoptImportStats> {
     progress.checking_notes();
-    crate::git_projection_engine::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(repo.root());
+    heddle_git_projection::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(
+        repo.root(),
+    );
     progress.ordering_commits();
     use ingest::{ImportOptions, import_git_into_scoped_with_options_and_progress};
 

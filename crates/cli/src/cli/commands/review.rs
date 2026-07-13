@@ -552,8 +552,7 @@ fn review_mine_only_principal_required_advice() -> RecoveryAdvice {
     )
 }
 
-/// Render a 16-byte StateId from the wire as its display form. Empty input
-/// → empty string (matches the prior empty-string-sentinel behavior).
+/// Render a 32-byte StateId from the wire as its display form.
 fn bytes_to_state_id_string(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();

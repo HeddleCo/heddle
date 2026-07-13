@@ -448,7 +448,7 @@ impl RepoConfig {
         })
     }
 
-    pub fn load_for_repository(path: &Path, root: &Path) -> Result<Self> {
+    pub fn load_for_repository(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)?;
         let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         if let Some(value) = invalid_output_format_value(&contents) {
@@ -468,7 +468,11 @@ impl RepoConfig {
             });
         }
         if version < SUPPORTED_REPO_FORMAT {
-            return migrate_legacy_repository_config(path, root, &contents, &resolved);
+            return Err(HeddleError::RepositoryFormatMigrationRequired {
+                path: resolved,
+                found: version,
+                required: SUPPORTED_REPO_FORMAT,
+            });
         }
         Self::load(path)
     }
@@ -506,45 +510,6 @@ fn repository_format_version(contents: &str, path: &Path) -> Result<u32> {
             path: path.to_path_buf(),
             source,
         })
-}
-
-fn migrate_legacy_repository_config(
-    path: &Path,
-    root: &Path,
-    contents: &str,
-    resolved: &Path,
-) -> Result<RepoConfig> {
-    let mut document =
-        toml::from_str::<toml::Value>(contents).map_err(|source| HeddleError::ConfigParse {
-            path: resolved.to_path_buf(),
-            source,
-        })?;
-    let repository = document
-        .get_mut("repository")
-        .and_then(toml::Value::as_table_mut)
-        .ok_or_else(|| HeddleError::Config("missing [repository] config table".to_string()))?;
-    let authority = if crate::repository::has_git_metadata(root) {
-        "git-overlay"
-    } else {
-        "native"
-    };
-    repository.insert(
-        "version".to_string(),
-        toml::Value::Integer(SUPPORTED_REPO_FORMAT.into()),
-    );
-    repository.insert(
-        "source_authority".to_string(),
-        toml::Value::String(authority.to_string()),
-    );
-    let migrated = toml::to_string_pretty(&document)
-        .map_err(|error| HeddleError::Config(error.to_string()))?;
-    let config =
-        toml::from_str::<RepoConfig>(&migrated).map_err(|source| HeddleError::ConfigParse {
-            path: resolved.to_path_buf(),
-            source,
-        })?;
-    write_file_atomic(path, migrated.as_bytes())?;
-    Ok(config)
 }
 
 fn invalid_output_format_value(contents: &str) -> Option<String> {
@@ -653,29 +618,20 @@ format = "auto"
     }
 
     #[test]
-    fn legacy_config_migration_materializes_existing_authority_once() {
-        for git_overlay in [false, true] {
-            let root = TempDir::new().unwrap();
-            if git_overlay {
-                sley::Repository::init(root.path()).unwrap();
+    fn legacy_config_requires_explicit_migration() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("config.toml");
+        std::fs::write(&path, "[repository]\nversion = 2\n").unwrap();
+
+        let error = RepoConfig::load_for_repository(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            HeddleError::RepositoryFormatMigrationRequired {
+                found: 2,
+                required: SUPPORTED_REPO_FORMAT,
+                ..
             }
-            let heddle_dir = root.path().join(".heddle");
-            std::fs::create_dir(&heddle_dir).unwrap();
-            let path = heddle_dir.join("config.toml");
-            std::fs::write(&path, "[repository]\nversion = 2\n").unwrap();
-
-            let config = RepoConfig::load_for_repository(&path, root.path()).unwrap();
-            let expected = if git_overlay {
-                RepositorySourceAuthority::GitOverlay
-            } else {
-                RepositorySourceAuthority::Native
-            };
-            assert_eq!(config.repository.source_authority, expected);
-            assert_eq!(config.repository.version, SUPPORTED_REPO_FORMAT);
-
-            let persisted = RepoConfig::load(&path).unwrap();
-            assert_eq!(persisted.repository.source_authority, expected);
-        }
+        ));
     }
 
     #[test]

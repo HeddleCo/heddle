@@ -1048,7 +1048,7 @@ mod tests {
     fn rejects_authority_inconsistent_recommendations() {
         for invocation in [
             "`heddle fetch origin`",
-            "`heddle switch main`",
+            "`heddle thread switch main`",
             "`heddle land feature --push`",
             "`heddle land feature --publish`",
         ] {

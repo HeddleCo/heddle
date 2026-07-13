@@ -93,7 +93,7 @@ fn repair_git(
 
 #[cfg(feature = "git-overlay")]
 fn repair_git_metadata(repo: &repo::Repository) -> Result<Vec<FsckRepair>> {
-    use crate::git_projection_engine::GitProjection;
+    use heddle_git_projection::GitProjection;
 
     let mut bridge = GitProjection::new(repo);
     if !bridge.mirror_path().exists() && sley::Repository::discover(repo.root()).is_err() {
@@ -164,7 +164,7 @@ fn repair_git_ref(
     use objects::object::ThreadName;
     use refs::Head;
 
-    use crate::git_projection_engine::git_ingest::import_git_history;
+    use heddle_git_projection::git_ingest::import_git_history;
 
     if preview {
         return Ok(vec![FsckRepair {
@@ -177,7 +177,7 @@ fn repair_git_ref(
 
     match prefer {
         "git" => {
-            let mut bridge = crate::git_projection_engine::GitProjection::new(repo);
+            let mut bridge = heddle_git_projection::GitProjection::new(repo);
             let stats = import_git_history(
                 &mut bridge,
                 Some(repo.root()),
@@ -208,9 +208,9 @@ fn repair_git_ref(
                 .ok_or_else(|| git_repair_missing_heddle_thread_advice(ref_name))?;
             repo.goto_without_record(&state)?;
             repo.refs().write_head(&Head::Attached { thread: tn })?;
-            let mut bridge = crate::git_projection_engine::GitProjection::new(repo);
+            let mut bridge = heddle_git_projection::GitProjection::new(repo);
             match bridge.write_through_current_checkout()? {
-                crate::git_projection_engine::WriteThroughOutcome::Wrote(git_oid) => {
+                heddle_git_projection::WriteThroughOutcome::Wrote(git_oid) => {
                     Ok(vec![FsckRepair {
                         name: "git_projection_ref_prefer_heddle".to_string(),
                         repaired: true,
@@ -221,7 +221,7 @@ fn repair_git_ref(
                         count: 1,
                     }])
                 }
-                crate::git_projection_engine::WriteThroughOutcome::Skipped(reason) => Err(anyhow!(
+                heddle_git_projection::WriteThroughOutcome::Skipped(reason) => Err(anyhow!(
                     git_repair_write_through_skipped_advice(ref_name, reason.to_string(),)
                 )),
             }

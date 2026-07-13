@@ -41,9 +41,9 @@ use crate::{
     attribution::clean_attribution_value,
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
-    git_projection_engine::GitProjection,
     perf::{ProfileField, emit_profile, profile_enabled},
 };
+use heddle_git_projection::GitProjection;
 
 #[derive(Serialize)]
 pub(crate) struct SnapshotOutput {

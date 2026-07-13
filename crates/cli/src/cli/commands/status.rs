@@ -135,10 +135,7 @@ fn fast_short_repo_config(start: &Path) -> Result<Option<RepoConfig>> {
     };
     let config_path = workdir.join(".heddle").join("config.toml");
     if config_path.is_file() {
-        Ok(Some(RepoConfig::load_for_repository(
-            &config_path,
-            &workdir,
-        )?))
+        Ok(Some(RepoConfig::load_for_repository(&config_path)?))
     } else {
         Ok(None)
     }

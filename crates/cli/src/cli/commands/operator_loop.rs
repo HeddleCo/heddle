@@ -20,8 +20,8 @@ use super::{
 use crate::{
     cli::{Cli, cli_args::SyncArgs, output_is_compact, should_output_json, style},
     config::UserConfig,
-    git_projection_engine::GitProjection,
 };
+use heddle_git_projection::GitProjection;
 
 pub async fn cmd_continue(cli: &Cli) -> Result<()> {
     let current_dir = std::env::current_dir()?;

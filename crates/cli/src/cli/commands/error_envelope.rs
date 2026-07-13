@@ -322,17 +322,9 @@ fn typed_recovery_commands(kind: &str) -> Vec<String> {
         }
         "thread_not_found" => &["heddle thread list"],
         "merge_no_common_ancestor" => &["heddle status"],
-        // Generic capture/stash recovery. `source_thread_uncaptured_work`
-        // normally arrives with explicit path-specific `heddle --repo
-        // <checkout> ...` commands attached to `RecoveryDetails`
-        // (`from_recovery_details` prefers those); this `kind`-keyed fallback
-        // only applies when no explicit commands were set. `dirty_worktree` has
-        // no checkout path to scope to, so the generic form matches `main`.
-        "dirty_worktree" | "source_thread_uncaptured_work" => &[
-            super::advice::DIRTY_WORKTREE_COMMIT_COMMAND,
-            super::advice::DIRTY_WORKTREE_CAPTURE_COMMAND,
-            super::advice::DIRTY_WORKTREE_STASH_COMMAND,
-        ],
+        "dirty_worktree" | "source_thread_uncaptured_work" => {
+            &[super::advice::DIRTY_WORKTREE_CAPTURE_COMMAND]
+        }
         _ => &["heddle help --output json"],
     };
     commands
@@ -453,7 +445,7 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
             };
         }
         if let Some(git_error) =
-            cause.downcast_ref::<crate::git_projection_engine::git_core::GitProjectionError>()
+            cause.downcast_ref::<heddle_git_projection::git_core::GitProjectionError>()
             && let Some(advice) = RecoveryAdvice::from_git_projection_error(git_error)
         {
             return ErrorClassification::from_advice(&advice);
@@ -536,6 +528,29 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                                 .to_string(),
                         primary_command: "heddle status".to_string(),
                         recovery_commands: vec!["heddle status".to_string()],
+                        extra_json_fields: serde_json::Map::new(),
+                    };
+                }
+                HeddleError::RepositoryFormatMigrationRequired {
+                    found, required, ..
+                } => {
+                    return ErrorClassification {
+                        kind: "repository_format_migration_required".to_string(),
+                        human_error: Some(heddle_err.to_string()),
+                        hint: format!(
+                            "This alpha repository uses format v{found}. Back it up, then recreate it or re-adopt its Git history as format v{required}."
+                        ),
+                        unsafe_condition: format!(
+                            "repository format v{found} is incompatible with required format v{required}"
+                        ),
+                        would_change:
+                            "opening it as the current format could misread legacy state"
+                                .to_string(),
+                        preserved:
+                            "the repository config, objects, refs, metadata, and worktree were left unchanged"
+                                .to_string(),
+                        primary_command: "heddle help adopt".to_string(),
+                        recovery_commands: vec!["heddle help adopt".to_string()],
                         extra_json_fields: serde_json::Map::new(),
                     };
                 }
@@ -781,6 +796,33 @@ mod tests {
                 .human_error
                 .as_deref()
                 .is_some_and(|error| error.contains("output.format") && error.contains("'auto'"))
+        );
+    }
+
+    #[test]
+    fn legacy_repository_format_is_migration_refusal_not_corruption() {
+        let err = anyhow!(HeddleError::RepositoryFormatMigrationRequired {
+            path: std::path::PathBuf::from("/tmp/legacy/.heddle/config.toml"),
+            found: 2,
+            required: 3,
+        });
+
+        let classified = classify_error(&err);
+        assert_eq!(classified.kind, "repository_format_migration_required");
+        assert_eq!(classified.primary_command, "heddle help adopt");
+        assert!(classified.preserved.contains("config"));
+        assert!(classified.recovery_commands.iter().all(|command| {
+            crate::cli::commands::command_catalog::validate_recommended_action(command).is_ok()
+        }));
+        assert!(
+            [
+                classified.kind.as_str(),
+                classified.hint.as_str(),
+                classified.unsafe_condition.as_str(),
+                classified.would_change.as_str(),
+            ]
+            .iter()
+            .all(|value| !value.contains("corrupt"))
         );
     }
 

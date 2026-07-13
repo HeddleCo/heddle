@@ -18,17 +18,23 @@ use tempfile::TempDir;
 
 use super::heddle;
 
-/// Overwrite `.heddle/config.toml` with a minimal-but-valid config that pins
-/// `[review.discussion] default_visibility` to `tier_toml`. Every other field
-/// falls back to its serde default, so this is enough to drive capture-time
-/// resolution deterministically. `tier_toml` is the raw TOML value for the
-/// tier (e.g. `"\"Public\""` or `"{ Restricted = { scope_label = \"embargo\" } }"`).
+/// Pin `[review.discussion] default_visibility` while preserving the current
+/// repository-format and source-authority fields written by `heddle init`.
 fn set_repo_default_visibility(repo: &Path, tier_toml: &str) {
     let config_path = repo.join(".heddle/config.toml");
-    let contents = format!(
-        "[repository]\nversion = 1\n\n[review.discussion]\ndefault_visibility = {tier_toml}\n"
-    );
-    fs::write(&config_path, contents).expect("write repo config");
+    let contents = fs::read_to_string(&config_path).expect("read repo config");
+    let updated = contents
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("default_visibility =") {
+                format!("default_visibility = {tier_toml}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&config_path, format!("{updated}\n")).expect("write repo config");
 }
 
 /// `heddle init` then capture one state; return the temp dir and the captured

@@ -4066,7 +4066,7 @@ impl ContentAddressedMount {
         // a mount-captured state is signed identically and no write bypasses it.
         self.inner
             .repo
-            .put_authored_state(&mut state)
+            .put_authored_state(&state)
             .map_err(MountError::Store)?;
 
         // Step 3 + 3a unified: advance the served thread and record the

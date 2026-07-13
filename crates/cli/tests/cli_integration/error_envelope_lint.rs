@@ -18,7 +18,7 @@
 //! (cli_integration/output_kind_invariant.rs): like that test it drives a
 //! curated set of representative invocations rather than every verb, since
 //! most error conditions need a hand-built fixture. The swept set is the
-//! `init`/`status`/`verify`/`commit`/`merge`/`push`/`pull` plus the current
+//! `init`/`status`/`verify`/`commit`/`push`/`pull` plus the current
 //! Git projection import/sync/repair surfaces whose codes
 //! `docs/exit-codes.md` documents; `SWEPT_COVERAGE`
 //! guards that each is exercised here.
@@ -38,7 +38,6 @@ const SWEPT_COVERAGE: &[&str] = &[
     "status",
     "verify",
     "commit",
-    "merge",
     "push",
     "pull",
     "import git",
@@ -82,10 +81,9 @@ fn init_repo() -> TempDir {
     temp
 }
 
-fn committed_repo() -> TempDir {
-    let temp = init_repo();
-    std::fs::write(temp.path().join("f.txt"), "base\n").expect("write f.txt");
-    heddle_output(&["commit", "-m", "base"], Some(temp.path())).expect("heddle commit");
+fn plain_git_repo() -> TempDir {
+    let temp = TempDir::new().expect("tempdir");
+    git(&["init", "-q", "-b", "main", "."], temp.path());
     temp
 }
 
@@ -103,25 +101,19 @@ fn adopted_git_overlay() -> TempDir {
     temp
 }
 
-/// `init` / `status` / `verify` / `merge` / `import git|sync` exit
+/// `init` / `status` / `verify` / `import git|sync` exit
 /// `0` on their documented happy paths, so this lint covers them through
 /// adjacent error conditions: an unparseable invocation (`init`), a
-/// missing-state lookup (`status`/`verify`/`merge` share the
+/// missing-state lookup (`status`/`verify` share the
 /// `state_not_found` / refusal envelopes), etc. The goal is envelope
 /// shape, not per-verb exhaustiveness.
 fn cases() -> Vec<ErrorCase> {
     vec![
         ErrorCase {
             covers: &["init"],
-            label: "init into an existing repo",
-            argv: &[
-                "init",
-                "--principal-name",
-                "Heddle Test",
-                "--principal-email",
-                "heddle@test.example",
-            ],
-            fixture: init_repo,
+            label: "init with an incomplete principal",
+            argv: &["init", "--principal-name", "Heddle Test"],
+            fixture: bare_dir,
         },
         ErrorCase {
             covers: &["status", "verify"],
@@ -131,15 +123,9 @@ fn cases() -> Vec<ErrorCase> {
         },
         ErrorCase {
             covers: &["commit"],
-            label: "commit with nothing staged",
+            label: "commit before Git Overlay initialization",
             argv: &["commit", "-m", "again"],
-            fixture: committed_repo,
-        },
-        ErrorCase {
-            covers: &["merge"],
-            label: "merge a nonexistent thread",
-            argv: &["merge", "does-not-exist"],
-            fixture: committed_repo,
+            fixture: plain_git_repo,
         },
         ErrorCase {
             covers: &["push"],
@@ -340,12 +326,12 @@ fn status_success_payload_omits_argv_siblings() {
         "next_action_argv",
     ];
 
-    let fixture = committed_repo();
+    let fixture = init_repo();
     let out = heddle_output(&["--output", "json", "status"], Some(fixture.path()))
         .expect("heddle status --output json");
     assert!(
         out.status.success(),
-        "status should exit 0 on a clean committed repo"
+        "status should exit 0 on a clean initialized repo"
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let payload: Value = serde_json::from_str(stdout.trim()).expect("status payload is JSON");

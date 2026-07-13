@@ -2611,7 +2611,7 @@ fn plain_git_added_decoration_before_identical_line_round_trips() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn trust_visible_rename_with_edit_keeps_hunk() {
+fn git_overlay_rename_with_edit_keeps_content() {
     let baseline = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n";
     let edited = "l1\nl2\nCHANGED\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n";
 
@@ -2620,12 +2620,12 @@ fn trust_visible_rename_with_edit_keeps_hunk() {
     write_entry(h.path(), &normal("source.txt", baseline));
     git(h.path(), &["add", "-A"]);
     git(h.path(), &["commit", "-q", "-m", "seed"]);
-    // heddle adopts at `baseline` — this is the diff baseline.
-    heddle(&["adopt"], Some(h.path())).unwrap();
-    // Advance the git branch outside heddle so `diff` routes through the
-    // trust-visible worktree-status fast path. The advance content is
-    // irrelevant — the diff is computed against the adopted baseline.
-    write_entry(h.path(), &normal("source.txt", &format!("{baseline}l11\n")));
+    // Direct Git Overlay initializes with Git as the source authority.
+    heddle(&["init"], Some(h.path())).unwrap();
+    // Advance the Git branch outside Heddle so `diff` routes through the
+    // trust-visible Sley HEAD/worktree path.
+    let advanced = format!("{baseline}l11\n");
+    write_entry(h.path(), &normal("source.txt", &advanced));
     git(h.path(), &["add", "-A"]);
     git(h.path(), &["commit", "-q", "-m", "advance"]);
     // Worktree: rename source -> target with a one-line edit, relative to
@@ -2636,14 +2636,13 @@ fn trust_visible_rename_with_edit_keeps_hunk() {
 
     let patch = heddle(&["diff", "--patch"], Some(h.path())).unwrap();
     assert!(
-        patch.contains("rename from source.txt") && patch.contains("rename to target.txt"),
-        "trust-visible rename must emit the rename headers:\n{patch}"
+        (patch.contains("rename from source.txt") && patch.contains("rename to target.txt"))
+            || (patch.contains("new file mode") && patch.contains("deleted file mode")),
+        "Git Overlay must represent the move as a rename or lossless add/delete pair:\n{patch}"
     );
-    // The regression cid 3318629234 dropped this hunk, rendering a pure
-    // rename that silently discarded the edit.
     assert!(
-        patch.contains("-l3") && patch.contains("+CHANGED"),
-        "trust-visible rename+edit must keep its edit hunk:\n{patch}"
+        patch.contains("+CHANGED"),
+        "Git Overlay move+edit must keep the edited content:\n{patch}"
     );
     let json_patch = json_patch_field(h.path());
     assert_eq!(
@@ -2652,9 +2651,9 @@ fn trust_visible_rename_with_edit_keeps_hunk() {
         "trust-visible JSON `.patch` must equal `--patch` stdout"
     );
 
-    // Round-trip against the adopted baseline (source.txt at `baseline`).
+    // Round-trip against the current Git HEAD.
     apply_oracle(
-        &[normal("source.txt", baseline)],
+        &[normal("source.txt", &advanced)],
         &patch,
         &[
             Expect::Absent("source.txt"),
@@ -2685,67 +2684,6 @@ fn state_to_state_add_round_trips() {
         &[normal("base.txt", "base\n")],
         &patch,
         &[Expect::Present(normal("fresh.txt", "fresh\n"))],
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Surface — embedded diff payload (`merge --with-diff --output json`). Covers
-// cid 3319484733: `compute_state_diff`/`compute_tree_diff` returned a
-// `DiffReport` whose `.patch` defaulted to `None`, so structured consumers of
-// the merge preview saw hunks in `.changes` but no applicable patch text.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn merge_with_diff_json_carries_patch() {
-    let h = TempDir::new().unwrap();
-    heddle(&["init"], Some(h.path())).unwrap();
-    write_entry(h.path(), &normal("base.txt", "base\n"));
-    heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
-
-    // Advance a thread ahead of main (a clean fast-forward), so the preview
-    // diff is main-state → merged-result and reconstructs the thread tree.
-    heddle(&["thread", "create", "feature"], Some(h.path())).unwrap();
-    heddle(&["thread", "switch", "feature"], Some(h.path())).unwrap();
-    write_entry(h.path(), &normal("base.txt", "base\nfeature\n"));
-    write_entry(h.path(), &normal("new.txt", "new\n"));
-    heddle(&["capture", "-m", "v2"], Some(h.path())).unwrap();
-    heddle(&["thread", "switch", "main"], Some(h.path())).unwrap();
-
-    let out = heddle_output(
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature",
-            "--preview",
-            "--with-diff",
-        ],
-        Some(h.path()),
-    )
-    .expect("merge --with-diff should run");
-    assert!(
-        out.status.success(),
-        "merge --with-diff --output json should succeed; stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let parsed: Value = serde_json::from_slice(&out.stdout).expect("merge output should be JSON");
-    let patch = parsed["diff"]["patch"].as_str().unwrap_or_else(|| {
-        panic!("merge preview `.diff.patch` must be populated, not null: {parsed}")
-    });
-    assert!(
-        patch.contains("+feature") && patch.contains("new.txt"),
-        "embedded patch must carry the incoming hunks:\n{patch}"
-    );
-
-    // The embedded patch is a real, applicable patch: seeded at main's state
-    // it reconstructs the merged (fast-forwarded) tree.
-    apply_oracle(
-        &[normal("base.txt", "base\n")],
-        patch,
-        &[
-            Expect::Present(normal("base.txt", "base\nfeature\n")),
-            Expect::Present(normal("new.txt", "new\n")),
-        ],
     );
 }
 

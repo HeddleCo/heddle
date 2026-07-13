@@ -2595,7 +2595,6 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use heddle_schema::op_record::tests_support::{encode_atomic_no_head, encode_pre_atomic};
-    use objects::object::StateId;
     use tempfile::TempDir;
 
     use super::*;
@@ -3409,58 +3408,6 @@ mod tests {
         assert_eq!(after_entries, before_entries);
         assert_eq!(after_payloads, before_payloads);
         assert_eq!(PackedOpLog::read_head_id(&path).unwrap(), 9);
-    }
-
-    #[test]
-    fn checked_in_pre_atomic_fixture_opens_migrates_and_reads() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("oplog.bin");
-        std::fs::write(
-            &path,
-            include_bytes!(
-                "../../tests/fixtures/issue-449-legacy-pre-atomic/.heddle/oplog/oplog.bin"
-            ),
-        )
-        .unwrap();
-
-        assert!(PackedOpLog::load(&path).is_err());
-        let loaded = load_for_migration_path(&path);
-        assert_eq!(loaded.entries.len(), 6);
-        assert!(matches!(
-            &loaded.entries[0].operation,
-            OpRecord::Snapshot {
-                head: Some(_),
-                thread: None,
-                ..
-            }
-        ));
-        assert!(matches!(
-            &loaded.entries[1].operation,
-            OpRecord::Snapshot { head: None, thread: Some(thread), .. } if thread == "main"
-        ));
-        assert!(matches!(
-            &loaded.entries[3].operation,
-            OpRecord::Fork { from, new_state, thread: None, head: None }
-                if *from == StateId::from_bytes([4; 32])
-                    && *new_state == StateId::from_bytes([5; 32])
-        ));
-
-        PackedOpLog::ensure_latest(&path).unwrap();
-        assert_eq!(PackedOpLog::read_head_id(&path).unwrap(), 6);
-        assert_eq!(
-            read_header(&path).unwrap().record_schema_version,
-            Some(OpRecordSchemaVersion::Current)
-        );
-        let index = PackedOpLogIndex::open(&path).unwrap();
-        assert_eq!(
-            index.transaction_commit("fixture-tx").unwrap(),
-            Some((6, 5))
-        );
-        assert_eq!(index.recent_entries(1).unwrap()[0].id, 6);
-
-        let migrated_once = std::fs::read(&path).unwrap();
-        PackedOpLog::ensure_latest(&path).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), migrated_once);
     }
 
     #[test]

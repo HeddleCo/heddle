@@ -5,7 +5,7 @@
 //! Before this fix, `heddle log --output json` returned `state_id` in the
 //! short form (`hs-…12 chars`), but `heddle review show`, `heddle
 //! discuss list`, and a couple of others rejected anything that wasn't
-//! a 16-byte full ID. The CLI's own JSON shape was unparseable by its
+//! a full state ID. The CLI's own JSON shape was unparseable by its
 //! own commands. This test pins the contract.
 
 use std::fs;

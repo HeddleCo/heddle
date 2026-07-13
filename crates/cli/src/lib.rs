@@ -12,18 +12,10 @@ compile_error!(
 
 pub(crate) mod attribution;
 pub mod bench;
-// Git projection lives in `heddle-git-projection`. Re-export under the
-// historical path so commands and integration tests keep working.
-// Always-compiled so light consumers (fsck, clone, fetch, remote,
-// checkpoint, operator_loop, gc) work in native-only builds without
-// fanning #[cfg] through their use blocks. User-visible separation is
-// enforced at the command surface: `Commands::GitOverlay` is gated
-// behind `git-overlay`.
 pub mod cli;
 pub mod client;
 pub mod exit;
 pub mod extensions;
-pub use heddle_git_projection as git_projection_engine;
 pub mod harness;
 pub mod operation_id;
 pub mod perf;

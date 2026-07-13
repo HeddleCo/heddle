@@ -154,7 +154,7 @@ pub(crate) fn collapse_resolved_states(
     // Store the new state through the authored-state chokepoint (heddle#482):
     // a collapse mints a new author-created state, so it is auto-signed like a
     // capture rather than carrying any source state's signature forward.
-    repo.put_authored_state(&mut new_state)?;
+    repo.put_authored_state(&new_state)?;
 
     // Build the published ref batch + its matching `Collapse` record, then
     // publish record-first through the write chokepoint (heddle#330 §2.2): the

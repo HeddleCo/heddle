@@ -3017,7 +3017,7 @@ mod tests {
         assert_eq!(update.kind, GrpcGitRefKind::Branch as i32);
         assert_eq!(update.target_oid.as_ref(), commit_oid.as_bytes());
         let checkpoint = update.checkpoint.expect("checkpoint");
-        assert_eq!(checkpoint.heddle_state_id.as_slice(), state.as_bytes());
+        assert_eq!(checkpoint.heddle_state_id.as_ref(), state.as_bytes());
         assert_eq!(checkpoint.git_commit_oid.as_ref(), commit_oid.as_bytes());
         assert_eq!(checkpoint.thread, "main");
     }

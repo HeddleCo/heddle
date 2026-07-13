@@ -675,6 +675,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn auto_land_policy_blocks_low_confidence_and_failing_tests() {
         let blockers = auto_land_policy_blockers(AutoLandPolicyInput {
             agent_authored: true,

@@ -53,7 +53,9 @@ pub fn encode_state(state: &State, config: &CompressionConfig) -> Result<Vec<u8>
 
 pub fn decode_state(data: &[u8]) -> Result<State> {
     let decoded = decode_body(data)?;
-    Ok(rmp_serde::from_slice(&decoded)?)
+    let mut state: State = rmp_serde::from_slice(&decoded)?;
+    state.state_id = state.id();
+    Ok(state)
 }
 
 pub fn encode_action(

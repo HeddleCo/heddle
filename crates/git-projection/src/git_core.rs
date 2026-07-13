@@ -3,7 +3,8 @@
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -28,12 +29,13 @@ use sley::{
     Repository as SleyRepository, Signature,
     plumbing::sley_core::ByteString as GitByteString,
     remote::{
-        CredentialHelperProvider, FetchOptions, LsRemoteFilter, NoCredentials, ProgressSink,
+        CredentialProvider, FetchOptions, LsRemoteFilter, NoCredentials, ProgressSink,
         PushActionPlan, PushCommand, PushOptions, SilentProgress,
     },
 };
 
 use super::{
+    credential::EmbeddingSafeCredentialProvider,
     git_export::{
         ExportStateOptions, commit_is_byte_faithful, export_all, export_current_thread,
         export_state,
@@ -645,13 +647,12 @@ impl CheckoutWrite {
         let branch_ref = format!("refs/heads/{thread}");
         let head_path = git_dir.join("HEAD");
         let index_path = git_dir.join("index");
-        let previous_head = fs::read(&head_path).ok();
-        let previous_index = fs::read(&index_path).ok();
-        let previous_branch = object_repo
-            .find_reference(&branch_ref)
-            .ok()
-            .flatten()
-            .and_then(|reference| reference.peeled_oid(&object_repo).ok().flatten());
+        let previous_head = read_optional_file(&head_path)?;
+        let previous_index = read_optional_file(&index_path)?;
+        let previous_branch = match object_repo.find_reference(&branch_ref).map_err(git_err)? {
+            Some(reference) => reference.peeled_oid(&object_repo).map_err(git_err)?,
+            None => None,
+        };
         Ok(Self {
             checkout_repo,
             object_repo,
@@ -678,14 +679,25 @@ impl CheckoutWrite {
     }
 
     fn publish(&self, git_oid: ObjectId) -> GitProjectionResult<()> {
+        let published_head = format!("ref: {}\n", self.branch_ref).into_bytes();
+        let mut head_written = false;
+        let mut index_written = false;
+        let mut branch_update_attempted = false;
+        let mut published_index = None;
         let result = (|| -> GitProjectionResult<()> {
             write_head_symref(&self.git_dir, &self.branch_ref)?;
+            head_written = true;
             let commit = self.object_repo.read_commit(&git_oid).map_err(git_err)?;
             let mut index = self
                 .object_repo
                 .index_from_tree(&commit.tree)
                 .map_err(git_err)?;
             index.upgrade_version_for_flags();
+            published_index = Some(
+                index
+                    .write(self.checkout_repo.object_format())
+                    .map_err(git_err)?,
+            );
             self.checkout_repo
                 .write_index(
                     &index,
@@ -695,12 +707,19 @@ impl CheckoutWrite {
                     },
                 )
                 .map_err(git_err)?;
-            update_checkout_head_ref(
+            index_written = true;
+            branch_update_attempted = true;
+            let head_reflog = update_checkout_branch_ref(
                 &self.checkout_repo,
+                &self.branch_ref,
                 git_oid,
                 self.previous_branch,
                 "heddle: write-through current thread",
             )?;
+            self.checkout_repo
+                .references()
+                .append_reflog("HEAD", &head_reflog)
+                .map_err(git_err)?;
             fsync_path(&self.head_path)?;
             fsync_path(&self.index_path)?;
             fsync_path(&self.git_dir)?;
@@ -708,19 +727,27 @@ impl CheckoutWrite {
         })();
 
         if let Err(error) = result {
-            restore_file(self.head_path.clone(), self.previous_head.as_deref())?;
-            restore_file(self.index_path.clone(), self.previous_index.as_deref())?;
-            match self.previous_branch {
-                Some(previous) => set_reference(
+            if branch_update_attempted {
+                rollback_reference_if_unchanged(
                     &self.object_repo,
                     &self.branch_ref,
-                    previous,
-                    RefPrecondition::Any,
-                    "heddle: rollback failed write-through",
-                )?,
-                None => {
-                    delete_reference_if_present(&self.object_repo, &self.branch_ref)?;
-                }
+                    git_oid,
+                    self.previous_branch,
+                )?;
+            }
+            if index_written {
+                restore_file_if_unchanged(
+                    &self.index_path,
+                    published_index.as_deref().expect("written index bytes"),
+                    self.previous_index.as_deref(),
+                )?;
+            }
+            if head_written {
+                restore_file_if_unchanged(
+                    &self.head_path,
+                    &published_head,
+                    self.previous_head.as_deref(),
+                )?;
             }
             let _ = fsync_path(&self.head_path);
             let _ = fsync_path(&self.index_path);
@@ -2524,13 +2551,101 @@ pub fn git_err(err: impl std::fmt::Display) -> GitProjectionError {
     GitProjectionError::Git(err.to_string())
 }
 
-fn restore_file(path: PathBuf, previous: Option<&[u8]>) -> GitProjectionResult<()> {
-    if let Some(previous) = previous {
-        fs::write(path, previous)?;
-    } else if path.exists() {
-        fs::remove_file(path)?;
+fn restore_file_if_unchanged(
+    path: &Path,
+    expected: &[u8],
+    previous: Option<&[u8]>,
+) -> GitProjectionResult<()> {
+    let file_name = path.file_name().ok_or_else(|| {
+        GitProjectionError::Git(format!("cannot lock rollback path {}", path.display()))
+    })?;
+    let mut lock_name = file_name.to_os_string();
+    lock_name.push(".lock");
+    let lock_path = path.with_file_name(lock_name);
+    let mut lock = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            GitProjectionError::Git(format!(
+                "cannot acquire Git rollback lock {}: {error}",
+                lock_path.display()
+            ))
+        })?;
+    let result = (|| {
+        let current = fs::read(path)?;
+        if current != expected {
+            return Err(GitProjectionError::Git(format!(
+                "refusing to roll back {} because another Git operation changed it",
+                path.display()
+            )));
+        }
+        if let Some(previous) = previous {
+            lock.write_all(previous)?;
+            lock.sync_all()?;
+            drop(lock);
+            fs::rename(&lock_path, path)?;
+        } else {
+            drop(lock);
+            fs::remove_file(path)?;
+            fs::remove_file(&lock_path)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&lock_path);
     }
-    Ok(())
+    result
+}
+
+fn read_optional_file(path: &Path) -> GitProjectionResult<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn rollback_reference_if_unchanged(
+    repo: &SleyRepository,
+    name: &str,
+    published: ObjectId,
+    previous: Option<ObjectId>,
+) -> GitProjectionResult<()> {
+    let current = match repo.find_reference(name).map_err(git_err)? {
+        Some(reference) => reference.peeled_oid(repo).map_err(git_err)?,
+        None => None,
+    };
+    if current == previous {
+        return Ok(());
+    }
+    if current != Some(published) {
+        return Err(GitProjectionError::Git(format!(
+            "refusing to roll back Git reference '{name}' because another Git operation changed it"
+        )));
+    }
+    let rollback = match previous {
+        Some(previous) => set_reference(
+            repo,
+            name,
+            previous,
+            RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(published)),
+            "heddle: rollback failed write-through",
+        ),
+        None => delete_reference_matching(repo, name, published),
+    };
+    if rollback.is_ok() {
+        return Ok(());
+    }
+    let current = match repo.find_reference(name).map_err(git_err)? {
+        Some(reference) => reference.peeled_oid(repo).map_err(git_err)?,
+        None => None,
+    };
+    if current == previous {
+        Ok(())
+    } else {
+        rollback
+    }
 }
 
 /// `fsync` a single file by opening it read-only and calling
@@ -2754,20 +2869,16 @@ fn collect_capture_paths<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-fn update_checkout_head_ref(
+fn update_checkout_branch_ref(
     repo: &SleyRepository,
+    branch_ref: &str,
     target: ObjectId,
     previous_branch: Option<ObjectId>,
     log_message: &str,
-) -> GitProjectionResult<()> {
+) -> GitProjectionResult<sley::plumbing::sley_refs::ReflogEntry> {
     let expected = previous_branch.map_or(RefPrecondition::MustNotExist, |oid| {
         RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(oid))
     });
-    let ref_name = repo
-        .head()
-        .ok()
-        .and_then(|head| head.symbolic_target.map(|name| name.to_string()))
-        .unwrap_or_else(|| "HEAD".to_string());
     let old_oid = previous_branch.unwrap_or_else(|| ObjectId::null(repo.object_format()));
     let head_reflog = sley::plumbing::sley_refs::ReflogEntry {
         old_oid,
@@ -2775,13 +2886,8 @@ fn update_checkout_head_ref(
         committer: git_projection_signature(),
         message: log_message.as_bytes().to_vec(),
     };
-    set_reference(repo, &ref_name, target, expected, log_message)?;
-    if ref_name != "HEAD" {
-        repo.references()
-            .append_reflog("HEAD", &head_reflog)
-            .map_err(git_err)?;
-    }
-    Ok(())
+    set_reference(repo, branch_ref, target, expected, log_message)?;
+    Ok(head_reflog)
 }
 
 fn checkout_git_head_is_detached(root: &Path) -> GitProjectionResult<bool> {
@@ -3931,8 +4037,8 @@ fn clone_url_to_bare_via_sley(
 ) -> GitProjectionResult<Option<String>> {
     fs::create_dir_all(dest)?;
     let repo = SleyRepository::init_bare(dest).map_err(git_err)?;
-    let config = repo.config_snapshot().map_err(git_err)?;
-    let mut credentials = CredentialHelperProvider::new(Some(&config));
+    let mut credentials =
+        EmbeddingSafeCredentialProvider::new(&repo.config_snapshot().map_err(git_err)?);
     let display_url = sley::plumbing::sley_core::redact_url_for_display(url);
     let outcome = repo
         .fetch(
@@ -4535,6 +4641,141 @@ fn push_network_remote(
     Ok(planned_write_names(&plan))
 }
 
+/// Push the authoritative checkout's Git refs directly through Sley.
+///
+/// Local branches and tags are intentional inputs because `.git` is authoritative
+/// in an overlay checkout. The per-remote manifest separately prevents Heddle
+/// from claiming, rewinding, or deleting destination refs it did not publish.
+pub struct AuthoritativeGitPushOptions<'a> {
+    pub heddle_dir: &'a Path,
+    pub remote: &'a str,
+    pub scope: GitPushScope,
+    pub current_branch: Option<&'a str>,
+    pub force: bool,
+}
+
+pub fn push_authoritative_git_refs(
+    source: &SleyRepository,
+    options: AuthoritativeGitPushOptions<'_>,
+    credentials: &mut dyn CredentialProvider,
+    progress: &mut dyn ProgressSink,
+) -> GitProjectionResult<Vec<String>> {
+    let AuthoritativeGitPushOptions {
+        heddle_dir,
+        remote,
+        scope,
+        current_branch,
+        force,
+    } = options;
+    let remote_url = source.remote(remote).map_err(git_err)?.push_url();
+    let manifest_path = network_exported_refs_path(heddle_dir, &remote_url);
+    let previously_exported = read_exported_refs_at(&manifest_path)?;
+    let served_frontier = collect_ref_updates(source)?
+        .into_iter()
+        .filter(|update| {
+            matches!(update.namespace, RefNamespace::Branch | RefNamespace::Tag)
+                || (update.namespace == RefNamespace::Note && update.name == "heddle")
+        })
+        .filter(|update| match scope {
+            GitPushScope::AllThreads => true,
+            GitPushScope::CurrentThread => {
+                update.namespace == RefNamespace::Note
+                    || (update.namespace == RefNamespace::Branch
+                        && Some(update.name.as_str()) == current_branch)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let records = source
+        .ls_remote(
+            remote,
+            LsRemoteFilter {
+                heads: false,
+                tags: false,
+                refs_only: true,
+            },
+            &|_| true,
+            credentials,
+        )
+        .map_err(git_err)?;
+    let remote_refs = records
+        .into_iter()
+        .filter(|record| GitRefName::new(&record.name).content_namespace().is_some())
+        .map(|record| (record.name, record.oid))
+        .collect::<HashMap<_, _>>();
+    let creatable = creatable_ref_names(&served_frontier, scope, current_branch);
+    let previously_exported_in_scope = previously_exported
+        .iter()
+        .filter(|(name, _)| match scope {
+            GitPushScope::AllThreads => true,
+            GitPushScope::CurrentThread => {
+                name.as_str() == "refs/notes/heddle"
+                    || current_branch
+                        .is_some_and(|branch| name.as_str() == format!("refs/heads/{branch}"))
+            }
+        })
+        .map(|(name, oid)| (name.clone(), *oid))
+        .collect::<HashMap<_, _>>();
+    let mut plan = plan_destination_reconcile(
+        source,
+        &served_frontier,
+        creatable.as_ref(),
+        &remote_refs,
+        &previously_exported_in_scope,
+        force,
+    )?;
+    if scope == GitPushScope::CurrentThread {
+        for (name, oid) in previously_exported {
+            plan.new_manifest.entry(name).or_insert(oid);
+        }
+    }
+    if plan.writes.is_empty() && plan.deletes.is_empty() {
+        write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
+        return Ok(Vec::new());
+    }
+
+    let force_transport_checks = plan.writes.iter().any(|write| write.force);
+    let mut commands = Vec::with_capacity(plan.writes.len() + plan.deletes.len());
+    let mut pack_objects = Vec::with_capacity(plan.writes.len());
+    for write in &plan.writes {
+        commands.push(PushCommand {
+            src: Some(write.new),
+            dst: write.full_name.clone(),
+            expected_old: write.old,
+            force: write.force,
+        });
+        pack_objects.push(write.new);
+    }
+    for delete in &plan.deletes {
+        commands.push(PushCommand {
+            src: None,
+            dst: delete.full_name.clone(),
+            expected_old: Some(delete.old),
+            force: false,
+        });
+    }
+    source
+        .push_actions(
+            remote,
+            PushActionPlan {
+                commands,
+                pack_objects,
+                options: PushOptions {
+                    quiet: true,
+                    force: force || force_transport_checks,
+                    thin: sley::remote::PushThinMode::Auto,
+                    atomic: false,
+                    push_options: Vec::new(),
+                },
+            },
+            credentials,
+            progress,
+        )
+        .map_err(git_err)?;
+    write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
+    Ok(planned_write_names(&plan))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4875,6 +5116,73 @@ mod tests {
             std::fs::read_to_string(git_dir.join("HEAD")).unwrap(),
             "ref: refs/heads/main\n"
         );
+    }
+
+    #[test]
+    fn rollback_restore_uses_git_lock_and_compare_and_swap() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("HEAD");
+        std::fs::write(&path, b"published").unwrap();
+
+        restore_file_if_unchanged(&path, b"published", Some(b"previous")).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous");
+        assert!(!tmp.path().join("HEAD.lock").exists());
+
+        std::fs::write(&path, b"concurrent").unwrap();
+        let error = restore_file_if_unchanged(&path, b"published", Some(b"previous"))
+            .expect_err("concurrent write must block rollback");
+        assert!(error.to_string().contains("another Git operation changed"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"concurrent");
+        assert!(!tmp.path().join("HEAD.lock").exists());
+    }
+
+    #[test]
+    fn checkout_publish_rolls_back_branch_when_head_reflog_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = SleyRepository::init(tmp.path()).expect("init repository");
+        repo.write_object(sley::plumbing::sley_object::EncodedObject::new(
+            GitObjectType::Tree,
+            Vec::new(),
+        ))
+        .expect("write empty tree");
+        let previous = test_commit(&repo, "previous", &[]);
+        let next = test_commit(&repo, "next", &[previous]);
+        set_reference(
+            &repo,
+            "refs/heads/main",
+            previous,
+            RefPrecondition::Any,
+            "test: seed branch",
+        )
+        .unwrap();
+        write_head_symref(repo.git_dir(), "refs/heads/main").unwrap();
+
+        let write = CheckoutWrite::prepare(tmp.path(), "main").unwrap();
+        let previous_head = write.previous_head.clone();
+        let previous_index = write.previous_index.clone();
+        std::fs::remove_file(write.git_dir.join("logs/HEAD")).expect("remove existing HEAD reflog");
+        std::fs::create_dir_all(write.git_dir.join("logs/HEAD"))
+            .expect("block HEAD reflog file creation");
+
+        write
+            .publish(next)
+            .expect_err("HEAD reflog failure must fail publication");
+
+        let branch = repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .unwrap()
+            .peeled_oid(&repo)
+            .unwrap()
+            .unwrap();
+        assert_eq!(branch, previous);
+        assert_eq!(read_optional_file(&write.head_path).unwrap(), previous_head);
+        assert_eq!(
+            read_optional_file(&write.index_path).unwrap(),
+            previous_index
+        );
+        assert!(!write.git_dir.join("index.lock").exists());
+        assert!(!write.git_dir.join("HEAD.lock").exists());
     }
 
     /// Characterization: `head_state()` branch/detached/unborn mapping matches

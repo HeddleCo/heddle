@@ -6,7 +6,7 @@ status: accepted
 
 Repository Source Authority determines which storage and transport adapter executes a source operation. The Heddle command surface stays consistent across authorities where the semantics are shared.
 
-In Git Overlay, the real `.git` is authoritative for commits, refs, packs, index, and worktree state. Sley executes `clone`, `commit`, `pull`, `push`, and `remote` directly against it. Heddle metadata remains in `.heddle`. There is no normal `.heddle/git` mirror and no dependency on the `git` executable.
+In Git Overlay, the real `.git` is authoritative for commits, refs, packs, index, and worktree state. Sley executes `clone`, `commit`, `pull`, `push`, and `remote` directly against it. Heddle metadata remains in `.heddle`. Normal overlay operations neither create nor use `.heddle/git` and do not depend on the `git` executable. Legacy and explicit native Git Projection maintenance can still use the Bridge Mirror while ADR 0042's retirement work remains incomplete.
 
 `capture` records the granular Heddle state, provenance, and coordination metadata. `commit` then records captured source history in `.git`. `land` projects a managed thread into the same authoritative Git store. Remote verbs use Sley configuration and streaming transport.
 
@@ -20,4 +20,4 @@ Behavior, recommendations, and machine action templates select typed source acti
 - Git Overlay mutations must preserve `.git` and `.heddle` consistency or fail with typed recovery.
 - Credentials, progress, and remote configuration flow through Sley interfaces.
 - Unsupported Git operations fail closed; users may choose another Git-compatible client without making it a Heddle dependency.
-- Compatibility shims and persistent bridge mirrors are not part of the model.
+- Compatibility shims and persistent bridge mirrors are not part of the target model; remaining Bridge Mirror maintenance paths are legacy migration work, not active Git Overlay storage.

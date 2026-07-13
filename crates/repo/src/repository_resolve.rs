@@ -221,10 +221,7 @@ mod tests {
         assert_eq!(repo.resolve_state("HEAD~1").unwrap(), Some(s1));
     }
 
-    /// Ambiguous-prefix detection: synthesize two states whose full
-    /// IDs share a common prefix by writing them straight to the store
-    /// at hand-picked IDs. Going through the snapshot path can't
-    /// reliably produce a collision because state IDs are random.
+    /// Ambiguous-prefix detection for content-addressed StateIds.
     #[test]
     fn resolve_state_errors_on_ambiguous_prefix() {
         use objects::object::{Attribution, State};
@@ -233,13 +230,25 @@ mod tests {
 
         let head = repo.head().unwrap().unwrap();
         let head_state = repo.store().get_state(&head).unwrap().unwrap();
-        let principal = repo.get_principal().unwrap();
-        let state_a = State::new(
-            head_state.tree,
-            vec![head],
-            Attribution::human(principal.clone()),
-        );
-        let state_b = State::new(head_state.tree, vec![head], Attribution::human(principal));
+        let mut by_prefix = std::collections::HashMap::new();
+        let (prefix, state_a, state_b) = (0..10_000)
+            .find_map(|index| {
+                let state = State::new(
+                    head_state.tree,
+                    vec![head],
+                    Attribution::human(objects::object::Principal::new(
+                        format!("Collision Candidate {index}"),
+                        "collision@example.test",
+                    )),
+                );
+                let id = state.id();
+                let full = id.to_string_full();
+                let prefix = full.strip_prefix("hs-").unwrap()[..4].to_string();
+                by_prefix
+                    .insert(prefix.clone(), state.clone())
+                    .map(|previous| (format!("hs-{prefix}"), previous, state))
+            })
+            .expect("10,000 content-addressed states should contain a four-character collision");
         let id_a = state_a.id();
         let id_b = state_b.id();
         repo.store().put_state(&state_a).unwrap();
@@ -254,15 +263,13 @@ mod tests {
         );
         assert!(listed.contains(&id_b), "state B must be indexed");
 
-        let prefix = "hs-";
-
-        let err = repo.resolve_state(prefix).unwrap_err();
+        let err = repo.resolve_state(&prefix).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("ambiguous state ID prefix"),
             "unexpected error: {msg}"
         );
-        assert!(msg.contains(prefix), "error should echo the prefix: {msg}");
+        assert!(msg.contains(&prefix), "error should echo the prefix: {msg}");
         assert!(matches!(err, HeddleError::Conflict(_)));
     }
 }

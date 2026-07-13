@@ -53,6 +53,23 @@ pub(crate) fn state_from_commit(
     // though these ASCII-footer parsers read a lossy view.
     let message = String::from_utf8_lossy(&commit.message);
     let note = read_heddle_note(commit)?;
+    if let Some(note) = note.as_ref()
+        && let Some(mut source_state) = note.source_state.clone()
+    {
+        let source_id = source_state.id();
+        if source_id.to_string_full() != note.state_id
+            || source_state.change_id.to_string_full() != note.change_id
+            || source_state.tree != tree
+            || source_state.parents != parents
+        {
+            return Err(IngestError::Git(format!(
+                "embedded Heddle state for commit {} does not match its note, tree, or parents",
+                commit.sha
+            )));
+        }
+        source_state.state_id = source_id;
+        return Ok(source_state);
+    }
     let identity = resolve_identity(commit, note.as_ref())?;
     let attribution = parse_attribution_with_note(&commit.author, &message, note.as_ref());
     let status = note_status(note.as_ref());
@@ -148,6 +165,8 @@ fn parse_attribution_with_note(
 struct HeddleNote {
     state_id: String,
     change_id: String,
+    #[serde(default)]
+    source_state: Option<State>,
     #[serde(default)]
     agent: Option<HeddleNoteAgent>,
     #[serde(default)]

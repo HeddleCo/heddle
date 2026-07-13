@@ -637,36 +637,34 @@ fn recommended_action_templates_describe_display_only_placeholders() {
 
 #[test]
 fn action_fields_template_dirty_worktree_message_placeholders() {
-    for (action, expected_argv_template) in [(
-        "heddle capture -m \"...\"",
-        vec!["heddle", "capture", "-m", "<message>"],
-    )] {
-        let fields = ActionFields::from_action(action);
-        assert_eq!(fields.action.as_deref(), Some(action));
-        let template = fields
-            .template
-            .unwrap_or_else(|| panic!("`{action}` should expose a structured template"));
-        assert_eq!(template.argv_template, expected_argv_template);
-        assert_eq!(template.required_inputs, vec!["message"]);
-        assert!(template.agent_may_fill);
-    }
+    let action = "heddle capture -m \"...\"";
+    let fields = ActionFields::from_action(action);
+    assert_eq!(fields.action.as_deref(), Some(action));
+    let template = fields
+        .template
+        .unwrap_or_else(|| panic!("`{action}` should expose a structured template"));
+    assert_eq!(
+        template.argv_template,
+        vec!["heddle", "capture", "-m", "<message>"]
+    );
+    assert_eq!(template.required_inputs, vec!["message"]);
+    assert!(template.agent_may_fill);
 }
 
 #[test]
 fn action_fields_template_argv_normalized_message_placeholders() {
-    for (action, expected_argv_template) in [(
-        "heddle capture -m ...",
-        vec!["heddle", "capture", "-m", "<message>"],
-    )] {
-        let fields = ActionFields::from_action(action);
-        assert_eq!(fields.action.as_deref(), Some(action));
-        let template = fields
-            .template
-            .unwrap_or_else(|| panic!("`{action}` should expose a structured template"));
-        assert_eq!(template.argv_template, expected_argv_template);
-        assert_eq!(template.required_inputs, vec!["message"]);
-        assert!(template.agent_may_fill);
-    }
+    let action = "heddle capture -m ...";
+    let fields = ActionFields::from_action(action);
+    assert_eq!(fields.action.as_deref(), Some(action));
+    let template = fields
+        .template
+        .unwrap_or_else(|| panic!("`{action}` should expose a structured template"));
+    assert_eq!(
+        template.argv_template,
+        vec!["heddle", "capture", "-m", "<message>"]
+    );
+    assert_eq!(template.required_inputs, vec!["message"]);
+    assert!(template.agent_may_fill);
 }
 
 #[test]
@@ -1234,7 +1232,7 @@ fn every_mutating_leaf_declares_a_concrete_side_effect() {
     let paths_with_children = contract_paths_with_children(&CONTRACTS.iter().collect::<Vec<_>>());
 
     for entry in CONTRACTS {
-        if paths_with_children.contains(&entry.path.to_vec()) || !entry.contract.mutates {
+        if paths_with_children.contains(entry.path) || !entry.contract.mutates {
             continue;
         }
         let declares_concrete_effect = entry.contract.writes_heddle_refs
@@ -1272,7 +1270,7 @@ fn observe_only_leaves_declare_no_mutation_effects() {
     let paths_with_children = contract_paths_with_children(&CONTRACTS.iter().collect::<Vec<_>>());
 
     for entry in CONTRACTS {
-        if paths_with_children.contains(&entry.path.to_vec()) || !entry.contract.observe_only {
+        if paths_with_children.contains(entry.path) || !entry.contract.observe_only {
             continue;
         }
         assert_eq!(

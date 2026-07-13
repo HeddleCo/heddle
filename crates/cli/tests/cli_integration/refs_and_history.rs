@@ -495,7 +495,8 @@ fn test_cli_help_verb_falls_through_to_clap() {
          of clap's per-verb help: {help_init}"
     );
     assert!(
-        help_init.contains("Usage: init") || help_init.contains("Initialize a new Heddle"),
+        help_init.contains("Usage: heddle init")
+            || help_init.contains("Initialize Heddle in a directory"),
         "`heddle help init` should render clap's per-verb help: {help_init}"
     );
 

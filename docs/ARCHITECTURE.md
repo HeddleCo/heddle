@@ -153,19 +153,20 @@ Object lookup order is loose object first, then packfile fallback.
 
 ## Worktrees And Agent Isolation
 
-An isolated worktree is a normal checkout directory that points at a shared object store via a `.heddle` file.
+An isolated worktree is a normal checkout directory with local authority and HEAD metadata that points at the shared object store.
 
 ```text
 /workspace/agent-a/
-  .heddle   # objectstore: /main/repo/.heddle
-  HEAD    # per-checkout HEAD
+  .heddle/
+    objectstore  # shared path plus checkout source authority
+    HEAD         # per-checkout HEAD
 ```
 
 Important current behavior:
 
 - `heddle start <thread> --path <dir>` creates a filesystem-isolated checkout
 - `heddle start <thread>` records thread and agent metadata while keeping execution roots private by default
-- the oplog is still global across worktrees, so undo/redo semantics are repository-global rather than checkout-local
+- the oplog is shared, while undo and redo filter operations to the current checkout lane
 
 ## Threads, Presence, Leases, And Provenance
 

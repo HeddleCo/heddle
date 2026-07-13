@@ -8,9 +8,7 @@ use heddle_core::status::next_action::{
 };
 use serde_json::{Map, Value};
 
-pub(crate) const DIRTY_WORKTREE_COMMIT_COMMAND: &str = "heddle capture -m \"...\"";
 pub(crate) const DIRTY_WORKTREE_CAPTURE_COMMAND: &str = "heddle capture -m \"...\"";
-pub(crate) const DIRTY_WORKTREE_STASH_COMMAND: &str = "heddle capture -m \"...\"";
 pub(crate) const GIT_OVERLAY_CHECKPOINT_COMMAND: &str = "heddle commit -m \"...\"";
 
 #[derive(Debug, Clone)]
@@ -78,12 +76,12 @@ impl RecoveryAdvice {
         } else {
             format!("unsaved worktree path(s): {path_list}, and {overflow} more")
         };
-        let primary_command = DIRTY_WORKTREE_COMMIT_COMMAND.to_string();
+        let primary_command = DIRTY_WORKTREE_CAPTURE_COMMAND.to_string();
         Self {
             kind: "dirty_worktree",
-            error: format!("Save or stash worktree changes before {action}"),
+            error: format!("Capture worktree changes before {action}"),
             hint: format!(
-                "Save the work with `{primary_command}`; use `{DIRTY_WORKTREE_CAPTURE_COMMAND}` for a Heddle-only recovery point or park it with `{DIRTY_WORKTREE_STASH_COMMAND}`, then retry."
+                "Capture the intended work with `{DIRTY_WORKTREE_CAPTURE_COMMAND}`, then retry."
             ),
             unsafe_condition,
             would_change: format!(
@@ -579,9 +577,9 @@ impl RecoveryAdvice {
             "the repository has no current HEAD state",
             format!("`{action}` needs a concrete Heddle state id and cannot safely infer one"),
             "no repository objects, refs, metadata, or worktree files were changed",
-            DIRTY_WORKTREE_COMMIT_COMMAND,
+            DIRTY_WORKTREE_CAPTURE_COMMAND,
             vec![
-                DIRTY_WORKTREE_COMMIT_COMMAND.to_string(),
+                DIRTY_WORKTREE_CAPTURE_COMMAND.to_string(),
                 GIT_OVERLAY_CHECKPOINT_COMMAND.to_string(),
                 "heddle status".to_string(),
             ],
@@ -731,12 +729,12 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn from_git_projection_error(
-        error: &crate::git_projection_engine::git_core::GitProjectionError,
+        error: &heddle_git_projection::git_core::GitProjectionError,
     ) -> Option<Self> {
-        use crate::git_projection_engine::git_core::GitProjectionError;
+        use heddle_git_projection::git_core::GitProjectionError;
         match error {
             GitProjectionError::NonFastForwardRef { name, .. }
-                if name == crate::git_projection_engine::git_notes::NOTES_REF =>
+                if name == heddle_git_projection::git_notes::NOTES_REF =>
             {
                 Some(Self::git_overlay_note_ref_conflict())
             }
@@ -1151,11 +1149,7 @@ impl RecoveryAdvice {
 }
 
 pub(crate) fn dirty_worktree_recovery_commands() -> Vec<String> {
-    vec![
-        DIRTY_WORKTREE_COMMIT_COMMAND.to_string(),
-        DIRTY_WORKTREE_CAPTURE_COMMAND.to_string(),
-        DIRTY_WORKTREE_STASH_COMMAND.to_string(),
-    ]
+    vec![DIRTY_WORKTREE_CAPTURE_COMMAND.to_string()]
 }
 
 fn hex_hash(hash: [u8; 32]) -> String {
@@ -1192,7 +1186,7 @@ impl Error for RecoveryAdvice {}
 #[cfg(test)]
 mod tests {
     use super::RecoveryAdvice;
-    use crate::git_projection_engine::git_core::GitProjectionError;
+    use heddle_git_projection::git_core::GitProjectionError;
 
     #[test]
     fn git_projection_mapping_conflict_returns_typed_advice() {

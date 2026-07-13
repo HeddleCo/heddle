@@ -23,3 +23,5 @@ import public "heddle/v1/timeline.proto";
 import public "heddle/v1/transactions.proto";
 import public "heddle/v1/hooks.proto";
 import public "heddle/v1/support.proto";
+import public "heddle/v1/search.proto";
+import public "heddle/v1/import.proto";

@@ -414,7 +414,9 @@ through Sley; it does not require a Git executable.
 
 `heddle commit --output json` emits after writing the current captured state
 to Git Overlay source history. `-m/--message` is optional and defaults to the
-capture intent.
+capture intent. The command commits the complete captured tree, replaces the
+Git index with that tree, and does not run Git `pre-commit` or `commit-msg`
+hooks.
 
 ```json
 {

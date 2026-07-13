@@ -2,21 +2,6 @@
 use super::*;
 use objects::store::{ActorPresenceStore, WriterLeaseStore};
 
-fn expect_json_reserve_failure(args: &[&str], cwd: &std::path::Path) -> Value {
-    let output = heddle_output(args, Some(cwd)).expect("invoke reserve failure");
-    assert!(
-        !output.status.success(),
-        "reservation attempt should fail for args {args:?}"
-    );
-    let stdout = str::from_utf8(&output.stdout).unwrap_or("");
-    assert!(
-        stdout.trim().is_empty(),
-        "JSON-mode reservation failures must not emit a success-shaped stdout object: {stdout}"
-    );
-    let stderr = str::from_utf8(&output.stderr).unwrap_or("");
-    serde_json::from_str(stderr.trim()).expect("reservation failure should emit JSON envelope")
-}
-
 #[test]
 fn thread_start_creates_presence_without_writer_authority() {
     let main = setup_repo("base.txt", "shared base");
@@ -555,8 +540,11 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
         Some("heddle land --thread feature/native-cli --no-push")
     );
 
-    let actor_list_json = heddle(&["--output", "json", "agent", "presence", "list"], Some(main.path()))
-        .expect("actor list should succeed");
+    let actor_list_json = heddle(
+        &["--output", "json", "agent", "presence", "list"],
+        Some(main.path()),
+    )
+    .expect("actor list should succeed");
     let actor_list: Value = serde_json::from_str(&actor_list_json).unwrap();
     let actor_session = actor_list["presence"]
         .as_array()
@@ -852,8 +840,11 @@ fn land_auto_captures_and_merges_clean_thread() {
         "auto_integrated"
     );
 
-    let actor_show = heddle_output(&["--output", "json", "agent", "presence", "show"], Some(main.path()))
-        .expect("invoke actor show after land");
+    let actor_show = heddle_output(
+        &["--output", "json", "agent", "presence", "show"],
+        Some(main.path()),
+    )
+    .expect("invoke actor show after land");
     assert!(
         !actor_show.status.success(),
         "actor show should not select the merged actor implicitly after land"

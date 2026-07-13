@@ -5,48 +5,51 @@ use repo::operation_dedup::{OperationDedupStore, hash_request_body};
 
 use super::*;
 
+fn initialize_direct_git_overlay_for_polish_tests(path: &std::path::Path) {
+    heddle(&["init"], Some(path)).expect("initialize direct Git overlay");
+}
+
 #[test]
 fn git_overlay_guide_is_concise_and_actionable() {
     let help = heddle_help(&["help", "git-overlay"]);
     assert!(
-        help.contains("Git-overlay workflow")
-            && help.contains("heddle adopt")
-            && help.contains("heddle commit -m")
-            && help.contains("heddle land --thread <name> --no-push"),
+        help.contains("Git Overlay workflow")
+            && help.contains("heddle init")
+            && help.contains("heddle capture -m")
+            && help.contains("heddle commit")
+            && help.contains("heddle land --thread <name>"),
         "help git-overlay should render the actual guide, not only clap usage: {help}"
     );
 
-    let output = heddle(&["--output", "text", "git-overlay"], None).unwrap();
-
     assert!(
-        output.contains("Git-overlay workflow"),
-        "guide should have a clear title: {output}"
+        help.contains("Git Overlay workflow"),
+        "guide should have a clear title: {help}"
     );
     assert!(
-        output.contains("heddle adopt"),
-        "guide should teach explicit native conversion: {output}"
+        help.contains("heddle init"),
+        "guide should teach direct-overlay initialization: {help}"
     );
     assert!(
-        output.contains("Worktree has unsaved edits")
-            && output.contains("Captured in Heddle but not Git")
-            && output.contains("Convert Git history to native Heddle storage"),
-        "guide should name concrete recovery states instead of vague Git/Heddle disagreement: {output}"
+        help.contains("Worktree has unsaved edits")
+            && help.contains("Move atomically to the full Native Heddle feature set")
+            && help.contains("heddle adopt --ref <branch>"),
+        "guide should name concrete recovery states instead of vague Git/Heddle disagreement: {help}"
     );
     assert!(
-        output.contains("heddle start <name> --path ../<name>"),
-        "guide should teach isolated threads with the real start argument name: {output}"
+        help.contains("heddle start <name> --path ../<name>"),
+        "guide should teach isolated threads with the real start argument name: {help}"
     );
     assert!(
-        output.contains("heddle land --thread <name> --no-push"),
-        "guide should teach landing after readiness: {output}"
+        help.contains("heddle land --thread <name>"),
+        "guide should teach landing after readiness: {help}"
     );
     assert!(
-        output.contains("heddle undo"),
-        "guide should make recovery part of the core loop: {output}"
+        help.contains("heddle undo"),
+        "guide should make recovery part of the core loop: {help}"
     );
     assert!(
-        output.contains("heddle verify"),
-        "guide should end on the proof surface: {output}"
+        help.contains("heddle verify"),
+        "guide should end on the proof surface: {help}"
     );
 }
 
@@ -70,22 +73,19 @@ fn model_help_topic_gives_short_first_time_mental_model() {
 }
 
 #[test]
-fn git_projection_help_topic_teaches_adoption_before_export_notes() {
+fn git_projection_help_topic_distinguishes_native_projection_from_overlay() {
     let help = heddle_help(&["help", "git-projection"]);
     assert!(
         help.starts_with("Git Projection"),
         "git projection topic should open with the workflow, not advanced notes metadata: {help}"
     );
     for needle in [
-        "heddle status",
-        "heddle adopt",
-        "heddle init",
-        "heddle import git --ref <branch>",
-        "heddle verify",
-        "heddle commit -m",
-        "heddle push",
-        "heddle land --thread <name> --no-push",
+        "heddle adopt --ref <branch>",
+        "heddle import git --path <git-repository> --ref <branch>",
+        "heddle export git --destination <bare-git-repository>",
+        "heddle sync git --path <git-repository>",
         "Export metadata for Git readers",
+        "refs/notes/heddle",
     ] {
         assert!(
             help.contains(needle),
@@ -93,12 +93,12 @@ fn git_projection_help_topic_teaches_adoption_before_export_notes() {
         );
     }
     assert!(
-        help.find("First run:") < help.find("Export metadata for Git readers"),
+        help.find("Move an existing Git repository") < help.find("Export metadata for Git readers"),
         "git projection topic should put adoption before notes/export details: {help}"
     );
     assert!(
-        !help.contains("\n    heddle land --push\n"),
-        "git projection topic should not teach a threadless land from the main checkout: {help}"
+        help.contains("It is not Git Overlay"),
+        "projection help must keep the authority boundary explicit: {help}"
     );
 }
 
@@ -116,8 +116,10 @@ fn import_alias_leads_to_adopt_instead_of_clap_guesswork() {
 fn adopt_help_does_not_claim_dirty_git_worktree_becomes_clean() {
     let help = heddle_help(&["adopt", "--help"]);
     assert!(
-        help.contains("without modifying existing Git worktree changes"),
-        "adopt help should say adoption leaves existing dirty work untouched: {help}"
+        help.contains("makes Heddle the source authority")
+            && help.contains("retains `.git` for explicit Git Projection")
+            && help.contains("Normal Git Overlay setup uses `heddle init`"),
+        "adopt help should explain the atomic authority migration: {help}"
     );
     assert!(
         !help.contains("leaves the Git working tree clean"),
@@ -155,86 +157,6 @@ fn thread_drop_does_not_recommend_deleted_thread() {
         !output.contains("ready --thread try-git-muscle"),
         "thread drop must not recommend an action for a deleted thread: {output}"
     );
-}
-
-#[test]
-fn switch_dash_c_guides_to_heddle_thread_flow() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
-    heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
-
-    let output = heddle_output(
-        &["switch", "-c", "try-git-muscle", "--output", "text"],
-        Some(temp.path()),
-    )
-    .expect("invoke switch -c");
-    assert!(!output.status.success(), "switch -c should be guided");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("heddle switch -c")
-            && stderr.contains("heddle start try-git-muscle --path ../try-git-muscle")
-            && !stderr.contains("unexpected argument"),
-        "switch -c should produce Heddle-native guidance instead of a generic clap error: {stderr}"
-    );
-}
-
-#[test]
-fn switch_print_cd_path_alias_matches_thread_switch() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
-    heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
-
-    let thread = "alias-print-cd";
-    let checkout = temp.path().parent().unwrap().join("alias-print-cd-path");
-    let checkout_str = checkout.to_str().expect("checkout path should be utf-8");
-    heddle(
-        &["start", thread, "--path", checkout_str],
-        Some(temp.path()),
-    )
-    .unwrap();
-
-    let direct = heddle_output(
-        &["thread", "switch", thread, "--print-cd-path"],
-        Some(temp.path()),
-    )
-    .expect("invoke thread switch --print-cd-path");
-    assert!(
-        direct.status.success(),
-        "thread switch --print-cd-path should succeed"
-    );
-    let expected = std::str::from_utf8(&direct.stdout)
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let alias = heddle_output(&["switch", "--print-cd-path", thread], Some(temp.path()))
-        .expect("invoke switch --print-cd-path");
-    assert!(
-        alias.status.success(),
-        "switch --print-cd-path should behave like thread switch; stderr={}",
-        std::str::from_utf8(&alias.stderr).unwrap_or("")
-    );
-    let stdout = std::str::from_utf8(&alias.stdout).unwrap();
-    assert_eq!(
-        stdout.trim(),
-        expected,
-        "switch --print-cd-path should print the thread checkout path"
-    );
-    assert_eq!(
-        stdout.trim().lines().count(),
-        1,
-        "switch --print-cd-path should only print the path"
-    );
-    assert!(
-        !stdout.contains("unexpected argument"),
-        "alias should parse --print-cd-path instead of surfacing clap text: {stdout}"
-    );
-
-    if checkout.exists() {
-        std::fs::remove_dir_all(checkout).unwrap();
-    }
 }
 
 #[test]
@@ -313,7 +235,7 @@ fn verify_is_strict_by_default() {
         "verify advice should name a Heddle recovery command: {stderr}"
     );
 
-    heddle(&["commit", "--all", "-m", "clean"], Some(temp.path())).expect("clean repo");
+    heddle(&["capture", "-m", "clean"], Some(temp.path())).expect("capture clean state");
     let clean =
         heddle_output(&["verify", "--output", "json"], Some(temp.path())).expect("invoke verify");
     assert!(
@@ -374,10 +296,10 @@ fn native_dirty_status_blocks_verification_without_git_overlay_language() {
     assert_eq!(status["verification"]["verified"], false);
     assert_eq!(status["verification"]["status"], "uncaptured");
     assert_eq!(status["verification"]["worktree_state"], "dirty");
-    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle capture -m \"...\"");
     assert_eq!(
         status["verification"]["recommended_action"],
-        "heddle commit -m \"...\""
+        "heddle capture -m \"...\""
     );
     assert_eq!(
         status["blockers"].as_array().map(Vec::len),
@@ -408,8 +330,10 @@ fn native_dirty_status_blocks_verification_without_git_overlay_language() {
         "native Heddle status should not use Git-overlay labeling: {text}"
     );
     assert!(
-        text.contains("commit captures them as a Heddle state") && !text.contains("Git checkpoint"),
-        "native Heddle status should not describe native commits as Git checkpoints: {text}"
+        text.contains("Changes not yet saved")
+            && text.contains("heddle capture -m \"...\"")
+            && !text.contains("Git checkpoint"),
+        "native Heddle status should describe unsaved work with capture language: {text}"
     );
 }
 
@@ -519,7 +443,7 @@ fn first_status_before_capture_names_default_identity() {
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(
         text.contains("Identity:")
-            && text.contains("first capture/checkpoint")
+            && text.contains("first capture")
             && text.contains("Unknown <unknown@example.com>")
             && text.contains("HEDDLE_PRINCIPAL_NAME"),
         "first-run status should make default attribution explicit before capture: {text}"
@@ -575,7 +499,7 @@ fn git_overlay_isolated_checkout_status_and_verify_identify_parent_context() {
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
 
     let checkout = sibling_checkout_path(temp.path(), "git-overlay-child");
     let checkout_arg = checkout.to_str().expect("checkout path should be utf8");
@@ -777,7 +701,7 @@ fn init_json_names_side_effects_next_action_and_schema() {
     assert_eq!(init["principal"]["name"], "Heddle Test");
     assert_eq!(init["principal"]["email"], "heddle@example.com");
     assert_eq!(init["principal_recommended_action"], Value::Null);
-    assert_eq!(init["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(init["recommended_action"], "heddle capture -m \"...\"");
     assert_eq!(
         init["verification"]["status"], "clean",
         "post-init verify should treat clean Git history as directly readable: {init}"
@@ -826,7 +750,7 @@ fn init_json_names_side_effects_next_action_and_schema() {
             && text.contains("Principal: Heddle Test <heddle@example.com> from git_config")
             && text.contains(".git/info/exclude")
             && text.contains("left Git-tracked files")
-            && text.contains("Next: heddle commit -m \"...\""),
+            && text.contains("Next: heddle capture -m \"...\""),
         "init text should make side effects and next save step obvious: {text}"
     );
 }
@@ -1013,20 +937,9 @@ fn explicit_json_for_text_only_command_uses_contract_advice() {
 fn command_catalog_exposes_agent_metadata_for_options() {
     let json = heddle(&["help", "--output", "json"], None).unwrap();
     let parsed: Value = serde_json::from_str(&json).unwrap();
-    assert!(
-        parsed["recommended_action_placeholders"]
-            .as_array()
-            .expect("placeholder registry should be cataloged")
-            .iter()
-            .any(|action| action
-                .as_str()
-                .is_some_and(|action| action == "git switch <branch>")),
-        "Git Overlay recovery should route Git-owned work directly to Git: {parsed}"
-    );
     for placeholder in [
         "heddle capture -m \"...\"",
         "heddle commit -m \"...\"",
-        "git switch <branch>",
         "heddle ready --thread <thread>",
         "heddle land --thread <thread>",
         "heddle clone <remote> <fresh-path>",
@@ -1087,7 +1000,7 @@ fn command_catalog_exposes_agent_metadata_for_options() {
     assert_eq!(commit["writes_git_refs"], true);
     assert_eq!(
         commit["side_effects"],
-        serde_json::json!(["writes_heddle_refs", "writes_git_refs"])
+        serde_json::json!(["writes_heddle_refs", "writes_git_refs", "writes_metadata"])
     );
     assert_eq!(commit["first_run_behavior"], "requires_initialized_repo");
 
@@ -1314,16 +1227,16 @@ fn schemas_no_arg_lists_verbs_and_ignores_trailing_global_flags() {
     );
 
     let direct = parse_exactly_one_json_value(
-        &heddle(&["schemas", "merge", "--preview"], None)
-            .expect("merge preview schema should be discoverable"),
+        &heddle(&["schemas", "log", "--reflog"], None)
+            .expect("reflog schema should be discoverable"),
     )
-    .expect("merge preview schema should parse");
+    .expect("reflog schema should parse");
     let trailing = parse_exactly_one_json_value(
         &heddle(
             &[
                 "schemas",
-                "merge",
-                "--preview",
+                "log",
+                "--reflog",
                 "--output",
                 "text",
                 "--verbose",
@@ -1332,7 +1245,7 @@ fn schemas_no_arg_lists_verbs_and_ignores_trailing_global_flags() {
         )
         .expect("trailing global flags should not become part of the schema verb"),
     )
-    .expect("merge preview schema with trailing global flags should parse");
+    .expect("reflog schema with trailing global flags should parse");
     assert_eq!(trailing["properties"], direct["properties"]);
 }
 
@@ -1428,16 +1341,6 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
                 source.contains("assert_local_ahead_verified_json")
                     && source.contains("\"remote_drift\": \"remote_ahead\""),
                 "{} should prove local-ahead commits remain verified sync guidance",
-                script.display()
-            );
-            assert!(
-                source.contains("assert_merge_preview_points_to_land_json"),
-                "{} should prove merge preview points to the land landing loop",
-                script.display()
-            );
-            assert!(
-                source.contains("checkpoint") && source.contains("capture"),
-                "{} should prove the explicit capture/checkpoint machine loop",
                 script.display()
             );
             assert!(
@@ -1745,7 +1648,7 @@ fn op_id_replays_first_contact_init_adopt_and_clone() {
     let source = TempDir::new().unwrap();
     heddle(&["init"], Some(source.path())).unwrap();
     std::fs::write(source.path().join("tracked.txt"), "clone me\n").unwrap();
-    heddle(&["commit", "-m", "seed"], Some(source.path())).unwrap();
+    heddle(&["capture", "-m", "seed"], Some(source.path())).unwrap();
     let clone_parent = TempDir::new().unwrap();
     let clone_dest = clone_parent.path().join("copy");
     let clone_dest_arg = clone_dest.display().to_string();
@@ -1940,40 +1843,17 @@ fn op_id_replays_export_git() {
 }
 
 #[test]
-fn op_id_decorated_stash_push_matches_registered_schema() {
-    let temp = TempDir::new().unwrap();
-    let op_id = "550e8400-e29b-41d4-a716-446655440011";
-
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("stashed.txt"), "stash me\n").unwrap();
-
-    let pushed = json_value(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "--op-id",
-            op_id,
-            "stash",
-            "push",
-            "-m",
-            "schema op-id stash",
-        ],
-    );
-    assert_eq!(pushed["op_id"], op_id);
-    assert_eq!(pushed["idempotency_status"], "executed");
-    assert_eq!(pushed["replayed"], false);
-    assert_eq!(pushed["operation_record"]["command"], "stash push");
-    assert_schema_declares_runtime_top_level(&["stash", "push"], &pushed);
-}
-
-#[test]
 fn commit_schema_declares_real_op_id_commit_and_replay_fields() {
     let temp = TempDir::new().unwrap();
     let op_id = "550e8400-e29b-41d4-a716-446655440010";
 
-    heddle(&["init"], Some(temp.path())).unwrap();
+    init_git_repo_for_json_contract(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "seed\n").unwrap();
+    git_commit_all_for_json_contract(temp.path(), "seed");
+    heddle(&["init"], Some(temp.path())).expect("initialize direct Git overlay");
     std::fs::write(temp.path().join("tracked.txt"), "commit me\n").unwrap();
+    heddle(&["capture", "-m", "op-id commit"], Some(temp.path()))
+        .expect("capture state before Git commit");
 
     let first = json_value(
         temp.path(),
@@ -1988,7 +1868,6 @@ fn commit_schema_declares_real_op_id_commit_and_replay_fields() {
         ],
     );
     assert_eq!(first["output_kind"], "commit");
-    assert_eq!(first["action"], "commit");
     assert_eq!(first["op_id"], op_id);
     assert_eq!(first["idempotency_status"], "executed");
     assert_eq!(first["replayed"], false);
@@ -2082,548 +1961,28 @@ fn capture_json_reports_recorded_confidence_principal_and_agent() {
 }
 
 #[test]
-fn commit_json_reports_recorded_confidence_principal_and_agent() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("agent.txt"), "agent work\n").unwrap();
-
-    let output = heddle_output_with_env(
-        &[
-            "commit",
-            "-m",
-            "agent save",
-            "--confidence",
-            "0.9",
-            "--output",
-            "json",
-        ],
-        Some(temp.path()),
-        &[
-            ("HEDDLE_PRINCIPAL_NAME", "Ada Agent"),
-            ("HEDDLE_PRINCIPAL_EMAIL", "ada-agent@example.com"),
-            ("HEDDLE_AGENT_PROVIDER", "codex"),
-            ("HEDDLE_AGENT_MODEL", "gpt-5-codex"),
-        ],
-    )
-    .expect("commit should run");
-    assert!(
-        output.status.success(),
-        "commit should succeed; stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let commit: Value = serde_json::from_str(&stdout)
-        .unwrap_or_else(|err| panic!("commit JSON should parse: {err}: {stdout}"));
-
-    assert_eq!(commit["output_kind"], "commit");
-    assert_eq!(commit["confidence"], serde_json::json!(0.9));
-    assert_eq!(commit["principal"]["name"], "Ada Agent");
-    assert_eq!(commit["principal"]["email"], "ada-agent@example.com");
-    assert_eq!(commit["agent"]["provider"], "codex");
-    assert_eq!(commit["agent"]["model"], "gpt-5-codex");
-    assert!(commit["agent"].get("session_id").is_none());
-    assert!(commit["agent"].get("segment_id").is_none());
-    assert!(commit["agent"].get("policy_id").is_none());
-    assert_schema_declares_runtime_top_level(&["commit"], &commit);
-
-    let show = json_value(temp.path(), &["show", "HEAD", "--output", "json"]);
-    assert_eq!(show["confidence"], commit["confidence"]);
-    assert_eq!(show["principal"], commit["principal"]);
-    assert_eq!(show["agent"]["provider"], commit["agent"]["provider"]);
-    assert_eq!(show["agent"]["model"], commit["agent"]["model"]);
-    assert!(show["agent"].get("session_id").is_none());
-    assert!(show["agent"].get("policy_id").is_none());
-}
-
-#[test]
-fn save_text_surfaces_principal_and_agent_attribution() {
-    let capture_repo = TempDir::new().unwrap();
-    heddle(&["init"], Some(capture_repo.path())).unwrap();
-    std::fs::write(capture_repo.path().join("agent.txt"), "agent work\n").unwrap();
-    let capture = heddle_output_with_env(
-        &[
-            "capture",
-            "-m",
-            "agent save",
-            "--confidence",
-            "0.9",
-            "--output",
-            "text",
-        ],
-        Some(capture_repo.path()),
-        &[
-            ("NO_COLOR", "1"),
-            ("HEDDLE_PRINCIPAL_NAME", "Ada Agent"),
-            ("HEDDLE_PRINCIPAL_EMAIL", "ada-agent@example.com"),
-            ("HEDDLE_AGENT_PROVIDER", "codex"),
-            ("HEDDLE_AGENT_MODEL", "gpt-5-codex"),
-        ],
-    )
-    .expect("capture text should run");
-    assert!(
-        capture.status.success(),
-        "capture should succeed: {}",
-        String::from_utf8_lossy(&capture.stderr)
-    );
-    let capture_text = String::from_utf8_lossy(&capture.stdout);
-    assert!(
-        capture_text.contains("Saved by: Ada Agent <ada-agent@example.com>")
-            && capture_text.contains("Agent: codex/gpt-5-codex"),
-        "capture text should make attribution visible at save time: {capture_text}"
-    );
-
-    let commit_repo = TempDir::new().unwrap();
-    heddle(&["init"], Some(commit_repo.path())).unwrap();
-    std::fs::write(commit_repo.path().join("agent.txt"), "agent work\n").unwrap();
-    let commit = heddle_output_with_env(
-        &[
-            "commit",
-            "-m",
-            "agent save",
-            "--confidence",
-            "0.9",
-            "--output",
-            "text",
-        ],
-        Some(commit_repo.path()),
-        &[
-            ("NO_COLOR", "1"),
-            ("HEDDLE_PRINCIPAL_NAME", "Ada Agent"),
-            ("HEDDLE_PRINCIPAL_EMAIL", "ada-agent@example.com"),
-            ("HEDDLE_AGENT_PROVIDER", "codex"),
-            ("HEDDLE_AGENT_MODEL", "gpt-5-codex"),
-        ],
-    )
-    .expect("commit text should run");
-    assert!(
-        commit.status.success(),
-        "commit should succeed: {}",
-        String::from_utf8_lossy(&commit.stderr)
-    );
-    let commit_text = String::from_utf8_lossy(&commit.stdout);
-    assert!(
-        commit_text.contains("Saved by: Ada Agent <ada-agent@example.com>")
-            && commit_text.contains("Agent: codex/gpt-5-codex"),
-        "commit text should make attribution visible at save time: {commit_text}"
-    );
-}
-
-#[test]
-fn git_overlay_commit_respects_staged_index_and_leaves_extra_work() {
+fn git_overlay_commit_without_capture_uses_typed_recovery() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
-    std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
+    std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(&["init"], Some(temp.path())).expect("initialize direct Git overlay");
 
-    std::fs::write(temp.path().join("file.txt"), "staged\n").unwrap();
-    git_ok_for_json_contract(temp.path(), &["add", "file.txt"]);
-    std::fs::write(temp.path().join("file.txt"), "staged\nunstaged\n").unwrap();
-    std::fs::write(temp.path().join("scratch.txt"), "do not sweep\n").unwrap();
-
-    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
-    assert!(
-        status_text.contains("Git index and worktree")
-            && status_text.contains("will commit staged paths")
-            && status_text.contains("will leave unstaged paths")
-            && status_text.contains("will leave untracked paths")
-            && status_text.contains("plain `heddle commit` checkpoints staged paths only")
-            && status_text.contains("heddle commit --all -m \"...\""),
-        "status text should explain staged-index commit scope before the user commits: {status_text}"
-    );
-
-    let verify = json_value(temp.path(), &["verify", "--output", "json"]);
-    assert_eq!(verify["status"], "dirty_worktree", "{verify}");
-    assert_eq!(
-        verify["recommended_action"], "heddle commit -m \"...\"",
-        "verify should recommend the staged-index commit path: {verify}"
-    );
-    assert_eq!(
-        verify["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["commit", "-m", "<message>"]),
-        "{verify}"
-    );
-
-    let before = git_stdout_for_json_contract(temp.path(), &["rev-parse", "HEAD"]);
     let output = heddle_output(
-        &["--output", "json", "commit", "-m", "index respect audit"],
+        &["--output", "json", "commit", "-m", "missing capture"],
         Some(temp.path()),
     )
-    .expect("commit should run");
-    assert!(
-        output.status.success(),
-        "plain commit should checkpoint only the staged index: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let commit: Value =
-        serde_json::from_slice(&output.stdout).expect("staged commit JSON should parse");
-    assert_eq!(commit["git_index"]["commit_mode"], "staged_index");
+    .expect("invoke commit without a captured state");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let envelope: Value = serde_json::from_slice(&output.stderr).expect("typed commit refusal");
+    assert_eq!(envelope["kind"], "commit_capture_required");
+    assert_eq!(envelope["primary_command"], "heddle capture -m \"...\"");
     assert_eq!(
-        commit["git_index"]["will_commit"],
-        serde_json::json!(["file.txt"])
+        envelope["recovery_commands"],
+        serde_json::json!(["heddle capture -m \"...\"", "heddle status"])
     );
-    assert_eq!(
-        commit["git_index"]["preserved_after_commit"],
-        serde_json::json!(["unstaged: file.txt", "untracked: scratch.txt"]),
-        "commit JSON should repeat the exact scope status predicted: {commit}"
-    );
-    assert!(
-        commit["summary"]
-            .as_str()
-            .is_some_and(|summary| summary.contains("left 2 unstaged/untracked")),
-        "commit summary should disclose preserved extra work: {commit}"
-    );
-    let after = git_stdout_for_json_contract(temp.path(), &["rev-parse", "HEAD"]);
-    assert_ne!(after, before, "staged commit should write a Git commit");
-    let committed_file = git_stdout_for_json_contract(temp.path(), &["show", "HEAD:file.txt"]);
-    assert_eq!(
-        committed_file, "staged",
-        "Git commit should contain the staged index version only"
-    );
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("file.txt")).unwrap(),
-        "staged\nunstaged\n",
-        "unstaged edit should remain in the worktree"
-    );
-    assert!(
-        temp.path().join("scratch.txt").exists(),
-        "untracked extra work should remain in the worktree"
-    );
-    let names = git_stdout_for_json_contract(temp.path(), &["show", "--name-only", "--format="]);
-    assert!(names.contains("file.txt"));
-    assert!(!names.contains("scratch.txt"));
-    let porcelain = git_stdout_for_json_contract(temp.path(), &["status", "--porcelain"]);
-    assert!(
-        porcelain.contains("M file.txt") && porcelain.contains("?? scratch.txt"),
-        "remaining work should look like ordinary unstaged Git work: {porcelain}"
-    );
-
-    git_ok_for_json_contract(temp.path(), &["add", "file.txt"]);
-    let all = heddle_output(
-        &[
-            "--output",
-            "json",
-            "commit",
-            "--all",
-            "-m",
-            "index respect audit",
-        ],
-        Some(temp.path()),
-    )
-    .expect("commit --all should run");
-    assert!(
-        all.status.success(),
-        "explicit --all should keep the full-worktree Heddle save available: {}",
-        String::from_utf8_lossy(&all.stderr)
-    );
-    let all_commit: Value =
-        serde_json::from_slice(&all.stdout).expect("commit --all JSON should parse");
-    assert_eq!(
-        all_commit["git_index"]["commit_mode"],
-        "worktree_all_explicit"
-    );
-    assert_eq!(
-        all_commit["git_index"]["preserved_after_commit"],
-        serde_json::json!([])
-    );
-    let names = git_stdout_for_json_contract(temp.path(), &["show", "--name-only", "--format="]);
-    assert!(names.contains("file.txt"));
-    assert!(names.contains("scratch.txt"));
-}
-
-#[test]
-fn git_overlay_commit_empty_index_sweeps_whole_worktree() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_for_json_contract(temp.path(), "main");
-    std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
-    git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
-
-    // Nothing staged: a worktree edit plus an untracked file.
-    std::fs::write(temp.path().join("file.txt"), "base\nswept\n").unwrap();
-    std::fs::write(temp.path().join("scratch.txt"), "untracked\n").unwrap();
-
-    let commit = json_value(
-        temp.path(),
-        &["commit", "-m", "sweep all", "--output", "json"],
-    );
-    assert_eq!(
-        commit["git_index"]["commit_mode"], "worktree_all",
-        "an empty index should commit all worktree paths: {commit}"
-    );
-    let names = git_stdout_for_json_contract(temp.path(), &["show", "--name-only", "--format="]);
-    assert!(
-        names.contains("file.txt") && names.contains("scratch.txt"),
-        "empty-index commit should sweep both the edited and the untracked path: {names}"
-    );
-}
-
-#[test]
-fn git_overlay_commit_no_all_empty_index_refuses_nothing_to_commit() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_for_json_contract(temp.path(), "main");
-    std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
-    git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
-
-    // Nothing genuinely staged: the index matches HEAD. Only worktree edits +
-    // an untracked file exist, so the worktree is dirty.
-    std::fs::write(temp.path().join("file.txt"), "base\nworktree edit\n").unwrap();
-    std::fs::write(temp.path().join("scratch.txt"), "untracked\n").unwrap();
-
-    let before = git_stdout_for_json_contract(temp.path(), &["rev-parse", "HEAD"]);
-
-    // `--no-all` is index-only. With the index identical to HEAD there is
-    // nothing staged, so it must refuse with nothing-to-commit rather than
-    // writing a spurious empty / index-identical Git checkpoint.
-    let output = heddle_output(
-        &["--output", "json", "commit", "--no-all", "-m", "index only"],
-        Some(temp.path()),
-    )
-    .expect("commit --no-all should run");
-    assert!(
-        !output.status.success(),
-        "commit --no-all with an empty index must refuse, not create a commit: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value =
-        serde_json::from_str(stderr).unwrap_or_else(|err| panic!("stderr JSON: {err}: {stderr}"));
-    assert_eq!(
-        envelope["kind"], "nothing_to_commit",
-        "--no-all with no staged changes must surface nothing-to-commit: {envelope}"
-    );
-
-    // HEAD is unchanged: no spurious commit was created.
-    let after = git_stdout_for_json_contract(temp.path(), &["rev-parse", "HEAD"]);
-    assert_eq!(
-        before, after,
-        "--no-all must not create a commit when nothing is staged"
-    );
-    let head_file = git_stdout_for_json_contract(temp.path(), &["show", "HEAD:file.txt"]);
-    assert_eq!(
-        head_file, "base",
-        "--no-all must not sweep worktree edits into a commit"
-    );
-    // The worktree edits remain untouched.
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("file.txt")).unwrap(),
-        "base\nworktree edit\n",
-        "the worktree edit should remain after --no-all"
-    );
-    assert!(
-        temp.path().join("scratch.txt").exists(),
-        "the untracked file should remain after --no-all"
-    );
-}
-
-#[test]
-fn git_overlay_commit_no_all_with_real_staged_changes_commits_index_only() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_for_json_contract(temp.path(), "main");
-    std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
-    git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
-
-    // Genuinely stage a change, then add an unstaged edit + untracked file on
-    // top so the worktree is dirty beyond the index.
-    std::fs::write(temp.path().join("file.txt"), "staged\n").unwrap();
-    git_ok_for_json_contract(temp.path(), &["add", "file.txt"]);
-    std::fs::write(temp.path().join("file.txt"), "staged\nunstaged\n").unwrap();
-    std::fs::write(temp.path().join("scratch.txt"), "do not sweep\n").unwrap();
-
-    let before = git_stdout_for_json_contract(temp.path(), &["rev-parse", "HEAD"]);
-    let output = heddle_output(
-        &["--output", "json", "commit", "--no-all", "-m", "index only"],
-        Some(temp.path()),
-    )
-    .expect("commit --no-all should run");
-    assert!(
-        output.status.success(),
-        "commit --no-all with real staged changes should succeed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let commit: Value =
-        serde_json::from_slice(&output.stdout).expect("commit --no-all JSON should parse");
-    assert_eq!(
-        commit["git_index"]["commit_mode"], "staged_index",
-        "--no-all must report an index-only commit: {commit}"
-    );
-    assert_eq!(
-        commit["git_index"]["will_commit"],
-        serde_json::json!(["file.txt"]),
-        "--no-all must commit only the staged path: {commit}"
-    );
-    assert_eq!(
-        commit["git_index"]["preserved_after_commit"],
-        serde_json::json!(["unstaged: file.txt", "untracked: scratch.txt"]),
-        "--no-all must preserve the unstaged/untracked worktree paths: {commit}"
-    );
-
-    let after = git_stdout_for_json_contract(temp.path(), &["rev-parse", "HEAD"]);
-    assert_ne!(before, after, "--no-all should write a Git commit");
-    // The commit reflects the staged index version only.
-    let head_file = git_stdout_for_json_contract(temp.path(), &["show", "HEAD:file.txt"]);
-    assert_eq!(
-        head_file, "staged",
-        "--no-all must commit the staged index content, not the worktree edit"
-    );
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("file.txt")).unwrap(),
-        "staged\nunstaged\n",
-        "the unstaged edit should remain in the worktree"
-    );
-}
-
-#[test]
-fn git_overlay_commit_no_all_does_not_checkpoint_pending_capture() {
-    // Regression for the clean-worktree `needs_checkpoint` fast-path: after a
-    // `heddle capture`, the worktree matches Heddle's tree (status is clean)
-    // while Git HEAD is behind, so commit would normally checkpoint the
-    // captured worktree change into Git. `--no-all` must force an INDEX-ONLY
-    // commit and refuse to auto-checkpoint that pending capture.
-    let temp = TempDir::new().unwrap();
-    init_git_repo_for_json_contract(temp.path(), "main");
-    std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
-    git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
-
-    // Capture a worktree edit into Heddle only. The Git index/HEAD still match
-    // the seed commit, and the worktree now matches Heddle's captured tree, so
-    // commit sees a clean worktree with an empty index that nonetheless needs a
-    // Git checkpoint.
-    std::fs::write(temp.path().join("file.txt"), "base\ncaptured\n").unwrap();
-    heddle(&["capture", "-m", "recoverable save"], Some(temp.path())).unwrap();
-    assert_eq!(
-        git_stdout_for_json_contract(temp.path(), &["show", "HEAD:file.txt"]),
-        "base",
-        "capture must not have moved Git HEAD"
-    );
-
-    // `--no-all`: index is empty, so there is nothing to commit. The captured
-    // worktree change must NOT be written into Git.
-    let output = heddle_output(
-        &["--output", "json", "commit", "--no-all", "-m", "index only"],
-        Some(temp.path()),
-    )
-    .expect("commit --no-all should run");
-    assert!(
-        !output.status.success(),
-        "commit --no-all with an empty index must refuse with nothing-to-commit: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value =
-        serde_json::from_str(stderr).unwrap_or_else(|err| panic!("stderr JSON: {err}: {stderr}"));
-    assert_eq!(
-        envelope["kind"], "nothing_to_commit",
-        "--no-all must surface nothing-to-commit, not a silent capture checkpoint: {envelope}"
-    );
-    assert_eq!(
-        git_stdout_for_json_contract(temp.path(), &["show", "HEAD:file.txt"]),
-        "base",
-        "--no-all must not checkpoint the pending capture into Git"
-    );
-}
-
-#[test]
-fn git_overlay_commit_without_no_all_checkpoints_pending_capture() {
-    // Contrast: the same clean-worktree `needs_checkpoint` scenario WITHOUT
-    // `--no-all` must still checkpoint the pending capture into Git (the
-    // default fast-path behavior).
-    let temp = TempDir::new().unwrap();
-    init_git_repo_for_json_contract(temp.path(), "main");
-    std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
-    git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
-
-    std::fs::write(temp.path().join("file.txt"), "base\ncaptured\n").unwrap();
-    let capture = json_value(
-        temp.path(),
-        &["capture", "-m", "recoverable save", "--output", "json"],
-    );
-    let captured_state = capture["state_id"]
-        .as_str()
-        .expect("capture should report change id")
-        .to_string();
-
-    let commit = json_value(
-        temp.path(),
-        &["commit", "-m", "checkpoint capture", "--output", "json"],
-    );
-    assert_eq!(
-        commit["included_pending_capture"], captured_state,
-        "without --no-all the fast-path should checkpoint the pending capture: {commit}"
-    );
-    assert_eq!(
-        git_stdout_for_json_contract(temp.path(), &["show", "HEAD:file.txt"]),
-        "base\ncaptured",
-        "without --no-all the captured worktree change must land in Git"
-    );
-}
-
-#[test]
-fn commit_help_surfaces_index_vs_worktree_auto_switch() {
-    let commit = heddle_help(&["commit", "--help"]);
-    assert!(
-        commit.contains("auto-switches on the Git index")
-            && commit.contains("with nothing staged it commits all worktree paths")
-            && commit.contains("with staged paths it commits only the index")
-            && commit.contains("--no-all"),
-        "commit help should surface the accurate index-vs-worktree auto-switch: {commit}"
-    );
-    assert!(
-        !commit.contains("by default behaves like `git commit -a`"),
-        "commit help must not use the misleading default-is-`git commit -a` framing: {commit}"
-    );
-}
-
-#[test]
-fn git_overlay_commit_discloses_pending_capture_when_checkpointing_later_delta() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_for_json_contract(temp.path(), "main");
-    std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
-    git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
-
-    std::fs::write(temp.path().join("file.txt"), "captured\n").unwrap();
-    let capture = json_value(
-        temp.path(),
-        &["capture", "-m", "recoverable save", "--output", "json"],
-    );
-    let captured_state = capture["state_id"]
-        .as_str()
-        .expect("capture should report change id")
-        .to_string();
-    let previous_git = git_stdout_for_json_contract(temp.path(), &["rev-parse", "HEAD"]);
-
-    std::fs::write(temp.path().join("file.txt"), "captured\nthen committed\n").unwrap();
-    let commit = json_value(
-        temp.path(),
-        &["commit", "-m", "checkpoint later delta", "--output", "json"],
-    );
-
-    assert_eq!(
-        commit["included_pending_capture"], captured_state,
-        "commit should disclose that it checkpointed work on top of an earlier Heddle-only save: {commit}"
-    );
-    assert_eq!(
-        commit["git_previous_commit"], previous_git,
-        "commit should expose the Git commit that HEAD moved from: {commit}"
-    );
-    assert_ne!(
-        commit["git_commit"], commit["git_previous_commit"],
-        "commit should expose Git commit movement when checkpointing: {commit}"
-    );
-    assert_eq!(commit["git_index"]["commit_mode"], "worktree_all");
-    assert_eq!(
-        commit["git_index"]["will_commit"],
-        serde_json::json!(["file.txt"])
-    );
-    assert_eq!(
-        commit["verification"]["verified"], true,
-        "commit should finish with a clean verification report: {commit}"
-    );
+    assert_json_recovery_advice_fields(&envelope, "commit without capture");
 }
 
 #[test]
@@ -2632,9 +1991,10 @@ fn git_overlay_commit_updates_head_reflog_for_git_muscle_memory() {
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
 
     std::fs::write(temp.path().join("file.txt"), "heddle commit\n").unwrap();
+    heddle(&["capture", "-m", "reflog audit"], Some(temp.path())).unwrap();
     heddle(&["commit", "-m", "reflog audit"], Some(temp.path())).unwrap();
 
     let head_reflog = git_stdout_for_json_contract(temp.path(), &["reflog", "-1", "--format=%gs"]);
@@ -2665,21 +2025,6 @@ fn git_stdout_for_json_contract(path: &std::path::Path, args: &[&str]) -> String
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-
-fn git_ok_for_json_contract(path: &std::path::Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .expect("git command should run");
-    assert!(
-        output.status.success(),
-        "git {:?} failed\nstdout: {}\nstderr: {}",
-        args,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 #[test]
@@ -2717,7 +2062,7 @@ fn invalid_op_id_fails_before_mutating_commit() {
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "initial");
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
     std::fs::write(temp.path().join("new.txt"), "new\n").unwrap();
 
@@ -2733,8 +2078,6 @@ fn invalid_op_id_fails_before_mutating_commit() {
             "commit",
             "-m",
             "agent cold commit",
-            "--confidence",
-            "0.77",
         ],
         Some(temp.path()),
     )
@@ -2931,14 +2274,13 @@ fn query_reads_live_oplog_before_operation_index_is_warm() {
 fn core_loop_schemas_are_discoverable() {
     for verb in [
         "init",
+        "adopt",
         "capture",
         "commit",
-        "checkpoint",
         "doctor",
         "doctor docs",
         "doctor schemas",
         "diff",
-        "git-overlay",
         "agent presence list",
         "agent presence show",
         "agent presence explain",
@@ -2957,7 +2299,6 @@ fn core_loop_schemas_are_discoverable() {
         "agent ready",
         "agent release",
         "agent list",
-        "switch",
         "thread list",
         "fsck repair git",
         "remote list",
@@ -2966,21 +2307,8 @@ fn core_loop_schemas_are_discoverable() {
         "remote remove",
         "remote set-default",
         "schemas",
-        "session start",
-        "session segment",
-        "session end",
-        "session show",
-        "session list",
-        "fetch",
         "pull",
         "push",
-        "stash push",
-        "stash list",
-        "stash pop",
-        "stash apply",
-        "stash drop",
-        "stash clear",
-        "stash show",
         "revert",
         "land",
         "start",
@@ -3170,8 +2498,11 @@ fn core_git_overlay_json_surfaces_emit_one_machine_value() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
+    json_value(
+        temp.path(),
+        &["--output", "json", "capture", "-m", "checkpoint"],
+    );
     json_value(
         temp.path(),
         &["--output", "json", "commit", "-m", "checkpoint"],
@@ -3219,14 +2550,13 @@ fn core_git_overlay_json_surfaces_emit_one_machine_value() {
 }
 
 #[test]
-fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
+fn captured_git_overlay_work_recommends_commit_not_recapture() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
 
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
     let capture_text = heddle(
         &[
@@ -3240,8 +2570,8 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     )
     .unwrap();
     assert!(
-        capture_text.contains("Next:") && capture_text.contains("heddle checkpoint -m \"...\""),
-        "Git-overlay capture should point to the concrete checkpoint step: {capture_text}"
+        capture_text.contains("Next:") && capture_text.contains("heddle commit -m \"...\""),
+        "Git-overlay capture should point to the concrete commit step: {capture_text}"
     );
     assert!(
         !capture_text.contains("agent-style saves"),
@@ -3263,7 +2593,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
         status["thread_state"], "blocked",
         "captured work that only needs a Git checkpoint should not rewrite lifecycle as blocked: {status}"
     );
-    assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
     assert!(
         status["verification"]["recommended_action_template"]["required_inputs"]
             .as_array()
@@ -3272,7 +2602,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     );
     assert_eq!(
         status["recovery_commands"],
-        serde_json::json!(["heddle checkpoint -m \"...\""])
+        serde_json::json!(["heddle commit -m \"...\""])
     );
     assert_eq!(
         status["recovery_action_templates"], status["verification"]["recovery_action_templates"],
@@ -3280,17 +2610,17 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     );
     assert_eq!(
         status["recovery_action_templates"][0]["argv_template"],
-        heddle_argv_json(["checkpoint", "-m", "<message>"]),
-        "templated checkpoint recovery should be machine-fillable at top level: {status}"
+        heddle_argv_json(["commit", "-m", "<message>"]),
+        "templated commit recovery should be machine-fillable at top level: {status}"
     );
     let thread_list = json_value(temp.path(), &["thread", "list", "--output", "json"]);
     assert_eq!(
-        thread_list["recommended_action"], "heddle checkpoint -m \"...\"",
+        thread_list["recommended_action"], "heddle commit -m \"...\"",
         "thread list should use the same verification blocker as status: {thread_list}"
     );
     assert_eq!(
         thread_list["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["checkpoint", "-m", "<message>"]),
+        heddle_argv_json(["commit", "-m", "<message>"]),
         "thread list top-level placeholder action should be machine-fillable: {thread_list}"
     );
     assert_eq!(
@@ -3299,17 +2629,20 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     );
     let workspace = json_value(temp.path(), &["status", "--output", "json"]);
     assert_eq!(
-        workspace["recommended_action"], "heddle checkpoint -m \"...\"",
+        workspace["recommended_action"], "heddle commit -m \"...\"",
         "workspace should use the same verification blocker as status: {workspace}"
     );
     assert_eq!(
         workspace["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["checkpoint", "-m", "<message>"]),
+        heddle_argv_json(["commit", "-m", "<message>"]),
         "workspace top-level placeholder action should be machine-fillable: {workspace}"
     );
     assert_eq!(status["verification"]["worktree_dirty"], true);
-    assert_eq!(status["changed_path_count"], 0);
-    assert_eq!(status["changes"]["modified"], serde_json::json!([]));
+    assert_eq!(status["changed_path_count"], 1);
+    assert_eq!(
+        status["changes"]["modified"],
+        serde_json::json!(["tracked.txt"])
+    );
     assert!(
         status["verification"]["checks"]
             .as_array()
@@ -3322,11 +2655,8 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
 
     let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
-        status_text.contains("Verdict: checkpoint needed")
-            && status_text
-                .contains("Git checkpoint pending: saved Heddle state is not yet a Git commit")
-            && status_text.contains("Saved in Heddle")
-            && status_text.contains("ready to checkpoint to Git")
+        status_text.contains("Saved in Heddle")
+            && status_text.contains("heddle commit")
             && !status_text.contains("Changed paths: 0")
             && !status_text.contains("Coordination: blocked")
             && !status_text.contains("Lifecycle: blocked"),
@@ -3335,7 +2665,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
 
     let verify = json_value(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(verify["status"], "needs_checkpoint");
-    assert_eq!(verify["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(verify["recommended_action"], "heddle commit -m \"...\"");
     assert!(
         verify["recommended_action_template"]["required_inputs"]
             .as_array()
@@ -3372,9 +2702,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     );
     let stdout = String::from_utf8_lossy(&commit.stdout);
     assert!(
-        stdout.contains("Included prior Heddle-only save")
-            && stdout.contains("Git HEAD moved:")
-            && stdout.contains("Verification: clean"),
+        stdout.contains("Committed as Git commit") && stdout.contains("Heddle state:"),
         "captured-but-not-checkpointed commit should complete the checkpoint: {stdout}"
     );
     let clean_after_commit = json_value(temp.path(), &["verify", "--output", "json"]);
@@ -3413,13 +2741,11 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
         serde_json::from_slice(&commit_json.stdout)
             .expect("captured-but-not-checkpointed commit should emit JSON success"),
     );
-    assert_eq!(committed["included_pending_capture"], captured_again);
+    assert_eq!(committed["state_id"], captured_again);
+    assert_eq!(committed["output_kind"], "commit");
+    assert_eq!(committed["action"], "commit");
+    assert_eq!(committed["status"], "committed");
     assert_eq!(committed["verification"]["verified"], true);
-    assert_eq!(
-        committed["git_index"],
-        serde_json::Value::Null,
-        "checkpointing a captured-clean state should not claim a new Git index capture: {committed}"
-    );
 
     let clean = json_value(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(
@@ -3450,7 +2776,7 @@ fn verify_reports_machine_contract_coverage() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
 
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
     let verify = json_value(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(verify["clean"], verify["verified"]);
     assert!(
@@ -3653,9 +2979,9 @@ fn commit_without_default_remote_does_not_recommend_unconfigured_push() {
     git_commit_all_for_json_contract(temp.path(), "seed");
 
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
 
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
+    heddle(&["capture", "-m", "local checkpoint"], Some(temp.path())).unwrap();
     let commit_text = heddle(
         &["commit", "-m", "local checkpoint", "--output", "text"],
         Some(temp.path()),
@@ -3665,12 +2991,13 @@ fn commit_without_default_remote_does_not_recommend_unconfigured_push() {
         !commit_text.contains("Next: heddle push"),
         "commit should not recommend a default push when no default remote is configured: {commit_text}"
     );
-    assert!(
-        commit_text.contains("Verification: clean"),
-        "commit should still end with a calm clean proof when no next action is known: {commit_text}"
-    );
 
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed again\n").unwrap();
+    heddle(
+        &["capture", "-m", "local checkpoint json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let commit_json = json_value(
         temp.path(),
         &["commit", "-m", "local checkpoint json", "--output", "json"],
@@ -3688,54 +3015,6 @@ fn commit_without_default_remote_does_not_recommend_unconfigured_push() {
 }
 
 #[test]
-fn native_commit_saves_heddle_state_without_impossible_checkpoint_recovery() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("README.md"), "hello\n").unwrap();
-
-    let commit = json_value(
-        temp.path(),
-        &[
-            "commit",
-            "-m",
-            "add readme",
-            "--confidence",
-            "0.82",
-            "--output",
-            "json",
-        ],
-    );
-    assert_eq!(commit["status"], "committed");
-    assert_eq!(commit["action"], "commit");
-    assert!(
-        commit["state_id"]
-            .as_str()
-            .is_some_and(|state| state.starts_with("hs-")),
-        "native commit should save a Heddle state: {commit}"
-    );
-    assert_eq!(commit["git_commit"], Value::Null);
-    assert_eq!(commit["verification"]["verified"], true);
-
-    std::fs::write(temp.path().join("NEXT.md"), "next\n").unwrap();
-    let text = heddle(
-        &["commit", "-m", "next native state", "--output", "text"],
-        Some(temp.path()),
-    )
-    .unwrap();
-    assert!(
-        text.contains("Committed Heddle state") && !text.contains("checkpoint"),
-        "native commit text should not recommend an unavailable Git checkpoint: {text}"
-    );
-
-    std::fs::write(temp.path().join("MORE.md"), "more\n").unwrap();
-    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
-    assert!(
-        status_text.contains("heddle commit -m \"...\"") && !status_text.contains("heddle push"),
-        "dirty native status without a remote should recommend a local save, not a publish follow-up: {status_text}"
-    );
-}
-
-#[test]
 fn core_mutations_emit_post_verification_in_json() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
@@ -3743,14 +3022,6 @@ fn core_mutations_emit_post_verification_in_json() {
     git_commit_all_for_json_contract(temp.path(), "seed");
 
     heddle(&["init"], Some(temp.path())).unwrap();
-    let import = json_value(
-        temp.path(),
-        &["import", "git", "--ref", "main", "--output", "json"],
-    );
-    assert!(
-        import["already_in_sync"].as_bool().is_some(),
-        "import should produce a normal JSON setup response: {import}"
-    );
 
     std::fs::write(temp.path().join("tracked.txt"), "captured\n").unwrap();
     let capture = json_value(
@@ -3767,7 +3038,7 @@ fn core_mutations_emit_post_verification_in_json() {
     );
     assert_eq!(
         capture["verification"]["recommended_action"],
-        "heddle checkpoint -m \"...\""
+        "heddle commit -m \"...\""
     );
     assert_eq!(
         capture["next_action"], capture["verification"]["recommended_action"],
@@ -3823,20 +3094,23 @@ fn core_mutations_emit_post_verification_in_json() {
         "content_hash should mean the same state hash in capture and log: {log_after_capture}"
     );
 
-    let checkpoint = json_value(
+    let committed_capture = json_value(
         temp.path(),
-        &["checkpoint", "-m", "checkpointed", "--output", "json"],
+        &["commit", "-m", "committed capture", "--output", "json"],
     );
-    assert_eq!(checkpoint["status"], "checkpointed");
-    assert_eq!(checkpoint["output_kind"], "checkpoint");
-    assert_eq!(checkpoint["action"], "checkpoint");
-    assert_schema_declares_runtime_top_level(&["checkpoint"], &checkpoint);
+    assert_eq!(committed_capture["status"], "committed");
+    assert_eq!(committed_capture["output_kind"], "commit");
+    assert_schema_declares_runtime_top_level(&["commit"], &committed_capture);
     assert_eq!(
-        checkpoint["verification"]["verified"], true,
-        "checkpoint should prove the repo is verified after writing Git: {checkpoint}"
+        committed_capture["verification"]["verified"], true,
+        "commit should prove the repo is verified after writing Git: {committed_capture}"
     );
 
     std::fs::write(temp.path().join("tracked.txt"), "committed\n").unwrap();
+    json_value(
+        temp.path(),
+        &["capture", "-m", "committed", "--output", "json"],
+    );
     let commit = json_value(
         temp.path(),
         &["commit", "-m", "committed", "--output", "json"],
@@ -3857,9 +3131,10 @@ fn core_mutations_emit_post_verification_in_json() {
     assert!(undo.get("next_action_template").is_some());
     assert!(undo.get("recommended_action").is_some());
     assert!(undo.get("recommended_action_template").is_some());
+    assert_eq!(undo["verification"]["verified"], false);
     assert_eq!(
-        undo["verification"]["verified"], true,
-        "undo should prove the repository after restoring state: {undo}"
+        undo["verification"]["recommended_action"], "heddle commit -m \"...\"",
+        "undoing a Git checkpoint should honestly report the restored capture as pending commit: {undo}"
     );
 }
 
@@ -3868,7 +3143,6 @@ fn plain_git_core_save_refusals_do_not_initialize_heddle() {
     for (verb, args) in [
         ("capture", vec!["capture", "-m", "should not init"]),
         ("commit", vec!["commit", "-m", "should not init"]),
-        ("checkpoint", vec!["checkpoint", "-m", "should not init"]),
     ] {
         let temp = TempDir::new().unwrap();
         init_git_repo_for_json_contract(temp.path(), "main");
@@ -3930,36 +3204,36 @@ fn dirty_git_repo_after_init_can_save_without_adoption() {
 
     let verify = json_value(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(verify["status"], "dirty_worktree");
-    assert_eq!(verify["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(verify["recommended_action"], "heddle capture -m \"...\"");
     assert_eq!(
         verify["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["commit", "-m", "<message>"])
+        heddle_argv_json(["capture", "-m", "<message>"])
     );
     assert_eq!(
         verify["recovery_action_templates"][0]["argv_template"],
-        heddle_argv_json(["commit", "-m", "<message>"])
+        heddle_argv_json(["capture", "-m", "<message>"])
     );
     assert!(
         verify["checks"].as_array().unwrap().iter().any(|check| {
             check["name"] == "Worktree"
                 && check["status"] == "dirty_worktree"
-                && check["recommended_action"] == "heddle commit -m \"...\""
+                && check["recommended_action"] == "heddle capture -m \"...\""
                 && check["recommended_action_template"]["argv_template"]
-                    == heddle_argv_json(["commit", "-m", "<message>"])
+                    == heddle_argv_json(["capture", "-m", "<message>"])
         }),
         "dirty first-run verify should recommend saving the dirty worktree: {verify}"
     );
 
     let status = json_value(temp.path(), &["status", "--output", "json"]);
     assert_eq!(status["verification"]["status"], "dirty_worktree");
-    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle capture -m \"...\"");
     assert_eq!(
         status["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["commit", "-m", "<message>"])
+        heddle_argv_json(["capture", "-m", "<message>"])
     );
     assert_eq!(
         status["recovery_action_templates"][0]["argv_template"],
-        heddle_argv_json(["commit", "-m", "<message>"])
+        heddle_argv_json(["capture", "-m", "<message>"])
     );
 
     let capture = json_value(
@@ -3970,17 +3244,21 @@ fn dirty_git_repo_after_init_can_save_without_adoption() {
     assert_eq!(capture["verification"]["status"], "needs_checkpoint");
     assert_eq!(
         capture["verification"]["recommended_action"],
-        "heddle checkpoint -m \"...\""
+        "heddle commit -m \"...\""
     );
 
-    let checkpoint = json_value(
+    let commit = json_value(
         temp.path(),
-        &["checkpoint", "-m", "save dirty work", "--output", "json"],
+        &["commit", "-m", "save dirty work", "--output", "json"],
     );
-    assert_eq!(checkpoint["status"], "checkpointed");
-    assert_eq!(checkpoint["verification"]["status"], "clean");
+    assert_eq!(commit["status"], "committed");
+    assert_eq!(commit["verification"]["status"], "clean");
 
     std::fs::write(temp.path().join("tracked.txt"), "dirty again\n").unwrap();
+    json_value(
+        temp.path(),
+        &["capture", "-m", "save dirty work again", "--output", "json"],
+    );
     let commit = json_value(
         temp.path(),
         &["commit", "-m", "save dirty work again", "--output", "json"],
@@ -4500,16 +3778,6 @@ fn git_status_short_for_json_contract(path: &std::path::Path) -> String {
     String::from_utf8(output.stdout).expect("git status should be UTF-8")
 }
 
-fn configure_repo_local_git_identity_for_json_contract(path: &std::path::Path) {
-    let config = path.join(".git").join("config");
-    let mut contents = std::fs::read_to_string(&config).unwrap_or_default();
-    if !contents.ends_with('\n') {
-        contents.push('\n');
-    }
-    contents.push_str("[user]\n\tname = Heddle Test\n\temail = heddle@example.com\n");
-    std::fs::write(config, contents).expect("write repo-local git identity");
-}
-
 fn parse_exactly_one_json_value(raw: &str) -> Result<Value, String> {
     let mut values = serde_json::Deserializer::from_str(raw).into_iter::<Value>();
     let value = values
@@ -4521,40 +3789,6 @@ fn parse_exactly_one_json_value(raw: &str) -> Result<Value, String> {
         Some(Err(err)) => Err(err.to_string()),
         None => Ok(value),
     }
-}
-
-#[test]
-fn git_projection_commit_branch_and_switch_shims_work() {
-    let temp = TempDir::new().unwrap();
-    SleyRepository::init(temp.path()).expect("init git repo");
-    configure_repo_local_git_identity_for_json_contract(temp.path());
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
-
-    let commit_json = heddle(
-        &["--output", "json", "commit", "-m", "seed commit"],
-        Some(temp.path()),
-    )
-    .unwrap();
-    let commit: Value = serde_json::from_str(&commit_json).unwrap();
-    assert_eq!(commit["action"], "commit");
-    assert!(commit["state_id"].as_str().unwrap_or("").starts_with("hs-"));
-    assert!(
-        commit["git_commit"].as_str().unwrap_or("").len() >= 7,
-        "commit shim should write a Git checkpoint: {commit}"
-    );
-
-    let branch = heddle(&["thread", "create", "feature/git-shim"], Some(temp.path())).unwrap();
-    assert!(
-        branch.contains("feature/git-shim") || branch.contains("Created"),
-        "thread create should create a thread: {branch}"
-    );
-
-    let switched = heddle(&["switch", "feature/git-shim"], Some(temp.path())).unwrap();
-    assert!(
-        switched.contains("feature/git-shim") || switched.contains("Switched"),
-        "switch shim should route to thread switch: {switched}"
-    );
 }
 
 #[test]
@@ -4584,12 +3818,12 @@ fn thread_switch_refuses_dirty_worktree_without_force() {
     assert!(!output.status.success(), "dirty switch should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Error: Save or stash worktree changes before switch threads")
-            && stderr.contains("Next: heddle commit -m \"...\"")
+        stderr.contains("Error: Capture worktree changes before switch threads")
+            && stderr.contains("Next: heddle capture -m \"...\"")
             && stderr.contains("Paths: unsaved worktree path(s): tracked.txt")
             && stderr.contains("Reason: switch threads would write another tree into the worktree")
             && stderr.contains("Kept: repository state and worktree files were left unchanged")
-            && stderr.contains("Also: heddle capture -m \"...\", heddle stash push -m \"...\"")
+            && !stderr.contains("stash")
             && !stderr.contains("Unsafe:")
             && !stderr.contains("Would change:")
             && !stderr.contains("Preserved:")
@@ -4615,13 +3849,12 @@ fn thread_switch_refuses_dirty_worktree_without_force() {
     );
     let verbose_stderr = String::from_utf8_lossy(&verbose.stderr);
     assert!(
-        verbose_stderr.contains("Error: Save or stash worktree changes before switch threads")
-            && verbose_stderr.contains("Next: heddle commit -m \"...\"")
+        verbose_stderr.contains("Error: Capture worktree changes before switch threads")
+            && verbose_stderr.contains("Next: heddle capture -m \"...\"")
             && verbose_stderr.contains("Unsafe:")
             && verbose_stderr.contains("Would change:")
             && verbose_stderr.contains("Preserved:")
-            && verbose_stderr
-                .contains("Also: heddle capture -m \"...\", heddle stash push -m \"...\"")
+            && !verbose_stderr.contains("stash")
             && verbose_stderr.contains("Hint:"),
         "dirty switch verbose should expose full preservation detail: {verbose_stderr}"
     );
@@ -4866,57 +4099,6 @@ fn undo_list_preview_conflict_uses_typed_advice() {
 }
 
 #[test]
-fn empty_stash_refusals_use_typed_advice() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-
-    for (args, kind, label, recovery) in [
-        (
-            ["--output", "json", "stash", "push"],
-            "no_changes_to_stash",
-            "No changes to stash",
-            "heddle status",
-        ),
-        (
-            ["--output", "json", "stash", "drop"],
-            "no_stash_available",
-            "No stash to drop",
-            "heddle stash list",
-        ),
-        (
-            ["--output", "json", "stash", "apply"],
-            "no_stash_available",
-            "No stash found",
-            "heddle stash list",
-        ),
-    ] {
-        let output = heddle_output(&args, Some(temp.path())).expect("invoke stash refusal");
-        assert!(!output.status.success(), "{label} should fail");
-        assert!(
-            output.stdout.is_empty(),
-            "JSON failure must keep stdout quiet: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        let stderr = std::str::from_utf8(&output.stderr).unwrap();
-        let envelope: Value =
-            serde_json::from_str(stderr).expect("stash refusal should emit JSON envelope");
-        assert_eq!(envelope["kind"], kind);
-        assert!(
-            envelope["error"]
-                .as_str()
-                .is_some_and(|error| error.contains(label)),
-            "error should keep the full typed advice: {envelope}"
-        );
-        assert!(
-            envelope["hint"]
-                .as_str()
-                .is_some_and(|hint| hint.contains(recovery)),
-            "hint should name the primary recovery command: {envelope}"
-        );
-    }
-}
-
-#[test]
 fn undo_thread_create_with_live_worktree_uses_typed_advice() {
     let temp = TempDir::new().unwrap();
     let worktree = sibling_checkout_path(temp.path(), "feature-wt");
@@ -4965,126 +4147,6 @@ fn undo_thread_create_with_live_worktree_uses_typed_advice() {
 }
 
 #[test]
-fn rebase_continue_abort_without_operation_use_typed_advice() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-
-    for args in [
-        ["--output", "json", "rebase", "--continue"],
-        ["--output", "json", "rebase", "--abort"],
-    ] {
-        let output = heddle_output(&args, Some(temp.path())).expect("invoke rebase recovery");
-        assert!(
-            !output.status.success(),
-            "rebase recovery without an operation should fail"
-        );
-        let stderr = std::str::from_utf8(&output.stderr).unwrap();
-        let envelope: Value =
-            serde_json::from_str(stderr).expect("rebase recovery should emit JSON envelope");
-        assert_eq!(envelope["kind"], "no_rebase_in_progress");
-        assert!(
-            envelope["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("No rebase in progress")),
-            "error should name the missing operation: {envelope}"
-        );
-        assert!(
-            envelope["hint"]
-                .as_str()
-                .is_some_and(|hint| hint.contains("heddle status")),
-            "hint should name the operation inspection command: {envelope}"
-        );
-    }
-}
-
-#[test]
-fn rebase_target_refusals_use_typed_advice() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
-    heddle(&["capture", "-m", "base"], Some(temp.path())).unwrap();
-
-    for (args, kind, expected) in [
-        (
-            vec!["--output", "json", "rebase"],
-            "rebase_target_required",
-            "target thread required",
-        ),
-        (
-            vec!["--output", "json", "rebase", "missing-thread"],
-            "rebase_target_not_found",
-            "missing-thread",
-        ),
-    ] {
-        let output = heddle_output(&args, Some(temp.path())).expect("invoke rebase target refusal");
-        assert!(
-            !output.status.success(),
-            "rebase target refusal should fail"
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "JSON-mode rebase target refusal must keep stdout quiet: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        let stderr = std::str::from_utf8(&output.stderr).unwrap();
-        let envelope: Value =
-            serde_json::from_str(stderr).expect("rebase target refusal should emit JSON envelope");
-        assert_eq!(envelope["kind"], kind);
-        assert!(
-            envelope["error"]
-                .as_str()
-                .is_some_and(|error| error.contains(expected)),
-            "rebase target refusal should include full typed advice: {stderr}"
-        );
-        assert!(
-            envelope["hint"]
-                .as_str()
-                .is_some_and(|hint| hint.contains("heddle thread list")),
-            "rebase target hint should name thread inspection: {stderr}"
-        );
-    }
-}
-
-#[test]
-fn switch_missing_state_uses_typed_advice() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
-    heddle(&["capture", "-m", "base"], Some(temp.path())).unwrap();
-
-    let output = heddle_output(
-        &["--output", "json", "switch", "hs-deadbeef1234"],
-        Some(temp.path()),
-    )
-    .expect("invoke switch target refusal");
-    assert!(
-        !output.status.success(),
-        "missing switch target should fail"
-    );
-    assert!(
-        output.stdout.is_empty(),
-        "JSON-mode switch refusal must keep stdout quiet: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value =
-        serde_json::from_str(stderr).expect("switch missing state should emit JSON envelope");
-    assert_eq!(envelope["kind"], "state_not_found");
-    assert!(
-        envelope["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("State not found: hs-deadbeef1234")),
-        "switch missing state should include full typed advice: {stderr}"
-    );
-    assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("heddle log")),
-        "switch missing state hint should name history inspection: {stderr}"
-    );
-}
-
-#[test]
 fn thread_start_active_reservation_uses_typed_advice() {
     let temp = TempDir::new().unwrap();
     let first = sibling_checkout_path(temp.path(), "first");
@@ -5105,6 +4167,17 @@ fn thread_start_active_reservation_uses_typed_advice() {
         Some(temp.path()),
     )
     .unwrap();
+    json_value(
+        temp.path(),
+        &[
+            "agent",
+            "reserve",
+            "--thread",
+            "feature/reserved-json",
+            "--output",
+            "json",
+        ],
+    );
 
     let output = heddle_output(
         &[
@@ -5256,109 +4329,12 @@ fn thread_switch_from_worktree_to_shared_thread_uses_typed_advice() {
 }
 
 #[test]
-fn dirty_switch_start_path_and_drop_refuse_without_force() {
-    let temp = TempDir::new().unwrap();
-    let checkout = temp.path().join("worker");
-    let checkout_arg = checkout.to_str().unwrap();
-
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
-    heddle(&["capture", "-m", "base"], Some(temp.path())).unwrap();
-    let base = Repository::open(temp.path())
-        .unwrap()
-        .current_state()
-        .unwrap()
-        .unwrap()
-        .state_id
-        .to_string();
-    std::fs::write(temp.path().join("tracked.txt"), "next\n").unwrap();
-    heddle(&["capture", "-m", "next"], Some(temp.path())).unwrap();
-
-    std::fs::write(temp.path().join("tracked.txt"), "dirty\n").unwrap();
-    let switch = heddle_output(&["--output", "json", "switch", &base], Some(temp.path()))
-        .expect("invoke switch");
-    assert!(!switch.status.success(), "dirty switch should fail");
-    let envelope: Value = serde_json::from_slice(&switch.stderr)
-        .unwrap_or_else(|err| panic!("dirty switch should emit JSON advice: {err}; {switch:?}"));
-    assert_eq!(envelope["kind"], "dirty_worktree");
-    assert!(
-        envelope["unsafe_condition"]
-            .as_str()
-            .is_some_and(|condition| condition.contains("tracked.txt")),
-        "dirty switch should list dirty paths: {envelope}"
-    );
-    let dirty_recovery_commands = serde_json::json!([
-        "heddle commit -m \"...\"",
-        "heddle capture -m \"...\"",
-        "heddle stash push -m \"...\""
-    ]);
-    assert_eq!(
-        &envelope["recovery_commands"], &dirty_recovery_commands,
-        "dirty switch should use the shared preservation commands: {envelope}"
-    );
-
-    let start = heddle_output(
-        &[
-            "--output",
-            "json",
-            "start",
-            "dirty-start",
-            "--path",
-            checkout_arg,
-        ],
-        Some(temp.path()),
-    )
-    .expect("invoke start");
-    assert!(!start.status.success(), "dirty start --path should fail");
-    let envelope: Value = serde_json::from_slice(&start.stderr).unwrap_or_else(|err| {
-        panic!("dirty start --path should emit JSON advice: {err}; {start:?}")
-    });
-    assert_eq!(envelope["kind"], "dirty_worktree");
-    assert_eq!(
-        &envelope["recovery_commands"], &dirty_recovery_commands,
-        "dirty start --path should use the shared preservation commands: {envelope}"
-    );
-
-    heddle(&["switch", &base, "--force"], Some(temp.path())).unwrap();
-    let checkout = temp.path().with_file_name("worker-drop-target");
-    let checkout_arg = checkout.to_str().unwrap();
-    heddle(
-        &["start", "drop-target", "--path", checkout_arg],
-        Some(temp.path()),
-    )
-    .unwrap();
-    std::fs::write(checkout.join("tracked.txt"), "dirty worker\n").unwrap();
-    let drop = heddle_output(
-        &["--output", "json", "thread", "drop", "drop-target"],
-        Some(temp.path()),
-    )
-    .expect("invoke thread drop");
-    assert!(!drop.status.success(), "dirty drop should fail");
-    let envelope: Value = serde_json::from_slice(&drop.stderr)
-        .unwrap_or_else(|err| panic!("dirty drop should emit JSON advice: {err}; {drop:?}"));
-    assert_eq!(envelope["kind"], "dirty_worktree");
-    assert_eq!(
-        &envelope["recovery_commands"], &dirty_recovery_commands,
-        "dirty drop should use the shared preservation commands: {envelope}"
-    );
-    let forced = heddle(
-        &["thread", "drop", "drop-target", "--force"],
-        Some(temp.path()),
-    )
-    .unwrap();
-    assert!(
-        forced.contains("drop-target"),
-        "forced drop should still name the target: {forced}"
-    );
-}
-
-#[test]
 fn start_path_inside_repo_refuses_before_creating_dirty_nested_checkout() {
     let temp = TempDir::new().unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     git_commit_all_for_json_contract(temp.path(), "base");
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
 
     let nested = temp.path().join("nested-checkout");
     let nested_arg = nested.to_str().unwrap();
@@ -5413,7 +4389,7 @@ fn start_relative_sibling_path_outside_repo_is_accepted_after_normalization() {
     std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     git_commit_all_for_json_contract(temp.path(), "base");
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
 
     let sibling_name = format!(
         "{}-sibling-start",
@@ -5457,7 +4433,7 @@ fn start_normalized_nested_path_inside_repo_is_refused() {
     std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     git_commit_all_for_json_contract(temp.path(), "base");
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
 
     let nested = temp.path().join("still-inside");
     let output = heddle_output(
@@ -5492,7 +4468,7 @@ fn start_default_path_lands_under_heddle_threads() {
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
 
     for (mode, name) in [("solid", "solid-thread"), ("materialized", "mat-thread")] {
         let started = json_value(
@@ -5523,7 +4499,7 @@ fn parent_status_ignores_default_thread_checkout_under_heddle() {
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
 
     // A default `start` drops a full checkout under `.heddle/threads/<name>`.
     json_value(
@@ -5573,7 +4549,7 @@ fn start_explicit_path_under_heddle_threads_is_accepted() {
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
 
     // The inverted guard allows an explicit `--path` under `.heddle/`
     // (heddle's reserved dir) even though it's inside the repo directory — as
@@ -5614,7 +4590,7 @@ fn start_managed_path_without_leaf_is_refused() {
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
 
     let bare = temp.path().join(".heddle").join("threads").join("no-leaf");
     let err = heddle(
@@ -5637,7 +4613,7 @@ fn start_cannot_reuse_another_threads_reserved_checkout() {
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
 
     json_value(
         temp.path(),
@@ -5673,7 +4649,7 @@ fn promote_materialized_thread_converts_in_place() {
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
 
     json_value(
         temp.path(),
@@ -5725,7 +4701,7 @@ fn inside_thread_checkout_resolves_thread_not_parent_branch() {
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
 
     for mode in ["solid", "materialized"] {
         let name = format!("{mode}-iso");
@@ -5803,16 +4779,15 @@ fn revert_refuses_dirty_worktree_with_shared_advice() {
     assert!(
         envelope["kind"] == "dirty_worktree"
             && envelope["error"].as_str().is_some_and(|error| error
-                .contains("Save or stash worktree changes before revert")
+                .contains("Capture worktree changes before revert")
                 && !error.contains("Unsafe:")
                 && !error.contains("Preserved:"))
             && envelope["unsafe_condition"]
                 .as_str()
                 .is_some_and(|condition| condition.contains("tracked.txt"))
-            && envelope["hint"]
-                .as_str()
-                .is_some_and(|hint| hint.contains("heddle capture -m \"...\"")
-                    && hint.contains("heddle stash push -m \"...\"")),
+            && envelope["hint"].as_str().is_some_and(|hint| hint
+                .contains("heddle capture -m \"...\"")
+                && !hint.contains("stash")),
         "dirty revert should use the shared typed preservation advice: {stderr}"
     );
 }
@@ -5847,118 +4822,6 @@ fn revert_empty_state_uses_typed_advice() {
             .as_str()
             .is_some_and(|hint| hint.contains("heddle show")),
         "hint should name the inspection command: {envelope}"
-    );
-}
-
-#[test]
-fn checkpoint_refuses_uncaptured_worktree_with_shared_advice() {
-    let temp = TempDir::new().unwrap();
-    SleyRepository::init(temp.path()).expect("init git repo");
-    configure_repo_local_git_identity_for_json_contract(temp.path());
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
-    heddle(
-        &["--output", "json", "commit", "-m", "seed checkpoint"],
-        Some(temp.path()),
-    )
-    .unwrap();
-
-    std::fs::write(temp.path().join("tracked.txt"), "dirty\n").unwrap();
-    std::fs::write(temp.path().join("scratch.txt"), "new\n").unwrap();
-    let output = heddle_output(
-        &["--output", "json", "checkpoint", "-m", "blocked checkpoint"],
-        Some(temp.path()),
-    )
-    .expect("invoke checkpoint");
-    assert!(!output.status.success(), "dirty checkpoint should fail");
-    assert!(
-        output.stdout.is_empty(),
-        "JSON-mode checkpoint refusal must not write stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let envelope: Value =
-        serde_json::from_str(&stderr).expect("dirty checkpoint should emit JSON error envelope");
-    assert_json_recovery_advice_fields(&envelope, &envelope.to_string());
-    assert!(
-        envelope["kind"] == "dirty_worktree"
-            && envelope["error"].as_str().is_some_and(|error| error
-                .contains("Save or stash worktree changes before checkpoint")
-                && !error.contains("Unsafe:")
-                && !error.contains("Preserved:"))
-            && envelope["hint"]
-                .as_str()
-                .is_some_and(|hint| hint.contains("heddle capture -m \"...\"")
-                    && hint.contains("heddle stash push -m \"...\"")),
-        "dirty checkpoint should use the shared typed preservation advice: {stderr}"
-    );
-    assert_eq!(envelope["primary_command"], "heddle commit -m \"...\"");
-    assert_eq!(envelope["primary_command_argv"], Value::Null);
-    assert_eq!(
-        envelope["recovery_commands"],
-        serde_json::json!([
-            "heddle commit -m \"...\"",
-            "heddle capture -m \"...\"",
-            "heddle stash push -m \"...\""
-        ])
-    );
-    assert!(
-        envelope["unsafe_condition"]
-            .as_str()
-            .is_some_and(
-                |condition| condition.contains("tracked.txt") && condition.contains("scratch.txt")
-            ),
-        "dirty checkpoint should expose paths outside the prose error: {envelope}"
-    );
-    assert!(
-        envelope["would_change"]
-            .as_str()
-            .is_some_and(|would_change| would_change.contains("checkpoint")),
-        "dirty checkpoint should expose what would change: {envelope}"
-    );
-    assert!(
-        envelope["preserved"]
-            .as_str()
-            .is_some_and(|preserved| preserved.contains("Heddle state was left unchanged")),
-        "dirty checkpoint should expose what was preserved: {envelope}"
-    );
-}
-
-#[test]
-fn clean_refuses_without_force_with_shared_advice() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("scratch.txt"), "new\n").unwrap();
-
-    let output =
-        heddle_output(&["--output", "json", "clean"], Some(temp.path())).expect("invoke clean");
-    assert!(!output.status.success(), "clean without force should fail");
-    assert!(
-        output.stdout.is_empty(),
-        "JSON-mode clean refusal must not write stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let envelope: Value =
-        serde_json::from_str(&stderr).expect("clean refusal should emit JSON error envelope");
-    assert_json_recovery_advice_fields(&envelope, &envelope.to_string());
-    assert!(
-        envelope["kind"] == "destructive_requires_force"
-            && envelope["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("Refusing to clean")
-                    && error.contains("destructive action requires --force"))
-            && envelope["unsafe_condition"]
-                .as_str()
-                .is_some_and(|condition| condition.contains("untracked paths"))
-            && envelope["preserved"]
-                .as_str()
-                .is_some_and(|preserved| preserved.contains("nothing was removed"))
-            && envelope["hint"]
-                .as_str()
-                .is_some_and(|hint| hint.contains("heddle clean --dry-run")
-                    && hint.contains("heddle clean --force")),
-        "clean refusal should use the shared typed force advice: {stderr}"
     );
 }
 
@@ -6046,9 +4909,11 @@ fn clone_invalid_remote_url_uses_typed_advice() {
         "clone invalid remote refusal should keep full typed advice: {stderr}"
     );
     assert!(
-        envelope["hint"].as_str().is_some_and(
-            |hint| hint.contains("file:///path/to/repo") && hint.contains("Git clone URL")
-        ),
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("existing local repository")
+                && hint.contains("hosted Heddle remote")
+                && hint.contains("Git clone URL")),
         "clone invalid remote hint should name valid remote shapes: {stderr}"
     );
 }
@@ -6461,7 +5326,7 @@ fn doctor_uses_recovery_language_without_breaking_json() {
         "doctor should label the freshly-initialized worktree as uncaptured: {text}"
     );
     assert!(
-        text.contains("Next step: heddle commit -m \"...\""),
+        text.contains("Next step: heddle capture -m \"...\""),
         "doctor should provide one primary recovery command: {text}"
     );
     assert!(
@@ -6478,7 +5343,7 @@ fn doctor_uses_recovery_language_without_breaking_json() {
     let parsed: Value = serde_json::from_str(&json).expect("doctor JSON should parse");
     assert_eq!(
         parsed["health"]["recommended_action"],
-        "heddle commit -m \"...\""
+        "heddle capture -m \"...\""
     );
 }
 
@@ -6552,221 +5417,6 @@ fn version_flag_reports_version() {
     assert!(
         !output.status.success(),
         "the `version` verb should be removed after #473"
-    );
-}
-
-#[test]
-fn start_merge_undo_json_workflow_keeps_machine_streams_clean() {
-    fn json_success(args: &[&str], cwd: &std::path::Path) -> Value {
-        let output = heddle_output(args, Some(cwd)).expect("invoke heddle");
-        let stdout = std::str::from_utf8(&output.stdout).unwrap();
-        let stderr = std::str::from_utf8(&output.stderr).unwrap();
-        assert!(
-            output.status.success(),
-            "{args:?} should succeed; stdout={stdout} stderr={stderr}"
-        );
-        assert!(
-            stderr.is_empty(),
-            "{args:?} JSON success must keep stderr quiet: {stderr}"
-        );
-        let parsed: Value = serde_json::from_str(stdout)
-            .unwrap_or_else(|_| panic!("{args:?} should emit parseable JSON: {stdout}"));
-        inject_post_verification_at(cwd, args, parsed)
-    }
-
-    let temp = TempDir::new().unwrap();
-    let repo = temp.path().join("repo");
-    let feature = temp.path().join("feature checkout");
-    std::fs::create_dir_all(&repo).unwrap();
-
-    json_success(&["--output", "json", "init"], &repo);
-    std::fs::write(
-        repo.join("app.txt"),
-        "base
-",
-    )
-    .unwrap();
-    json_success(
-        &[
-            "--output",
-            "json",
-            "capture",
-            "-m",
-            "base",
-            "--confidence",
-            "0.9",
-        ],
-        &repo,
-    );
-
-    let started = json_success(
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/a",
-            "--path",
-            feature.to_str().expect("utf8 path"),
-            "--workspace",
-            "solid",
-        ],
-        &repo,
-    );
-    assert_eq!(started["name"], "feature/a");
-    let feature_path = canonical_path_string(&feature);
-    assert_eq!(
-        started["execution_path"].as_str(),
-        Some(feature_path.as_str())
-    );
-
-    std::fs::write(
-        feature.join("app.txt"),
-        "base
-feature
-",
-    )
-    .unwrap();
-    json_success(
-        &[
-            "--output",
-            "json",
-            "capture",
-            "-m",
-            "feature",
-            "--confidence",
-            "0.9",
-        ],
-        &feature,
-    );
-
-    let before_merge_preview = json_success(&["--output", "json", "status"], &repo);
-    let preview = json_success(
-        &["--output", "json", "merge", "feature/a", "--preview"],
-        &repo,
-    );
-    assert_eq!(preview["status"], "preview");
-    assert_eq!(preview["output_kind"], "merge");
-    assert_eq!(preview["preview_only"], true);
-    assert_eq!(preview["would_merge"], true);
-    assert_eq!(preview["applied"], false);
-    assert_eq!(
-        preview["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["land", "--thread", "feature/a", "--no-push"])
-    );
-    assert_schema_declares_runtime_top_level(&["merge", "--preview"], &preview);
-    assert_eq!(
-        preview["verification"]["verified"], true,
-        "merge preview should prove repository verify when no ready-thread workflow gate is present: {preview}"
-    );
-    let after_merge_preview = json_success(&["--output", "json", "status"], &repo);
-    assert_eq!(
-        after_merge_preview["current_state"], before_merge_preview["current_state"],
-        "merge --preview must not advance the current thread: before={before_merge_preview} after={after_merge_preview}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(repo.join("app.txt")).unwrap(),
-        "base\n",
-        "merge --preview must not modify the worktree"
-    );
-
-    let merged = json_success(&["--output", "json", "merge", "feature/a"], &repo);
-    assert_eq!(merged["status"], "completed");
-    assert_eq!(merged["output_kind"], "merge");
-    assert_eq!(merged["fast_forward"], true);
-    assert_eq!(merged["would_merge"], false);
-    assert_eq!(merged["applied"], true);
-    assert_eq!(merged["recommended_action"], Value::Null);
-    assert_eq!(merged["recommended_action_argv"], Value::Null);
-    assert_eq!(
-        merged["verification"]["verified"], true,
-        "merge apply should prove post-merge repository verify: {merged}"
-    );
-
-    let before_repeat_merge = json_success(&["--output", "json", "status"], &repo);
-    let repeat_merge = heddle_output(&["--output", "text", "merge", "feature/a"], Some(&repo))
-        .expect("invoke repeat merge");
-    assert!(
-        repeat_merge.status.success(),
-        "already-applied merge should be a successful no-op"
-    );
-    assert!(
-        repeat_merge.stderr.is_empty(),
-        "already-applied merge should keep stderr quiet: {}",
-        String::from_utf8_lossy(&repeat_merge.stderr)
-    );
-    let repeat_stdout = String::from_utf8_lossy(&repeat_merge.stdout);
-    assert!(
-        repeat_stdout.contains("Already up to date"),
-        "already-applied merge should name the no-op state: {repeat_stdout}"
-    );
-    let noop_preview = heddle_output(
-        &["--output", "text", "merge", "main", "--preview"],
-        Some(&repo),
-    )
-    .expect("invoke no-op self preview");
-    assert!(
-        noop_preview.status.success(),
-        "self merge preview should be a successful no-op"
-    );
-    let noop_preview_stdout = String::from_utf8_lossy(&noop_preview.stdout);
-    assert!(
-        noop_preview_stdout.contains("Already up to date"),
-        "self merge preview should name the no-op state: {noop_preview_stdout}"
-    );
-    assert!(
-        !noop_preview_stdout.contains("Next:"),
-        "self merge preview must not recommend itself: {noop_preview_stdout}"
-    );
-    let noop_preview_json =
-        json_success(&["--output", "json", "merge", "main", "--preview"], &repo);
-    assert_eq!(noop_preview_json["output_kind"], "merge");
-    assert_eq!(noop_preview_json["recommended_action"], Value::Null);
-    assert_eq!(noop_preview_json["next_action"], Value::Null);
-    assert_eq!(noop_preview_json["recommended_action_argv"], Value::Null);
-    assert_eq!(noop_preview_json["next_action_argv"], Value::Null);
-    let after_repeat_merge = json_success(&["--output", "json", "status"], &repo);
-    assert_eq!(
-        after_repeat_merge["current_state"], before_repeat_merge["current_state"],
-        "already-applied merge must not advance state: before={before_repeat_merge} after={after_repeat_merge}"
-    );
-
-    let listed = json_success(&["--output", "json", "undo", "--list"], &repo);
-    assert_eq!(listed["output_kind"], "undo_list");
-    assert!(
-        listed["batches"]
-            .as_array()
-            .is_some_and(|batches| !batches.is_empty()),
-        "undo --list should expose recent operation batches: {listed}"
-    );
-
-    assert_eq!(
-        std::fs::read_to_string(repo.join("app.txt")).unwrap(),
-        "base\nfeature\n",
-        "real merge should update the worktree before undo preview"
-    );
-    let before_undo_preview = json_success(&["--output", "json", "status"], &repo);
-    let preview_undo = json_success(&["--output", "json", "undo", "--preview"], &repo);
-    assert_eq!(preview_undo["output_kind"], "undo");
-    assert_eq!(preview_undo["status"], "preview");
-    assert_eq!(preview_undo["action"], "undo");
-    assert_eq!(preview_undo["next_action"], Value::Null);
-    assert_eq!(preview_undo["recommended_action"], Value::Null);
-    assert!(
-        preview_undo["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("Would undo"),
-        "undo preview should clearly name the dry run: {preview_undo}"
-    );
-    let after_undo_preview = json_success(&["--output", "json", "status"], &repo);
-    assert_eq!(
-        after_undo_preview["current_state"], before_undo_preview["current_state"],
-        "undo --preview must not advance or rewind the current thread: before={before_undo_preview} after={after_undo_preview}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(repo.join("app.txt")).unwrap(),
-        "base\nfeature\n",
-        "undo --preview must not modify the worktree"
     );
 }
 
@@ -6949,10 +5599,10 @@ fn ready_refuses_dirty_capture_without_intent() {
     );
     assert_eq!(ready["readiness"]["conflict_count"], 0);
     assert_eq!(ready["readiness"]["impact"], "none");
-    assert_eq!(ready["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(ready["recommended_action"], "heddle capture -m \"...\"");
     assert_eq!(
         ready["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["commit", "-m", "<message>"])
+        heddle_argv_json(["capture", "-m", "<message>"])
     );
     assert_eq!(
         ready["verification"]["status"], "uncaptured",
@@ -7053,13 +5703,14 @@ fn verify_plain_git_blocker_text_is_not_redundant() {
     )
     .expect("adopt should render text");
     assert!(
-        adopt.contains("Git worktree: stays clean")
+        adopt.contains("adopted the Git repository into Heddle-native source storage")
+            && adopt.contains("Git worktree: stays clean")
             && adopt.contains(".heddle metadata")
             && adopt.contains("imported Git history")
             && adopt.contains("Git commits inspected")
             && adopt.contains("New Heddle states")
             && !adopt.contains("Heddle changes saved"),
-        "adopt text should say first-run metadata/import work leaves Git clean: {adopt}"
+        "adopt text should explain the atomic native-authority migration: {adopt}"
     );
 }
 
@@ -7089,7 +5740,7 @@ fn verify_prioritizes_dirty_worktree_over_optional_git_only_refs() {
 
     let verify = json_value(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(verify["status"], "dirty_worktree");
-    assert_eq!(verify["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(verify["recommended_action"], "heddle capture -m \"...\"");
     let mapping = verify["checks"]
         .as_array()
         .unwrap()
@@ -7202,21 +5853,6 @@ fn initialized_git_overlay_status_and_ready_do_not_claim_actionable_readiness() 
         "thread list should carry clean coordination after direct Git-backed init: {threads}"
     );
     assert_eq!(thread["blockers"], serde_json::json!([]));
-
-    let merge_preview = heddle_output(
-        &["merge", "main", "--preview", "--output", "text"],
-        Some(temp.path()),
-    )
-    .expect("merge preview should render blocked verify output");
-    assert!(
-        merge_preview.status.success(),
-        "clean self merge preview should succeed"
-    );
-    let merge_stdout = String::from_utf8_lossy(&merge_preview.stdout);
-    assert!(
-        merge_stdout.contains("Already up to date") || merge_stdout.contains("up to date"),
-        "clean self merge preview should report the no-op merge verdict: {merge_stdout}"
-    );
 }
 
 // Regression: heddle#306. `status` synthesized `thread_state: "blocked"` from a
@@ -7519,7 +6155,7 @@ fn default_thread_and_workspace_cap_optional_git_only_refs() {
             .expect("git checkout main should run");
         assert!(status.success(), "git checkout main should succeed");
     }
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
 
     let text = heddle(&["thread", "list", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
@@ -8000,14 +6636,14 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         );
     }
     assert!(
-        stdout.contains("Nearby: `heddle undo`, `heddle verify`, `heddle push`, `heddle pull`.")
-            && stdout.contains("Start here: `heddle init`, `heddle commit`, or `heddle clone`."),
+        stdout.contains("Nearby: `heddle pull`, `heddle undo`, and `heddle verify`.")
+            && stdout.contains("Start here: `heddle init`, `heddle clone`, or `heddle capture`."),
         "default help should keep adjacent commands discoverable without expanding the first-screen loop: {stdout}"
     );
     assert!(
-        stdout.contains("Existing Git: heddle status -> heddle init -> heddle verify -> heddle commit -m \"...\" -> heddle push")
+        stdout.contains("Existing Git: heddle status -> heddle init -> heddle capture -m \"...\" -> heddle commit -> heddle push")
             && stdout
-                .contains("Isolated work: heddle start <name> --path ../<name> -> heddle commit -m \"...\" -> heddle ready -> heddle land"),
+                .contains("Isolated work: heddle start <name> --path ../<name> -> heddle capture -m \"...\" -> heddle ready -> heddle land"),
         "default help should connect first-run adoption and isolated work to the same product loop: {stdout}"
     );
     assert!(
@@ -8079,12 +6715,12 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
 
     let push_help = heddle_help(&["push", "--help"]);
     assert!(
-        push_help.contains("Remote name, local path, URL, or hosted address"),
+        push_help.contains("Heddle remote name, native repository path, or hosted address"),
         "push help should match Git-overlay and hosted reality, not only host:port remotes: {push_help}"
     );
     let pull_help = heddle_help(&["pull", "--help"]);
     assert!(
-        pull_help.contains("Remote name, local path, URL, or hosted address"),
+        pull_help.contains("Heddle remote name, native repository path, or hosted address"),
         "pull help should match Git-overlay and hosted reality, not only host:port remotes: {pull_help}"
     );
 
@@ -8213,20 +6849,10 @@ fn thread_show_hides_agent_internals_until_verbose() {
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
     heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
-    heddle(
-        &[
-            "actor",
-            "spawn",
-            "--thread",
-            "main",
-            "--provider",
-            "openai",
-            "--model",
-            "codex",
-        ],
-        Some(temp.path()),
-    )
-    .unwrap();
+    json_value(
+        temp.path(),
+        &["agent", "reserve", "--thread", "main", "--output", "json"],
+    );
 
     let text = heddle(
         &["thread", "show", "main", "--output", "text"],
@@ -8277,102 +6903,15 @@ fn thread_show_hides_agent_internals_until_verbose() {
     )
     .unwrap();
     assert!(
-        verbose.contains("Actor:") && verbose.contains("Session:") && verbose.contains("Attach:"),
+        verbose.contains("Actor:") && verbose.contains("Session:") && verbose.contains("Harness:"),
         "verbose thread show should expose agent internals for debugging: {verbose}"
     );
     assert!(
         verbose.contains("Base:")
             && verbose.contains("Current:")
             && verbose.contains("Lifecycle:")
-            && verbose.contains("Last activity:")
-            && verbose.contains("Recent saved states"),
-        "verbose thread show should keep state IDs, lifecycle, activity, and history available: {verbose}"
-    );
-}
-
-#[test]
-fn merge_preview_blocks_uncaptured_isolated_source_checkout() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
-    heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
-
-    let checkout = sibling_checkout_path(temp.path(), "dirty-feature");
-    let checkout_arg = checkout.to_str().expect("checkout path utf8");
-    heddle(
-        &["start", "feature/dirty-source", "--path", checkout_arg],
-        Some(temp.path()),
-    )
-    .unwrap();
-    std::fs::write(checkout.join("feature.txt"), "uncaptured\n").unwrap();
-
-    let preview = heddle_output(
-        &[
-            "merge",
-            "feature/dirty-source",
-            "--preview",
-            "--output",
-            "json",
-        ],
-        Some(temp.path()),
-    )
-    .unwrap();
-    assert!(
-        !preview.status.success(),
-        "dirty source preview should fail closed instead of returning a successful blocked payload"
-    );
-    assert!(
-        preview.stdout.is_empty(),
-        "JSON-mode refusal should keep stdout quiet: {}",
-        String::from_utf8_lossy(&preview.stdout)
-    );
-    let stderr = String::from_utf8_lossy(&preview.stderr);
-    let preview: Value =
-        serde_json::from_str(&stderr).expect("dirty source preview should emit JSON envelope");
-    assert_eq!(preview["kind"], "source_thread_uncaptured_work");
-    assert_json_recovery_advice_fields(&preview, "dirty source merge preview");
-    assert!(
-        preview["error"]
-            .as_str()
-            .is_some_and(|message| message.contains("merge preview did not run")),
-        "dirty source preview should not claim an up-to-date merge: {preview}"
-    );
-    assert!(
-        preview["primary_command"]
-            .as_str()
-            .is_some_and(|action| action.contains("ready -m \"Save source work\"")),
-        "dirty source preview should point back to ready capture: {preview}"
-    );
-    assert!(
-        preview["unsafe_condition"]
-            .as_str()
-            .is_some_and(|condition| condition.contains("feature.txt")),
-        "dirty source preview should list uncaptured source paths: {preview}"
-    );
-
-    let text = heddle_output(
-        &[
-            "merge",
-            "feature/dirty-source",
-            "--preview",
-            "--output",
-            "text",
-        ],
-        Some(temp.path()),
-    )
-    .unwrap();
-    assert!(
-        !text.status.success(),
-        "text dirty source preview should fail closed"
-    );
-    let text = String::from_utf8_lossy(&text.stderr);
-    assert!(
-        text.contains("merge preview did not run")
-            && text.contains("uncaptured path(s): feature.txt")
-            && text.contains("Next:")
-            && text.contains("ready -m \"Save source work\"")
-            && !text.contains("Already up to date"),
-        "text preview should fail closed on source checkout dirtiness: {text}"
+            && verbose.contains("Last activity:"),
+        "verbose thread show should keep state IDs, lifecycle, and activity available: {verbose}"
     );
 }
 
@@ -8412,8 +6951,8 @@ fn isolated_thread_status_and_diff_report_untracked_only_work() {
         "isolated status should surface untracked-only work as added: {status}"
     );
     assert_eq!(
-        status["recommended_action"], "heddle commit -m \"...\"",
-        "untracked-only isolated work should point to capture/commit before readiness: {status}"
+        status["recommended_action"], "heddle capture -m \"...\"",
+        "untracked-only isolated work should point to capture before readiness: {status}"
     );
 
     let diff = json_value(&checkout, &["diff", "--name-only", "--output", "json"]);
@@ -8461,7 +7000,7 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
     assert!(
         ready.contains("Next:")
             && ready.contains("heddle --repo")
-            && ready.contains("land --thread feature/capture-next --no-push"),
+            && ready.contains("land --thread feature/capture-next"),
         "ready should use a shared next-action label that runs from the isolated checkout: {ready}"
     );
     assert!(
@@ -8474,7 +7013,7 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
     assert_eq!(
         checkout_status["recommended_action"],
         format!(
-            "heddle --repo {} land --thread feature/capture-next --no-push",
+            "heddle --repo {} land --thread feature/capture-next",
             repo_path
         )
     );
@@ -8486,7 +7025,6 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
             "land",
             "--thread",
             "feature/capture-next",
-            "--no-push",
         ]),
         "status inside an isolated checkout should emit a runnable parent-repo land action: {checkout_status}"
     );
@@ -8526,156 +7064,8 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
     let checkout_status_text = heddle(&["status", "--output", "text"], Some(&checkout)).unwrap();
     assert!(
         checkout_status_text.contains("heddle --repo")
-            && checkout_status_text.contains("land --thread feature/capture-next --no-push"),
+            && checkout_status_text.contains("land --thread feature/capture-next"),
         "status text inside an isolated checkout should point to the parent repo: {checkout_status_text}"
-    );
-
-    let preview = heddle(
-        &[
-            "merge",
-            "feature/capture-next",
-            "--preview",
-            "--output",
-            "text",
-        ],
-        Some(temp.path()),
-    )
-    .unwrap();
-    assert!(
-        preview.contains("Next:")
-            && preview.contains("heddle land --thread feature/capture-next --no-push"),
-        "merge preview should use the shared next-action label: {preview}"
-    );
-    assert!(
-        !preview.contains("recommended action:"),
-        "merge preview should not use a separate lowercase recommendation label: {preview}"
-    );
-
-    let contextual_preview = json_value(
-        &checkout,
-        &[
-            "--repo",
-            repo_path.as_str(),
-            "merge",
-            "feature/capture-next",
-            "--preview",
-            "--output",
-            "json",
-        ],
-    );
-    assert_eq!(
-        contextual_preview["recommended_action"],
-        format!(
-            "heddle --repo {} land --thread feature/capture-next --no-push",
-            repo_path
-        ),
-        "merge preview invoked from an isolated checkout must preserve parent repo context: {contextual_preview}"
-    );
-    assert_eq!(
-        contextual_preview["recommended_action_template"]["argv_template"],
-        heddle_argv_json([
-            "--repo",
-            repo_path.as_str(),
-            "land",
-            "--thread",
-            "feature/capture-next",
-            "--no-push",
-        ]),
-        "merge preview argv must be directly runnable from the isolated checkout: {contextual_preview}"
-    );
-
-    let checkout_after_preview = json_value(&checkout, &["status", "--output", "json"]);
-    assert_eq!(
-        checkout_after_preview["recommended_action"],
-        format!(
-            "heddle --repo {} land --thread feature/capture-next --no-push",
-            repo_path
-        )
-    );
-    assert_eq!(
-        checkout_after_preview["recommended_action_template"]["argv_template"],
-        heddle_argv_json([
-            "--repo",
-            repo_path.as_str(),
-            "land",
-            "--thread",
-            "feature/capture-next",
-            "--no-push",
-        ]),
-        "status inside an isolated checkout should emit a runnable parent-repo land action after preview: {checkout_after_preview}"
-    );
-    assert_eq!(
-        checkout_after_preview["verification"]["recommended_action"],
-        checkout_after_preview["recommended_action"],
-        "status verification should match the contextual parent-repo land action after preview: {checkout_after_preview}"
-    );
-    assert_eq!(
-        checkout_after_preview["verification"]["recommended_action_template"]["argv_template"],
-        checkout_after_preview["recommended_action_template"]["argv_template"],
-        "status verification argv should match the contextual parent-repo land action after preview: {checkout_after_preview}"
-    );
-
-    let land = heddle(
-        &[
-            "land",
-            "--thread",
-            "feature/capture-next",
-            "--no-push",
-            "--output",
-            "text",
-        ],
-        Some(temp.path()),
-    )
-    .unwrap();
-    assert!(
-        land.contains("landed: on parent") && land.contains("push: not pushed"),
-        "land should report the landed value state and push state: {land}"
-    );
-    assert!(
-        !land.contains("completed:")
-            && !land.contains("up to date:")
-            && !land.contains("integrated: yes"),
-        "land should not render step accounting as the primary human output: {land}"
-    );
-    assert!(
-        land.contains("Next:") && land.contains("heddle thread cleanup --merged --dry-run"),
-        "land should surface the safe cleanup path for merged isolated checkouts: {land}"
-    );
-
-    let list = heddle(&["thread", "list", "--output", "text"], Some(temp.path())).unwrap();
-    assert!(
-        list.contains("feature/capture-next")
-            && list.contains("lifecycle: merged")
-            && list.contains("next step: heddle thread cleanup --merged --dry-run"),
-        "thread list should make merged checkout cleanup discoverable: {list}"
-    );
-
-    let show = heddle(
-        &["thread", "show", "feature/capture-next", "--output", "text"],
-        Some(temp.path()),
-    )
-    .unwrap();
-    assert!(
-        show.contains("Lifecycle: merged")
-            && show.contains("Next step: heddle thread cleanup --merged --dry-run")
-            && !show.contains("\nSync:"),
-        "thread show should make merged checkout cleanup discoverable: {show}"
-    );
-
-    let cleanup = heddle(
-        &["thread", "cleanup", "--merged", "--output", "text"],
-        Some(temp.path()),
-    )
-    .unwrap();
-    assert!(
-        cleanup.contains("dropped 1 merged thread(s)"),
-        "cleanup should confirm that the merged thread was removed from active surfaces: {cleanup}"
-    );
-    let list_after_cleanup =
-        heddle(&["thread", "list", "--output", "text"], Some(temp.path())).unwrap();
-    assert!(
-        !list_after_cleanup.contains("feature/capture-next"),
-        "default thread list should not keep showing a merged thread after cleanup: {list_after_cleanup}"
     );
 }
 
@@ -8820,21 +7210,13 @@ fn command_catalog_exposes_public_surface_for_agents() {
         .iter()
         .find(|entry| entry["display"] == "commit")
         .expect("commit command should be cataloged");
+    assert_eq!(commit["command_action"]["action"], "heddle commit");
+    assert_eq!(commit["command_action"]["executable"], true);
     assert_eq!(
-        commit["command_action"]["action"],
-        "heddle commit -m <message>"
+        commit["command_action"]["argv"],
+        heddle_argv_json(["commit"])
     );
-    assert_eq!(commit["command_action"]["executable"], false);
-    assert_eq!(commit["command_action"]["argv"], Value::Null);
-    assert_eq!(
-        commit["command_action"]["template"]["argv_template"],
-        heddle_argv_json(["commit", "-m", "<message>"])
-    );
-    assert_eq!(
-        commit["command_action"]["template"]["required_inputs"],
-        serde_json::json!(["message"])
-    );
-    assert_eq!(commit["command_action"]["template"]["agent_may_fill"], true);
+    assert_eq!(commit["command_action"]["template"], Value::Null);
     let start = commands
         .iter()
         .find(|entry| entry["display"] == "start")
@@ -8878,19 +7260,6 @@ fn command_catalog_exposes_public_surface_for_agents() {
     assert!(
         land_help.contains("--no-squash") && land_help.contains("Preserve per-State Git export"),
         "land help should make the squash override discoverable: {land_help}"
-    );
-    let checkpoint = commands
-        .iter()
-        .find(|entry| entry["display"] == "checkpoint")
-        .expect("checkpoint command should be cataloged");
-    assert_eq!(checkpoint["surface"], "native");
-    assert_eq!(checkpoint["help_visibility"], "advanced");
-    assert_eq!(checkpoint["canonical_command"], Value::Null);
-    assert_eq!(checkpoint["canonical_action"], Value::Null);
-    assert_eq!(checkpoint["command_action"]["action"], "heddle checkpoint");
-    assert_eq!(
-        checkpoint["command_action"]["argv"],
-        heddle_argv_json(["checkpoint"])
     );
     let bridge_import = commands
         .iter()
@@ -8986,12 +7355,11 @@ fn command_catalog_exposes_public_surface_for_agents() {
 fn git_dependencies_help_topic_explains_no_git_contract() {
     let help = heddle_help(&["help", "git-dependencies"]);
     assert!(
-        help.contains("without `git` on PATH")
-            && help.contains("Git-compatible, not Git-binary-dependent")
-            && help.contains("must not spawn a `git` process")
-            && help.contains("tool that started it")
-            && help.contains("Unsupported native Git-overlay capabilities")
-            && help.contains("merge --git-commit")
+        help.contains("Heddle never requires the `git` executable")
+            && help.contains("Sley is its embedded Git engine")
+            && help.contains("operate on the checkout's real `.git` directly")
+            && help.contains("client that started it")
+            && help.contains("Unsupported capabilities fail closed")
             && help.contains("heddle help --output json"),
         "git-dependencies topic should explain supported paths and zero-git runtime behavior: {help}"
     );
@@ -9218,7 +7586,6 @@ fn unknown_state_id_hints_at_heddle_log_across_state_readers() {
     heddle(&["init"], Some(temp.path())).unwrap();
 
     for args in [
-        vec!["--output", "text", "switch", "hs-nonexistent"],
         vec!["--output", "text", "show", "hs-nonexistent"],
         vec!["--output", "text", "diff", "hs-nonexistent", "HEAD"],
     ] {
@@ -9297,40 +7664,13 @@ fn unknown_thread_hints_at_heddle_thread_list() {
 }
 
 #[test]
-fn merge_missing_thread_uses_thread_list_advice() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-
-    let output = heddle_output(
-        &["merge", "missing", "--preview", "--output", "json"],
-        Some(temp.path()),
-    )
-    .expect("invoke missing merge source");
-    assert!(
-        !output.status.success(),
-        "merge on a missing thread should exit non-zero"
-    );
-    assert!(
-        output.stdout.is_empty(),
-        "JSON-mode missing merge source refusal must keep stdout quiet"
-    );
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value =
-        serde_json::from_str(stderr).expect("missing merge source should emit JSON envelope");
-    assert_eq!(envelope["kind"], "thread_not_found");
-    assert_eq!(
-        envelope["primary_command_template"]["argv_template"],
-        heddle_argv_json(["thread", "list"]),
-        "missing merge source should recover through thread discovery: {envelope}"
-    );
-}
-
-#[test]
 fn help_for_verb_prefixes_usage_with_heddle() {
     // `heddle help status` falls through to status's clap-derived help.
     // The Usage line MUST start with `Usage: heddle status` — saying just
     // `Usage: status` would suggest the user can run `status` standalone.
-    for verb in ["status", "capture", "log", "merge", "undo", "start", "init"] {
+    for verb in [
+        "status", "capture", "commit", "log", "undo", "start", "init",
+    ] {
         let output = heddle_help(&["help", verb]);
         assert!(
             output.contains(&format!("Usage: heddle {verb}")),
@@ -9363,10 +7703,11 @@ fn op_id_help_is_visible_only_for_supported_commands() {
         "op-id capable command help should expose --op-id: {commit}"
     );
     assert!(
-        commit.contains("with nothing staged it commits all worktree paths")
-            && commit.contains("with staged paths it commits only the index")
-            && commit.contains("--all"),
-        "commit help should explain all-worktree and staged-index semantics for Git users: {commit}"
+        commit.contains("Commits the complete captured tree")
+            && commit.contains("replaces the Git index with that tree")
+            && !commit.contains("--all")
+            && !commit.contains("--no-all"),
+        "commit help should explain the captured-state contract: {commit}"
     );
 
     let init = heddle_help(&["help", "init"]);
@@ -9627,7 +7968,7 @@ fn context_invalid_scope_uses_typed_advice_json() {
 }
 
 #[test]
-fn discuss_resolve_into_annotation_emits_resolved_annotation_json() {
+fn discuss_resolve_by_edit_emits_resolved_state_json() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::create_dir_all(temp.path().join("src")).unwrap();
@@ -9649,9 +7990,13 @@ fn discuss_resolve_into_annotation_emits_resolved_annotation_json() {
             &state_id,
         ],
     );
-    let discussion_id = opened["id"]
+    let discussion_id = opened["discussion"]["id"]
         .as_str()
         .expect("discuss open should return an id")
+        .to_string();
+    let resolved_state_id = opened["discussion"]["anchor"]["state_id"]
+        .as_str()
+        .expect("discussion anchor should expose the resolved state id")
         .to_string();
 
     let resolved = json_value(
@@ -9661,32 +8006,24 @@ fn discuss_resolve_into_annotation_emits_resolved_annotation_json() {
             "resolve",
             &discussion_id,
             "--mode",
-            "into-annotation",
-            "--annotation-kind",
-            "rationale",
-            "--annotation-content",
-            "Future annotation body",
-            "--annotation-tags",
-            "review,design",
+            "by-edit",
+            "--state",
+            &resolved_state_id,
         ],
     );
     assert_eq!(resolved["output_kind"], "discuss_resolve");
-    assert_eq!(resolved["id"].as_str(), Some(discussion_id.as_str()));
-    assert_eq!(resolved["resolution"]["kind"], "resolved_into_annotation");
-    let annotation_id = resolved["resolved_annotation_id"]
-        .as_str()
-        .expect("resolved discussion should expose the created annotation id");
-    let parsed_annotation_id = uuid::Uuid::parse_str(annotation_id)
-        .unwrap_or_else(|error| panic!("annotation id should be a UUID: {error}: {resolved}"));
     assert_eq!(
-        parsed_annotation_id.get_version_num(),
-        7,
-        "annotation id should be UUIDv7: {resolved}"
+        resolved["discussion"]["id"].as_str(),
+        Some(discussion_id.as_str())
     );
     assert_eq!(
-        resolved["resolution"]["annotation_id"].as_str(),
-        Some(annotation_id),
-        "resolution payload and top-level convenience id should match: {resolved}"
+        resolved["discussion"]["resolution"]["kind"],
+        "addressed_by_state"
+    );
+    assert_eq!(
+        resolved["discussion"]["resolution"]["state_id"].as_str(),
+        Some(resolved_state_id.as_str()),
+        "resolution payload should expose the state containing the edit: {resolved}"
     );
 }
 
@@ -10160,7 +8497,7 @@ fn agent_reserve_reports_path_for_existing_materialized_thread() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).expect("init");
     std::fs::write(temp.path().join("app.txt"), "base\n").expect("write base file");
-    heddle(&["commit", "--all", "-m", "base"], Some(temp.path())).expect("commit base");
+    heddle(&["capture", "-m", "base"], Some(temp.path())).expect("capture base");
 
     let thread_path = sibling_checkout_path(temp.path(), "agent-materialized");
     let thread_path_arg = thread_path.to_str().expect("utf8 thread path");
@@ -10333,65 +8670,6 @@ fn agent_presence_explain_json_detects_harness_without_active_presence() {
     assert!(
         parsed.get("verification").is_some(),
         "actor explain should prove repository verify for agents: {parsed}"
-    );
-}
-
-#[test]
-fn agent_presence_explain_detached_head_recommends_thread_inspection() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
-    heddle(&["capture", "-m", "base"], Some(temp.path())).unwrap();
-    let base = Repository::open(temp.path())
-        .unwrap()
-        .current_state()
-        .unwrap()
-        .unwrap()
-        .state_id
-        .to_string();
-    std::fs::write(temp.path().join("tracked.txt"), "next\n").unwrap();
-    heddle(&["capture", "-m", "next"], Some(temp.path())).unwrap();
-    // `goto` to an earlier state detaches HEAD — there is no current thread
-    // to attach an actor to, so `--no-thread` would fail.
-    heddle(&["switch", &base, "--force"], Some(temp.path())).unwrap();
-    assert!(
-        matches!(
-            Repository::open(temp.path()).unwrap().head_ref().unwrap(),
-            refs::Head::Detached { .. }
-        ),
-        "goto should leave HEAD detached for this test"
-    );
-
-    let output = heddle_output_with_env(
-        &["agent", "presence", "explain", "--output", "json"],
-        Some(temp.path()),
-        &[
-            ("CODEX_THREAD_ID", "thread-cold-agent"),
-            ("CODEX_MODEL", "gpt-5.3-codex"),
-            ("CODEX_REASONING_EFFORT", "high"),
-        ],
-    )
-    .expect("invoke actor explain");
-    assert!(
-        output.status.success(),
-        "actor explain should succeed on detached HEAD; stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: Value = serde_json::from_str(&stdout)
-        .unwrap_or_else(|err| panic!("actor explain JSON should parse: {err}: {stdout}"));
-    assert_eq!(parsed["output_kind"], "agent_presence_explain", "{parsed}");
-    assert_eq!(parsed["attached"], false);
-    // Detached HEAD: recommend the minting form (mints a dedicated thread),
-    // NOT `--no-thread`, which cannot succeed without a current thread.
-    assert_eq!(
-        parsed["recommended_action"], "heddle thread list",
-        "detached HEAD should recommend an exact inspection command: {parsed}"
-    );
-    assert_eq!(
-        parsed["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["thread", "list"]),
-        "presence explain should expose replayable inspection argv: {parsed}"
     );
 }
 
@@ -10951,77 +9229,6 @@ fn generic_json_runtime_errors_keep_nonempty_machine_envelope() {
 }
 
 #[test]
-fn schema_near_miss_recommends_real_match_or_catalog_not_unrelated_schema() {
-    let output =
-        heddle_output(&["--output", "json", "schemas", "mer"], None).expect("invoke near miss");
-    assert!(
-        !output.status.success(),
-        "near-miss schema lookup should fail"
-    );
-    assert!(
-        output.stdout.is_empty(),
-        "JSON failure must not pollute stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: serde_json::Value = serde_json::from_str(stderr.trim())
-        .unwrap_or_else(|err| panic!("stderr should be JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "schema_not_registered");
-    assert_eq!(
-        envelope["primary_command"],
-        "heddle schemas merge --preview"
-    );
-    assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("merge --preview") && !hint.contains("abort")),
-        "near-miss advice should point at the real nearby schema, not an unrelated verb: {envelope}"
-    );
-    assert!(
-        envelope["recovery_commands"]
-            .as_array()
-            .is_some_and(|commands| commands
-                .iter()
-                .any(|command| command == &serde_json::json!("heddle schemas"))
-                && commands
-                    .iter()
-                    .all(|command| command != &serde_json::json!("heddle schemas abort"))),
-        "schema recovery should include neutral catalog discovery and exclude unrelated fallbacks: {envelope}"
-    );
-}
-
-#[test]
-fn schemas_requires_exact_verb_but_suggests_unambiguous_schema() {
-    let output = heddle_output(&["--output", "json", "schemas", "merge"], None)
-        .expect("invoke exact-only schema lookup");
-    assert!(
-        !output.status.success(),
-        "base schema lookup should fail exact-only"
-    );
-    assert!(
-        output.stdout.is_empty(),
-        "JSON failure must not pollute stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: serde_json::Value = serde_json::from_str(stderr.trim())
-        .unwrap_or_else(|err| panic!("stderr should be JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "schema_not_registered");
-    assert_eq!(
-        envelope["primary_command"],
-        "heddle schemas merge --preview"
-    );
-    assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("merge --preview")),
-        "exact-only schema lookup should still suggest the precise schema verb: {envelope}"
-    );
-}
-
-#[test]
 fn doctor_schemas_reports_runtime_and_documented_coverage() {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -11151,7 +9358,6 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         );
     }
     for verb in [
-        "switch",
         "thread list",
         "fsck repair git",
         "capture",
@@ -11178,18 +9384,6 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         "remote add",
         "remote remove",
         "remote set-default",
-        "stash push",
-        "stash list",
-        "stash pop",
-        "stash apply",
-        "stash drop",
-        "stash clear",
-        "stash show",
-        "session start",
-        "session segment",
-        "session end",
-        "session show",
-        "session list",
         "start",
         "thread create",
         "thread current",
@@ -11215,7 +9409,6 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         "doctor",
         "doctor docs",
         "doctor schemas",
-        "git-overlay",
         "watch",
         "try",
         "query --attribution",
@@ -11632,9 +9825,10 @@ fn default_undo_text_hides_batches_and_checkpoint_ids_until_verbose() {
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "seed\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
+    initialize_direct_git_overlay_for_polish_tests(temp.path());
 
     std::fs::write(temp.path().join("tracked.txt"), "seed\nchanged\n").unwrap();
+    heddle(&["capture", "-m", "write saved change"], Some(temp.path())).unwrap();
     heddle(&["commit", "-m", "write saved change"], Some(temp.path())).unwrap();
 
     let list = heddle(&["--output", "text", "undo", "--list"], Some(temp.path()))
@@ -12067,9 +10261,19 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
 
     json_value(temp.path(), &["adopt", "--output", "json"]);
     std::fs::write(temp.path().join("tracked.txt"), "heddle side\n").unwrap();
-    json_value(
-        temp.path(),
-        &["commit", "-m", "heddle side", "--output", "json"],
+    let capture = heddle_output_with_env(
+        &["capture", "-m", "heddle side", "--output", "json"],
+        Some(temp.path()),
+        &[
+            ("HEDDLE_PRINCIPAL_NAME", "Heddle Test"),
+            ("HEDDLE_PRINCIPAL_EMAIL", "heddle@example.com"),
+        ],
+    )
+    .expect("capture native divergence");
+    assert!(
+        capture.status.success(),
+        "capture native divergence: {}",
+        String::from_utf8_lossy(&capture.stderr)
     );
 
     let reset = std::process::Command::new("git")
@@ -12274,6 +10478,7 @@ fn read_commands_gate_repository_preamble_on_verbose() {
     heddle(&["init"], Some(temp.path())).unwrap();
     heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
+    heddle(&["capture", "-m", "checkpoint"], Some(temp.path())).unwrap();
     heddle(&["commit", "-m", "checkpoint"], Some(temp.path())).unwrap();
 
     for (label, default_args, verbose_args) in [

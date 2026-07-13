@@ -57,8 +57,8 @@ use crate::{
         output_is_compact, should_output_json, style, worktree_status_options,
     },
     config::UserConfig,
-    git_projection_engine::GitProjection,
 };
+use heddle_git_projection::GitProjection;
 
 #[derive(Serialize)]
 struct SyncOutput {
@@ -289,7 +289,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         let land_command = land_local_command(&thread.id);
         // `heddle start` would refuse here — the thread still holds an active
         // reservation, so it returns `active_reservation_advice` and the
-        // operator is stuck. `heddle switch` rebuilds the dedicated worktree at
+        // operator is stuck. `heddle thread switch` rebuilds the dedicated worktree at
         // the recorded `execution_path` from the thread's current state (see
         // `cmd_thread_switch`), which is exactly the path this `land` reads, so
         // the rebuild clears the blocker and the follow-up `land` succeeds.

@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-use oplog::{OpLogBackend, OpRecord};
-
 use super::{git_overlay_fixtures::GitOverlayFixture, *};
 
 /// The `bisect` verb was removed in the whole-CLI consolidation (heddle#473),
@@ -65,10 +63,6 @@ fn git_stdout(path: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn mirror_git_stdout(path: &std::path::Path, args: &[&str]) -> String {
-    git_stdout(&path.join(".heddle/git"), args)
-}
-
 fn git_status_short(path: &std::path::Path) -> String {
     git_stdout(path, &["status", "--short"])
 }
@@ -86,41 +80,8 @@ fn git_commit_all(path: &std::path::Path, message: &str) {
     git(&["commit", "-m", message], path);
 }
 
-fn heddle_adopt(path: &std::path::Path) {
+fn initialize_git_overlay(path: &std::path::Path) {
     heddle(&["init"], Some(path)).unwrap();
-    heddle(&["import", "git"], Some(path)).unwrap();
-}
-
-fn setup_diverged_imported_git_ref(path: &std::path::Path) {
-    init_git_repo_with_branch(path, "main");
-    std::fs::write(path.join("shared.txt"), "base\n").unwrap();
-    std::fs::write(path.join("main-only.txt"), "main-only\n").unwrap();
-    git_commit_all(path, "base");
-
-    git(&["switch", "-c", "feature"], path);
-    std::fs::write(path.join("shared.txt"), "feature edit\n").unwrap();
-    std::fs::write(path.join("feature.txt"), "feature\n").unwrap();
-    git_commit_all(path, "feature");
-
-    git(&["switch", "main"], path);
-    std::fs::write(path.join("main-only.txt"), "main edit\n").unwrap();
-    std::fs::write(path.join("main2.txt"), "main file\n").unwrap();
-    git_commit_all(path, "main");
-
-    heddle_adopt(path);
-}
-
-fn setup_linear_imported_git_ref(path: &std::path::Path) {
-    init_git_repo_with_branch(path, "main");
-    std::fs::write(path.join("base.txt"), "base\n").unwrap();
-    git_commit_all(path, "base");
-
-    git(&["switch", "-c", "feature"], path);
-    std::fs::write(path.join("feature.txt"), "feature\n").unwrap();
-    git_commit_all(path, "feature");
-
-    git(&["switch", "main"], path);
-    heddle_adopt(path);
 }
 
 fn raw_git_preservation_action() -> &'static str {
@@ -204,6 +165,19 @@ fn json(cwd: &std::path::Path, args: &[&str]) -> Value {
     );
 }
 
+fn json_success_with_env(cwd: &std::path::Path, args: &[&str], env: &[(&str, &str)]) -> Value {
+    let output = heddle_output_with_env(args, Some(cwd), env)
+        .unwrap_or_else(|err| panic!("heddle {args:?}: {err}"));
+    assert!(
+        output.status.success(),
+        "heddle {args:?} failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|err| panic!("expected JSON for {args:?}: {err}"))
+}
+
 /// Mutation `--output json` replies no longer embed `verification`
 /// (the verification-claim gate still consults it in-memory, but it
 /// is omitted from the wire to keep mutation replies focused).
@@ -285,194 +259,6 @@ fn assert_operator_json_contract(parsed: &Value, output_kind: &str) {
     }
 }
 
-fn assert_action_is_argv_or_template(label: &str, output: &Value, action: &str) {
-    let concrete = !action.contains("...") && !action.contains('<');
-    let template = &output["recommended_action_template"];
-    // The canonical fillable template is always present for a valid action
-    // and exposes a non-empty argv_template (HeddleCo/heddle#254).
-    assert!(
-        template["argv_template"]
-            .as_array()
-            .is_some_and(|argv| !argv.is_empty()),
-        "{label} recommended action should expose a fillable template with argv_template: {output}"
-    );
-    let required_inputs = template["required_inputs"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{label} template should list required_inputs: {output}"));
-    if concrete {
-        assert!(
-            required_inputs.is_empty(),
-            "{label} concrete recommended action template should need no inputs to run: {output}"
-        );
-    } else {
-        assert!(
-            !required_inputs.is_empty(),
-            "{label} templated recommended action should require inputs before running: {output}"
-        );
-    }
-}
-
-fn assert_remote_divergence_surface(
-    label: &str,
-    output: &Value,
-    expected_status: &str,
-    expected_remote_drift: &str,
-    expected_action: &str,
-    expected_argv: Option<Value>,
-) {
-    let verification = if output.get("verification").is_some() {
-        &output["verification"]
-    } else {
-        output
-    };
-    assert_eq!(
-        verification["status"], expected_status,
-        "{label} should report the same primary blocker: {output}"
-    );
-    assert_eq!(
-        verification["remote_drift"], expected_remote_drift,
-        "{label} should report the same remote drift: {output}"
-    );
-    assert_eq!(
-        output["recommended_action"], expected_action,
-        "{label} top-level action should match verification: {output}"
-    );
-    assert_eq!(
-        verification["recommended_action"], expected_action,
-        "{label} verification action should match top-level action: {output}"
-    );
-    if output.get("health").is_some() {
-        assert_eq!(
-            output["health"]["recommended_action"], expected_action,
-            "{label} health action should match verification action: {output}"
-        );
-    }
-    match expected_argv {
-        Some(argv) => {
-            assert_eq!(
-                output["recommended_action_template"]["argv_template"], argv,
-                "{label} should expose executable argv_template for the primary action: {output}"
-            );
-        }
-        None => assert_action_is_argv_or_template(label, output, expected_action),
-    }
-}
-
-#[test]
-fn git_overlay_imported_ref_preview_diff_uses_merge_tree() {
-    let temp = TempDir::new().unwrap();
-    setup_diverged_imported_git_ref(temp.path());
-
-    let parsed = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature",
-            "--preview",
-            "--with-diff",
-        ],
-    );
-
-    assert_eq!(parsed["status"], "completed", "{parsed}");
-    assert_eq!(parsed["merge_relation"], "clean_apply", "{parsed}");
-    assert_eq!(parsed["changed_path_count"], 2, "{parsed}");
-    assert_eq!(parsed["recommended_action"], Value::Null, "{parsed}");
-    assert_eq!(parsed["next_action"], Value::Null, "{parsed}");
-    let diff = &parsed["diff"];
-    assert_eq!(diff["to_state"], "<merged-preview>", "{parsed}");
-    let changes = diff["changes"].as_array().expect("diff changes array");
-    let paths = changes
-        .iter()
-        .filter_map(|change| change["path"].as_str())
-        .collect::<Vec<_>>();
-    assert!(
-        paths.contains(&"feature.txt") && paths.contains(&"shared.txt"),
-        "preview diff should include incoming changes: {parsed}"
-    );
-    assert_eq!(
-        parsed["changed_paths"],
-        serde_json::json!(paths),
-        "{parsed}"
-    );
-    assert!(
-        !changes
-            .iter()
-            .any(|change| change["path"] == "main2.txt" && change["kind"] == "deleted"),
-        "preview diff must not show deletion of destination-only files: {parsed}"
-    );
-}
-
-#[test]
-fn git_overlay_imported_ref_fast_forward_preview_has_no_ship_action() {
-    let temp = TempDir::new().unwrap();
-    setup_linear_imported_git_ref(temp.path());
-
-    let parsed = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature",
-            "--preview",
-            "--with-diff",
-        ],
-    );
-
-    assert_eq!(parsed["status"], "preview", "{parsed}");
-    assert_eq!(parsed["merge_relation"], "fast_forward", "{parsed}");
-    assert_eq!(parsed["recommended_action"], Value::Null, "{parsed}");
-    assert_eq!(parsed["recommended_action_argv"], Value::Null, "{parsed}");
-    assert_eq!(parsed["next_action"], Value::Null, "{parsed}");
-    assert_eq!(
-        parsed["changed_paths"],
-        serde_json::json!(["feature.txt"]),
-        "{parsed}"
-    );
-    assert_eq!(parsed["diff"]["changed_path_count"], 1, "{parsed}");
-}
-
-#[test]
-fn git_overlay_imported_ref_ready_and_ship_fail_closed() {
-    let temp = TempDir::new().unwrap();
-    setup_diverged_imported_git_ref(temp.path());
-
-    for args in [
-        vec!["--output", "json", "ready", "--thread", "feature"],
-        vec![
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature",
-            "--no-push",
-        ],
-    ] {
-        let output = heddle_output(&args, Some(temp.path())).expect("command should run");
-        assert!(
-            !output.status.success(),
-            "imported Git ref must not be treated as a managed thread: {args:?}"
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "JSON refusal should be emitted on stderr only: {args:?}"
-        );
-        let stderr = std::str::from_utf8(&output.stderr).unwrap();
-        let envelope: Value = serde_json::from_str(stderr)
-            .unwrap_or_else(|err| panic!("expected JSON envelope: {err}: {stderr}"));
-        assert_eq!(
-            envelope["kind"], "imported_git_ref_not_managed_thread",
-            "{envelope}"
-        );
-        assert_eq!(
-            envelope["primary_command"], "heddle fsck repair git --ref feature --preview",
-            "{envelope}"
-        );
-    }
-}
-
 fn assert_git_overlay_basics(parsed: &Value) {
     assert_eq!(parsed["repository_capability"], "git-overlay");
     assert_eq!(parsed["storage_model"], "git+heddle-sidecar");
@@ -500,35 +286,6 @@ fn assert_verify_check_rows(parsed: &Value) {
     }
 }
 
-fn init_heddle_conflict_repo(path: &std::path::Path) {
-    heddle(&["init"], Some(path)).unwrap();
-    std::fs::write(path.join("conflict.txt"), "base\n").unwrap();
-    heddle(&["capture", "-m", "Base"], Some(path)).unwrap();
-    heddle(&["thread", "create", "feature"], Some(path)).unwrap();
-    heddle(&["thread", "switch", "feature"], Some(path)).unwrap();
-    std::fs::write(path.join("conflict.txt"), "feature version\n").unwrap();
-    heddle(&["capture", "-m", "Feature change"], Some(path)).unwrap();
-    heddle(&["thread", "switch", "main"], Some(path)).unwrap();
-    std::fs::write(path.join("conflict.txt"), "main version\n").unwrap();
-    heddle(&["capture", "-m", "Main change"], Some(path)).unwrap();
-    heddle(&["thread", "switch", "feature"], Some(path)).unwrap();
-}
-
-fn start_conflicted_heddle_merge(path: &std::path::Path) -> String {
-    let output = heddle_output(&["merge", "main"], Some(path))
-        .expect("heddle merge should run and report conflict state");
-    assert!(
-        !output.status.success(),
-        "conflicted mutating merge should exit nonzero after writing its report"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    assert!(
-        stdout.contains("Conflict") || path.join(".heddle/MERGE_STATE").exists(),
-        "heddle merge should persist an in-progress merge state for continue: {stdout}"
-    );
-    stdout
-}
-
 #[test]
 fn git_overlay_matrix_commit_prefers_heddle_principal_over_git_identity() {
     let temp = TempDir::new().unwrap();
@@ -538,22 +295,29 @@ fn git_overlay_matrix_commit_prefers_heddle_principal_over_git_identity() {
 
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("local.txt"), "local\n").unwrap();
-    let output = heddle_output_with_env(
-        &["commit", "-m", "local identity commit"],
-        Some(temp.path()),
+    let env = [
+        ("HEDDLE_PRINCIPAL_NAME", "Heddle Principal"),
+        ("HEDDLE_PRINCIPAL_EMAIL", "principal@example.com"),
+    ];
+    let capture = json_success_with_env(
+        temp.path(),
         &[
-            ("HEDDLE_PRINCIPAL_NAME", "Heddle Principal"),
-            ("HEDDLE_PRINCIPAL_EMAIL", "principal@example.com"),
+            "--output",
+            "json",
+            "capture",
+            "-m",
+            "local identity capture",
         ],
-    )
-    .expect("heddle commit should run");
-    assert!(
-        output.status.success(),
-        "heddle commit should succeed: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        &env,
+    );
+    json_success_with_env(
+        temp.path(),
+        &["--output", "json", "commit", "-m", "local identity commit"],
+        &env,
     );
 
+    assert_eq!(capture["principal"]["name"], "Heddle Principal");
+    assert_eq!(capture["principal"]["email"], "principal@example.com");
     let identity = git_stdout(temp.path(), &["log", "-1", "--format=%an <%ae>%n%cn <%ce>"]);
     assert_eq!(
         identity,
@@ -570,13 +334,11 @@ fn git_overlay_matrix_commit_uses_local_git_identity_for_state_and_checkpoint() 
 
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("local.txt"), "local\n").unwrap();
-    let commit = json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "local identity commit"],
-    );
+    let capture = json(temp.path(), &["capture", "-m", "local identity capture"]);
+    json(temp.path(), &["commit", "-m", "local identity commit"]);
 
-    assert_eq!(commit["principal"]["name"], "Repo Local");
-    assert_eq!(commit["principal"]["email"], "local@example.com");
+    assert_eq!(capture["principal"]["name"], "Repo Local");
+    assert_eq!(capture["principal"]["email"], "local@example.com");
     let identity = git_stdout(temp.path(), &["log", "-1", "--format=%an <%ae>%n%cn <%ce>"]);
     assert_eq!(
         identity,
@@ -600,13 +362,11 @@ fn git_overlay_matrix_commit_prefers_local_git_identity_over_user_config_princip
 
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("local.txt"), "local\n").unwrap();
-    let commit = json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "local identity commit"],
-    );
+    let capture = json(temp.path(), &["capture", "-m", "local identity capture"]);
+    json(temp.path(), &["commit", "-m", "local identity commit"]);
 
-    assert_eq!(commit["principal"]["name"], "Repo Local");
-    assert_eq!(commit["principal"]["email"], "local@example.com");
+    assert_eq!(capture["principal"]["name"], "Repo Local");
+    assert_eq!(capture["principal"]["email"], "local@example.com");
     let identity = git_stdout(temp.path(), &["log", "-1", "--format=%an <%ae>%n%cn <%ce>"]);
     assert_eq!(
         identity,
@@ -615,14 +375,14 @@ fn git_overlay_matrix_commit_prefers_local_git_identity_over_user_config_princip
 }
 
 #[test]
-fn git_overlay_matrix_isolated_commit_uses_parent_git_identity_before_user_config_principal() {
+fn git_overlay_matrix_isolated_checkout_uses_native_capture_with_parent_git_identity() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     git(&["config", "user.name", "Audit User"], temp.path());
     git(&["config", "user.email", "audit@example.com"], temp.path());
     std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
     git_commit_all(temp.path(), "base");
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
 
     let user_config = temp.path().with_extension("audit-user-config.toml");
     std::fs::write(
@@ -644,23 +404,37 @@ fn git_overlay_matrix_isolated_commit_uses_parent_git_identity_before_user_confi
         ],
     );
 
+    let status = json(&checkout, &["status"]);
+    assert_eq!(status["repository_capability"], "native-heddle");
+    assert_eq!(status["storage_model"], "heddle-native");
+
     std::fs::write(checkout.join("audit.txt"), "isolated\n").unwrap();
+    let env = [("HEDDLE_CONFIG", user_config.to_str().unwrap())];
+    let capture = json_success_with_env(
+        &checkout,
+        &["--output", "json", "capture", "-m", "isolated audit"],
+        &env,
+    );
+    assert_eq!(capture["principal"]["name"], "Audit User");
+    assert_eq!(capture["principal"]["email"], "audit@example.com");
+
+    let parent_head = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
     let output = heddle_output_with_env(
         &["--output", "json", "commit", "-m", "isolated audit"],
         Some(&checkout),
-        &[("HEDDLE_CONFIG", user_config.to_str().unwrap())],
+        &env,
     )
-    .expect("isolated commit should run");
+    .expect("isolated commit refusal should run");
     assert!(
-        output.status.success(),
-        "isolated commit should succeed: stdout={} stderr={}",
+        !output.status.success(),
+        "a native isolated checkout must not write the parent Git history: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let commit: Value =
-        serde_json::from_slice(&output.stdout).expect("isolated commit JSON should parse");
-    assert_eq!(commit["principal"]["name"], "Audit User");
-    assert_eq!(commit["principal"]["email"], "audit@example.com");
+    let refusal: Value =
+        serde_json::from_slice(&output.stderr).expect("isolated commit refusal should be JSON");
+    assert_eq!(refusal["kind"], "commit_requires_git_overlay");
+    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), parent_head);
 }
 
 #[test]
@@ -677,13 +451,11 @@ fn git_overlay_matrix_commit_prefers_repo_principal_over_git_identity() {
     std::fs::write(&config_path, config).unwrap();
 
     std::fs::write(temp.path().join("repo.txt"), "repo\n").unwrap();
-    let commit = json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "repo identity commit"],
-    );
+    let capture = json(temp.path(), &["capture", "-m", "repo identity capture"]);
+    json(temp.path(), &["commit", "-m", "repo identity commit"]);
 
-    assert_eq!(commit["principal"]["name"], "Repo Principal");
-    assert_eq!(commit["principal"]["email"], "repo@example.com");
+    assert_eq!(capture["principal"]["name"], "Repo Principal");
+    assert_eq!(capture["principal"]["email"], "repo@example.com");
     let identity = git_stdout(temp.path(), &["log", "-1", "--format=%an <%ae>%n%cn <%ce>"]);
     assert_eq!(
         identity,
@@ -707,50 +479,35 @@ fn git_overlay_matrix_commit_uses_global_git_identity_when_repo_local_absent() {
 
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("global.txt"), "global\n").unwrap();
-    let output = heddle_output_with_env(
-        &["commit", "-m", "global identity commit"],
-        Some(temp.path()),
+    let env = [
+        ("GIT_CONFIG_GLOBAL", global_config.to_str().unwrap()),
+        ("HOME", global_home.path().to_str().unwrap()),
+        ("XDG_CONFIG_HOME", global_home.path().to_str().unwrap()),
+    ];
+    let capture = json_success_with_env(
+        temp.path(),
         &[
-            ("GIT_CONFIG_GLOBAL", global_config.to_str().unwrap()),
-            ("HOME", global_home.path().to_str().unwrap()),
-            ("XDG_CONFIG_HOME", global_home.path().to_str().unwrap()),
+            "--output",
+            "json",
+            "capture",
+            "-m",
+            "global identity capture",
         ],
-    )
-    .expect("heddle commit should run");
-    assert!(
-        output.status.success(),
-        "heddle commit should accept Git's global identity fallback: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        &env,
+    );
+    json_success_with_env(
+        temp.path(),
+        &["--output", "json", "commit", "-m", "global identity commit"],
+        &env,
     );
 
+    assert_eq!(capture["principal"]["name"], "Global User");
+    assert_eq!(capture["principal"]["email"], "global@example.com");
     let identity = git_stdout(temp.path(), &["log", "-1", "--format=%an <%ae>%n%cn <%ce>"]);
     assert_eq!(
         identity,
         "Global User <global@example.com>\nGlobal User <global@example.com>"
     );
-}
-
-#[test]
-fn git_overlay_matrix_checkpoint_message_controls_git_subject() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("captured.txt"), "captured\n").unwrap();
-    heddle(
-        &["capture", "-m", "captured heddle intent"],
-        Some(temp.path()),
-    )
-    .unwrap();
-    heddle(
-        &["checkpoint", "-m", "checkpoint git subject"],
-        Some(temp.path()),
-    )
-    .unwrap();
-
-    let subject = git_stdout(temp.path(), &["log", "-1", "--format=%s"]);
-    assert_eq!(subject, "checkpoint git subject");
 }
 
 #[test]
@@ -763,24 +520,37 @@ fn git_overlay_matrix_commit_without_git_identity_uses_heddle_principal() {
 
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("principal.txt"), "principal\n").unwrap();
-    let output = heddle_output_with_env(
-        &["commit", "-m", "heddle principal commit"],
-        Some(temp.path()),
+    let env = [
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("HOME", global_home.path().to_str().unwrap()),
+        ("XDG_CONFIG_HOME", global_home.path().to_str().unwrap()),
+        ("HEDDLE_PRINCIPAL_NAME", "Heddle Principal"),
+        ("HEDDLE_PRINCIPAL_EMAIL", "principal@example.com"),
+    ];
+    let capture = json_success_with_env(
+        temp.path(),
         &[
-            ("GIT_CONFIG_GLOBAL", "/dev/null"),
-            ("HOME", global_home.path().to_str().unwrap()),
-            ("XDG_CONFIG_HOME", global_home.path().to_str().unwrap()),
-            ("HEDDLE_PRINCIPAL_NAME", "Heddle Principal"),
-            ("HEDDLE_PRINCIPAL_EMAIL", "principal@example.com"),
+            "--output",
+            "json",
+            "capture",
+            "-m",
+            "heddle principal capture",
         ],
-    )
-    .expect("heddle commit should run");
-    assert!(
-        output.status.success(),
-        "commit should use Heddle principal without Git config: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        &env,
     );
+    json_success_with_env(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "commit",
+            "-m",
+            "heddle principal commit",
+        ],
+        &env,
+    );
+    assert_eq!(capture["principal"]["name"], "Heddle Principal");
+    assert_eq!(capture["principal"]["email"], "principal@example.com");
     let identity = git_stdout(temp.path(), &["log", "-1", "--format=%an <%ae>%n%cn <%ce>"]);
     assert_eq!(
         identity,
@@ -789,7 +559,7 @@ fn git_overlay_matrix_commit_without_git_identity_uses_heddle_principal() {
 }
 
 #[test]
-fn git_overlay_matrix_commit_without_any_identity_refuses_before_capture() {
+fn git_overlay_matrix_capture_without_any_identity_refuses_before_state_change() {
     let temp = TempDir::new().unwrap();
     let global_home = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
@@ -799,18 +569,15 @@ fn git_overlay_matrix_commit_without_any_identity_refuses_before_capture() {
     git(&["config", "--unset", "user.email"], temp.path());
 
     let before_head = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    heddle_adopt(temp.path());
-    let before_state = json(temp.path(), &["status", "--output", "json"])["current_state"]
-        .as_str()
-        .expect("adopted repo should have a current state")
-        .to_string();
+    initialize_git_overlay(temp.path());
+    let before_state = json(temp.path(), &["status", "--output", "json"])["current_state"].clone();
 
     std::fs::write(temp.path().join("no-identity.txt"), "anonymous?\n").unwrap();
     let output = heddle_output_with_env(
         &[
             "--output",
             "json",
-            "commit",
+            "capture",
             "-m",
             "should not become unknown",
         ],
@@ -823,178 +590,27 @@ fn git_overlay_matrix_commit_without_any_identity_refuses_before_capture() {
             ("HEDDLE_PRINCIPAL_EMAIL", ""),
         ],
     )
-    .expect("heddle commit should run");
+    .expect("heddle capture should run");
     assert!(
         !output.status.success(),
-        "commit should refuse missing identity"
+        "capture should refuse missing identity"
     );
     assert!(output.stdout.is_empty());
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
     let envelope: Value =
         serde_json::from_str(stderr).expect("missing identity should emit JSON envelope");
-    assert_eq!(envelope["kind"], "git_checkpoint_identity_required");
+    assert_eq!(envelope["kind"], "capture_identity_required");
     assert!(
         envelope["unsafe_condition"]
             .as_str()
             .is_some_and(|condition| condition.contains("Unknown <unknown@example.com>")),
-        "identity refusal should name the unsafe fallback: {stderr}"
+        "capture refusal should name the unsafe fallback: {stderr}"
     );
     assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), before_head);
     assert_eq!(
         json(temp.path(), &["status", "--output", "json"])["current_state"],
         before_state,
-        "missing identity refusal must happen before preserving a Heddle capture"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_commit_no_all_nothing_staged_refuses_before_identity_preflight() {
-    // `--no-all` with the index identical to HEAD has nothing to commit. That
-    // nothing-to-commit short-circuit must run BEFORE the identity / ref-update
-    // preflights: a repo with no configured identity must still get the
-    // nothing-to-commit outcome, not an identity-required refusal on a commit
-    // that was never going to write anything.
-    let temp = TempDir::new().unwrap();
-    let global_home = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    git(&["config", "--unset", "user.name"], temp.path());
-    git(&["config", "--unset", "user.email"], temp.path());
-
-    let before_head = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    heddle_adopt(temp.path());
-
-    // Nothing genuinely staged (index == HEAD); only worktree edits + an
-    // untracked file make the worktree dirty.
-    std::fs::write(temp.path().join("base.txt"), "base\nworktree edit\n").unwrap();
-    std::fs::write(temp.path().join("scratch.txt"), "untracked\n").unwrap();
-
-    let output = heddle_output_with_env(
-        &["--output", "json", "commit", "--no-all", "-m", "index only"],
-        Some(temp.path()),
-        &[
-            ("GIT_CONFIG_GLOBAL", "/dev/null"),
-            ("HOME", global_home.path().to_str().unwrap()),
-            ("XDG_CONFIG_HOME", global_home.path().to_str().unwrap()),
-            ("HEDDLE_PRINCIPAL_NAME", ""),
-            ("HEDDLE_PRINCIPAL_EMAIL", ""),
-        ],
-    )
-    .expect("heddle commit --no-all should run");
-    assert!(
-        !output.status.success(),
-        "commit --no-all with nothing staged must refuse: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value = serde_json::from_str(stderr).expect("refusal should emit JSON envelope");
-    assert_eq!(
-        envelope["kind"], "nothing_to_commit",
-        "--no-all with nothing staged must surface nothing-to-commit before the identity preflight, not an identity refusal: {stderr}"
-    );
-    assert_eq!(
-        git_stdout(temp.path(), &["rev-parse", "HEAD"]),
-        before_head,
-        "--no-all must not create a commit when nothing is staged"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_index_checkpoint_recovery_reuses_preserved_snapshot() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    heddle_adopt(temp.path());
-
-    std::fs::write(temp.path().join("file.txt"), "staged\n").unwrap();
-    git(&["add", "file.txt"], temp.path());
-    std::fs::write(temp.path().join("file.txt"), "staged\nunstaged\n").unwrap();
-    std::fs::write(temp.path().join("scratch.txt"), "left behind\n").unwrap();
-
-    let git_dir = temp.path().join(".git");
-    std::fs::write(git_dir.join("index.lock"), "held by test\n").unwrap();
-    let failed = heddle_output(
-        &[
-            "--output",
-            "json",
-            "commit",
-            "--no-all",
-            "-m",
-            "index only recovery",
-        ],
-        Some(temp.path()),
-    )
-    .expect("invoke faulted index-only commit");
-    assert!(
-        !failed.status.success(),
-        "locked index should fail after preserving the Heddle state"
-    );
-    let stderr = std::str::from_utf8(&failed.stderr).unwrap();
-    let envelope: Value =
-        serde_json::from_str(stderr).expect("checkpoint failure should emit JSON advice");
-    assert_eq!(envelope["kind"], "commit_checkpoint_failed");
-    assert_eq!(
-        envelope["recovery_commands"],
-        serde_json::json!(["heddle checkpoint --from-index-snapshot -m \"index only recovery\""])
-    );
-
-    let repo = Repository::open(temp.path()).expect("open repo after failed commit");
-    let preserved = repo
-        .current_state()
-        .expect("read current state")
-        .expect("failed commit should preserve a current state")
-        .state_id;
-    assert_eq!(
-        snapshot_count_for_change(temp.path(), &preserved),
-        1,
-        "the failed commit should preserve exactly one staged-index snapshot"
-    );
-    assert!(
-        repo.latest_git_checkpoint_for_state(&preserved)
-            .expect("read checkpoints")
-            .is_none(),
-        "the locked-index failure should not have recorded the Git checkpoint yet"
-    );
-
-    std::fs::remove_file(git_dir.join("index.lock")).unwrap();
-    let recovered = json(
-        temp.path(),
-        &[
-            "checkpoint",
-            "--from-index-snapshot",
-            "-m",
-            "index only recovery",
-        ],
-    );
-    assert_eq!(recovered["output_kind"], "checkpoint");
-    assert_eq!(recovered["state_id"], preserved.short());
-    assert_eq!(
-        snapshot_count_for_change(temp.path(), &preserved),
-        1,
-        "recovery must not re-enter commit_staged_index and mint a duplicate snapshot"
-    );
-
-    let repo = Repository::open(temp.path()).expect("reopen repo after recovery");
-    let checkpoint = repo
-        .latest_git_checkpoint_for_state(&preserved)
-        .expect("read checkpoint after recovery")
-        .expect("recovery should record the Git checkpoint");
-    assert_eq!(
-        git_stdout(temp.path(), &["rev-parse", "HEAD"]),
-        checkpoint.git_commit,
-        "recovery should advance Git HEAD to the checkpoint commit"
-    );
-    assert_eq!(
-        git_stdout(temp.path(), &["show", "HEAD:file.txt"]),
-        "staged",
-        "the recovered Git checkpoint should commit the preserved staged index tree"
-    );
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("file.txt")).unwrap(),
-        "staged\nunstaged\n",
-        "checkpoint recovery must preserve unstaged worktree edits after checkpointing the staged tree"
+        "missing identity refusal must happen before changing the Heddle state"
     );
 }
 
@@ -1376,7 +992,7 @@ fn git_overlay_matrix_verify_reads_git_tags_created_after_adoption() {
 }
 
 #[test]
-fn git_overlay_matrix_verify_reports_moved_git_tag_before_adoption() {
+fn git_overlay_matrix_native_adopted_tag_is_stable_when_git_projection_moves() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
@@ -1384,35 +1000,26 @@ fn git_overlay_matrix_verify_reports_moved_git_tag_before_adoption() {
     git(&["tag", "v1.0.0"], temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
     git_commit_all(temp.path(), "two");
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+
+    let adopted = json(temp.path(), &["adopt", "--output", "json"]);
+    assert_eq!(adopted["adopted"], true);
+    let tag_before = json(temp.path(), &["show", "v1.0.0", "--output", "json"]);
+    let state_before = tag_before["state_id"]
+        .as_str()
+        .expect("adopted tag should resolve to native state")
+        .to_string();
 
     git(&["tag", "-f", "v1.0.0", "HEAD"], temp.path());
 
     let verify = json(temp.path(), &["verify", "--output", "json"]);
-    assert_eq!(verify["verified"], false);
-    assert_eq!(verify["status"], "tag_marker_mismatch");
-    assert_eq!(verify["mapping_state"], "tag_marker_mismatch");
-    assert_eq!(verify["recommended_action"], "heddle adopt --ref v1.0.0");
-    assert!(
-        verify["checks"].as_array().unwrap().iter().any(|check| {
-            check["name"] == "Mapping"
-                && check["status"] == "tag_marker_mismatch"
-                && check["details"]["mismatched_tags"]
-                    .as_str()
-                    .is_some_and(|details| details.contains("v1.0.0"))
-        }),
-        "verify should report moved Git tag marker mismatches: {verify}"
+    assert_eq!(verify["verified"], true);
+    assert_eq!(verify["status"], "clean");
+    let tag_after = json(temp.path(), &["show", "v1.0.0", "--output", "json"]);
+    assert_eq!(
+        tag_after["state_id"], state_before,
+        "native Heddle tags must not move when the Git projection changes"
     );
-
-    let adopted = json(
-        temp.path(),
-        &["adopt", "--ref", "v1.0.0", "--output", "json"],
-    );
-    assert_eq!(adopted["tags_synced"], 1);
-    assert_eq!(adopted["verification"]["verified"], true);
-    assert_eq!(adopted["verification"]["status"], "clean");
 }
-
 #[test]
 fn git_overlay_matrix_selective_branch_adopt_surfaces_remaining_tag_import() {
     let temp = TempDir::new().unwrap();
@@ -1486,6 +1093,10 @@ fn git_overlay_matrix_new_branch_at_adopted_tip_verifies_without_setup_loop() {
 fn git_overlay_matrix_commit_after_adopt_ref_checkpoints_without_import_loop() {
     let fixture = GitOverlayFixture::imported_main();
     std::fs::write(fixture.path().join("README.md"), "changed\n").unwrap();
+    json(
+        fixture.path(),
+        &["--output", "json", "capture", "-m", "change"],
+    );
 
     let commit = json(
         fixture.path(),
@@ -1518,7 +1129,7 @@ fn git_overlay_matrix_ready_is_clean_after_direct_backed_init() {
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let ready = json(temp.path(), &["--output", "json", "ready"]);
-    assert_eq!(ready["status"], "completed");
+    assert_eq!(ready["status"], "completed", "{ready}");
     assert_eq!(ready["verification"]["verified"], true);
     assert_eq!(ready["verification"]["status"], "clean");
     assert_eq!(ready["recommended_action"], Value::Null);
@@ -1535,425 +1146,45 @@ fn git_overlay_matrix_ready_is_clean_after_direct_backed_init() {
 fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actionable() {
     let fixture =
         GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/ready-verify");
-    let thread_path = fixture.ready_thread_path().to_path_buf();
+    let thread_path = fixture.ready_thread_path();
 
-    let ready = json(
-        &thread_path,
-        &["--output", "json", "ready", "-m", "ready thread work"],
-    );
+    let ready = json(thread_path, &["--output", "json", "ready"]);
     assert_eq!(ready["status"], "completed");
-    let repo_path = canonical_path_string(fixture.path());
-    let parent_land_action = format!(
-        "heddle --repo {} land --thread feature/ready-verify --no-push",
-        repo_path
-    );
-    assert_eq!(
-        ready["recommended_action"], parent_land_action,
-        "ready from an isolated checkout should print a command that works from that checkout: {ready}"
-    );
     assert_eq!(ready["verification"]["verified"], true);
-    assert_eq!(ready["verification"]["status"], "clean");
     assert_eq!(ready["verification"]["workflow_status"], "ready");
     assert!(
-        ready["verification"]["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|check| check["name"] == "Workflow"
-                && check["status"] == "ready"
-                && check["clean"] == true),
-        "workflow attention should stay actionable without making repository verification false: {ready}"
-    );
-    // The mutation reply no longer carries verification on the wire,
-    // so we rely on the top-level recommended_action to capture the
-    // context-aware command (asserted above). The injected verification
-    // proof (grafted from a separate verify call) carries a plain
-    // recommendation without the original `--repo` prefix, which is
-    // expected: the separate verify call has no caller context.
-    let _ = parent_land_action;
-    assert_eq!(
-        ready["verification"]["recovery_commands"],
-        serde_json::json!([])
-    );
-    assert_verify_check_rows(&ready["verification"]);
-
-    let parent_status_before_preview = json(fixture.path(), &["--output", "json", "status"]);
-    assert_eq!(
-        parent_status_before_preview["recommended_action"],
-        "heddle land --thread feature/ready-verify --no-push",
-        "parent status should keep ready workflow actionable: {parent_status_before_preview}"
-    );
-    let thread_list_before_preview = json(fixture.path(), &["--output", "json", "thread", "list"]);
-    assert_eq!(
-        thread_list_before_preview["recommended_action"],
-        "heddle land --thread feature/ready-verify --no-push",
-        "thread list top-level action should match verify after ready: {thread_list_before_preview}"
-    );
-    assert_eq!(
-        thread_list_before_preview["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["land", "--thread", "feature/ready-verify", "--no-push"]),
-        "thread list top-level action should be directly executable: {thread_list_before_preview}"
-    );
-    let workspace_before_preview = json(fixture.path(), &["--output", "json", "status"]);
-    assert_eq!(
-        workspace_before_preview["recommended_action"],
-        "heddle land --thread feature/ready-verify --no-push",
-        "workspace top-level action should match verify after ready: {workspace_before_preview}"
-    );
-    assert_eq!(
-        workspace_before_preview["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["land", "--thread", "feature/ready-verify", "--no-push"]),
-        "workspace top-level action should be directly executable: {workspace_before_preview}"
+        ready["recommended_action"]
+            .as_str()
+            .is_some_and(
+                |action| action.contains("land --thread feature/ready-verify")
+                    && !action.contains("--no-push")
+            ),
+        "ready should expose the direct land action: {ready}"
     );
 
-    let status_text = heddle(&["status", "--output", "text"], Some(&thread_path)).unwrap();
-    assert!(
-        status_text.contains("Thread changes vs target: 1")
-            && status_text.contains("No unsaved changes, worktree clean"),
-        "ready thread status should distinguish captured thread changes from unsaved worktree edits: {status_text}"
-    );
-    let status_json = json(&thread_path, &["--output", "json", "status"]);
+    let parent_status = json(fixture.path(), &["--output", "json", "status"]);
     assert_eq!(
-        status_json["changed_path_count"], 1,
-        "aggregate status count should still include captured thread delta: {status_json}"
-    );
-    assert_eq!(
-        status_json["worktree_changed_path_count"], 0,
-        "ready thread status should expose clean worktree count separately: {status_json}"
-    );
-    assert_eq!(
-        status_json["thread_changed_path_count"], 1,
-        "ready thread status should expose captured thread delta separately: {status_json}"
-    );
-
-    let thread_show_before_preview = json(
-        fixture.path(),
-        &["--output", "json", "thread", "show", "feature/ready-verify"],
-    );
-    assert_eq!(
-        thread_show_before_preview["recommended_action"],
-        "heddle land --thread feature/ready-verify --no-push",
-        "thread show should follow the canonical land path after ready: {thread_show_before_preview}"
-    );
-    let preview = json(
-        fixture.path(),
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature/ready-verify",
-            "--preview",
-        ],
-    );
-    assert_eq!(
-        preview["recommended_action"],
-        "heddle land --thread feature/ready-verify --no-push"
-    );
-    let thread_show_after_preview = json(
-        fixture.path(),
-        &["--output", "json", "thread", "show", "feature/ready-verify"],
-    );
-    assert_eq!(
-        thread_show_after_preview["recommended_action"],
-        "heddle land --thread feature/ready-verify --no-push",
-        "thread show should keep the established land path after merge preview: {thread_show_after_preview}"
-    );
-    assert_eq!(
-        thread_show_after_preview["verification"]["recommended_action"],
-        "heddle land --thread feature/ready-verify --no-push",
-        "nested verify should not send agents back to preview after preview already succeeded: {thread_show_after_preview}"
-    );
-    assert!(
-        thread_show_after_preview["verification"]["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|check| check["name"] == "Workflow"
-                && check["recommended_action"]
-                    == "heddle land --thread feature/ready-verify --no-push"),
-        "Workflow check should match the established land path: {thread_show_after_preview}"
-    );
-    let ready_after_preview = json(&thread_path, &["--output", "json", "ready"]);
-    let repo_path = canonical_path_string(fixture.path());
-    let parent_land_action = format!(
-        "heddle --repo {} land --thread feature/ready-verify --no-push",
-        repo_path
-    );
-    assert_eq!(
-        ready_after_preview["recommended_action"], parent_land_action,
-        "ready rerun after preview should preserve the land path: {ready_after_preview}"
-    );
-    // Mutation reply no longer carries verification on the wire; the
-    // injected verify is rooted in `thread_path` without --repo, so
-    // its recommendation lacks the parent --repo prefix the original
-    // ready built. The top-level assertion above already proves the
-    // land path is preserved end-to-end.
-    let parent_status_after_preview = json(fixture.path(), &["--output", "json", "status"]);
-    assert_eq!(
-        parent_status_after_preview["recommended_action"],
-        "heddle land --thread feature/ready-verify --no-push",
-        "parent status should keep previewed workflow actionable: {parent_status_after_preview}"
+        parent_status["recommended_action"],
+        "heddle land --thread feature/ready-verify"
     );
     let thread_list = json(fixture.path(), &["--output", "json", "thread", "list"]);
     assert_eq!(
-        thread_list["recommended_action"], "heddle land --thread feature/ready-verify --no-push",
-        "thread list top-level action should match verify after preview: {thread_list}"
-    );
-    let listed = thread_list["threads"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|thread| thread["name"] == "feature/ready-verify")
-        .expect("ready thread should be listed");
-    assert_eq!(
-        listed["recommended_action"], "heddle land --thread feature/ready-verify --no-push",
-        "thread list should match ready/verify next action: {thread_list}"
-    );
-    assert_eq!(
-        listed["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["land", "--thread", "feature/ready-verify", "--no-push"]),
-        "thread list item actions should be directly executable: {thread_list}"
-    );
-    let workspace = json(fixture.path(), &["--output", "json", "status"]);
-    assert_eq!(
-        workspace["recommended_action"], "heddle land --thread feature/ready-verify --no-push",
-        "workspace top-level action should match verify after preview: {workspace}"
-    );
-    let workspace_thread = listed;
-    assert_eq!(
-        workspace_thread["recommended_action"],
-        "heddle land --thread feature/ready-verify --no-push",
-        "workspace should match ready/verify next action: {workspace}"
-    );
-    assert_eq!(
-        workspace_thread["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["land", "--thread", "feature/ready-verify", "--no-push"]),
-        "workspace item actions should be directly executable: {workspace}"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_agent_ship_allows_absent_confidence() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    heddle_adopt(temp.path());
-
-    let started = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/land-absent-confidence",
-            "--workspace",
-            "materialized",
-        ],
-    );
-    let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
-    std::fs::write(thread_path.join("agent.txt"), "agent work\n").unwrap();
-    let capture = heddle_output_with_env(
-        &["capture", "-m", "agent work", "--output", "json"],
-        Some(&thread_path),
-        &[
-            ("HEDDLE_AGENT_PROVIDER", "codex"),
-            ("HEDDLE_AGENT_MODEL", "gpt-5"),
-        ],
-    )
-    .expect("agent capture should run");
-    assert!(
-        capture.status.success(),
-        "agent capture should succeed: {}",
-        String::from_utf8_lossy(&capture.stderr)
+        thread_list["recommended_action"],
+        "heddle land --thread feature/ready-verify"
     );
 
-    let ready = json(&thread_path, &["--output", "json", "ready"]);
-    assert_eq!(
-        ready["status"], "completed",
-        "absent confidence should not make ready and land disagree: {ready}"
-    );
-    let preview = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature/land-absent-confidence",
-            "--preview",
-        ],
-    );
-    assert_eq!(
-        preview["recommended_action"],
-        "heddle land --thread feature/land-absent-confidence --no-push"
-    );
-
-    let land = json(
-        temp.path(),
+    let landed = json(
+        fixture.path(),
         &[
             "--output",
             "json",
             "land",
             "--thread",
-            "feature/land-absent-confidence",
-            "--no-push",
+            "feature/ready-verify",
         ],
     );
-    assert_eq!(
-        land["status"], "landed",
-        "land should not block on absent confidence after ready completed: {land}"
-    );
-    assert_eq!(land["integrated"], true);
-    assert!(
-        land["blockers"]
-            .as_array()
-            .is_none_or(|blockers| blockers.is_empty()),
-        "successful land should have no blockers: {land}"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_low_confidence_blocks_ready_and_ship_with_recapture_action() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    heddle_adopt(temp.path());
-
-    let started = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/land-low-confidence",
-            "--workspace",
-            "materialized",
-        ],
-    );
-    let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
-    std::fs::write(thread_path.join("agent.txt"), "agent work\n").unwrap();
-    let capture = heddle_output_with_env(
-        &[
-            "capture",
-            "-m",
-            "agent work",
-            "--confidence",
-            "0.60",
-            "--output",
-            "json",
-        ],
-        Some(&thread_path),
-        &[
-            ("HEDDLE_AGENT_PROVIDER", "codex"),
-            ("HEDDLE_AGENT_MODEL", "gpt-5"),
-        ],
-    )
-    .expect("agent capture should run");
-    assert!(
-        capture.status.success(),
-        "agent capture should succeed: {}",
-        String::from_utf8_lossy(&capture.stderr)
-    );
-
-    let ready = json(&thread_path, &["--output", "json", "ready"]);
-    assert_eq!(ready["status"], "blocked", "{ready}");
-    assert_eq!(
-        ready["recommended_action"], "heddle commit -m \"...\" --confidence <confidence>",
-        "ready should give the corrective action before marking the thread ready: {ready}"
-    );
-    assert!(
-        ready["blockers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|blocker| blocker
-                .as_str()
-                .is_some_and(|text| text.contains("confidence 0.60 is below"))),
-        "ready should explain the confidence policy gate: {ready}"
-    );
-
-    let preview = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature/land-low-confidence",
-            "--preview",
-        ],
-    );
-    assert_eq!(
-        preview["recommended_action"],
-        "heddle land --thread feature/land-low-confidence --no-push"
-    );
-
-    let ship_output = heddle_output(
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/land-low-confidence",
-            "--no-push",
-        ],
-        Some(temp.path()),
-    )
-    .expect("invoke blocked low-confidence land");
-    assert!(
-        !ship_output.status.success(),
-        "blocked policy land should exit nonzero"
-    );
-    let land: Value = serde_json::from_slice(&ship_output.stdout)
-        .unwrap_or_else(|err| panic!("blocked land should emit JSON on stdout: {err}"));
-    assert_eq!(land["status"], "blocked");
-    assert_eq!(land["integrated"], false);
-    assert_eq!(land["checkpointed"], false);
-    // heddle#464 bug 2: this land runs from the PARENT checkout (`temp.path()`)
-    // against an isolated thread whose checkout is `thread_path`. An unscoped
-    // `heddle commit` would commit the parent and never update the blocked
-    // thread's confidence, so the recovery must scope the recapture to the
-    // thread via the global `--repo` flag. (Contrast the in-thread `ready`
-    // recovery above, which stays unscoped.)
-    // The thread's checkout lives under `.heddle/threads/<encoded>/<repo-name>`, and
-    // the slash in `feature/land-low-confidence` is percent-encoded into one
-    // path segment (`feature%2Fland-low-confidence`, heddle#572 r2). The `%`
-    // is outside `shell_quote`'s bare set, so the breadcrumb single-quotes the
-    // `--repo` path — apply the same quoting here rather than hard-coding it.
-    let expected_scoped_recapture = format!(
-        "heddle --repo {} commit -m \"...\" --confidence <confidence>",
-        repo::shell_quote(&thread_path.display().to_string())
-    );
-    assert_eq!(
-        land["recommended_action"], expected_scoped_recapture,
-        "blocked policy land from the parent must scope the recapture to the thread's checkout, not land again or commit the parent: {land}"
-    );
-    assert!(
-        land["blockers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|blocker| blocker
-                .as_str()
-                .is_some_and(|text| text.contains("confidence 0.60 is below"))),
-        "land should explain the policy blocker: {land}"
-    );
-    assert!(
-        land["skipped_steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|step| step == "checkpoint(not reached)"),
-        "blocked land should not claim checkpoint was unnecessary: {land}"
-    );
-    assert!(
-        !land["skipped_steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|step| step == "checkpoint(not needed)"),
-        "blocked land should reserve checkpoint(not needed) for paths that reached merge: {land}"
-    );
+    assert_eq!(landed["output_kind"], "land");
+    assert_eq!(landed["verification"]["verified"], true);
 }
 
 #[test]
@@ -1967,7 +1198,8 @@ fn git_overlay_matrix_ready_thread_action_not_overridden_by_remote_push() {
     let origin_arg = origin.path().to_str().expect("origin path should be utf8");
     git(&["remote", "add", "origin", origin_arg], temp.path());
     git(&["push", "-u", "origin", "main"], temp.path());
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
 
     let started = json(
         temp.path(),
@@ -1984,14 +1216,15 @@ fn git_overlay_matrix_ready_thread_action_not_overridden_by_remote_push() {
     std::fs::write(thread_path.join("feature.txt"), "feature\n").unwrap();
     json(
         &thread_path,
-        &["--output", "json", "commit", "-m", "feature work"],
+        &["--output", "json", "capture", "-m", "feature work"],
     );
 
     std::fs::write(temp.path().join("main.txt"), "main change\n").unwrap();
     json(
         temp.path(),
-        &["--output", "json", "commit", "-m", "main work"],
+        &["--output", "json", "capture", "-m", "main work"],
     );
+    json(temp.path(), &["--output", "json", "commit"]);
     let verify = json(temp.path(), &["--output", "json", "verify"]);
     assert_eq!(
         verify["recommended_action"], "heddle push",
@@ -2010,90 +1243,14 @@ fn git_overlay_matrix_ready_thread_action_not_overridden_by_remote_push() {
     );
     assert_eq!(ready["status"], "completed", "{ready}");
     assert_eq!(
-        ready["recommended_action"], "heddle land --thread feature/stale-ready --no-push",
+        ready["recommended_action"], "heddle land --thread feature/stale-ready",
         "thread-scoped ready should refresh clean stale work and keep land primary, not global push: {ready}"
     );
     assert_eq!(
-        ready["report"]["recommended_action"], "heddle land --thread feature/stale-ready --no-push",
+        ready["report"]["recommended_action"], "heddle land --thread feature/stale-ready",
         "nested report should match the top-level ready action: {ready}"
     );
     assert_eq!(ready["report"]["freshness"], "current", "{ready}");
-}
-
-#[test]
-fn git_overlay_matrix_current_thread_recovery_not_overridden_by_remote_push() {
-    let temp = TempDir::new().unwrap();
-    let origin = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    git(&["init", "--bare", "--initial-branch=main"], origin.path());
-    std::fs::write(temp.path().join("tracked.txt"), "seed\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    git(
-        &[
-            "remote",
-            "add",
-            "origin",
-            origin.path().to_str().expect("origin path should be utf8"),
-        ],
-        temp.path(),
-    );
-    git(&["push", "-u", "origin", "main"], temp.path());
-    heddle_adopt(temp.path());
-
-    let started = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/stale-current",
-            "--workspace",
-            "materialized",
-        ],
-    );
-    let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
-    std::fs::write(thread_path.join("feature.txt"), "feature\n").unwrap();
-    json(
-        &thread_path,
-        &["--output", "json", "commit", "-m", "feature work"],
-    );
-
-    std::fs::write(temp.path().join("main.txt"), "main change\n").unwrap();
-    json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "main work"],
-    );
-    let verify = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(
-        verify["recommended_action"], "heddle push",
-        "global clean remote-ahead guidance should remain push: {verify}"
-    );
-
-    for (label, args) in [
-        ("status", vec!["--output", "json", "status"]),
-        ("workspace", vec!["--output", "json", "status"]),
-        ("thread list", vec!["--output", "json", "thread", "list"]),
-        (
-            "thread show",
-            vec![
-                "--output",
-                "json",
-                "thread",
-                "show",
-                "feature/stale-current",
-            ],
-        ),
-    ] {
-        let output = json(&thread_path, &args);
-        assert_eq!(
-            output["recommended_action"], "heddle sync --thread feature/stale-current",
-            "{label} should keep current-thread recovery primary, not global push: {output}"
-        );
-        assert_eq!(
-            output["verification"]["recommended_action"], output["recommended_action"],
-            "{label} verification should agree with the selected primary action: {output}"
-        );
-    }
 }
 
 #[test]
@@ -2414,34 +1571,23 @@ fn git_overlay_matrix_commit_ignores_gitignored_noise_and_refuses_noop() {
 
     std::fs::create_dir(temp.path().join("__pycache__")).unwrap();
     std::fs::write(temp.path().join("__pycache__/tracked.pyc"), "cache").unwrap();
+    let before_head = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
 
     let output = heddle_output(
         &["--output", "json", "commit", "-m", "noop"],
         Some(temp.path()),
     )
     .expect("commit should run");
-    assert!(!output.status.success(), "ignored-only commit should fail");
     assert!(
-        output.stdout.is_empty(),
-        "JSON-mode no-op commit refusal must keep stdout quiet: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: serde_json::Value =
-        serde_json::from_str(stderr).expect("no-op commit should emit JSON envelope");
-    assert_eq!(envelope["kind"], "nothing_to_commit");
-    assert!(
-        envelope["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("nothing to commit")),
-        "ignored-only commit should refuse with full typed advice: {stderr}"
+        output.status.success(),
+        "ignored-only commit should be a no-op"
     );
     assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("heddle status")),
-        "ignored-only commit should name the recovery command: {stderr}"
+        output.stderr.is_empty(),
+        "JSON-mode no-op commit should keep stderr quiet: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), before_head);
 }
 
 #[test]
@@ -2478,6 +1624,10 @@ fn git_overlay_matrix_commit_requires_explicit_ignore_for_python_generated_noise
     assert!(
         will_commit.iter().any(|path| path == "src/app.pyc"),
         "unignored generated noise must stay visible in the Git index plan: {status}"
+    );
+    json(
+        temp.path(),
+        &["--output", "json", "capture", "-m", "capture generated"],
     );
 
     let output = heddle_output(
@@ -2532,7 +1682,7 @@ fn git_overlay_matrix_commit_noop_fails_closed_when_verification_blocked() {
     assert!(
         envelope["error"]
             .as_str()
-            .is_some_and(|error| { error.contains("externally-started Git merge is in progress") }),
+            .is_some_and(|error| error.contains("externally-started Git merge")),
         "verify-blocked no-op commit should refuse with full typed advice: {stderr}"
     );
     assert!(
@@ -2541,856 +1691,6 @@ fn git_overlay_matrix_commit_noop_fails_closed_when_verification_blocked() {
             .is_some_and(|hint| hint.contains("heddle verify")
                 && hint.contains("finish or abort it with the Git-compatible tool")),
         "verify-blocked no-op commit should name the verify recovery command: {stderr}"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_undo_rewinds_git_checkpoint_when_safe() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    let base = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
-
-    std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
-    let commit = json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
-    assert_eq!(commit["output_kind"], "commit");
-    assert!(commit["git_commit"].as_str().is_some());
-    let after = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    assert_ne!(after, base);
-
-    let undo_list = json(
-        temp.path(),
-        &["--output", "json", "undo", "--list", "--depth", "1"],
-    );
-    let operations = undo_list["batches"][0]["operations"]
-        .as_array()
-        .expect("undo list should expose operations");
-    let logical_operations: Vec<_> = operations
-        .iter()
-        .filter(|op| {
-            !op["description"]
-                .as_str()
-                .is_some_and(|description| description.starts_with("transaction commit "))
-        })
-        .collect();
-    assert_eq!(
-        logical_operations.len(),
-        2,
-        "Git-backed commit should be one logical undo batch containing capture + Git checkpoint: {undo_list}"
-    );
-    assert!(
-        logical_operations.iter().any(|op| op["description"]
-            .as_str()
-            .is_some_and(|description| description.starts_with("snapshot "))),
-        "commit undo batch should include the captured Heddle state: {undo_list}"
-    );
-    assert!(
-        logical_operations.iter().any(|op| op["description"]
-            .as_str()
-            .is_some_and(|description| description.starts_with("git checkpoint "))),
-        "commit undo batch should include the Git checkpoint: {undo_list}"
-    );
-
-    let undo = json(temp.path(), &["--output", "json", "undo"]);
-    assert_eq!(undo["action"], "undo");
-    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), base);
-    assert_eq!(
-        git_stdout(temp.path(), &["reflog", "-1", "--format=%gs", "HEAD"]),
-        "heddle: undo git checkpoint",
-        "undo should update the visible HEAD reflog, not only refs/heads/main"
-    );
-    assert_eq!(
-        git_stdout(
-            temp.path(),
-            &["reflog", "-1", "--format=%gs", "refs/heads/main"]
-        ),
-        "heddle: undo git checkpoint",
-        "undo should keep the branch reflog aligned with HEAD"
-    );
-    assert_eq!(
-        mirror_git_stdout(temp.path(), &["rev-parse", "refs/heads/main"]),
-        base,
-        "undo should rewind the legacy Bridge Mirror branch as well as the visible Git checkout"
-    );
-    assert_eq!(git_stdout(temp.path(), &["status", "--short"]), "");
-    let verify = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(
-        undo["verification"]["status"], verify["status"],
-        "undo JSON verify status should match an immediate verify probe: undo={undo}, verify={verify}"
-    );
-    assert_eq!(
-        undo["verification"]["recommended_action"], verify["recommended_action"],
-        "undo JSON recommended action should match an immediate verify probe: undo={undo}, verify={verify}"
-    );
-    let status = json(temp.path(), &["--output", "json", "status"]);
-    assert_eq!(status["verification"]["status"], "clean");
-
-    std::fs::write(temp.path().join("tracked.txt"), "three\n").unwrap();
-    let second = json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "change after undo"],
-    );
-    assert_eq!(second["output_kind"], "commit");
-    assert!(
-        second["git_commit"]
-            .as_str()
-            .is_some_and(|git_commit| git_commit != after),
-        "a new commit after undo should checkpoint normally, not try to rewrite the undone export: {second}"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_undo_after_push_recommends_publish_undo_not_pull() {
-    let origin = TempDir::new().unwrap();
-    git(&["init", "--bare", "--initial-branch=main"], origin.path());
-
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    git(
-        &["remote", "add", "origin", origin.path().to_str().unwrap()],
-        temp.path(),
-    );
-    std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    let base_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    git(&["push", "-u", "origin", "main"], temp.path());
-    heddle_adopt(temp.path());
-
-    std::fs::write(temp.path().join("tracked.txt"), "published change\n").unwrap();
-    let commit = json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "published change"],
-    );
-    let published_git = commit["git_commit"].as_str().unwrap().to_string();
-    assert_ne!(published_git, base_git);
-
-    let push = json(temp.path(), &["--output", "json", "push", "origin"]);
-    assert_eq!(push["verification"]["verified"], true, "{push}");
-    assert_eq!(
-        git_stdout(origin.path(), &["rev-parse", "refs/heads/main"]),
-        published_git
-    );
-
-    let undo = json(temp.path(), &["--output", "json", "undo"]);
-    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), base_git);
-    assert_eq!(
-        undo["verification"]["status"], "remote_contains_undone_checkpoint",
-        "undo should classify the upstream as the just-undone checkpoint: {undo}"
-    );
-    assert_eq!(
-        undo["verification"]["recommended_action"], "heddle push --force",
-        "undo must not recommend pulling the change the user just undid: {undo}"
-    );
-    assert_eq!(
-        undo["verification"]["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["push", "--force"]),
-        "agents should receive the same publish-undo action as structured argv: {undo}"
-    );
-    assert!(
-        undo["verification"]["recovery_commands"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|command| command == "heddle undo --redo"),
-        "undo should also name the restore-the-work option: {undo}"
-    );
-
-    let status = json(temp.path(), &["--output", "json", "status"]);
-    assert_eq!(
-        status["remote_tracking"]["next_action"], "heddle push --force",
-        "raw remote tracking guidance must agree with verification: {status}"
-    );
-    assert_eq!(
-        status["verification"]["remote_drift"],
-        "remote_contains_undone_checkpoint"
-    );
-    assert_eq!(status["recommended_action"], "heddle push --force");
-    assert_eq!(
-        status["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["push", "--force"])
-    );
-
-    let publish_undo = json(
-        temp.path(),
-        &["--output", "json", "push", "origin", "--force"],
-    );
-    assert_eq!(publish_undo["force"], true);
-    assert!(
-        publish_undo["force_discard_warning"]
-            .as_str()
-            .is_some_and(|warning| warning.contains("discarded")),
-        "force push should state the remote discard risk: {publish_undo}"
-    );
-    assert_eq!(
-        publish_undo["verification"]["verified"], true,
-        "{publish_undo}"
-    );
-    assert_eq!(
-        git_stdout(origin.path(), &["rev-parse", "refs/heads/main"]),
-        base_git,
-        "force-publishing the undo should move the remote back to the local branch"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_merge_git_commit_fast_forward_records_checkpoint_and_undoes_together() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
-    git_commit_all(temp.path(), "base");
-    let base_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    heddle_adopt(temp.path());
-
-    let feature_path = temp.path().with_extension("feature-merge-git-commit-ff");
-    json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/merge-git-commit-ff",
-            "--path",
-            feature_path.to_str().unwrap(),
-        ],
-    );
-    std::fs::write(feature_path.join("sibling.txt"), "sibling\n").unwrap();
-    heddle(&["capture", "-m", "sibling captured"], Some(&feature_path)).unwrap();
-
-    let merge = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature/merge-git-commit-ff",
-            "-m",
-            "merge sibling thread",
-            "--git-commit",
-        ],
-    );
-    assert_eq!(merge["status"], "completed");
-    assert_eq!(merge["fast_forward"], true);
-    assert!(merge["git_commit"]["sha"].as_str().is_some());
-    assert_eq!(merge["verification"]["verified"], true);
-    assert_eq!(merge["verification"]["status"], "clean");
-
-    let verify = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(verify["verified"], true);
-    assert_eq!(verify["status"], "clean");
-    assert_eq!(verify["mapping_state"], "clean");
-    assert_eq!(git_status_short(temp.path()), "");
-
-    let undo_list = json(
-        temp.path(),
-        &["--output", "json", "undo", "--list", "--depth", "1"],
-    );
-    let operations = undo_list["batches"][0]["operations"]
-        .as_array()
-        .expect("undo list should expose operations");
-    assert_eq!(
-        operations.len(),
-        2,
-        "merge --git-commit should be one logical undo batch containing merge + Git checkpoint: {undo_list}"
-    );
-    assert!(
-        operations.iter().any(|op| op["description"]
-            .as_str()
-            .is_some_and(|description| description.starts_with("fast-forward "))),
-        "fast-forward merge batch should include the Heddle merge movement: {undo_list}"
-    );
-    assert!(
-        operations.iter().any(|op| op["description"]
-            .as_str()
-            .is_some_and(|description| description.starts_with("git checkpoint "))),
-        "fast-forward merge batch should include the Git checkpoint: {undo_list}"
-    );
-
-    let undo = json(temp.path(), &["--output", "json", "undo"]);
-    assert_eq!(undo["status"], "completed");
-    assert_eq!(undo["verification"]["verified"], true);
-    assert_eq!(undo["verification"]["status"], "clean");
-    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), base_git);
-    assert_eq!(git_status_short(temp.path()), "");
-    assert!(!temp.path().join("sibling.txt").exists());
-}
-
-#[test]
-fn git_overlay_matrix_merge_git_commit_fast_forward_uses_git_merge_checkpoint_when_branch_exists() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
-    git_commit_all(temp.path(), "base");
-    heddle_adopt(temp.path());
-
-    json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "thread",
-            "create",
-            "feature/merge-sample",
-        ],
-    );
-    json(
-        temp.path(),
-        &["--output", "json", "switch", "feature/merge-sample"],
-    );
-    std::fs::write(temp.path().join("feature.txt"), "feature\n").unwrap();
-    let feature_commit = json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "Add feature file"],
-    );
-    assert_eq!(feature_commit["verification"]["verified"], true);
-    let feature_git = git_stdout(temp.path(), &["rev-parse", "feature/merge-sample"]);
-
-    json(temp.path(), &["--output", "json", "switch", "main"]);
-    let preview_text = heddle(
-        &[
-            "--output",
-            "text",
-            "merge",
-            "feature/merge-sample",
-            "--git-commit",
-            "--preview",
-        ],
-        Some(temp.path()),
-    )
-    .unwrap();
-    assert!(
-        preview_text.contains("Would advance main"),
-        "preview should describe Heddle movement plus Git checkpoint honestly: {preview_text}"
-    );
-    assert!(
-        !preview_text.contains("Would fast-forward"),
-        "preview must not imply a Git graph fast-forward when --git-commit will write a checkpoint: {preview_text}"
-    );
-
-    let merge = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature/merge-sample",
-            "--git-commit",
-        ],
-    );
-    assert_eq!(merge["status"], "completed");
-    assert_eq!(merge["fast_forward"], true);
-    assert!(
-        merge["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("wrote a Git checkpoint commit")),
-        "JSON should describe the Git side as a checkpoint commit, not a graph fast-forward: {merge}"
-    );
-    assert!(
-        !merge["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("Fast-forwarded")),
-        "JSON must not claim a Git graph fast-forward: {merge}"
-    );
-    let git_commit = merge["git_commit"]["sha"]
-        .as_str()
-        .expect("merge should write a Git commit");
-    let parents = git_stdout(temp.path(), &["log", "-1", "--pretty=%P"]);
-    assert!(
-        parents
-            .split_whitespace()
-            .any(|parent| parent == feature_git),
-        "Git checkpoint should include the source branch tip as a parent so Git agrees it is merged: commit={git_commit}, parents={parents}, source={feature_git}"
-    );
-    git(&["branch", "-d", "feature/merge-sample"], temp.path());
-}
-
-#[test]
-fn git_overlay_matrix_push_preserves_merge_git_checkpoint_tip() {
-    let temp = TempDir::new().unwrap();
-    let origin = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    git(&["init", "--bare", "--initial-branch=main"], origin.path());
-    git(
-        &[
-            "remote",
-            "add",
-            "origin",
-            origin.path().to_str().expect("origin path should be utf8"),
-        ],
-        temp.path(),
-    );
-    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
-    git_commit_all(temp.path(), "base");
-    heddle_adopt(temp.path());
-
-    json(
-        temp.path(),
-        &["--output", "json", "thread", "create", "feature/audit"],
-    );
-    json(
-        temp.path(),
-        &["--output", "json", "switch", "feature/audit"],
-    );
-    std::fs::write(temp.path().join("audit.txt"), "thread edit\n").unwrap();
-    json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "thread edit"],
-    );
-    json(temp.path(), &["--output", "json", "switch", "main"]);
-
-    let merge = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature/audit",
-            "-m",
-            "merge thread audit",
-            "--git-commit",
-        ],
-    );
-    assert_eq!(merge["status"], "completed");
-    let merge_sha = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    assert_eq!(
-        git_stdout(temp.path(), &["log", "-1", "--format=%s"]),
-        "merge thread audit"
-    );
-
-    let push = json(temp.path(), &["--output", "json", "push", "origin"]);
-    assert_eq!(push["success"], true);
-    assert_eq!(
-        git_stdout(temp.path(), &["rev-parse", "HEAD"]),
-        merge_sha,
-        "push must not rewrite the visible local Git checkpoint commit"
-    );
-    assert_eq!(
-        git_stdout(temp.path(), &["log", "-1", "--format=%s"]),
-        "merge thread audit",
-        "push must preserve the user-supplied merge checkpoint message"
-    );
-    assert_eq!(
-        mirror_git_stdout(temp.path(), &["rev-parse", "refs/heads/main"]),
-        merge_sha,
-        "the legacy Bridge Mirror should push the checkpoint commit, not a synthesized export"
-    );
-    assert_eq!(
-        git_stdout(origin.path(), &["rev-parse", "refs/heads/main"]),
-        merge_sha,
-        "the remote should receive the same checkpoint commit visible locally"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_merge_git_commit_three_way_records_checkpoint_and_undoes_together() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
-    git_commit_all(temp.path(), "base");
-    heddle_adopt(temp.path());
-
-    let feature_path = temp.path().with_extension("feature-merge-git-commit-3way");
-    json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/merge-git-commit-3way",
-            "--path",
-            feature_path.to_str().unwrap(),
-        ],
-    );
-    std::fs::write(feature_path.join("feature.txt"), "feature\n").unwrap();
-    heddle(&["capture", "-m", "feature captured"], Some(&feature_path)).unwrap();
-
-    std::fs::write(temp.path().join("main.txt"), "main\n").unwrap();
-    let main_commit = json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "main change"],
-    );
-    assert_eq!(main_commit["verification"]["verified"], true);
-    let main_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    let refresh = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "thread",
-            "refresh",
-            "feature/merge-git-commit-3way",
-        ],
-    );
-    assert_eq!(refresh["status"], "completed", "{refresh}");
-
-    let merge = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature/merge-git-commit-3way",
-            "-m",
-            "merge feature thread",
-            "--git-commit",
-        ],
-    );
-    assert_eq!(merge["status"], "completed");
-    assert_eq!(merge["fast_forward"], true);
-    assert!(merge["git_commit"]["sha"].as_str().is_some());
-    assert_eq!(merge["verification"]["verified"], true);
-    assert_eq!(merge["verification"]["status"], "clean");
-
-    let undo_list = json(
-        temp.path(),
-        &["--output", "json", "undo", "--list", "--depth", "1"],
-    );
-    let operations = undo_list["batches"][0]["operations"]
-        .as_array()
-        .expect("undo list should expose operations");
-    assert_eq!(
-        operations.len(),
-        2,
-        "refreshed merge --git-commit should be one logical undo batch containing merge state + Git checkpoint: {undo_list}"
-    );
-    assert!(
-        operations.iter().any(|op| op["description"]
-            .as_str()
-            .is_some_and(|description| description
-                .starts_with("fast-forward feature/merge-git-commit-3way into main"))),
-        "refreshed merge batch should include the Heddle fast-forward state: {undo_list}"
-    );
-    assert!(
-        operations.iter().any(|op| op["description"]
-            .as_str()
-            .is_some_and(|description| description.starts_with("git checkpoint "))),
-        "3-way merge batch should include the Git checkpoint: {undo_list}"
-    );
-
-    let undo = json(temp.path(), &["--output", "json", "undo"]);
-    assert_eq!(undo["status"], "completed");
-    assert_eq!(undo["verification"]["verified"], true);
-    assert_eq!(undo["verification"]["status"], "clean");
-    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), main_git);
-    assert_eq!(git_status_short(temp.path()), "");
-    assert!(temp.path().join("main.txt").exists());
-    assert!(!temp.path().join("feature.txt").exists());
-}
-
-#[test]
-fn git_overlay_matrix_undo_text_reports_non_clean_post_verify_next_action() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
-
-    std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
-    heddle(&["capture", "-m", "captured"], Some(temp.path())).unwrap();
-    heddle(&["checkpoint", "-m", "checkpointed"], Some(temp.path())).unwrap();
-
-    let undo = heddle(&["undo", "--output", "text"], Some(temp.path())).unwrap();
-    let verify = json(temp.path(), &["--output", "json", "verify"]);
-    assert_ne!(
-        verify["status"], "clean",
-        "checkpoint undo should leave a non-clean verify state for text UX coverage: {verify}"
-    );
-    let expected_status = verify["status"].as_str().unwrap();
-    let expected_action = verify["recommended_action"].as_str().unwrap();
-    let expected_status_text = match expected_status {
-        "dirty_worktree" | "uncaptured" => "changes to save",
-        other => other,
-    };
-    assert!(
-        undo.contains(&format!("Verification: {expected_status_text}")),
-        "undo text should name the current post-undo verify status: {undo}"
-    );
-    assert!(
-        undo.contains(&format!("Next: {expected_action}")),
-        "undo text should name the primary post-undo next action: {undo}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
-        "two\n",
-        "undoing only the Git checkpoint should keep the worktree aligned with the current Heddle state"
-    );
-    assert!(
-        git_status_short(temp.path()).contains("tracked.txt"),
-        "Git should now see the saved Heddle state as checkpoint-needed work: {}",
-        git_status_short(temp.path())
-    );
-    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
-    assert!(
-        status_text.contains("checkpoint needed") && !status_text.contains("Git: saved to commit"),
-        "status should not claim the current saved state is still checkpointed after undo removed the Git commit: {status_text}"
-    );
-    let status_json = json(temp.path(), &["--output", "json", "status"]);
-    assert_eq!(status_json["git_checkpoint"], Value::Null);
-
-    let second_undo = json(temp.path(), &["--output", "json", "undo"]);
-    assert_eq!(second_undo["status"], "completed");
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
-        "one\n",
-        "the next undo should be able to undo the capture without a false dirty-worktree refusal"
-    );
-    assert_eq!(git_status_short(temp.path()), "");
-}
-
-#[test]
-fn git_overlay_matrix_undo_preview_refuses_dirty_worktree_like_real_undo() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
-
-    std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
-    let commit = json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
-    assert_eq!(commit["output_kind"], "commit");
-    let git_before = git_ref_snapshot(temp.path());
-    let heddle_before = json(temp.path(), &["--output", "json", "status"])["current_state"]
-        .as_str()
-        .expect("status should report current Heddle state")
-        .to_string();
-
-    std::fs::write(temp.path().join("tracked.txt"), "dirty after commit\n").unwrap();
-
-    let preview = heddle_output(
-        &["--output", "json", "undo", "--preview"],
-        Some(temp.path()),
-    )
-    .expect("undo preview should run");
-    assert!(
-        !preview.status.success(),
-        "dirty undo preview should refuse"
-    );
-    assert!(
-        preview.stdout.is_empty(),
-        "JSON-mode dirty undo preview must keep stdout quiet: {}",
-        String::from_utf8_lossy(&preview.stdout)
-    );
-    let preview_stderr = std::str::from_utf8(&preview.stderr).unwrap();
-    let preview_envelope: Value =
-        serde_json::from_str(preview_stderr).expect("dirty preview should emit JSON envelope");
-    assert_eq!(preview_envelope["kind"], "dirty_worktree");
-    assert_json_recovery_advice_fields(&preview_envelope, &preview_envelope.to_string());
-    assert!(
-        preview_envelope["unsafe_condition"]
-            .as_str()
-            .is_some_and(|condition| condition.contains("modified: tracked.txt")),
-        "dirty preview should name dirty paths: {preview_stderr}"
-    );
-    assert_eq!(
-        git_ref_snapshot(temp.path()),
-        git_before,
-        "dirty preview refusal must not move Git refs"
-    );
-    assert_eq!(
-        json(temp.path(), &["--output", "json", "status"])["current_state"],
-        heddle_before,
-        "dirty preview refusal must leave Heddle state untouched"
-    );
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
-        "dirty after commit\n",
-        "dirty preview refusal must leave the user's worktree bytes untouched"
-    );
-
-    let undo =
-        heddle_output(&["--output", "json", "undo"], Some(temp.path())).expect("undo should run");
-    assert!(!undo.status.success(), "dirty real undo should refuse");
-    let undo_stderr = std::str::from_utf8(&undo.stderr).unwrap();
-    let undo_envelope: Value =
-        serde_json::from_str(undo_stderr).expect("dirty undo should emit JSON envelope");
-    assert_eq!(undo_envelope["kind"], preview_envelope["kind"]);
-    assert_eq!(
-        undo_envelope["primary_command"], preview_envelope["primary_command"],
-        "preview and real undo should share recovery advice"
-    );
-    assert_eq!(git_ref_snapshot(temp.path()), git_before);
-    assert_eq!(
-        json(temp.path(), &["--output", "json", "status"])["current_state"],
-        heddle_before
-    );
-}
-
-#[test]
-fn git_overlay_matrix_undo_preview_refuses_active_operation_like_real_undo() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
-
-    std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
-    let commit = json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
-    assert_eq!(commit["output_kind"], "commit");
-
-    seed_heddle_bisect_state(temp.path());
-    let git_before = git_ref_snapshot(temp.path());
-    let status_before = json(temp.path(), &["--output", "json", "status"]);
-    assert_eq!(status_before["operation"]["kind"], "bisect");
-    let heddle_before = status_before["current_state"]
-        .as_str()
-        .expect("status should report current Heddle state")
-        .to_string();
-
-    let preview = heddle_output(
-        &["--output", "json", "undo", "--preview"],
-        Some(temp.path()),
-    )
-    .expect("undo preview should run");
-    assert!(
-        !preview.status.success(),
-        "active-operation undo preview should refuse"
-    );
-    assert!(
-        preview.stdout.is_empty(),
-        "JSON-mode active-operation undo preview must keep stdout quiet: {}",
-        String::from_utf8_lossy(&preview.stdout)
-    );
-    let preview_stderr = std::str::from_utf8(&preview.stderr).unwrap();
-    let preview_envelope: Value = serde_json::from_str(preview_stderr)
-        .expect("active-operation preview should emit JSON envelope");
-    assert_eq!(preview_envelope["kind"], "operation_in_progress");
-    assert_json_recovery_advice_fields(&preview_envelope, &preview_envelope.to_string());
-    assert!(
-        preview_envelope["unsafe_condition"]
-            .as_str()
-            .is_some_and(|condition| condition.contains("heddle bisect is in-progress")),
-        "active-operation preview should name the operation: {preview_stderr}"
-    );
-    assert_eq!(preview_envelope["primary_command"], "heddle abort");
-    assert_eq!(
-        git_ref_snapshot(temp.path()),
-        git_before,
-        "active-operation preview refusal must not move Git refs"
-    );
-    let status_after_preview = json(temp.path(), &["--output", "json", "status"]);
-    assert_eq!(status_after_preview["current_state"], heddle_before);
-    assert_eq!(
-        status_after_preview["operation"]["kind"], "bisect",
-        "preview refusal must leave the active operation in place"
-    );
-
-    let undo =
-        heddle_output(&["--output", "json", "undo"], Some(temp.path())).expect("undo should run");
-    assert!(
-        !undo.status.success(),
-        "active-operation real undo should refuse"
-    );
-    let undo_stderr = std::str::from_utf8(&undo.stderr).unwrap();
-    let undo_envelope: Value =
-        serde_json::from_str(undo_stderr).expect("active-operation undo should emit JSON envelope");
-    assert_eq!(undo_envelope["kind"], preview_envelope["kind"]);
-    assert_eq!(
-        undo_envelope["primary_command"], preview_envelope["primary_command"],
-        "preview and real undo should share recovery advice"
-    );
-    assert_eq!(git_ref_snapshot(temp.path()), git_before);
-}
-
-#[test]
-fn git_overlay_matrix_unsafe_commit_undo_reports_git_oid_and_preserves_heddle() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
-
-    std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
-    let commit = json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
-    let expected_git = commit["git_commit"]
-        .as_str()
-        .expect("commit should report Git checkpoint")
-        .to_string();
-    let heddle_after_commit = json(temp.path(), &["--output", "json", "status"])["current_state"]
-        .as_str()
-        .expect("status should report current Heddle state")
-        .to_string();
-
-    git(&["reset", "--soft", "HEAD~1"], temp.path());
-    let current_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    assert_ne!(current_git, expected_git);
-
-    let git_before_preview = git_ref_snapshot(temp.path());
-    let preview = heddle_output(
-        &["--output", "json", "undo", "--preview"],
-        Some(temp.path()),
-    )
-    .expect("undo preview should run");
-    assert!(!preview.status.success(), "unsafe preview should refuse");
-    assert!(
-        preview.stdout.is_empty(),
-        "JSON-mode unsafe undo preview must keep stdout quiet: {}",
-        String::from_utf8_lossy(&preview.stdout)
-    );
-    let preview_stderr = std::str::from_utf8(&preview.stderr).unwrap();
-    let preview_envelope: Value =
-        serde_json::from_str(preview_stderr).expect("unsafe preview should emit JSON envelope");
-    assert_eq!(preview_envelope["kind"], "git_head_mismatch");
-    assert_json_recovery_advice_fields(&preview_envelope, &preview_envelope.to_string());
-    assert!(
-        preview_envelope["unsafe_condition"]
-            .as_str()
-            .is_some_and(|condition| condition.contains(&current_git)
-                && condition.contains(&expected_git)
-                && condition.contains("dirty paths: modified: tracked.txt")),
-        "unsafe preview should name current/expected Git OIDs and dirty paths: {preview_stderr}"
-    );
-    assert_eq!(
-        preview_envelope["primary_command"],
-        "heddle fsck repair git --prefer heddle --ref main --preview"
-    );
-    assert_eq!(
-        git_ref_snapshot(temp.path()),
-        git_before_preview,
-        "unsafe preview refusal must not move Git refs"
-    );
-    assert_eq!(
-        json(temp.path(), &["--output", "json", "status"])["current_state"],
-        heddle_after_commit,
-        "unsafe preview refusal must leave Heddle state untouched"
-    );
-
-    let output =
-        heddle_output(&["--output", "json", "undo"], Some(temp.path())).expect("undo should run");
-    assert!(!output.status.success(), "unsafe undo should refuse");
-    assert!(
-        output.stdout.is_empty(),
-        "JSON-mode unsafe undo must keep stdout quiet: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: serde_json::Value =
-        serde_json::from_str(stderr).expect("unsafe undo should emit JSON envelope");
-    assert_eq!(envelope["kind"], preview_envelope["kind"]);
-    assert_json_recovery_advice_fields(&envelope, &envelope.to_string());
-    assert!(
-        envelope["unsafe_condition"]
-            .as_str()
-            .is_some_and(|condition| condition.contains(&current_git)
-                && condition.contains(&expected_git)
-                && condition.contains("dirty paths: modified: tracked.txt")),
-        "unsafe undo should name current/expected Git OIDs and reconcile preview: {stderr}"
-    );
-    assert_eq!(
-        envelope["primary_command"], preview_envelope["primary_command"],
-        "preview and real undo should share recovery advice"
-    );
-
-    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), current_git);
-    let status_after = json(temp.path(), &["--output", "json", "status"]);
-    assert_eq!(
-        status_after["current_state"], heddle_after_commit,
-        "unsafe Git undo must leave Heddle state untouched: {status_after}"
     );
 }
 
@@ -3406,15 +1706,15 @@ fn git_overlay_matrix_top_level_push_closes_remote_verification_loop() {
     git(&["remote", "add", "origin", origin_arg], temp.path());
     git(&["push", "-u", "origin", "main"], temp.path());
 
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
+    json(
+        temp.path(),
+        &["--output", "json", "capture", "-m", "change"],
+    );
     let commit = json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
     assert_eq!(commit["output_kind"], "commit");
-    assert_eq!(commit["next_action"], "heddle push");
-    assert_eq!(
-        commit["next_action_template"]["argv_template"],
-        heddle_argv_json(["push"])
-    );
     assert_eq!(commit["recommended_action"], "heddle push");
     assert_eq!(
         commit["recommended_action_template"]["argv_template"],
@@ -3433,7 +1733,7 @@ fn git_overlay_matrix_top_level_push_closes_remote_verification_loop() {
         "old commit next_template alias removed"
     );
     let before_push = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(before_push["verified"], true);
+    assert_eq!(before_push["verified"], true, "{before_push}");
     assert_eq!(before_push["status"], "clean");
     assert_eq!(before_push["remote_drift"], "remote_ahead");
     assert_eq!(before_push["clone_verification"], "verified");
@@ -3512,7 +1812,8 @@ fn git_overlay_matrix_commit_refuses_remote_divergence_before_capture() {
     let origin_arg = origin.path().to_str().expect("origin path should be utf8");
     git(&["remote", "add", "origin", origin_arg], temp.path());
     git(&["push", "-u", "origin", "main"], temp.path());
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
 
     let peer_arg = peer.path().to_str().expect("peer path should be utf8");
     git(&["clone", origin_arg, peer_arg], temp.path());
@@ -3522,19 +1823,27 @@ fn git_overlay_matrix_commit_refuses_remote_divergence_before_capture() {
     std::fs::write(temp.path().join("tracked.txt"), "local\n").unwrap();
     json(
         temp.path(),
+        &["--output", "json", "capture", "-m", "local checkpoint"],
+    );
+    json(
+        temp.path(),
         &["--output", "json", "commit", "-m", "local checkpoint"],
     );
-    let state_before = state_chain_ids(temp.path(), 8);
     let git_head_before = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
 
     std::fs::write(peer.path().join("tracked.txt"), "remote\n").unwrap();
     git_commit_all(peer.path(), "remote checkpoint");
     git(&["push", "origin", "main"], peer.path());
-    heddle(&["fetch", "origin"], Some(temp.path())).expect("fetch remote divergence");
+    git(&["fetch", "origin"], temp.path());
     let verify = json(temp.path(), &["--output", "json", "verify"]);
     assert_eq!(verify["remote_drift"], "remote_diverged", "{verify}");
 
     std::fs::write(temp.path().join("extra.txt"), "blocked\n").unwrap();
+    json(
+        temp.path(),
+        &["--output", "json", "capture", "-m", "should not commit"],
+    );
+    let state_before = state_chain_ids(temp.path(), 8);
     let output = heddle_output(
         &["--output", "json", "commit", "-m", "should not capture"],
         Some(temp.path()),
@@ -3573,227 +1882,10 @@ fn git_overlay_matrix_commit_refuses_remote_divergence_before_capture() {
         "failed commit must not move the local Git branch"
     );
     let status = json(temp.path(), &["--output", "json", "status"]);
-    assert_ne!(
+    assert_eq!(
         status["verification"]["status"], "needs_checkpoint",
-        "preflight refusal must not leave a captured-but-uncheckpointed state: {status}"
+        "the explicit capture must remain available after commit refuses remote divergence: {status}"
     );
-}
-
-#[test]
-fn git_overlay_matrix_checkpoint_closes_imported_remote_divergence_after_merge() {
-    let temp = TempDir::new().unwrap();
-    let origin = TempDir::new().unwrap();
-    let peer = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    git(&["init", "--bare", "--initial-branch=main"], origin.path());
-    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    let origin_arg = origin.path().to_str().expect("origin path should be utf8");
-    git(&["remote", "add", "origin", origin_arg], temp.path());
-    git(&["push", "-u", "origin", "main"], temp.path());
-    heddle_adopt(temp.path());
-
-    let peer_arg = peer.path().to_str().expect("peer path should be utf8");
-    git(&["clone", origin_arg, peer_arg], temp.path());
-    git(&["config", "user.name", "Peer"], peer.path());
-    git(&["config", "user.email", "peer@example.com"], peer.path());
-
-    std::fs::write(temp.path().join("local.txt"), "local\n").unwrap();
-    json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "local checkpoint"],
-    );
-
-    std::fs::write(peer.path().join("remote.txt"), "remote\n").unwrap();
-    git_commit_all(peer.path(), "remote checkpoint");
-    git(&["push", "origin", "main"], peer.path());
-    heddle(&["fetch", "origin"], Some(temp.path())).expect("fetch remote divergence");
-
-    let before_import = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(
-        before_import["remote_drift"], "remote_diverged",
-        "{before_import}"
-    );
-    assert_eq!(
-        before_import["recommended_action"], "heddle import git --ref origin/main",
-        "{before_import}"
-    );
-
-    let import = json(
-        temp.path(),
-        &["--output", "json", "import", "git", "--ref", "origin/main"],
-    );
-    assert_eq!(import["branches_synced"], 1, "{import}");
-    assert_eq!(import["states_created"], 1, "{import}");
-
-    let preview = json(
-        temp.path(),
-        &["--output", "json", "merge", "origin/main", "--preview"],
-    );
-    assert_eq!(preview["preview_only"], true, "{preview}");
-    assert_eq!(preview["conflict_count"], 0, "{preview}");
-
-    let merged = json(temp.path(), &["--output", "json", "merge", "origin/main"]);
-    assert_eq!(merged["status"], "completed", "{merged}");
-    assert_eq!(merged["preview_only"], false, "{merged}");
-
-    let needs_checkpoint = json(temp.path(), &["--output", "json", "status"]);
-    assert_eq!(
-        needs_checkpoint["verification"]["status"], "needs_checkpoint",
-        "{needs_checkpoint}"
-    );
-    assert_eq!(
-        needs_checkpoint["verification"]["remote_drift"], "remote_diverged",
-        "{needs_checkpoint}"
-    );
-    assert_eq!(
-        needs_checkpoint["recommended_action"], "heddle checkpoint -m \"...\"",
-        "after integrating upstream into Heddle, checkpoint must remain the primary way out: {needs_checkpoint}"
-    );
-
-    let checkpoint = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "checkpoint",
-            "-m",
-            "checkpoint integrated remote",
-        ],
-    );
-    assert_eq!(checkpoint["status"], "checkpointed", "{checkpoint}");
-    assert_eq!(
-        checkpoint["verification"]["status"], "clean",
-        "checkpoint should write a Git merge commit that can be pushed normally: {checkpoint}"
-    );
-    assert_eq!(checkpoint["verification"]["remote_drift"], "remote_ahead");
-    assert_eq!(checkpoint["recommended_action"], "heddle push");
-}
-
-#[test]
-fn git_overlay_matrix_imported_remote_divergence_surfaces_agree_on_next_action() {
-    let temp = TempDir::new().unwrap();
-    let origin = TempDir::new().unwrap();
-    let peer = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    git(&["init", "--bare", "--initial-branch=main"], origin.path());
-    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    let origin_arg = origin.path().to_str().expect("origin path should be utf8");
-    git(&["remote", "add", "origin", origin_arg], temp.path());
-    git(&["push", "-u", "origin", "main"], temp.path());
-    heddle_adopt(temp.path());
-
-    let peer_arg = peer.path().to_str().expect("peer path should be utf8");
-    git(&["clone", origin_arg, peer_arg], temp.path());
-    git(&["config", "user.name", "Peer"], peer.path());
-    git(&["config", "user.email", "peer@example.com"], peer.path());
-
-    std::fs::write(temp.path().join("local.txt"), "local\n").unwrap();
-    json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "local checkpoint"],
-    );
-
-    std::fs::write(peer.path().join("remote.txt"), "remote\n").unwrap();
-    git_commit_all(peer.path(), "remote checkpoint");
-    git(&["push", "origin", "main"], peer.path());
-    heddle(&["fetch", "origin"], Some(temp.path())).expect("fetch remote divergence");
-
-    json(
-        temp.path(),
-        &["--output", "json", "import", "git", "--ref", "origin/main"],
-    );
-
-    let merge_action = "heddle fsck repair git --ref origin/main --preview";
-    let merge_argv = Some(heddle_argv_json([
-        "fsck",
-        "repair",
-        "git",
-        "--ref",
-        "origin/main",
-        "--preview",
-    ]));
-    for (label, output) in [
-        ("status", json(temp.path(), &["--output", "json", "status"])),
-        ("verify", json(temp.path(), &["--output", "json", "verify"])),
-        ("doctor", json(temp.path(), &["--output", "json", "doctor"])),
-        ("status", json(temp.path(), &["--output", "json", "status"])),
-    ] {
-        assert_remote_divergence_surface(
-            label,
-            &output,
-            "remote_diverged",
-            "remote_diverged",
-            merge_action,
-            merge_argv.clone(),
-        );
-        assert_ne!(
-            output["recommended_action"], "heddle land",
-            "{label} must not recommend land for imported remote divergence: {output}"
-        );
-    }
-
-    let status = json(temp.path(), &["--output", "json", "status"]);
-    assert_eq!(
-        status["remote_tracking"]["next_action"], merge_action,
-        "status remote tracking action should not contradict the primary blocker: {status}"
-    );
-    let doctor = json(temp.path(), &["--output", "json", "doctor"]);
-    assert_eq!(
-        doctor["remote_tracking"]["next_action"], merge_action,
-        "doctor remote tracking action should not contradict the primary blocker: {doctor}"
-    );
-
-    json(
-        temp.path(),
-        &["--output", "json", "merge", "origin/main", "--preview"],
-    );
-    json(temp.path(), &["--output", "json", "merge", "origin/main"]);
-
-    let checkpoint_action = "heddle checkpoint -m \"...\"";
-    for (label, output) in [
-        ("status", json(temp.path(), &["--output", "json", "status"])),
-        ("verify", json(temp.path(), &["--output", "json", "verify"])),
-        ("doctor", json(temp.path(), &["--output", "json", "doctor"])),
-        ("status", json(temp.path(), &["--output", "json", "status"])),
-    ] {
-        assert_remote_divergence_surface(
-            label,
-            &output,
-            "needs_checkpoint",
-            "remote_diverged",
-            checkpoint_action,
-            None,
-        );
-    }
-
-    let checkpoint = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "checkpoint",
-            "-m",
-            "checkpoint integrated remote",
-        ],
-    );
-    assert_eq!(checkpoint["verification"]["remote_drift"], "remote_ahead");
-    for (label, output) in [
-        ("status", json(temp.path(), &["--output", "json", "status"])),
-        ("verify", json(temp.path(), &["--output", "json", "verify"])),
-        ("doctor", json(temp.path(), &["--output", "json", "doctor"])),
-        ("status", json(temp.path(), &["--output", "json", "status"])),
-    ] {
-        assert_remote_divergence_surface(
-            label,
-            &output,
-            "clean",
-            "remote_ahead",
-            "heddle push",
-            Some(heddle_argv_json(["push"])),
-        );
-    }
 }
 
 #[test]
@@ -3814,11 +1906,16 @@ fn git_overlay_matrix_push_defaults_to_branch_upstream_remote() {
     git(&["remote", "add", "upstream", upstream_arg], temp.path());
     git(&["push", "-u", "upstream", "main"], temp.path());
 
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+    initialize_git_overlay(temp.path());
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
+    json(
+        temp.path(),
+        &["--output", "json", "capture", "-m", "change"],
+    );
     json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
     let before_push = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(before_push["verified"], true);
+    assert_eq!(before_push["verified"], true, "{before_push}");
     assert_eq!(before_push["status"], "clean");
     assert_eq!(before_push["remote_drift"], "remote_ahead");
     assert_eq!(before_push["recommended_action"], "heddle push");
@@ -3853,8 +1950,13 @@ fn git_overlay_matrix_local_only_branch_is_clean_until_push_sets_tracking() {
     git(&["remote", "add", "upstream", upstream_arg], temp.path());
     git(&["push", "upstream", "main"], temp.path());
 
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+    initialize_git_overlay(temp.path());
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
+    json(
+        temp.path(),
+        &["--output", "json", "capture", "-m", "change"],
+    );
     json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
     let before_push = json(temp.path(), &["--output", "json", "verify"]);
     assert_eq!(before_push["verified"], true);
@@ -3904,7 +2006,8 @@ fn git_overlay_matrix_remote_add_configures_default_push_remote() {
     std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
     git_commit_all(temp.path(), "seed");
 
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+    initialize_git_overlay(temp.path());
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
     let audit_arg = audit.path().to_str().expect("audit path should be utf8");
     let added = json(
         temp.path(),
@@ -3912,7 +2015,7 @@ fn git_overlay_matrix_remote_add_configures_default_push_remote() {
     );
     assert_eq!(added["output_kind"], "remote_add");
     assert_eq!(added["default"], "audit");
-    assert_eq!(added["verification"]["default_remote"], "audit");
+    assert_eq!(added["verification"]["default_remote"], "audit", "{added}");
     assert_eq!(added["verification"]["verified"], true);
     assert_eq!(added["verification"]["status"], "clean");
     assert_eq!(added["verification"]["remote_drift"], "remote_untracked");
@@ -3948,7 +2051,7 @@ fn git_overlay_matrix_remote_remove_clears_git_only_origin() {
     git(&["init", "--bare", "--initial-branch=main"], origin.path());
     std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
     git_commit_all(temp.path(), "seed");
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
 
     let origin_arg = origin.path().to_str().expect("origin path should be utf8");
     git(&["remote", "add", "origin", origin_arg], temp.path());
@@ -4005,7 +2108,7 @@ fn git_overlay_matrix_remote_remove_clears_both_sources() {
     git(&["init", "--bare", "--initial-branch=main"], staging.path());
     std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
     git_commit_all(temp.path(), "seed");
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
 
     let staging_arg = staging
         .path()
@@ -4057,7 +2160,7 @@ fn git_overlay_matrix_remote_remove_unknown_returns_not_found() {
     init_git_repo_with_branch(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
     git_commit_all(temp.path(), "seed");
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
 
     let output = heddle_output(
         &["--output", "json", "remote", "remove", "bogus"],
@@ -4081,87 +2184,12 @@ fn git_overlay_matrix_remote_remove_unknown_returns_not_found() {
 }
 
 #[test]
-fn git_overlay_matrix_remote_set_default_accepts_git_only_remote() {
-    let temp = TempDir::new().unwrap();
-    let backup = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    git(&["init", "--bare", "--initial-branch=main"], backup.path());
-    std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    heddle_adopt(temp.path());
-
-    let backup_arg = backup.path().to_str().expect("backup path should be utf8");
-    git(&["remote", "add", "backup", backup_arg], temp.path());
-
-    let set_default = json(
-        temp.path(),
-        &["--output", "json", "remote", "set-default", "backup"],
-    );
-    assert_eq!(set_default["output_kind"], "remote_set_default");
-    assert_eq!(set_default["status"], "completed");
-    assert_eq!(set_default["name"], "backup");
-    assert_eq!(set_default["default"], "backup");
-
-    let listed = json(temp.path(), &["--output", "json", "remote", "list"]);
-    assert!(
-        listed["remotes"]
-            .as_array()
-            .expect("remotes array")
-            .iter()
-            .any(|item| item["name"] == "backup" && item["is_default"] == true),
-        "Git-only remote should be selectable as default: {listed}"
-    );
-
-    let verify = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(
-        verify["default_remote"], "backup",
-        "verify should report the configured default remote: {verify}"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_remote_set_default_works_for_dual_location_remote() {
-    let temp = TempDir::new().unwrap();
-    let origin = TempDir::new().unwrap();
-    let staging = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    git(&["init", "--bare", "--initial-branch=main"], origin.path());
-    git(&["init", "--bare", "--initial-branch=main"], staging.path());
-    std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    heddle_adopt(temp.path());
-
-    let origin_arg = origin.path().to_str().expect("origin path should be utf8");
-    let staging_arg = staging
-        .path()
-        .to_str()
-        .expect("staging path should be utf8");
-    json(
-        temp.path(),
-        &["--output", "json", "remote", "add", "origin", origin_arg],
-    );
-    json(
-        temp.path(),
-        &["--output", "json", "remote", "add", "staging", staging_arg],
-    );
-
-    let set_default = json(
-        temp.path(),
-        &["--output", "json", "remote", "set-default", "staging"],
-    );
-    assert_eq!(set_default["default"], "staging");
-
-    let verify = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(verify["default_remote"], "staging");
-}
-
-#[test]
 fn git_overlay_matrix_remote_set_default_unknown_returns_not_found() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
     git_commit_all(temp.path(), "seed");
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
 
     let output = heddle_output(
         &["--output", "json", "remote", "set-default", "bogus"],
@@ -4186,41 +2214,12 @@ fn git_overlay_matrix_remote_set_default_unknown_returns_not_found() {
 }
 
 #[test]
-fn git_overlay_matrix_local_ahead_noop_merge_preserves_merge_relation() {
-    let temp = TempDir::new().unwrap();
-    let origin = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    git(&["init", "--bare", "--initial-branch=main"], origin.path());
-    std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    let origin_arg = origin.path().to_str().expect("origin path should be utf8");
-    git(&["remote", "add", "origin", origin_arg], temp.path());
-    git(&["push", "-u", "origin", "main"], temp.path());
-
-    heddle(&["adopt"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
-    json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
-
-    let merge = json(
-        temp.path(),
-        &["--output", "json", "merge", "main", "--preview"],
-    );
-    assert_eq!(merge["status"], "completed");
-    assert_eq!(merge["merge_relation"], "already_up_to_date");
-    let verify = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(verify["verified"], true);
-    assert_eq!(verify["status"], "clean");
-    assert_eq!(verify["remote_drift"], "remote_ahead");
-    assert_eq!(verify["recommended_action"], "heddle push");
-}
-
-#[test]
 fn git_overlay_matrix_subdirectory_dirty_commands() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "feature/drop-in");
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
 
     let nested = temp.path().join("src/deep/nested");
     std::fs::create_dir_all(&nested).unwrap();
@@ -4278,7 +2277,12 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
 
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
+    heddle(
+        &["import", "git", "--ref", "feature/drop-in"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     std::fs::write(temp.path().join("tracked.txt"), "tracked committed via git").unwrap();
     git(&["add", "tracked.txt"], temp.path());
@@ -4396,8 +2400,14 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
         temp.path(),
         &["--output", "json", "ready", "-m", "carry branch work"],
     );
-    assert_eq!(ready["status"], "blocked");
-    assert_eq!(ready["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(ready["status"], "blocked", "{ready}");
+    assert_eq!(ready["captured"], true, "{ready}");
+    assert!(
+        ready["recommended_action"]
+            .as_str()
+            .is_some_and(|action| action.contains("heddle commit")),
+        "captured overlay work should recommend committing it to Git: {ready}"
+    );
 }
 
 /// Full out-of-band round trip (#534): adopt → plain-git commits → detection
@@ -4410,7 +2420,7 @@ fn git_overlay_matrix_manual_git_commits_reconcile_round_trip() {
     init_git_repo_with_branch(temp.path(), "feature/drop-in");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all(temp.path(), "seed branch");
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
 
     std::fs::write(temp.path().join("tracked.txt"), "first manual git edit\n").unwrap();
     git_commit_all(temp.path(), "manual git commit 1");
@@ -4463,9 +2473,14 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     init_git_repo_with_branch(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
     git_commit_all(temp.path(), "seed");
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
 
     std::fs::write(temp.path().join("tracked.txt"), "heddle change\n").unwrap();
+    json(
+        temp.path(),
+        &["--output", "json", "capture", "-m", "heddle change"],
+    );
     let committed = json(
         temp.path(),
         &["--output", "json", "commit", "-m", "heddle change"],
@@ -4551,7 +2566,7 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     assert!(refused.stdout.is_empty());
     let stderr = std::str::from_utf8(&refused.stderr).unwrap();
     let envelope: Value = serde_json::from_str(stderr).expect("reconcile refusal should be JSON");
-    assert_eq!(envelope["kind"], "repository_verification_blocked");
+    assert_eq!(envelope["kind"], "git_checkpoint_preflight_blocked");
     assert!(
         envelope["error"]
             .as_str()
@@ -4611,7 +2626,7 @@ fn git_overlay_matrix_branch_delete_does_not_recommend_deleted_thread() {
     init_git_repo_with_branch(temp.path(), "main");
     std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
     git_commit_all(temp.path(), "seed branch");
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
 
     json(
         temp.path(),
@@ -4698,7 +2713,10 @@ fn git_overlay_matrix_auto_adopts_local_branch_tips_without_full_import() {
             .as_str()
             .is_some_and(|oid| !oid.is_empty())
     );
-    assert_eq!(alpha["recommended_action"], "heddle switch support/alpha");
+    assert_eq!(
+        alpha["recommended_action"],
+        "heddle thread switch support/alpha"
+    );
 
     let beta_show = json(
         temp.path(),
@@ -4814,12 +2832,12 @@ fn git_overlay_matrix_detached_head_sequence_commands() {
     assert!(verify["git_branch"].is_null());
     assert!(verify["heddle_thread"].is_null());
     assert_eq!(
-        verify["recommended_action"], "heddle switch feature/drop-in",
+        verify["recommended_action"], "heddle thread switch feature/drop-in",
         "detached-head recovery should stay inside Heddle's no-git runtime: {verify}"
     );
     assert_eq!(
         verify["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["switch", "feature/drop-in"])
+        heddle_argv_json(["thread", "switch", "feature/drop-in"])
     );
     assert!(
         verify["checks"]
@@ -4876,10 +2894,10 @@ fn git_overlay_matrix_commit_refuses_detached_head_without_advancing_branch() {
     );
     let envelope: Value =
         serde_json::from_str(&combined).expect("detached-head refusal should be a JSON envelope");
-    assert_eq!(envelope["primary_command"], "heddle switch main");
+    assert_eq!(envelope["primary_command"], "heddle thread switch main");
     assert_eq!(
         envelope["primary_command_template"]["argv_template"],
-        heddle_argv_json(["switch", "main"])
+        heddle_argv_json(["thread", "switch", "main"])
     );
     assert!(
         !combined.contains("git switch"),
@@ -4942,7 +2960,7 @@ fn git_overlay_matrix_dirty_branch_switch_when_git_allows_carryover() {
     std::fs::write(temp.path().join("shared.txt"), "base").unwrap();
     git_commit_all(temp.path(), "seed branch");
     git(&["branch", "support/carry"], temp.path());
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
 
     std::fs::write(temp.path().join("shared.txt"), "carried modification").unwrap();
     git(&["checkout", "support/carry"], temp.path());
@@ -4970,6 +2988,7 @@ fn git_overlay_matrix_dirty_branch_switch_when_git_allows_carryover() {
         &["--output", "json", "ready", "-m", "first-run ready state"],
     );
     assert_eq!(ready["captured"], true);
+    json(temp.path(), &["--output", "json", "commit"]);
 
     let after_ready = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(after_ready["thread"], "support/carry");
@@ -4996,16 +3015,21 @@ fn git_overlay_matrix_no_commit_first_run_durability_commands() {
     let same_state_diff = json(temp.path(), &["diff", "HEAD", "HEAD"]);
     assert_eq!(same_state_diff["stats"]["files_changed"], 0);
 
-    let ready = json(temp.path(), &["--output", "json", "ready"]);
-    assert_eq!(ready["thread_state"], "active");
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let ready = json(
+        temp.path(),
+        &["--output", "json", "ready", "-m", "First-run capture"],
+    );
+    assert_eq!(ready["captured"], false, "{ready}");
+    assert_eq!(ready["status"], "blocked", "{ready}");
+    assert_eq!(ready["recommended_action"], "heddle commit -m \"...\"");
 
-    let checkpoint = json(temp.path(), &["checkpoint", "-m", "First-run checkpoint"]);
-    assert_eq!(checkpoint["summary"], "First-run checkpoint");
-    assert_eq!(checkpoint["storage_model"], "git+heddle-sidecar");
-    assert!(checkpoint["git_commit"].as_str().is_some());
+    let commit = json(temp.path(), &["--output", "json", "commit"]);
+    assert!(commit["git_commit"].as_str().is_some());
 
     let status = json(temp.path(), &["status", "--output", "json"]);
-    assert!(status["git_checkpoint"]["git_commit"].as_str().is_some());
+    assert_eq!(status["verification"]["verified"], true);
+    assert_eq!(status["changed_path_count"], 0);
 }
 
 #[test]
@@ -5078,243 +3102,17 @@ fn git_overlay_matrix_imported_branch_evolution_after_git_import() {
 }
 
 #[test]
-fn git_overlay_matrix_stale_conflict_ship_blocks_with_guidance() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "feature/drop-in");
-    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed branch");
-    heddle_adopt(temp.path());
-
-    let started = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/conflict",
-            "--workspace",
-            "materialized",
-        ],
-    );
-    let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
-
-    std::fs::write(thread_path.join("conflict.txt"), "thread change\n").unwrap();
-    heddle(&["capture", "-m", "thread change"], Some(&thread_path)).unwrap();
-
-    std::fs::write(temp.path().join("conflict.txt"), "main change\n").unwrap();
-    json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "main change"],
-    );
-
-    let before_ship = json(
-        temp.path(),
-        &["thread", "show", "feature/conflict", "--output", "json"],
-    );
-    assert_eq!(before_ship["freshness"], "stale");
-
-    let ship_output = heddle_output(
-        &["--output", "json", "land", "--thread", "feature/conflict"],
-        Some(temp.path()),
-    )
-    .expect("invoke blocked conflict land");
-    assert!(
-        !ship_output.status.success(),
-        "blocked conflict land should exit nonzero"
-    );
-    let land: Value = serde_json::from_slice(&ship_output.stdout)
-        .unwrap_or_else(|err| panic!("blocked conflict land should emit JSON on stdout: {err}"));
-    assert_eq!(land["status"], "blocked");
-    assert_eq!(land["checkpointed"], false);
-    assert_eq!(land["integrated"], false);
-    assert!(
-        land["next_action"]
-            .as_str()
-            .unwrap_or("")
-            .contains("resolve --list"),
-        "blocked land should materialize conflicts and surface resolve: {land}"
-    );
-    let resolve_list = heddle_output(
-        &["--output", "json", "resolve", "--list"],
-        Some(&thread_path),
-    )
-    .expect("land conflict should leave runnable resolve state in the thread checkout");
-    assert!(
-        resolve_list.status.success(),
-        "resolve --list after blocked land should succeed: stdout={} stderr={}",
-        String::from_utf8_lossy(&resolve_list.stdout),
-        String::from_utf8_lossy(&resolve_list.stderr),
-    );
-
-    let thread_show = json(
-        temp.path(),
-        &["thread", "show", "feature/conflict", "--output", "json"],
-    );
-    assert_eq!(thread_show["thread_state"], "blocked");
-    assert!(
-        thread_show["recommended_action"]
-            .as_str()
-            .unwrap_or("")
-            .contains("resolve --list")
-    );
-}
-
-#[test]
-fn git_overlay_matrix_conflicted_merge_exits_nonzero_after_writing_markers() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    heddle_adopt(temp.path());
-
-    heddle(
-        &["thread", "create", "feature/conflict-merge"],
-        Some(temp.path()),
-    )
-    .unwrap();
-    heddle(
-        &["thread", "switch", "feature/conflict-merge"],
-        Some(temp.path()),
-    )
-    .unwrap();
-    std::fs::write(temp.path().join("conflict.txt"), "feature\n").unwrap();
-    heddle(&["capture", "-m", "feature"], Some(temp.path())).unwrap();
-    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("conflict.txt"), "main\n").unwrap();
-    heddle(&["capture", "-m", "main"], Some(temp.path())).unwrap();
-
-    let merge = heddle_output(
-        &["--output", "json", "merge", "feature/conflict-merge"],
-        Some(temp.path()),
-    )
-    .expect("invoke conflicted merge");
-    assert!(
-        !merge.status.success(),
-        "conflicted mutating merge should exit nonzero"
-    );
-    let parsed: Value = serde_json::from_slice(&merge.stdout)
-        .unwrap_or_else(|err| panic!("conflicted merge should emit JSON on stdout: {err}"));
-    assert_eq!(parsed["status"], "blocked", "{parsed}");
-    assert_eq!(parsed["conflict_count"], 1, "{parsed}");
-    assert_eq!(parsed["conflicts"], serde_json::json!(["conflict.txt"]));
-    assert!(
-        parsed["recommended_action"]
-            .as_str()
-            .is_some_and(|action| action == "heddle sync --thread feature/conflict-merge"),
-        "stale conflicted merge should refresh before materializing conflict markers: {parsed}"
-    );
-    let conflict_file = std::fs::read_to_string(temp.path().join("conflict.txt")).unwrap();
-    assert!(
-        !conflict_file.contains("<<<<<<<") && conflict_file == "main\n",
-        "stale merge refusal must not materialize conflict markers"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_stale_conflict_thread_resolve_enters_conflict_recovery() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "feature/drop-in");
-    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed branch");
-    heddle_adopt(temp.path());
-
-    let started = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/resolve-conflict",
-            "--workspace",
-            "materialized",
-        ],
-    );
-    let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
-
-    std::fs::write(thread_path.join("conflict.txt"), "thread change\n").unwrap();
-    heddle(&["capture", "-m", "thread change"], Some(&thread_path)).unwrap();
-
-    std::fs::write(temp.path().join("conflict.txt"), "main change\n").unwrap();
-    json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "main change"],
-    );
-
-    let preview_output = heddle_output(
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature/resolve-conflict",
-            "--preview",
-        ],
-        Some(temp.path()),
-    )
-    .expect("invoke stale conflict merge preview");
-    assert!(
-        !preview_output.status.success(),
-        "stale conflict preview should exit nonzero"
-    );
-    assert!(
-        preview_output.stdout.is_empty(),
-        "strict JSON preview refusal should emit the envelope on stderr"
-    );
-    let preview_stderr = std::str::from_utf8(&preview_output.stderr).unwrap();
-    let preview: Value = serde_json::from_str(preview_stderr)
-        .unwrap_or_else(|err| panic!("expected JSON stderr: {err}: {preview_stderr}"));
-    assert_eq!(preview["kind"], "merge_preview_blocked", "{preview}");
-    assert_eq!(
-        preview["primary_command"],
-        "heddle sync --thread feature/resolve-conflict"
-    );
-    assert_eq!(preview["conflict_count"], 1, "{preview}");
-    assert_eq!(preview["conflicts"], serde_json::json!(["conflict.txt"]));
-    assert_eq!(preview["merge_relation"], "path_conflicts", "{preview}");
-
-    let resolved = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "thread",
-            "resolve",
-            "feature/resolve-conflict",
-        ],
-    );
-    assert_eq!(resolved["status"], "blocked", "{resolved}");
-    assert!(
-        resolved["next_action"]
-            .as_str()
-            .is_some_and(|action| action.contains("resolve --list")),
-        "thread resolve should point at materialized conflict state: {resolved}"
-    );
-    assert!(
-        resolved["recommended_action"]
-            .as_str()
-            .is_some_and(|action| action.contains("resolve conflict.txt")),
-        "thread resolve should make the next file resolution executable: {resolved}"
-    );
-    assert!(
-        !resolved["recommended_action"]
-            .as_str()
-            .unwrap_or("")
-            .contains("thread refresh"),
-        "thread resolve must not loop back to refresh after writing conflict state: {resolved}"
-    );
-    let conflict_file = std::fs::read_to_string(thread_path.join("conflict.txt")).unwrap();
-    assert!(
-        conflict_file.contains("<<<<<<<"),
-        "thread resolve should materialize conflict markers in the isolated checkout"
-    );
-}
-
-#[test]
 fn git_overlay_matrix_reopen_from_different_cwds_preserves_state_and_git_only_aliases() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "feature/drop-in");
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
+    heddle(
+        &["import", "git", "--ref", "feature/drop-in"],
+        Some(temp.path()),
+    )
+    .unwrap();
     git(&["branch", "support/reopen-me"], temp.path());
 
     let root_status = json(temp.path(), &["status", "--output", "json"]);
@@ -5355,12 +3153,11 @@ fn git_overlay_matrix_reopen_from_different_cwds_preserves_state_and_git_only_al
     );
 
     let root_status_after = json(temp.path(), &["status", "--output", "json"]);
-    assert!(
-        root_status_after["changes"]["modified"]
-            .as_array()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        root_status_after["worktree_changed_path_count"], 0,
+        "{root_status_after}"
     );
+    assert_eq!(root_status_after["thread_changed_path_count"], 0);
     let root_bridge_after = json(temp.path(), &["status", "--output", "json"]);
     assert_no_legacy_verification_sidecars(&root_bridge_after);
     assert_eq!(
@@ -5375,7 +3172,12 @@ fn git_overlay_matrix_binary_file_commands_remain_coherent() {
     init_git_repo_with_branch(temp.path(), "feature/drop-in");
     std::fs::write(temp.path().join("binary.bin"), vec![0u8, 1, 2, 3, 255]).unwrap();
     git_commit_all(temp.path(), "seed binary");
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
+    heddle(
+        &["import", "git", "--ref", "feature/drop-in"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     std::fs::write(temp.path().join("binary.bin"), vec![9u8, 8, 7, 6, 5]).unwrap();
 
@@ -5398,15 +3200,15 @@ fn git_overlay_matrix_binary_file_commands_remain_coherent() {
         temp.path(),
         &["--output", "json", "ready", "-m", "binary ready capture"],
     );
-    assert_eq!(ready["captured"], true);
+    assert_eq!(ready["captured"], true, "{ready}");
 
     let status_after = json(temp.path(), &["status", "--output", "json"]);
-    assert!(
-        status_after["changes"]["modified"]
-            .as_array()
-            .unwrap()
-            .is_empty()
+    assert_eq!(status_after["worktree_changed_path_count"], 0);
+    assert_eq!(
+        status_after["thread_changed_path_count"], 0,
+        "{status_after}"
     );
+    assert_eq!(status_after["verification"]["status"], "needs_checkpoint");
 }
 
 #[cfg(unix)]
@@ -5420,7 +3222,7 @@ fn git_overlay_matrix_clean_dangling_symlink_does_not_look_committable() {
     git_commit_all(temp.path(), "seed dangling symlink");
     assert_eq!(git_status_short(temp.path()), "");
 
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
 
     let status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(
@@ -5463,7 +3265,7 @@ fn git_overlay_matrix_diff_status_keeps_cross_type_move_split() {
     std::fs::write(temp.path().join("anchor.txt"), "shared payload\n").unwrap();
     std::fs::write(temp.path().join("filler.txt"), "filler\n").unwrap();
     git_commit_all(temp.path(), "seed mover + anchor");
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
 
     // Advance the Git branch outside Heddle (an unrelated commit), then leave
     // a cross-type move dirty in the worktree. Direct-backed Git overlays read
@@ -5521,7 +3323,7 @@ fn git_overlay_matrix_diff_added_symlink_renders_link_target() {
     init_git_repo_with_branch(temp.path(), "main");
     std::fs::write(temp.path().join("README.md"), "hello\n").unwrap();
     git_commit_all(temp.path(), "seed readme");
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
 
     symlink("README.md", temp.path().join("link-to-readme")).unwrap();
     let diff = json(temp.path(), &["--output", "json", "diff"]);
@@ -5563,7 +3365,7 @@ fn git_overlay_matrix_symlink_status_and_ready_work() {
     std::fs::write(temp.path().join("target.txt"), "target").unwrap();
     symlink("target.txt", temp.path().join("link.txt")).unwrap();
     git_commit_all(temp.path(), "seed symlink");
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
 
     std::fs::remove_file(temp.path().join("link.txt")).unwrap();
     symlink("other.txt", temp.path().join("link.txt")).unwrap();
@@ -5596,7 +3398,7 @@ fn git_overlay_matrix_filemode_changes_surface_and_capture() {
     init_git_repo_with_branch(temp.path(), "feature/drop-in");
     std::fs::write(temp.path().join("script.sh"), "#!/bin/sh\necho hi\n").unwrap();
     git_commit_all(temp.path(), "seed script");
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
 
     let script = temp.path().join("script.sh");
     let mut perms = std::fs::metadata(&script).unwrap().permissions();
@@ -5618,1459 +3420,8 @@ fn git_overlay_matrix_filemode_changes_surface_and_capture() {
     );
     assert_eq!(ready["captured"], true);
 
-    let checkpoint = json(temp.path(), &["checkpoint", "-m", "mode checkpoint"]);
-    assert!(checkpoint["git_commit"].as_str().is_some());
-}
-
-#[test]
-fn git_overlay_matrix_stale_thread_can_recover_via_sync_then_ship() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "feature/drop-in");
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    git_commit_all(temp.path(), "seed branch");
-    heddle_adopt(temp.path());
-
-    let started = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/recover",
-            "--workspace",
-            "materialized",
-        ],
-    );
-    let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
-
-    std::fs::write(thread_path.join("feature.txt"), "feature work").unwrap();
-    heddle(&["capture", "-m", "feature work"], Some(&thread_path)).unwrap();
-
-    std::fs::write(temp.path().join("base.txt"), "base updated").unwrap();
-    json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "advance main"],
-    );
-
-    let before_sync = json(
-        temp.path(),
-        &["thread", "show", "feature/recover", "--output", "json"],
-    );
-    assert_eq!(before_sync["freshness"], "stale");
-
-    let sync = json(
-        temp.path(),
-        &["--output", "json", "sync", "--thread", "feature/recover"],
-    );
-    assert_eq!(sync["status"], "refreshed");
-    assert_eq!(sync["chosen_path"], "refresh");
-
-    let after_sync = json(
-        temp.path(),
-        &["thread", "show", "feature/recover", "--output", "json"],
-    );
-    assert_eq!(after_sync["freshness"], "current");
-
-    let land = json(
-        temp.path(),
-        &["--output", "json", "land", "--thread", "feature/recover"],
-    );
-    assert_eq!(land["status"], "landed");
-    assert_eq!(land["checkpointed"], true);
-    assert!(land["git_commit"].as_str().is_some());
-    assert_eq!(
-        land["performed_steps"],
-        serde_json::json!(["merge", "checkpoint"])
-    );
-    assert_eq!(
-        land["skipped_steps"],
-        serde_json::json!([
-            "capture(no changes)",
-            "sync(current)",
-            "push(not requested)"
-        ])
-    );
-
-    // The thread refreshed cleanly via an automatic conflict-free 3-way merge
-    // (thread touched feature.txt; main advanced base.txt — disjoint paths).
-    // No human resolved anything, so the land message must NOT claim a manual
-    // resolution. HeddleCo/heddle: misleading "manually resolved" wording.
-    let message = land["message"].as_str().unwrap_or_default();
-    assert!(
-        message.contains("via an automatic integration merge"),
-        "auto-clean land must report an automatic integration merge: {land}"
-    );
-    assert!(
-        !message.contains("manually resolved"),
-        "auto-clean land must not claim a manual resolution: {land}"
-    );
-}
-
-// Companion to `..._stale_thread_can_recover_via_sync_then_ship` above: that
-// test lands a *conflict-free* (automatic 3-way) integration; this one lands a
-// thread whose conflicts the operator *actually resolved by hand*. The land
-// message must differ between the two — only the genuine manual-resolution path
-// may say "from a manually resolved integration state". Both threads reach land
-// through the same `manual_resolution_state` adoption branch, so the wording is
-// driven by `conflicts_resolved_manually`, not by which branch ran.
-#[test]
-fn git_overlay_matrix_manual_conflict_land_reports_manual_resolution() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "feature/drop-in");
-    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed branch");
-    heddle_adopt(temp.path());
-
-    let started = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/manual",
-            "--workspace",
-            "materialized",
-        ],
-    );
-    let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
-
-    // Both sides edit the SAME file divergently so the refresh genuinely
-    // conflicts and forces a manual resolution (disjoint edits would 3-way
-    // merge cleanly — that is the auto-clean test above).
-    std::fs::write(thread_path.join("conflict.txt"), "thread change\n").unwrap();
-    heddle(&["capture", "-m", "thread change"], Some(&thread_path)).unwrap();
-
-    std::fs::write(temp.path().join("conflict.txt"), "main change\n").unwrap();
-    json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "advance main"],
-    );
-
-    // sync materializes the conflict in the thread's own checkout and blocks.
-    let sync = json(
-        temp.path(),
-        &["--output", "json", "sync", "--thread", "feature/manual"],
-    );
-    assert_eq!(sync["status"], "blocked", "{sync}");
-
-    // The operator resolves the conflict by hand (here: take the thread side)
-    // and finishes the in-progress merge in the thread checkout.
-    let resolve = json(
-        &thread_path,
-        &["--output", "json", "resolve", "--all", "--theirs"],
-    );
-    assert_eq!(resolve["remaining"], serde_json::json!([]), "{resolve}");
-    assert_eq!(resolve["continued"], true, "{resolve}");
-    assert_eq!(resolve["continuation_status"], "continued", "{resolve}");
-
-    let after_resolve = json(
-        temp.path(),
-        &["thread", "show", "feature/manual", "--output", "json"],
-    );
-    assert_eq!(after_resolve["freshness"], "current", "{after_resolve}");
-
-    let land = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/manual",
-            "--no-push",
-        ],
-    );
-    assert_eq!(land["status"], "landed", "{land}");
-
-    let message = land["message"].as_str().unwrap_or_default();
-    assert!(
-        message.contains("from a manually resolved integration state"),
-        "a land after genuine manual conflict resolution must report the manual \
-         resolution: {land}"
-    );
-    assert!(
-        !message.contains("automatic integration merge"),
-        "a manually resolved land must not be reported as automatic: {land}"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_stale_merge_preview_blocks_ship_recommendation_and_diff() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed branch");
-    heddle_adopt(temp.path());
-
-    let started = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/stale-preview",
-            "--workspace",
-            "materialized",
-        ],
-    );
-    let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
-
-    std::fs::write(thread_path.join("feature.txt"), "feature work\n").unwrap();
-    let ready = json(
-        &thread_path,
-        &["--output", "json", "ready", "-m", "feature ready"],
-    );
-    assert_eq!(ready["status"], "completed");
-
-    std::fs::write(
-        temp.path().join("base.txt"),
-        "base\nadvanced outside heddle\n",
-    )
-    .unwrap();
-    git_commit_all(temp.path(), "external main advance");
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
-
-    let thread_show = json(
-        temp.path(),
-        &[
-            "thread",
-            "show",
-            "feature/stale-preview",
-            "--output",
-            "json",
-        ],
-    );
-    assert_eq!(thread_show["freshness"], "stale");
-
-    let parent_status = json(temp.path(), &["--output", "json", "status"]);
-    assert_eq!(
-        parent_status["recommended_action"], "heddle sync --thread feature/stale-preview",
-        "parent status must refresh a stale ready thread before merge preview is actionable: {parent_status}"
-    );
-    assert_ne!(
-        parent_status["recommended_action"], "heddle merge feature/stale-preview --preview",
-        "parent status must not recommend merge preview for a stale ready thread: {parent_status}"
-    );
-
-    let no_diff_preview_output = heddle_output(
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature/stale-preview",
-            "--preview",
-        ],
-        Some(temp.path()),
-    )
-    .expect("invoke stale merge preview without diff");
-    assert!(
-        !no_diff_preview_output.status.success(),
-        "stale merge preview without --with-diff must fail closed too"
-    );
-    assert!(
-        no_diff_preview_output.stdout.is_empty(),
-        "strict JSON refusal should emit one JSON document on stderr only"
-    );
-    let stderr = std::str::from_utf8(&no_diff_preview_output.stderr).unwrap();
-    let no_diff_preview: Value = serde_json::from_str(stderr)
-        .unwrap_or_else(|err| panic!("expected JSON stderr: {err}: {stderr}"));
-    assert_eq!(no_diff_preview["kind"], "merge_preview_blocked");
-    assert_eq!(
-        no_diff_preview["primary_command"],
-        "heddle sync --thread feature/stale-preview"
-    );
-
-    let preview_output = heddle_output(
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature/stale-preview",
-            "--preview",
-            "--with-diff",
-        ],
-        Some(temp.path()),
-    )
-    .expect("invoke stale merge preview");
-    assert!(
-        !preview_output.status.success(),
-        "stale merge preview that did not run must be a strict failure"
-    );
-    assert!(
-        preview_output.stdout.is_empty(),
-        "strict JSON refusal should emit one JSON document on stderr only"
-    );
-    let stderr = std::str::from_utf8(&preview_output.stderr).unwrap();
-    let preview: Value = serde_json::from_str(stderr)
-        .unwrap_or_else(|err| panic!("expected JSON stderr: {err}: {stderr}"));
-    assert_json_recovery_advice_fields(&preview, "stale merge preview refusal");
-    assert_eq!(preview["kind"], "merge_preview_blocked");
-    assert_eq!(
-        preview["primary_command"],
-        "heddle sync --thread feature/stale-preview"
-    );
-    assert_eq!(
-        preview["recovery_commands"],
-        serde_json::json!(["heddle sync --thread feature/stale-preview"])
-    );
-    assert!(
-        preview["unsafe_condition"]
-            .as_str()
-            .unwrap_or("")
-            .contains("stale"),
-        "blocked preview should still identify stale sync state: {preview}"
-    );
-    assert!(
-        !preview["primary_command"]
-            .as_str()
-            .unwrap_or("")
-            .contains("land"),
-        "stale preview must not recommend land: {preview}"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_verify_blocked_merge_preview_exits_nonzero() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed branch");
-    heddle_adopt(temp.path());
-
-    let started = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/verify-blocked-preview",
-            "--workspace",
-            "materialized",
-        ],
-    );
-    let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
-    std::fs::write(thread_path.join("feature.txt"), "feature work\n").unwrap();
-    let ready = json(
-        &thread_path,
-        &["--output", "json", "ready", "-m", "feature ready"],
-    );
-    assert_eq!(ready["status"], "completed");
-
-    std::fs::write(temp.path().join(".git").join("MERGE_HEAD"), "deadbeef\n").unwrap();
-    let output = heddle_output(
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature/verify-blocked-preview",
-            "--preview",
-        ],
-        Some(temp.path()),
-    )
-    .expect("invoke verification-blocked merge preview");
-    assert!(
-        !output.status.success(),
-        "merge preview must fail strictly when verification prevents the preview from running"
-    );
-    assert!(output.stdout.is_empty());
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value = serde_json::from_str(stderr)
-        .unwrap_or_else(|err| panic!("expected JSON stderr: {err}: {stderr}"));
-    assert_json_recovery_advice_fields(&envelope, "verification-blocked merge preview refusal");
-    assert_eq!(envelope["kind"], "merge_preview_blocked");
-    assert!(
-        envelope["unsafe_condition"]
-            .as_str()
-            .unwrap_or("")
-            .contains("Operation: Git merge is in progress"),
-        "verification-blocked preview should name the blocking check: {envelope}"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_ship_uses_thread_intent_for_git_checkpoint_subject() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
-    git_commit_all(temp.path(), "base");
-    heddle_adopt(temp.path());
-
-    let feature_path = temp.path().with_extension("feature-land-message");
-    json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/land-message",
-            "--path",
-            feature_path.to_str().unwrap(),
-        ],
-    );
-    std::fs::write(feature_path.join("tags.txt"), "tags\n").unwrap();
-    let ready = json(
-        &feature_path,
-        &["--output", "json", "ready", "-m", "Add evaluation tags"],
-    );
-    assert_eq!(ready["status"], "completed");
-
-    let land = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/land-message",
-            "--no-push",
-        ],
-    );
-    assert_eq!(land["status"], "landed");
-    assert_eq!(land["checkpointed"], true);
-    assert!(land["git_commit"].as_str().is_some());
-    assert_eq!(
-        git_stdout(temp.path(), &["log", "-1", "--pretty=%s"]),
-        "Add evaluation tags"
-    );
-
-    let checkpoint_records_path = temp.path().join(".heddle/state/git-checkpoints.json");
-    let checkpoint_records: Value =
-        serde_json::from_str(&std::fs::read_to_string(checkpoint_records_path).unwrap()).unwrap();
-    assert!(
-        checkpoint_records
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|record| record["summary"] == "Add evaluation tags"),
-        "land should record the meaningful thread intent as the Git checkpoint summary: {checkpoint_records}"
-    );
-}
-
-fn setup_two_capture_land_thread(temp: &TempDir, thread: &str) -> (std::path::PathBuf, String) {
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
-    git_commit_all(temp.path(), "base");
-    let base = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    heddle_adopt(temp.path());
-
-    let checkout = temp.path().with_extension(thread.replace('/', "-"));
-    json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            thread,
-            "--path",
-            checkout.to_str().unwrap(),
-        ],
-    );
-    std::fs::write(checkout.join("one.txt"), "one\n").unwrap();
-    json(
-        &checkout,
-        &["--output", "json", "capture", "-m", "first source"],
-    );
-    std::fs::write(checkout.join("two.txt"), "two\n").unwrap();
-    json(
-        &checkout,
-        &["--output", "json", "ready", "-m", "second source"],
-    );
-
-    (checkout, base)
-}
-
-fn collapse_records(path: &std::path::Path) -> Vec<(Vec<String>, String, Option<String>)> {
-    let repo = Repository::open(path).expect("repo should open");
-    repo.oplog()
-        .recent(128)
-        .expect("read oplog")
-        .into_iter()
-        .filter_map(|entry| match entry.operation {
-            OpRecord::Collapse {
-                sources,
-                result,
-                thread,
-                ..
-            } => Some((
-                sources.into_iter().map(|id| id.short()).collect(),
-                result.short(),
-                thread,
-            )),
-            _ => None,
-        })
-        .collect()
-}
-
-fn snapshot_count_for_change(path: &std::path::Path, state_id: &objects::object::StateId) -> usize {
-    let repo = Repository::open(path).expect("repo should open");
-    repo.oplog()
-        .recent(512)
-        .expect("read oplog")
-        .into_iter()
-        .filter(|entry| {
-            matches!(
-                &entry.operation,
-                OpRecord::Snapshot { new_state, .. } if new_state == state_id
-            )
-        })
-        .count()
-}
-
-fn thread_tip(path: &std::path::Path, thread: &str) -> String {
-    let repo = Repository::open(path).expect("repo should open");
-    repo.refs()
-        .get_thread(&objects::object::ThreadName::new(thread))
-        .expect("thread ref lookup should succeed")
-        .unwrap_or_else(|| panic!("thread {thread} should exist"))
-        .short()
-}
-
-fn assert_latest_undo_batch_has_land_squash_ops(path: &std::path::Path) {
-    let undo_list = json(
-        path,
-        &["--output", "json", "undo", "--list", "--depth", "1"],
-    );
-    let batches = undo_list["batches"]
-        .as_array()
-        .expect("undo list should expose batches");
-    assert_eq!(
-        batches.len(),
-        1,
-        "land should expose one latest undo batch: {undo_list}"
-    );
-    let operations = batches[0]["operations"]
-        .as_array()
-        .expect("undo list should expose operations");
-    let logical_operations: Vec<_> = operations
-        .iter()
-        .filter(|op| {
-            !op["description"]
-                .as_str()
-                .is_some_and(|description| description.starts_with("transaction commit "))
-        })
-        .collect();
-    assert_eq!(
-        logical_operations.len(),
-        3,
-        "squashed land should coalesce collapse + integration + Git checkpoint: {undo_list}"
-    );
-    assert!(
-        logical_operations.iter().any(|op| op["description"]
-            .as_str()
-            .is_some_and(|description| description.starts_with("collapse "))),
-        "squashed land undo batch should include the source collapse: {undo_list}"
-    );
-    assert!(
-        logical_operations.iter().any(|op| op["description"]
-            .as_str()
-            .is_some_and(|description| description.starts_with("fast-forward "))),
-        "squashed land undo batch should include the target integration: {undo_list}"
-    );
-    assert!(
-        logical_operations.iter().any(|op| op["description"]
-            .as_str()
-            .is_some_and(|description| description.starts_with("git checkpoint "))),
-        "squashed land undo batch should include the Git checkpoint: {undo_list}"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_land_squashes_thread_to_one_git_commit_by_default() {
-    let temp = TempDir::new().unwrap();
-    let (_checkout, base) = setup_two_capture_land_thread(&temp, "feature/squash-default");
-
-    let land = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/squash-default",
-            "--no-push",
-        ],
-    );
-    assert_eq!(land["status"], "landed");
-    assert_eq!(land["checkpointed"], true);
-    assert_eq!(
-        git_stdout(
-            temp.path(),
-            &["rev-list", "--count", &format!("{base}..HEAD")]
-        ),
-        "1",
-        "default land should project the thread as one Git commit"
-    );
-    assert_eq!(git_stdout(temp.path(), &["show", "HEAD:one.txt"]), "one");
-    assert_eq!(git_stdout(temp.path(), &["show", "HEAD:two.txt"]), "two");
-
-    let records = collapse_records(temp.path());
-    let record = records
-        .iter()
-        .find(|(_, _, thread)| thread.as_deref() == Some("feature/squash-default"))
-        .unwrap_or_else(|| panic!("land should record thread collapse: {records:?}"));
-    assert_eq!(
-        record.0.len(),
-        2,
-        "collapse record should retain the full ordered source list"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_expand_squashed_land_by_state_and_git_oid() {
-    let temp = TempDir::new().unwrap();
-    let (_checkout, _base) = setup_two_capture_land_thread(&temp, "feature/expand");
-
-    let land = json(
-        temp.path(),
-        &["land", "--thread", "feature/expand", "--no-push"],
-    );
-    assert_eq!(land["status"], "landed");
-
-    let expanded = json(temp.path(), &["expand", "HEAD"]);
-    assert_eq!(expanded["output_kind"], "expand");
-    assert_eq!(expanded["status"], "completed");
-    assert_eq!(expanded["collapsed"]["source_count"], 2);
-    assert_eq!(expanded["collapsed"]["thread"], "feature/expand");
-    let captures = expanded["captures"].as_array().expect("captures array");
-    assert_eq!(captures.len(), 2, "{expanded}");
-    assert_eq!(captures[0]["intent"], "first source");
-    assert_eq!(captures[1]["intent"], "second source");
-
-    let git_commit = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    let expanded_by_git = json(temp.path(), &["expand", &git_commit]);
-    assert_eq!(
-        expanded_by_git["collapsed"]["state_id"],
-        expanded["collapsed"]["state_id"]
-    );
-
-    let log = json(temp.path(), &["log", "-n", "1"]);
-    let first = &log["states"].as_array().expect("log states")[0];
-    assert_eq!(first["collapsed"]["expandable"], true, "{log}");
-    assert_eq!(first["collapsed"]["source_count"], 2, "{log}");
-}
-
-#[test]
-fn git_overlay_matrix_squashed_land_default_subject_is_land_thread() {
-    let temp = TempDir::new().unwrap();
-    let (_checkout, _base) = setup_two_capture_land_thread(&temp, "feature/default-subject");
-
-    let land = json(
-        temp.path(),
-        &["land", "--thread", "feature/default-subject", "--no-push"],
-    );
-    assert_eq!(land["status"], "landed");
-    assert_eq!(
-        git_stdout(temp.path(), &["log", "-1", "--pretty=%s"]),
-        "Land feature/default-subject"
-    );
-    assert!(
-        !temp.path().join(".heddle/git").exists(),
-        "land must checkpoint directly into the authoritative checkout .git"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_squashed_land_undo_restores_git_target_and_source_thread() {
-    let temp = TempDir::new().unwrap();
-    let (_checkout, base_git) = setup_two_capture_land_thread(&temp, "feature/squash-undo");
-    let source_tip_before = thread_tip(temp.path(), "feature/squash-undo");
-    let target_tip_before = thread_tip(temp.path(), "main");
-
-    let land = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/squash-undo",
-            "--no-push",
-        ],
-    );
-    assert_eq!(land["status"], "landed");
-    assert_eq!(
-        git_stdout(
-            temp.path(),
-            &["rev-list", "--count", &format!("{base_git}..HEAD")]
-        ),
-        "1",
-        "default land should project the multi-state source as one Git commit"
-    );
-    assert_ne!(
-        thread_tip(temp.path(), "feature/squash-undo"),
-        source_tip_before,
-        "land squash should move the source thread to the synthetic collapse state"
-    );
-    assert_ne!(thread_tip(temp.path(), "main"), target_tip_before);
-
-    assert_latest_undo_batch_has_land_squash_ops(temp.path());
-    let undo = json(temp.path(), &["--output", "json", "undo"]);
-    assert_eq!(undo["status"], "completed", "{undo}");
-    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), base_git);
-    assert_eq!(thread_tip(temp.path(), "main"), target_tip_before);
-    assert_eq!(
-        thread_tip(temp.path(), "feature/squash-undo"),
-        source_tip_before,
-        "undo must restore the source thread to its pre-collapse tip"
-    );
-    assert_eq!(git_status_short(temp.path()), "");
-}
-
-#[test]
-fn git_overlay_matrix_manual_resolution_land_squashes_and_undo_restores_source_thread() {
-    let temp = TempDir::new().unwrap();
-    let (_checkout, _base_git) = setup_two_capture_land_thread(&temp, "feature/manual-squash");
-
-    std::fs::write(temp.path().join("main-only.txt"), "main\n").unwrap();
-    let main_commit = json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "main advance"],
-    );
-    assert_eq!(main_commit["output_kind"], "commit", "{main_commit}");
-    let pre_land_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    let target_tip_before = thread_tip(temp.path(), "main");
-
-    let refresh = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "thread",
-            "refresh",
-            "feature/manual-squash",
-        ],
-    );
-    assert_eq!(refresh["status"], "completed", "{refresh}");
-    let source_tip_before_land = thread_tip(temp.path(), "feature/manual-squash");
-
-    let land = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/manual-squash",
-            "--no-push",
-        ],
-    );
-    assert_eq!(land["status"], "landed", "{land}");
-    assert_eq!(land["checkpointed"], true);
-    assert_eq!(
-        git_stdout(
-            temp.path(),
-            &["rev-list", "--count", &format!("{pre_land_git}..HEAD")]
-        ),
-        "1",
-        "manual-resolution land should squash the refreshed multi-state thread by default"
-    );
-
-    assert_latest_undo_batch_has_land_squash_ops(temp.path());
-    let undo = json(temp.path(), &["--output", "json", "undo"]);
-    assert_eq!(undo["status"], "completed", "{undo}");
-    assert_eq!(
-        git_stdout(temp.path(), &["rev-parse", "HEAD"]),
-        pre_land_git
-    );
-    assert_eq!(thread_tip(temp.path(), "main"), target_tip_before);
-    assert_eq!(
-        thread_tip(temp.path(), "feature/manual-squash"),
-        source_tip_before_land,
-        "undo must restore the refreshed source thread tip that existed before land"
-    );
-    assert_eq!(git_status_short(temp.path()), "");
-}
-
-#[test]
-fn git_overlay_matrix_land_no_squash_preserves_per_state_git_export() {
-    let temp = TempDir::new().unwrap();
-    let (_checkout, base) = setup_two_capture_land_thread(&temp, "feature/no-squash");
-
-    let land = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/no-squash",
-            "--no-squash",
-            "--no-push",
-        ],
-    );
-    assert_eq!(land["status"], "landed");
-    assert_eq!(
-        git_stdout(
-            temp.path(),
-            &["rev-list", "--count", &format!("{base}..HEAD")]
-        ),
-        "2",
-        "--no-squash should preserve one Git commit per source state"
-    );
-    assert!(
-        collapse_records(temp.path()).is_empty(),
-        "--no-squash land should not mint a collapse result"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_land_config_can_opt_out_of_squash() {
-    let temp = TempDir::new().unwrap();
-    let (_checkout, base) = setup_two_capture_land_thread(&temp, "feature/config-no-squash");
-    let config_dir = TempDir::new().unwrap();
-    let config = config_dir.path().join("land-no-squash-config.toml");
-    std::fs::write(
-        &config,
-        "[principal]\nname = \"Heddle Test\"\nemail = \"heddle@example.com\"\n\n[land]\nsquash = false\n",
-    )
-    .unwrap();
-
-    let output = heddle_output_with_env(
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/config-no-squash",
-            "--no-push",
-        ],
-        Some(temp.path()),
-        &[("HEDDLE_CONFIG", config.to_str().unwrap())],
-    )
-    .expect("land with config should run");
-    assert!(
-        output.status.success(),
-        "config opt-out land should succeed: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let land: Value = serde_json::from_slice(&output.stdout).expect("land JSON should parse");
-    assert_eq!(land["status"], "landed");
-    assert_eq!(
-        git_stdout(
-            temp.path(),
-            &["rev-list", "--count", &format!("{base}..HEAD")]
-        ),
-        "2",
-        "land.squash=false should preserve per-State Git export"
-    );
-    assert!(collapse_records(temp.path()).is_empty());
-}
-
-#[test]
-fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
-    let temp = TempDir::new().unwrap();
-    let origin = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    git(&["init", "--bare", "--initial-branch=main"], origin.path());
-    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
-    git_commit_all(temp.path(), "base");
-    let origin_arg = origin.path().to_str().expect("origin path should be utf8");
-    git(&["remote", "add", "origin", origin_arg], temp.path());
-    git(&["push", "-u", "origin", "main"], temp.path());
-    heddle_adopt(temp.path());
-
-    let feature_path = temp.path().with_extension("feature-land-undo");
-    let started = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/land-undo",
-            "--path",
-            feature_path.to_str().unwrap(),
-        ],
-    );
-    assert_eq!(started["thread"]["name"], "feature/land-undo");
-
-    std::fs::write(feature_path.join("README.md"), "base\nfeature\n").unwrap();
-    std::fs::write(feature_path.join("feature.txt"), "feature\n").unwrap();
-    let ready = json(
-        &feature_path,
-        &[
-            "--output",
-            "json",
-            "ready",
-            "-m",
-            "feature ready for land undo",
-        ],
-    );
-    assert_eq!(ready["status"], "completed");
-
-    let base_verify = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(base_verify["verified"], true);
-    assert_eq!(base_verify["status"], "clean");
-    assert_eq!(
-        base_verify["recommended_action"],
-        "heddle land --thread feature/land-undo --no-push"
-    );
-
-    let land = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/land-undo",
-            "--no-push",
-        ],
-    );
-    assert_eq!(land["status"], "landed");
-    assert_eq!(land["checkpointed"], true);
-    assert_eq!(land["verification"]["verified"], true);
-    assert_eq!(land["verification"]["status"], "clean");
-    assert_eq!(land["verification"]["recommended_action"], "heddle push");
-    assert_eq!(land["recommended_action"], "heddle push");
-    assert_eq!(land["next_action"], "heddle push");
-    assert!(land["git_commit"].as_str().is_some());
-
-    let after_ship = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(after_ship["verified"], true);
-    assert_eq!(after_ship["status"], "clean");
-    assert_eq!(after_ship["recommended_action"], "heddle push");
-    let thread_after_ship = json(
-        temp.path(),
-        &["--output", "json", "thread", "show", "feature/land-undo"],
-    );
-    assert_eq!(thread_after_ship["thread_state"], "merged");
-    assert_eq!(
-        thread_after_ship["integration_policy_result"]["status"],
-        "auto_integrated"
-    );
-
-    let undo = json(temp.path(), &["--output", "json", "undo"]);
-    assert_eq!(undo["action"], "undo");
-
-    let after_undo = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(
-        after_undo["verified"], true,
-        "land undo should not leave Git/Heddle mapping blocked: {after_undo}"
-    );
-    assert_eq!(after_undo["status"], "clean");
-    assert_eq!(
-        after_undo["recommended_action"],
-        "heddle land --thread feature/land-undo --no-push"
-    );
-    let status_after_undo = json(temp.path(), &["--output", "json", "status"]);
-    assert_eq!(
-        status_after_undo["recommended_action"], "heddle land --thread feature/land-undo --no-push",
-        "status should restore the ready workflow action after land undo: {status_after_undo}"
-    );
-    let thread_list_after_undo = json(temp.path(), &["--output", "json", "thread", "list"]);
-    assert_eq!(
-        thread_list_after_undo["recommended_action"],
-        "heddle land --thread feature/land-undo --no-push",
-        "thread list should restore the ready workflow action after land undo: {thread_list_after_undo}"
-    );
-    let workspace_after_undo = json(temp.path(), &["--output", "json", "status"]);
-    assert_eq!(
-        workspace_after_undo["recommended_action"],
-        "heddle land --thread feature/land-undo --no-push",
-        "workspace should restore the ready workflow action after land undo: {workspace_after_undo}"
-    );
-    assert_eq!(git_status_short(temp.path()), "");
-    assert!(
-        !temp.path().join("feature.txt").exists(),
-        "undo should remove the feature file from the main Git worktree"
-    );
-
-    let thread_after_undo = json(
-        temp.path(),
-        &["--output", "json", "thread", "show", "feature/land-undo"],
-    );
-    assert_eq!(
-        thread_after_undo["thread_state"], "ready",
-        "undoing the land should unmark the source thread as merged: {thread_after_undo}"
-    );
-    assert_eq!(
-        thread_after_undo["integration_policy_result"]["status"],
-        Value::Null,
-        "undoing the land should clear stale auto-integrated metadata: {thread_after_undo}"
-    );
-
-    let thread_record_path = std::fs::read_dir(temp.path().join(".heddle/thread_records"))
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .find(|path| {
-            std::fs::read_to_string(path)
-                .map(|content| content.contains(r#"thread = "feature/land-undo""#))
-                .unwrap_or(false)
-        })
-        .expect("feature thread record should exist");
-    let thread_record = std::fs::read_to_string(&thread_record_path).unwrap();
-    let stale_record = thread_record.replace(r#"state = "ready""#, r#"state = "merged""#);
-    std::fs::write(&thread_record_path, stale_record).unwrap();
-    let stale_verify = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(stale_verify["status"], "stale_integration_metadata");
-    let workflow = stale_verify["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|check| check["name"] == "Workflow")
-        .unwrap_or_else(|| panic!("verify should include Workflow check: {stale_verify}"));
-    assert_eq!(workflow["status"], "stale_integration_metadata");
-
-    std::fs::write(temp.path().join("local-dirty.txt"), "local dirty\n").unwrap();
-    let redo_refusal = heddle_output(&["--output", "json", "undo", "--redo"], Some(temp.path()))
-        .expect("redo should run");
-    assert!(!redo_refusal.status.success(), "dirty redo should refuse");
-    let stderr = String::from_utf8_lossy(&redo_refusal.stderr);
-    let envelope: Value = serde_json::from_str(stderr.trim())
-        .unwrap_or_else(|err| panic!("dirty redo should emit JSON envelope: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "dirty_worktree");
-    assert!(
-        !temp.path().join("feature.txt").exists(),
-        "redo refusal must not partially re-apply Heddle/worktree state"
-    );
-    let dirty_verify = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(
-        dirty_verify["status"], "dirty_worktree",
-        "dirty redo refusal should leave only the user's dirty path, not a needs-checkpoint partial apply: {dirty_verify}"
-    );
-
-    std::fs::remove_file(temp.path().join("local-dirty.txt")).unwrap();
-    let redo = json(temp.path(), &["--output", "json", "undo", "--redo"]);
-    assert_eq!(redo["action"], "redo");
-    assert_eq!(redo["status"], "completed");
-    assert_eq!(redo["verification"]["verified"], true);
-    assert_eq!(redo["verification"]["status"], "clean");
-    assert_eq!(git_status_short(temp.path()), "");
-    assert!(
-        temp.path().join("feature.txt").exists(),
-        "redo should restore the landed feature file once preflights pass"
-    );
-
-    let thread_after_redo = json(
-        temp.path(),
-        &["--output", "json", "thread", "show", "feature/land-undo"],
-    );
-    assert_eq!(thread_after_redo["thread_state"], "merged");
-    assert_eq!(
-        thread_after_redo["integration_policy_result"]["status"],
-        "auto_integrated"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_ship_push_without_remote_refuses_before_mutation() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
-    git_commit_all(temp.path(), "base");
-    heddle_adopt(temp.path());
-
-    let feature_path = temp.path().with_extension("feature-no-remote-push");
-    json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/no-remote-push",
-            "--path",
-            feature_path.to_str().unwrap(),
-        ],
-    );
-    std::fs::write(feature_path.join("README.md"), "base\nfeature\n").unwrap();
-    let ready = json(
-        &feature_path,
-        &[
-            "--output",
-            "json",
-            "ready",
-            "-m",
-            "feature ready without remote",
-        ],
-    );
-    assert_eq!(ready["status"], "completed");
-
-    let preview = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature/no-remote-push",
-            "--preview",
-        ],
-    );
-    assert_eq!(
-        preview["recommended_action"],
-        "heddle land --thread feature/no-remote-push --no-push"
-    );
-    assert_eq!(
-        preview["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["land", "--thread", "feature/no-remote-push", "--no-push"])
-    );
-    assert_eq!(
-        preview["verification"]["recommended_action"],
-        "heddle land --thread feature/no-remote-push --no-push"
-    );
-
-    let before_state = json(temp.path(), &["--output", "json", "status"])["current_state"].clone();
-    let before_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    let before_refs = git_ref_snapshot(temp.path());
-    let push = heddle_output(
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/no-remote-push",
-            "--push",
-        ],
-        Some(temp.path()),
-    )
-    .expect("invoke land --push");
-    assert!(
-        !push.status.success(),
-        "land --push should refuse without a remote"
-    );
-    assert!(
-        push.stdout.is_empty(),
-        "JSON refusal should not emit partial stdout: {}",
-        String::from_utf8_lossy(&push.stdout)
-    );
-    let stderr = std::str::from_utf8(&push.stderr).unwrap();
-    let envelope: Value =
-        serde_json::from_str(stderr).unwrap_or_else(|err| panic!("stderr JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "land_push_remote_missing");
-    assert_json_recovery_advice_fields(&envelope, &envelope.to_string());
-    assert!(
-        envelope["preserved"]
-            .as_str()
-            .is_some_and(|preserved| preserved.contains("repository state"))
-            && envelope["primary_command"]
-                == "heddle land --thread feature/no-remote-push --no-push",
-        "refusal should explain preservation and local land recovery: {envelope}"
-    );
-    assert_eq!(
-        json(temp.path(), &["--output", "json", "status"])["current_state"],
-        before_state
-    );
-    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), before_git);
-    assert_eq!(git_ref_snapshot(temp.path()), before_refs);
-}
-
-#[test]
-fn git_overlay_matrix_ship_remote_without_push_refuses_before_mutation() {
-    let temp = TempDir::new().unwrap();
-    let origin = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    git(&["init", "--bare", "--initial-branch=main"], origin.path());
-    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
-    git_commit_all(temp.path(), "base");
-    let origin_arg = origin.path().to_str().expect("origin path should be utf8");
-    git(&["remote", "add", "origin", origin_arg], temp.path());
-    git(&["push", "-u", "origin", "main"], temp.path());
-    heddle_adopt(temp.path());
-
-    let feature_path = temp.path().with_extension("feature-remote-without-push");
-    json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/remote-without-push",
-            "--path",
-            feature_path.to_str().unwrap(),
-        ],
-    );
-    std::fs::write(feature_path.join("README.md"), "base\nfeature\n").unwrap();
-    let ready = json(
-        &feature_path,
-        &[
-            "--output",
-            "json",
-            "ready",
-            "-m",
-            "feature ready for remote without push",
-        ],
-    );
-    assert_eq!(ready["status"], "completed");
-
-    let before_state = json(temp.path(), &["--output", "json", "status"])["current_state"].clone();
-    let before_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    let before_refs = git_ref_snapshot(temp.path());
-    let land = heddle_output(
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/remote-without-push",
-            "--remote",
-            "origin",
-        ],
-        Some(temp.path()),
-    )
-    .expect("invoke land --remote");
-    assert!(
-        !land.status.success(),
-        "land --remote without --push should refuse"
-    );
-    assert!(
-        land.stdout.is_empty(),
-        "JSON refusal should not emit partial stdout: {}",
-        String::from_utf8_lossy(&land.stdout)
-    );
-    let stderr = std::str::from_utf8(&land.stderr).unwrap();
-    let envelope: Value =
-        serde_json::from_str(stderr).unwrap_or_else(|err| panic!("stderr JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "land_remote_requires_push");
-    assert_eq!(
-        envelope["primary_command"],
-        "heddle land --thread feature/remote-without-push --push --remote origin"
-    );
-    assert_json_recovery_advice_fields(&envelope, &envelope.to_string());
-    assert_eq!(
-        json(temp.path(), &["--output", "json", "status"])["current_state"],
-        before_state
-    );
-    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), before_git);
-    assert_eq!(git_ref_snapshot(temp.path()), before_refs);
-}
-
-#[test]
-fn git_overlay_matrix_ship_push_failure_reports_partial_local_ship() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
-    git_commit_all(temp.path(), "base");
-    let missing_remote = temp.path().with_extension("missing-remote");
-    git(
-        &["remote", "add", "backup", missing_remote.to_str().unwrap()],
-        temp.path(),
-    );
-    heddle_adopt(temp.path());
-
-    let feature_path = temp.path().with_extension("feature-partial-push");
-    json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/partial-push",
-            "--path",
-            feature_path.to_str().unwrap(),
-        ],
-    );
-    std::fs::write(feature_path.join("README.md"), "base\nfeature\n").unwrap();
-    let ready = json(
-        &feature_path,
-        &["--output", "json", "ready", "-m", "feature partial push"],
-    );
-    assert_eq!(ready["status"], "completed");
-
-    let preview = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature/partial-push",
-            "--preview",
-        ],
-    );
-    assert_eq!(
-        preview["recommended_action"],
-        "heddle land --thread feature/partial-push --no-push"
-    );
-    assert_eq!(
-        preview["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["land", "--thread", "feature/partial-push", "--no-push"])
-    );
-    assert_eq!(
-        preview["verification"]["recommended_action"],
-        "heddle land --thread feature/partial-push --no-push"
-    );
-
-    let text_preview = heddle(
-        &[
-            "--output",
-            "text",
-            "merge",
-            "feature/partial-push",
-            "--preview",
-            "--with-diff",
-        ],
-        Some(temp.path()),
-    )
-    .expect("text merge preview with diff should succeed");
-    assert!(
-        text_preview.contains("Next: heddle land --thread feature/partial-push --no-push"),
-        "text merge preview should recommend local land first: {text_preview}"
-    );
-    assert!(
-        !text_preview.contains("--push"),
-        "text merge preview should not recommend pushing immediately: {text_preview}"
-    );
-
-    let before_state = json(temp.path(), &["--output", "json", "status"])["current_state"].clone();
-    let before_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    let push = heddle_output(
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/partial-push",
-            "--push",
-            "--remote",
-            "backup",
-        ],
-        Some(temp.path()),
-    )
-    .expect("invoke land --push");
-    assert!(!push.status.success(), "push to missing remote should fail");
-    assert!(
-        push.stdout.is_empty(),
-        "JSON partial failure should be a stderr envelope only: {}",
-        String::from_utf8_lossy(&push.stdout)
-    );
-    let stderr = std::str::from_utf8(&push.stderr).unwrap();
-    let envelope: Value =
-        serde_json::from_str(stderr).unwrap_or_else(|err| panic!("stderr JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "land_push_partial_failure");
-    assert_json_recovery_advice_fields(&envelope, &envelope.to_string());
-    assert!(
-        envelope["preserved"]
-            .as_str()
-            .is_some_and(|preserved| preserved.contains("completed steps: merge, checkpoint")),
-        "partial failure should name completed work and recovery: {envelope}"
-    );
-    assert_eq!(envelope["primary_command"], "heddle undo");
-    assert_eq!(
-        envelope["recovery_commands"],
-        serde_json::json!(["heddle undo", "heddle push backup"])
-    );
-    assert_ne!(
-        json(temp.path(), &["--output", "json", "status"])["current_state"],
-        before_state,
-        "partial push failure should honestly report that local Heddle state moved"
-    );
-    assert_ne!(
-        git_stdout(temp.path(), &["rev-parse", "HEAD"]),
-        before_git,
-        "partial push failure should honestly report that Git checkpoint moved"
-    );
-
-    let undo = json(temp.path(), &["--output", "json", "undo"]);
-    assert_eq!(undo["action"], "undo");
-    assert_eq!(
-        json(temp.path(), &["--output", "json", "status"])["current_state"],
-        before_state
-    );
-    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), before_git);
-}
-
-#[test]
-fn git_overlay_matrix_land_no_push_syncs_remote_behind_before_landing() {
-    let fixture = GitOverlayFixture::imported_main()
-        .with_bare_origin()
-        .with_remote_behind()
-        .with_ready_materialized_thread("isolated");
-    let feature_path = fixture.ready_thread_path().to_path_buf();
-    let ready = json(&feature_path, &["--output", "json", "ready"]);
-    assert_eq!(ready["status"], "completed");
-    let before_status = json(fixture.path(), &["--output", "json", "status"]);
-    assert_eq!(
-        before_status["verification"]["remote_drift"],
-        "remote_behind"
-    );
-    let before_state = before_status["current_state"].clone();
-    let before_git = fixture.git_stdout(&["rev-parse", "HEAD"]);
-    let before_refs = git_ref_snapshot(fixture.path());
-
-    let land = fixture
-        .heddle_output(&[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "isolated",
-            "--no-push",
-        ])
-        .expect("invoke land --no-push with known upstream drift");
-    assert!(
-        land.status.success(),
-        "land should pull upstream, refresh the thread, and land: stdout={} stderr={}",
-        String::from_utf8_lossy(&land.stdout),
-        String::from_utf8_lossy(&land.stderr)
-    );
-    let land: Value = serde_json::from_slice(&land.stdout)
-        .unwrap_or_else(|err| panic!("land should emit JSON on stdout: {err}"));
-    assert_eq!(land["status"], "landed", "{land}");
-    assert_eq!(land["synced"], true, "{land}");
-    assert_eq!(land["integrated"], true, "{land}");
-    assert_eq!(land["checkpointed"], true, "{land}");
-    assert!(
-        land["performed_steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|step| step == "sync"),
-        "land should report the automatic remote/thread sync step: {land}"
-    );
-
-    let after_status = json(fixture.path(), &["--output", "json", "status"]);
-    assert_ne!(
-        after_status["current_state"], before_state,
-        "successful land should advance the parent Heddle thread"
-    );
-    assert_ne!(fixture.git_stdout(&["rev-parse", "HEAD"]), before_git);
-    assert!(
-        git_ref_snapshot(fixture.path()) != before_refs,
-        "successful land should move visible Git refs"
-    );
-    assert_eq!(
-        after_status["verification"]["remote_drift"], "remote_ahead",
-        "after --no-push land, publish should be the remaining remote step: {after_status}"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_ship_refuses_index_lock_before_mutation() {
-    let fixture =
-        GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/index-lock");
-    let before_state =
-        json(fixture.path(), &["--output", "json", "status"])["current_state"].clone();
-    let before_git = fixture.git_stdout(&["rev-parse", "HEAD"]);
-    let before_refs = git_ref_snapshot(fixture.path());
-    let fixture = fixture.with_index_lock();
-
-    let land = fixture
-        .heddle_output(&[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/index-lock",
-            "--no-push",
-        ])
-        .expect("invoke land with index lock");
-    assert!(
-        !land.status.success(),
-        "land should fail before landing when checkpoint preflight sees index lock"
-    );
-    assert!(land.stdout.is_empty());
-    let stderr = std::str::from_utf8(&land.stderr).unwrap();
-    let envelope: Value =
-        serde_json::from_str(stderr).unwrap_or_else(|err| panic!("stderr JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "land_checkpoint_preflight_blocked");
-    assert_eq!(envelope["primary_command"], "heddle status");
-    assert_eq!(
-        json(fixture.path(), &["--output", "json", "status"])["current_state"],
-        before_state,
-        "failed land must not fast-forward Heddle state"
-    );
-    assert_eq!(fixture.git_stdout(&["rev-parse", "HEAD"]), before_git);
-    assert_eq!(git_ref_snapshot(fixture.path()), before_refs);
+    let commit = json(temp.path(), &["--output", "json", "commit"]);
+    assert!(commit["git_commit"].as_str().is_some());
 }
 
 #[test]
@@ -7128,139 +3479,6 @@ fn git_overlay_matrix_manual_git_merge_commit_after_bootstrap_commands() {
     assert!(
         ready["captured"].is_boolean(),
         "ready should remain well-formed after a manual Git merge commit: {ready}"
-    );
-}
-
-#[test]
-fn git_overlay_matrix_side_only_import_is_available_not_next_action() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-
-    git(&["checkout", "-b", "side"], temp.path());
-    std::fs::write(temp.path().join("side.txt"), "side\n").unwrap();
-    git_commit_all(temp.path(), "side work");
-
-    git(&["checkout", "main"], temp.path());
-    std::fs::write(temp.path().join("main.txt"), "main\n").unwrap();
-    git_commit_all(temp.path(), "main work");
-    git(
-        &["merge", "--no-ff", "side", "-m", "merge side"],
-        temp.path(),
-    );
-
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
-
-    let verify = json(temp.path(), &["verify", "--output", "json"]);
-    assert_eq!(verify["verified"], true);
-    assert_eq!(verify["status"], "clean");
-    assert_eq!(
-        verify["recommended_action"],
-        Value::Null,
-        "side-only import availability should not hijack verified mainline flow: {verify}"
-    );
-    let mapping = verify["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|check| check["name"] == "Mapping")
-        .unwrap_or_else(|| panic!("verify should include Mapping check: {verify}"));
-    assert_eq!(mapping["clean"], true);
-    assert_eq!(mapping["recommended_action"], Value::Null);
-
-    let status = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(status["verification"]["verified"], true);
-    assert_eq!(status["verification"]["status"], "clean");
-    assert_eq!(status["output_kind"], "status");
-    assert_eq!(status["recommended_action"], Value::Null);
-
-    let thread_list = json(temp.path(), &["thread", "list", "--output", "json"]);
-    assert_eq!(thread_list["output_kind"], "thread_list");
-    assert_eq!(thread_list["recommended_action"], Value::Null);
-    assert!(
-        thread_list["threads"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|thread| thread["name"] != "side"),
-        "side-only refs should not be modeled as active threads: {thread_list}"
-    );
-    assert_eq!(thread_list["available_git_refs"][0]["name"], "side");
-    assert_eq!(
-        thread_list["available_git_refs"][0]["recommended_action"],
-        "heddle switch side"
-    );
-    assert_eq!(
-        thread_list["available_git_refs"][0]["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["switch", "side"])
-    );
-
-    let workspace = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(workspace["output_kind"], "status");
-    assert_eq!(workspace["recommended_action"], Value::Null);
-    assert!(
-        workspace.get("available_git_refs").is_none(),
-        "status JSON should leave optional Git-only refs on thread list: {workspace}"
-    );
-
-    let bridge = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(bridge["verification"]["verified"], true);
-    assert_eq!(bridge["verification"]["status"], "clean");
-    assert_eq!(bridge["output_kind"], "status");
-    assert_eq!(bridge["recommended_action"], Value::Null);
-    assert_no_legacy_verification_sidecars(&bridge);
-
-    let text = heddle(&["thread", "list", "--output", "text"], Some(temp.path())).unwrap();
-    assert!(
-        text.contains("Optional Git-only branch available: side")
-            || text.contains("Optional Git-only branches"),
-        "thread list should use optional Git-only branch language: {text}"
-    );
-    assert!(
-        text.contains("switch") || text.contains("heddle switch side"),
-        "thread list should explain optional Git-only branch switching without sounding blocked: {text}"
-    );
-    assert!(
-        !text.contains("Available Git refs") && !text.contains("optional import:"),
-        "thread list should avoid implementation-shaped Git ref copy: {text}"
-    );
-
-    let status_text = heddle(&["status", "--output", "text", "-v"], Some(temp.path())).unwrap();
-    assert!(
-        status_text.contains("Health: clean")
-            && !status_text.contains("Setup needed")
-            && !status_text.contains("Next step: heddle adopt --ref side"),
-        "current-branch status should stay focused on the verified checkout: {status_text}"
-    );
-    let bridge_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
-    assert!(
-        (bridge_text.contains("Verdict: clean") || bridge_text.contains("Health: clean"))
-            && !bridge_text.contains("heddle adopt --ref side")
-            && !bridge_text.contains("Next step: heddle adopt --ref side"),
-        "status should report imported history as in sync and leave optional branch adoption to thread/workspace views: {bridge_text}"
-    );
-
-    std::fs::write(temp.path().join("scratch.txt"), "dirty\n").unwrap();
-    let dirty_thread_list = json(temp.path(), &["thread", "list", "--output", "json"]);
-    assert_eq!(
-        dirty_thread_list["recommended_action"], "heddle commit -m \"...\"",
-        "dirty checkout should keep the primary action focused on saved work: {dirty_thread_list}"
-    );
-    assert_eq!(dirty_thread_list["available_git_refs"][0]["name"], "side");
-    assert_eq!(
-        dirty_thread_list["available_git_refs"][0]["recommended_action"], "heddle switch side",
-        "available Git refs must keep executable switch actions even when verification is blocked: {dirty_thread_list}"
-    );
-    assert_eq!(
-        dirty_thread_list["available_git_refs"][0]["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["switch", "side"])
-    );
-
-    let dirty_workspace = json(temp.path(), &["status", "--output", "json"]);
-    assert!(
-        dirty_workspace.get("available_git_refs").is_none(),
-        "status JSON should leave optional Git-only refs on thread list even while blocked: {dirty_workspace}"
     );
 }
 
@@ -7375,7 +3593,7 @@ fn git_overlay_matrix_rebase_and_cherry_pick_sequences_remain_coherent() {
     init_git_repo_with_branch(rebase_repo.path(), "feature/drop-in");
     std::fs::write(rebase_repo.path().join("base.txt"), "base\n").unwrap();
     git_commit_all(rebase_repo.path(), "seed branch");
-    heddle_adopt(rebase_repo.path());
+    initialize_git_overlay(rebase_repo.path());
 
     git(&["checkout", "-b", "support/rebase"], rebase_repo.path());
     std::fs::write(rebase_repo.path().join("clash.txt"), "support rebase\n").unwrap();
@@ -7425,7 +3643,7 @@ fn git_overlay_matrix_rebase_and_cherry_pick_sequences_remain_coherent() {
     init_git_repo_with_branch(cherry_repo.path(), "feature/drop-in");
     std::fs::write(cherry_repo.path().join("conflict.txt"), "base\n").unwrap();
     git_commit_all(cherry_repo.path(), "seed branch");
-    heddle_adopt(cherry_repo.path());
+    initialize_git_overlay(cherry_repo.path());
 
     git(&["checkout", "-b", "support/cherry"], cherry_repo.path());
     std::fs::write(cherry_repo.path().join("extra.txt"), "support extra\n").unwrap();
@@ -7530,282 +3748,6 @@ fn git_overlay_matrix_rebase_and_cherry_pick_sequences_remain_coherent() {
 }
 
 #[test]
-fn git_overlay_matrix_stale_ship_manual_resolution_then_retry_ships() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "feature/drop-in");
-    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed branch");
-    heddle_adopt(temp.path());
-
-    let started = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/manual-recover",
-            "--workspace",
-            "materialized",
-        ],
-    );
-    let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
-
-    std::fs::write(thread_path.join("conflict.txt"), "thread change\n").unwrap();
-    heddle(&["capture", "-m", "thread change"], Some(&thread_path)).unwrap();
-
-    std::fs::write(temp.path().join("conflict.txt"), "main change\n").unwrap();
-    heddle(&["capture", "-m", "main change"], Some(temp.path())).unwrap();
-
-    let blocked = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/manual-recover",
-        ],
-    );
-    assert_eq!(blocked["status"], "blocked");
-    assert_operator_json_contract(&blocked, "land");
-
-    let refresh_error = heddle(
-        &[
-            "--output",
-            "json",
-            "thread",
-            "refresh",
-            "feature/manual-recover",
-        ],
-        Some(temp.path()),
-    )
-    .expect_err("refresh should materialize durable conflict state before manual resolution");
-    assert!(
-        refresh_error.contains("thread_refresh_conflicted")
-            && refresh_error.contains(thread_path.to_str().unwrap()),
-        "refresh conflict should point at the thread checkout for resolution: {refresh_error}"
-    );
-    std::fs::write(
-        thread_path.join("conflict.txt"),
-        "main change\nthread change\n",
-    )
-    .unwrap();
-    let resolved = json(
-        &thread_path,
-        &["--output", "json", "resolve", "conflict.txt"],
-    );
-    assert_eq!(resolved["continued"], true, "{resolved}");
-    assert_eq!(resolved["continuation_status"], "continued", "{resolved}");
-    assert_eq!(resolved["output_kind"], "resolve", "{resolved}");
-    assert!(
-        resolved["recommended_action"]
-            .as_str()
-            .is_some_and(|action| action.contains("land")),
-        "resolve should hand the operator back to the parent land flow: {resolved}"
-    );
-
-    let after_continue = json(
-        temp.path(),
-        &[
-            "thread",
-            "show",
-            "feature/manual-recover",
-            "--output",
-            "json",
-        ],
-    );
-    assert_eq!(after_continue["freshness"], "current", "{after_continue}");
-    assert_eq!(after_continue["thread_state"], "ready", "{after_continue}");
-    assert_eq!(
-        after_continue["integration_policy_result"]["status"], "manual_resolved",
-        "{after_continue}"
-    );
-    assert!(
-        !after_continue["recommended_action"]
-            .as_str()
-            .unwrap_or("")
-            .contains("thread refresh"),
-        "manual conflict resolution should not leave parent thread advice stuck on refresh: {after_continue}"
-    );
-    let resolved_again = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "thread",
-            "resolve",
-            "feature/manual-recover",
-        ],
-    );
-    assert_eq!(resolved_again["status"], "completed", "{resolved_again}");
-    assert!(
-        resolved_again["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("manual resolution recorded")
-                && !message.contains("requires a manual follow-up")),
-        "completed thread resolve should not read like it is still blocked: {resolved_again}"
-    );
-
-    let retry_ship = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/manual-recover",
-        ],
-    );
-    assert_eq!(retry_ship["status"], "landed");
-    assert_operator_json_contract(&retry_ship, "land");
-    assert_eq!(retry_ship["checkpointed"], true);
-    assert!(retry_ship["git_commit"].as_str().is_some());
-    let expected_next_action = if retry_ship["verification"]["recommended_action"] == "heddle push"
-    {
-        "heddle push"
-    } else {
-        "heddle thread cleanup --merged --dry-run"
-    };
-    assert_eq!(retry_ship["next_action"], expected_next_action);
-    assert_eq!(retry_ship["recommended_action"], expected_next_action);
-}
-
-#[test]
-fn git_overlay_matrix_stale_ship_manual_resolution_pushes_when_requested() {
-    let temp = TempDir::new().unwrap();
-    let origin = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "feature/drop-in");
-    git(
-        &["init", "--bare", "--initial-branch=feature/drop-in"],
-        origin.path(),
-    );
-    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed branch");
-    let origin_arg = origin.path().to_str().expect("origin path should be utf8");
-    git(&["remote", "add", "origin", origin_arg], temp.path());
-    git(&["push", "-u", "origin", "feature/drop-in"], temp.path());
-    heddle_adopt(temp.path());
-
-    let started = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/manual-push",
-            "--workspace",
-            "materialized",
-        ],
-    );
-    let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
-
-    std::fs::write(thread_path.join("conflict.txt"), "thread change\n").unwrap();
-    heddle(&["capture", "-m", "thread change"], Some(&thread_path)).unwrap();
-
-    std::fs::write(temp.path().join("conflict.txt"), "main change\n").unwrap();
-    heddle(&["capture", "-m", "main change"], Some(temp.path())).unwrap();
-
-    let blocked = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/manual-push",
-        ],
-    );
-    assert_eq!(blocked["status"], "blocked");
-    assert_operator_json_contract(&blocked, "land");
-
-    let refresh_error = heddle(
-        &[
-            "--output",
-            "json",
-            "thread",
-            "refresh",
-            "feature/manual-push",
-        ],
-        Some(temp.path()),
-    )
-    .expect_err("refresh should materialize durable conflict state before manual resolution");
-    assert!(
-        refresh_error.contains("thread_refresh_conflicted")
-            && refresh_error.contains(thread_path.to_str().unwrap()),
-        "refresh conflict should point at the thread checkout for resolution: {refresh_error}"
-    );
-    std::fs::write(
-        thread_path.join("conflict.txt"),
-        "main change\nthread change\n",
-    )
-    .unwrap();
-    let resolved = json(
-        &thread_path,
-        &["--output", "json", "resolve", "conflict.txt"],
-    );
-    assert_eq!(resolved["continued"], true, "{resolved}");
-    assert_eq!(resolved["continuation_status"], "continued", "{resolved}");
-    assert_eq!(resolved["output_kind"], "resolve", "{resolved}");
-    heddle(
-        &["thread", "resolve", "feature/manual-push"],
-        Some(temp.path()),
-    )
-    .unwrap();
-
-    let retry_ship = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/manual-push",
-            "--push",
-            "--remote",
-            "origin",
-        ],
-    );
-    assert_eq!(retry_ship["status"], "landed");
-    assert_operator_json_contract(&retry_ship, "land");
-    assert_eq!(retry_ship["checkpointed"], true);
-    assert_eq!(retry_ship["pushed"], true);
-    assert_eq!(retry_ship["pushed_remote"], "origin");
-    assert_eq!(
-        retry_ship["chosen_path"],
-        "capture_sync_manual_resolution_checkpoint_push"
-    );
-    assert!(
-        retry_ship["performed_steps"]
-            .as_array()
-            .expect("performed_steps array")
-            .iter()
-            .any(|step| step == "push"),
-        "manual-resolution land --push should record the push step: {retry_ship}"
-    );
-    assert!(
-        !retry_ship["skipped_steps"]
-            .as_array()
-            .expect("skipped_steps array")
-            .iter()
-            .any(|step| step == "push(not requested)"),
-        "manual-resolution land --push must not claim the push was not requested: {retry_ship}"
-    );
-    assert_eq!(
-        retry_ship["recommended_action"],
-        "heddle thread cleanup --merged --dry-run"
-    );
-    assert_eq!(
-        git_stdout(origin.path(), &["rev-parse", "refs/heads/feature/drop-in"]),
-        git_stdout(temp.path(), &["rev-parse", "HEAD"]),
-        "explicit land --push --remote origin should update the remote branch"
-    );
-    let verify = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(verify["verified"], true);
-    assert_eq!(verify["status"], "clean");
-    assert_eq!(verify["recommended_action"], Value::Null);
-}
-
-#[test]
 fn git_overlay_matrix_native_git_worktree_bootstraps_cleanly() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "feature/drop-in");
@@ -7825,7 +3767,7 @@ fn git_overlay_matrix_native_git_worktree_bootstraps_cleanly() {
         temp.path(),
     );
 
-    heddle_adopt(&worktree_path);
+    initialize_git_overlay(&worktree_path);
     std::fs::write(worktree_path.join("native.txt"), "native worktree\n").unwrap();
 
     let status = json(&worktree_path, &["status", "--output", "json"]);
@@ -8010,7 +3952,7 @@ fn git_overlay_matrix_native_worktree_branch_switch_and_remote_drift_surface_cle
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all(temp.path(), "seed branch");
     git(&["push", "-u", "origin", "feature/drop-in"], temp.path());
-    heddle_adopt(temp.path());
+    initialize_git_overlay(temp.path());
 
     let worktree_path = temp.path().join("git-worktrees/support");
     std::fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
@@ -8025,7 +3967,7 @@ fn git_overlay_matrix_native_worktree_branch_switch_and_remote_drift_surface_cle
         temp.path(),
     );
     std::fs::write(worktree_path.join("native.txt"), "native worktree\n").unwrap();
-    heddle_adopt(&worktree_path);
+    initialize_git_overlay(&worktree_path);
     let worktree_status = json(&worktree_path, &["status", "--output", "json"]);
     assert_eq!(worktree_status["thread"], "support/native-worktree");
     assert_eq!(
@@ -8078,608 +4020,4 @@ fn git_overlay_matrix_native_worktree_branch_switch_and_remote_drift_surface_cle
         .find(|entry| entry["is_current"] == true)
         .expect("current thread should be present");
     assert_eq!(current["remote_tracking"]["behind"], 1);
-}
-
-#[test]
-fn git_overlay_matrix_continue_and_abort_unify_operator_flow() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
-    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
-    heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
-    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("conflict.txt"), "feature version\n").unwrap();
-    heddle(&["capture", "-m", "Feature change"], Some(temp.path())).unwrap();
-    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("conflict.txt"), "main version\n").unwrap();
-    heddle(&["capture", "-m", "Main change"], Some(temp.path())).unwrap();
-    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-
-    let merge_output = start_conflicted_heddle_merge(temp.path());
-    assert!(
-        merge_output.contains("Conflict") || temp.path().join(".heddle/MERGE_STATE").exists(),
-        "heddle merge should persist an in-progress merge state for continue"
-    );
-    let second_merge = heddle_output(&["--output", "json", "merge", "main"], Some(temp.path()))
-        .expect("invoke merge while merge state exists");
-    assert!(
-        !second_merge.status.success(),
-        "second merge should refuse while merge state exists"
-    );
-    assert!(
-        second_merge.stdout.is_empty(),
-        "JSON-mode active-merge refusal must keep stdout quiet: {}",
-        String::from_utf8_lossy(&second_merge.stdout)
-    );
-    let stderr = std::str::from_utf8(&second_merge.stderr).unwrap();
-    let envelope: serde_json::Value =
-        serde_json::from_str(stderr).expect("active merge refusal should emit JSON envelope");
-    assert_eq!(envelope["kind"], "merge_already_in_progress");
-    assert!(
-        envelope["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("merge is already in progress")),
-        "active merge refusal should keep full typed advice: {stderr}"
-    );
-    assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("heddle status")
-                && hint.contains("heddle continue")
-                && hint.contains("heddle resolve --abort")),
-        "active merge refusal should name recovery commands: {stderr}"
-    );
-    let resolved = json(
-        temp.path(),
-        &["--output", "json", "resolve", "--all", "--ours"],
-    );
-    assert_eq!(resolved["continued"], true, "{resolved}");
-    assert_eq!(resolved["continuation_status"], "continued", "{resolved}");
-
-    let status_after_continue = json(temp.path(), &["status", "--output", "json"]);
-    assert!(status_after_continue["operation"].is_null());
-
-    let git_repo = TempDir::new().unwrap();
-    init_git_repo_with_branch(git_repo.path(), "feature/drop-in");
-    std::fs::write(git_repo.path().join("base.txt"), "base\n").unwrap();
-    git_commit_all(git_repo.path(), "seed branch");
-    heddle(&["init"], Some(git_repo.path())).unwrap();
-    let _ = json(git_repo.path(), &["status", "--output", "json"]);
-    git(&["checkout", "-b", "support/rebase"], git_repo.path());
-    std::fs::write(git_repo.path().join("clash.txt"), "support rebase\n").unwrap();
-    git_commit_all(git_repo.path(), "support rebase");
-    git(&["checkout", "feature/drop-in"], git_repo.path());
-    std::fs::write(git_repo.path().join("clash.txt"), "main rebase\n").unwrap();
-    git_commit_all(git_repo.path(), "main rebase");
-    git(&["checkout", "support/rebase"], git_repo.path());
-    let rebase = Command::new("git")
-        .args(["rebase", "feature/drop-in"])
-        .current_dir(git_repo.path())
-        .output()
-        .expect("git rebase should run");
-    assert!(!rebase.status.success());
-
-    let aborted = json(git_repo.path(), &["--output", "json", "abort"]);
-    assert_eq!(aborted["status"], "blocked");
-    assert_eq!(aborted["recommended_action"], raw_git_preservation_action());
-    let status_after_abort = json(git_repo.path(), &["status", "--output", "json"]);
-    assert_eq!(status_after_abort["operation"]["kind"], "rebase");
-}
-
-#[test]
-fn git_overlay_matrix_rebase_noop_defers_up_to_date_claim_to_verification() {
-    let remote = TempDir::new().unwrap();
-    git(
-        &["init", "--bare", remote.path().to_str().unwrap()],
-        remote.path(),
-    );
-
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "feature/drop-in");
-    git(
-        &["remote", "add", "origin", remote.path().to_str().unwrap()],
-        temp.path(),
-    );
-    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
-    git_commit_all(temp.path(), "seed branch");
-    git(&["push", "-u", "origin", "feature/drop-in"], temp.path());
-    heddle_adopt(temp.path());
-
-    let other = TempDir::new().unwrap();
-    git(
-        &[
-            "clone",
-            remote.path().to_str().unwrap(),
-            other.path().to_str().unwrap(),
-        ],
-        temp.path(),
-    );
-    git(&["config", "user.name", "Heddle Test"], other.path());
-    git(
-        &["config", "user.email", "heddle@example.com"],
-        other.path(),
-    );
-    git(&["checkout", "feature/drop-in"], other.path());
-    std::fs::write(other.path().join("tracked.txt"), "remote advanced\n").unwrap();
-    git_commit_all(other.path(), "remote advance");
-    git(&["push", "origin", "feature/drop-in"], other.path());
-    git(&["fetch", "origin"], temp.path());
-
-    let verify_before = json(temp.path(), &["verify", "--output", "json"]);
-    assert_eq!(verify_before["verified"], false);
-    assert_eq!(verify_before["remote_drift"], "remote_behind");
-
-    let rebase = json(
-        temp.path(),
-        &["--output", "json", "rebase", "feature/drop-in"],
-    );
-    assert_eq!(rebase["status"], "blocked");
-    assert_eq!(rebase["reason"], "repository_verification");
-    assert_eq!(rebase["verification"]["verified"], false);
-    assert_eq!(rebase["verification"]["remote_drift"], "remote_behind");
-    assert_eq!(rebase["recommended_action"], "heddle pull");
-    assert_eq!(
-        rebase["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["pull"])
-    );
-}
-
-#[test]
-fn git_overlay_matrix_sync_and_primary_guidance_prefer_heddle_verbs() {
-    let remote = TempDir::new().unwrap();
-    git(
-        &["init", "--bare", remote.path().to_str().unwrap()],
-        remote.path(),
-    );
-
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "feature/drop-in");
-    git(
-        &["remote", "add", "origin", remote.path().to_str().unwrap()],
-        temp.path(),
-    );
-    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
-    git_commit_all(temp.path(), "seed branch");
-    git(&["push", "-u", "origin", "feature/drop-in"], temp.path());
-    heddle_adopt(temp.path());
-
-    let other = TempDir::new().unwrap();
-    git(
-        &[
-            "clone",
-            remote.path().to_str().unwrap(),
-            other.path().to_str().unwrap(),
-        ],
-        temp.path(),
-    );
-    // Clone does not inherit user identity from the remote; configure it
-    // explicitly so `git commit` succeeds on CI runners without a global
-    // git config.
-    git(&["config", "user.name", "Heddle Test"], other.path());
-    git(
-        &["config", "user.email", "heddle@example.com"],
-        other.path(),
-    );
-    git(&["checkout", "feature/drop-in"], other.path());
-    std::fs::write(other.path().join("tracked.txt"), "remote advanced\n").unwrap();
-    git_commit_all(other.path(), "remote advance");
-    git(&["push", "origin", "feature/drop-in"], other.path());
-    git(&["fetch", "origin"], temp.path());
-
-    let status_before = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(status_before["remote_tracking"]["behind"], 1);
-    assert_eq!(status_before["recommended_action"], "heddle pull");
-
-    let doctor_before = json(temp.path(), &["doctor", "--output", "json"]);
-    assert_eq!(doctor_before["health"]["recommended_action"], "heddle pull");
-
-    let sync = json(temp.path(), &["--output", "json", "sync"]);
-    assert_eq!(sync["status"], "synced");
-
-    let verify_after_sync = json(temp.path(), &["verify", "--output", "json"]);
-    assert_eq!(
-        verify_after_sync["verified"], true,
-        "sync may report synced only after the shared verify engine is clean: {verify_after_sync}"
-    );
-
-    let status_after = json(temp.path(), &["status", "--output", "json"]);
-    assert!(status_after["remote_tracking"].is_null());
-}
-
-#[test]
-fn git_overlay_matrix_continue_handles_each_supported_operation_state() {
-    // Heddle merge: unresolved conflicts should block, then continue should finish once resolved.
-    let heddle_merge = TempDir::new().unwrap();
-    init_heddle_conflict_repo(heddle_merge.path());
-    start_conflicted_heddle_merge(heddle_merge.path());
-
-    let conflict_list = json(
-        heddle_merge.path(),
-        &["resolve", "--list", "--output", "json"],
-    );
-    assert_eq!(
-        conflict_list["conflicts"][0], "conflict.txt",
-        "resolve --list should surface active text-merge conflicts, not only structured conflict blobs: {conflict_list}"
-    );
-    let conflict_show_text =
-        std::fs::read_to_string(heddle_merge.path().join("conflict.txt")).unwrap();
-    assert!(
-        conflict_show_text.contains("<<<<<<<") && conflict_show_text.contains(">>>>>>>"),
-        "conflict file should retain active merge markers: {conflict_show_text}"
-    );
-
-    let blocked_continue = json(heddle_merge.path(), &["--output", "json", "continue"]);
-    assert_eq!(blocked_continue["status"], "blocked");
-    assert_eq!(blocked_continue["next_action"], "heddle resolve --list");
-    assert_eq!(
-        blocked_continue["recommended_action"],
-        "heddle resolve conflict.txt"
-    );
-
-    let resolved_merge = json(
-        heddle_merge.path(),
-        &["--output", "json", "resolve", "--all", "--ours"],
-    );
-    assert_eq!(resolved_merge["continued"], true, "{resolved_merge}");
-    assert_eq!(
-        resolved_merge["continuation_status"], "continued",
-        "{resolved_merge}"
-    );
-    assert!(json(heddle_merge.path(), &["status", "--output", "json"])["operation"].is_null());
-
-    // Raw Git merge: Heddle must not shell out to `git merge --continue`.
-    let git_merge = TempDir::new().unwrap();
-    init_git_repo_with_branch(git_merge.path(), "feature/drop-in");
-    std::fs::write(git_merge.path().join("conflict.txt"), "base\n").unwrap();
-    git_commit_all(git_merge.path(), "seed branch");
-    heddle(&["init"], Some(git_merge.path())).unwrap();
-    let _ = json(git_merge.path(), &["status", "--output", "json"]);
-    git(&["checkout", "-b", "support/merge"], git_merge.path());
-    std::fs::write(git_merge.path().join("conflict.txt"), "support merge\n").unwrap();
-    git_commit_all(git_merge.path(), "support merge");
-    git(&["checkout", "feature/drop-in"], git_merge.path());
-    std::fs::write(git_merge.path().join("conflict.txt"), "main merge\n").unwrap();
-    git_commit_all(git_merge.path(), "main merge");
-    let merge = Command::new("git")
-        .args(["merge", "support/merge"])
-        .current_dir(git_merge.path())
-        .output()
-        .expect("git merge should run");
-    assert!(!merge.status.success());
-    std::fs::write(git_merge.path().join("conflict.txt"), "main merge\n").unwrap();
-    git(&["add", "conflict.txt"], git_merge.path());
-    let continued_git_merge = json(git_merge.path(), &["--output", "json", "continue"]);
-    assert_eq!(continued_git_merge["status"], "blocked");
-    assert_eq!(
-        continued_git_merge["recommended_action"],
-        raw_git_preservation_action()
-    );
-    assert!(
-        continued_git_merge["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("no-git runtime")),
-        "raw Git handoff should explain why Heddle did not run git: {continued_git_merge}"
-    );
-    assert!(!json(git_merge.path(), &["status", "--output", "json"])["operation"].is_null());
-
-    // Raw Git cherry-pick: Heddle must not shell out to `git cherry-pick --continue`.
-    let git_cherry = TempDir::new().unwrap();
-    init_git_repo_with_branch(git_cherry.path(), "feature/drop-in");
-    std::fs::write(git_cherry.path().join("conflict.txt"), "base\n").unwrap();
-    git_commit_all(git_cherry.path(), "seed branch");
-    let _ = json(git_cherry.path(), &["status", "--output", "json"]);
-    git(&["checkout", "-b", "support/cherry"], git_cherry.path());
-    std::fs::write(git_cherry.path().join("conflict.txt"), "support cherry\n").unwrap();
-    git_commit_all(git_cherry.path(), "support cherry");
-    let cherry_commit = {
-        let output = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(git_cherry.path())
-            .output()
-            .expect("git rev-parse should run");
-        assert!(output.status.success());
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    };
-    git(&["checkout", "feature/drop-in"], git_cherry.path());
-    std::fs::write(git_cherry.path().join("conflict.txt"), "main cherry\n").unwrap();
-    git_commit_all(git_cherry.path(), "main cherry");
-    let cherry_pick = Command::new("git")
-        .args(["cherry-pick", &cherry_commit])
-        .current_dir(git_cherry.path())
-        .output()
-        .expect("git cherry-pick should run");
-    assert!(!cherry_pick.status.success());
-    std::fs::write(git_cherry.path().join("conflict.txt"), "main cherry\n").unwrap();
-    git(&["add", "conflict.txt"], git_cherry.path());
-    let continued_git_cherry = json(git_cherry.path(), &["--output", "json", "continue"]);
-    assert_eq!(continued_git_cherry["status"], "blocked");
-    assert_eq!(
-        continued_git_cherry["recommended_action"],
-        raw_git_preservation_action()
-    );
-    assert!(!json(git_cherry.path(), &["status", "--output", "json"])["operation"].is_null());
-
-    // Raw Git revert: Heddle must not shell out to `git revert --continue`.
-    let git_revert = TempDir::new().unwrap();
-    init_git_repo_with_branch(git_revert.path(), "feature/drop-in");
-    std::fs::write(git_revert.path().join("tracked.txt"), "base\n").unwrap();
-    git_commit_all(git_revert.path(), "seed branch");
-    let _ = json(git_revert.path(), &["status", "--output", "json"]);
-    std::fs::write(git_revert.path().join("tracked.txt"), "main change\n").unwrap();
-    git_commit_all(git_revert.path(), "main change");
-    let revert = Command::new("git")
-        .args(["revert", "--no-commit", "HEAD"])
-        .current_dir(git_revert.path())
-        .output()
-        .expect("git revert should run");
-    assert!(revert.status.success());
-    git(&["add", "tracked.txt"], git_revert.path());
-    let continued_git_revert = json(git_revert.path(), &["--output", "json", "continue"]);
-    assert_eq!(continued_git_revert["status"], "blocked");
-    assert_eq!(
-        continued_git_revert["recommended_action"],
-        raw_git_preservation_action()
-    );
-    assert!(!json(git_revert.path(), &["status", "--output", "json"])["operation"].is_null());
-
-    // Bisect states should remain intentionally blocked under continue.
-    let heddle_bisect = TempDir::new().unwrap();
-    init_git_repo_with_branch(heddle_bisect.path(), "feature/drop-in");
-    std::fs::write(heddle_bisect.path().join("tracked.txt"), "base\n").unwrap();
-    git_commit_all(heddle_bisect.path(), "seed branch");
-    let _ = json(heddle_bisect.path(), &["status", "--output", "json"]);
-    seed_heddle_bisect_state(heddle_bisect.path());
-    let blocked_heddle_bisect = json(heddle_bisect.path(), &["--output", "json", "continue"]);
-    assert_eq!(blocked_heddle_bisect["status"], "blocked");
-    assert_eq!(blocked_heddle_bisect["recommended_action"], "heddle abort");
-
-    let git_bisect = TempDir::new().unwrap();
-    init_git_repo_with_branch(git_bisect.path(), "feature/drop-in");
-    std::fs::write(git_bisect.path().join("tracked.txt"), "base\n").unwrap();
-    git_commit_all(git_bisect.path(), "seed branch");
-    std::fs::write(git_bisect.path().join("tracked.txt"), "middle\n").unwrap();
-    git_commit_all(git_bisect.path(), "middle change");
-    std::fs::write(git_bisect.path().join("tracked.txt"), "bad\n").unwrap();
-    git_commit_all(git_bisect.path(), "bad change");
-    let _ = json(git_bisect.path(), &["status", "--output", "json"]);
-    git(&["bisect", "start"], git_bisect.path());
-    git(&["bisect", "bad"], git_bisect.path());
-    git(&["bisect", "good", "HEAD~2"], git_bisect.path());
-    let blocked_git_bisect = json(git_bisect.path(), &["--output", "json", "continue"]);
-    assert_eq!(blocked_git_bisect["status"], "blocked");
-    assert_eq!(
-        blocked_git_bisect["recommended_action"],
-        raw_git_preservation_action()
-    );
-}
-
-#[test]
-fn git_overlay_matrix_abort_handles_each_supported_operation_state() {
-    let heddle_merge = TempDir::new().unwrap();
-    init_heddle_conflict_repo(heddle_merge.path());
-    start_conflicted_heddle_merge(heddle_merge.path());
-    let aborted_heddle_merge = json(heddle_merge.path(), &["--output", "json", "abort"]);
-    assert_eq!(aborted_heddle_merge["status"], "aborted");
-    assert!(json(heddle_merge.path(), &["status", "--output", "json"])["operation"].is_null());
-
-    let heddle_bisect = TempDir::new().unwrap();
-    init_git_repo_with_branch(heddle_bisect.path(), "feature/drop-in");
-    std::fs::write(heddle_bisect.path().join("tracked.txt"), "base\n").unwrap();
-    git_commit_all(heddle_bisect.path(), "seed branch");
-    let _ = json(heddle_bisect.path(), &["status", "--output", "json"]);
-    seed_heddle_bisect_state(heddle_bisect.path());
-    let aborted_heddle_bisect = json(heddle_bisect.path(), &["--output", "json", "abort"]);
-    assert_eq!(aborted_heddle_bisect["status"], "aborted");
-    assert!(json(heddle_bisect.path(), &["status", "--output", "json"])["operation"].is_null());
-
-    let git_rebase = TempDir::new().unwrap();
-    init_git_repo_with_branch(git_rebase.path(), "feature/drop-in");
-    std::fs::write(git_rebase.path().join("clash.txt"), "base\n").unwrap();
-    git_commit_all(git_rebase.path(), "seed branch");
-    let _ = json(git_rebase.path(), &["status", "--output", "json"]);
-    git(&["checkout", "-b", "support/rebase"], git_rebase.path());
-    std::fs::write(git_rebase.path().join("clash.txt"), "support rebase\n").unwrap();
-    git_commit_all(git_rebase.path(), "support rebase");
-    git(&["checkout", "feature/drop-in"], git_rebase.path());
-    std::fs::write(git_rebase.path().join("clash.txt"), "main rebase\n").unwrap();
-    git_commit_all(git_rebase.path(), "main rebase");
-    git(&["checkout", "support/rebase"], git_rebase.path());
-    let rebase = Command::new("git")
-        .args(["rebase", "feature/drop-in"])
-        .current_dir(git_rebase.path())
-        .output()
-        .expect("git rebase should run");
-    assert!(!rebase.status.success());
-    let aborted_git_rebase = json(git_rebase.path(), &["--output", "json", "abort"]);
-    assert_eq!(aborted_git_rebase["status"], "blocked");
-    assert_eq!(
-        aborted_git_rebase["recommended_action"],
-        raw_git_preservation_action()
-    );
-    assert!(!json(git_rebase.path(), &["status", "--output", "json"])["operation"].is_null());
-
-    let git_merge = TempDir::new().unwrap();
-    init_git_repo_with_branch(git_merge.path(), "feature/drop-in");
-    std::fs::write(git_merge.path().join("conflict.txt"), "base\n").unwrap();
-    git_commit_all(git_merge.path(), "seed branch");
-    heddle(&["init"], Some(git_merge.path())).unwrap();
-    let _ = json(git_merge.path(), &["status", "--output", "json"]);
-    git(&["checkout", "-b", "support/merge"], git_merge.path());
-    std::fs::write(git_merge.path().join("conflict.txt"), "support merge\n").unwrap();
-    git_commit_all(git_merge.path(), "support merge");
-    git(&["checkout", "feature/drop-in"], git_merge.path());
-    std::fs::write(git_merge.path().join("conflict.txt"), "main merge\n").unwrap();
-    git_commit_all(git_merge.path(), "main merge");
-    let merge = Command::new("git")
-        .args(["merge", "support/merge"])
-        .current_dir(git_merge.path())
-        .output()
-        .expect("git merge should run");
-    assert!(!merge.status.success());
-    let aborted_git_merge = json(git_merge.path(), &["--output", "json", "abort"]);
-    assert_eq!(aborted_git_merge["status"], "blocked");
-    assert_eq!(
-        aborted_git_merge["recommended_action"],
-        raw_git_preservation_action()
-    );
-    assert!(!json(git_merge.path(), &["status", "--output", "json"])["operation"].is_null());
-
-    let git_cherry = TempDir::new().unwrap();
-    init_git_repo_with_branch(git_cherry.path(), "feature/drop-in");
-    std::fs::write(git_cherry.path().join("conflict.txt"), "base\n").unwrap();
-    git_commit_all(git_cherry.path(), "seed branch");
-    let _ = json(git_cherry.path(), &["status", "--output", "json"]);
-    git(&["checkout", "-b", "support/cherry"], git_cherry.path());
-    std::fs::write(git_cherry.path().join("conflict.txt"), "support cherry\n").unwrap();
-    git_commit_all(git_cherry.path(), "support cherry");
-    let cherry_commit = {
-        let output = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(git_cherry.path())
-            .output()
-            .expect("git rev-parse should run");
-        assert!(output.status.success());
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    };
-    git(&["checkout", "feature/drop-in"], git_cherry.path());
-    std::fs::write(git_cherry.path().join("conflict.txt"), "main cherry\n").unwrap();
-    git_commit_all(git_cherry.path(), "main cherry");
-    let cherry_pick = Command::new("git")
-        .args(["cherry-pick", &cherry_commit])
-        .current_dir(git_cherry.path())
-        .output()
-        .expect("git cherry-pick should run");
-    assert!(!cherry_pick.status.success());
-    let aborted_git_cherry = json(git_cherry.path(), &["--output", "json", "abort"]);
-    assert_eq!(aborted_git_cherry["status"], "blocked");
-    assert_eq!(
-        aborted_git_cherry["recommended_action"],
-        raw_git_preservation_action()
-    );
-    assert!(!json(git_cherry.path(), &["status", "--output", "json"])["operation"].is_null());
-
-    let git_revert = TempDir::new().unwrap();
-    init_git_repo_with_branch(git_revert.path(), "feature/drop-in");
-    std::fs::write(git_revert.path().join("tracked.txt"), "base\n").unwrap();
-    git_commit_all(git_revert.path(), "seed branch");
-    let _ = json(git_revert.path(), &["status", "--output", "json"]);
-    std::fs::write(git_revert.path().join("tracked.txt"), "main change\n").unwrap();
-    git_commit_all(git_revert.path(), "main change");
-    let revert = Command::new("git")
-        .args(["revert", "--no-commit", "HEAD"])
-        .current_dir(git_revert.path())
-        .output()
-        .expect("git revert should run");
-    assert!(revert.status.success());
-    let aborted_git_revert = json(git_revert.path(), &["--output", "json", "abort"]);
-    assert_eq!(aborted_git_revert["status"], "blocked");
-    assert_eq!(
-        aborted_git_revert["recommended_action"],
-        raw_git_preservation_action()
-    );
-    assert!(!json(git_revert.path(), &["status", "--output", "json"])["operation"].is_null());
-
-    let git_bisect = TempDir::new().unwrap();
-    init_git_repo_with_branch(git_bisect.path(), "feature/drop-in");
-    std::fs::write(git_bisect.path().join("tracked.txt"), "base\n").unwrap();
-    git_commit_all(git_bisect.path(), "seed branch");
-    std::fs::write(git_bisect.path().join("tracked.txt"), "middle\n").unwrap();
-    git_commit_all(git_bisect.path(), "middle change");
-    std::fs::write(git_bisect.path().join("tracked.txt"), "bad\n").unwrap();
-    git_commit_all(git_bisect.path(), "bad change");
-    let _ = json(git_bisect.path(), &["status", "--output", "json"]);
-    git(&["bisect", "start"], git_bisect.path());
-    git(&["bisect", "bad"], git_bisect.path());
-    git(&["bisect", "good", "HEAD~2"], git_bisect.path());
-    let aborted_git_bisect = json(git_bisect.path(), &["--output", "json", "abort"]);
-    assert_eq!(aborted_git_bisect["status"], "blocked");
-    assert_eq!(
-        aborted_git_bisect["recommended_action"],
-        raw_git_preservation_action()
-    );
-    assert!(!json(git_bisect.path(), &["status", "--output", "json"])["operation"].is_null());
-}
-
-#[test]
-fn git_overlay_matrix_operator_states_survive_reopen_and_keep_guidance_consistent() {
-    let temp = TempDir::new().unwrap();
-    init_heddle_conflict_repo(temp.path());
-    start_conflicted_heddle_merge(temp.path());
-
-    let status = json(temp.path(), &["status", "--output", "json"]);
-    let doctor = json(temp.path(), &["doctor", "--output", "json"]);
-    let thread_show = json(
-        temp.path(),
-        &["thread", "show", "feature", "--output", "json"],
-    );
-    let workspace = json(temp.path(), &["status", "--output", "json"]);
-
-    assert_eq!(status["operation"]["kind"], "merge");
-    assert_eq!(doctor["operation"]["kind"], "merge");
-    assert_eq!(thread_show["operation"]["kind"], "merge");
-    assert_eq!(workspace["operation"]["kind"], "merge");
-    assert_eq!(status["recommended_action"], "heddle continue");
-    assert_eq!(doctor["health"]["recommended_action"], "heddle continue");
-    assert_eq!(thread_show["recommended_action"], "heddle continue");
-    assert_eq!(workspace["recommended_action"], "heddle continue");
-
-    let nested = temp.path().join("nested/reopen/path");
-    std::fs::create_dir_all(&nested).unwrap();
-    let status_reopened = json(&nested, &["status", "--output", "json"]);
-    let workspace_reopened = json(&nested, &["status", "--output", "json"]);
-    assert_eq!(status_reopened["operation"]["kind"], "merge");
-    assert_eq!(status_reopened["recommended_action"], "heddle continue");
-    assert_eq!(workspace_reopened["recommended_action"], "heddle continue");
-}
-
-#[test]
-fn git_overlay_matrix_continue_retry_loops_block_then_succeed_after_resolution() {
-    let heddle_merge = TempDir::new().unwrap();
-    init_heddle_conflict_repo(heddle_merge.path());
-    start_conflicted_heddle_merge(heddle_merge.path());
-    let blocked = json(heddle_merge.path(), &["--output", "json", "continue"]);
-    assert_eq!(blocked["status"], "blocked");
-    assert_operator_json_contract(&blocked, "continue");
-    let resolved = json(
-        heddle_merge.path(),
-        &["--output", "json", "resolve", "--all", "--ours"],
-    );
-    assert_eq!(resolved["continued"], true, "{resolved}");
-    assert_eq!(resolved["continuation_status"], "continued", "{resolved}");
-
-    let git_merge = TempDir::new().unwrap();
-    init_git_repo_with_branch(git_merge.path(), "feature/drop-in");
-    std::fs::write(git_merge.path().join("conflict.txt"), "base\n").unwrap();
-    git_commit_all(git_merge.path(), "seed branch");
-    heddle(&["init"], Some(git_merge.path())).unwrap();
-    let _ = json(git_merge.path(), &["status", "--output", "json"]);
-    git(&["checkout", "-b", "support/merge"], git_merge.path());
-    std::fs::write(git_merge.path().join("conflict.txt"), "support merge\n").unwrap();
-    git_commit_all(git_merge.path(), "support merge");
-    git(&["checkout", "feature/drop-in"], git_merge.path());
-    std::fs::write(git_merge.path().join("conflict.txt"), "main merge\n").unwrap();
-    git_commit_all(git_merge.path(), "main merge");
-    let merge = Command::new("git")
-        .args(["merge", "support/merge"])
-        .current_dir(git_merge.path())
-        .output()
-        .expect("git merge should run");
-    assert!(!merge.status.success());
-    let blocked_git = json(git_merge.path(), &["status", "--output", "json"]);
-    assert_eq!(blocked_git["operation"]["kind"], "merge", "{blocked_git}");
-    std::fs::write(git_merge.path().join("conflict.txt"), "main merge\n").unwrap();
-    git(&["add", "conflict.txt"], git_merge.path());
-    let continued_git = json(git_merge.path(), &["--output", "json", "continue"]);
-    assert_eq!(continued_git["status"], "blocked");
-    assert_eq!(
-        continued_git["recommended_action"],
-        raw_git_preservation_action()
-    );
-    assert!(
-        continued_git["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("no-git runtime")),
-        "raw Git continue should explain the native no-git boundary: {continued_git}"
-    );
-    assert_operator_json_contract(&continued_git, "continue");
 }

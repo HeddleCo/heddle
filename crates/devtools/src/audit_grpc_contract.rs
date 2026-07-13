@@ -235,7 +235,10 @@ fn collect_marked_fields(
         return;
     }
 
-    for field in message.fields() {
+    let fields = message.fields().collect::<Vec<_>>();
+    let has_direct_key = fields.iter().any(|field| field_is_marked(field, extension));
+
+    for field in fields {
         let field_path = format!("{path}.{}", field.name());
         if field_is_marked(&field, extension) {
             validate_marked_field(&field, &field_path, problems);
@@ -249,7 +252,7 @@ fn collect_marked_fields(
             });
         }
 
-        if let Kind::Message(child) = field.kind() {
+        if !has_direct_key && let Kind::Message(child) = field.kind() {
             let child_non_singular_edge = non_singular_edge
                 .or_else(|| (field.is_list() || field.is_map()).then_some(field_path.as_str()));
             collect_marked_fields(
@@ -377,6 +380,27 @@ message Envelope { oneof body { Request request = 1; string heartbeat = 2; } }
         assert!(problems.is_empty(), "unexpected problems: {problems:?}");
         assert_eq!(marked.len(), 1);
         assert_eq!(marked[0].path, "Envelope.request.client_operation_id");
+    }
+
+    #[test]
+    fn direct_key_is_authoritative_over_nested_request_keys() {
+        let pool = fixture_pool(
+            r#"
+message FirstRequest { string client_operation_id = 1 [(heddle.v1.idempotency_key) = true]; }
+message SecondRequest { string client_operation_id = 1 [(heddle.v1.idempotency_key) = true]; }
+message Envelope {
+  oneof body {
+    FirstRequest first = 1;
+    SecondRequest second = 2;
+  }
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
+}
+"#,
+        );
+        let (marked, problems) = marked_fields(&pool, "fixture.Envelope");
+        assert!(problems.is_empty(), "unexpected problems: {problems:?}");
+        assert_eq!(marked.len(), 1);
+        assert_eq!(marked[0].path, "Envelope.client_operation_id");
     }
 
     #[test]

@@ -110,6 +110,8 @@ impl HeddleExitCode {
             //   that output contract (the invocation parses fine; the
             //   command rejects the requested projection)
             "nothing_to_capture"
+            | "commit_requires_git_overlay"
+            | "commit_capture_required"
             | "git_repair_requires_adoption"
             | "git_repair_requires_import"
             | "dirty_worktree"
@@ -168,7 +170,8 @@ impl HeddleExitCode {
                     // A missing repository is a missing precondition
                     // (initialize/point at one), not an IO failure.
                     objects::error::HeddleError::RepositoryNotFound(_) => return Self::Config,
-                    objects::error::HeddleError::RepositoryFormatTooNew { .. } => {
+                    objects::error::HeddleError::RepositoryFormatTooNew { .. }
+                    | objects::error::HeddleError::RepositoryFormatMigrationRequired { .. } => {
                         return Self::DataErr;
                     }
                     objects::error::HeddleError::StateNotFound(_)
@@ -397,6 +400,17 @@ mod tests {
             key: "output.format".to_string(),
             value: "auto".to_string(),
             valid_values: vec!["'text'".to_string(), "'json'".to_string()],
+        }
+        .into();
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn repository_format_migration_required_is_data_err() {
+        let err: anyhow::Error = objects::error::HeddleError::RepositoryFormatMigrationRequired {
+            path: std::path::PathBuf::from("/tmp/config.toml"),
+            found: 2,
+            required: 3,
         }
         .into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);

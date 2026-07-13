@@ -10,6 +10,9 @@ service RepoEventService {
   rpc SubscribeRepoEvents(SubscribeRepoEventsRequest) returns (stream RepoEvent) {
     option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
   }
+  rpc SubscribeRepoEventsMulti(SubscribeRepoEventsMultiRequest) returns (stream RepoEvent) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 }
 
 message SubscribeRepoEventsRequest {
@@ -17,6 +20,12 @@ message SubscribeRepoEventsRequest {
   string thread = 2;
   int64 after_event_id = 3;
   repeated string event_types = 4;
+}
+
+message SubscribeRepoEventsMultiRequest {
+  repeated string repo_paths = 1;
+  string thread = 2;
+  repeated string event_types = 3;
 }
 
 message RepoEvent {

@@ -82,10 +82,10 @@ fn has_unaccepted_ancestor(
         if !accepted.contains(&parent) {
             return true;
         }
-        if seen.insert(parent) {
-            if let Some(operation) = operations.get(&parent) {
-                pending.extend(operation.operation.parents.iter().copied());
-            }
+        if seen.insert(parent)
+            && let Some(operation) = operations.get(&parent)
+        {
+            pending.extend(operation.operation.parents.iter().copied());
         }
     }
     false
@@ -341,10 +341,10 @@ fn precedes(
         if id == ancestor {
             return true;
         }
-        if seen.insert(id) {
-            if let Some(operation) = operations.get(&id) {
-                pending.extend(operation.operation.parents.iter().copied());
-            }
+        if seen.insert(id)
+            && let Some(operation) = operations.get(&id)
+        {
+            pending.extend(operation.operation.parents.iter().copied());
         }
     }
     false

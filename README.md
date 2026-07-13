@@ -30,7 +30,7 @@ In a plain Git repo, observe-only commands do not create `.heddle/`. `heddle sta
 - whether Heddle has been initialized
 - the exact next command to initialize Git Overlay
 
-Run the exact command printed by `heddle status`. In an existing Git checkout, that is `heddle init`: it creates the `.heddle` sidecar while the real `.git` remains authoritative for commits, trees, refs, packs, index, and worktree state. Heddle stores captures, threads, provenance, discussions, and source mappings in `.heddle`. Its embedded Sley engine powers the thin Git surface — `clone`, `commit`, `pull`, `push`, and `remote` — directly against `.git`. Heddle never requires the `git` executable and does not maintain a normal `.heddle/git` mirror.
+Run the exact command printed by `heddle status`. In an existing Git checkout, that is `heddle init`: it creates the `.heddle` sidecar while the real `.git` remains authoritative for commits, trees, refs, packs, index, and worktree state. Heddle stores captures, threads, provenance, discussions, and source mappings in `.heddle`. Its embedded Sley engine powers the thin Git surface — `clone`, `commit`, `pull`, `push`, and `remote` — directly against `.git`. Heddle never requires the `git` executable. Normal Git Overlay neither creates nor reads `.heddle/git`; only legacy migration and repair may read an existing Bridge Mirror while its retirement is completed.
 
 `heddle adopt` atomically imports selected Git refs, makes Heddle the source authority, and enables the full Native Heddle feature set. The retained `.git` is then an explicit Git Projection adapter. Adoption is not required for normal Git Overlay use.
 
@@ -109,7 +109,7 @@ heddle init --principal-name "Ada Lovelace" --principal-email ada@example.com
 heddle capture -m "start project"
 ```
 
-In a Git checkout, `heddle init` creates the Heddle sidecar and leaves source storage in the checkout's real `.git`. `heddle capture` records Heddle metadata and provenance in `.heddle`; `heddle commit`, `pull`, `push`, and `remote` delegate through Sley to `.git`. Use `heddle adopt` when you want an atomic transition to Heddle-native source authority and its full feature set.
+In a Git checkout, `heddle init` creates the Heddle sidecar and leaves source storage in the checkout's real `.git`. `heddle capture` records Heddle metadata and provenance in `.heddle`; `heddle commit`, `pull`, `push`, and `remote` delegate through Sley to `.git`. `heddle commit` commits the complete captured tree, replaces the Git index with that tree, and does not run Git `pre-commit` or `commit-msg` hooks. Use `heddle adopt` when you want an atomic transition to Heddle-native source authority and its full feature set.
 
 ### The verb-by-verb tour
 

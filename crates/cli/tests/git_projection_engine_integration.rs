@@ -14,7 +14,7 @@ use std::{
 };
 
 use base64::Engine;
-use cli::git_projection_engine::{
+use heddle_git_projection::{
     GitProjection,
     git_core::{
         GitProjectionError, GitPushScope, SyncMapping, clone_url_to_bare, copy_local_repo_to_bare,
@@ -1234,7 +1234,7 @@ fn both_engines_fail_hard_on_default_rerun_after_lossy() {
 fn checkout_materialization_reconstructs_faithful_commit_from_empty_mirror() {
     use std::collections::HashSet;
 
-    use cli::git_projection_engine::git_reconstruct::commit_object_id;
+    use heddle_git_projection::git_reconstruct::commit_object_id;
     use objects::object::{Attribution, Principal, State};
 
     let heddle_temp = TempDir::new().expect("heddle temp");
@@ -2008,6 +2008,7 @@ fn mapping_rebuilds_from_heddle_notes() {
     let commit_oid = commit_with_tree(&git_repo, Some("refs/heads/main"), tree_oid, "base", &[]);
     let state_id = StateId::from_bytes([63; 32]);
     let note = git_notes::HeddleNote {
+        source_state: None,
         state_id: state_id.to_string_full(),
         change_id: ChangeId::from_bytes([1; 16]).to_string_full(),
         agent: None,
@@ -2046,6 +2047,7 @@ fn mapping_rebuild_prefers_heddle_notes_over_stale_cache() {
         .expect("oid");
 
     let note = git_notes::HeddleNote {
+        source_state: None,
         state_id: state_id.to_string_full(),
         change_id: ChangeId::from_bytes([2; 16]).to_string_full(),
         agent: None,
@@ -4356,13 +4358,13 @@ fn export_retracts_note_for_retracted_commit() {
     {
         let mirror = test_support::open_git_repo(&git_projection).expect("open mirror");
         assert!(
-            cli::git_projection_engine::git_notes::read_note(&mirror, oid_a)
+            heddle_git_projection::git_notes::read_note(&mirror, oid_a)
                 .unwrap()
                 .is_some(),
             "A must carry a note after run 1"
         );
         assert!(
-            cli::git_projection_engine::git_notes::read_note(&mirror, oid_b)
+            heddle_git_projection::git_notes::read_note(&mirror, oid_b)
                 .unwrap()
                 .is_some(),
             "B must carry a note after run 1"
@@ -4391,13 +4393,13 @@ fn export_retracts_note_for_retracted_commit() {
     export_all(&mut git_projection).expect("second export");
     let mirror = test_support::open_git_repo(&git_projection).expect("open mirror");
     assert!(
-        cli::git_projection_engine::git_notes::read_note(&mirror, oid_b)
+        heddle_git_projection::git_notes::read_note(&mirror, oid_b)
             .unwrap()
             .is_none(),
         "run 2 must retract the note for the now-embargoed B (no metadata leak)"
     );
     assert!(
-        cli::git_projection_engine::git_notes::read_note(&mirror, oid_a)
+        heddle_git_projection::git_notes::read_note(&mirror, oid_a)
             .unwrap()
             .is_some(),
         "A is still served — its note must survive the retraction"
@@ -4462,7 +4464,7 @@ fn scoped_export_retracts_note_for_commit_with_embargoed_ancestor() {
     {
         let mirror = test_support::open_git_repo(&git_projection).expect("open mirror");
         assert!(
-            cli::git_projection_engine::git_notes::read_note(&mirror, oid_x)
+            heddle_git_projection::git_notes::read_note(&mirror, oid_x)
                 .unwrap()
                 .is_some(),
             "X must carry a note after run 1"
@@ -4493,13 +4495,13 @@ fn scoped_export_retracts_note_for_commit_with_embargoed_ancestor() {
     export_current_thread(&mut git_projection, "other").expect("scoped export");
     let mirror = test_support::open_git_repo(&git_projection).expect("open mirror");
     assert!(
-        cli::git_projection_engine::git_notes::read_note(&mirror, oid_x)
+        heddle_git_projection::git_notes::read_note(&mirror, oid_x)
             .unwrap()
             .is_none(),
         "scoped export must retract X's note (ancestor embargoed) — no notes leak"
     );
     assert!(
-        cli::git_projection_engine::git_notes::read_note(&mirror, oid_o)
+        heddle_git_projection::git_notes::read_note(&mirror, oid_o)
             .unwrap()
             .is_some(),
         "O is served — its note must survive the scoped retraction"
@@ -6249,7 +6251,7 @@ fn export_propagates_tag_and_note_deletion() {
             "destination must have the tag while public"
         );
         assert!(
-            cli::git_projection_engine::git_notes::read_note(&dest, oid_r)
+            heddle_git_projection::git_notes::read_note(&dest, oid_r)
                 .unwrap()
                 .is_some(),
             "destination must carry R's note while public"
@@ -6306,7 +6308,7 @@ fn export_propagates_tag_and_note_deletion() {
         "a stale heddle-managed notes ref absent from the served mirror must be DELETED at the destination"
     );
     assert!(
-        cli::git_projection_engine::git_notes::read_note(&dest, oid_r)
+        heddle_git_projection::git_notes::read_note(&dest, oid_r)
             .unwrap()
             .is_none(),
         "the embargoed commit's note must no longer be readable at the destination"
@@ -6756,7 +6758,7 @@ fn foreign_ref_on_url_remote_survives() {
 /// the destination's newer commit survives. Covers local-path AND URL/network.
 #[test]
 fn out_of_band_destination_descendant_not_force_overwritten() {
-    use cli::git_projection_engine::git_core::GitProjectionError;
+    use heddle_git_projection::git_core::GitProjectionError;
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
@@ -7759,7 +7761,7 @@ fn foreign_destination_ref_spared() {
 /// local-path AND URL/network.
 #[test]
 fn out_of_band_destination_tag_not_overwritten() {
-    use cli::git_projection_engine::git_core::GitProjectionError;
+    use heddle_git_projection::git_core::GitProjectionError;
     use objects::object::{Attribution, Principal, State};
 
     let heddle_temp = TempDir::new().expect("heddle temp");

@@ -103,9 +103,12 @@ impl PgRefBackend {
     }
 
     fn bytes_to_id(bytes: Vec<u8>) -> Result<StateId> {
-        let arr: [u8; 16] = bytes
-            .try_into()
-            .map_err(|_| HeddleError::InvalidObject("invalid StateId bytes in database".into()))?;
+        let found = bytes.len();
+        let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+            HeddleError::InvalidObject(format!(
+                "invalid StateId width in database: expected 32 bytes, found {found}"
+            ))
+        })?;
         Ok(StateId::from_bytes(arr))
     }
 
@@ -386,49 +389,6 @@ impl RefBackend for PgRefBackend {
     }
 }
 
-// ── Issue #62 regression: current-thread runtime panic ──────────────────────
 #[cfg(test)]
-mod current_thread_runtime_tests {
-    use sqlx::postgres::PgPoolOptions;
-
-    use super::*;
-
-    /// Connection URL for the integration test: the CI `postgres-tests`
-    /// job sets `DATABASE_URL` to the service container; everywhere else it
-    /// is unset and we fall back to a deliberately-unreachable endpoint
-    /// (port 1) so the call still round-trips through the runtime bridge
-    /// without depending on a real database.
-    fn test_database_url() -> String {
-        std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://heddle-test@127.0.0.1:1/heddle_test".to_string())
-    }
-
-    /// Issue #62: `PgRefBackend`'s sync methods must not panic when the
-    /// caller is on a `current_thread` Tokio runtime. The pre-fix
-    /// `tokio::task::block_in_place(...)` path is only valid on a
-    /// `multi_thread` runtime; on `current_thread` it panics with
-    /// `"can call blocking only when running on the multi-threaded runtime"`.
-    ///
-    /// `#[ignore]`: the postgres integration suite only runs under the CI
-    /// `postgres-tests` job (`cargo test --features postgres -- --ignored`)
-    /// which provides a real `DATABASE_URL`. Without it the pool points at an
-    /// unreachable endpoint, so the method returns `Err` rather than `Ok` —
-    /// either way the contract under test is the *absence of a panic*.
-    #[tokio::test(flavor = "current_thread")]
-    #[ignore = "postgres integration: needs DATABASE_URL (CI postgres-tests job)"]
-    async fn pg_refs_methods_do_not_panic_on_current_thread_runtime() {
-        // Short `acquire_timeout` keeps the test snappy when the endpoint is
-        // unreachable: the future resolves to `Err(PoolTimedOut)` instead of
-        // waiting for sqlx's 30 s default.
-        let pool = PgPoolOptions::new()
-            .acquire_timeout(std::time::Duration::from_millis(200))
-            .connect_lazy(&test_database_url())
-            .expect("connect_lazy accepts the URL");
-        let backend = PgRefBackend::new(Arc::new(pool), Uuid::new_v4());
-        // `read_head()` is the cheapest read; the panic surfaces inside
-        // `self.block(...)` regardless of which sync method we pick. Result
-        // can be `Ok(_)` or `Err(...)` — only the absence of a panic
-        // matters here.
-        let _ = backend.read_head();
-    }
-}
+#[path = "pg_refs_tests.rs"]
+mod tests;

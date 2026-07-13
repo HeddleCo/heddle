@@ -227,14 +227,14 @@ fn short_status_surfaces_stale_materialized_thread_advisory() {
         manifest_path.display()
     );
     let manifest = fs::read_to_string(&manifest_path).unwrap();
-    // StateId is `[u8; 16]` with the default serde derive, so the
-    // manifest's `state_id` is a 16-element integer array. Parse the
-    // TOML, replace the bytes with a distinct 16-byte value (every
+    // StateId is `[u8; 32]` with the default serde derive, so the
+    // manifest's `state_id` is a 32-element integer array. Parse the
+    // TOML, replace the bytes with a distinct 32-byte value (every
     // byte differs from `rand::random()` with vanishing probability),
     // and write it back.
     let mut doc: toml::Value = toml::from_str(&manifest).unwrap();
     let stale_state_id = toml::Value::Array(
-        (0u8..16)
+        (0u8..32)
             .map(|b| toml::Value::Integer((b ^ 0xa5) as i64))
             .collect(),
     );

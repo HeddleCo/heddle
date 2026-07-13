@@ -1144,11 +1144,13 @@ pub struct CommitAgentSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CommitSchema {
     pub output_kind: String,
+    pub action: String,
     pub status: String,
     pub state_id: String,
     pub git_commit: String,
     pub summary: String,
     pub recommended_action: Option<String>,
+    pub recommended_action_template: Option<ActionTemplateSchema>,
     pub verification: RepositoryVerificationStateSchema,
 }
 

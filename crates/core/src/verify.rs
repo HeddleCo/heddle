@@ -1298,7 +1298,7 @@ fn recommended_action_templates() -> Vec<ActionTemplate> {
         ),
         (
             "heddle commit -m \"...\"",
-            &["git", "commit", "-m", "<message>"][..],
+            &["heddle", "commit", "-m", "<message>"][..],
             &["message"][..],
             true,
         ),
@@ -1324,7 +1324,7 @@ fn recommended_action_templates() -> Vec<ActionTemplate> {
         ),
         ("heddle status", &["heddle", "status"][..], &[][..], false),
         (
-            "heddle switch <branch>",
+            "heddle thread switch <branch>",
             &["heddle", "switch", "<branch>"][..],
             &["branch"][..],
             false,

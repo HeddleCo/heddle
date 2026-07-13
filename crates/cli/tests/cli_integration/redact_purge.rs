@@ -62,7 +62,8 @@ fn setup_git_overlay_repo_with_secret() -> (TempDir, String) {
     fs::write(temp.path().join("README.md"), "seed\n").unwrap();
     git_overlay_fixture_cmd(temp.path(), &["add", "."]);
     git_overlay_fixture_cmd(temp.path(), &["commit", "-m", "seed"]);
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
 
     fs::create_dir_all(temp.path().join("config")).unwrap();
     fs::write(
@@ -70,11 +71,8 @@ fn setup_git_overlay_repo_with_secret() -> (TempDir, String) {
         b"api_token = \"super-secret-leaked-value\"\n",
     )
     .unwrap();
-    heddle(
-        &["--output", "json", "commit", "-m", "leak the secret"],
-        Some(temp.path()),
-    )
-    .expect("heddle commit");
+    heddle(&["capture", "-m", "leak the secret"], Some(temp.path())).expect("heddle capture");
+    heddle(&["commit", "-m", "leak the secret"], Some(temp.path())).expect("heddle commit");
 
     let raw = heddle(
         &["--output", "json", "log", "--limit", "1"],
@@ -630,7 +628,7 @@ fn redact_apply_signed_propagates_to_cloned_replica() {
     let apply = signed_redact_on_repo_a(&a, &state, &pem_path);
     let redaction_id = apply["redaction_id"].as_str().unwrap().to_string();
 
-    // Set up B: init empty repo, trust A's signing key, then fetch.
+    // Set up B: init empty repo, trust A's signing key, then pull.
     // Operators do this on their own machine the first time they
     // accept signed redactions from a new collaborator; the trust
     // gate is fail-closed so signed records won't propagate until
@@ -655,12 +653,12 @@ fn redact_apply_signed_propagates_to_cloned_replica() {
         Some(&b_path),
     )
     .expect("remote add origin");
-    heddle(&["fetch", "origin"], Some(&b_path)).expect("fetch propagates signed redaction to B");
+    heddle(&["pull", "origin"], Some(&b_path)).expect("pull propagates signed redaction to B");
 
     // B's redact list must include the propagated redaction. The
     // worktree-stub contract is tested separately by the local
     // materialize tests; here we pin the propagation contract: A's
-    // redaction record exists in B's local sidecar after fetch.
+    // redaction record exists in B's local sidecar after pull.
     let list_raw = heddle(&["--output", "json", "redact", "list"], Some(&b_path)).unwrap();
     let list: Value = serde_json::from_str(&list_raw).unwrap();
     let rows = list["redactions"].as_array().expect("redactions array");
@@ -749,7 +747,7 @@ fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
     )
     .expect("purge on A succeeds");
 
-    // Set up B with explicit trust for A's signing key, then fetch.
+    // Set up B with explicit trust for A's signing key, then pull.
     let b_dir = TempDir::new().unwrap();
     let b_path = b_dir.path().join("replica-b");
     fs::create_dir_all(&b_path).unwrap();
@@ -770,8 +768,8 @@ fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
         Some(&b_path),
     )
     .expect("remote add origin");
-    heddle(&["fetch", "origin"], Some(&b_path))
-        .expect("fetch propagates signed redaction + purge to B");
+    heddle(&["pull", "origin"], Some(&b_path))
+        .expect("pull propagates signed redaction + purge to B");
 
     // B must record the purge.
     let purge_list_raw = heddle(
@@ -794,7 +792,7 @@ fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
 }
 
 #[test]
-fn tampered_redaction_is_refused_at_fetch_boundary() {
+fn tampered_redaction_is_refused_at_pull_boundary() {
     use crypto::Ed25519Signer;
     use objects::object::RedactionsBlob;
 
@@ -846,11 +844,11 @@ fn tampered_redaction_is_refused_at_fetch_boundary() {
         Some(&b_path),
     )
     .expect("remote add origin");
-    let err = heddle(&["fetch", "origin"], Some(&b_path))
-        .expect_err("fetch must refuse a tampered redaction");
+    let err = heddle(&["pull", "origin"], Some(&b_path))
+        .expect_err("pull must refuse a tampered redaction");
     assert!(
         err.contains("failed to verify") || err.contains("Tampered") || err.contains("tampered"),
-        "fetch rejection must explain the tamper cause: {err}"
+        "pull rejection must explain the tamper cause: {err}"
     );
 }
 
@@ -1048,7 +1046,7 @@ fn purge_apply_also_emits_ignore_hint() {
 }
 
 #[test]
-fn redact_after_peer_fetch_still_propagates_on_resync() {
+fn redact_after_peer_pull_still_propagates_on_resync() {
     // Scenario the codex review flagged: peer B clones A *first*,
     // then A declares a redaction. A second clone-from-A would find
     // every state/tree/blob already present locally and previously
@@ -1089,7 +1087,7 @@ fn redact_after_peer_fetch_still_propagates_on_resync() {
     let _ = signed_redact_on_repo_a(&a, &state, &pem_path);
 
     // Re-sync: B trusts A's signing key, registers A as a remote,
-    // then `heddle fetch origin` should ferry the sidecar even
+    // then `heddle pull origin` should ferry the sidecar even
     // though every state/tree/blob is already present on B. Trust
     // setup happens after the initial clone (which used no signed
     // redactions, so didn't need trust) — same operator pattern
@@ -1110,7 +1108,12 @@ fn redact_after_peer_fetch_still_propagates_on_resync() {
         Some(&b_path),
     )
     .expect("remote add origin");
-    heddle(&["fetch", "origin"], Some(&b_path)).expect("re-fetch A → B after redaction declared");
+    let pull =
+        heddle(&["pull", "origin"], Some(&b_path)).expect("pull A → B after redaction declared");
+    assert!(
+        pull.contains("already up to date"),
+        "no-op resync should explain that source state is current: {pull}"
+    );
 
     let list_after: Value = serde_json::from_str(
         &heddle(&["--output", "json", "redact", "list"], Some(&b_path)).unwrap(),
@@ -1119,12 +1122,12 @@ fn redact_after_peer_fetch_still_propagates_on_resync() {
     assert_eq!(
         list_after["redactions"].as_array().unwrap().len(),
         1,
-        "B must see the post-clone redaction after re-fetch: {list_after:?}"
+        "B must see the post-clone redaction after pull: {list_after:?}"
     );
 }
 
 #[test]
-fn untrusted_signed_redaction_is_refused_at_fetch_boundary() {
+fn untrusted_signed_redaction_is_refused_at_pull_boundary() {
     // Codex P1: signature verification alone is integrity, not
     // authentication. Without a trust check the receiver accepts
     // *any* mathematically-valid signature, including one minted by
@@ -1132,7 +1135,7 @@ fn untrusted_signed_redaction_is_refused_at_fetch_boundary() {
     //
     // This test pins the fail-closed default end-to-end: B receives
     // a signed redaction from A, but B has *not* added A's key to
-    // its trust list. The fetch must refuse with `UntrustedKey`,
+    // its trust list. The pull must refuse with `UntrustedKey`,
     // and B's local store must be unchanged.
     use crypto::Ed25519Signer;
 
@@ -1154,11 +1157,11 @@ fn untrusted_signed_redaction_is_refused_at_fetch_boundary() {
         Some(&b_path),
     )
     .expect("remote add origin");
-    let err = heddle(&["fetch", "origin"], Some(&b_path))
-        .expect_err("fetch must refuse untrusted signed redaction");
+    let err = heddle(&["pull", "origin"], Some(&b_path))
+        .expect_err("pull must refuse untrusted signed redaction");
     assert!(
         err.contains("untrusted operator key"),
-        "fetch rejection must explain the untrusted-key cause: {err}"
+        "pull rejection must explain the untrusted-key cause: {err}"
     );
 
     // B's local redaction store must remain empty.

@@ -1482,6 +1482,7 @@ mod tests {
         let bogus_tree = objects::object::ContentHash::compute(b"definitely-not-in-store-bytes");
         let mut mutated = state.clone();
         mutated.tree = bogus_tree;
+        let missing_tree_state_id = mutated.id();
         repo.store().put_state(&mutated).expect("put mutated state");
 
         // The review payload must still come back — empty summary,
@@ -1489,7 +1490,7 @@ mod tests {
         let resp = svc
             .get_review_payload(Request::new(GetReviewPayloadRequest {
                 repo_path: String::new(),
-                state_id: state_id.as_bytes().to_vec(),
+                state_id: missing_tree_state_id.as_bytes().to_vec(),
                 include_all_signals: false,
             }))
             .await

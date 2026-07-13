@@ -28,7 +28,7 @@ use serde::Serialize;
 
 use crate::cli::{Cli, render::write_json_stdout, should_output_json};
 #[cfg(feature = "git-overlay")]
-use crate::git_projection_engine::GitProjection;
+use heddle_git_projection::GitProjection;
 
 #[derive(Serialize, Default)]
 struct GcOutput {

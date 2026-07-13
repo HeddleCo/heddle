@@ -170,6 +170,7 @@ mod tests {
             (2, ObjectType::State),
             (3, ObjectType::Action),
             (4, ObjectType::Delta),
+            (5, ObjectType::StateAttachment),
         ] {
             let mut buf = Vec::new();
             encode_type_and_size(obj_type, 42, &mut buf);
@@ -241,8 +242,8 @@ mod tests {
 
     #[test]
     fn test_invalid_type_rejected() {
-        // Type 5, 6, 7 are invalid
-        let buf = [0x50]; // type = 5, size = 0
+        // Type 6 and 7 are unassigned.
+        let buf = [0x60]; // type = 6, size = 0
         assert!(decode_type_and_size(&buf).is_none());
     }
 }

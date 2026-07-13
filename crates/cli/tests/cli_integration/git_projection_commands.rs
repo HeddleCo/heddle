@@ -32,6 +32,20 @@ fn init_colocated_git_repo(path: &std::path::Path) {
         .unwrap();
 }
 
+fn init_direct_git_overlay(path: &std::path::Path) {
+    heddle(
+        &[
+            "init",
+            "--principal-name",
+            "Heddle Test",
+            "--principal-email",
+            "heddle@example.com",
+        ],
+        Some(path),
+    )
+    .expect("initialize direct Git Overlay");
+}
+
 fn git_commit_all_in(path: &std::path::Path, message: &str) {
     assert!(
         Command::new("git")
@@ -249,8 +263,7 @@ fn capture_marks_new_file_intent_to_add_in_colocated_index() {
     std::fs::write(source.path().join("tracked.txt"), "already tracked\n").unwrap();
     git_commit_all_in(source.path(), "initial");
 
-    heddle(&["adopt", "--ref", "main"], Some(source.path()))
-        .expect("adopt should import Git history into Heddle");
+    init_direct_git_overlay(source.path());
 
     std::fs::write(source.path().join("new_file.txt"), "brand new content\n").unwrap();
     heddle(&["capture", "-m", "add new file"], Some(source.path()))
@@ -306,8 +319,7 @@ fn recapture_prunes_stale_intent_to_add_for_removed_file() {
     std::fs::write(source.path().join("tracked.txt"), "already tracked\n").unwrap();
     git_commit_all_in(source.path(), "initial");
 
-    heddle(&["adopt", "--ref", "main"], Some(source.path()))
-        .expect("adopt should import Git history into Heddle");
+    init_direct_git_overlay(source.path());
 
     // Capture a new file: it becomes intent-to-add in the colocated index.
     std::fs::write(source.path().join("new_file.txt"), "brand new content\n").unwrap();
@@ -361,8 +373,7 @@ fn recapture_to_empty_tree_prunes_stale_intent_to_add() {
     std::fs::write(source.path().join("tracked.txt"), "already tracked\n").unwrap();
     git_commit_all_in(source.path(), "initial");
 
-    heddle(&["adopt", "--ref", "main"], Some(source.path()))
-        .expect("adopt should import Git history into Heddle");
+    init_direct_git_overlay(source.path());
 
     // Capture a new file: it becomes intent-to-add in the colocated index.
     std::fs::write(source.path().join("new_file.txt"), "brand new content\n").unwrap();
@@ -427,8 +438,7 @@ fn recapture_skips_intent_to_add_that_conflicts_with_tracked_file() {
     std::fs::write(source.path().join("foo"), "i am a file\n").unwrap();
     git_commit_all_in(source.path(), "initial");
 
-    heddle(&["adopt", "--ref", "main"], Some(source.path()))
-        .expect("adopt should import Git history into Heddle");
+    init_direct_git_overlay(source.path());
 
     // Replace the tracked file `foo` with a directory `foo/` containing
     // `foo/bar`. The captured state now has `foo/bar`, but the real
@@ -474,8 +484,7 @@ fn recapture_skips_intent_to_add_that_conflicts_with_tracked_dir() {
     std::fs::write(source.path().join("foo").join("bar"), "i am under a dir\n").unwrap();
     git_commit_all_in(source.path(), "initial");
 
-    heddle(&["adopt", "--ref", "main"], Some(source.path()))
-        .expect("adopt should import Git history into Heddle");
+    init_direct_git_overlay(source.path());
 
     // Replace the directory `foo/` with a file `foo`. The captured state
     // now has `foo`, but the real index entry `foo/bar` is still present.

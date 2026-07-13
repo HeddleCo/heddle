@@ -225,6 +225,10 @@ Examples:
   heddle capture -m 'add login route'
   heddle commit
   heddle commit -m 'add login route'
+
+Behavior:
+  Commits the complete captured tree and replaces the Git index with that tree.
+  Git pre-commit and commit-msg hooks are not run.
 ")]
 pub struct CommitArgs {
     /// Git commit message. Defaults to the current capture intent.
@@ -1124,6 +1128,12 @@ pub struct RemoteOperationArgs {
 
 /// Arguments for the `push` command.
 #[derive(Clone, Debug, clap::Args)]
+#[command(after_help = "\
+Git Overlay refs:
+  A normal push writes refs/heads/<thread> and refs/notes/heddle.
+  --all-threads writes every refs/heads/<thread> and refs/tags/<tag>, plus refs/notes/heddle.
+  JSON output lists changed refs in refs_written; verify with git ls-remote <remote>.
+")]
 pub struct PushArgs {
     /// Heddle remote name, native repository path, or hosted address.
     pub remote: Option<String>,
@@ -1144,7 +1154,7 @@ pub struct PushArgs {
     #[arg(short, long)]
     pub force: bool,
 
-    /// Push every Heddle thread.
+    /// Push every thread. In Git Overlay, also include every local Git tag.
     #[arg(long)]
     pub all_threads: bool,
 

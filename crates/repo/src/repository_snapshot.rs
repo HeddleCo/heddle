@@ -46,13 +46,17 @@ enum SnapshotSource {
     SuppliedTree(Tree),
 }
 
-struct SnapshotMutation<'a> {
-    repo: &'a Repository,
-    source: SnapshotSource,
+struct SnapshotDetails {
     intent: Option<String>,
     confidence: Option<f32>,
     attribution: Attribution,
     lineage: Vec<ChangeLineage>,
+}
+
+struct SnapshotMutation<'a> {
+    repo: &'a Repository,
+    source: SnapshotSource,
+    details: SnapshotDetails,
     prev_head: Option<StateId>,
     head: Head,
     transaction_id: String,
@@ -68,30 +72,15 @@ impl<'a> SnapshotMutation<'a> {
     fn new(
         repo: &'a Repository,
         source: SnapshotSource,
-        intent: Option<String>,
-        confidence: Option<f32>,
-        attribution: Attribution,
-        lineage: Vec<ChangeLineage>,
+        details: SnapshotDetails,
         prev_head: Option<StateId>,
         head: Head,
     ) -> Self {
-        let transaction_id = snapshot_transaction_id(
-            repo,
-            &source,
-            intent.as_deref(),
-            confidence,
-            &attribution,
-            &lineage,
-            prev_head,
-            &head,
-        );
+        let transaction_id = snapshot_transaction_id(repo, &source, &details, &head);
         Self {
             repo,
             source,
-            intent,
-            confidence,
-            attribution,
-            lineage,
+            details,
             prev_head,
             head,
             transaction_id,
@@ -242,18 +231,18 @@ impl SnapshotMutation<'_> {
             None => vec![],
         };
 
-        let mut state = State::new_snapshot(tree_hash, parents, self.attribution.clone());
+        let mut state = State::new_snapshot(tree_hash, parents, self.details.attribution.clone());
 
-        if let Some(intent) = self.intent.clone() {
+        if let Some(intent) = self.details.intent.clone() {
             state = state.with_intent(intent);
         }
 
-        if let Some(confidence) = self.confidence {
+        if let Some(confidence) = self.details.confidence {
             state = state.with_confidence(confidence);
         }
 
-        if !self.lineage.is_empty() {
-            state = state.with_lineage(self.lineage.clone());
+        if !self.details.lineage.is_empty() {
+            state = state.with_lineage(self.details.lineage.clone());
         }
 
         let inherited_context = if let Some(parent_id) = self.prev_head
@@ -493,11 +482,7 @@ impl WorktreeWalkPolicy for SnapshotFingerprintPolicy<'_> {
 fn snapshot_transaction_id(
     repo: &Repository,
     source: &SnapshotSource,
-    intent: Option<&str>,
-    confidence: Option<f32>,
-    attribution: &Attribution,
-    lineage: &[ChangeLineage],
-    _prev_head: Option<StateId>,
+    details: &SnapshotDetails,
     head: &Head,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
@@ -519,16 +504,16 @@ fn snapshot_transaction_id(
     hasher.update(b"\0");
     hasher.update(head.to_text().as_bytes());
     hasher.update(b"\0");
-    hasher.update(intent.unwrap_or_default().as_bytes());
+    hasher.update(details.intent.as_deref().unwrap_or_default().as_bytes());
     hasher.update(b"\0");
-    if let Some(confidence) = confidence {
+    if let Some(confidence) = details.confidence {
         hasher.update(&confidence.to_bits().to_le_bytes());
     }
     hasher.update(b"\0");
-    hasher.update(attribution.principal.name.as_bytes());
+    hasher.update(details.attribution.principal.name.as_bytes());
     hasher.update(b"\0");
-    hasher.update(attribution.principal.email.as_bytes());
-    if let Some(agent) = &attribution.agent {
+    hasher.update(details.attribution.principal.email.as_bytes());
+    if let Some(agent) = &details.attribution.agent {
         hasher.update(b"\0agent\0");
         hasher.update(agent.provider.as_bytes());
         hasher.update(b"\0");
@@ -541,7 +526,9 @@ fn snapshot_transaction_id(
         hasher.update(agent.policy_id.as_deref().unwrap_or_default().as_bytes());
     }
     hasher.update(b"\0lineage\0");
-    hasher.update(&rmp_serde::to_vec_named(lineage).expect("lineage encoding is infallible"));
+    hasher.update(
+        &rmp_serde::to_vec_named(&details.lineage).expect("lineage encoding is infallible"),
+    );
     format!("snapshot-{}", hasher.finalize().to_hex())
 }
 
@@ -674,14 +661,16 @@ impl Repository {
             let intent = intent.or_else(|| Some(format!("Merge {}", theirs.short())));
             let state = self.snapshot_merge_with_attribution_and_lineage(
                 &theirs,
-                intent,
-                confidence,
-                attribution,
+                SnapshotDetails {
+                    intent,
+                    confidence,
+                    attribution,
+                    lineage,
+                },
                 base,
                 // We hold the snapshot write lock here; fold the default-
                 // visibility binding into the merge's batch (heddle#317).
                 true,
-                lineage,
             )?;
             self.merge_state_manager().finish()?;
             let tree = self
@@ -703,10 +692,12 @@ impl Repository {
             SnapshotMutation::new(
                 self,
                 SnapshotSource::Worktree { fingerprint },
-                intent,
-                confidence,
-                attribution,
-                lineage,
+                SnapshotDetails {
+                    intent,
+                    confidence,
+                    attribution,
+                    lineage,
+                },
                 prev_head,
                 head.clone(),
             ),
@@ -782,10 +773,12 @@ impl Repository {
             SnapshotMutation::new(
                 self,
                 SnapshotSource::SuppliedTree(tree),
-                intent,
-                confidence,
-                attribution,
-                Vec::new(),
+                SnapshotDetails {
+                    intent,
+                    confidence,
+                    attribution,
+                    lineage: Vec::new(),
+                },
                 prev_head,
                 head,
             ),
@@ -822,24 +815,23 @@ impl Repository {
     ) -> Result<State> {
         self.snapshot_merge_with_attribution_and_lineage(
             merge_parent,
-            intent,
-            confidence,
-            attribution,
+            SnapshotDetails {
+                intent,
+                confidence,
+                attribution,
+                lineage: Vec::new(),
+            },
             merge_base,
             fold_default_visibility,
-            Vec::new(),
         )
     }
 
     fn snapshot_merge_with_attribution_and_lineage(
         &self,
         merge_parent: &StateId,
-        intent: Option<String>,
-        confidence: Option<f32>,
-        attribution: Attribution,
+        details: SnapshotDetails,
         merge_base: Option<StateId>,
         fold_default_visibility: bool,
-        lineage: Vec<ChangeLineage>,
     ) -> Result<State> {
         let tree = self.build_tree(&self.root)?;
         let tree_hash = self.store.put_tree(&tree)?;
@@ -849,18 +841,18 @@ impl Repository {
             .ok_or_else(|| HeddleError::NotFound("No current state".to_string()))?;
         let parents = vec![first_parent, *merge_parent];
 
-        let mut state = State::new_merge(tree_hash, parents, attribution);
+        let mut state = State::new_merge(tree_hash, parents, details.attribution);
 
-        if let Some(intent) = intent {
+        if let Some(intent) = details.intent {
             state = state.with_intent(intent);
         }
 
-        if let Some(confidence) = confidence {
+        if let Some(confidence) = details.confidence {
             state = state.with_confidence(confidence);
         }
 
-        if !lineage.is_empty() {
-            state = state.with_lineage(lineage);
+        if !details.lineage.is_empty() {
+            state = state.with_lineage(details.lineage);
         }
 
         let ours_state = self

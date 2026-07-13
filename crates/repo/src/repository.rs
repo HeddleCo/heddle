@@ -377,21 +377,6 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
         shallow: ShallowInfo,
     ) -> Self {
         let capability = repository_capability_for_authority(config.repository.source_authority);
-        Self::from_parts_with_capability(
-            root, heddle_dir, store, refs, oplog, config, shallow, capability,
-        )
-    }
-
-    fn from_parts_with_capability(
-        root: PathBuf,
-        heddle_dir: PathBuf,
-        store: S,
-        refs: R,
-        oplog: O,
-        config: RepoConfig,
-        shallow: ShallowInfo,
-        capability: RepositoryCapability,
-    ) -> Self {
         Self {
             root,
             heddle_dir,
@@ -450,6 +435,13 @@ fn ensure_supported_repo_format(config_path: &Path, config: &RepoConfig) -> Resu
             supported,
         });
     }
+    if found < supported {
+        return Err(HeddleError::RepositoryFormatMigrationRequired {
+            path: config_path.to_path_buf(),
+            found,
+            required: supported,
+        });
+    }
     Ok(())
 }
 
@@ -460,7 +452,6 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
         store: S,
         config: RepoConfig,
         refs: RefManager,
-        capability: RepositoryCapability,
     ) -> Result<Self> {
         let actor = config
             .principal
@@ -484,8 +475,8 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
         // — a prior process's committed-but-unpublished crash tail on its next
         // read, without re-deriving long-since-deleted refs from ancient records.
         refs.init_reconcile_watermark()?;
-        Ok(Self::from_parts_with_capability(
-            root, heddle_dir, store, refs, oplog, config, shallow, capability,
+        Ok(Self::from_parts(
+            root, heddle_dir, store, refs, oplog, config, shallow,
         ))
     }
 }
@@ -692,8 +683,8 @@ impl Repository {
     ///
     /// - Main repo: `.heddle/objects/`, `.heddle/refs/`, `.heddle/HEAD`,
     ///   `.heddle/state/`, etc.
-    /// - Worktree: `.heddle/objectstore` (text pointer to the shared
-    ///   `.heddle/`), `.heddle/HEAD` (per-checkout), `.heddle/state/`
+    /// - Worktree: `.heddle/objectstore` (shared store path and checkout
+    ///   authority), `.heddle/HEAD` (per-checkout), `.heddle/state/`
     ///   (per-checkout cached state).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let start_path = path.as_ref().canonicalize()?;
@@ -741,12 +732,13 @@ impl Repository {
                     // Worktree mode: pointer dir at <dir>/.heddle/, shared
                     // object store at the path read from .heddle/objectstore.
                     let content = fs::read_to_string(&pointer_path)?;
-                    let raw_shared = parse_objectstore_pointer(&content).ok_or_else(|| {
+                    let pointer = parse_objectstore_pointer(&content).ok_or_else(|| {
                         HeddleError::Config(format!(
-                            "invalid .heddle/objectstore pointer at {}: expected 'objectstore: <path>'",
+                            "invalid .heddle/objectstore pointer at {}: expected objectstore and source-authority entries",
                             pointer_path.display()
                         ))
                     })?;
+                    let raw_shared = pointer.objectstore;
 
                     if raw_shared.is_relative() {
                         return Err(HeddleError::Config(format!(
@@ -776,20 +768,14 @@ impl Repository {
                     }
 
                     let config_path = shared_galeed_dir.join("config.toml");
-                    let source_root = shared_galeed_dir.parent().unwrap_or(dir);
-                    let config = RepoConfig::load_for_repository(&config_path, source_root)?;
+                    let mut config = RepoConfig::load_for_repository(&config_path)?;
                     ensure_supported_repo_format(&config_path, &config)?;
+                    config.repository.source_authority = pointer.source_authority;
                     let store = Self::build_store(&config, &shared_galeed_dir)?;
                     let local_head_path = heddle_path.join("HEAD");
                     let refs = RefManager::new(&shared_galeed_dir).with_local_head(local_head_path);
-                    let repo = Self::open_raw(
-                        dir.to_path_buf(),
-                        shared_galeed_dir,
-                        store,
-                        config,
-                        refs,
-                        RepositoryCapability::NativeHeddle,
-                    )?;
+                    let repo =
+                        Self::open_raw(dir.to_path_buf(), shared_galeed_dir, store, config, refs)?;
                     repo.run_open_hooks()?;
                     return Ok(repo);
                 }
@@ -797,20 +783,11 @@ impl Repository {
                 if objects_dir.is_dir() {
                     // Main repo mode.
                     let config_path = heddle_path.join("config.toml");
-                    let config = RepoConfig::load_for_repository(&config_path, dir)?;
+                    let config = RepoConfig::load_for_repository(&config_path)?;
                     ensure_supported_repo_format(&config_path, &config)?;
                     let store = Self::build_store(&config, &heddle_path)?;
                     let refs = RefManager::new(&heddle_path);
-                    let capability =
-                        repository_capability_for_authority(config.repository.source_authority);
-                    let repo = Self::open_raw(
-                        dir.to_path_buf(),
-                        heddle_path,
-                        store,
-                        config,
-                        refs,
-                        capability,
-                    )?;
+                    let repo = Self::open_raw(dir.to_path_buf(), heddle_path, store, config, refs)?;
                     repo.run_open_hooks()?;
                     if repo.capability() == RepositoryCapability::GitOverlay {
                         match detect_git_head_state(dir) {
@@ -924,7 +901,10 @@ impl Repository {
     }
 
     pub fn source_authority(&self) -> RepositorySourceAuthority {
-        self.config.repository.source_authority
+        match self.capability {
+            RepositoryCapability::GitOverlay => RepositorySourceAuthority::GitOverlay,
+            RepositoryCapability::NativeHeddle => RepositorySourceAuthority::Native,
+        }
     }
 
     pub fn transition_source_authority(
@@ -932,15 +912,21 @@ impl Repository {
         expected: RepositorySourceAuthority,
         next: RepositorySourceAuthority,
     ) -> Result<()> {
-        if self.source_authority() != expected {
+        let _write_lock = self.locker().write().map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to lock repository for source-authority transition: {error}"
+            ))
+        })?;
+        let config_path = self.heddle_dir.join("config.toml");
+        let mut config = RepoConfig::load_for_repository(&config_path)?;
+        if config.repository.source_authority != expected {
             return Err(HeddleError::Config(format!(
                 "repository source authority changed before transition: expected {expected:?}, found {:?}",
-                self.source_authority()
+                config.repository.source_authority
             )));
         }
-        let mut config = self.config.clone();
         config.repository.source_authority = next;
-        config.save(&self.heddle_dir.join("config.toml"))
+        config.save(&config_path)
     }
 
     pub fn git_overlay_sley_repository(&self) -> Result<Option<SleyRepository>> {
@@ -1005,16 +991,16 @@ impl Repository {
     }
 
     pub fn current_lane(&self) -> Result<Option<String>> {
-        if self.capability() == RepositoryCapability::GitOverlay
-            && self.git_overlay_head_is_detached()?
-            && detect_git_in_progress_branch(&self.root)?.is_none()
-        {
-            return Ok(None);
-        }
+        if self.capability() == RepositoryCapability::GitOverlay && has_git_metadata(&self.root) {
+            if self.git_overlay_head_is_detached()?
+                && detect_git_in_progress_branch(&self.root)?.is_none()
+            {
+                return Ok(None);
+            }
 
-        if self.current_state()?.is_none() && self.capability() == RepositoryCapability::GitOverlay
-        {
-            return self.git_overlay_current_branch();
+            if self.current_state()?.is_none() {
+                return self.git_overlay_current_branch();
+            }
         }
 
         match self.head_ref()? {
@@ -2115,7 +2101,11 @@ impl Repository {
         fs::create_dir_all(&heddle_dir)?;
         write_file_atomic(
             &heddle_dir.join("objectstore"),
-            format!("objectstore: {}\n", shared.display()).as_bytes(),
+            format!(
+                "objectstore: {}\nsource-authority: native\n",
+                shared.display()
+            )
+            .as_bytes(),
         )?;
         fs::create_dir_all(heddle_dir.join("state"))?;
         Ok(())
@@ -2413,8 +2403,9 @@ impl Repository {
             "/{}",
             repository_thread_materialize::COURTESY_STUB_FILENAME
         ));
+        // Root Git metadata is repository-engine state, never source content.
+        patterns.push("/.git/".to_string());
         if self.capability() == RepositoryCapability::GitOverlay {
-            patterns.push(".git".to_string());
             append_ignore_file_patterns(&mut patterns, &self.root.join(".gitignore"))?;
         }
         // Worktree-local, never-captured excludes (heddle's analogue of
@@ -2541,7 +2532,7 @@ impl Repository {
     ///
     /// Worktree-mutating commands (merge, rebase, goto, ship) should
     /// resolve their target via this helper so that
-    /// `heddle thread switch X && heddle merge Y` lands the merge into
+    /// `heddle thread switch X && heddle sync --thread Y` lands the merge into
     /// thread `X`'s dedicated worktree, not into whichever directory the
     /// operator happened to invoke `heddle` from. Snapshot/capture
     /// intentionally stay CWD-based: the agent inside their worktree
@@ -2852,19 +2843,32 @@ pub fn is_synthetic_root(state: &State) -> bool {
         && state.attribution.agent.is_none()
 }
 
-/// Parse a `.heddle` pointer file and return the shared object store path.
-///
-/// The file must contain a line of the form `objectstore: <path>`.
-fn parse_objectstore_pointer(content: &str) -> Option<PathBuf> {
+struct WorktreePointer {
+    objectstore: PathBuf,
+    source_authority: RepositorySourceAuthority,
+}
+
+fn parse_objectstore_pointer(content: &str) -> Option<WorktreePointer> {
+    let mut objectstore = None;
+    let mut source_authority = None;
     for line in content.lines() {
         if let Some(path) = line.strip_prefix("objectstore:") {
             let path = path.trim();
             if !path.is_empty() {
-                return Some(PathBuf::from(path));
+                objectstore = Some(PathBuf::from(path));
             }
+        } else if let Some(authority) = line.strip_prefix("source-authority:") {
+            source_authority = match authority.trim() {
+                "native" => Some(RepositorySourceAuthority::Native),
+                "git-overlay" => Some(RepositorySourceAuthority::GitOverlay),
+                _ => return None,
+            };
         }
     }
-    None
+    Some(WorktreePointer {
+        objectstore: objectstore?,
+        source_authority: source_authority?,
+    })
 }
 
 pub(crate) fn has_git_metadata(path: &Path) -> bool {
@@ -3008,15 +3012,10 @@ fn git_ahead_behind_counts(
     if upstream == head {
         return Ok((0, 0));
     }
-    let db = sley::ObjectDatabase::from_git_dir(git.common_dir(), git.object_format());
-    let (ahead, behind) = sley::plumbing::sley_rev::ahead_behind_counts(
-        git.git_dir(),
-        git.object_format(),
-        &db,
-        &head,
-        &upstream,
-    )
-    .map_err(|error| HeddleError::Config(error.to_string()))?;
+    let (ahead, behind) = git
+        .rev_graph()
+        .ahead_behind(head, upstream)
+        .map_err(|error| HeddleError::Config(error.to_string()))?;
     Ok((ahead, behind))
 }
 
@@ -3242,7 +3241,7 @@ mod tests {
     #[test]
     fn git_remote_tracking_reports_diverged_ahead_behind() {
         let temp = diverged_two_ahead_one_behind_fixture();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = Repository::init_git_overlay_sidecar(temp.path()).unwrap();
         assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
 
         let status = repo
@@ -3264,7 +3263,7 @@ mod tests {
         git(root, &["update-ref", "refs/remotes/origin/main", &tip]);
         configure_main_tracks_origin(root);
 
-        let repo = Repository::init_default(root).unwrap();
+        let repo = Repository::init_git_overlay_sidecar(root).unwrap();
         assert!(repo.git_remote_tracking_status().unwrap().is_none());
     }
 
@@ -3276,7 +3275,7 @@ mod tests {
         git(root, &["commit", "--allow-empty", "-m", "only"]);
         git(root, &["remote", "add", "origin", root.to_str().unwrap()]);
 
-        let repo = Repository::init_default(root).unwrap();
+        let repo = Repository::init_git_overlay_sidecar(root).unwrap();
         let status = repo
             .git_remote_tracking_status()
             .unwrap()

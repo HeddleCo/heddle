@@ -246,7 +246,7 @@ pub fn describe_thread_advice_with_initial(
 ///
 /// Keeps the first few names and tags the rest as `… +N more`. Without this,
 /// a repo with hundreds of changed files would push a 1.5-screen-wide line
-/// into `heddle status` / `heddle thread drop` / `heddle merge --preview`.
+/// into `heddle status` / `heddle thread drop` / `heddle sync --thread`.
 /// The full list still lives in the JSON form of every advice-emitting verb.
 fn preview_paths(paths: &[String]) -> String {
     const PREVIEW: usize = 3;

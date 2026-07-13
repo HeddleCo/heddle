@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{path::Path, process::Command};
+use std::{
+    io::Write as _,
+    path::Path,
+    process::{Command, Stdio},
+};
 
 use serde_json::Value;
 use sley::{
-    CommitObject, EntryKind, GitObjectType, ObjectId, RefPrecondition, ReferenceTarget,
+    CommitObject, DeleteRef, EntryKind, GitObjectType, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository,
     plumbing::{sley_object::EncodedObject, sley_refs::ReflogEntry},
 };
@@ -37,21 +41,36 @@ fn write_commit(
 }
 
 fn publish_branch(repo: &SleyRepository, branch: &str, old: Option<ObjectId>, new: ObjectId) {
+    publish_ref(repo, &format!("refs/heads/{branch}"), old, new);
+}
+
+fn publish_ref(repo: &SleyRepository, name: &str, old: Option<ObjectId>, new: ObjectId) {
     let identity = b"Heddle Test <heddle@example.com> 0 +0000".to_vec();
     let references = repo.references();
     let mut refs = references.transaction();
     refs.update_to(
-        format!("refs/heads/{branch}"),
+        name,
         ReferenceTarget::Direct(new),
         RefPrecondition::Any,
         Some(ReflogEntry {
             old_oid: old.unwrap_or_else(|| ObjectId::null(repo.object_format())),
             new_oid: new,
             committer: identity,
-            message: format!("update {branch}").into_bytes(),
+            message: format!("update {name}").into_bytes(),
         }),
     );
     refs.commit().expect("publish branch");
+}
+
+fn delete_ref(repo: &SleyRepository, name: &str, expected_old: ObjectId) {
+    repo.delete_ref(DeleteRef {
+        name: sley::FullName::new(name).expect("valid ref name"),
+        expected_old: Some(expected_old),
+        expected: None,
+        reflog: None,
+        reflog_committer: None,
+    })
+    .expect("delete ref");
 }
 
 fn seed_source(path: &Path) -> (SleyRepository, ObjectId) {
@@ -102,6 +121,62 @@ fn clone_source(temp: &TempDir, source: &Path, checkout: &Path) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn embedded_credential_store_runs_without_git_on_path() {
+    let temp = TempDir::new().expect("tempdir");
+    let credentials = temp.path().join("credentials");
+    let helper_args = [
+        "credential-store".to_string(),
+        format!("--file={}", credentials.display()),
+    ];
+
+    let mut store = Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(&helper_args)
+        .arg("store")
+        .env("PATH", "")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start embedded credential store");
+    store
+        .stdin
+        .take()
+        .expect("store stdin")
+        .write_all(b"protocol=https\nhost=example.test\nusername=alice\npassword=secret\n\n")
+        .expect("write credential");
+    let stored = store.wait_with_output().expect("wait for store");
+    assert!(
+        stored.status.success(),
+        "embedded store failed: {}",
+        String::from_utf8_lossy(&stored.stderr)
+    );
+
+    let mut get = Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(&helper_args)
+        .arg("get")
+        .env("PATH", "")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start embedded credential lookup");
+    get.stdin
+        .take()
+        .expect("get stdin")
+        .write_all(b"protocol=https\nhost=example.test\n\n")
+        .expect("write lookup");
+    let found = get.wait_with_output().expect("wait for lookup");
+    assert!(
+        found.status.success(),
+        "embedded lookup failed: {}",
+        String::from_utf8_lossy(&found.stderr)
+    );
+    let found = String::from_utf8(found.stdout).expect("credential output UTF-8");
+    assert!(found.contains("username=alice"));
+    assert!(found.contains("password=secret"));
 }
 
 fn set_git_config(repo: &SleyRepository, key: &str, value: &str) {
@@ -267,4 +342,195 @@ fn overlay_push_rejects_native_only_flags_before_transport() {
             text.contains("no hook ran") && text.contains("left unchanged")
         }));
     }
+}
+
+#[test]
+fn overlay_push_all_threads_carries_git_refs_and_spares_foreign_destination_refs() {
+    let temp = TempDir::new().expect("tempdir");
+    let source_path = temp.path().join("source.git");
+    let checkout = temp.path().join("checkout");
+    let (source, first) = seed_source(&source_path);
+    clone_source(&temp, &source_path, &checkout);
+
+    let local = SleyRepository::discover(&checkout).expect("open checkout");
+    let feature = write_commit(&local, Some(first), b"feature\n", b"feature\n");
+    publish_branch(&local, "feature", None, feature);
+    publish_branch(&local, "foreign-collision", None, first);
+    publish_branch(&source, "foreign-collision", None, first);
+    publish_ref(&local, "refs/tags/v1", None, feature);
+    heddle_git_projection::git_notes::write_note(
+        &local,
+        feature,
+        &heddle_git_projection::git_notes::HeddleNote {
+            source_state: None,
+            state_id: "hs-test-state".to_string(),
+            change_id: "hc-test-change".to_string(),
+            agent: None,
+            confidence: Some(0.9),
+            status: "published".to_string(),
+            omitted_annotations_breakdown: None,
+            signal_counts: None,
+            attribution: None,
+        },
+    )
+    .expect("write Heddle note");
+
+    let pushed = run(
+        &temp,
+        &checkout,
+        &["--output", "json", "push", "--all-threads"],
+    );
+    assert!(
+        pushed.status.success(),
+        "all-thread push failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&pushed.stdout),
+        String::from_utf8_lossy(&pushed.stderr)
+    );
+    let pushed: Value = serde_json::from_slice(&pushed.stdout).expect("push JSON");
+    assert_eq!(pushed["ref_scope"], "all_threads_tags_and_heddle_notes");
+    assert_eq!(pushed["git_notes_ref"], "refs/notes/heddle");
+    assert_eq!(pushed["tags_included"], true);
+    assert!(
+        pushed["refs_written"].as_array().is_some_and(|refs| refs
+            .iter()
+            .any(|name| name == "refs/heads/feature")
+            && refs.iter().any(|name| name == "refs/tags/v1")
+            && refs.iter().any(|name| name == "refs/notes/heddle")),
+        "push must report every materialized namespace: {pushed}"
+    );
+    assert!(
+        source
+            .find_reference("refs/heads/feature")
+            .unwrap()
+            .is_some()
+    );
+    assert!(source.find_reference("refs/tags/v1").unwrap().is_some());
+    assert!(
+        source
+            .find_reference("refs/heads/foreign-collision")
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        source
+            .find_reference("refs/notes/heddle")
+            .unwrap()
+            .is_some()
+    );
+
+    let advanced_feature = write_commit(&local, Some(feature), b"advanced\n", b"advanced\n");
+    publish_branch(&local, "feature", Some(feature), advanced_feature);
+    publish_ref(&local, "refs/tags/v1", Some(feature), advanced_feature);
+    let scoped = run(&temp, &checkout, &["--output", "json", "push"]);
+    assert!(
+        scoped.status.success(),
+        "current-thread push failed: {}",
+        String::from_utf8_lossy(&scoped.stderr)
+    );
+    assert_eq!(
+        source
+            .find_reference("refs/heads/feature")
+            .unwrap()
+            .expect("remote feature survives")
+            .direct_target()
+            .expect("direct feature target"),
+        feature,
+        "current-thread push must not advance an existing sibling branch"
+    );
+    assert_eq!(
+        source
+            .find_reference("refs/tags/v1")
+            .unwrap()
+            .expect("remote tag survives")
+            .direct_target()
+            .expect("direct tag target"),
+        feature,
+        "current-thread push must not update an existing tag"
+    );
+
+    delete_ref(&local, "refs/heads/feature", advanced_feature);
+    delete_ref(&local, "refs/heads/foreign-collision", first);
+    delete_ref(&local, "refs/tags/v1", advanced_feature);
+    let retracted = run(
+        &temp,
+        &checkout,
+        &["--output", "json", "push", "--all-threads"],
+    );
+    assert!(
+        retracted.status.success(),
+        "retraction push failed: {}",
+        String::from_utf8_lossy(&retracted.stderr)
+    );
+    assert!(
+        source
+            .find_reference("refs/heads/feature")
+            .unwrap()
+            .is_none()
+    );
+    assert!(source.find_reference("refs/tags/v1").unwrap().is_none());
+    assert!(
+        source
+            .find_reference("refs/heads/foreign-collision")
+            .unwrap()
+            .is_some(),
+        "a same-name destination ref Heddle never wrote must remain unowned"
+    );
+    assert!(
+        source
+            .find_reference("refs/notes/heddle")
+            .unwrap()
+            .is_some(),
+        "still-served provenance notes must survive sibling ref deletion"
+    );
+    assert!(!checkout.join(".heddle/git").exists());
+}
+
+#[test]
+fn overlay_pull_fetches_heddle_notes_with_the_branch() {
+    let temp = TempDir::new().expect("tempdir");
+    let source_path = temp.path().join("source.git");
+    let checkout = temp.path().join("checkout");
+    let (source, first) = seed_source(&source_path);
+    clone_source(&temp, &source_path, &checkout);
+
+    let heddle = repo::Repository::open(&checkout).expect("open Heddle metadata");
+    let state = heddle
+        .refs()
+        .get_thread(&objects::object::ThreadName::new("main"))
+        .expect("read main thread")
+        .expect("main state");
+    heddle_git_projection::git_notes::write_note(
+        &source,
+        first,
+        &heddle_git_projection::git_notes::HeddleNote {
+            source_state: None,
+            state_id: state.to_string(),
+            change_id: state.to_string(),
+            agent: None,
+            confidence: Some(0.8),
+            status: "published".to_string(),
+            omitted_annotations_breakdown: None,
+            signal_counts: None,
+            attribution: None,
+        },
+    )
+    .expect("write remote Heddle note");
+    let second = write_commit(&source, Some(first), b"two\n", b"two\n");
+    publish_branch(&source, "main", Some(first), second);
+
+    let pulled = run(&temp, &checkout, &["--output", "json", "pull"]);
+    assert!(
+        pulled.status.success(),
+        "pull failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&pulled.stdout),
+        String::from_utf8_lossy(&pulled.stderr)
+    );
+    let pulled: Value = serde_json::from_slice(&pulled.stdout).expect("pull JSON");
+    assert_eq!(pulled["commits_seen_scope"], "branches_and_heddle_notes");
+    let local = SleyRepository::discover(&checkout).expect("reopen checkout");
+    let note = heddle_git_projection::git_notes::read_note(&local, first)
+        .expect("read local note")
+        .expect("Heddle note fetched");
+    assert_eq!(note.state_id, state.to_string());
+    assert!(!checkout.join(".heddle/git").exists());
 }

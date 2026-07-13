@@ -1,19 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::{
-    path::{Path, PathBuf},
-    process::{Command, Output},
-};
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{git_hermetic, heddle, heddle_output};
+use super::{git_hermetic, heddle};
 
 pub(crate) struct GitOverlayFixture {
     temp: TempDir,
     work: PathBuf,
     origin: Option<PathBuf>,
-    peer: Option<PathBuf>,
     ready_thread: Option<(String, PathBuf)>,
 }
 
@@ -34,7 +30,6 @@ impl GitOverlayFixture {
             temp,
             work,
             origin: None,
-            peer: None,
             ready_thread: None,
         }
     }
@@ -80,38 +75,10 @@ impl GitOverlayFixture {
         assert_eq!(_ready["verification"]["status"], "clean");
         let recommended_action = _ready["recommended_action"].as_str().unwrap_or("");
         assert!(
-            recommended_action.contains(&format!("land --thread {thread} --no-push")),
+            recommended_action.contains(&format!("land --thread {thread}")),
             "ready helper should preserve the first-transition land action: {_ready}"
         );
         self.ready_thread = Some((thread.to_string(), thread_path));
-        self
-    }
-
-    pub(crate) fn with_remote_behind(mut self) -> Self {
-        if self.origin.is_none() {
-            self = self.with_bare_origin();
-        }
-        let origin = self.origin_path().to_path_buf();
-        let peer = self.temp.path().join("peer");
-        self.git_at(
-            self.temp.path(),
-            &["clone", path_str(&origin), path_str(&peer)],
-        );
-        self.git_at(&peer, &["config", "user.name", "Peer"]);
-        self.git_at(&peer, &["config", "user.email", "peer@example.com"]);
-        std::fs::write(peer.join("README.md"), "base\npeer\n").expect("advance peer");
-        self.git_at(&peer, &["add", "README.md"]);
-        self.git_at(&peer, &["commit", "-m", "peer"]);
-        self.git_at(&peer, &["push", "origin", "main"]);
-        self.heddle(&["fetch", "origin"])
-            .expect("fetch upstream drift");
-        self.peer = Some(peer);
-        self
-    }
-
-    pub(crate) fn with_index_lock(self) -> Self {
-        std::fs::write(self.work.join(".git/index.lock"), "held by fixture\n")
-            .expect("write git index lock");
         self
     }
 
@@ -135,10 +102,6 @@ impl GitOverlayFixture {
         heddle(args, Some(&self.work))
     }
 
-    pub(crate) fn heddle_output(&self, args: &[&str]) -> Result<Output, String> {
-        heddle_output(args, Some(&self.work))
-    }
-
     pub(crate) fn json(&self, args: &[&str]) -> Value {
         self.json_at(&self.work, args)
     }
@@ -156,58 +119,6 @@ impl GitOverlayFixture {
 
     pub(crate) fn git_at(&self, path: &Path, args: &[&str]) {
         git_hermetic(args, path);
-    }
-
-    pub(crate) fn git_stdout(&self, args: &[&str]) -> String {
-        self.git_stdout_at(&self.work, args)
-    }
-
-    pub(crate) fn git_stdout_at(&self, path: &Path, args: &[&str]) -> String {
-        let output = self.git_output_at(path, args);
-        assert!(
-            output.status.success(),
-            "git {args:?} failed in {}\nstdout: {}\nstderr: {}",
-            path.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
-
-    fn git_output_at(&self, path: &Path, args: &[&str]) -> Output {
-        let mut command = Command::new("git");
-        command.env_clear();
-        if let Some(path_env) = std::env::var_os("PATH") {
-            command.env("PATH", path_env);
-        }
-        command
-            .env("HOME", path)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_AUTHOR_NAME", "test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
-            .env("LANG", "C")
-            .env("LC_ALL", "C")
-            .env("TERM", "dumb")
-            .args([
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "user.name=test",
-                "-c",
-                "user.email=test@example.com",
-                "-c",
-                "init.defaultBranch=main",
-            ])
-            .args(args)
-            .current_dir(path)
-            .output()
-            .unwrap_or_else(|err| panic!("spawn git {args:?}: {err}"))
     }
 }
 

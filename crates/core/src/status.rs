@@ -13,7 +13,6 @@ use std::{
 
 use crate::source_authority::{SourceAction, SourceAuthorityActions};
 use chrono::Utc;
-use cli_shared::remote::RemoteConfig;
 use objects::{
     HeddleError,
     error::Result,
@@ -927,9 +926,9 @@ fn detached_head_primary_recovery(repo: &Repository) -> String {
     match repo.refs().read_head() {
         Ok(Head::Attached { thread }) if !thread.trim().is_empty() => {
             return if thread.starts_with('-') {
-                heddle_action(["switch", "--", thread.as_str()])
+                heddle_action(["thread", "switch", "--", thread.as_str()])
             } else {
-                heddle_action(["switch", thread.as_str()])
+                heddle_action(["thread", "switch", thread.as_str()])
             };
         }
         _ => {}
@@ -941,9 +940,9 @@ fn detached_head_primary_recovery(repo: &Repository) -> String {
             .filter(|tip| tip.history_imported)
             .find(|tip| tip.git_commit == detached_commit)
     {
-        return heddle_action(["switch", tip.branch.as_str()]);
+        return heddle_action(["thread", "switch", tip.branch.as_str()]);
     }
-    "heddle switch <branch>".to_string()
+    "heddle thread switch <branch>".to_string()
 }
 
 fn branch_tip_needs_reconcile(repo: &Repository, tip: &GitOverlayBranchTip) -> bool {
@@ -1145,26 +1144,18 @@ fn native_worktree_status(repo: &Repository) -> Result<Option<WorktreeStatus>> {
 }
 
 pub fn default_remote_name(repo: &Repository) -> Option<String> {
-    RemoteConfig::open(repo)
+    crate::remote::resolved_default_remote_name(repo)
         .ok()
-        .and_then(|cfg| cfg.default_name().map(str::to_string))
-        .or_else(|| {
-            (repo.capability() == RepositoryCapability::GitOverlay)
-                .then(|| git_default_remote_name(repo.root()))
-                .flatten()
-        })
-}
-
-fn git_default_remote_name(root: &Path) -> Option<String> {
-    let repo = SleyRepository::discover(root).ok()?;
-    git_default_remote_name_from_repo(&repo)
+        .flatten()
 }
 
 pub(crate) fn git_default_remote_name_from_repo(repo: &SleyRepository) -> Option<String> {
-    repo.remote_names()
-        .ok()?
-        .into_iter()
-        .find(|name| name == "origin")
+    let remotes = repo.remote_names().ok()?;
+    remotes
+        .iter()
+        .find(|name| name.as_str() == "origin")
+        .cloned()
+        .or_else(|| (remotes.len() == 1).then(|| remotes[0].clone()))
 }
 
 fn heddle_worktree_is_clean(repo: &Repository) -> bool {
@@ -1231,7 +1222,7 @@ fn remote_drift_recovery_commands(
         "remote_diverged" => {
             let upstream = remote.upstream.trim();
             if upstream.is_empty() {
-                return vec!["heddle fetch".to_string()];
+                return vec!["heddle pull".to_string()];
             }
             let import = canonical_git_import_ref_command(upstream);
             let reconcile = canonical_git_repair_ref_preview_command(None, upstream);
@@ -2734,7 +2725,7 @@ fn first_capture_identity_notice(
     let principal = resolve_principal(repo, ctx.config())?;
     if principal_is_default_unknown(&principal) {
         return Ok(Some(
-            "no principal configured; the first capture/checkpoint would use Unknown <unknown@example.com>. Set HEDDLE_PRINCIPAL_NAME and HEDDLE_PRINCIPAL_EMAIL or run `heddle init --principal-name <name> --principal-email <email>`.".to_string(),
+            "no principal configured; the first capture would use Unknown <unknown@example.com>. Set HEDDLE_PRINCIPAL_NAME and HEDDLE_PRINCIPAL_EMAIL or run `heddle init --principal-name <name> --principal-email <email>`.".to_string(),
         ));
     }
     Ok(None)
@@ -2861,7 +2852,7 @@ fn fast_short_repo_kind(workdir: &Path) -> Result<FastShortRepoKind> {
     if !config_path.is_file() {
         return Ok(FastShortRepoKind::Fallback);
     }
-    let config = RepoConfig::load_for_repository(&config_path, workdir)?;
+    let config = RepoConfig::load_for_repository(&config_path)?;
     Ok(match config.repository.source_authority {
         repo::RepositorySourceAuthority::GitOverlay => FastShortRepoKind::GitOverlay,
         repo::RepositorySourceAuthority::Native => FastShortRepoKind::Fallback,
@@ -2980,15 +2971,10 @@ fn fast_remote_health_for_pair(
     if head == upstream {
         return Ok(None);
     }
-    let db = sley::ObjectDatabase::from_git_dir(git.common_dir(), git.object_format());
-    let (ahead, behind) = sley::plumbing::sley_rev::ahead_behind_counts(
-        git.git_dir(),
-        git.object_format(),
-        &db,
-        &head,
-        &upstream,
-    )
-    .map_err(sley_error)?;
+    let (ahead, behind) = git
+        .rev_graph()
+        .ahead_behind(head, upstream)
+        .map_err(sley_error)?;
     Ok(match (ahead, behind) {
         (0, 0) => None,
         (_, 0) => Some("ready to push"),

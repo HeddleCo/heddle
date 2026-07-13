@@ -33,6 +33,8 @@ pub struct HeddleNote {
     pub state_id: String,
     pub change_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_state: Option<State>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<NoteAgent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
@@ -108,6 +110,7 @@ impl HeddleNote {
         Self {
             state_id: state.id().to_string_full(),
             change_id: state.change_id.to_string_full(),
+            source_state: Some(state.clone()),
             agent,
             confidence: state.confidence,
             status,

@@ -65,10 +65,10 @@ use crate::{
         should_output_json, style,
     },
     client::LocalSync,
-    git_projection_engine::git_core::{
-        clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference, write_head_symref,
-    },
     remote::{Remote, RemoteConfig, RemoteTarget},
+};
+use heddle_git_projection::git_core::{
+    clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference, write_head_symref,
 };
 
 /// `output_kind` value carried by the final `heddle clone --output json`
@@ -573,7 +573,7 @@ fn finish_git_overlay_clone(
         refs.join(", ")
     };
     let mut progress = ImportProgress::start(cli, &repo, &scope_label, &remote_display);
-    crate::git_projection_engine::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(
+    heddle_git_projection::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(
         local_path,
     );
     progress.begin_commit_import();
@@ -1197,11 +1197,14 @@ async fn clone_local(
     let local_repo = Repository::init(local_path)?;
 
     // Fetch the state and dependencies
-    let objects_copied = if let Some(d) = depth {
+    let mut objects_copied = if let Some(d) = depth {
         sync.fetch_state_with_depth(&local_repo, &state_id, d)?
     } else {
         sync.fetch_state(&local_repo, &state_id)?
     };
+    if depth.is_none() {
+        objects_copied += sync.fetch_markers(&local_repo)?;
+    }
 
     // Materialize from a fresh clone baseline before publishing the local
     // thread ref. Otherwise HEAD can resolve to the target first and make
@@ -2142,7 +2145,7 @@ fn clone_symlink_unsupported_advice(path: &Path, dest_path: &Path) -> RecoveryAd
 /// `PartialFetchMetadata` records blake3 hashes only, but
 /// `Repository::read_object` is keyed by Git OID. Git Projection
 /// already computes blake3↔git mappings *for commits* (see
-/// `SyncMapping` in `git_projection_engine/git_core.rs`); blob mappings are
+/// `SyncMapping` in `heddle-git-projection::git_core`); blob mappings are
 /// constructed on-the-fly during import. We accept the same shape of
 /// mapping here, populated by the caller (clone-time or test-time)
 /// before [`Self::hydrate`] fires. Future work: persist a sidecar

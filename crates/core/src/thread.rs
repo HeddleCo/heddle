@@ -432,9 +432,12 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadListEntry
                 summary.recommended_action.clear();
             } else {
                 summary.recommended_action = if branch_tip.branch.starts_with('-') {
-                    format!("heddle switch -- {}", shell_quote(&branch_tip.branch))
+                    format!(
+                        "heddle thread switch -- {}",
+                        shell_quote(&branch_tip.branch)
+                    )
                 } else {
-                    format!("heddle switch {}", shell_quote(&branch_tip.branch))
+                    format!("heddle thread switch {}", shell_quote(&branch_tip.branch))
                 };
             }
         }
@@ -1113,7 +1116,7 @@ mod tests {
                 is_isolated: false,
                 thread_health: "git_backed".into(),
                 blockers: vec![],
-                recommended_action: "heddle switch origin/main".into(),
+                recommended_action: "heddle thread switch origin/main".into(),
                 recommended_action_template: None,
                 git_branch_tip: Some("deadbeef".into()),
                 history_imported: false,

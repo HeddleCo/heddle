@@ -183,7 +183,7 @@ pub fn remote_tracking_next_action_for(
         "remote_diverged" => {
             let upstream = remote.upstream.trim();
             if upstream.is_empty() {
-                Some("heddle fetch".to_string())
+                Some(actions.display(SourceAction::Pull))
             } else {
                 Some(canonical_git_import_ref_command(upstream))
             }
@@ -200,9 +200,7 @@ pub fn remote_untracked_action_for(
     remote: &GitRemoteTrackingStatus,
     authority: RepositorySourceAuthority,
 ) -> String {
-    if remote.next_action.trim().is_empty() {
-        SourceAuthorityActions::new(authority).display(SourceAction::Push)
-    } else if authority == RepositorySourceAuthority::GitOverlay {
+    if remote.next_action.trim().is_empty() || authority == RepositorySourceAuthority::GitOverlay {
         SourceAuthorityActions::new(authority).display(SourceAction::Push)
     } else {
         remote.next_action.clone()

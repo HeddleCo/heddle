@@ -864,16 +864,13 @@ mod tests {
 
     /// A repo whose `[review.discussion] default_visibility` is pinned to
     /// `tier_toml`, so the capture-time binding resolves a non-public default.
-    fn repo_with_default(tier_toml: &str) -> (TempDir, Repository) {
+    fn repo_with_internal_default() -> (TempDir, Repository) {
         let dir = TempDir::new().unwrap();
         Repository::init_default(dir.path()).unwrap();
-        std::fs::write(
-            dir.path().join(".heddle/config.toml"),
-            format!(
-                "[repository]\nversion = 1\n\n[review.discussion]\ndefault_visibility = {tier_toml}\n"
-            ),
-        )
-        .unwrap();
+        let config_path = dir.path().join(".heddle/config.toml");
+        let mut config = crate::repository::repo_config::RepoConfig::load(&config_path).unwrap();
+        config.review.discussion.default_visibility = VisibilityTier::Internal;
+        config.save(&config_path).unwrap();
         let repo = Repository::open(dir.path()).unwrap();
         (dir, repo)
     }
@@ -1276,7 +1273,7 @@ mod tests {
         // the write lock (heddle#317 r5). Models a `visibility set` that landed
         // before the bind: bind sees the record, skips, and stages no oplog
         // entry. Driven end-to-end through `stage_default_visibility_binding`.
-        let (_dir, repo) = repo_with_default("\"Internal\"");
+        let (_dir, repo) = repo_with_internal_default();
         let state = StateId::from_bytes([77u8; 32]);
 
         // A user (or a racer) already set a team-scoped tier on this state.
@@ -1759,7 +1756,7 @@ mod tests {
         // staged sidecar must be rewound so no orphaned non-public sidecar is
         // left for a state whose snapshot batch never committed. Driven through
         // the fold-and-rewind chokepoint with a deterministic commit fault.
-        let (_dir, repo) = repo_with_default("\"Internal\"");
+        let (_dir, repo) = repo_with_internal_default();
         let state = StateId::from_bytes([88u8; 32]);
         assert!(
             !repo

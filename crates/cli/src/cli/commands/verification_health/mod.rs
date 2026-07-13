@@ -326,7 +326,7 @@ pub(crate) fn raw_git_operation_mutation_advice(
         ),
         "Git refs, Git sequencer files, Heddle refs, and worktree files were left unchanged",
         primary_command.clone(),
-        vec![primary_command, "heddle verify".to_string()],
+        vec![primary_command],
     )))
 }
 fn raw_git_operation_recovery_hint(
@@ -444,7 +444,7 @@ impl GitOverlayMutationPreflight {
         Self {
             check_detached_head: true,
             check_unimported_git_history: true,
-            check_raw_git_operation: false,
+            check_raw_git_operation: true,
             check_verification: true,
         }
     }
@@ -520,15 +520,6 @@ pub(crate) fn git_overlay_mutation_preflight_advice(
 ) -> anyhow::Result<Option<RecoveryAdvice>> {
     git_overlay_mutation_preflight_advice_inner(repo, action, preflight, None)
 }
-/// `checkpoint` hot-path variant of [`git_overlay_mutation_preflight_advice`]
-/// that reuses an already-computed git-overlay worktree status for the
-/// `checkpoint` hot-path variant of [`git_overlay_mutation_preflight_advice`]
-/// that reuses an already-computed git-overlay worktree status for the
-/// `check_verification` branch instead of re-walking the worktree. All other
-/// `checkpoint` hot-path variant of [`git_overlay_mutation_preflight_advice`]
-/// that reuses an already-computed git-overlay worktree status for the
-/// `check_verification` branch instead of re-walking the worktree. All other
-/// branches and the resulting advice are identical.
 /// `checkpoint` hot-path variant of [`git_overlay_mutation_preflight_advice`]
 /// that reuses an already-computed git-overlay worktree status for the
 /// `check_verification` branch instead of re-walking the worktree. All other

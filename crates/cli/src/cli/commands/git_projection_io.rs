@@ -27,12 +27,10 @@ use super::{
         serialize_empty_action_as_null,
     },
 };
-use crate::{
-    cli::{Cli, cli_args::GitSource, should_output_json, style},
-    git_projection_engine::{
-        GitProjection, git_core::clone_url_to_bare, git_export::export_all,
-        git_ingest::import_git_history, git_util::ExportedRef,
-    },
+use crate::cli::{Cli, cli_args::GitSource, should_output_json, style};
+use heddle_git_projection::{
+    GitProjection, git_core::clone_url_to_bare, git_export::export_all,
+    git_ingest::import_git_history, git_util::ExportedRef,
 };
 
 /// A `GitSource` resolved to an on-disk path. For URL sources we own a

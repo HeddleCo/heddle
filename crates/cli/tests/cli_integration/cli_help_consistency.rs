@@ -69,7 +69,7 @@ fn clone_help_pins_behavior_stanza() {
     // where an unhinted clone lands per remote kind — and points at the
     // topic page for the rest.
     assert!(
-        summary.contains("default branch") && summary.contains("`main`"),
+        summary.contains("selected default branch"),
         "clone help summary should say where clones land: {summary}"
     );
     assert!(
@@ -82,30 +82,16 @@ fn clone_help_pins_behavior_stanza() {
     );
 
     let help = heddle_help(&["help", "clone"]);
-    // Default-thread resolution for Git-overlay clones: lands on the
-    // remote's advertised default branch (its Git HEAD).
     assert!(
-        help.contains("no --thread") && help.contains("default branch"),
-        "clone topic should explain where an unhinted clone lands: {help}"
+        help.contains("Git source is streamed by Sley directly")
+            && help.contains("No Git executable or `.heddle/git` mirror is used"),
+        "clone topic should explain the Git-overlay transport and storage path: {help}"
     );
-    // The Git-overlay fallback chain (main, then first imported thread).
     assert!(
-        help.contains("`main`") && help.contains("alphabetically first"),
-        "clone topic should name the default-thread fallback chain: {help}"
-    );
-    // The transport distinction: native-local and hosted Heddle clones target
-    // `main` directly (no Git-HEAD fallback chain) — the inaccuracy this stanza
-    // must not regress.
-    assert!(
-        help.contains("Native-local and hosted Heddle clones")
-            && help.contains("target `main` directly"),
-        "clone topic should distinguish the Heddle-remote default from the Git-overlay chain: {help}"
-    );
-    // The failure mode: an unhinted native/hosted clone fails when the remote
-    // has no `main` thread, and the user must pass `--thread <name>`.
-    assert!(
-        help.contains("the clone fails") && help.contains("--thread <name>"),
-        "clone topic should document that an unhinted native/hosted clone fails when the remote has no `main` thread: {help}"
+        help.contains("Native clones target `main` directly")
+            && help.contains("if the remote has no `main` thread")
+            && help.contains("--thread <name>"),
+        "clone topic should explain native default-thread selection: {help}"
     );
     // Depth semantics: 0 means full history, N keeps the tip plus N ancestry levels.
     assert!(
@@ -116,13 +102,11 @@ fn clone_help_pins_behavior_stanza() {
         help.contains("depth boundary") && help.contains("re-clone at a greater --depth"),
         "clone topic should explain that history past the depth boundary is absent and recovered by re-cloning at a greater depth: {help}"
     );
-    // Depth on Git-overlay clones: nonzero is rejected, --depth 0 is accepted
-    // (= the full-clone default, since cmd_clone normalizes 0 to None before
-    // the rejection check).
     assert!(
-        help.contains("Git-overlay clones reject a nonzero --depth")
-            && help.contains("--depth 0 is accepted"),
-        "clone topic should distinguish nonzero --depth (rejected) from --depth 0 (accepted) for Git-overlay clones: {help}"
+        help.contains("Git Overlay clones ingest full history")
+            && help.contains("reject partial-history")
+            && help.contains("options"),
+        "clone topic should explain that shallow history is native-only: {help}"
     );
     // Depth-1 materializes the tip plus its immediate parents, not just the tip.
     assert!(
@@ -221,8 +205,8 @@ fn clone_help_carries_hidden_flag_breadcrumb() {
 fn pull_help_carries_hidden_flag_breadcrumb() {
     let help = heddle_help(&["pull", "--help"]);
     assert!(
-        help.contains("--lazy") && help.contains("planned for v0.3.1"),
-        "pull help should name the hidden --lazy flag and its timeline: {help}"
+        help.contains("--lazy") && help.contains("hydrates it explicitly later"),
+        "pull help should name the hidden --lazy flag and its behavior: {help}"
     );
 }
 
@@ -248,107 +232,94 @@ fn start_help_carries_hidden_flag_breadcrumb() {
     }
 }
 
-/// heddle#654. A user piping `heddle diff --patch | patch -p1` must learn
-/// from `--help` — not from a silent failure — that patch(1) compatibility
-/// is best-effort and `git apply` is the canonical consumer.
+/// Diff help must keep the patch format and extended-header boundary explicit.
 #[test]
-fn diff_help_warns_patch_compat_is_best_effort() {
+fn diff_help_explains_git_compatible_patch_headers() {
     let help = heddle_help(&["diff", "--help"]);
     assert!(
-        help.contains("git apply") && help.contains("patch(1)") && help.contains("best-effort"),
-        "diff help should state that patch(1) support is best-effort and git apply is canonical: {help}"
-    );
-    assert!(
-        help.contains("type changes") && help.contains("mode bits"),
-        "diff help should name the git-extended-header cases that need git apply: {help}"
+        help.contains("Git-compatible unified diff")
+            && help.contains("extended headers for type and mode changes"),
+        "diff help should explain its patch format and extended headers: {help}"
     );
 }
 
-/// heddle#467. Semantic merge is the default strategy when compiled in; the
-/// merge help must expose only the hunk-only escape hatch and must not repeat
-/// the old false feature-gate claim.
+/// Commit help must explain the capture-to-Git authority boundary.
 #[test]
-fn merge_help_pins_semantic_default_and_opt_out() {
-    let help = heddle_help(&["merge", "--help"]);
-    assert!(
-        help.contains("--no-semantic"),
-        "merge help should expose the hunk-only opt-out: {help}"
-    );
-    assert!(
-        help.contains("Semantic merge is the default"),
-        "merge help should state that semantic merge is the default: {help}"
-    );
-    assert!(
-        !help.contains("--semantic"),
-        "merge help must not advertise the removed --semantic opt-in: {help}"
-    );
-    assert!(
-        !help.contains("Requires building heddle with `--features semantic`"),
-        "merge help must not claim the default feature requires an explicit build flag: {help}"
-    );
-}
-
-/// heddle#655. `[aliases: --intent]` on commit's `-m` reads as a typo
-/// without an explanation; the help text must say why the alias exists.
-#[test]
-fn commit_help_explains_intent_alias() {
+fn commit_help_explains_capture_boundary() {
     let help = heddle_help(&["commit", "--help"]);
     assert!(
-        help.contains("--intent") && help.contains("WHY"),
-        "commit help should explain the deliberate --intent alias: {help}"
+        help.contains("Defaults to the current capture intent")
+            && help.contains("Commits the complete captured tree")
+            && help.contains("Git pre-commit and commit-msg hooks are not run"),
+        "commit help should explain how a capture becomes Git history: {help}"
     );
 }
 
-/// heddle#649. Git veterans need one explicit translation page instead of
-/// inferring Heddle's nouns from scattered command help.
+/// The Git concepts page must explain authority boundaries and advertise only
+/// the current thin Git surface.
 #[test]
-fn git_concepts_topic_maps_git_veteran_terms() {
+fn git_concepts_topic_explains_authority_and_current_surface() {
     let help = heddle_help(&["help", "git-concepts"]);
 
     assert!(
-        help.contains("| Git concept | Heddle concept + semantic difference |"),
-        "git-concepts topic should be a two-column concept table: {help}"
+        help.contains("Git and Heddle own different layers."),
+        "git-concepts topic should lead with the authority boundary: {help}"
     );
-    for row in [
-        "`git commit`",
-        "Git commit SHA",
-        "`git branch foo`",
-        "`git checkout foo` / `git switch foo`",
-        "`git tag v1.0`",
-        "`git remote add origin <url>`",
-        "`git push` / `git pull`",
-        "`git fetch`",
-        "`git rebase` to catch up",
+    for ownership in [
+        "`.git` owns commits, refs",
+        "the index, and worktree state",
+        "coordination and durable metadata in `.heddle`",
+        "captures, provenance, threads, readiness, review, and safe landing",
     ] {
         assert!(
-            help.contains(row),
-            "git-concepts topic missing row `{row}`: {help}"
-        );
-    }
-    for heddle in [
-        "heddle commit -m",
-        "heddle start foo",
-        "heddle thread create foo",
-        "heddle thread marker create v1.0",
-        "heddle remote add origin <url>",
-        "heddle push",
-        "heddle pull",
-        "heddle fetch",
-        "heddle sync",
-    ] {
-        assert!(
-            help.contains(heddle),
-            "git-concepts topic missing Heddle mapping `{heddle}`: {help}"
+            help.contains(ownership),
+            "git-concepts topic missing ownership statement `{ownership}`: {help}"
         );
     }
     assert!(
-        help.contains("Reconciliation examples:")
-            && help.contains("heddle start feature/auth --path ../feature-auth")
-            && help.contains("heddle thread marker create v1.0")
-            && help.contains("heddle fetch origin")
-            && help.contains("heddle sync"),
-        "git-concepts topic should include practical reconciliation examples: {help}"
+        help.contains("`clone`,")
+            && help.contains("`commit`,")
+            && help.contains("`pull`,")
+            && help.contains("`push`, and `remote`")
+            && help.contains("embedded Sley engine directly"),
+        "git-concepts topic should name the current thin Git surface and engine: {help}"
     );
+    for mapping in [
+        "| Intent | Git Overlay | Native Heddle |",
+        "`heddle capture`, then `heddle commit`",
+        "| Record a granular Heddle savepoint | `heddle capture` | `heddle capture` |",
+        "| Check integration readiness | `heddle ready` | `heddle ready` |",
+        "| Integrate a managed thread | `heddle land` | `heddle land` |",
+        "| Synchronize source | `heddle pull` / `heddle push`",
+        "| Configure remotes | `heddle remote` | `heddle remote` |",
+    ] {
+        assert!(
+            help.contains(mapping),
+            "git-concepts topic missing current mapping `{mapping}`: {help}"
+        );
+    }
+    assert!(
+        help.contains("Use `heddle init` to add that sidecar")
+            && help.contains("`heddle adopt`")
+            && help.contains("one atomic transition")
+            && help.contains("makes Heddle the repository authority"),
+        "git-concepts topic should distinguish sidecar initialization from adoption: {help}"
+    );
+    assert!(
+        help.contains("optional Git-compatible client")
+            && help.contains("it is not a Heddle dependency")
+            && help.contains("`import git`")
+            && help.contains("`export")
+            && help.contains("git`, and `sync git`")
+            && help.contains("translate data between authorities"),
+        "git-concepts topic should explain unsupported Git operations and authority translation: {help}"
+    );
+    for removed in ["heddle checkpoint", "heddle fetch", "heddle switch"] {
+        assert!(
+            !help.contains(removed),
+            "git-concepts topic must not advertise removed command `{removed}`: {help}"
+        );
+    }
 
     let top = heddle_help(&["help"]);
     assert!(

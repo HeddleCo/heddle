@@ -72,6 +72,14 @@ fn main() -> Result<()> {
 }
 
 async fn async_main() -> Result<()> {
+    let embedding_args = std::env::args().skip(1).collect::<Vec<_>>();
+    if let Some(result) =
+        heddle_git_projection::credential::dispatch_embedded_credential_helper(&embedding_args)
+    {
+        result.map_err(anyhow::Error::new)?;
+        return Ok(());
+    }
+
     // Install the ring crypto provider as the rustls default. Without this,
     // any rustls TLS handshake (gRPC, GitHub REST, `import git
     // https://…`) panics in 0.23.x. We pin ring instead of aws-lc-rs to

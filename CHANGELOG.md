@@ -13,12 +13,30 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+### Breaking
+
+- **Repository and wire format v3.** Physical state identity is now a 32-byte
+  content-addressed `StateId`, distinct from rewrite-stable `ChangeId`, and
+  signatures are attachments rather than identity-bearing state fields. Heddle
+  refuses to open v2 repositories without changing them; recreate the repository
+  or re-adopt its Git history. The release must be coordinated with Weft's
+  `heddle-wire`/`heddle-objects`/`heddle-repo` dependency bump and its Postgres
+  ref columns must migrate to 32-byte state ids before deployment.
+
 ### Changed
 
-- **gRPC contract cleanup before 0.23.** Removed 29 unimplemented RPCs and
-  their exclusive messages before extracting the contract to `HeddleCo/api`.
-  The generated Rust and TypeScript surfaces now expose 15 services and 147
-  RPCs with explicit effect and deduplication contracts.
+- **Explicit source authority and direct Sley Git Overlay.** Existing Git
+  checkouts keep source objects, refs, index, and worktree state in their real
+  `.git`; Heddle keeps provenance and coordination metadata in `.heddle`.
+  `clone`, `commit`, `pull`, `push`, and `remote` use the embedded Sley engine
+  without requiring a Git executable. `heddle adopt` is the atomic transition to
+  native Heddle source storage.
+
+- **gRPC contract cleanup before 0.23.** Retained every RPC implemented by
+  Weft and removed only the unserved `TreeEditService` methods before extracting
+  the contract to `HeddleCo/api`. The generated Rust and TypeScript surfaces
+  expose 17 services and 176 RPCs with explicit effect and deduplication
+  contracts.
 
 ## 0.8.0 - 2026-07-03
 

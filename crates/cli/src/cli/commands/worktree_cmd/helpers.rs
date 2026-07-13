@@ -408,16 +408,7 @@ pub(crate) fn write_isolated_checkout(
             abs_path
         )));
     }
-    let shared_galeed_dir = repo.heddle_dir();
-    std::fs::create_dir_all(&heddle_dir)?;
-    {
-        use std::io::Write as _;
-        let mut pointer_file = std::fs::File::create(heddle_dir.join("objectstore"))?;
-        pointer_file
-            .write_all(format!("objectstore: {}\n", shared_galeed_dir.display()).as_bytes())?;
-        pointer_file.sync_all()?;
-    }
-    std::fs::create_dir_all(heddle_dir.join("state"))?;
+    Repository::init_worktree(abs_path, repo.heddle_dir())?;
     // Fault point for the partial-materialize rollback test (heddle#356):
     // the checkout's `.heddle` metadata is already on disk here but no tree
     // bytes are, modeling a materialize that fails partway. The transaction's

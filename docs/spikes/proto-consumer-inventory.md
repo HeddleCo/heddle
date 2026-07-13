@@ -1,54 +1,49 @@
 # gRPC consumer inventory
 
-Status: pre-extraction snapshot from Heddle `origin/main` at `ec3c7296`, plus
-read-only local Weft and Tapestry checkouts inspected on 2026-07-12.
+Status: pre-extraction snapshot verified against Heddle and Weft `origin/main`
+on 2026-07-13. Weft handler and registration evidence was checked at
+`eb1155d8c941171817d9b15ab2a73f948e0aca47`.
 
-This inventory answers whether a contract member has implementation or consumer
-evidence. It is not a compatibility promise. The sibling checkouts do not contain
-every branch referenced by recent cross-repository issue links, so absence is
-recorded as uncertain rather than treated as proof that a capability is dead.
+This inventory records implementation evidence for the contract Heddle builds
+and publishes. It is not a compatibility promise.
 
-## Keep: implementation or consumer evidence exists
+## Hosted services
 
-- Heddle local daemon: `DiscussionService`, `HookService`,
-  `OperationLogQueryService`, `SignalService`, `StateReviewService`,
-  and `TimelineService`.
-- Weft hosted handlers: `AuthService`, `ContentService`, `DiscussionService`,
-  `FeedService`, `HookService`, `HostedUserService`,
-  `OperationLogQueryService`, `RepoEventService`, `ReviewService`,
-  `SignalService`, `StateReviewService`, `RepoSyncService`,
-  `ThreadWorkflowService`, and `TransactionService`.
-- Tapestry imports or invokes Hosted, Content, ThreadWorkflow, Feed, RepoEvent,
-  Review, StateReview, and Discussion surfaces.
-- Heddle hosted clients exercise Auth, Content, Hosted, RepoSync, and TreeEdit
-  generated clients; TreeEdit currently has client/mock evidence but no handler
-  in the inspected Weft checkout.
+Weft registers and serves `AuthService`, `ContentService`, `DiscussionService`,
+`FeedService`, `HookService`, `HostedUserService`, `ImportService`,
+`OperationLogQueryService`, `RepoEventService`, `RepoSyncService`,
+`ReviewService`, `SearchService`, `SignalService`, `StateReviewService`,
+`ThreadWorkflowService`, and `TransactionService`.
 
-These services and the shared messages reachable from them stay in the extracted
-contract.
+The following surfaces have concrete Weft handlers and remain in the contract:
 
-`TransactionService` stays because Weft has a hosted handler. Heddle's local
-transaction sentinel and CLI were removed: they recorded operations after those
-operations had already executed, so commit was not atomic and abort did not
-restore source or worktree state.
+- import job creation and progress streaming;
+- hosted search;
+- account-recovery declaration, proof, veto, and completion;
+- subscription recording;
+- spool reads, visibility, settings, child edges, and monorepo resolution;
+- subject and handle resolution, claims, escrow, and proof workflows;
+- governance and membership history; and
+- single- and multi-repository event subscriptions.
+
+The generated Rust and TypeScript bindings must retain those services, methods,
+and their reachable messages.
+
+## Local services
+
+Heddle's local daemon serves `DiscussionService`, `HookService`,
+`OperationLogQueryService`, `SignalService`, `StateReviewService`, and
+`TimelineService`. Those contracts also remain part of the canonical package.
 
 ## Removed before 0.23
 
-The pre-0.23 contract removes surfaces with no production handler or consumer:
-`ImportService`, `SearchService`, `TreeEditService`, multi-repository event
-subscription, hosted spool settings, subject and handle resolvers, child-edge
-mutation/listing, governance and membership history, proof and handle escrow,
-billing subscription recording, and account recovery. Their exclusive messages
-are removed with them. Generated Rust and TypeScript APIs therefore cannot imply
-capabilities the product does not provide.
+`TreeEditService` is removed. The inspected Weft server has no implementation or
+registration for its `StatusForThread`, `DiffForThread`, or `LogForThread`
+methods, and Heddle no longer exposes the removed hosted tree-edit client seam.
 
-`ResolveMonorepo`, single-repository `SubscribeRepoEvents`, the implemented
-StateReview surface, and shared identity/authentication fields remain.
+## Extraction gate
 
-## Cutover action
-
-Before Weft adopts the first `HeddleCo/api` release, generate a descriptor-based
-service/method inventory and compare it with the services registered by Weft.
-Missing hosted handlers must fail in Weft. Each uncertain member must then move
-to either implemented/kept or intentionally removed in a coordinated API,
-Heddle, Weft, and Tapestry change.
+Before Weft adopts the first `HeddleCo/api` release, compare the API descriptor
+with Weft's registered services and generated trait implementations. Any future
+removal requires a coordinated Heddle, Weft, and Tapestry change backed by the
+same implementation and consumer inventory.
