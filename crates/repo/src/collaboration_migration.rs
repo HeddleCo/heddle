@@ -104,8 +104,13 @@ pub fn plan_legacy_discussion_migration(
         let operation = CollaborationOperationEnvelope::new(
             discussion_id,
             Vec::new(),
-            CollaborationIdempotencyKey::new(format!("legacy:{}", primary.as_str()))
-                .map_err(HeddleError::InvalidObject)?,
+            CollaborationIdempotencyKey::new(format!(
+                "legacy:{}:{}:{}",
+                primary.state_id.to_string_full(),
+                primary.attachment_id.as_hash().to_hex(),
+                primary.blob_hash.to_hex()
+            ))
+            .map_err(HeddleError::InvalidObject)?,
             import_actor.clone(),
             selected.discussion.opened_at.saturating_mul(1000),
             legacy_body(selected, legacy_id, primary, &sources)?,
@@ -246,11 +251,11 @@ fn maximal_candidates<'a>(
 }
 
 fn source_locator(candidate: &Candidate) -> Result<LegacySourceLocator> {
-    LegacySourceLocator::new(format!(
-        "state/{}/attachment/{}/blob/{}",
-        candidate.state_id, candidate.attachment_id, candidate.blob_hash
+    Ok(LegacySourceLocator::new(
+        candidate.state_id,
+        candidate.attachment_id,
+        candidate.blob_hash,
     ))
-    .map_err(HeddleError::InvalidObject)
 }
 
 fn legacy_body(
@@ -300,4 +305,109 @@ fn legacy_body(
         turns,
         resolution,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use objects::object::{
+        Blob, DiscussionTurn, Principal, StateAttachment, SymbolAnchor, VisibilityTier,
+    };
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::CollaborationWriteDisposition;
+
+    fn actor() -> Attribution {
+        Attribution::human(Principal::new("Importer", "importer@example.com"))
+    }
+
+    fn discussion(id: &str, body: &str, state_id: StateId) -> Discussion {
+        Discussion {
+            id: id.to_string(),
+            anchor: SymbolAnchor::new("src/lib.rs", "run"),
+            opened_against_state: state_id,
+            opened_at: 1_700_000_000,
+            thread_ref: None,
+            turns: vec![DiscussionTurn {
+                author: Principal::new("Ada", "ada@example.com"),
+                body: body.to_string(),
+                posted_at: 1_700_000_000,
+            }],
+            resolution: DiscussionResolution::Open,
+            body_changed_since_open: false,
+            orphaned: false,
+            visibility: VisibilityTier::default(),
+            resolved_annotation_id: None,
+        }
+    }
+
+    fn candidate(state_id: StateId, body: &str) -> Candidate {
+        Candidate {
+            state_id,
+            attachment_id: StateAttachmentId::from_hash(objects::object::ContentHash::from_bytes(
+                [4; 32],
+            )),
+            blob_hash: objects::object::ContentHash::from_bytes([5; 32]),
+            discussion: discussion("legacy-1", body, state_id),
+        }
+    }
+
+    #[test]
+    fn maximal_head_divergence_is_a_blocker() {
+        let left = StateId::from_bytes([1; 32]);
+        let right = StateId::from_bytes([2; 32]);
+        let candidates = vec![candidate(left, "left"), candidate(right, "right")];
+        let parents = BTreeMap::from([(left, Vec::new()), (right, Vec::new())]);
+        let maximal = maximal_candidates(&candidates, &parents);
+        assert_eq!(maximal.len(), 2);
+        assert_ne!(maximal[0].discussion, maximal[1].discussion);
+    }
+
+    #[test]
+    fn migration_reads_detached_attachment_and_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let repository = Repository::init_default(temp.path()).unwrap();
+        let state_id = repository.head().unwrap().unwrap();
+        let bytes = DiscussionsBlob::new(vec![discussion("legacy-1", "why?", state_id)])
+            .encode()
+            .unwrap();
+        let blob_hash = repository.store().put_blob(&Blob::new(bytes)).unwrap();
+        repository
+            .put_state_attachment(&StateAttachment {
+                state_id,
+                body: StateAttachmentBody::Discussions(blob_hash),
+                attribution: actor(),
+                created_at: Utc::now(),
+                supersedes: None,
+            })
+            .unwrap();
+        let obsolete = repository.heddle_dir().join("discussions");
+        fs::create_dir_all(&obsolete).unwrap();
+        fs::write(obsolete.join("legacy.msgpack"), b"legacy").unwrap();
+
+        let store = CollaborationStore::open(repository.heddle_dir()).unwrap();
+        let plan = plan_legacy_discussion_migration(&repository, actor()).unwrap();
+        assert!(plan.is_ready());
+        assert_eq!(plan.items.len(), 1);
+        let first = apply_legacy_discussion_migration(&repository, &store, &plan).unwrap();
+        let second = apply_legacy_discussion_migration(&repository, &store, &plan).unwrap();
+        assert_eq!(
+            first.writes[0].disposition,
+            CollaborationWriteDisposition::Created
+        );
+        assert_eq!(
+            second.writes[0].disposition,
+            CollaborationWriteDisposition::IdempotentReplay
+        );
+        assert!(!obsolete.exists());
+        assert_eq!(
+            repository
+                .latest_state_attachment(&state_id, crate::StateAttachmentKind::Discussions)
+                .unwrap()
+                .unwrap()
+                .body,
+            StateAttachmentBody::Discussions(blob_hash)
+        );
+    }
 }

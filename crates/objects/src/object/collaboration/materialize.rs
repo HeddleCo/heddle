@@ -19,6 +19,40 @@ pub struct HostedCollaborationSet {
 }
 
 impl HostedCollaborationSet {
+    pub fn validate(
+        &self,
+        operations: &BTreeMap<CollabOpId, DecodedCollaborationOperation>,
+    ) -> Result<(), CollaborationCodecError> {
+        if !self.accepted.is_subset(&self.received) || !self.rejected.is_subset(&self.received) {
+            return Err(CollaborationCodecError::Invalid(
+                "hosted accepted and rejected sets must be subsets of received".to_string(),
+            ));
+        }
+        if !self.accepted.is_disjoint(&self.rejected) {
+            return Err(CollaborationCodecError::Invalid(
+                "hosted accepted and rejected sets must be disjoint".to_string(),
+            ));
+        }
+        for id in &self.accepted {
+            let operation = operations.get(id).ok_or_else(|| {
+                CollaborationCodecError::Invalid(format!(
+                    "hosted accepted operation {id} is unavailable"
+                ))
+            })?;
+            if !operation
+                .operation
+                .parents
+                .iter()
+                .all(|parent| self.accepted.contains(parent))
+            {
+                return Err(CollaborationCodecError::Invalid(format!(
+                    "hosted accepted set is not parent-closed at {id}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn blocked_descendants(
         &self,
         operations: &BTreeMap<CollabOpId, DecodedCollaborationOperation>,
@@ -27,17 +61,34 @@ impl HostedCollaborationSet {
             .difference(&self.accepted)
             .filter(|id| {
                 !self.rejected.contains(id)
-                    && operations.get(id).is_some_and(|operation| {
-                        operation
-                            .operation
-                            .parents
-                            .iter()
-                            .any(|parent| !self.accepted.contains(parent))
-                    })
+                    && has_unaccepted_ancestor(**id, &self.accepted, operations)
             })
             .copied()
             .collect()
     }
+}
+
+fn has_unaccepted_ancestor(
+    id: CollabOpId,
+    accepted: &BTreeSet<CollabOpId>,
+    operations: &BTreeMap<CollabOpId, DecodedCollaborationOperation>,
+) -> bool {
+    let Some(operation) = operations.get(&id) else {
+        return true;
+    };
+    let mut pending = operation.operation.parents.clone();
+    let mut seen = BTreeSet::new();
+    while let Some(parent) = pending.pop() {
+        if !accepted.contains(&parent) {
+            return true;
+        }
+        if seen.insert(parent) {
+            if let Some(operation) = operations.get(&parent) {
+                pending.extend(operation.operation.parents.iter().copied());
+            }
+        }
+    }
+    false
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,7 +191,7 @@ fn materialize_discussion(
     }
     let root_id = roots[0];
     let root = &all[&root_id].operation.body;
-    let (title, anchor, visibility, root_turns, mut resolution) = match root {
+    let (title, anchor, visibility, root_turns, base_resolution) = match root {
         CollaborationOperationBodyV1::Open {
             title,
             anchor,
@@ -178,38 +229,14 @@ fn materialize_discussion(
         .into_iter()
         .map(|turn| (root_id, turn))
         .collect::<Vec<_>>();
-    let mut competing_resolutions = BTreeSet::new();
-    let mut selected_conflicts = BTreeMap::new();
+    let mut state_operations = BTreeSet::new();
     for id in ids.iter().copied().filter(|id| *id != root_id) {
         match &all[&id].operation.body {
             CollaborationOperationBodyV1::AppendTurn { turn } => turns.push((id, turn.clone())),
-            CollaborationOperationBodyV1::Resolve { resolution: next } => {
-                competing_resolutions.insert(id);
-                resolution = Some(next.clone());
-            }
-            CollaborationOperationBodyV1::Reopen { .. } => resolution = None,
-            CollaborationOperationBodyV1::ResolveConflict {
-                competing,
-                selected,
-            } => {
-                for operation in competing {
-                    selected_conflicts.insert(*operation, *selected);
-                }
-                let selected_body = &all
-                    .get(selected)
-                    .ok_or_else(|| {
-                        CollaborationCodecError::Invalid(format!(
-                            "conflict resolution selects missing operation {selected}"
-                        ))
-                    })?
-                    .operation
-                    .body;
-                if let CollaborationOperationBodyV1::Resolve {
-                    resolution: selected,
-                } = selected_body
-                {
-                    resolution = Some(selected.clone());
-                }
+            CollaborationOperationBodyV1::Resolve { .. }
+            | CollaborationOperationBodyV1::Reopen { .. }
+            | CollaborationOperationBodyV1::ResolveConflict { .. } => {
+                state_operations.insert(id);
             }
             CollaborationOperationBodyV1::Open { .. }
             | CollaborationOperationBodyV1::LegacyImported { .. } => {
@@ -220,23 +247,33 @@ fn materialize_discussion(
         }
     }
 
-    let conflicts = competing_resolutions
+    let maximal_state = state_operations
         .iter()
-        .filter(|left| {
-            competing_resolutions.iter().any(|right| {
-                left != &right
-                    && !precedes(**left, *right, all)
-                    && !precedes(*right, **left, all)
-                    && all[*left].operation.body != all[right].operation.body
-                    && selected_conflicts.get(left) != Some(*right)
-                    && selected_conflicts.get(right) != Some(*left)
-            })
+        .filter(|candidate| {
+            !state_operations
+                .iter()
+                .any(|other| candidate != &other && precedes(**candidate, *other, all))
         })
         .copied()
         .collect::<BTreeSet<_>>();
-    if !conflicts.is_empty() {
-        resolution = None;
+    let mut outcomes = BTreeMap::new();
+    for id in &maximal_state {
+        outcomes.insert(*id, resolution_outcome(*id, all, &mut BTreeSet::new())?);
     }
+    let first_outcome = outcomes.values().next().cloned();
+    let conflicts = if outcomes
+        .values()
+        .all(|outcome| Some(outcome) == first_outcome.as_ref())
+    {
+        BTreeSet::new()
+    } else {
+        outcomes.keys().copied().collect()
+    };
+    let resolution = if conflicts.is_empty() {
+        first_outcome.unwrap_or(base_resolution)
+    } else {
+        None
+    };
 
     let ids_set = ids.iter().copied().collect::<BTreeSet<_>>();
     let heads = ids_set
@@ -260,6 +297,37 @@ fn materialize_discussion(
         heads,
         display_head,
     })
+}
+
+fn resolution_outcome(
+    id: CollabOpId,
+    operations: &BTreeMap<CollabOpId, DecodedCollaborationOperation>,
+    visiting: &mut BTreeSet<CollabOpId>,
+) -> Result<Option<CollaborationResolution>, CollaborationCodecError> {
+    if !visiting.insert(id) {
+        return Err(CollaborationCodecError::Invalid(format!(
+            "collaboration conflict resolution cycle at {id}"
+        )));
+    }
+    let body = &operations
+        .get(&id)
+        .ok_or_else(|| CollaborationCodecError::Invalid(format!("missing operation {id}")))?
+        .operation
+        .body;
+    let result = match body {
+        CollaborationOperationBodyV1::Resolve { resolution } => Some(resolution.clone()),
+        CollaborationOperationBodyV1::Reopen { .. } => None,
+        CollaborationOperationBodyV1::ResolveConflict { selected, .. } => {
+            resolution_outcome(*selected, operations, visiting)?
+        }
+        _ => {
+            return Err(CollaborationCodecError::Invalid(format!(
+                "operation {id} does not select a resolution outcome"
+            )));
+        }
+    };
+    visiting.remove(&id);
+    Ok(result)
 }
 
 fn precedes(
@@ -460,6 +528,93 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_reopen_and_resolve_surface_conflict() {
+        let root = root();
+        let resolved = decoded(
+            vec![root.operation_id],
+            "resolve",
+            2,
+            CollaborationOperationBodyV1::Resolve {
+                resolution: CollaborationResolution::Dismissed {
+                    reason: "done".to_string(),
+                },
+            },
+        );
+        let reopened = decoded(
+            vec![root.operation_id],
+            "reopen",
+            3,
+            CollaborationOperationBodyV1::Reopen {
+                reason: "new evidence".to_string(),
+            },
+        );
+        let view =
+            materialize_repository_collaboration(vec![root, resolved.clone(), reopened.clone()])
+                .unwrap();
+        assert_eq!(
+            view.discussions[&discussion_id()].conflict_operations,
+            BTreeSet::from([resolved.operation_id, reopened.operation_id])
+        );
+    }
+
+    #[test]
+    fn competing_conflict_resolutions_form_a_recursive_conflict() {
+        let root = root();
+        let left = decoded(
+            vec![root.operation_id],
+            "left",
+            2,
+            CollaborationOperationBodyV1::Resolve {
+                resolution: CollaborationResolution::Dismissed {
+                    reason: "left".to_string(),
+                },
+            },
+        );
+        let right = decoded(
+            vec![root.operation_id],
+            "right",
+            3,
+            CollaborationOperationBodyV1::Resolve {
+                resolution: CollaborationResolution::Dismissed {
+                    reason: "right".to_string(),
+                },
+            },
+        );
+        let mut competing = vec![left.operation_id, right.operation_id];
+        competing.sort();
+        let choose_left = decoded(
+            competing.clone(),
+            "choose-left",
+            4,
+            CollaborationOperationBodyV1::ResolveConflict {
+                competing: competing.clone(),
+                selected: left.operation_id,
+            },
+        );
+        let choose_right = decoded(
+            competing.clone(),
+            "choose-right",
+            5,
+            CollaborationOperationBodyV1::ResolveConflict {
+                competing,
+                selected: right.operation_id,
+            },
+        );
+        let view = materialize_repository_collaboration(vec![
+            root,
+            left,
+            right,
+            choose_left.clone(),
+            choose_right.clone(),
+        ])
+        .unwrap();
+        assert_eq!(
+            view.discussions[&discussion_id()].conflict_operations,
+            BTreeSet::from([choose_left.operation_id, choose_right.operation_id])
+        );
+    }
+
+    #[test]
     fn hosted_sets_separate_rejected_and_blocked_descendants() {
         let root = root();
         let rejected = decoded(
@@ -478,22 +633,43 @@ mod tests {
                 turn: DiscussionTurnV1::new("blocked").unwrap(),
             },
         );
-        let operations = [root.clone(), rejected.clone(), child.clone()]
-            .into_iter()
-            .map(|operation| (operation.operation_id, operation))
-            .collect();
+        let grandchild = decoded(
+            vec![child.operation_id],
+            "grandchild",
+            4,
+            CollaborationOperationBodyV1::AppendTurn {
+                turn: DiscussionTurnV1::new("also blocked").unwrap(),
+            },
+        );
+        let operations = [
+            root.clone(),
+            rejected.clone(),
+            child.clone(),
+            grandchild.clone(),
+        ]
+        .into_iter()
+        .map(|operation| (operation.operation_id, operation))
+        .collect();
         let hosted = HostedCollaborationSet {
             received: BTreeSet::from([
                 root.operation_id,
                 rejected.operation_id,
                 child.operation_id,
+                grandchild.operation_id,
             ]),
             accepted: BTreeSet::from([root.operation_id]),
             rejected: BTreeSet::from([rejected.operation_id]),
         };
+        hosted.validate(&operations).unwrap();
         assert_eq!(
             hosted.blocked_descendants(&operations),
-            BTreeSet::from([child.operation_id])
+            BTreeSet::from([child.operation_id, grandchild.operation_id])
         );
+        let invalid = HostedCollaborationSet {
+            received: hosted.received.clone(),
+            accepted: BTreeSet::from([root.operation_id, child.operation_id]),
+            rejected: BTreeSet::new(),
+        };
+        assert!(invalid.validate(&operations).is_err());
     }
 }

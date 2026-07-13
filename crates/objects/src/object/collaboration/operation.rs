@@ -246,6 +246,13 @@ impl CollaborationOperationEnvelope {
                 "non-root collaboration operation requires a parent".to_string(),
             ));
         }
+        if let CollaborationOperationBodyV1::ResolveConflict { competing, .. } = &self.body
+            && competing.iter().any(|id| !self.parents.contains(id))
+        {
+            return Err(CollaborationCodecError::Invalid(
+                "conflict resolution must causally follow every competing operation".to_string(),
+            ));
+        }
         self.body.validate()
     }
 }

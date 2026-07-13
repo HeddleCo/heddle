@@ -10,6 +10,8 @@ use super::{CollabOpId, CollaborationOperationEnvelope};
 pub enum CollaborationCodecError {
     #[error("collaboration operation encoding failed: {0}")]
     Encoding(String),
+    #[error("collaboration operation decoding failed: {0}")]
+    Decoding(String),
     #[error("unsupported collaboration operation version {0}")]
     UnsupportedVersion(u16),
     #[error("invalid collaboration operation: {0}")]
@@ -38,7 +40,7 @@ pub(crate) fn decode(
     bytes: &[u8],
 ) -> Result<DecodedCollaborationOperation, CollaborationCodecError> {
     let probe: VersionProbe = rmp_serde::from_slice(bytes)
-        .map_err(|error| CollaborationCodecError::Encoding(error.to_string()))?;
+        .map_err(|error| CollaborationCodecError::Decoding(error.to_string()))?;
     if probe.schema_version != 1 {
         return Err(CollaborationCodecError::UnsupportedVersion(
             probe.schema_version,

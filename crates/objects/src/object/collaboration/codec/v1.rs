@@ -122,7 +122,7 @@ pub(super) fn decode(
     bytes: &[u8],
 ) -> Result<CollaborationOperationEnvelope, CollaborationCodecError> {
     let wire: WireOperationV1 = rmp_serde::from_slice(bytes)
-        .map_err(|error| CollaborationCodecError::Encoding(error.to_string()))?;
+        .map_err(|error| CollaborationCodecError::Decoding(error.to_string()))?;
     Ok(CollaborationOperationEnvelope {
         discussion_id: wire.discussion_id,
         parents: wire.parents,

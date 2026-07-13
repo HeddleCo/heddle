@@ -69,6 +69,11 @@ struct IdempotencyScope {
     key: CollaborationIdempotencyKey,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct PendingCommit {
+    operation_id: CollabOpId,
+}
+
 pub struct CollaborationStore {
     root: PathBuf,
     lock: RepoLock,
@@ -88,9 +93,19 @@ impl CollaborationStore {
             root,
         };
         let _guard = store.lock.write().map_err(lock_error)?;
-        if store.read_index_unlocked()?.is_none() {
+        if store.pending_commit_path().exists() {
             let index = store.rebuild_index_unlocked()?;
             store.write_index_unlocked(&index)?;
+            store.clear_pending_commit_unlocked()?;
+        } else {
+            match store.read_index_unlocked() {
+                Ok(Some(_)) => {}
+                Ok(None) | Err(HeddleError::InvalidObject(_)) => {
+                    let index = store.rebuild_index_unlocked()?;
+                    store.write_index_unlocked(&index)?;
+                }
+                Err(error) => return Err(error),
+            }
         }
         Ok(store)
     }
@@ -112,6 +127,11 @@ impl CollaborationStore {
         let id = decoded.operation_id;
         let scope = idempotency_scope(&decoded.operation);
         let _guard = self.lock.write().map_err(lock_error)?;
+        if self.pending_commit_path().exists() {
+            let recovered = self.rebuild_index_unlocked()?;
+            self.write_index_unlocked(&recovered)?;
+            self.clear_pending_commit_unlocked()?;
+        }
         let mut index = self.read_or_rebuild_index_unlocked()?;
         if let Some(existing) = index.idempotency.get(&scope) {
             if *existing != id {
@@ -136,6 +156,7 @@ impl CollaborationStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(error.into()),
         };
+        self.stage_pending_commit_unlocked(id)?;
         if !existed {
             fs::create_dir_all(path.parent().expect("operation path has shard"))?;
             write_file_atomic(&path, bytes)?;
@@ -148,6 +169,7 @@ impl CollaborationStore {
             .insert(id);
         index.idempotency.insert(scope, id);
         self.write_index_unlocked(&index)?;
+        self.clear_pending_commit_unlocked()?;
         Ok(CollaborationWriteOutcome {
             operation_id: id,
             disposition: if existed {
@@ -279,6 +301,25 @@ impl CollaborationStore {
         self.root.join("indexes").join("operations.msgpack")
     }
 
+    fn pending_commit_path(&self) -> PathBuf {
+        self.root.join("pending-commit.msgpack")
+    }
+
+    fn stage_pending_commit_unlocked(&self, operation_id: CollabOpId) -> Result<()> {
+        let bytes = rmp_serde::to_vec_named(&PendingCommit { operation_id })
+            .map_err(|error| HeddleError::Serialization(error.to_string()))?;
+        write_file_atomic(&self.pending_commit_path(), &bytes)?;
+        Ok(())
+    }
+
+    fn clear_pending_commit_unlocked(&self) -> Result<()> {
+        match fs::remove_file(self.pending_commit_path()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn read_index_unlocked(&self) -> Result<Option<StoreIndex>> {
         let bytes = match fs::read(self.index_path()) {
             Ok(bytes) => bytes,
@@ -380,5 +421,120 @@ fn codec_error(error: impl std::fmt::Display) -> HeddleError {
 }
 
 fn lock_error(error: impl std::fmt::Display) -> HeddleError {
-    HeddleError::Lock(error.to_string())
+    HeddleError::InvalidObject(format!("collaboration store lock: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, sync::Arc, thread};
+
+    use objects::object::{
+        Attribution, CollaborationAnchor, CollaborationOperationBodyV1, DiscussionTurnV1,
+        Principal, VisibilityTier,
+    };
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn operation(key: &str) -> CollaborationOperationEnvelope {
+        CollaborationOperationEnvelope::new(
+            "disc-018f47ea-4a54-7c89-b012-3456789abcde".parse().unwrap(),
+            Vec::new(),
+            CollaborationIdempotencyKey::new(key).unwrap(),
+            Attribution::human(Principal::new("Ada", "ada@example.com")),
+            1,
+            CollaborationOperationBodyV1::Open {
+                title: format!("Review {key}"),
+                anchor: CollaborationAnchor::Repository,
+                visibility: VisibilityTier::default(),
+                turn: DiscussionTurnV1::new("first").unwrap(),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn operation_file_is_commit_point_and_index_is_rebuildable() {
+        let temp = TempDir::new().unwrap();
+        let store = CollaborationStore::open(temp.path()).unwrap();
+        let operation = operation("one");
+        let bytes = operation.encode().unwrap();
+        let operation_id = CollabOpId::for_bytes(&bytes);
+        store.stage_pending_commit_unlocked(operation_id).unwrap();
+        let path = store.operation_path(&operation_id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_file_atomic(&path, &bytes).unwrap();
+
+        let reopened = CollaborationStore::open(temp.path()).unwrap();
+        assert_eq!(reopened.operation_ids().unwrap(), vec![operation_id]);
+        assert!(reopened.verify_integrity().unwrap().index_current);
+        assert!(!reopened.pending_commit_path().exists());
+    }
+
+    #[test]
+    fn operation_paths_are_sharded_by_content_identity() {
+        let temp = TempDir::new().unwrap();
+        let store = CollaborationStore::open(temp.path()).unwrap();
+        let outcome = store.write_operation(&operation("one")).unwrap();
+        let path = store.operation_path(&outcome.operation_id);
+        assert_eq!(
+            path.parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            &outcome.operation_id.to_hex()[..2]
+        );
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn per_discussion_index_keeps_show_local() {
+        let temp = TempDir::new().unwrap();
+        let store = CollaborationStore::open(temp.path()).unwrap();
+        let first = operation("one");
+        let first_id = first.discussion_id;
+        store.write_operation(&first).unwrap();
+        let mut second = operation("two");
+        second.discussion_id = "disc-018f47ea-4a54-7c89-b012-3456789abcdf".parse().unwrap();
+        store.write_operation(&second).unwrap();
+
+        let ids = store.discussion_operation_ids(&first_id).unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(
+            store
+                .materialize_discussion(&first_id)
+                .unwrap()
+                .unwrap()
+                .title,
+            "Review one"
+        );
+    }
+
+    #[test]
+    fn lock_serializes_concurrent_idempotent_appends() {
+        let temp = TempDir::new().unwrap();
+        let store = Arc::new(CollaborationStore::open(temp.path()).unwrap());
+        let operation = Arc::new(operation("same"));
+        let handles = (0..8)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let operation = Arc::clone(&operation);
+                thread::spawn(move || store.write_operation(&operation).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(store.operation_ids().unwrap().len(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| outcome.disposition == CollaborationWriteDisposition::Created)
+                .count(),
+            1
+        );
+    }
 }

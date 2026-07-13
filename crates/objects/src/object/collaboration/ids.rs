@@ -5,7 +5,7 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use uuid::Uuid;
 
-use crate::object::ContentHash;
+use crate::object::{ContentHash, StateAttachmentId, StateId};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct CollabOpId([u8; 32]);
@@ -112,7 +112,7 @@ impl DiscussionRecordId {
     }
 
     pub fn for_legacy_source(source: &LegacySourceLocator, opened_at_ms: i64) -> Self {
-        let hash = ContentHash::compute_typed("legacy-discussion", source.as_str().as_bytes());
+        let hash = ContentHash::compute_typed("legacy-discussion", &source.identity_bytes());
         let mut bytes = [0; 16];
         bytes[..6].copy_from_slice(&(opened_at_ms.max(0) as u64).to_be_bytes()[2..]);
         bytes[6..].copy_from_slice(&hash.as_bytes()[..10]);
@@ -170,7 +170,7 @@ pub enum DiscussionRecordIdParseError {
 
 macro_rules! nonempty_id {
     ($name:ident, $message:literal) => {
-        #[derive(Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+        #[derive(Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize)]
         #[serde(transparent)]
         pub struct $name(String);
 
@@ -187,6 +187,15 @@ macro_rules! nonempty_id {
                 &self.0
             }
         }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+            }
+        }
     };
 }
 
@@ -195,7 +204,57 @@ nonempty_id!(
     "idempotency key must not be empty"
 );
 nonempty_id!(LegacyDiscussionId, "legacy discussion id must not be empty");
-nonempty_id!(
-    LegacySourceLocator,
-    "legacy source locator must not be empty"
-);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct LegacySourceLocator {
+    pub state_id: StateId,
+    pub attachment_id: StateAttachmentId,
+    pub blob_hash: ContentHash,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialized_nonempty_ids_cannot_bypass_validation() {
+        let bytes = rmp_serde::to_vec_named("").unwrap();
+        assert!(rmp_serde::from_slice::<CollaborationIdempotencyKey>(&bytes).is_err());
+        assert!(rmp_serde::from_slice::<LegacyDiscussionId>(&bytes).is_err());
+    }
+
+    #[test]
+    fn legacy_locator_preserves_full_typed_identities() {
+        let locator = LegacySourceLocator::new(
+            StateId::from_bytes([1; 32]),
+            StateAttachmentId::from_hash(ContentHash::from_bytes([2; 32])),
+            ContentHash::from_bytes([3; 32]),
+        );
+        let bytes = locator.identity_bytes();
+        assert_eq!(&bytes[..32], &[1; 32]);
+        assert_eq!(&bytes[32..64], &[2; 32]);
+        assert_eq!(&bytes[64..], &[3; 32]);
+    }
+}
+
+impl LegacySourceLocator {
+    pub fn new(
+        state_id: StateId,
+        attachment_id: StateAttachmentId,
+        blob_hash: ContentHash,
+    ) -> Self {
+        Self {
+            state_id,
+            attachment_id,
+            blob_hash,
+        }
+    }
+
+    pub fn identity_bytes(&self) -> [u8; 96] {
+        let mut bytes = [0; 96];
+        bytes[..32].copy_from_slice(self.state_id.as_bytes());
+        bytes[32..64].copy_from_slice(self.attachment_id.as_hash().as_bytes());
+        bytes[64..].copy_from_slice(self.blob_hash.as_bytes());
+        bytes
+    }
+}
