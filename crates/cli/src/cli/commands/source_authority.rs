@@ -10,6 +10,7 @@ use super::{advice::RecoveryAdvice, command_catalog::checked_action_from_argv};
 pub(crate) enum SourceOperation {
     Push,
     Pull,
+    Remote,
 }
 
 impl SourceOperation {
@@ -17,6 +18,7 @@ impl SourceOperation {
         match self {
             Self::Push => "push",
             Self::Pull => "pull",
+            Self::Remote => "remote",
         }
     }
 }
@@ -31,6 +33,16 @@ impl SourceAuthorityDispatch {
         Self {
             actions: SourceAuthorityActions::new(repo.source_authority()),
         }
+    }
+
+    pub(crate) fn git_overlay() -> Self {
+        Self {
+            actions: SourceAuthorityActions::new(RepositorySourceAuthority::GitOverlay),
+        }
+    }
+
+    pub(crate) fn is_native(self) -> bool {
+        self.actions.authority() == RepositorySourceAuthority::Native
     }
 
     pub(crate) fn require_push(
@@ -53,7 +65,7 @@ impl SourceAuthorityDispatch {
         if let Some(thread) = thread {
             argv.push(thread.to_string());
         }
-        self.require_native(SourceOperation::Push, argv, None)
+        self.require_native(SourceOperation::Push, argv, Vec::new())
     }
 
     pub(crate) fn require_pull(
@@ -69,24 +81,41 @@ impl SourceAuthorityDispatch {
         if let Some(thread) = remote_thread {
             argv.push(thread.to_string());
         }
-        let preceding =
-            local_thread.map(|thread| checked_action_from_argv(["git", "switch", thread]));
+        let preceding = local_thread
+            .map(|thread| checked_action_from_argv(["git", "switch", thread]))
+            .into_iter()
+            .collect();
         self.require_native(SourceOperation::Pull, argv, preceding)
+    }
+
+    pub(crate) fn require_remote<I, S>(
+        self,
+        argv: I,
+        preceding_actions: Vec<String>,
+    ) -> Result<(), RecoveryAdvice>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.require_native(
+            SourceOperation::Remote,
+            argv.into_iter().map(Into::into).collect(),
+            preceding_actions,
+        )
     }
 
     fn require_native(
         self,
         operation: SourceOperation,
         recovery_argv: Vec<String>,
-        preceding_action: Option<String>,
+        mut preceding_actions: Vec<String>,
     ) -> Result<(), RecoveryAdvice> {
         if self.actions.authority() == RepositorySourceAuthority::Native {
             return Ok(());
         }
         let direct_git = checked_action_from_argv(recovery_argv);
-        let mut recovery_commands = preceding_action.into_iter().collect::<Vec<_>>();
-        recovery_commands.push(direct_git.clone());
-        recovery_commands.push("heddle adopt".to_string());
+        preceding_actions.push(direct_git.clone());
+        preceding_actions.push("heddle adopt".to_string());
         Err(RecoveryAdvice::safety_refusal(
             "source_authority_direct_git",
             format!(
@@ -101,7 +130,7 @@ impl SourceAuthorityDispatch {
             ),
             "Git source state and Heddle metadata were left unchanged",
             direct_git,
-            recovery_commands,
+            preceding_actions,
         ))
     }
 }

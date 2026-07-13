@@ -1139,30 +1139,7 @@ pub struct PushArgs {
     #[arg(short, long)]
     pub force: bool,
 
-    /// Ad-hoc dual-push: after the primary push to the heddle remote
-    /// succeeds, also push to the named Git remote (default
-    /// `origin`). Use `--mirror` alone for `origin`, or `--mirror=<name>`
-    /// to target a specific Git remote. The secondary Git remote push is best-effort:
-    /// if it fails, the primary push is still reported as successful
-    /// and the mirror failure surfaces as a warning.
-    ///
-    /// `require_equals` pairs with `default_missing_value` (clap
-    /// requires both, or the next token after `--mirror` would be
-    /// swallowed as the Git remote mirror value — silently consuming the
-    /// positional primary remote).
-    #[arg(
-        long,
-        value_name = "REMOTE",
-        num_args = 0..=1,
-        require_equals = true,
-        default_missing_value = "origin",
-    )]
-    pub mirror: Option<String>,
-
-    /// Push every Heddle thread, Git tag visible to this checkout, and Heddle note ref in Git-overlay mode.
-    ///
-    /// Without this flag, Git-overlay push sends the current branch plus
-    /// refs/notes/heddle and skips Git tags.
+    /// Push every Heddle thread.
     #[arg(long)]
     pub all_threads: bool,
 
