@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Actor domain: list/show assembly plus pure spawn/done planning.
+//! Actor presence reports and completion planning.
 //!
 //! Owns:
 //! - listing registry entries into a typed report with stable JSON field names
 //! - pure active-only (and related) filters over [`ActorPresence`] slices
-//! - assembling a single actor entry plus ancestry chain for show/spawn JSON
-//! - pure [`plan_actor_spawn`] / [`build_spawn_entry`] for `actor spawn`
+//! - assembling a single actor entry plus ancestry chain for presence JSON
 //! - pure [`complete_actor_entry`] / [`plan_actor_done`] and thin
 //!   [`mark_actor_done`] for `actor done`
 //!
@@ -18,7 +17,7 @@ use chrono::{DateTime, Utc};
 use objects::store::{
     ActorChainNode, ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
 };
-use repo::{Repository, ThreadId, ThreadIdError};
+use repo::Repository;
 use serde::Serialize;
 
 /// Machine JSON for `heddle actor list` domain fields (stable field names).
@@ -32,7 +31,7 @@ pub struct ActorListReport {
     pub active_only: bool,
 }
 
-/// Machine JSON for a single-actor payload (`actor_show` / `actor_spawn` body).
+/// Machine JSON for a single actor-presence payload.
 ///
 /// Domain portion only — CLI supplies `output_kind` and `verification` when
 /// rendering machine output.
@@ -250,279 +249,6 @@ pub fn show_actor_from_entry(
 }
 
 // ---------------------------------------------------------------------------
-// Spawn planning
-// ---------------------------------------------------------------------------
-
-/// Caller-supplied spawn inputs for pure planning.
-///
-/// Field names mirror the CLI `actor spawn` surface plus resolved host facts
-/// (probe, HEAD base state, current lane). Harness probing and HEAD resolution
-/// stay caller-owned.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ActorSpawnOptions {
-    /// Explicit `--thread` name (CLI conflicts with `no_thread`).
-    pub thread: Option<String>,
-    /// Attach to the current lane without minting `actor/<session>`.
-    pub no_thread: bool,
-    /// Current checkout lane when known. Required when `no_thread` is true.
-    pub current_lane: Option<String>,
-    /// CLI `--provider` (empty/whitespace treated as unset).
-    pub provider: Option<String>,
-    /// CLI `--model` (empty/whitespace treated as unset).
-    pub model: Option<String>,
-    /// Harness probe fields (caller-resolved; unused when identity is explicit).
-    pub probe_provider: Option<String>,
-    pub probe_model: Option<String>,
-    pub harness: Option<String>,
-    pub thinking_level: Option<String>,
-    pub probe_source: Option<String>,
-    pub probe_confidence: Option<f32>,
-    /// Full base state id string for `anchor_state`.
-    pub base_state_full: String,
-    /// Short display form for `base_state`.
-    pub base_state_short: String,
-}
-
-/// How the spawn thread name is determined.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActorSpawnThreadSource {
-    /// Caller supplied `--thread <name>`.
-    Explicit(String),
-    /// `--no-thread` attached to the current lane.
-    CurrentLane(String),
-    /// Default: mint `actor/<session_id>` once the registry allocates an id.
-    GeneratedFromSession,
-}
-
-/// Attach rule used for registry attribution on spawn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActorSpawnAttachMode {
-    /// Fresh spawn (optional explicit thread or generated `actor/<session>`).
-    ExplicitSpawn,
-    /// `--no-thread` attach to the current lane.
-    NoThreadAttach,
-}
-
-impl ActorSpawnAttachMode {
-    /// Registry `winning_attach_rule` / precedence token.
-    pub fn rule(self) -> &'static str {
-        match self {
-            Self::ExplicitSpawn => "explicit-actor-spawn",
-            Self::NoThreadAttach => "no-thread-attach",
-        }
-    }
-
-    /// Human attach-reason string persisted on the registry entry.
-    pub fn reason(self, session_id: &str, thread: &str) -> String {
-        match self {
-            Self::ExplicitSpawn => {
-                format!("actor {session_id} was spawned explicitly on thread {thread}")
-            }
-            Self::NoThreadAttach => format!(
-                "actor {session_id} was attached to the current thread {thread} without minting a new thread"
-            ),
-        }
-    }
-}
-
-/// Pure plan for `heddle actor spawn` after option preflight.
-///
-/// Thread-ref creation, registry writes, and harness probing remain with the
-/// caller. Finalize the thread name with [`resolve_spawn_thread_name`] once a
-/// session id is allocated, then [`build_spawn_entry`].
-#[derive(Debug, Clone, PartialEq)]
-pub struct ActorSpawnPlan {
-    pub thread_source: ActorSpawnThreadSource,
-    /// When true, caller should create a thread ref if it does not exist.
-    pub mint_thread_if_missing: bool,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub harness: Option<String>,
-    pub thinking_level: Option<String>,
-    pub probe_source: Option<String>,
-    pub probe_confidence: Option<f32>,
-    pub attach_mode: ActorSpawnAttachMode,
-    pub base_state_full: String,
-    pub base_state_short: String,
-}
-
-/// Failures from pure actor spawn planning.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActorSpawnError {
-    /// Explicit `--thread` failed the safe-slug / reserved-structure rule.
-    InvalidThreadName(ThreadIdError),
-    /// `--no-thread` with no current lane to attach to.
-    NoCurrentLane,
-}
-
-impl std::fmt::Display for ActorSpawnError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidThreadName(err) => write!(f, "{err}"),
-            Self::NoCurrentLane => write!(
-                f,
-                "cannot attach with --no-thread: HEAD is not attached to a thread"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ActorSpawnError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::InvalidThreadName(err) => Some(err),
-            Self::NoCurrentLane => None,
-        }
-    }
-}
-
-impl From<ThreadIdError> for ActorSpawnError {
-    fn from(value: ThreadIdError) -> Self {
-        Self::InvalidThreadName(value)
-    }
-}
-
-/// Treat empty/whitespace CLI attribution strings as unset.
-pub fn nonempty_attr(value: Option<String>) -> Option<String> {
-    value.and_then(|v| {
-        let trimmed = v.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-/// True when the caller supplied a non-empty `--provider` and/or `--model`.
-pub fn is_explicit_identity(provider: &Option<String>, model: &Option<String>) -> bool {
-    provider
-        .as_ref()
-        .is_some_and(|value| !value.trim().is_empty())
-        || model.as_ref().is_some_and(|value| !value.trim().is_empty())
-}
-
-/// Default thread name minted for a generated actor session.
-pub fn default_actor_thread_name(session_id: &str) -> String {
-    format!("actor/{session_id}")
-}
-
-/// Pure preflight for `heddle actor spawn`.
-///
-/// Validates explicit thread names, enforces `--no-thread` lane requirements,
-/// and resolves identity / attach fields that do not need I/O.
-pub fn plan_actor_spawn(options: &ActorSpawnOptions) -> Result<ActorSpawnPlan, ActorSpawnError> {
-    let (thread_source, mint_thread_if_missing, attach_mode) = if options.no_thread {
-        let lane = options
-            .current_lane
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or(ActorSpawnError::NoCurrentLane)?;
-        (
-            ActorSpawnThreadSource::CurrentLane(lane.to_string()),
-            false,
-            ActorSpawnAttachMode::NoThreadAttach,
-        )
-    } else if let Some(name) = options.thread.as_deref() {
-        let validated = ThreadId::new(name).map_err(ActorSpawnError::from)?;
-        (
-            ActorSpawnThreadSource::Explicit(validated.as_str().to_string()),
-            true,
-            ActorSpawnAttachMode::ExplicitSpawn,
-        )
-    } else {
-        (
-            ActorSpawnThreadSource::GeneratedFromSession,
-            true,
-            ActorSpawnAttachMode::ExplicitSpawn,
-        )
-    };
-
-    let explicit = is_explicit_identity(&options.provider, &options.model);
-    let provider =
-        nonempty_attr(options.provider.clone()).or_else(|| options.probe_provider.clone());
-    let model = nonempty_attr(options.model.clone()).or_else(|| options.probe_model.clone());
-    let probe_source = if explicit {
-        Some("explicit_payload".to_string())
-    } else {
-        options.probe_source.clone()
-    };
-    let probe_confidence = if explicit {
-        Some(1.0)
-    } else {
-        options.probe_confidence
-    };
-
-    Ok(ActorSpawnPlan {
-        thread_source,
-        mint_thread_if_missing,
-        provider,
-        model,
-        harness: options.harness.clone(),
-        thinking_level: options.thinking_level.clone(),
-        probe_source,
-        probe_confidence,
-        attach_mode,
-        base_state_full: options.base_state_full.clone(),
-        base_state_short: options.base_state_short.clone(),
-    })
-}
-
-/// Resolve the concrete thread name once a session id is allocated.
-pub fn resolve_spawn_thread_name(plan: &ActorSpawnPlan, session_id: &str) -> String {
-    match &plan.thread_source {
-        ActorSpawnThreadSource::Explicit(name) | ActorSpawnThreadSource::CurrentLane(name) => {
-            name.clone()
-        }
-        ActorSpawnThreadSource::GeneratedFromSession => default_actor_thread_name(session_id),
-    }
-}
-
-/// Pure assembly of a registry entry from a spawn plan and session runtime fields.
-///
-/// Does not touch the filesystem. Caller supplies time for deterministic tests.
-pub fn build_spawn_entry(
-    plan: &ActorSpawnPlan,
-    session_id: &str,
-    now: DateTime<Utc>,
-) -> ActorPresence {
-    let thread = resolve_spawn_thread_name(plan, session_id);
-    let rule = plan.attach_mode.rule().to_string();
-    ActorPresence {
-        session_id: session_id.to_string(),
-        client_instance_id: None,
-        native_actor_key: None,
-        native_parent_actor_key: None,
-        native_instance_key: None,
-        heddle_session_id: None,
-        thread_id: None,
-        thread: thread.clone(),
-        anchor_state: Some(plan.base_state_full.clone()),
-        anchor_root: None,
-        path: None,
-        base_state: plan.base_state_short.clone(),
-        started_at: now,
-        provider: plan.provider.clone(),
-        model: plan.model.clone(),
-        harness: plan.harness.clone(),
-        thinking_level: plan.thinking_level.clone(),
-        usage_summary: AgentUsageSummary::default(),
-        last_progress_at: None,
-        report_flush_state: None,
-        attach_reason: Some(plan.attach_mode.reason(session_id, &thread)),
-        task_assignment_id: None,
-        attach_precedence: vec![rule.clone()],
-        winning_attach_rule: Some(rule),
-        probe_source: plan.probe_source.clone(),
-        probe_confidence: plan.probe_confidence,
-        status: ActorPresenceStatus::Active,
-        completed_at: None,
-        context_queries: vec![],
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Done planning
 // ---------------------------------------------------------------------------
 
@@ -605,24 +331,6 @@ mod tests {
             status,
             completed_at: None,
             context_queries: vec![],
-        }
-    }
-
-    fn spawn_options() -> ActorSpawnOptions {
-        ActorSpawnOptions {
-            thread: None,
-            no_thread: false,
-            current_lane: None,
-            provider: None,
-            model: None,
-            probe_provider: Some("probe-provider".to_string()),
-            probe_model: Some("probe-model".to_string()),
-            harness: Some("codex".to_string()),
-            thinking_level: Some("high".to_string()),
-            probe_source: Some("env".to_string()),
-            probe_confidence: Some(0.7),
-            base_state_full: "abcdef0123456789".to_string(),
-            base_state_short: "abcdef0".to_string(),
         }
     }
 
@@ -771,118 +479,6 @@ mod tests {
             report.actor_chain[1].native_parent_actor_key.as_deref(),
             Some("root-key")
         );
-    }
-
-    #[test]
-    fn plan_spawn_defaults_to_generated_thread() {
-        let plan = plan_actor_spawn(&spawn_options()).unwrap();
-        assert_eq!(
-            plan.thread_source,
-            ActorSpawnThreadSource::GeneratedFromSession
-        );
-        assert!(plan.mint_thread_if_missing);
-        assert_eq!(plan.attach_mode, ActorSpawnAttachMode::ExplicitSpawn);
-        assert_eq!(plan.provider.as_deref(), Some("probe-provider"));
-        assert_eq!(plan.model.as_deref(), Some("probe-model"));
-        assert_eq!(plan.probe_source.as_deref(), Some("env"));
-        assert_eq!(plan.probe_confidence, Some(0.7));
-        assert_eq!(
-            resolve_spawn_thread_name(&plan, "agent-abc"),
-            "actor/agent-abc"
-        );
-    }
-
-    #[test]
-    fn plan_spawn_explicit_thread_validates_name() {
-        let mut options = spawn_options();
-        options.thread = Some("feature/ok".to_string());
-        let plan = plan_actor_spawn(&options).unwrap();
-        assert_eq!(
-            plan.thread_source,
-            ActorSpawnThreadSource::Explicit("feature/ok".to_string())
-        );
-        assert!(plan.mint_thread_if_missing);
-
-        options.thread = Some("../escape".to_string());
-        assert!(matches!(
-            plan_actor_spawn(&options),
-            Err(ActorSpawnError::InvalidThreadName(_))
-        ));
-    }
-
-    #[test]
-    fn plan_spawn_no_thread_requires_current_lane() {
-        let mut options = spawn_options();
-        options.no_thread = true;
-        options.current_lane = None;
-        assert_eq!(
-            plan_actor_spawn(&options),
-            Err(ActorSpawnError::NoCurrentLane)
-        );
-
-        options.current_lane = Some("main".to_string());
-        let plan = plan_actor_spawn(&options).unwrap();
-        assert_eq!(
-            plan.thread_source,
-            ActorSpawnThreadSource::CurrentLane("main".to_string())
-        );
-        assert!(!plan.mint_thread_if_missing);
-        assert_eq!(plan.attach_mode, ActorSpawnAttachMode::NoThreadAttach);
-        assert_eq!(plan.attach_mode.rule(), "no-thread-attach");
-    }
-
-    #[test]
-    fn plan_spawn_explicit_identity_overrides_probe() {
-        let mut options = spawn_options();
-        options.provider = Some("  anthropic  ".to_string());
-        options.model = Some("claude".to_string());
-        let plan = plan_actor_spawn(&options).unwrap();
-        assert_eq!(plan.provider.as_deref(), Some("anthropic"));
-        assert_eq!(plan.model.as_deref(), Some("claude"));
-        assert_eq!(plan.probe_source.as_deref(), Some("explicit_payload"));
-        assert_eq!(plan.probe_confidence, Some(1.0));
-    }
-
-    #[test]
-    fn plan_spawn_empty_cli_identity_falls_back_to_probe() {
-        let mut options = spawn_options();
-        options.provider = Some("   ".to_string());
-        options.model = Some("".to_string());
-        let plan = plan_actor_spawn(&options).unwrap();
-        assert!(!is_explicit_identity(&options.provider, &options.model));
-        assert_eq!(plan.provider.as_deref(), Some("probe-provider"));
-        assert_eq!(plan.model.as_deref(), Some("probe-model"));
-        assert_eq!(plan.probe_source.as_deref(), Some("env"));
-        assert_eq!(plan.probe_confidence, Some(0.7));
-    }
-
-    #[test]
-    fn build_spawn_entry_assembles_active_registry_fields() {
-        let plan = plan_actor_spawn(&spawn_options()).unwrap();
-        let now = Utc::now();
-        let entry = build_spawn_entry(&plan, "agent-xyz", now);
-        assert_eq!(entry.session_id, "agent-xyz");
-        assert_eq!(entry.thread, "actor/agent-xyz");
-        assert_eq!(entry.base_state, "abcdef0");
-        assert_eq!(entry.anchor_state.as_deref(), Some("abcdef0123456789"));
-        assert_eq!(entry.status, ActorPresenceStatus::Active);
-        assert_eq!(entry.started_at, now);
-        assert_eq!(
-            entry.winning_attach_rule.as_deref(),
-            Some("explicit-actor-spawn")
-        );
-        assert_eq!(
-            entry.attach_precedence,
-            vec!["explicit-actor-spawn".to_string()]
-        );
-        assert!(
-            entry
-                .attach_reason
-                .as_deref()
-                .unwrap()
-                .contains("spawned explicitly")
-        );
-        assert!(entry.completed_at.is_none());
     }
 
     #[test]

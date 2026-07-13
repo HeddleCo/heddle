@@ -68,11 +68,9 @@ pub mod workflow;
 
 pub use actor::{
     ActorChainEntry, ActorDoneOptions, ActorDonePlan, ActorEntryReport, ActorListReport,
-    ActorShowReport, ActorSpawnAttachMode, ActorSpawnError, ActorSpawnOptions, ActorSpawnPlan,
-    ActorSpawnThreadSource, assemble_actor_entry, build_spawn_entry, complete_actor_entry,
-    default_actor_thread_name, filter_actors, filter_actors_ref, is_explicit_identity, list_actors,
-    list_actors_from_registry, mark_actor_done, nonempty_attr, plan_actor_done, plan_actor_spawn,
-    resolve_spawn_thread_name, show_actor_by_session, show_actor_from_entry,
+    ActorShowReport, assemble_actor_entry, complete_actor_entry, filter_actors, filter_actors_ref,
+    list_actors, list_actors_from_registry, mark_actor_done, plan_actor_done,
+    show_actor_by_session, show_actor_from_entry,
 };
 pub use agent_fanout::{
     FanoutBaseFacts, FanoutBaseSelection, FanoutCommandSpec, FanoutLaneAvailability,
