@@ -3146,18 +3146,21 @@ nothing to stop — both exit 0):
 {"output_kind": "daemon_stop", "action": "daemon stop", "status": "not_running"}
 ```
 
-`heddle discuss open|append|resolve|show --output json` emit (each carries
-`output_kind` set to the snake-cased subcommand, e.g. `discuss_open`,
-`discuss_append`):
+`heddle discuss open|append|resolve|reopen --output json` emit a write
+outcome and the resulting materialized discussion. The operation id is the
+durable collaboration-log address; `disposition` is `created`,
+`existing_operation`, or `idempotent_replay`:
 
 ```json
-{"output_kind": "discuss_open", "id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "change_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}
+{"output_kind":"discuss_open","operation_id":"co-01abc","disposition":"created","discussion":{"id":"disc-018f47ea-4a54-7c89-b012-3456789abcde","title":"Please check this edge case.","anchor":{"kind":"symbol","state_id":"hs-01abc","path":"src/lib.rs","symbol":"verify"},"visibility":"team:platform","status":"open","resolution":null,"conflict_operation_ids":[],"head_operation_ids":["co-01abc"],"display_head_operation_id":"co-01abc","turns":[{"operation_id":"co-01abc","author_name":"A. Engineer","author_email":"a@example.com","agent":null,"occurred_at_ms":1767225600000,"body":"Please check this edge case.","content_hash":"0123456789abcdef"}]}}
 ```
 
-`heddle discuss list --output json` emits:
+`heddle discuss show --output json` uses the same discussion object beneath
+`{"output_kind":"discuss_show","discussion":...}`. `heddle discuss list
+--output json` emits:
 
 ```json
-{"output_kind": "discuss_list", "discussions": [{"id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "change_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}]}
+{"output_kind":"discuss_list","discussions":[]}
 ```
 
 `heddle fsck --output json` emits:

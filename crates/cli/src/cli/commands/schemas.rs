@@ -120,7 +120,8 @@ schema_registry! {
     (&["review next"], ReviewNextSchema),
     (&["review health"], ReviewHealthSchema),
     (&["retro"], RetroSchema),
-    (&["discuss open", "discuss append", "discuss resolve", "discuss show"], DiscussionEnvelopeSchema),
+    (&["discuss open", "discuss append", "discuss resolve", "discuss reopen"], DiscussionWriteSchema),
+    (&["discuss show"], DiscussionShowSchema),
     (&["discuss list"], DiscussionListSchema),
     (&["query --attribution"], BlameSchema),
     (&["transaction commit"], TransactionCommitSchema),
@@ -945,29 +946,28 @@ pub struct RetroOperationEntrySchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DiscussionSchema {
     pub id: String,
-    pub file: String,
-    pub symbol: String,
-    pub opened_against_state: String,
-    pub opened_at_secs: i64,
+    pub title: String,
+    pub anchor: DiscussionAnchorSchema,
     pub visibility: String,
-    pub body_changed_since_open: bool,
-    pub orphaned: bool,
-    pub resolution: DiscussionResolutionSchema,
+    pub status: String,
+    pub resolution: Option<DiscussionResolutionSchema>,
+    pub conflict_operation_ids: Vec<String>,
+    pub head_operation_ids: Vec<String>,
+    pub display_head_operation_id: String,
     pub turns: Vec<DiscussionTurnSchema>,
-    pub resolved_annotation_id: Option<String>,
 }
 
-/// Per-discussion verbs (`open`/`append`/`resolve`/`show`) emit the
-/// discussion payload flattened beneath an `output_kind` discriminator,
-/// mirroring `DiscussionEnvelope` in `discuss.rs`. `discuss list` reuses
-/// the bare [`DiscussionSchema`] for its inner items — those carry no
-/// per-item discriminator (the list envelope owns it), so the
-/// discriminator lives on this wrapper rather than on the shared inner
-/// struct.
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct DiscussionEnvelopeSchema {
+pub struct DiscussionWriteSchema {
     pub output_kind: String,
-    #[serde(flatten)]
+    pub operation_id: String,
+    pub disposition: String,
+    pub discussion: DiscussionSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DiscussionShowSchema {
+    pub output_kind: String,
     pub discussion: DiscussionSchema,
 }
 
@@ -976,15 +976,28 @@ pub struct DiscussionResolutionSchema {
     pub kind: String,
     pub annotation_id: Option<String>,
     pub state_id: Option<String>,
+    pub change_id: Option<String>,
     pub reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+pub struct DiscussionAnchorSchema {
+    pub kind: String,
+    pub state_id: Option<String>,
+    pub change_id: Option<String>,
+    pub path: Option<String>,
+    pub symbol: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct DiscussionTurnSchema {
+    pub operation_id: String,
     pub author_name: String,
     pub author_email: String,
+    pub agent: Option<String>,
+    pub occurred_at_ms: i64,
     pub body: String,
-    pub posted_at_secs: i64,
+    pub content_hash: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -3593,6 +3606,7 @@ mod tests {
             "discuss open",
             "discuss append",
             "discuss resolve",
+            "discuss reopen",
             "discuss list",
             "discuss show",
             "query",

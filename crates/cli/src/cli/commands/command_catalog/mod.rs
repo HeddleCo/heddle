@@ -1748,7 +1748,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["discuss", "open"],
         json_discriminators(
-            documented_schemas(REF_AND_METADATA_MUTATION, &["discuss open"]),
+            documented_schemas(METADATA_MUTATION, &["discuss open"]),
             &[json_discriminator(
                 Some("discuss open"),
                 "output_kind",
@@ -1759,7 +1759,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["discuss", "append"],
         json_discriminators(
-            documented_schemas(REF_AND_METADATA_MUTATION, &["discuss append"]),
+            documented_schemas(METADATA_MUTATION, &["discuss append"]),
             &[json_discriminator(
                 Some("discuss append"),
                 "output_kind",
@@ -1770,11 +1770,22 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["discuss", "resolve"],
         json_discriminators(
-            documented_schemas(REF_AND_METADATA_MUTATION, &["discuss resolve"]),
+            documented_schemas(METADATA_MUTATION, &["discuss resolve"]),
             &[json_discriminator(
                 Some("discuss resolve"),
                 "output_kind",
                 "discuss_resolve",
+            )],
+        ),
+    ),
+    entry(
+        &["discuss", "reopen"],
+        json_discriminators(
+            documented_schemas(METADATA_MUTATION, &["discuss reopen"]),
+            &[json_discriminator(
+                Some("discuss reopen"),
+                "output_kind",
+                "discuss_reopen",
             )],
         ),
     ),
@@ -4375,6 +4386,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             DiscussCommands::Open(_) => vec!["discuss", "open"],
             DiscussCommands::Append(_) => vec!["discuss", "append"],
             DiscussCommands::Resolve(_) => vec!["discuss", "resolve"],
+            DiscussCommands::Reopen(_) => vec!["discuss", "reopen"],
             DiscussCommands::List(_) => vec!["discuss", "list"],
             DiscussCommands::Show(_) => vec!["discuss", "show"],
         },

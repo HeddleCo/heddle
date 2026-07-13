@@ -7,6 +7,7 @@ use std::{
 
 use objects::{
     error::{HeddleError, Result},
+    fs_atomic::write_file_atomic,
     object::{
         Attribution, CollabOpId, CollaborationAnchor, CollaborationIdempotencyKey,
         CollaborationOperationBodyV1, CollaborationOperationEnvelope, Discussion,
@@ -168,6 +169,24 @@ pub fn apply_legacy_discussion_migration(
         }
     }
     Ok(report)
+}
+
+pub fn migrate_legacy_discussions_once(
+    repository: &Repository,
+    store: &CollaborationStore,
+    import_actor: Attribution,
+) -> Result<Option<LegacyDiscussionMigrationReport>> {
+    let marker = repository
+        .heddle_dir()
+        .join("collaboration/migrations/legacy-discussions-v1");
+    if marker.exists() {
+        return Ok(None);
+    }
+    let plan = plan_legacy_discussion_migration(repository, import_actor)?;
+    let report = apply_legacy_discussion_migration(repository, store, &plan)?;
+    fs::create_dir_all(marker.parent().expect("migration marker has parent"))?;
+    write_file_atomic(&marker, b"1\n")?;
+    Ok(Some(report))
 }
 
 fn collect_candidates(repository: &Repository) -> Result<Vec<Candidate>> {

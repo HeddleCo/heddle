@@ -860,17 +860,17 @@ Tick budget: at most 3 signals per state by default. Priority:\n\
 invariant_adjacency > self_flagged_uncertainty > pattern_deviation >\n\
 novelty > test_reachability.\n";
 
-const DISCUSS_TOPIC: &str = "`heddle discuss open | append | resolve | list | show`\n\
+const DISCUSS_TOPIC: &str = "`heddle discuss open | append | resolve | reopen | list | show`\n\
 \n\
-Discussions anchor at the symbol level (file + symbol name, no line range)\n\
-so they survive renames and cross-file moves. Each discussion accumulates\n\
-turns and can resolve by edit, dismissal, or context annotation:\n\
+Discussions are stable records in the repository collaboration log. Turns,\n\
+resolutions, and reopenings append immutable operations; concurrent turns\n\
+converge without rewriting source history. Symbol anchors record the state,\n\
+file, and symbol where the discussion began:\n\
 \n\
 - `resolve <id> --mode by-edit`          with `--state` (defaults to HEAD).\n\
   Records that a subsequent edit addressed the discussion.\n\
 - `resolve <id> --mode dismiss`          requires non-empty `--reason`.\n\
-- `resolve <id> --mode into-annotation` requires `--annotation-content` and\n\
-  records active context on the discussion anchor.\n\
+- `reopen <id> --reason <text>`          compensates a prior resolution.\n\
 \n\
 Visibility: `--visibility public|internal|team:NAME|restricted:LABEL|private:LABEL`.\n\
 Empty visibility uses the configured discussion visibility policy.\n";

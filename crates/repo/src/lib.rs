@@ -85,9 +85,9 @@ pub mod worktree_walk;
 // Re-export commonly used types from underlying crates.
 pub use ephemeral_thread::{CollapsedThread, collapse_expired_ephemeral_threads};
 pub use collaboration_migration::{
-    LegacyDiscussionMigrationBlocker, LegacyDiscussionMigrationItem,
-    LegacyDiscussionMigrationPlan, LegacyDiscussionMigrationReport,
-    apply_legacy_discussion_migration, plan_legacy_discussion_migration,
+    LegacyDiscussionMigrationBlocker, LegacyDiscussionMigrationItem, LegacyDiscussionMigrationPlan,
+    LegacyDiscussionMigrationReport, apply_legacy_discussion_migration,
+    migrate_legacy_discussions_once, plan_legacy_discussion_migration,
 };
 pub use collaboration_store::{
     CollaborationIntegrityReport, CollaborationStore, CollaborationWriteDisposition,
