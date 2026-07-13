@@ -11,7 +11,6 @@ mod agent_provenance;
 mod auto_capture;
 mod blame;
 mod checkpoint;
-mod cherry_pick;
 mod child_env;
 mod clone;
 mod collapse;
@@ -96,7 +95,6 @@ pub use agent_cmd::{
     agent_api_schema, cmd_agent_capture, cmd_agent_heartbeat, cmd_agent_list, cmd_agent_ready,
     cmd_agent_release, cmd_agent_reserve,
 };
-pub use cherry_pick::cmd_cherry_pick;
 pub use clone::{
     CLONE_CONNECTION_OUTPUT_KIND, CLONE_OUTPUT_KIND, GitOverlayBlobHydrator, cmd_clone,
     register_git_overlay_factory,

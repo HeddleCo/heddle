@@ -478,24 +478,6 @@ Examples:
         command: MaintenanceCommands,
     },
 
-    /// Apply specific commits.
-    CherryPick {
-        /// Commit to cherry-pick.
-        commit: String,
-
-        /// Commit message for the cherry-pick.
-        #[arg(short = 'm', long)]
-        message: Option<String>,
-
-        /// Apply changes to worktree without committing.
-        #[arg(long)]
-        no_commit: bool,
-
-        /// Discard uncommitted local changes instead of refusing.
-        #[arg(long)]
-        force: bool,
-    },
-
     /// Clone from remote.
     Clone(CloneArgs),
 

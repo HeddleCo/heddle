@@ -5,7 +5,6 @@ pub mod actor;
 pub mod agent_fanout;
 pub mod agent_ops;
 pub mod approval_plan;
-pub mod cherry_pick_plan;
 pub mod clean_plan;
 pub mod clone_plan;
 pub mod collapse_plan;
@@ -95,13 +94,6 @@ pub use approval_plan::{
     eligibility_approvals_counted_message, eligibility_blocked_message, format_unix_secs_display,
     format_unix_secs_label, plan_eligibility_summary, short_state_id, state_id_bytes_to_string,
     timestamp_secs_u64, unmet_requirement_line,
-};
-pub use cherry_pick_plan::{
-    CherryPickOutcome, CherryPickResolvePlan, CherryPickSuccessFacts,
-    cherry_pick_commit_not_found_kind, cherry_pick_commit_not_found_summary,
-    cherry_pick_human_message, cherry_pick_json_status, cherry_pick_should_refuse_not_found,
-    cherry_pick_status_applied, cherry_pick_status_committed, default_cherry_pick_commit_message,
-    plan_cherry_pick_resolve,
 };
 pub use clean_plan::{
     clean_empty_message, clean_path_line, clean_paths_header, clean_result_lines, clean_result_text,
