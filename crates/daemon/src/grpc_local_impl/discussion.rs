@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Local gRPC service for the W2 `DiscussionService`.
 //!
-//! Reads and writes the `DiscussionsBlob` attached to a state via
-//! [`State::with_discussions`]. Open / append / resolve mutations all follow
-//! the same pattern: load the current state, decode (or create fresh) the
-//! existing blob, mutate, encode back to a new [`Blob`], persist a new
-//! `State` with the updated `discussions` content hash.
+//! Reads and writes the `DiscussionsBlob` attached to an immutable state.
 //!
 //! State-scoped discovery reads the requested state's blob. Repository-wide
 //! discovery walks reachable states and deduplicates by discussion id, preferring
@@ -25,15 +21,14 @@ use grpc::heddle::v1::{
 use objects::{
     lock::RepositoryLockExt,
     object::{
-        Annotation, AnnotationKind, AnnotationScope, Blob, ChangeId, ContentHash, ContextBlob,
-        ContextTarget, Discussion, DiscussionResolution, DiscussionTurn, DiscussionsBlob,
-        Principal, State, SymbolAnchor, VisibilityTier,
+        Annotation, AnnotationKind, AnnotationScope, Blob, ContentHash, ContextBlob, ContextTarget,
+        Discussion, DiscussionResolution, DiscussionTurn, DiscussionsBlob, Principal, State,
+        StateAttachment, StateAttachmentBody, StateId, SymbolAnchor, VisibilityTier,
     },
     store::ObjectStore,
 };
 use prost::Message;
-use refs::Head;
-use repo::Repository;
+use repo::{Repository, StateAttachmentKind};
 use tonic::{Request, Response, Status};
 
 use super::{GrpcLocalService, to_status, with_idempotency};
@@ -170,9 +165,9 @@ fn discussion_to_proto(d: &Discussion) -> ProtoDiscussion {
 }
 
 /// Resolve a `state_id` string to a stored `State`, returning the parsed
-/// `ChangeId` and the loaded `State`.
-fn load_state(repo: &Repository, state_id: &[u8]) -> Result<(ChangeId, State), Status> {
-    let id = ChangeId::try_from_slice(state_id)
+/// `StateId` and the loaded `State`.
+fn load_state(repo: &Repository, state_id: &[u8]) -> Result<(StateId, State), Status> {
+    let id = StateId::try_from_slice(state_id)
         .map_err(|err| Status::invalid_argument(format!("invalid state_id: {err}")))?;
     let state = repo
         .store()
@@ -185,8 +180,14 @@ fn load_state(repo: &Repository, state_id: &[u8]) -> Result<(ChangeId, State), S
 /// Decode a state's `DiscussionsBlob`, returning an empty blob when the
 /// state has no discussions attached yet.
 fn decode_blob_for_state(repo: &Repository, state: &State) -> Result<DiscussionsBlob, Status> {
-    let Some(hash) = state.discussions else {
+    let Some(attachment) = repo
+        .latest_state_attachment(&state.state_id, StateAttachmentKind::Discussions)
+        .map_err(to_status)?
+    else {
         return Ok(DiscussionsBlob::new(Vec::new()));
+    };
+    let StateAttachmentBody::Discussions(hash) = attachment.body else {
+        unreachable!()
     };
     let blob = repo
         .store()
@@ -196,7 +197,7 @@ fn decode_blob_for_state(repo: &Repository, state: &State) -> Result<Discussions
             Status::not_found(format!(
                 "discussions blob {} referenced by state {} is missing",
                 hash,
-                state.change_id.to_string_full()
+                state.state_id.to_string_full()
             ))
         })?;
     DiscussionsBlob::decode(blob.content())
@@ -206,7 +207,7 @@ fn decode_blob_for_state(repo: &Repository, state: &State) -> Result<Discussions
 /// Convenience: load both the state and its decoded `DiscussionsBlob`.
 fn load_discussions_blob(
     repo: &Repository,
-    state_id: &ChangeId,
+    state_id: &StateId,
 ) -> Result<(State, DiscussionsBlob), Status> {
     let state = repo
         .store()
@@ -219,17 +220,24 @@ fn load_discussions_blob(
     Ok((state, blob))
 }
 
-/// Encode `blob`, persist it under a fresh `ContentHash`, then build and
-/// store a new `State` with the updated `discussions` pointer.
 fn save_discussions_blob(
     repo: &Repository,
     state: &State,
     blob: &DiscussionsBlob,
-) -> Result<State, Status> {
+) -> Result<(), Status> {
     let hash = put_discussions_blob(repo, blob)?;
-    let new_state = state.clone().with_discussions(hash);
-    repo.store().put_state(&new_state).map_err(to_status)?;
-    Ok(new_state)
+    let prior = repo
+        .latest_state_attachment(&state.state_id, StateAttachmentKind::Discussions)
+        .map_err(to_status)?;
+    let attachment = StateAttachment {
+        state_id: state.state_id,
+        body: StateAttachmentBody::Discussions(hash),
+        attribution: repo.get_attribution().map_err(to_status)?,
+        created_at: chrono::Utc::now(),
+        supersedes: prior.map(|attachment| attachment.id()),
+    };
+    repo.put_state_attachment(&attachment).map_err(to_status)?;
+    Ok(())
 }
 
 /// Resolve the active principal using the repository's identity chain
@@ -275,7 +283,7 @@ fn put_discussions_blob(repo: &Repository, blob: &DiscussionsBlob) -> Result<Con
     repo.store().put_blob(&Blob::new(bytes)).map_err(to_status)
 }
 
-fn reachable_discussions(repo: &Repository) -> Result<Vec<(ChangeId, Discussion)>, Status> {
+fn reachable_discussions(repo: &Repository) -> Result<Vec<(StateId, Discussion)>, Status> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
@@ -300,10 +308,10 @@ fn reachable_discussions(repo: &Repository) -> Result<Vec<(ChangeId, Discussion)
 
 fn push_discussions_from_state(
     repo: &Repository,
-    state_id: ChangeId,
+    state_id: StateId,
     state: &State,
     seen: &mut HashSet<String>,
-    out: &mut Vec<(ChangeId, Discussion)>,
+    out: &mut Vec<(StateId, Discussion)>,
 ) -> Result<(), Status> {
     let blob = decode_blob_for_state(repo, state)?;
     for discussion in blob.discussions {
@@ -379,13 +387,22 @@ fn resolve_discussion_into_annotation(
         attribution.to_string(),
         now_secs(),
         source_hash,
-        Some(head.change_id),
+        Some(head.state_id),
     );
     annotation.resolved_from_discussion = Some(discussion.id.clone());
     annotation.visibility = discussion.visibility.clone();
     let annotation_id = annotation.annotation_id.clone();
 
-    let mut context = match head.context {
+    let context_attachment = repo
+        .latest_state_attachment(&head.state_id, StateAttachmentKind::Context)
+        .map_err(to_status)?;
+    let context_root = context_attachment.as_ref().map(|attachment| {
+        let StateAttachmentBody::Context(root) = &attachment.body else {
+            unreachable!()
+        };
+        *root
+    });
+    let mut context = match context_root {
         Some(root) => repo
             .get_context_blob(&root, &target)
             .map_err(to_status)?
@@ -394,7 +411,7 @@ fn resolve_discussion_into_annotation(
     };
     context.annotations.push(annotation);
     let context_root = repo
-        .set_context_blob(head.context.as_ref(), &target, &context)
+        .set_context_blob(context_root.as_ref(), &target, &context)
         .map_err(to_status)?;
 
     let updated = discussions
@@ -410,28 +427,16 @@ fn resolve_discussion_into_annotation(
         .map_err(|err| Status::invalid_argument(err.to_string()))?;
     let updated = updated.clone();
 
-    let discussions_hash = put_discussions_blob(repo, discussions)?;
-    let mut new_state = State::new(head.tree, vec![head.change_id], attribution)
-        .with_intent(format!(
-            "discussion: resolve {} into annotation",
-            updated.id
-        ))
-        .with_context(context_root)
-        .with_discussions(discussions_hash);
-    if let Some(provenance) = head.provenance {
-        new_state = new_state.with_provenance(provenance);
-    }
-    if let Some(risk_signals) = head.risk_signals {
-        new_state = new_state.with_risk_signals(risk_signals);
-    }
-    if let Some(review_signatures) = head.review_signatures {
-        new_state = new_state.with_review_signatures(review_signatures);
-    }
-    if let Some(structured_conflicts) = head.structured_conflicts {
-        new_state = new_state.with_structured_conflicts(structured_conflicts);
-    }
-    repo.put_authored_state(&mut new_state).map_err(to_status)?;
-    advance_head(repo, &new_state).map_err(to_status)?;
+    let context_record = StateAttachment {
+        state_id: head.state_id,
+        body: StateAttachmentBody::Context(context_root),
+        attribution: attribution.clone(),
+        created_at: chrono::Utc::now(),
+        supersedes: context_attachment.map(|attachment| attachment.id()),
+    };
+    repo.put_state_attachment(&context_record)
+        .map_err(to_status)?;
+    save_discussions_blob(repo, head, discussions)?;
 
     Ok(updated)
 }
@@ -525,15 +530,6 @@ fn extract_line_range(source: &[u8], start: u32, end: u32) -> Vec<u8> {
     source[start_byte..end_byte].to_vec()
 }
 
-fn advance_head(repo: &Repository, state: &State) -> repo::Result<()> {
-    match repo.refs().read_head()? {
-        Head::Attached { thread } => repo.refs().set_thread(&thread, &state.change_id),
-        Head::Detached { .. } => repo.refs().write_head(&Head::Detached {
-            state: state.change_id,
-        }),
-    }
-}
-
 #[tonic::async_trait]
 impl DiscussionService for LocalDiscussionService {
     async fn open_discussion(
@@ -568,10 +564,9 @@ impl DiscussionService for LocalDiscussionService {
                     if req.body.trim().is_empty() {
                         return Err(Status::invalid_argument("body must be non-empty"));
                     }
-                    let opened_against =
-                        ChangeId::try_from_slice(&req.state_id).map_err(|err| {
-                            Status::invalid_argument(format!("invalid state_id: {err}"))
-                        })?;
+                    let opened_against = StateId::try_from_slice(&req.state_id).map_err(|err| {
+                        Status::invalid_argument(format!("invalid state_id: {err}"))
+                    })?;
                     let now = now_secs();
                     let principal = principal_for(repo);
                     let visibility = if req.visibility.trim().is_empty() {
@@ -580,7 +575,7 @@ impl DiscussionService for LocalDiscussionService {
                         parse_visibility(&req.visibility)?
                     };
                     let discussion = Discussion {
-                        id: ChangeId::generate().to_string_full(),
+                        id: uuid::Uuid::now_v7().to_string(),
                         anchor: SymbolAnchor::new(anchor_proto.file, anchor_proto.symbol),
                         opened_against_state: opened_against,
                         opened_at: now,
@@ -737,7 +732,7 @@ impl DiscussionService for LocalDiscussionService {
                         }
                         Resolution::ByEdit(payload) => {
                             let state_id =
-                                ChangeId::try_from_slice(&payload.state_id).map_err(|err| {
+                                StateId::try_from_slice(&payload.state_id).map_err(|err| {
                                     Status::invalid_argument(format!("invalid state_id: {err}"))
                                 })?;
                             blob.discussions[idx].resolution =
@@ -853,7 +848,7 @@ mod tests {
 
     use super::*;
 
-    fn fresh_service() -> (TempDir, ChangeId, LocalDiscussionService) {
+    fn fresh_service() -> (TempDir, StateId, LocalDiscussionService) {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         // Take a snapshot so we have a real state to anchor discussions against.
@@ -864,10 +859,10 @@ mod tests {
         let dedup = OperationDedupStore::open(repo.heddle_dir()).unwrap();
         let inner = GrpcLocalService::new(Arc::new(repo), Arc::new(dedup));
         let svc = LocalDiscussionService::new(inner);
-        (temp, state.change_id, svc)
+        (temp, state.state_id, svc)
     }
 
-    fn open_request(state_id: &ChangeId, body: &str, op_id: &str) -> OpenDiscussionRequest {
+    fn open_request(state_id: &StateId, body: &str, op_id: &str) -> OpenDiscussionRequest {
         OpenDiscussionRequest {
             repo_path: String::new(),
             state_id: state_id.as_bytes().to_vec(),
@@ -947,11 +942,6 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(process_global)]
     async fn open_discussion_serializes_concurrent_appends() {
-        // Regression for the lost-update race: two OpenDiscussions with
-        // different operation ids could both read the same base
-        // `DiscussionsBlob`, then the second `put_state` would clobber the
-        // first discussion. The fix wraps the read-modify-write in
-        // `repo.locker().write()` and re-loads the blob inside the lock.
         let (_t, state_id, svc) = fresh_service();
         let op_a = objects::object::OperationId::new().to_string();
         let op_b = objects::object::OperationId::new().to_string();
@@ -1051,7 +1041,7 @@ mod tests {
         let svc = LocalDiscussionService::new(inner);
 
         let opened = svc
-            .open_discussion(Request::new(open_request(&state.change_id, "hello", "")))
+            .open_discussion(Request::new(open_request(&state.state_id, "hello", "")))
             .await
             .unwrap()
             .into_inner();
@@ -1117,12 +1107,15 @@ mod tests {
 
         let repo = svc.inner.repo();
         let head_id = repo.head().unwrap().unwrap();
-        assert_ne!(
-            head_id, state_id,
-            "resolving into context should create and publish a new HEAD state"
-        );
+        assert_eq!(head_id, state_id);
         let head = repo.store().get_state(&head_id).unwrap().unwrap();
-        let context_root = head.context.expect("new state should carry context");
+        let context_attachment = repo
+            .latest_state_attachment(&head_id, StateAttachmentKind::Context)
+            .unwrap()
+            .expect("state should carry a context attachment");
+        let StateAttachmentBody::Context(context_root) = context_attachment.body else {
+            panic!("expected context attachment")
+        };
         let (target, context, index) = repo
             .find_annotation(&context_root, &annotation_id)
             .unwrap()
