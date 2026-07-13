@@ -1303,7 +1303,7 @@ fn presence_for_lease(repo: &Repository, lease: &WriterLease) -> Result<Option<A
     let Some(session_id) = lease.actor_session_id.as_deref() else {
         return Ok(None);
     };
-    ActorPresenceStore::new(repo.heddle_dir()).load(session_id)
+    Ok(ActorPresenceStore::new(repo.heddle_dir()).load(session_id)?)
 }
 
 pub async fn cmd_agent_capture(

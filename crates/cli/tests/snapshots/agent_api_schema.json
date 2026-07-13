@@ -109,6 +109,12 @@
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
+      "lease_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "path": {
         "type": "string"
       },
@@ -136,6 +142,12 @@
       },
       "title": {
         "type": "string"
+      },
+      "token": {
+        "type": [
+          "string",
+          "null"
+        ]
       }
     },
     "required": [
@@ -203,6 +215,12 @@
       },
       "AgentFanoutLaneOutput": {
         "properties": {
+          "lease_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "path": {
             "type": "string"
           },
@@ -230,6 +248,12 @@
           },
           "title": {
             "type": "string"
+          },
+          "token": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -871,6 +895,12 @@
       },
       "AgentReservationOutput": {
         "properties": {
+          "actor_session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "anchor_root": {
             "type": [
               "string",
@@ -883,38 +913,17 @@
               "null"
             ]
           },
-          "harness": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "heartbeat_at": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "last_progress_at": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           },
           "lease_expires_at": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
+          },
+          "lease_id": {
+            "type": "string"
           },
           "liveness": {
             "type": "string"
-          },
-          "model": {
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "path": {
             "type": [
@@ -922,51 +931,10 @@
               "null"
             ]
           },
-          "probe_confidence": {
-            "format": "float",
-            "type": [
-              "number",
-              "null"
-            ]
-          },
-          "probe_source": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "provider": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "reservation_token": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "session_id": {
-            "type": "string"
-          },
           "status": {
-            "description": "Lifecycle status as a stable kebab-case string\n(`active|abandoned|complete|merged`). Mirrors\n`objects::store::AgentStatus` but kept as a `String` here so\nthe schema lives entirely in the CLI crate.",
             "type": "string"
-          },
-          "task": {
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "task_assignment_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "thinking_level": {
             "type": [
               "string",
               "null"
@@ -977,9 +945,11 @@
           }
         },
         "required": [
-          "session_id",
+          "lease_id",
           "thread",
           "status",
+          "heartbeat_at",
+          "lease_expires_at",
           "liveness"
         ],
         "type": "object"
@@ -1443,9 +1413,14 @@
       "reservation": {
         "$ref": "#/$defs/AgentReservationOutput"
       },
+      "token": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "verification": {
-        "$ref": "#/$defs/RepositoryVerificationState",
-        "writeOnly": true
+        "$ref": "#/$defs/RepositoryVerificationState"
       }
     },
     "required": [
@@ -1489,6 +1464,12 @@
       },
       "AgentReservationOutput": {
         "properties": {
+          "actor_session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "anchor_root": {
             "type": [
               "string",
@@ -1501,38 +1482,17 @@
               "null"
             ]
           },
-          "harness": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "heartbeat_at": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "last_progress_at": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           },
           "lease_expires_at": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
+          },
+          "lease_id": {
+            "type": "string"
           },
           "liveness": {
             "type": "string"
-          },
-          "model": {
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "path": {
             "type": [
@@ -1540,51 +1500,10 @@
               "null"
             ]
           },
-          "probe_confidence": {
-            "format": "float",
-            "type": [
-              "number",
-              "null"
-            ]
-          },
-          "probe_source": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "provider": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "reservation_token": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "session_id": {
-            "type": "string"
-          },
           "status": {
-            "description": "Lifecycle status as a stable kebab-case string\n(`active|abandoned|complete|merged`). Mirrors\n`objects::store::AgentStatus` but kept as a `String` here so\nthe schema lives entirely in the CLI crate.",
             "type": "string"
-          },
-          "task": {
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "task_assignment_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "thinking_level": {
             "type": [
               "string",
               "null"
@@ -1595,9 +1514,11 @@
           }
         },
         "required": [
-          "session_id",
+          "lease_id",
           "thread",
           "status",
+          "heartbeat_at",
+          "lease_expires_at",
           "liveness"
         ],
         "type": "object"
@@ -2088,6 +2009,12 @@
   "AgentReservationOutput": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
+      "actor_session_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "anchor_root": {
         "type": [
           "string",
@@ -2100,38 +2027,17 @@
           "null"
         ]
       },
-      "harness": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
       "heartbeat_at": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "last_progress_at": {
-        "type": [
-          "string",
-          "null"
-        ]
+        "type": "string"
       },
       "lease_expires_at": {
-        "type": [
-          "string",
-          "null"
-        ]
+        "type": "string"
+      },
+      "lease_id": {
+        "type": "string"
       },
       "liveness": {
         "type": "string"
-      },
-      "model": {
-        "type": [
-          "string",
-          "null"
-        ]
       },
       "path": {
         "type": [
@@ -2139,51 +2045,10 @@
           "null"
         ]
       },
-      "probe_confidence": {
-        "format": "float",
-        "type": [
-          "number",
-          "null"
-        ]
-      },
-      "probe_source": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "provider": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "reservation_token": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "session_id": {
-        "type": "string"
-      },
       "status": {
-        "description": "Lifecycle status as a stable kebab-case string\n(`active|abandoned|complete|merged`). Mirrors\n`objects::store::AgentStatus` but kept as a `String` here so\nthe schema lives entirely in the CLI crate.",
         "type": "string"
-      },
-      "task": {
-        "type": [
-          "string",
-          "null"
-        ]
       },
       "task_assignment_id": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "thinking_level": {
         "type": [
           "string",
           "null"
@@ -2194,9 +2059,11 @@
       }
     },
     "required": [
-      "session_id",
+      "lease_id",
       "thread",
       "status",
+      "heartbeat_at",
+      "lease_expires_at",
       "liveness"
     ],
     "title": "AgentReservationOutput",
