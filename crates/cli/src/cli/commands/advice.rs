@@ -8,10 +8,10 @@ use heddle_core::status::next_action::{
 };
 use serde_json::{Map, Value};
 
-pub(crate) const DIRTY_WORKTREE_COMMIT_COMMAND: &str = "heddle commit -m \"...\"";
+pub(crate) const DIRTY_WORKTREE_COMMIT_COMMAND: &str = "heddle capture -m \"...\"";
 pub(crate) const DIRTY_WORKTREE_CAPTURE_COMMAND: &str = "heddle capture -m \"...\"";
 pub(crate) const DIRTY_WORKTREE_STASH_COMMAND: &str = "heddle capture -m \"...\"";
-pub(crate) const GIT_OVERLAY_CHECKPOINT_COMMAND: &str = "heddle checkpoint -m \"...\"";
+pub(crate) const GIT_OVERLAY_CHECKPOINT_COMMAND: &str = "git commit -m \"...\"";
 
 #[derive(Debug, Clone)]
 pub struct RecoveryAdvice {
@@ -584,7 +584,7 @@ impl RecoveryAdvice {
         Self::safety_refusal(
             "repository_no_head",
             format!("Repository has no HEAD state for {action}"),
-            "Create a Heddle anchor with `heddle commit -m \"...\"`; for a clean Git-overlay checkout that only needs metadata, use `heddle checkpoint -m \"...\"`, then retry.",
+            "Create a Heddle anchor with `heddle capture -m \"...\"`; commit Git-owned source history with `git commit -m \"...\"`, then retry.",
             "the repository has no current HEAD state",
             format!("`{action}` needs a concrete Heddle state id and cannot safely infer one"),
             "no repository objects, refs, metadata, or worktree files were changed",
@@ -710,54 +710,6 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn land_push_remote_missing(thread: &str) -> Self {
-        let local_command = super::thread_landing::land_local_command(thread);
-        Self::safety_refusal(
-            "land_push_remote_missing",
-            format!("Refusing to land thread `{thread}` with --push: no push remote is configured"),
-            format!(
-                "Run `{local_command}` to land locally, or configure a remote and retry with `--push`."
-            ),
-            "no default Git or Heddle remote is configured for push",
-            "landing with --push would merge and checkpoint before discovering there is nowhere to push",
-            "repository state, refs, metadata, and worktree files were left unchanged",
-            local_command.clone(),
-            vec![local_command, "heddle remote add <name> <url>".to_string()],
-        )
-    }
-
-    pub(crate) fn land_remote_requires_push(thread: &str, remote: &str) -> Self {
-        let push_command = super::thread_landing::land_push_remote_command(thread, remote);
-        let local_command = super::thread_landing::land_local_command(thread);
-        Self::safety_refusal(
-            "land_remote_requires_push",
-            format!("Land remote `{remote}` was provided without --push"),
-            format!(
-                "Run `{push_command}` to land and publish, or `{local_command}` to land locally."
-            ),
-            "`--remote` names a push destination, but this land invocation did not request a push",
-            "continuing would merge/checkpoint locally while leaving the named remote unchanged",
-            "repository state, refs, metadata, remote refs, and worktree files were left unchanged",
-            push_command.clone(),
-            vec![push_command, local_command],
-        )
-    }
-
-    pub(crate) fn land_push_option_conflict(thread: &str) -> Self {
-        let push_command = super::thread_landing::land_push_command(thread);
-        let local_command = super::thread_landing::land_local_command(thread);
-        Self::safety_refusal(
-            "land_push_option_conflict",
-            "Land was asked to both push and not push",
-            format!("Choose `{push_command}` or `{local_command}`."),
-            "`--push` and `--no-push` are mutually exclusive publish choices",
-            "continuing would make the publish side effect ambiguous",
-            "repository state, refs, metadata, remote refs, and worktree files were left unchanged",
-            local_command.clone(),
-            vec![push_command, local_command],
-        )
-    }
-
     pub(crate) fn land_push_partial_failure(
         thread: &str,
         push_error: impl fmt::Display,
@@ -806,14 +758,14 @@ impl RecoveryAdvice {
             format!(
                 "Land partially completed for `{thread}`, but Git checkpoint failed: {checkpoint_error}"
             ),
-            "Run `heddle undo` to roll back the local land, or resolve the checkpoint issue and run `heddle commit -m \"...\"`.",
+            "Run `heddle undo` to roll back the local land, or resolve the Git issue and run `git commit -m \"...\"`.",
             "Git checkpoint failed after Heddle had already completed local land steps",
             "retrying blindly could obscure the already-landed local merge state",
             format!("completed steps: {completed}. No Git checkpoint was written."),
             "heddle undo",
             vec![
                 "heddle undo".to_string(),
-                "heddle commit -m \"...\"".to_string(),
+                "git commit -m \"...\"".to_string(),
             ],
         )
     }

@@ -29,8 +29,7 @@ mod output_mode;
 pub use cli_base::Cli;
 pub use cli_shared::OutputMode;
 pub use commands_advanced::{
-    CheckpointArgs, TransactionAbortArgs, TransactionBeginArgs, TransactionCommands,
-    TransactionIdArgs,
+    TransactionAbortArgs, TransactionBeginArgs, TransactionCommands, TransactionIdArgs,
 };
 pub use commands_agent::{AgentCommands, AgentFanoutCommands, AgentServeArgs, AgentTaskCommands};
 pub use commands_args::{
@@ -38,7 +37,7 @@ pub use commands_args::{
     AgentApiListArgs, AgentCaptureArgs, AgentFanoutPlanArgs, AgentFanoutStartArgs,
     AgentHeartbeatArgs, AgentReadyArgs, AgentReleaseArgs, AgentReleaseStatusArg, AgentReserveArgs,
     AgentTaskCreateArgs, AgentTaskListArgs, AgentTaskShowArgs, AgentTaskStatusArg,
-    AgentTaskUpdateArgs, CloneArgs, CollapseArgs, CommitArgs, DiagnoseArgs, DiffArgs, DoctorArgs,
+    AgentTaskUpdateArgs, CloneArgs, CollapseArgs, DiagnoseArgs, DiffArgs, DoctorArgs,
     DoctorCommands, DoctorDocsArgs, DoctorSchemasArgs, ExpandArgs, InitArgs, LandArgs, LogArgs,
     PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
     SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, SnapshotArgs, SyncArgs,

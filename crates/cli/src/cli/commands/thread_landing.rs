@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared commands for the ready -> land thread landing loop.
 
-use repo::Repository;
-
 use super::command_catalog::{heddle_action, thread_flag_args};
 
 pub(crate) fn merge_preview_command(thread_id: &str) -> String {
@@ -15,44 +13,13 @@ pub(crate) fn switch_thread_command(thread_id: &str) -> String {
     heddle_action(["thread", "switch", thread_id])
 }
 
-pub(crate) fn land_command_for_thread(repo: &Repository, thread_id: &str) -> String {
-    let has_push_target = super::remote::resolved_default_remote_name(repo)
-        .ok()
-        .flatten()
-        .is_some();
-    land_command_with_push_target(thread_id, has_push_target)
-}
-
-pub(crate) fn land_command_with_push_target(thread_id: &str, has_push_target: bool) -> String {
-    if has_push_target {
-        land_push_command(thread_id)
-    } else {
-        land_local_command(thread_id)
-    }
-}
-
-pub(crate) fn land_push_command(thread_id: &str) -> String {
-    let mut argv = vec!["land".to_string()];
-    argv.extend(thread_flag_args(thread_id));
-    argv.push("--push".to_string());
-    heddle_action(argv)
-}
-
-pub(crate) fn land_push_remote_command(thread_id: &str, remote: &str) -> String {
-    let mut argv = vec!["land".to_string()];
-    argv.extend(thread_flag_args(thread_id));
-    argv.extend([
-        "--push".to_string(),
-        "--remote".to_string(),
-        remote.to_string(),
-    ]);
-    heddle_action(argv)
+pub(crate) fn land_command_for_thread(_repo: &repo::Repository, thread_id: &str) -> String {
+    land_local_command(thread_id)
 }
 
 pub(crate) fn land_local_command(thread_id: &str) -> String {
     let mut argv = vec!["land".to_string()];
     argv.extend(thread_flag_args(thread_id));
-    argv.push("--no-push".to_string());
     heddle_action(argv)
 }
 
@@ -68,15 +35,7 @@ mod tests {
         );
         assert_eq!(
             land_local_command("feature/demo"),
-            "heddle land --thread feature/demo --no-push"
-        );
-        assert_eq!(
-            land_command_with_push_target("feature/demo", true),
-            "heddle land --thread feature/demo --push"
-        );
-        assert_eq!(
-            land_push_remote_command("feature/demo", "origin"),
-            "heddle land --thread feature/demo --push --remote origin"
+            "heddle land --thread feature/demo"
         );
         assert_eq!(
             merge_preview_command("feature with spaces"),
@@ -96,8 +55,6 @@ mod tests {
         let id = "-foo";
         let cmds = [
             land_local_command(id),
-            land_push_command(id),
-            land_push_remote_command(id, "origin"),
             merge_preview_command(id),
             switch_thread_command(id),
         ];
@@ -110,15 +67,7 @@ mod tests {
         // `=` as unsafe, so `--thread=-foo` renders single-quoted — still
         // runnable (the shell strips the quotes, clap binds the value) and, as
         // the loop above asserts, accepted by the validator.
-        assert_eq!(
-            land_local_command(id),
-            "heddle land '--thread=-foo' --no-push"
-        );
-        assert_eq!(land_push_command(id), "heddle land '--thread=-foo' --push");
-        assert_eq!(
-            land_push_remote_command(id, "origin"),
-            "heddle land '--thread=-foo' --push --remote origin"
-        );
+        assert_eq!(land_local_command(id), "heddle land '--thread=-foo'");
         assert_eq!(merge_preview_command(id), "heddle ready '--thread=-foo'");
         assert_eq!(switch_thread_command(id), "heddle thread switch -foo");
     }

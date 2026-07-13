@@ -1423,7 +1423,7 @@ pub fn merge_thread_into_current_with_machine_contract(
                 ));
                 post_snapshot_git_blockers.push(format!(
                     "recovery: heddle merge state {} is intact; resolve the Git checkout issue \
-                     (identity, locks, or filesystem errors) and run `heddle commit -m \"{}\"` — do NOT re-run `heddle merge`",
+                     (identity, locks, or filesystem errors) and run `git commit -m \"{}\"` — do NOT re-run the integration",
                     new_state.state_id.short(),
                     merge_message
                 ));
@@ -1482,9 +1482,9 @@ pub fn merge_thread_into_current_with_machine_contract(
 
 fn land_local_command(thread_id: &str) -> String {
     if thread_id.starts_with('-') {
-        format!("heddle land --thread -- {thread_id} --no-push")
+        format!("heddle land --thread -- {thread_id}")
     } else {
-        format!("heddle land --thread {thread_id} --no-push")
+        format!("heddle land --thread {thread_id}")
     }
 }
 
@@ -2406,7 +2406,7 @@ fn merge_output_thread_health(
 
 fn coordination_blocker_recommended_action(merge_state: Option<&String>) -> String {
     if merge_state.is_some() {
-        "heddle commit -m \"...\"".to_string()
+        "heddle capture -m \"...\"".to_string()
     } else {
         "heddle status".to_string()
     }
@@ -3107,7 +3107,7 @@ mod tests {
     fn coordination_blocker_recommendations_are_machine_actions() {
         let merge_state = "hs-landed123".to_string();
         let post_snapshot = coordination_blocker_recommended_action(Some(&merge_state));
-        assert_eq!(post_snapshot, "heddle commit -m \"...\"");
+        assert_eq!(post_snapshot, "heddle capture -m \"...\"");
         assert!(
             action_template(&post_snapshot).is_some(),
             "commit placeholder should carry a fillable template"

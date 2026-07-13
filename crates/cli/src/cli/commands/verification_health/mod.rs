@@ -12,10 +12,12 @@ use std::{collections::BTreeSet, path::Path};
 // Re-exported for unit tests in operator/thread_shaping modules.
 #[cfg(test)]
 pub(crate) use heddle_core::VerificationCheck;
+#[cfg(test)]
+use heddle_core::status::next_action::remote_tracking_next_action;
 use heddle_core::status::next_action::{
     canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
     heddle_action as core_heddle_action, import_guidance_includes_active_branch,
-    remote_tracking_next_action, remote_tracking_status,
+    remote_tracking_next_action_for, remote_tracking_status,
 };
 pub(crate) use heddle_core::{
     ActionTemplate, MachineContractCoverage, MachineContractInput, PlainGitVerifyProbe,
@@ -1048,23 +1050,24 @@ pub(crate) fn remote_drift_decision(
         "remote_untracked" => RemoteDriftDecision {
             status,
             verified_as_clean: true,
-            primary_action: remote_tracking_next_action(remote),
+            primary_action: remote_tracking_next_action_for(remote, repo.source_authority()),
             recovery_commands: Vec::new(),
             requires_clean_worktree: false,
         },
         "remote_ahead" => RemoteDriftDecision {
             status,
             verified_as_clean: true,
-            primary_action: Some("heddle push".to_string()),
+            primary_action: remote_tracking_next_action_for(remote, repo.source_authority()),
             recovery_commands: Vec::new(),
             requires_clean_worktree: false,
         },
         "remote_contains_undone_checkpoint" => RemoteDriftDecision {
             status,
             verified_as_clean: false,
-            primary_action: remote_tracking_next_action(remote),
+            primary_action: remote_tracking_next_action_for(remote, repo.source_authority()),
             recovery_commands: vec![
-                core_heddle_action(["push", "--force"]),
+                remote_tracking_next_action_for(remote, repo.source_authority())
+                    .expect("undone checkpoint has a source recovery action"),
                 core_heddle_action(["undo", "--redo"]),
             ],
             requires_clean_worktree: true,
@@ -1072,8 +1075,10 @@ pub(crate) fn remote_drift_decision(
         "remote_behind" => RemoteDriftDecision {
             status,
             verified_as_clean: false,
-            primary_action: Some("heddle pull".to_string()),
-            recovery_commands: vec!["heddle pull".to_string()],
+            primary_action: remote_tracking_next_action_for(remote, repo.source_authority()),
+            recovery_commands: remote_tracking_next_action_for(remote, repo.source_authority())
+                .into_iter()
+                .collect(),
             requires_clean_worktree: true,
         },
         "remote_diverged" => {

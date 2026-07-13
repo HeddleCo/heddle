@@ -43,6 +43,7 @@ use super::{
     auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
     command_catalog::{ActionFields, ActionTemplate},
     snapshot::ensure_current_state,
+    source_authority::SourceAuthorityDispatch,
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 #[cfg(feature = "client")]
@@ -175,6 +176,9 @@ pub async fn cmd_push(
     insecure: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
+    SourceAuthorityDispatch::for_repo(&repo)
+        .require_push(remote.as_deref(), thread.as_deref(), force, all_threads)
+        .map_err(anyhow::Error::new)?;
     if let Some(remote_name) = remote.as_deref() {
         ensure_remote_arg_resolves(&repo, remote_name)?;
     }

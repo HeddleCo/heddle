@@ -88,7 +88,7 @@ pub fn resolve_absolute_path(cwd: &Path, path: &Path) -> PathBuf {
 
 /// Default next action after a successful init.
 pub fn init_recommended_action() -> &'static str {
-    "heddle commit -m \"...\""
+    "heddle capture -m \"...\""
 }
 
 #[cfg(test)]

@@ -28,7 +28,7 @@ pub const AUTO_LAND_CONFIDENCE_THRESHOLD: f32 = 0.75;
 
 /// Recovery breadcrumb when auto-land policy blocks on confidence / tests.
 pub const AUTO_LAND_CONFIDENCE_RECOVERY_ACTION: &str =
-    "heddle commit -m \"...\" --confidence <confidence>";
+    "heddle capture -m \"...\" --confidence <confidence>";
 
 // ---------------------------------------------------------------------------
 // Ready verification preflight
@@ -124,54 +124,6 @@ pub fn ready_scoped_next_action(
     effective_next_action(
         NextActionInput::default(operation, remote_tracking, import_hint, thread_action).ready(),
     )
-}
-
-// ---------------------------------------------------------------------------
-// Land push options
-// ---------------------------------------------------------------------------
-
-/// CLI land push flags normalized into a plan input.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct LandPushOptions {
-    pub push: bool,
-    pub no_push: bool,
-    pub remote: Option<String>,
-}
-
-/// Pure validation outcome for land push flags (before remote resolution).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LandPushPlan {
-    pub should_push: bool,
-    /// Explicit remote from the caller; `None` when push is on and the default
-    /// must still be resolved from the repository.
-    pub remote: Option<String>,
-}
-
-/// Failures for land push flag combinations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LandPushPlanError {
-    /// Both `--push` and `--no-push` were set.
-    OptionConflict,
-    /// `--remote` was set without `--push`.
-    RemoteRequiresPush { remote: String },
-}
-
-/// Validate land push / remote flags. Does not resolve the default remote.
-pub fn plan_land_push(options: &LandPushOptions) -> Result<LandPushPlan, LandPushPlanError> {
-    if options.push && options.no_push {
-        return Err(LandPushPlanError::OptionConflict);
-    }
-    if let Some(remote) = options.remote.as_deref()
-        && !options.push
-    {
-        return Err(LandPushPlanError::RemoteRequiresPush {
-            remote: remote.to_string(),
-        });
-    }
-    Ok(LandPushPlan {
-        should_push: options.push,
-        remote: options.remote.clone(),
-    })
 }
 
 /// Whether land should squash the thread into one Git commit on write-through.
@@ -340,14 +292,11 @@ pub fn land_text_step(step: &str) -> String {
         "sync" => "refreshed".to_string(),
         "merge" => "merged".to_string(),
         "checkpoint" => "committed".to_string(),
-        "push" => "pushed".to_string(),
         "capture(no changes)" => "no unsaved changes".to_string(),
         "sync(current)" => "already refreshed".to_string(),
         "merge(blocked)" => "merge blocked".to_string(),
         "checkpoint(not needed)" => "no Git commit needed".to_string(),
         "checkpoint(not reached)" => "Git commit not reached".to_string(),
-        "push(not requested)" => "push not requested".to_string(),
-        "push(not reached)" => "push not reached".to_string(),
         other => other.to_string(),
     }
 }
@@ -376,19 +325,6 @@ pub fn quote_recommended_action_arg(value: &str) -> String {
         value.to_string()
     } else {
         format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-    }
-}
-
-/// Rewrite land `--no-push` recommendations to `--push` when a default remote exists.
-pub fn rewrite_land_action_for_default_remote(
-    action: Option<&str>,
-    has_default_remote: bool,
-) -> Option<String> {
-    let action = action?;
-    if has_default_remote && action.contains(" land ") && action.contains("--no-push") {
-        Some(action.replace("--no-push", "--push"))
-    } else {
-        Some(action.to_string())
     }
 }
 
@@ -451,14 +387,12 @@ pub fn land_performed_steps(
     synced: bool,
     integrated: bool,
     checkpointed: bool,
-    pushed: bool,
 ) -> Vec<String> {
     [
         (captured, "capture"),
         (synced, "sync"),
         (integrated, "merge"),
         (checkpointed, "checkpoint"),
-        (pushed, "push"),
     ]
     .into_iter()
     .filter(|&(done, _step)| done)
@@ -472,7 +406,6 @@ pub fn land_skipped_steps(
     synced: bool,
     integrated: bool,
     checkpointed: bool,
-    pushed: bool,
 ) -> Vec<String> {
     [
         (!captured, "capture(no changes)"),
@@ -480,8 +413,6 @@ pub fn land_skipped_steps(
         (!integrated, "merge(blocked)"),
         (!checkpointed && integrated, "checkpoint(not needed)"),
         (!checkpointed && !integrated, "checkpoint(not reached)"),
-        (!pushed && integrated, "push(not requested)"),
-        (!pushed && !integrated, "push(not reached)"),
     ]
     .into_iter()
     .filter(|&(skipped, _step)| skipped)
@@ -492,13 +423,12 @@ pub fn land_skipped_steps(
 /// Next action after a successful local land (push if trust says so, else cleanup).
 pub fn integrated_land_next_action(
     integrated: bool,
-    pushed: bool,
     trust_recommended_action: &str,
 ) -> Option<String> {
     if !integrated {
         return None;
     }
-    if !pushed && trust_recommended_action == "heddle push" {
+    if matches!(trust_recommended_action, "heddle push" | "git push") {
         Some(trust_recommended_action.to_string())
     } else {
         Some("heddle thread cleanup --merged --dry-run".to_string())
@@ -633,7 +563,7 @@ mod tests {
             conflicts: Vec::new(),
             conflict_count: 0,
             blockers: Vec::new(),
-            recommended_action: "heddle land --thread feature --no-push".to_string(),
+            recommended_action: "heddle land --thread feature".to_string(),
             recommended_action_template: None,
             thread_health: "ready".to_string(),
         }
@@ -700,11 +630,8 @@ mod tests {
             None
         );
         assert_eq!(
-            ready_report_recommended_action(
-                "fast_forward",
-                "heddle land --thread feature --no-push"
-            ),
-            Some("heddle land --thread feature --no-push".to_string())
+            ready_report_recommended_action("fast_forward", "heddle land --thread feature"),
+            Some("heddle land --thread feature".to_string())
         );
     }
 
@@ -729,7 +656,7 @@ mod tests {
             message: String::new(),
             next_action: String::new(),
         };
-        let fallback = Some("heddle land --thread feature --no-push");
+        let fallback = Some("heddle land --thread feature");
         let scoped = ready_scoped_next_action(Some(&operation), None, None, fallback);
         let core = core_next_action::effective_next_action(
             core_next_action::NextActionInput::default(Some(&operation), None, None, fallback)
@@ -748,47 +675,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn land_push_plan_validates_flags() {
-        assert_eq!(
-            plan_land_push(&LandPushOptions {
-                push: true,
-                no_push: true,
-                remote: None,
-            }),
-            Err(LandPushPlanError::OptionConflict)
-        );
-        assert_eq!(
-            plan_land_push(&LandPushOptions {
-                push: false,
-                no_push: false,
-                remote: Some("origin".to_string()),
-            }),
-            Err(LandPushPlanError::RemoteRequiresPush {
-                remote: "origin".to_string()
-            })
-        );
-        assert_eq!(
-            plan_land_push(&LandPushOptions {
-                push: true,
-                no_push: false,
-                remote: Some("origin".to_string()),
-            }),
-            Ok(LandPushPlan {
-                should_push: true,
-                remote: Some("origin".to_string()),
-            })
-        );
-        assert_eq!(
-            plan_land_push(&LandPushOptions::default()),
-            Ok(LandPushPlan {
-                should_push: false,
-                remote: None,
-            })
-        );
-    }
-
-    #[test]
     fn auto_land_policy_blocks_low_confidence_and_failing_tests() {
         let blockers = auto_land_policy_blockers(AutoLandPolicyInput {
             agent_authored: true,
@@ -872,22 +758,19 @@ mod tests {
     #[test]
     fn land_step_accounting_and_next_action() {
         assert_eq!(
-            land_performed_steps(true, false, true, true, false),
+            land_performed_steps(true, false, true, true),
             vec!["capture", "merge", "checkpoint"]
         );
-        assert!(land_skipped_steps(true, true, true, true, true).is_empty());
+        assert!(land_skipped_steps(true, true, true, true).is_empty());
         assert_eq!(
-            integrated_land_next_action(true, false, "heddle push"),
+            integrated_land_next_action(true, "heddle push"),
             Some("heddle push".to_string())
         );
         assert_eq!(
-            integrated_land_next_action(true, true, "heddle push"),
-            Some("heddle thread cleanup --merged --dry-run".to_string())
+            integrated_land_next_action(true, "git push"),
+            Some("git push".to_string())
         );
-        assert_eq!(
-            integrated_land_next_action(false, false, "heddle push"),
-            None
-        );
+        assert_eq!(integrated_land_next_action(false, "heddle push"), None);
     }
 
     #[test]
@@ -959,11 +842,6 @@ mod tests {
         assert_eq!(
             scope_action_to_repo("heddle land main", "/tmp/repo"),
             "heddle --repo /tmp/repo land main"
-        );
-        assert_eq!(
-            rewrite_land_action_for_default_remote(Some("heddle land x --no-push"), true)
-                .as_deref(),
-            Some("heddle land x --push")
         );
         assert_eq!(ready_merge_type_label("fast_forward"), "fast-forward");
         assert_eq!(

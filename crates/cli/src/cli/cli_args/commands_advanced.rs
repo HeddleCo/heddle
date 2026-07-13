@@ -3,18 +3,6 @@
 
 use clap::{Args, Subcommand};
 
-#[derive(Clone, Debug, Args)]
-pub struct CheckpointArgs {
-    /// Git-facing commit summary for the current captured work.
-    #[arg(short = 'm', long)]
-    pub message: Option<String>,
-
-    /// Internal recovery: retry a failed staged-index commit checkpoint against the current
-    /// preserved Heddle state without requiring the dirty worktree to match it.
-    #[arg(long = "from-index-snapshot", hide = true)]
-    pub from_index_snapshot: bool,
-}
-
 #[derive(Clone, Debug, Subcommand)]
 pub enum TransactionCommands {
     /// Begin a new transaction. Returns its id.

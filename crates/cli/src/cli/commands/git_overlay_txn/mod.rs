@@ -248,14 +248,13 @@ fn land_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Optio
 pub(crate) fn native_checkpoint_unavailable_advice(repo: &Repository) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "checkpoint_requires_git_overlay",
-        "`heddle checkpoint` is only for Git-overlay repositories",
-        "Use `heddle commit -m \"...\"` to save native Heddle work, or `heddle capture -m \"...\"` for a recoverable step without a Git checkpoint.",
+        "Git checkpointing is only available in Git-overlay repositories",
+        "Use `heddle capture -m \"...\"` to save native Heddle work.",
         format!("repository mode is {}", repo.storage_model_label()),
         "checkpoint would need to write a Git commit, but this checkout has no Git-overlay branch/index",
         "Heddle refs and worktree files were left unchanged",
-        "heddle commit -m \"...\"",
+        "heddle capture -m \"...\"",
         vec![
-            "heddle commit -m \"...\"".to_string(),
             "heddle capture -m \"...\"".to_string(),
             "heddle status".to_string(),
         ],
@@ -290,7 +289,7 @@ pub(crate) fn commit_blocked_by_trust_advice(
             "refusing to report nothing to commit: repository verification is blocked ({})",
             trust.status
         ),
-        "retrying `heddle commit`",
+        "retrying `heddle capture`",
         trust,
         format!(
             "repository verification status is {}: {}",
@@ -426,20 +425,15 @@ fn commit_safe_trust(mut trust: RepositoryVerificationState) -> RepositoryVerifi
 fn is_commit_action(action: &str) -> bool {
     matches!(
         action.trim(),
-        "heddle commit"
-            | "heddle commit -m \"...\""
-            | "heddle commit -m \"...\" --confidence <confidence>"
-    ) || action.trim().starts_with("heddle commit ")
+        "heddle capture"
+            | "heddle capture -m \"...\""
+            | "heddle capture -m \"...\" --confidence <confidence>"
+    ) || action.trim().starts_with("heddle capture ")
 }
 
-fn checkpoint_recovery_command(message: Option<&str>, index_only: bool) -> String {
-    let scope = if index_only {
-        " --from-index-snapshot"
-    } else {
-        ""
-    };
+fn checkpoint_recovery_command(message: Option<&str>, _index_only: bool) -> String {
     format!(
-        "heddle checkpoint{scope} -m {}",
+        "git commit -m {}",
         shell_double_quoted(message.unwrap_or("commit"))
     )
 }
@@ -477,11 +471,11 @@ mod tests {
         assert!(advice.error.contains("git write failed"));
         assert_eq!(
             advice.primary_command,
-            "heddle checkpoint -m \"say \\\"hello\\\"\""
+            "git commit -m \"say \\\"hello\\\"\""
         );
         assert_eq!(
             advice.recovery_commands,
-            vec!["heddle checkpoint -m \"say \\\"hello\\\"\""]
+            vec!["git commit -m \"say \\\"hello\\\"\""]
         );
         assert!(advice.preserved.contains("change-123"));
     }
@@ -492,13 +486,10 @@ mod tests {
         let advice =
             commit_checkpoint_failed_advice("change-456", Some("index only"), &error, true);
 
-        assert_eq!(
-            advice.primary_command,
-            "heddle checkpoint --from-index-snapshot -m \"index only\""
-        );
+        assert_eq!(advice.primary_command, "git commit -m \"index only\"");
         assert_eq!(
             advice.recovery_commands,
-            vec!["heddle checkpoint --from-index-snapshot -m \"index only\""]
+            vec!["git commit -m \"index only\""]
         );
     }
 

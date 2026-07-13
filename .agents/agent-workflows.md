@@ -83,7 +83,7 @@ Important current behavior:
 - `heddle thread show/list/refresh/promote/drop` manage thread lifecycle and maintenance.
 - `heddle start <thread> --path <dir>` creates a user-visible isolated checkout when the thread needs its own working directory.
 - `capture` records changed paths, impact categories, freshness, and promotion warnings for the active thread.
-- `merge --preview` shows the semantic integration summary before apply.
+- `ready` shows the semantic integration summary before `land`.
 - `start <thread> --path <dir>` is the canonical isolated-checkout path.
 - `actor spawn` creates a thread-linked actor registry entry only; it does not create filesystem isolation.
 - `actor spawn` is for explicit Heddle actors; ambient harness integration may create actors automatically.

@@ -227,49 +227,6 @@ pub struct SnapshotArgs {
     pub paths: Vec<String>,
 }
 
-/// Arguments for the Git-compatible `commit` shim.
-///
-/// This is the daily-driver save path: it records a recoverable Heddle
-/// state, plus the matching Git checkpoint in Git-overlay repositories.
-#[derive(Clone, Debug, clap::Args)]
-#[command(after_help = "\
-Behavior:
-  Heddle's commit auto-switches on the Git index: with nothing staged it commits all worktree paths (like `git commit -a`, incl. untracked); with staged paths it commits only the index (like `git commit`). Pass `--no-all` to force index-only even when nothing is staged; pass `--all` to include unstaged/untracked paths even when the index has staged paths.
-
-Examples:
-  heddle commit -m 'add login route'        # save work; Git-overlay repos also checkpoint Git
-  heddle commit -m 'wip' --confidence 0.6   # record honest confidence
-  heddle commit --no-all -m 'index only'    # commit only the Git index, never sweep the worktree
-  heddle commit --all -m 'save everything'  # include unstaged/untracked paths even when the Git index is staged
-")]
-pub struct CommitArgs {
-    /// Commit/capture message. `--intent` is a deliberate alias: agents
-    /// (and humans) may prefer it to record WHY the change was made, not
-    /// just what changed — intent is first-class in Heddle's state model.
-    #[arg(short = 'm', long = "message", visible_alias = "intent")]
-    pub message: Option<String>,
-
-    /// Confidence level for the captured Heddle state (0.0-1.0).
-    #[arg(long, value_parser = parse_confidence)]
-    pub confidence: Option<f32>,
-
-    /// Include unstaged and untracked paths when the Git index already has staged changes.
-    #[arg(long)]
-    pub all: bool,
-
-    /// Force an index-only commit even when nothing is staged, instead of sweeping the worktree.
-    #[arg(long = "no-all", conflicts_with = "all")]
-    pub no_all: bool,
-
-    /// Allow a large or deletion-heavy capture without the safety preflight.
-    #[arg(short, long)]
-    pub force: bool,
-}
-
-// `CheckpointArgs` lives in `commands_advanced.rs` (canonical
-// definition on main). Codex's foundation commit added a parallel
-// definition here; deleted during the rebase onto main.
-
 /// Arguments for the `log` command.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
@@ -887,7 +844,7 @@ pub struct SyncArgs {
 /// Arguments for the `land` command.
 #[derive(Clone, Debug, clap::Args)]
 pub struct LandArgs {
-    /// Thread to capture, integrate, and optionally push (default: current thread).
+    /// Thread to capture and integrate (default: current thread).
     #[arg(long = "thread")]
     pub thread: Option<String>,
 
@@ -898,18 +855,6 @@ pub struct LandArgs {
     /// Preserve per-State Git export instead of squashing the landed thread.
     #[arg(long)]
     pub no_squash: bool,
-
-    /// Push after integration completes.
-    #[arg(long)]
-    pub push: bool,
-
-    /// Skip push even if defaults would otherwise allow it.
-    #[arg(long)]
-    pub no_push: bool,
-
-    /// Remote to push to when `--push` is used.
-    #[arg(long)]
-    pub remote: Option<String>,
 }
 
 /// Arguments for `thread show`.

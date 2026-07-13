@@ -1,102 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `heddle checkpoint` — Git-facing commit boundary.
-//!
-//! Our git-overlay model treats captures as granular sub-commit
-//! provenance and checkpoints as the Git commit equivalent that
-//! syncs the current Heddle state to the Git ref through Git projection.
-//!
-//! Resolved against main's "A11 cheap save" variant: the lightweight
-//! save semantic is already covered by `heddle capture`, so we keep
-//! the Git-overlay checkpoint that the shakedown doc and the OSS
-//! launch claim are built around. The function is renamed to `run`
-//! to match main's `pub use checkpoint::run as cmd_checkpoint;`
-//! convention.
+//! Internal Git-checkpoint implementation used by thread landing.
 
 use anyhow::{Result, anyhow};
 use heddle_core::{GitScope, SavePlan, SaveVerb, execute_save};
 use objects::object::Attribution;
 use repo::{GitCheckpointRecord, Repository, RepositoryCapability};
-use serde::Serialize;
 
 use super::{
-    action_line::print_next,
-    command_catalog::ActionTemplate,
     git_overlay_txn,
     snapshot::{SnapshotAgentOverrides, build_attribution},
-    verification_health::RepositoryVerificationState,
     worktree_safety::dirty_worktree_advice,
 };
-use crate::{
-    cli::{CheckpointArgs, Cli, should_output_json, style, worktree_status_options},
-    config::UserConfig,
-};
-
-#[derive(Serialize)]
-struct CheckpointOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    action: &'static str,
-    state_id: String,
-    git_commit: String,
-    summary: String,
-    capability: String,
-    storage_model: String,
-    committed_at: String,
-    next_action: Option<String>,
-    next_action_template: Option<ActionTemplate>,
-    recommended_action: Option<String>,
-    recommended_action_template: Option<ActionTemplate>,
-    #[serde(skip_serializing)]
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
-
-pub async fn run(cli: &Cli, args: &CheckpointArgs) -> Result<()> {
-    let cwd;
-    let start = if let Some(path) = cli.repo.as_ref() {
-        path
-    } else {
-        cwd = std::env::current_dir()?;
-        &cwd
-    };
-    git_overlay_txn::preflight_plain_git_mutation(start, "checkpoint")?;
-
-    let repo = Repository::open(start)?;
-    let status_options = worktree_status_options(Some(repo.config()));
-    let record = if args.from_index_snapshot {
-        create_git_checkpoint_from_index_snapshot(&repo, args.message.as_deref(), status_options)?
-    } else {
-        create_git_checkpoint(&repo, args.message.as_deref(), status_options)?
-    };
-    let state = repo
-        .current_state()?
-        .ok_or_else(|| anyhow!("no captured state found after checkpoint"))?;
-    // NOTE: `build_output` recomputes the verification state from scratch — it
-    // must NOT reuse the pre-checkpoint worktree status. The checkpoint just
-    // advanced the Git ref, which flips the git-overlay health from
-    // `needs_checkpoint` to `clean` (and remote drift from diverged to ahead);
-    // the post-mutation output reflects the NEW git state, so the status walk
-    // here is a different, necessary one. The redundant-walk elimination is
-    // scoped to the PRE-mutation consumers inside `create_git_checkpoint_inner`.
-    let output = build_output(&repo, &state.state_id.short(), &record);
-
-    if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
-    } else {
-        println!(
-            "Checkpointed {} as Git commit {}",
-            output.state_id,
-            &output.git_commit[..std::cmp::min(12, output.git_commit.len())]
-        );
-        if output.trust.verified {
-            println!("Verification: {}", style::accent("clean"));
-        } else if !output.trust.recommended_action.is_empty() {
-            print_next(&output.trust.recommended_action);
-        }
-    }
-
-    Ok(())
-}
+use crate::config::UserConfig;
 
 pub(crate) fn create_git_checkpoint(
     repo: &Repository,
@@ -104,42 +19,6 @@ pub(crate) fn create_git_checkpoint(
     status_options: repo::WorktreeStatusOptions,
 ) -> Result<GitCheckpointRecord> {
     create_git_checkpoint_inner(repo, message, status_options, true, None)
-}
-
-/// Variant of [`create_git_checkpoint`] that reuses an already-computed
-/// git-overlay worktree status for checkpoint's two PRE-mutation preflights
-/// instead of re-walking the worktree. Used by `commit`, which has already
-/// computed the same pre-mutation status for its own preflights — no Git
-/// mutation happens between commit's walk and checkpoint's preflights, so they
-/// observe the same git state and the gating decision is byte-identical to
-/// [`create_git_checkpoint`].
-pub(crate) fn create_git_checkpoint_with_worktree_status(
-    repo: &Repository,
-    message: Option<&str>,
-    status_options: repo::WorktreeStatusOptions,
-    worktree_status: &git_overlay_txn::GitOverlayWorktreeStatus,
-) -> Result<GitCheckpointRecord> {
-    create_git_checkpoint_inner(repo, message, status_options, true, Some(worktree_status))
-}
-
-pub(crate) fn create_git_checkpoint_from_index_snapshot(
-    repo: &Repository,
-    message: Option<&str>,
-    status_options: repo::WorktreeStatusOptions,
-) -> Result<GitCheckpointRecord> {
-    create_git_checkpoint_inner(repo, message, status_options, false, None)
-}
-
-/// Index-snapshot checkpoint helper retained for callers that still compose
-/// capture and checkpoint as separate steps; commit uses `execute_save` now.
-#[allow(dead_code)]
-pub(crate) fn create_git_checkpoint_from_index_snapshot_with_worktree_status(
-    repo: &Repository,
-    message: Option<&str>,
-    status_options: repo::WorktreeStatusOptions,
-    worktree_status: &git_overlay_txn::GitOverlayWorktreeStatus,
-) -> Result<GitCheckpointRecord> {
-    create_git_checkpoint_inner(repo, message, status_options, false, Some(worktree_status))
 }
 
 fn create_git_checkpoint_inner(
@@ -202,8 +81,8 @@ fn create_git_checkpoint_inner(
         git_overlay_txn::preflight_git_checkpoint_identity_for_principal(
             repo,
             &existing_state.attribution.principal,
-            "checkpoint",
-            "heddle checkpoint -m \"...\"",
+            "land",
+            "git commit -m \"...\"",
         )?;
     }
 
@@ -297,36 +176,4 @@ fn create_git_checkpoint_inner(
     report
         .git_checkpoint
         .ok_or_else(|| anyhow!("checkpoint completed without a Git checkpoint record"))
-}
-
-fn build_output(
-    repo: &Repository,
-    state_id: &str,
-    record: &GitCheckpointRecord,
-) -> CheckpointOutput {
-    // Fresh verification state: this runs AFTER the checkpoint advanced the Git
-    // ref, so it must re-read the new git-overlay state (do NOT reuse the
-    // pre-checkpoint worktree status threaded into the preflights above).
-    let trust = git_overlay_txn::post_verify(repo);
-    let recommended_action = action_value(&trust);
-    CheckpointOutput {
-        output_kind: "checkpoint",
-        status: "checkpointed",
-        action: "checkpoint",
-        state_id: state_id.to_string(),
-        git_commit: record.git_commit.clone(),
-        summary: record.summary.clone(),
-        capability: repo.capability_label().to_string(),
-        storage_model: repo.storage_model_label().to_string(),
-        committed_at: record.committed_at.clone(),
-        next_action: recommended_action.clone(),
-        next_action_template: trust.recommended_action_template.clone(),
-        recommended_action,
-        recommended_action_template: trust.recommended_action_template.clone(),
-        trust,
-    }
-}
-
-fn action_value(trust: &RepositoryVerificationState) -> Option<String> {
-    (!trust.recommended_action.trim().is_empty()).then(|| trust.recommended_action.clone())
 }

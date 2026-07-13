@@ -25,16 +25,15 @@ use cli::{
         commands::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
             cmd_abort, cmd_actor_done, cmd_actor_explain, cmd_actor_list, cmd_actor_show,
-            cmd_actor_spawn, cmd_adopt, cmd_agent, cmd_capture_split, cmd_checkpoint,
-            cmd_cherry_pick, cmd_clone, cmd_collapse, cmd_commit_git_projection, cmd_complete,
-            cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
-            cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
-            cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
-            cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff, cmd_discuss,
-            cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fsck, cmd_hook, cmd_init,
-            cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_oplog, cmd_pull, cmd_push,
-            cmd_query, cmd_ready, cmd_redo, cmd_remote, cmd_resolve, cmd_retro, cmd_revert,
-            cmd_review, cmd_run, cmd_schemas, cmd_session_end, cmd_session_list,
+            cmd_actor_spawn, cmd_adopt, cmd_agent, cmd_capture_split, cmd_cherry_pick, cmd_clone,
+            cmd_collapse, cmd_complete, cmd_context_audit, cmd_context_check, cmd_context_edit,
+            cmd_context_get, cmd_context_history, cmd_context_list, cmd_context_rm,
+            cmd_context_set, cmd_context_suggest, cmd_context_supersede, cmd_continue,
+            cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff,
+            cmd_discuss, cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fsck, cmd_hook,
+            cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_oplog, cmd_pull,
+            cmd_push, cmd_query, cmd_ready, cmd_redo, cmd_remote, cmd_resolve, cmd_retro,
+            cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_session_end, cmd_session_list,
             cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell, cmd_show,
             cmd_snapshot, cmd_start, cmd_status, cmd_sync_smart, cmd_thread, cmd_timeline,
             cmd_transaction, cmd_try, cmd_undo, cmd_verify, cmd_watch,
@@ -369,9 +368,6 @@ async fn async_main() -> Result<()> {
             thread,
             message,
             no_squash,
-            push,
-            no_push,
-            remote,
         }) => {
             cmd_land(
                 &cli,
@@ -379,9 +375,6 @@ async fn async_main() -> Result<()> {
                     thread: thread.clone(),
                     message: message.clone(),
                     no_squash: *no_squash,
-                    push: *push,
-                    no_push: *no_push,
-                    remote: remote.clone(),
                 },
             )
             .await
@@ -416,8 +409,6 @@ async fn async_main() -> Result<()> {
                 .await
             }
         }
-
-        Commands::Commit(args) => cmd_commit_git_projection(&cli, args.clone()).await,
 
         Commands::Log(LogArgs {
             state,
@@ -734,8 +725,6 @@ async fn async_main() -> Result<()> {
         Commands::Discuss { command } => cmd_discuss(&cli, command).await,
 
         Commands::Query(args) => cmd_query(&cli, args).await,
-
-        Commands::Checkpoint(args) => cmd_checkpoint(&cli, args).await,
 
         Commands::Transaction { command } => cmd_transaction(&cli, command).await,
 

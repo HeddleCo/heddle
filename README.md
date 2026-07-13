@@ -90,17 +90,18 @@ New to Heddle? In an existing Git checkout, start with `heddle status` and initi
 ```bash
 heddle status
 heddle init
-heddle commit -m "start project"
+heddle capture -m "start project"
+git commit -am "start project"
 ```
 
-For a new or unborn repo, initialize once, set attribution if needed, then use `heddle commit` as the everyday save boundary:
+For a new or unborn repo, initialize once, set attribution if needed, then use `heddle capture` as the Heddle save boundary:
 
 ```bash
 heddle init --principal-name "Ada Lovelace" --principal-email ada@example.com
-heddle commit -m "start project"
+heddle capture -m "start project"
 ```
 
-In a Git checkout, `heddle init` creates the Heddle sidecar and leaves source storage in the checkout's real `.git`; `heddle commit` records the Heddle state and matching Git checkpoint. Use `heddle adopt` when you explicitly want to import Git history and move source authority to Heddle-native storage. The existing `.git` is retained as an explicit projection adapter. `heddle status` always prints the next useful command when there is an obvious one.
+In a Git checkout, `heddle init` creates the Heddle sidecar and leaves source storage in the checkout's real `.git`. `heddle capture` records Heddle provenance in `.heddle`; source commits and remote transport remain direct `git commit`, `git pull`, and `git push` operations. Use `heddle adopt` when you explicitly want to import Git history and move source authority to Heddle-native storage. The existing `.git` is retained as an explicit projection adapter.
 
 ### The verb-by-verb tour
 
@@ -110,17 +111,19 @@ heddle status
 heddle init
 heddle verify
 
-# Save work as one verified Heddle change plus a matching Git commit
-heddle commit -m "add user authentication"
+# Save Heddle provenance, then commit Git-owned source history
+heddle capture -m "add user authentication"
+git commit -am "add user authentication"
 
 # Start isolated work and prove it is ready
 heddle start feature/auth --path ../feature-auth
 cd ../feature-auth
-heddle commit -m "add auth validation"
+heddle capture -m "add auth validation"
 heddle ready
 
-# Land and push
-heddle land --thread feature/auth --push
+# Land locally, then publish with the source authority
+heddle land --thread feature/auth
+git push
 
 # Inspect history and provenance
 heddle log

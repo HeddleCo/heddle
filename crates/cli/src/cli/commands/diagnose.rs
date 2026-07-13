@@ -462,7 +462,7 @@ fn diagnose_health(
 ) -> DiagnoseHealthOutput {
     let Some(summary) = current_summary else {
         let recommended_action = if worktree_dirty {
-            "heddle commit -m \"...\""
+            "heddle capture -m \"...\""
         } else {
             ""
         };

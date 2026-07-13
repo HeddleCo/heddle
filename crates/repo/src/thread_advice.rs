@@ -34,7 +34,7 @@ pub fn shell_quote(arg: &str) -> String {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecommendedAction {
-    Commit,
+    Capture,
     Ready,
     Sync,
     Land,
@@ -56,10 +56,10 @@ impl RecommendedAction {
         // emit boundary; creation-time validation stays as a UX/early-reject
         // layer, but safety does not depend on it being covered everywhere.)
         match self {
-            Self::Commit => Some("heddle commit -m \"...\"".to_string()),
+            Self::Capture => Some("heddle capture -m \"...\"".to_string()),
             Self::Ready => Some(format!("heddle ready {}", thread_flag(thread_id))),
             Self::Sync => Some(format!("heddle sync {}", thread_flag(thread_id))),
-            Self::Land => Some(format!("heddle land {} --no-push", thread_flag(thread_id))),
+            Self::Land => Some(format!("heddle land {}", thread_flag(thread_id))),
             Self::Resolve => Some("heddle resolve --list".to_string()),
             Self::Review => None,
             Self::Promote => Some(format!(
@@ -124,7 +124,7 @@ pub fn describe_thread_advice(
 ///
 /// When `initial_state` is true and the worktree is dirty, the thread
 /// is labeled `"uncaptured"` instead of `"dirty_worktree"`. The
-/// recommended action stays `heddle commit` — only the label
+/// recommended action stays `heddle capture` — only the label
 /// changes, so the user-facing first impression matches the actual
 /// situation (nothing has been captured yet) rather than implying
 /// that something has drifted. See heddle#160.
@@ -165,7 +165,7 @@ pub fn describe_thread_advice_with_initial(
 
     let mut blockers = Vec::new();
     let action = if worktree_dirty {
-        RecommendedAction::Commit
+        RecommendedAction::Capture
     } else if thread.freshness == ThreadFreshness::Stale {
         blockers.push(format!(
             "Thread '{}' is stale against '{}'",
@@ -212,7 +212,7 @@ pub fn describe_thread_advice_with_initial(
         return ThreadAdvice {
             thread_health: "ready".to_string(),
             blockers,
-            recommended_action: format!("heddle land {} --no-push", thread_flag(&thread.id)),
+            recommended_action: format!("heddle land {}", thread_flag(&thread.id)),
         };
     } else if clean_ready_merges_to_apply || thread.state == ThreadState::Ready {
         RecommendedAction::Land
@@ -289,10 +289,7 @@ mod tests {
         let advice = describe_thread_advice(&thread_json("blocked"), false, 0, false);
         assert_eq!(advice.thread_health, "blocked");
         assert_ne!(advice.recommended_action, "heddle resolve --list");
-        assert_eq!(
-            advice.recommended_action,
-            "heddle land --thread feature/x --no-push"
-        );
+        assert_eq!(advice.recommended_action, "heddle land --thread feature/x");
     }
 
     // Even when a preview reports conflicts, the merge is a dry run with no
@@ -302,10 +299,7 @@ mod tests {
     fn previewed_conflicts_recommend_land_not_dead_resolve_breadcrumb() {
         let advice = describe_thread_advice(&thread_json("active"), false, 2, false);
         assert_ne!(advice.recommended_action, "heddle resolve --list");
-        assert_eq!(
-            advice.recommended_action,
-            "heddle land --thread feature/x --no-push"
-        );
+        assert_eq!(advice.recommended_action, "heddle land --thread feature/x");
     }
 
     // A clean slug renders bare in every breadcrumb (no regression): quoting is
@@ -319,7 +313,7 @@ mod tests {
         );
         assert_eq!(
             RecommendedAction::Land.command("feature/x").as_deref(),
-            Some("heddle land --thread feature/x --no-push")
+            Some("heddle land --thread feature/x")
         );
         assert_eq!(
             RecommendedAction::Promote.command("team@scope").as_deref(),
@@ -385,7 +379,7 @@ mod tests {
         );
         assert_eq!(
             RecommendedAction::Land.command(id.as_str()).as_deref(),
-            Some("heddle land --thread=-foo --no-push")
+            Some("heddle land --thread=-foo")
         );
         assert_eq!(
             RecommendedAction::Promote.command(id.as_str()).as_deref(),

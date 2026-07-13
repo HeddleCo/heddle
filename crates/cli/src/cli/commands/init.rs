@@ -181,12 +181,12 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     let trust = build_repository_verification_state(&repo);
     // Init must never end without a next step (heddle#644). When the repo has
     // existing Git history the trust state recommends the exact setup command;
-    // when it doesn't, point at the first save — `heddle commit` records the
+    // when it doesn't, point at the first Heddle save boundary.
     // first state and, in Git-overlay repos, the matching Git checkpoint.
     let next_action = if !trust.recommended_action.is_empty() {
         Some(trust.recommended_action.clone())
     } else {
-        Some("heddle commit -m \"...\"".to_string())
+        Some("heddle capture -m \"...\"".to_string())
     };
     let principal_status = init_principal_status(&repo, &user_config)?;
     let placeholder_principal_warning = principal_status

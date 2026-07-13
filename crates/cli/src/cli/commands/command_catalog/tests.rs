@@ -141,14 +141,12 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["context", "reason", "git", "--path", "."],
     ),
     sample(&["capture"], &["capture"]),
-    sample(&["checkpoint"], &["checkpoint"]),
     sample(&["cherry-pick"], &["cherry-pick", "abc123"]),
     sample(&["clone"], &["clone", "remote", "local"]),
     sample(
         &["collapse"],
         &["collapse", "s1", "s2", "--into", "squashed"],
     ),
-    sample(&["commit"], &["commit"]),
     sample(&["continue"], &["continue"]),
     sample(&["expand"], &["expand", "HEAD"]),
     sample(
@@ -450,7 +448,7 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
         "",
         "heddle init",
         "heddle capture -m \"...\"",
-        "heddle commit -m \"...\"",
+        "git commit -m \"...\"",
         "heddle capture -m \"Preserve raw Git operation work\"",
         "git switch <branch>",
         "heddle start feature/auth --path <dir>",
@@ -500,21 +498,14 @@ fn recommended_action_templates_describe_display_only_placeholders() {
     let commit = catalog
         .recommended_action_templates
         .iter()
-        .find(|template| template.action == "heddle commit -m \"...\"")
+        .find(|template| template.action == "git commit -m \"...\"")
         .expect("commit placeholder should have a structured template");
     assert_eq!(
         commit.argv_template,
-        vec!["heddle", "commit", "-m", "<message>"]
+        vec!["git", "commit", "-m", "<message>"]
     );
     assert_eq!(commit.required_inputs, vec!["message"]);
     assert!(commit.agent_may_fill);
-
-    let template = recommended_action_template("heddle checkpoint -m \"...\"")
-        .expect("checkpoint placeholder should resolve");
-    assert_eq!(
-        template.argv_template,
-        vec!["heddle", "checkpoint", "-m", "<message>"]
-    );
 
     let switch = recommended_action_template("git switch <branch>")
         .expect("switch placeholder should resolve");
@@ -596,16 +587,10 @@ fn recommended_action_templates_describe_display_only_placeholders() {
 
 #[test]
 fn action_fields_template_dirty_worktree_message_placeholders() {
-    for (action, expected_argv_template) in [
-        (
-            "heddle commit -m \"...\"",
-            vec!["heddle", "commit", "-m", "<message>"],
-        ),
-        (
-            "heddle capture -m \"...\"",
-            vec!["heddle", "capture", "-m", "<message>"],
-        ),
-    ] {
+    for (action, expected_argv_template) in [(
+        "heddle capture -m \"...\"",
+        vec!["heddle", "capture", "-m", "<message>"],
+    )] {
         let fields = ActionFields::from_action(action);
         assert_eq!(fields.action.as_deref(), Some(action));
         let template = fields
@@ -619,16 +604,10 @@ fn action_fields_template_dirty_worktree_message_placeholders() {
 
 #[test]
 fn action_fields_template_argv_normalized_message_placeholders() {
-    for (action, expected_argv_template) in [
-        (
-            "heddle commit -m ...",
-            vec!["heddle", "commit", "-m", "<message>"],
-        ),
-        (
-            "heddle capture -m ...",
-            vec!["heddle", "capture", "-m", "<message>"],
-        ),
-    ] {
+    for (action, expected_argv_template) in [(
+        "heddle capture -m ...",
+        vec!["heddle", "capture", "-m", "<message>"],
+    )] {
         let fields = ActionFields::from_action(action);
         assert_eq!(fields.action.as_deref(), Some(action));
         let template = fields
@@ -1515,7 +1494,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "export git",
             "sync git",
             "capture",
-            "checkpoint",
             "cherry-pick",
             "clone",
             "clone",
@@ -1523,7 +1501,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // (Spool epic P9) emits a monorepo summary record.
             "clone",
             "expand",
-            "commit",
             "continue",
             "context set",
             "context get",
@@ -1963,13 +1940,10 @@ fn command_contract_table_drives_help_tiers() {
         (
             "verify", "everyday", "native", "everyday", None, None, false,
         ),
-        (
-            "commit", "everyday", "native", "everyday", None, None, false,
-        ),
         ("land", "everyday", "native", "everyday", None, None, false),
         ("push", "everyday", "native", "everyday", None, None, false),
         (
-            "capture", "advanced", "native", "advanced", None, None, false,
+            "capture", "everyday", "native", "everyday", None, None, false,
         ),
         (
             "thread create",
@@ -1982,15 +1956,6 @@ fn command_contract_table_drives_help_tiers() {
         ),
         (
             "thread promote",
-            "advanced",
-            "native",
-            "advanced",
-            None,
-            None,
-            false,
-        ),
-        (
-            "checkpoint",
             "advanced",
             "native",
             "advanced",
@@ -2041,7 +2006,7 @@ fn command_contract_table_drives_help_tiers() {
 fn parsed_command_op_id_support_reads_contract_table() {
     for (argv, expected) in [
         (vec!["heddle", "status"], false),
-        (vec!["heddle", "commit", "-m", "checkpoint"], true),
+        (vec!["heddle", "capture", "-m", "checkpoint"], true),
         (vec!["heddle", "thread", "list"], false),
         (vec!["heddle", "thread", "drop", "feature"], true),
     ] {
@@ -2117,7 +2082,6 @@ fn op_id_persistence_reads_contract_table() {
     for (display, persists, store_scope) in [
         ("capture", false, "repository"),
         ("review sign", false, "repository"),
-        ("commit", false, "repository"),
         ("status", false, "none"),
         ("init", false, "bootstrap"),
         ("adopt", false, "bootstrap"),

@@ -269,7 +269,7 @@ pub fn commit_next_action_from_trust(
 // Git-projection commit index planning (pure)
 // ---------------------------------------------------------------------------
 
-/// Pure commit index plan for git-overlay `heddle commit` routing.
+/// Pure commit index plan for internal Git projection writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitGitIndexPlan {
     pub commit_mode: &'static str,
@@ -395,8 +395,8 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
         return Err(anyhow!(HeddleError::recovery(
             RecoveryDetails::safety_refusal(
                 "native_checkpoint_unavailable",
-                "heddle checkpoint is only available in Git-overlay repositories",
-                "Use `heddle commit -m \"...\"` to save Heddle state in a native checkout.",
+                "Git checkpointing is only available in Git-overlay repositories",
+                "Use `heddle capture -m \"...\"` to save Heddle state in a native checkout.",
                 "this checkout is not a Git-overlay repository",
                 "checkpoint would try to write a Git commit where no active Git store is bound",
                 "repository state, refs, and worktree files were left unchanged",
@@ -442,7 +442,7 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
                     RecoveryDetails::safety_refusal(
                         "dirty_worktree",
                         "Save or stash worktree changes before checkpoint",
-                        "Save the work with `heddle commit -m \"...\"`, then retry the checkpoint.",
+                        "Save the work with `heddle capture -m \"...\"`, then retry the integration.",
                         "the current Heddle state was left unchanged; these paths have not been captured",
                         "checkpoint would write a Git commit that does not include dirty worktree paths",
                         "the current Heddle state was left unchanged; these paths have not been captured",
@@ -625,7 +625,7 @@ fn write_git_checkpoint(
                 RecoveryDetails::safety_refusal(
                     "checkpoint_git_write_skipped",
                     format!("Git checkpoint write-through was skipped: {reason}"),
-                    "Inspect `heddle verify`, resolve the skip reason, then retry `heddle checkpoint -m \"...\"`.",
+                    "Inspect `heddle verify`, resolve the skip reason, then retry `heddle land`.",
                     format!("write-through skipped: {reason}"),
                     "checkpoint would need to write the current Heddle state into the Git branch and index",
                     "the current Heddle state was preserved; no Git checkpoint record was written",
@@ -723,10 +723,7 @@ fn soften_commit_next_action(trust: &mut RepositoryVerificationState) {
 
 fn is_commit_action(action: &str) -> bool {
     let trimmed = action.trim();
-    trimmed == "heddle commit"
-        || trimmed.starts_with("heddle commit ")
-        || trimmed == "commit"
-        || trimmed.starts_with("commit ")
+    trimmed == "heddle capture" || trimmed.starts_with("heddle capture ")
 }
 
 #[cfg(test)]

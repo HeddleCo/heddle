@@ -10,7 +10,7 @@
 //! This module provides a single guard that callers invoke before mutating the
 //! worktree. It mirrors `git checkout`'s default of protecting the working copy
 //! and produces a precise error message that points the user at
-//! `heddle commit -m "..."`, `heddle capture -m "..."`, or
+//! `heddle capture -m "..."` or
 //! `heddle capture -m "..."` to preserve work first.
 
 use anyhow::{Result, anyhow};

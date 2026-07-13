@@ -72,8 +72,6 @@ schema_registry! {
     (&["init"], InitSchema),
     (&["adopt"], AdoptSchema),
     (&["capture"], CaptureSchema),
-    (&["commit"], CommitSchema),
-    (&["checkpoint"], CheckpointSchema),
     (&["undo", "undo --redo"], UndoSchema),
     (&["undo --list"], UndoListSchema),
     (&["clean"], CleanSchema),
@@ -1066,30 +1064,6 @@ pub struct CaptureSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct CommitSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: String,
-    pub state_id: String,
-    pub git_commit: Option<String>,
-    pub git_previous_commit: Option<String>,
-    pub summary: String,
-    pub confidence: Option<f32>,
-    pub git_index: Option<GitIndexInfoSchema>,
-    pub included_pending_capture: Option<String>,
-    pub principal: CommitPrincipalSchema,
-    pub agent: Option<CommitAgentSchema>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub op_id: Option<String>,
-    pub operation_record: Option<OperationRecordSchema>,
-    pub idempotency_status: Option<String>,
-    pub replayed: Option<bool>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct CommitPrincipalSchema {
     pub name: String,
     pub email: String,
@@ -1105,23 +1079,6 @@ pub struct CommitAgentSchema {
     pub segment_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_id: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CheckpointSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: String,
-    pub state_id: String,
-    pub git_commit: String,
-    pub summary: String,
-    pub capability: String,
-    pub storage_model: String,
-    pub committed_at: String,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1296,8 +1253,6 @@ pub struct LandSchema {
     pub git_commit: Option<String>,
     pub synced: bool,
     pub integrated: bool,
-    pub pushed: bool,
-    pub pushed_remote: Option<String>,
     pub performed_steps: Vec<String>,
     pub skipped_steps: Vec<String>,
     pub merge_state: Option<String>,
@@ -3676,21 +3631,6 @@ mod tests {
     }
 
     #[test]
-    fn commit_schema_declares_op_id_replay_fields() {
-        let schema = schema_for_verb("commit").expect("commit schema");
-        let properties = schema
-            .get("properties")
-            .and_then(|p| p.as_object())
-            .expect("commit schema has properties");
-        for required in OP_ID_REPLAY_FIELD_NAMES {
-            assert!(
-                properties.contains_key(*required),
-                "commit schema missing op-id replay property '{required}'"
-            );
-        }
-    }
-
-    #[test]
     fn op_id_supported_schema_verbs_declare_replay_fields() {
         let mut checked = 0;
         for verb in schema_verbs() {
@@ -3713,7 +3653,7 @@ mod tests {
         }
         assert!(
             checked > 1,
-            "op-id schema coverage test should exercise more than commit"
+            "op-id schema coverage test should exercise multiple verbs"
         );
     }
 

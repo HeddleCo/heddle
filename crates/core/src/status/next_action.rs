@@ -2,10 +2,14 @@
 //! Shared status and command next-action selection.
 
 use repo::{
-    GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus, shell_quote,
+    GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
+    RepositorySourceAuthority, shell_quote,
 };
 
-use crate::RepositoryVerificationState;
+use crate::{
+    RepositoryVerificationState,
+    source_authority::{SourceAction, SourceAuthorityActions},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NextActionScope {
@@ -22,6 +26,7 @@ pub struct NextActionInput<'a> {
     pub thread_health: Option<&'a str>,
     pub trust: Option<&'a RepositoryVerificationState>,
     pub scope: NextActionScope,
+    pub source_authority: RepositorySourceAuthority,
 }
 
 impl<'a> NextActionInput<'a> {
@@ -39,6 +44,7 @@ impl<'a> NextActionInput<'a> {
             thread_health: None,
             trust: None,
             scope: NextActionScope::Default,
+            source_authority: RepositorySourceAuthority::Native,
         }
     }
 
@@ -55,6 +61,11 @@ impl<'a> NextActionInput<'a> {
 
     pub fn ready(mut self) -> Self {
         self.scope = NextActionScope::Ready;
+        self
+    }
+
+    pub fn with_source_authority(mut self, authority: RepositorySourceAuthority) -> Self {
+        self.source_authority = authority;
         self
     }
 }
@@ -88,6 +99,7 @@ fn ready_next_action(input: NextActionInput<'_>) -> String {
         thread_health: None,
         trust: None,
         scope: NextActionScope::Default,
+        source_authority: input.source_authority,
     })
 }
 
@@ -110,6 +122,7 @@ fn current_thread_next_action(input: NextActionInput<'_>) -> String {
         thread_health: None,
         trust: None,
         scope: NextActionScope::Default,
+        source_authority: input.source_authority,
     })
 }
 
@@ -118,7 +131,8 @@ fn default_next_action(input: NextActionInput<'_>) -> String {
         return operation.next_action.clone();
     }
     if let Some(remote_tracking) = input.remote_tracking
-        && let Some(action) = remote_tracking_next_action(remote_tracking)
+        && let Some(action) =
+            remote_tracking_next_action_for(remote_tracking, input.source_authority)
     {
         return action;
     }
@@ -149,12 +163,23 @@ pub fn remote_tracking_status(remote: &GitRemoteTrackingStatus) -> &'static str 
 }
 
 pub fn remote_tracking_next_action(remote: &GitRemoteTrackingStatus) -> Option<String> {
+    remote_tracking_next_action_for(remote, RepositorySourceAuthority::Native)
+}
+
+pub fn remote_tracking_next_action_for(
+    remote: &GitRemoteTrackingStatus,
+    authority: RepositorySourceAuthority,
+) -> Option<String> {
+    let actions = SourceAuthorityActions::new(authority);
     match remote_tracking_status(remote) {
         "clean" => None,
-        "remote_untracked" => Some(remote_untracked_action(remote)),
-        "remote_contains_undone_checkpoint" => Some(heddle_action(["push", "--force"])),
-        "remote_behind" => Some("heddle pull".to_string()),
-        "remote_ahead" => Some("heddle push".to_string()),
+        "remote_untracked" => Some(remote_untracked_action_for(remote, authority)),
+        "remote_contains_undone_checkpoint" => Some(match authority {
+            RepositorySourceAuthority::Native => heddle_action(["push", "--force"]),
+            RepositorySourceAuthority::GitOverlay => "git push --force-with-lease".to_string(),
+        }),
+        "remote_behind" => Some(actions.display(SourceAction::Pull)),
+        "remote_ahead" => Some(actions.display(SourceAction::Push)),
         "remote_diverged" => {
             let upstream = remote.upstream.trim();
             if upstream.is_empty() {
@@ -168,8 +193,17 @@ pub fn remote_tracking_next_action(remote: &GitRemoteTrackingStatus) -> Option<S
 }
 
 pub fn remote_untracked_action(remote: &GitRemoteTrackingStatus) -> String {
+    remote_untracked_action_for(remote, RepositorySourceAuthority::Native)
+}
+
+pub fn remote_untracked_action_for(
+    remote: &GitRemoteTrackingStatus,
+    authority: RepositorySourceAuthority,
+) -> String {
     if remote.next_action.trim().is_empty() {
-        "heddle push".to_string()
+        SourceAuthorityActions::new(authority).display(SourceAction::Push)
+    } else if authority == RepositorySourceAuthority::GitOverlay {
+        SourceAuthorityActions::new(authority).display(SourceAction::Push)
     } else {
         remote.next_action.clone()
     }
@@ -240,14 +274,12 @@ pub fn merge_preview_command(thread_id: &str) -> String {
 pub fn land_local_command(thread_id: &str) -> String {
     let mut argv = vec!["land".to_string()];
     argv.extend(thread_flag_args(thread_id));
-    argv.push("--no-push".to_string());
     heddle_action(argv)
 }
 
 pub fn land_push_command(thread_id: &str) -> String {
     let mut argv = vec!["land".to_string()];
     argv.extend(thread_flag_args(thread_id));
-    argv.push("--push".to_string());
     heddle_action(argv)
 }
 
@@ -288,7 +320,6 @@ pub fn contextual_thread_action(
             "land".to_string(),
         ];
         argv.extend(thread_flag_args(thread_id));
-        argv.push("--no-push".to_string());
         return heddle_action(argv);
     }
     if action == land_push_command(thread_id) {
@@ -298,7 +329,6 @@ pub fn contextual_thread_action(
             "land".to_string(),
         ];
         argv.extend(thread_flag_args(thread_id));
-        argv.push("--push".to_string());
         return heddle_action(argv);
     }
     action.to_string()
@@ -331,8 +361,8 @@ pub fn thread_recovery_action_is_primary(thread_health: Option<&str>, thread_act
     matches!(
         thread_health.unwrap_or_default(),
         "blocked" | "dirty_worktree" | "uncaptured"
-    ) || thread_action == "heddle commit"
-        || thread_action.starts_with("heddle commit ")
+    ) || thread_action == "heddle capture"
+        || thread_action.starts_with("heddle capture ")
         || thread_action.starts_with("heddle sync ")
         || thread_action.starts_with("heddle resolve ")
         || thread_action.starts_with("heddle thread promote ")
@@ -393,10 +423,10 @@ mod tests {
     fn current_thread_recovery_precedes_publish_when_thread_action_is_primary() {
         let remote = remote("feature", "origin/feature", 1, 0, "heddle push");
         let action = effective_next_action(
-            NextActionInput::default(None, Some(&remote), None, Some("heddle commit -m \"...\""))
+            NextActionInput::default(None, Some(&remote), None, Some("heddle capture -m \"...\""))
                 .current_thread(Some("dirty_worktree")),
         );
-        assert_eq!(action, "heddle commit -m \"...\"");
+        assert_eq!(action, "heddle capture -m \"...\"");
     }
 
     #[test]
