@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Top-level CLI commands.
 
-use clap::{Subcommand, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 
 #[cfg(feature = "client")]
 use super::AuthCommands;
@@ -20,10 +20,52 @@ use super::{
 #[cfg(feature = "git-overlay")]
 use super::{ExportCommands, ImportCommands};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum FsckRepairTarget {
-    /// Repair Git projection metadata only.
-    Git,
+#[derive(Clone, Debug, Args)]
+pub struct FsckArgs {
+    /// Full check (includes content verification).
+    #[arg(long)]
+    pub full: bool,
+
+    /// Run slower graph and signature integrity checks.
+    #[arg(long)]
+    pub thorough: bool,
+
+    /// Include Git projection, mapping, notes, and checkout checks.
+    #[arg(long)]
+    pub git: bool,
+
+    #[command(subcommand)]
+    pub command: Option<FsckCommands>,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum FsckCommands {
+    /// Repair an integrity surface, then verify it.
+    Repair {
+        #[command(subcommand)]
+        target: FsckRepairCommands,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum FsckRepairCommands {
+    /// Reconcile Git projection metadata or one projected ref.
+    Git(FsckRepairGitArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct FsckRepairGitArgs {
+    /// Git ref to reconcile. Required for native repositories.
+    #[arg(long = "ref", value_name = "BRANCH")]
+    pub ref_name: Option<String>,
+
+    /// Assert the intended authority direction.
+    #[arg(long, value_parser = ["git", "heddle"])]
+    pub prefer: Option<String>,
+
+    /// Show the authority-valid repair without changing refs.
+    #[arg(long)]
+    pub preview: bool,
 }
 
 #[derive(Subcommand)]
@@ -329,36 +371,8 @@ Examples:
     /// Resolve merge conflicts.
     Resolve(ResolveArgs),
 
-    /// Verify repository integrity.
-    Fsck {
-        /// Full check (includes content verification).
-        #[arg(long)]
-        full: bool,
-
-        /// Run slower graph and signature integrity checks.
-        #[arg(long)]
-        thorough: bool,
-
-        /// Include Git projection, mapping, notes, and checkout checks.
-        #[arg(long)]
-        git: bool,
-
-        /// Repair a focused integrity surface before checking it.
-        #[arg(long, value_enum, value_name = "TARGET")]
-        repair: Option<FsckRepairTarget>,
-
-        /// Git ref to reconcile when repairing Git projection state.
-        #[arg(long = "ref", value_name = "BRANCH", requires = "repair")]
-        ref_name: Option<String>,
-
-        /// Which local side should be authoritative for Git ref repair.
-        #[arg(long, value_parser = ["git", "heddle"], requires = "repair")]
-        prefer: Option<String>,
-
-        /// Show the planned Git repair without changing refs.
-        #[arg(long, requires = "repair")]
-        preview: bool,
-    },
+    /// Verify repository integrity or explicitly repair one surface.
+    Fsck(FsckArgs),
 
     /// Inspect and repair the operation log.
     ///

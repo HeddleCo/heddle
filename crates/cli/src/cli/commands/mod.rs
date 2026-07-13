@@ -124,7 +124,7 @@ pub use error_envelope::{
     print_error_with_hint, print_error_with_hint_with_config, print_parse_error_json_envelope,
 };
 pub use expand::cmd_expand;
-pub use fsck::cmd_fsck;
+pub use fsck::{cmd_fsck, cmd_fsck_repair_git};
 pub use gc::cmd_gc;
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 pub use git_projection_io::cmd_context_reason_git;
