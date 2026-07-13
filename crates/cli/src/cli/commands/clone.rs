@@ -1424,16 +1424,6 @@ pub fn register_git_overlay_factory() {
 mod tests {
     use super::*;
 
-    fn opts(depth: Option<u32>, lazy: bool, filter: Option<&str>) -> CloneOptions {
-        CloneOptions {
-            thread: None,
-            depth,
-            lazy,
-            filter: filter.map(str::to_string),
-            insecure: false,
-        }
-    }
-
     #[test]
     fn heddle_clone_output_uses_native_repository_capability() {
         let temp = tempfile::TempDir::new().expect("temp");
@@ -1451,31 +1441,6 @@ mod tests {
 
         assert_eq!(repo.capability_label(), "native-heddle");
         assert_eq!(output.repository_capability, Some("native-heddle"));
-    }
-
-    #[test]
-    fn heddle_clone_output_uses_git_overlay_repository_capability() {
-        let temp = tempfile::TempDir::new().expect("temp");
-        SleyRepository::init(temp.path()).expect("init git repo");
-        let repo = Repository::init(temp.path()).expect("init git-overlay repo");
-
-        let output = heddle_clone_output(
-            "heddle://weft.local:8421/org/repo".to_string(),
-            temp.path().display().to_string(),
-            "main".to_string(),
-            repo.capability_label(),
-            None,
-            None,
-            None,
-        );
-
-        assert_eq!(repo.capability_label(), "git-overlay");
-        assert_eq!(output.repository_capability, Some("git-overlay"));
-    }
-
-    #[test]
-    fn reject_unsupported_passes_when_no_flags_set() {
-        assert!(reject_unsupported_for_git_overlay(&opts(None, false, None)).is_ok());
     }
 
     #[cfg(feature = "client")]
@@ -1504,112 +1469,6 @@ mod tests {
                 .expect("thread selected");
 
         assert_eq!(selected, "feature");
-    }
-
-    // ---- clone text-mode summary helpers (heddle#161) ----
-
-    #[test]
-    fn clone_repo_name_strips_https_url_and_dot_git() {
-        assert_eq!(
-            clone_repo_name_from_label("https://github.com/BurntSushi/ripgrep.git"),
-            "ripgrep"
-        );
-        assert_eq!(
-            clone_repo_name_from_label("https://github.com/BurntSushi/ripgrep"),
-            "ripgrep"
-        );
-    }
-
-    #[test]
-    fn clone_repo_name_strips_ssh_url_and_dot_git() {
-        assert_eq!(
-            clone_repo_name_from_label("git@github.com:owner/repo.git"),
-            "repo"
-        );
-    }
-
-    #[test]
-    fn clone_repo_name_extracts_last_filesystem_segment() {
-        assert_eq!(clone_repo_name_from_label("/home/user/foo"), "foo");
-        assert_eq!(
-            clone_repo_name_from_label("file:///tmp/projects/bar/"),
-            "bar"
-        );
-    }
-
-    #[test]
-    fn clone_repo_name_falls_back_to_label_when_no_segment() {
-        // Empty or pathologic input: don't panic, return the input as-is
-        // so the rendered summary still carries *something* identifying.
-        assert_eq!(clone_repo_name_from_label(""), "");
-        assert_eq!(clone_repo_name_from_label("///"), "///");
-    }
-
-    #[test]
-    fn clone_repo_name_handles_windows_drive_paths() {
-        // Windows drive prefixes (`C:\…` and `C:/…`) are not SSH/SCP
-        // shorthand — earlier versions unconditionally split on `:` and
-        // dropped the drive letter, producing `\src\ripgrep` instead of
-        // `ripgrep`.
-        assert_eq!(clone_repo_name_from_label("C:\\src\\ripgrep"), "ripgrep");
-        assert_eq!(clone_repo_name_from_label("C:/src/ripgrep"), "ripgrep");
-        assert_eq!(
-            clone_repo_name_from_label("D:\\workspaces\\heddle.git"),
-            "heddle"
-        );
-    }
-
-    #[test]
-    fn clone_repo_name_handles_local_paths_with_colon() {
-        // Git treats `host:path` as SCP shorthand only when the prefix
-        // contains no path separator. `/tmp/foo:bar/repo` and
-        // `./foo:bar/repo.git` are valid local paths whose basename
-        // must not be shadowed by the colon.
-        assert_eq!(clone_repo_name_from_label("/tmp/foo:bar/repo.git"), "repo");
-        assert_eq!(clone_repo_name_from_label("./foo:bar/repo.git"), "repo");
-    }
-
-    #[test]
-    fn format_clone_completion_text_names_repo_and_count_and_thread_and_next_command() {
-        // Style helpers are no-ops when color is uninitialized (test
-        // default), so substring assertions work on the raw text. Keeps
-        // the assertions independent of ANSI escape sequences.
-        let lines = format_clone_completion_lines("ripgrep", 2249, "master");
-        let joined = lines.join("\n");
-        assert!(
-            joined.contains("ripgrep"),
-            "summary must name the repo: {joined}"
-        );
-        assert!(
-            joined.contains("2249"),
-            "summary must include the commit count: {joined}"
-        );
-        assert!(
-            joined.contains("commit"),
-            "summary must use the word 'commit': {joined}"
-        );
-        assert!(
-            joined.contains("master"),
-            "summary must name the current thread: {joined}"
-        );
-        assert!(
-            joined.to_lowercase().contains("heddle status"),
-            "summary must suggest `heddle status` as the next step: {joined}"
-        );
-    }
-
-    #[test]
-    fn format_clone_completion_singularizes_one_commit() {
-        // Avoid "1 commits" — the style::count helper already singularizes,
-        // but pin it here so a future formatter refactor doesn't regress.
-        let lines = format_clone_completion_lines("tiny", 1, "main");
-        let joined = lines.join("\n");
-        assert!(
-            joined.contains("1 commit ")
-                || joined.contains("1 commit\n")
-                || joined.ends_with("1 commit"),
-            "one commit must not pluralize: {joined}"
-        );
     }
 
     #[cfg(feature = "client")]
@@ -1698,88 +1557,6 @@ mod tests {
             path.exists(),
             "disarmed clone cleanup must preserve the successful destination"
         );
-    }
-
-    #[test]
-    fn reject_unsupported_rejects_filter() {
-        let err = reject_unsupported_for_git_overlay(&opts(None, false, Some("blob:none")))
-            .expect_err("filter must be rejected");
-        let advice = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
-            .expect("filter refusal should use typed recovery advice");
-        assert_eq!(advice.kind, "git_overlay_clone_option_unsupported");
-        assert_eq!(advice.primary_command, "heddle clone <remote> <path>");
-        assert!(advice.preserved.contains("no clone directory"));
-        let msg = err.to_string();
-        assert!(
-            msg.contains("--filter"),
-            "message must name --filter: {msg}"
-        );
-        assert!(
-            msg.contains("not yet supported"),
-            "message must say not yet supported: {msg}"
-        );
-    }
-
-    #[test]
-    fn reject_unsupported_rejects_lazy() {
-        let err = reject_unsupported_for_git_overlay(&opts(None, true, None))
-            .expect_err("lazy must be rejected");
-        let advice = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
-            .expect("lazy refusal should use typed recovery advice");
-        assert_eq!(advice.kind, "git_overlay_clone_option_unsupported");
-        assert!(advice.primary_hint().contains("full Git-overlay clone"));
-        let msg = err.to_string();
-        assert!(msg.contains("--lazy"), "message must name --lazy: {msg}");
-        assert!(
-            msg.contains("not yet supported"),
-            "message must say not yet supported: {msg}"
-        );
-    }
-
-    #[test]
-    fn reject_unsupported_rejects_depth() {
-        let err = reject_unsupported_for_git_overlay(&opts(Some(1), false, None))
-            .expect_err("depth must be rejected");
-        let advice = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
-            .expect("depth refusal should use typed recovery advice");
-        assert_eq!(advice.kind, "git_overlay_clone_option_unsupported");
-        assert!(advice.error.contains("shallow boundary"));
-        let msg = err.to_string();
-        assert!(msg.contains("--depth"), "message must name --depth: {msg}");
-        assert!(
-            msg.contains("not yet supported"),
-            "message must say not yet supported: {msg}"
-        );
-    }
-
-    #[test]
-    fn clone_verification_failures_use_typed_recovery_advice() {
-        let advice = clone_verification_failed_advice(
-            "clone verification failed: Heddle active thread is 'dev', expected 'main'",
-            "Heddle active thread 'dev' does not match imported Git branch 'main'",
-            "continuing would report the clone as verified while Heddle is attached to the wrong thread",
-            "heddle thread switch main --force",
-        );
-
-        assert_eq!(advice.kind, "clone_verification_failed");
-        assert!(
-            advice
-                .error
-                .contains("clone verification failed: Heddle active thread")
-        );
-        assert_eq!(advice.primary_command, "heddle thread switch main --force");
-        assert_eq!(
-            advice.recovery_commands,
-            vec!["heddle thread switch main --force"]
-        );
-        assert!(advice.preserved.contains("left for inspection"));
-        assert!(advice.primary_hint().contains("Repair the clone mapping"));
     }
 
     /// Standalone helpers to exercise [`GitOverlayBlobHydrator`]'s

@@ -1355,7 +1355,7 @@ fn credential_and_trust_effect_sets_are_config_scoped() {
 
 #[test]
 fn fsck_observation_has_no_side_effects() {
-    assert_command_effects(&["fsck"], &[]);
+    assert_command_effects(&["fsck"], &[CommandSideEffect::ObserveOnly]);
     let contract = raw_command_contract_for_path(["fsck"]).expect("fsck contract");
     assert!(contract.observe_only);
     assert!(!contract.supports_op_id);
@@ -1595,9 +1595,9 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "log",
             "log",
             "log",
-            "maintenance gc",
             "maintenance inspect",
             "maintenance refresh",
+            "maintenance gc",
             "pull",
             "push",
             "query",

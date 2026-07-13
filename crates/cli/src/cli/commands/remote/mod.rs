@@ -1230,6 +1230,7 @@ struct PushNetworkOptions<'a> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "client")]
     use tempfile::TempDir;
 
     use super::*;
