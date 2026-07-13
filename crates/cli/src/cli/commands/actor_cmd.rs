@@ -17,7 +17,7 @@ use heddle_core::{
 };
 use objects::{
     object::ThreadName,
-    store::{AgentEntry, AgentRegistry, AgentStatus},
+    store::{AgentEntry, AgentRegistry},
 };
 use repo::Repository;
 use serde::Serialize;
@@ -203,7 +203,7 @@ pub async fn cmd_actor_spawn(
         let entry = build_spawn_entry(
             &plan,
             session_id,
-            Some(std::process::id()),
+            None,
             Some(objects::store::generate_agent_id()),
             chrono::Utc::now(),
         );
@@ -297,8 +297,8 @@ fn render_actor_list(report: &ActorListReport) {
     println!("Actors:");
     for entry in &report.actors {
         println!(
-            "  {} [{}] thread:{} base:{}",
-            entry.session_id, entry.status, entry.thread, entry.base_state
+            "  {} [{}; {}] thread:{} base:{}",
+            entry.session_id, entry.status, entry.liveness, entry.thread, entry.base_state
         );
         if let Some(path) = &entry.path {
             println!("    path: {}", path);
@@ -328,6 +328,7 @@ fn render_actor_show(actor: &ActorEntryReport) {
     println!("Actor: {}", actor.session_id);
     println!("Thread: {}", actor.thread);
     println!("Status: {}", actor.status);
+    println!("Liveness: {}", actor.liveness);
     println!("Base state: {}", actor.base_state);
     if let Some(heddle_session_id) = &actor.heddle_session_id {
         println!("Heddle session: {}", heddle_session_id);
@@ -346,6 +347,12 @@ fn render_actor_show(actor: &ActorEntryReport) {
     }
     if let Some(path) = &actor.path {
         println!("Path: {}", path);
+    }
+    if let Some(lease_expires_at) = &actor.lease_expires_at {
+        println!("Lease expires: {}", lease_expires_at);
+    }
+    if let Some(last_progress_at) = &actor.last_progress_at {
+        println!("Last progress: {}", last_progress_at);
     }
     if let Some(provider) = &actor.provider {
         println!("Provider: {}", provider);
@@ -648,9 +655,9 @@ fn resolve_actor_entry(
 
     if let Some(thread) = current_lane.as_deref()
         && let Some(entry) = registry
-            .list()?
+            .active_entries()?
             .into_iter()
-            .filter(|entry| entry.status == AgentStatus::Active && entry.thread == thread)
+            .filter(|entry| entry.thread == thread)
             .max_by_key(|entry| entry.started_at)
     {
         return Ok(entry);
@@ -666,10 +673,7 @@ fn resolve_actor_entry(
     // would contradict `actor spawn --no-thread`'s rejection and re-introduce
     // the recommend/execute split this oracle exists to prevent.
     if current_lane.is_some()
-        && let Some(entry) = registry
-            .list()?
-            .into_iter()
-            .find(|entry| entry.status == AgentStatus::Active)
+        && let Some(entry) = registry.active_entries()?.into_iter().next()
     {
         return Ok(entry);
     }

@@ -1681,6 +1681,8 @@ impl HarnessBridgeRuntime {
                     existing.probe_source = probe.probe_source.clone();
                     existing.probe_confidence = probe.confidence;
                     existing.status = AgentStatus::Active;
+                    existing.heartbeat_at = Some(Utc::now());
+                    existing.completed_at = None;
                 })?
                 .ok_or_else(|| anyhow!("registry entry disappeared during update"));
         }
@@ -1727,6 +1729,8 @@ impl HarnessBridgeRuntime {
                     existing.probe_source = probe.probe_source.clone();
                     existing.probe_confidence = probe.confidence;
                     existing.status = AgentStatus::Active;
+                    existing.heartbeat_at = Some(Utc::now());
+                    existing.completed_at = None;
                 },
                 |session_id| {
                     Ok(AgentEntry {
@@ -1738,9 +1742,8 @@ impl HarnessBridgeRuntime {
                         heddle_session_id: Some(heddle_session_id.to_string()),
                         thread_id: thread_id.map(ToString::to_string),
                         thread: thread_name.unwrap_or("detached").to_string(),
-                        pid: Some(std::process::id()),
+                        pid: None,
                         boot_id: None,
-                        liveness_path: None,
                         heartbeat_at: Some(Utc::now()),
                         anchor_state: self.repo.head()?.map(|id| id.to_string_full()),
                         anchor_root: None,
@@ -1780,9 +1783,8 @@ impl HarnessBridgeRuntime {
                 heddle_session_id: Some(heddle_session_id.to_string()),
                 thread_id: thread_id.map(ToString::to_string),
                 thread: thread_name.unwrap_or("detached").to_string(),
-                pid: Some(std::process::id()),
+                pid: None,
                 boot_id: None,
-                liveness_path: None,
                 heartbeat_at: Some(Utc::now()),
                 anchor_state: self.repo.head()?.map(|id| id.to_string_full()),
                 anchor_root: None,
@@ -1899,6 +1901,9 @@ impl HarnessBridgeRuntime {
                 entry.probe_source = report.probe_source.clone();
                 entry.probe_confidence = report.probe_confidence;
                 entry.status = status.clone();
+                if status == AgentStatus::Active {
+                    entry.heartbeat_at = Some(Utc::now());
+                }
                 entry.completed_at = match status {
                     AgentStatus::Active => None,
                     AgentStatus::Abandoned | AgentStatus::Complete | AgentStatus::Merged => {
@@ -3726,9 +3731,8 @@ mod tests {
                     heddle_session_id: Some(existing_session.id.clone()),
                     thread_id: None,
                     thread: "detached".to_string(),
-                    pid: Some(std::process::id()),
+                    pid: None,
                     boot_id: None,
-                    liveness_path: None,
                     heartbeat_at: Some(Utc::now()),
                     anchor_state: None,
                     anchor_root: None,

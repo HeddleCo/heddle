@@ -1344,7 +1344,11 @@ Background startup refusals use the shared error envelope.
     "harness": "codex",
     "thinking_level": "high",
     "probe_source": "app_protocol",
-    "probe_confidence": 0.98
+    "probe_confidence": 0.98,
+    "heartbeat_at": "2026-07-12T23:15:00Z",
+    "lease_expires_at": "2026-07-12T23:20:00Z",
+    "last_progress_at": "2026-07-12T23:14:42Z",
+    "liveness": "alive"
   }
 }
 ```

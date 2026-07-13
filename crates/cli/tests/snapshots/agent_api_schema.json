@@ -889,6 +889,27 @@
               "null"
             ]
           },
+          "heartbeat_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_progress_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lease_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "liveness": {
+            "type": "string"
+          },
           "model": {
             "type": [
               "string",
@@ -958,7 +979,8 @@
         "required": [
           "session_id",
           "thread",
-          "status"
+          "status",
+          "liveness"
         ],
         "type": "object"
       },
@@ -1485,6 +1507,27 @@
               "null"
             ]
           },
+          "heartbeat_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_progress_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lease_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "liveness": {
+            "type": "string"
+          },
           "model": {
             "type": [
               "string",
@@ -1554,7 +1597,8 @@
         "required": [
           "session_id",
           "thread",
-          "status"
+          "status",
+          "liveness"
         ],
         "type": "object"
       },
@@ -2062,6 +2106,27 @@
           "null"
         ]
       },
+      "heartbeat_at": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "last_progress_at": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "lease_expires_at": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "liveness": {
+        "type": "string"
+      },
       "model": {
         "type": [
           "string",
@@ -2131,7 +2196,8 @@
     "required": [
       "session_id",
       "thread",
-      "status"
+      "status",
+      "liveness"
     ],
     "title": "AgentReservationOutput",
     "type": "object"

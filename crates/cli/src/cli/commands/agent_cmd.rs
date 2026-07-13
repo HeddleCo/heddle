@@ -10,13 +10,14 @@ use heddle_core::{
     assemble_agent_reservation_list, assemble_fanout_plan_report, check_agent_capture_thread,
     check_fanout_start_preflight, fanout_child_body, fanout_parent_delegated_by,
     fanout_start_attach_rule, plan_agent_capture, plan_agent_ready, plan_fanout,
-    select_fanout_parent_thread, session_is_active, touch_agent_heartbeat, touch_agent_release,
+    select_fanout_parent_thread, touch_agent_release,
 };
 use objects::{
     object::ThreadName,
     store::{
         AgentEntry, AgentRegistry, AgentStatus, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
-        AgentUsageSummary, ObjectStore, ReserveOutcome, current_boot_id, validate_task_id,
+        AgentUsageSummary, ObjectStore, ReserveOutcome, SessionRenewal, current_boot_id,
+        validate_task_id,
     },
 };
 use oplog::OpLogRecorder;
@@ -70,6 +71,10 @@ pub struct AgentReservationOutput {
     pub thinking_level: Option<String>,
     pub probe_source: Option<String>,
     pub probe_confidence: Option<f32>,
+    pub heartbeat_at: Option<String>,
+    pub lease_expires_at: Option<String>,
+    pub last_progress_at: Option<String>,
+    pub liveness: String,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -183,6 +188,10 @@ impl From<AgentReservationReport> for AgentReservationOutput {
             thinking_level: report.thinking_level,
             probe_source: report.probe_source,
             probe_confidence: report.probe_confidence,
+            heartbeat_at: report.heartbeat_at,
+            lease_expires_at: report.lease_expires_at,
+            last_progress_at: report.last_progress_at,
+            liveness: report.liveness,
         }
     }
 }
@@ -397,11 +406,10 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
         // the shared reservation advice so the caller sees the owner's
         // session_id alongside the drift in the standard error envelope.
         let registry = AgentRegistry::new(repo.heddle_dir());
-        registry.reap_dead_for_thread(&thread_name)?;
         if let Some(owner) = registry
-            .list()?
+            .active_entries()?
             .into_iter()
-            .find(|entry| entry.status == AgentStatus::Active && entry.thread == thread_name)
+            .find(|entry| entry.thread == thread_name)
         {
             return Err(anyhow!(live_owner_conflict_advice(
                 &thread_name,
@@ -434,15 +442,7 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
             .ok()
             .and_then(crate::attribution::clean_attribution_value),
     )?;
-    // `--hold-for-pid PID` binds the reservation to an external
-    // process (typically the orchestrator that wraps the heddle
-    // CLI). Without it we record this one-shot CLI's pid, which
-    // exits before the next liveness check — fine when the calling
-    // script doesn't care about reaping, but means the dead-pid
-    // reaper would recycle the reservation immediately if a second
-    // agent races in. With `--hold-for-pid` the reservation tracks
-    // the orchestrator's lifetime instead.
-    let recorded_pid = args.hold_for_pid.unwrap_or_else(std::process::id);
+    let recorded_pid = args.hold_for_pid;
     let outcome = registry.try_reserve_thread(&thread_name, |session_id| {
         Ok(AgentEntry {
             session_id: session_id.to_string(),
@@ -453,13 +453,8 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
             heddle_session_id: None,
             thread_id: Some(thread_name.clone()),
             thread: thread_name.clone(),
-            pid: Some(recorded_pid),
-            boot_id: current_boot_id(),
-            liveness_path: Some(
-                repo.heddle_dir()
-                    .join("agents")
-                    .join(format!("{session_id}.live")),
-            ),
+            pid: recorded_pid,
+            boot_id: recorded_pid.and_then(|_| current_boot_id()),
             heartbeat_at: Some(Utc::now()),
             anchor_state: Some(anchor_full_for_entry.clone()),
             anchor_root: Some(anchor_root.clone()),
@@ -642,12 +637,7 @@ fn ensure_thread_record(
 pub fn cmd_agent_heartbeat(cli: &Cli, args: AgentHeartbeatArgs) -> Result<()> {
     let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
-    let now = Utc::now();
-    let entry = registry
-        .update_entry(&args.session, |entry| {
-            touch_agent_heartbeat(entry, now);
-        })?
-        .ok_or_else(|| anyhow!(agent_session_not_found_advice(&args.session)))?;
+    let entry = validate_active_session(&registry, &args.session)?;
     render_agent_reservation_envelope(&repo, &entry)
 }
 
@@ -670,13 +660,8 @@ pub fn cmd_agent_release(cli: &Cli, args: AgentReleaseArgs) -> Result<()> {
 pub fn cmd_agent_list(cli: &Cli, args: AgentApiListArgs) -> Result<()> {
     let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
-    if args.alive_only {
-        // Sweep dead reservations before reporting so callers asking
-        // "who is alive?" see a pid-checked, current view.
-        registry.reap_dead()?;
-    }
-    let list =
-        assemble_agent_reservation_list(registry.list()?, args.thread.clone(), args.alive_only);
+    let entries = registry.current_entries()?;
+    let list = assemble_agent_reservation_list(entries, args.thread.clone(), args.alive_only);
     render_agent_list(
         AgentReservationListOutput {
             reservations: list
@@ -1200,9 +1185,10 @@ fn render_agent_list(output: AgentReservationListOutput, json: bool) -> Result<(
     println!("Agent reservations ({}):", entries.len());
     for entry in entries {
         println!(
-            "  {} [{}] thread={}",
+            "  {} [{}; {}] thread={}",
             crate::cli::style::accent(&entry.session_id),
             entry.status,
+            entry.liveness,
             entry.thread,
         );
         if let Some(task) = &entry.task {
@@ -1212,6 +1198,18 @@ fn render_agent_list(output: AgentReservationListOutput, json: bool) -> Result<(
             && !path.is_empty()
         {
             println!("    path: {}", crate::cli::style::dim(path));
+        }
+        if let Some(lease_expires_at) = &entry.lease_expires_at {
+            println!(
+                "    lease expires: {}",
+                crate::cli::style::dim(lease_expires_at)
+            );
+        }
+        if let Some(last_progress_at) = &entry.last_progress_at {
+            println!(
+                "    last progress: {}",
+                crate::cli::style::dim(last_progress_at)
+            );
         }
     }
     Ok(())
@@ -1301,22 +1299,14 @@ fn agent_session_not_found_advice(session_id: &str) -> RecoveryAdvice {
     )
 }
 
-/// Resolve `--session SID` to an Active reservation, refresh its
-/// heartbeat, and return the entry. Errors out cleanly when the
-/// session is missing, terminal, or reaped between calls — that's the
-/// signal the orchestrator must re-reserve before continuing.
 fn validate_active_session(
     registry: &AgentRegistry,
     session_id: &str,
 ) -> Result<objects::store::AgentEntry> {
-    let now = Utc::now();
-    let entry = registry
-        .update_entry(session_id, |entry| {
-            touch_agent_heartbeat(entry, now);
-        })?
-        .ok_or_else(|| anyhow!(agent_session_not_found_advice(session_id)))?;
-    if !session_is_active(&entry.status) {
-        return Err(anyhow!(RecoveryAdvice::safety_refusal(
+    match registry.renew_active_session(session_id, Utc::now())? {
+        SessionRenewal::Renewed(entry) => Ok(entry),
+        SessionRenewal::Missing => Err(anyhow!(agent_session_not_found_advice(session_id))),
+        SessionRenewal::Inactive(entry) => Err(anyhow!(RecoveryAdvice::safety_refusal(
             "agent_session_inactive",
             format!(
                 "agent session '{}' is no longer active (status: {})",
@@ -1325,17 +1315,15 @@ fn validate_active_session(
             "Reserve the thread again before retrying the guarded agent command.",
             format!("session {session_id} has terminal status {}", entry.status),
             "continuing would let a stale reservation write or mark readiness after ownership ended",
-            "the session heartbeat was refreshed, but no capture, ready, refs, or worktree changes were applied",
+            "no heartbeat, capture, ready, refs, or worktree changes were applied",
             "heddle agent reserve --thread <thread>",
             vec!["heddle agent reserve --thread <thread>".to_string()],
-        )));
+        ))),
     }
-    Ok(entry)
 }
 
 /// `heddle agent capture --session <SID>`: a session-validated
-/// alias for `heddle capture` that proves the caller still owns the
-/// reservation it claims to before writing.
+/// alias for `heddle capture` that requires a current reservation lease.
 pub async fn cmd_agent_capture(
     cli: &Cli,
     args: crate::cli::cli_args::AgentCaptureArgs,
@@ -1376,7 +1364,7 @@ pub async fn cmd_agent_capture(
                 plan.session
             ),
             "capturing from the wrong thread would attribute work to a reservation that does not own this checkout",
-            "the session heartbeat was refreshed, but no capture, refs, or worktree changes were applied",
+            "the session lease was renewed, but no capture, refs, or worktree changes were applied",
             format!("heddle thread switch {reserved_thread}"),
             vec![format!("heddle thread switch {reserved_thread}")],
         )));

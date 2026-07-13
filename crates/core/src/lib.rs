@@ -85,12 +85,11 @@ pub use agent_fanout::{
 pub use agent_ops::{
     AgentCaptureOptions, AgentCapturePlan, AgentCapturePlanError, AgentCaptureThreadCheck,
     AgentExplainReport, AgentReadyOptions, AgentReadyPlan, AgentReadyPlanError, AgentReleaseKind,
-    AgentReservationListReport, AgentReservationReport, AgentSessionUse, apply_agent_heartbeat,
-    apply_agent_release, assemble_agent_explain, assemble_agent_reservation,
-    assemble_agent_reservation_list, check_agent_capture_thread, classify_agent_session_use,
-    default_attach_reason_message, filter_agent_reservations, filter_agent_reservations_ref,
-    plan_agent_capture, plan_agent_ready, session_is_active, touch_agent_heartbeat,
-    touch_agent_release,
+    AgentReservationListReport, AgentReservationReport, AgentSessionUse, apply_agent_release,
+    assemble_agent_explain, assemble_agent_reservation, assemble_agent_reservation_list,
+    check_agent_capture_thread, classify_agent_session_use, default_attach_reason_message,
+    filter_agent_reservations, filter_agent_reservations_ref, plan_agent_capture, plan_agent_ready,
+    session_is_active, touch_agent_release,
 };
 pub use approval_plan::{
     EligibilitySummary, approval_recorded_message, approval_revoked_message,

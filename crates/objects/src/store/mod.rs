@@ -19,7 +19,7 @@ pub mod store_compliance;
 
 pub use agent_registry::{
     ActorChainNode, AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ContextQueryEntry,
-    ReserveOutcome, generate_agent_id,
+    ReserveOutcome, SessionRenewal, generate_agent_id,
 };
 pub use agent_task::{
     AGENT_TASK_SCHEMA_VERSION, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
@@ -32,7 +32,9 @@ pub use fs::{
     recover_pack_install_intents_with_ttl,
 };
 pub use heddle_format::compression::{CompressionConfig, CompressionError, compress, decompress};
-pub use liveness::{Liveness, current_boot_id, is_owner_alive, process_alive};
+pub use liveness::{
+    AGENT_LEASE_DURATION, Liveness, current_boot_id, process_alive, reservation_liveness_at,
+};
 #[cfg(any(test, feature = "memory-backend"))]
 pub use memory::InMemoryStore;
 pub use pack::{PackBuilder, PackObjectId, PackReader, PackStats, StreamingPackBuilder, SyncData};

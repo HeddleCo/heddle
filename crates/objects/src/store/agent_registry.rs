@@ -18,7 +18,7 @@ use crate::{
     lock::RepoLock,
     store::{
         HeddleError, Result,
-        liveness::{Liveness, is_owner_alive},
+        liveness::{Liveness, reservation_liveness_at},
     },
 };
 
@@ -27,16 +27,20 @@ const STALE_AGENT_TTL_DAYS: i64 = 7;
 /// Outcome of an attempt to reserve an active session on a thread.
 ///
 /// `LiveOwner` carries the existing reservation so callers can compare
-/// anchors and surface either an "already reserved by another live
-/// process" or an "anchor drift" error. The registry reaps dead owners
-/// in-place before producing this outcome — so an `Active` entry seen
-/// here is guaranteed to have been alive at the moment of the check.
+/// anchors and surface either a current owner or anchor drift.
 #[derive(Debug)]
 pub enum ReserveOutcome {
     /// Reservation succeeded; the new entry is included.
     Reserved(AgentEntry),
     /// Another live agent already holds this thread.
     LiveOwner(AgentEntry),
+}
+
+#[derive(Debug)]
+pub enum SessionRenewal {
+    Renewed(AgentEntry),
+    Missing,
+    Inactive(AgentEntry),
 }
 
 /// A record of one `heddle context get` call made during an agent session.
@@ -122,9 +126,6 @@ pub struct AgentEntry {
     /// Host boot identifier when available; differentiates reused PIDs.
     #[serde(default)]
     pub boot_id: Option<String>,
-    /// Advisory liveness lock file path for future long-lived runners.
-    #[serde(default)]
-    pub liveness_path: Option<PathBuf>,
     /// Most recent reservation heartbeat.
     #[serde(default)]
     pub heartbeat_at: Option<DateTime<Utc>>,
@@ -191,6 +192,13 @@ pub struct AgentEntry {
     /// Appended by the CLI each time an agent queries context from its worktree.
     #[serde(default)]
     pub context_queries: Vec<ContextQueryEntry>,
+}
+
+impl AgentEntry {
+    pub fn lease_expires_at(&self) -> Option<DateTime<Utc>> {
+        self.heartbeat_at
+            .map(|heartbeat| heartbeat + crate::store::AGENT_LEASE_DURATION)
+    }
 }
 
 /// One hop in an actor ancestry chain, ordered root to leaf.
@@ -304,17 +312,25 @@ impl AgentRegistry {
     /// other than `Active`) are reported as `Dead` so reaping logic can
     /// skip them in one pass alongside crashed actives.
     pub fn liveness_for(entry: &AgentEntry) -> Liveness {
+        Self::liveness_for_at(entry, Utc::now())
+    }
+
+    pub fn liveness_for_at(entry: &AgentEntry, now: DateTime<Utc>) -> Liveness {
         if entry.status != AgentStatus::Active {
             return Liveness::Dead;
         }
-        is_owner_alive(entry.pid, entry.boot_id.as_deref())
+        reservation_liveness_at(entry.pid, entry.boot_id.as_deref(), entry.heartbeat_at, now)
     }
 
     /// Mark an active entry as `Abandoned`, recording the moment the
     /// reservation was reaped.
-    fn abandon_active_entry(&self, mut entry: AgentEntry) -> Result<AgentEntry> {
+    fn abandon_active_entry_at(
+        &self,
+        mut entry: AgentEntry,
+        abandoned_at: DateTime<Utc>,
+    ) -> Result<AgentEntry> {
         entry.status = AgentStatus::Abandoned;
-        entry.completed_at = Some(Utc::now());
+        entry.completed_at = Some(abandoned_at);
         self.write_entry_file(&entry)?;
         Ok(entry)
     }
@@ -327,6 +343,7 @@ impl AgentRegistry {
         if !self.agents_dir.exists() {
             return Ok(0);
         }
+        let now = Utc::now();
         let mut reaped = 0usize;
         for dir_entry in std::fs::read_dir(&self.agents_dir)? {
             let dir_entry = dir_entry?;
@@ -345,30 +362,62 @@ impl AgentRegistry {
             {
                 continue;
             }
-            if Self::liveness_for(&entry) == Liveness::Dead {
-                self.abandon_active_entry(entry)?;
+            if Self::liveness_for_at(&entry, now) == Liveness::Dead {
+                self.abandon_active_entry_at(entry, now)?;
                 reaped += 1;
             }
         }
         Ok(reaped)
     }
 
-    /// Reap any active reservation on `thread` whose owning process is
-    /// no longer alive. Returns the number of entries abandoned.
-    ///
-    /// This is the read-side complement of [`try_reserve_thread`]:
-    /// callers that only need a fresh view of which sessions are alive
-    /// (e.g. `heddle agent list --alive-only`) can run it without
-    /// reserving.
+    /// Reap expired reservations on one thread.
     pub fn reap_dead_for_thread(&self, thread: &str) -> Result<usize> {
         let _lock = self.write_lock()?;
         self.reap_dead_locked(Some(thread))
     }
 
-    /// Reap dead reservations across every thread.
+    /// Reap expired reservations across every thread.
     pub fn reap_dead(&self) -> Result<usize> {
         let _lock = self.write_lock()?;
         self.reap_dead_locked(None)
+    }
+
+    pub fn current_entries(&self) -> Result<Vec<AgentEntry>> {
+        self.reap_dead()?;
+        self.list()
+    }
+
+    pub fn active_entries(&self) -> Result<Vec<AgentEntry>> {
+        Ok(self
+            .current_entries()?
+            .into_iter()
+            .filter(|entry| entry.status == AgentStatus::Active)
+            .collect())
+    }
+
+    pub fn renew_active_session(
+        &self,
+        session_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<SessionRenewal> {
+        let _lock = self.write_lock()?;
+        let path = self.entry_path(session_id)?;
+        let Some(mut entry) = self.load_entry_from_path(&path)? else {
+            return Ok(SessionRenewal::Missing);
+        };
+        if entry.status != AgentStatus::Active {
+            return Ok(SessionRenewal::Inactive(entry));
+        }
+        match Self::liveness_for_at(&entry, now) {
+            Liveness::Dead => Ok(SessionRenewal::Inactive(
+                self.abandon_active_entry_at(entry, now)?,
+            )),
+            Liveness::Alive => {
+                entry.heartbeat_at = Some(now);
+                self.write_entry_file(&entry)?;
+                Ok(SessionRenewal::Renewed(entry))
+            }
+        }
     }
 
     fn create_generated_entry_with<F, G>(
@@ -535,6 +584,10 @@ impl AgentRegistry {
                 self.prune_stale_entry_path(&path)?;
                 continue;
             }
+            if entry.status == AgentStatus::Active && Self::liveness_for(&entry) == Liveness::Dead {
+                self.abandon_active_entry_at(entry, Utc::now())?;
+                continue;
+            }
             if entry.status == AgentStatus::Active && matches(&entry) {
                 update_existing(&mut entry);
                 self.write_entry_file(&entry)?;
@@ -595,11 +648,9 @@ impl AgentRegistry {
             }
             match Self::liveness_for(&entry) {
                 Liveness::Dead => {
-                    self.abandon_active_entry(entry)?;
+                    self.abandon_active_entry_at(entry, Utc::now())?;
                 }
-                Liveness::Alive | Liveness::Unknown => {
-                    // Unknown collapses to Alive here so we never
-                    // double-allocate a thread on insufficient evidence.
+                Liveness::Alive => {
                     live_owner = Some(entry);
                     break;
                 }
@@ -624,38 +675,16 @@ impl AgentRegistry {
         }
     }
 
-    /// Backwards-compatible thin wrapper around [`try_reserve_thread`]
-    /// that returns the same flat `Result<AgentEntry>` shape callers
-    /// historically expected. Live-owner conflicts surface as a
-    /// `HeddleError::Config(..)` with the same human-readable message
-    /// as before.
-    pub fn create_generated_entry_for_thread<F>(
-        &self,
-        thread: &str,
-        build_entry: F,
-    ) -> Result<AgentEntry>
-    where
-        F: FnMut(&str) -> Result<AgentEntry>,
-    {
-        match self.try_reserve_thread(thread, build_entry)? {
-            ReserveOutcome::Reserved(entry) => Ok(entry),
-            ReserveOutcome::LiveOwner(existing) => Err(HeddleError::Config(format!(
-                "thread '{}' already has active reservation {}. Use `heddle thread show {}` to inspect it, or release the session before starting another writer.",
-                thread, existing.session_id, thread
-            ))),
-        }
-    }
-
     /// Find the active session whose visible or private execution root matches
     /// the given worktree root.
     pub fn find_active_by_path(&self, worktree_root: &Path) -> Result<Option<AgentEntry>> {
         let canonical = worktree_root
             .canonicalize()
             .unwrap_or_else(|_| worktree_root.to_path_buf());
-        let entries = self.list()?;
+        let entries = self.active_entries()?;
         Ok(entries
             .into_iter()
-            .find(|e| e.status == AgentStatus::Active && entry_matches_root(e, &canonical)))
+            .find(|entry| entry_matches_root(entry, &canonical)))
     }
 
     /// Find the active registry entry associated with the given Heddle session ID.
@@ -663,11 +692,10 @@ impl AgentRegistry {
         &self,
         heddle_session_id: &str,
     ) -> Result<Option<AgentEntry>> {
-        let entries = self.list()?;
-        Ok(entries.into_iter().find(|entry| {
-            entry.status == AgentStatus::Active
-                && entry.heddle_session_id.as_deref() == Some(heddle_session_id)
-        }))
+        let entries = self.active_entries()?;
+        Ok(entries
+            .into_iter()
+            .find(|entry| entry.heddle_session_id.as_deref() == Some(heddle_session_id)))
     }
 
     /// Find the active registry entry associated with a stable harness-side
@@ -676,11 +704,10 @@ impl AgentRegistry {
         &self,
         client_instance_id: &str,
     ) -> Result<Option<AgentEntry>> {
-        let entries = self.list()?;
-        Ok(entries.into_iter().find(|entry| {
-            entry.status == AgentStatus::Active
-                && entry.client_instance_id.as_deref() == Some(client_instance_id)
-        }))
+        let entries = self.active_entries()?;
+        Ok(entries
+            .into_iter()
+            .find(|entry| entry.client_instance_id.as_deref() == Some(client_instance_id)))
     }
 
     /// Find the active registry entry associated with a harness-native actor key.
@@ -688,11 +715,10 @@ impl AgentRegistry {
         &self,
         native_actor_key: &str,
     ) -> Result<Option<AgentEntry>> {
-        let entries = self.list()?;
-        Ok(entries.into_iter().find(|entry| {
-            entry.status == AgentStatus::Active
-                && entry.native_actor_key.as_deref() == Some(native_actor_key)
-        }))
+        let entries = self.active_entries()?;
+        Ok(entries
+            .into_iter()
+            .find(|entry| entry.native_actor_key.as_deref() == Some(native_actor_key)))
     }
 
     /// Return this actor's native parent chain, ordered root to leaf.
@@ -702,7 +728,7 @@ impl AgentRegistry {
     /// threads, but the native parent key is the stable "who spawned whom"
     /// edge that preserves Human -> agent -> agent attribution.
     pub fn actor_chain_for_session(&self, session_id: &str) -> Result<Vec<ActorChainNode>> {
-        let entries = self.list()?;
+        let entries = self.current_entries()?;
         let by_session: HashMap<&str, &AgentEntry> = entries
             .iter()
             .map(|entry| (entry.session_id.as_str(), entry))
@@ -743,10 +769,9 @@ impl AgentRegistry {
         let canonical = worktree_root
             .canonicalize()
             .unwrap_or_else(|_| worktree_root.to_path_buf());
-        let entries = self.list()?;
+        let entries = self.active_entries()?;
         Ok(entries.into_iter().find(|entry| {
-            entry.status == AgentStatus::Active
-                && entry.native_instance_key.as_deref() == Some(native_instance_key)
+            entry.native_instance_key.as_deref() == Some(native_instance_key)
                 && entry_matches_root(entry, &canonical)
         }))
     }
@@ -809,6 +834,7 @@ mod tests {
     }
 
     fn entry(session_id: &str, status: AgentStatus) -> AgentEntry {
+        let heartbeat_at = (status == AgentStatus::Active).then(Utc::now);
         AgentEntry {
             session_id: session_id.to_string(),
             client_instance_id: None,
@@ -820,8 +846,7 @@ mod tests {
             thread: format!("agent/{session_id}"),
             pid: None,
             boot_id: None,
-            liveness_path: None,
-            heartbeat_at: None,
+            heartbeat_at,
             anchor_state: None,
             anchor_root: None,
             reservation_token: None,
@@ -845,6 +870,42 @@ mod tests {
             completed_at: None,
             context_queries: vec![],
         }
+    }
+
+    #[test]
+    fn renewal_extends_lease_without_claiming_progress() {
+        let (_temp, registry) = create_registry();
+        let mut active = entry("agent-renew", AgentStatus::Active);
+        let original_heartbeat = Utc::now() - chrono::Duration::minutes(1);
+        active.heartbeat_at = Some(original_heartbeat);
+        active.last_progress_at = Some(original_heartbeat - chrono::Duration::minutes(1));
+        registry.save(&active).unwrap();
+
+        let renewed_at = Utc::now();
+        let SessionRenewal::Renewed(renewed) = registry
+            .renew_active_session("agent-renew", renewed_at)
+            .unwrap()
+        else {
+            panic!("current lease should renew");
+        };
+        assert_eq!(renewed.heartbeat_at, Some(renewed_at));
+        assert_eq!(renewed.last_progress_at, active.last_progress_at);
+    }
+
+    #[test]
+    fn renewal_reaps_an_expired_lease() {
+        let (_temp, registry) = create_registry();
+        let mut expired = entry("agent-expired", AgentStatus::Active);
+        expired.heartbeat_at = Some(Utc::now() - crate::store::AGENT_LEASE_DURATION);
+        registry.save(&expired).unwrap();
+
+        let SessionRenewal::Inactive(expired) = registry
+            .renew_active_session("agent-expired", Utc::now() + chrono::Duration::seconds(1))
+            .unwrap()
+        else {
+            panic!("expired lease should be abandoned");
+        };
+        assert_eq!(expired.status, AgentStatus::Abandoned);
     }
 
     #[test]

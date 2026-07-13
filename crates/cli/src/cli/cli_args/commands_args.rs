@@ -1467,18 +1467,7 @@ pub struct AgentReserveArgs {
     #[arg(long)]
     pub task_id: Option<String>,
 
-    /// Bind the reservation's liveness to an external process pid
-    /// instead of this one-shot CLI invocation's pid.
-    ///
-    /// `heddle agent reserve` exits as soon as the reservation is
-    /// recorded, so its own pid is dead by the time another agent
-    /// checks liveness — that means the dead-pid reaper would
-    /// immediately recycle the reservation. With `--hold-for-pid`
-    /// the orchestrator passes its own (long-lived) pid; the
-    /// reservation lives as long as that process does, and a SIGKILL
-    /// or normal exit on the orchestrator triggers automatic reap.
-    ///
-    /// This is the daemon-ownership pattern without shipping a daemon.
+    /// Reap the lease early when this long-lived owner process exits.
     #[arg(long, value_name = "PID")]
     pub hold_for_pid: Option<u32>,
 }
@@ -1676,9 +1665,7 @@ pub struct AgentFanoutStartArgs {
     pub coordination_discussion_id: Option<String>,
 }
 
-/// Arguments for `agent capture`. Mirrors `heddle capture` with an
-/// extra `--session` guard so an orchestrator can prove it owns the
-/// thread before writing.
+/// Arguments for `agent capture` under a current reservation lease.
 #[derive(Clone, Debug, clap::Args)]
 pub struct AgentCaptureArgs {
     /// Agent session id obtained from `agent reserve`.

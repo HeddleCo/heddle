@@ -74,6 +74,11 @@ pub struct ActorEntryReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_progress_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub heartbeat_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at: Option<String>,
+    pub liveness: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub report_flush_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attach_reason: Option<String>,
@@ -141,6 +146,9 @@ impl From<&AgentEntry> for ActorEntryReport {
             thinking_level: entry.thinking_level.clone(),
             usage_summary: entry.usage_summary.clone(),
             last_progress_at: entry.last_progress_at.map(|ts| ts.to_rfc3339()),
+            heartbeat_at: entry.heartbeat_at.map(|ts| ts.to_rfc3339()),
+            lease_expires_at: entry.lease_expires_at().map(|ts| ts.to_rfc3339()),
+            liveness: AgentRegistry::liveness_for(entry).to_string(),
             report_flush_state: entry.report_flush_state.clone(),
             attach_reason: entry.attach_reason.clone(),
             attach_precedence: entry.attach_precedence.clone(),
@@ -198,7 +206,8 @@ pub fn list_actors_from_registry(
     registry: &AgentRegistry,
     active_only: bool,
 ) -> Result<ActorListReport> {
-    let entries = filter_actors(registry.list()?, active_only);
+    let entries = registry.current_entries()?;
+    let entries = filter_actors(entries, active_only);
     Ok(ActorListReport {
         output_kind: "actor_list",
         actors: entries.iter().map(ActorEntryReport::from).collect(),
@@ -500,7 +509,6 @@ pub fn build_spawn_entry(
         thread: thread.clone(),
         pid,
         boot_id: None,
-        liveness_path: None,
         heartbeat_at: Some(now),
         anchor_state: Some(plan.base_state_full.clone()),
         anchor_root: None,
@@ -588,7 +596,6 @@ mod tests {
             thread: thread.to_string(),
             pid: None,
             boot_id: None,
-            liveness_path: None,
             heartbeat_at: None,
             anchor_state: None,
             anchor_root: None,

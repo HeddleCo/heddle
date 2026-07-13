@@ -3,7 +3,6 @@
 
 use std::{
     path::{Path, PathBuf},
-    process,
     time::Instant,
 };
 
@@ -28,7 +27,7 @@ pub use heddle_core::{
 };
 use objects::{
     object::{ChangeId, State, ThreadName},
-    store::{AgentEntry, AgentRegistry, AgentStatus, ObjectStore, current_boot_id},
+    store::{AgentEntry, AgentRegistry, AgentStatus, ObjectStore, ReserveOutcome},
 };
 use oplog::OpLogRecorder;
 use refs::{Head, RefExpectation, RefUpdate};
@@ -1291,7 +1290,7 @@ fn finalize_thread_start(
     let registry = AgentRegistry::new(repo.heddle_dir());
     let path_for_entry = abs_path.to_path_buf();
     let thread_name = args.name.clone();
-    let entry = registry.create_generated_entry_for_thread(&thread_name, |session_id| {
+    let outcome = registry.try_reserve_thread(&thread_name, |session_id| {
         Ok(AgentEntry {
             session_id: session_id.to_string(),
             client_instance_id: None,
@@ -1301,13 +1300,8 @@ fn finalize_thread_start(
             heddle_session_id: None,
             thread_id: Some(thread_name.clone()),
             thread: thread_name.clone(),
-            pid: Some(process::id()),
-            boot_id: current_boot_id(),
-            liveness_path: Some(
-                repo.heddle_dir()
-                    .join("agents")
-                    .join(format!("{session_id}.live")),
-            ),
+            pid: None,
+            boot_id: None,
             heartbeat_at: Some(Utc::now()),
             anchor_state: Some(base_state.to_string_full()),
             anchor_root: Some(base_root.to_string()),
@@ -1340,6 +1334,16 @@ fn finalize_thread_start(
             context_queries: vec![],
         })
     })?;
+    let entry = match outcome {
+        ReserveOutcome::Reserved(entry) => entry,
+        ReserveOutcome::LiveOwner(owner) => {
+            return Err(anyhow!(
+                "thread '{}' is reserved by active session {}",
+                thread_name,
+                owner.session_id
+            ));
+        }
+    };
 
     let summary = find_thread_summary(repo, &args.name)?;
     let message = match thread_mode {
@@ -2801,9 +2805,9 @@ pub(crate) fn find_active_thread_entry(
 ) -> Result<Option<AgentEntry>> {
     let registry = AgentRegistry::new(repo.heddle_dir());
     Ok(registry
-        .list()?
+        .active_entries()?
         .into_iter()
-        .filter(|entry| entry.thread == thread && entry.status == AgentStatus::Active)
+        .filter(|entry| entry.thread == thread)
         .max_by_key(|entry| entry.started_at))
 }
 

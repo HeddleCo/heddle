@@ -45,6 +45,8 @@ When a supported coding harness is involved, prefer the Heddle-native mental mod
 - thread = the work context
 - actor = the active worker
 - session = the provenance record for that actor
+- task = the local delegation record
+- reservation = the exclusive writer lease for a thread
 
 Do not frame Heddle as a wrapper that should execute the harness. Heddle should follow the harness ambiently when possible.
 
@@ -86,6 +88,17 @@ Important current behavior:
 - `actor spawn` creates a thread-linked actor registry entry only; it does not create filesystem isolation.
 - `actor spawn` is for explicit Heddle actors; ambient harness integration may create actors automatically.
 - use `start <thread> --path <dir>` when you need a real isolated checkout.
+
+## Reservation Liveness
+
+Agent reservations use a five-minute heartbeat lease. `agent heartbeat`,
+`agent capture`, and `agent ready` renew a current lease. `--hold-for-pid`
+adds an early-death signal for a long-lived orchestrator process; PID liveness
+does not replace heartbeats.
+
+The current CLI returns `reservation_token`, but guarded commands do not yet
+accept it as ownership proof. Treat `session_id` as a lookup key, not a secret.
+Do not describe the current token as an authorization mechanism.
 
 ## Harness Integration Install
 

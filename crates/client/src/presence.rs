@@ -600,7 +600,6 @@ mod tests {
             thread: format!("agent/{session_id}"),
             pid: None,
             boot_id: None,
-            liveness_path: None,
             heartbeat_at: None,
             anchor_state: None,
             anchor_root: None,

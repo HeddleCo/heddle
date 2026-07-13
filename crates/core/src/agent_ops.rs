@@ -12,7 +12,7 @@
 //! CLI-owned.
 
 use chrono::{DateTime, Utc};
-use objects::store::{AgentEntry, AgentStatus};
+use objects::store::{AgentEntry, AgentRegistry, AgentStatus};
 use serde::Serialize;
 
 // ---------------------------------------------------------------------------
@@ -225,6 +225,10 @@ pub struct AgentReservationReport {
     pub thinking_level: Option<String>,
     pub probe_source: Option<String>,
     pub probe_confidence: Option<f32>,
+    pub heartbeat_at: Option<String>,
+    pub lease_expires_at: Option<String>,
+    pub last_progress_at: Option<String>,
+    pub liveness: String,
 }
 
 impl From<&AgentEntry> for AgentReservationReport {
@@ -245,6 +249,10 @@ impl From<&AgentEntry> for AgentReservationReport {
             thinking_level: entry.thinking_level.clone(),
             probe_source: entry.probe_source.clone(),
             probe_confidence: entry.probe_confidence,
+            heartbeat_at: entry.heartbeat_at.map(|value| value.to_rfc3339()),
+            lease_expires_at: entry.lease_expires_at().map(|value| value.to_rfc3339()),
+            last_progress_at: entry.last_progress_at.map(|value| value.to_rfc3339()),
+            liveness: AgentRegistry::liveness_for(entry).to_string(),
         }
     }
 }
@@ -365,23 +373,6 @@ pub fn assemble_agent_explain(entry: &AgentEntry) -> AgentExplainReport {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Heartbeat / release transitions
-// ---------------------------------------------------------------------------
-
-/// Pure heartbeat touch: refresh `heartbeat_at` and `last_progress_at`.
-pub fn apply_agent_heartbeat(mut entry: AgentEntry, now: DateTime<Utc>) -> AgentEntry {
-    entry.heartbeat_at = Some(now);
-    entry.last_progress_at = Some(now);
-    entry
-}
-
-/// Mutating form for use inside `registry.update_entry` closures.
-pub fn touch_agent_heartbeat(entry: &mut AgentEntry, now: DateTime<Utc>) {
-    entry.heartbeat_at = Some(now);
-    entry.last_progress_at = Some(now);
-}
-
 /// Terminal status requested by `agent release`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentReleaseKind {
@@ -478,7 +469,6 @@ mod tests {
             thread: thread.to_string(),
             pid: Some(7),
             boot_id: None,
-            liveness_path: None,
             heartbeat_at: None,
             anchor_state: Some("abcfull".to_string()),
             anchor_root: Some("rootshort".to_string()),
@@ -651,14 +641,9 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_and_release_transitions() {
+    fn release_transitions() {
         let entry = sample_entry("agent-1", AgentStatus::Active, "t1");
         let now = Utc::now();
-        let touched = apply_agent_heartbeat(entry.clone(), now);
-        assert_eq!(touched.heartbeat_at, Some(now));
-        assert_eq!(touched.last_progress_at, Some(now));
-        assert_eq!(touched.status, AgentStatus::Active);
-
         let released =
             apply_agent_release(entry.clone(), AgentReleaseKind::Complete.to_status(), now);
         assert_eq!(released.status, AgentStatus::Complete);
@@ -670,11 +655,9 @@ mod tests {
     }
 
     #[test]
-    fn touch_helpers_mutate_in_place() {
+    fn touch_release_mutates_in_place() {
         let mut entry = sample_entry("agent-1", AgentStatus::Active, "t1");
         let now = Utc::now();
-        touch_agent_heartbeat(&mut entry, now);
-        assert_eq!(entry.heartbeat_at, Some(now));
         touch_agent_release(&mut entry, AgentStatus::Complete, now);
         assert_eq!(entry.status, AgentStatus::Complete);
         assert_eq!(entry.completed_at, Some(now));
