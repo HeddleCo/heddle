@@ -710,39 +710,6 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn land_push_partial_failure(
-        thread: &str,
-        push_error: impl fmt::Display,
-        performed_steps: Vec<String>,
-        git_commit: Option<&str>,
-        attempted_remote: Option<&str>,
-    ) -> Self {
-        let completed = if performed_steps.is_empty() {
-            "no completed steps were recorded".to_string()
-        } else {
-            performed_steps.join(", ")
-        };
-        let checkpoint = git_commit
-            .map(|oid| format!(" Git checkpoint {oid} was written."))
-            .unwrap_or_default();
-        let push_command = attempted_remote
-            .filter(|remote| !remote.trim().is_empty())
-            .map(|remote| format!("heddle push {remote}"))
-            .unwrap_or_else(|| "heddle push".to_string());
-        Self::safety_refusal(
-            "land_push_partial_failure",
-            format!("Land partially completed for `{thread}`, but push failed: {push_error}"),
-            format!(
-                "The thread was preserved locally. Run `heddle undo` to roll back the local land, or fix the remote and run `{push_command}`."
-            ),
-            "push failed after Heddle had already completed local land steps",
-            "retrying blindly could duplicate or obscure the already-landed local merge/checkpoint",
-            format!("completed steps: {completed}.{checkpoint}"),
-            "heddle undo",
-            vec!["heddle undo".to_string(), push_command],
-        )
-    }
-
     pub(crate) fn land_checkpoint_partial_failure(
         thread: &str,
         checkpoint_error: impl fmt::Display,

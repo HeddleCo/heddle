@@ -6,8 +6,6 @@
 //! index, ref, or object mutations: those stay in the Git projection engine,
 //! checkpoint, repo::atomic, and refs::commit_and_publish paths.
 
-use std::path::Path;
-
 use anyhow::{Result, anyhow};
 use objects::{
     object::{Principal, ThreadName},
@@ -17,41 +15,23 @@ use repo::{CommitGraphIndex, Repository, RepositoryCapability, thread_flag};
 
 use super::{
     advice::RecoveryAdvice,
-    command_catalog::ActionFields,
-    snapshot::resolve_principal,
     thread_landing::land_local_command,
     verification_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
         build_repository_verification_state,
         build_repository_verification_state_with_worktree_status,
         git_overlay_mutation_preflight_advice_with_worktree_status,
-        plain_git_mutation_preflight_advice, repository_verification_blocked_advice,
+        repository_verification_blocked_advice,
     },
 };
-use crate::{
-    config::UserConfig,
-    git_projection_engine::git_core::{
-        git_config_identity_with_global_fallback, principal_is_default_unknown,
-    },
+use crate::git_projection_engine::git_core::{
+    git_config_identity_with_global_fallback, principal_is_default_unknown,
 };
 
 pub(crate) type GitOverlayWorktreeStatus = repo::Result<Option<WorktreeStatus>>;
 
 pub(crate) struct GitOverlayMutationFacts {
     worktree_status: GitOverlayWorktreeStatus,
-}
-
-impl GitOverlayMutationFacts {
-    pub(crate) fn worktree_status(&self) -> &GitOverlayWorktreeStatus {
-        &self.worktree_status
-    }
-}
-
-pub(crate) fn preflight_plain_git_mutation(start: &Path, action: &str) -> Result<()> {
-    if let Some(advice) = plain_git_mutation_preflight_advice(start, action)? {
-        return Err(anyhow!(advice));
-    }
-    Ok(())
 }
 
 pub(crate) fn gather_mutation_facts(repo: &Repository) -> GitOverlayMutationFacts {
@@ -65,26 +45,7 @@ pub(crate) fn preflight_checkpoint(
     action: &str,
     facts: &GitOverlayMutationFacts,
 ) -> Result<()> {
-    preflight_checkpoint_with_worktree_status(repo, action, facts.worktree_status())
-}
-
-pub(crate) fn preflight_checkpoint_with_worktree_status(
-    repo: &Repository,
-    action: &str,
-    worktree_status: &GitOverlayWorktreeStatus,
-) -> Result<()> {
-    preflight_checkpoint_like_with_worktree_status(repo, action, worktree_status)
-}
-
-pub(crate) fn preflight_commit(repo: &Repository, facts: &GitOverlayMutationFacts) -> Result<()> {
-    preflight_commit_like_with_worktree_status(repo, facts.worktree_status())
-}
-
-pub(crate) fn preflight_commit_checkpoint_ref_update(
-    repo: &Repository,
-    facts: &GitOverlayMutationFacts,
-) -> Result<()> {
-    preflight_checkpoint_ref_update_with_worktree_status(repo, "commit", facts.worktree_status())
+    preflight_checkpoint_like_with_worktree_status(repo, action, &facts.worktree_status)
 }
 
 pub(crate) fn preflight_land_checkpoint(repo: &Repository, thread_id: &str) -> Result<()> {
@@ -111,21 +72,6 @@ fn preflight_checkpoint_like_with_worktree_status(
     Ok(())
 }
 
-fn preflight_commit_like_with_worktree_status(
-    repo: &Repository,
-    worktree_status: &GitOverlayWorktreeStatus,
-) -> Result<()> {
-    if let Some(advice) = git_overlay_mutation_preflight_advice_with_worktree_status(
-        repo,
-        "commit",
-        GitOverlayMutationPreflight::commit_like(),
-        worktree_status,
-    )? {
-        return Err(anyhow!(advice));
-    }
-    Ok(())
-}
-
 fn preflight_checkpoint_ref_update_with_worktree_status(
     repo: &Repository,
     action: &str,
@@ -136,16 +82,6 @@ fn preflight_checkpoint_ref_update_with_worktree_status(
     }
     let trust = preflight_verify_with_worktree_status(repo, worktree_status);
     preflight_checkpoint_ref_update_with_trust(repo, action, trust)
-}
-
-pub(crate) fn preflight_git_checkpoint_identity(
-    repo: &Repository,
-    user_config: &UserConfig,
-    action: &str,
-    retry_command: &str,
-) -> Result<()> {
-    let principal = resolve_principal(repo, user_config)?;
-    preflight_git_checkpoint_identity_for_principal(repo, &principal, action, retry_command)
 }
 
 pub(crate) fn preflight_git_checkpoint_identity_for_principal(
@@ -179,10 +115,6 @@ pub(crate) fn preflight_verify_with_worktree_status(
 
 pub(crate) fn post_verify(repo: &Repository) -> RepositoryVerificationState {
     build_repository_verification_state(repo)
-}
-
-pub(crate) fn post_verify_commit(repo: &Repository) -> RepositoryVerificationState {
-    commit_safe_trust(post_verify(repo))
 }
 
 fn land_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Option<RecoveryAdvice> {
@@ -258,46 +190,6 @@ pub(crate) fn native_checkpoint_unavailable_advice(repo: &Repository) -> Recover
             "heddle capture -m \"...\"".to_string(),
             "heddle status".to_string(),
         ],
-    )
-}
-
-pub(crate) fn commit_checkpoint_failed_advice(
-    state_id: &str,
-    message: Option<&str>,
-    err: &anyhow::Error,
-    index_only: bool,
-) -> RecoveryAdvice {
-    let recovery = checkpoint_recovery_command(message, index_only);
-    RecoveryAdvice::safety_refusal(
-        "commit_checkpoint_failed",
-        format!("capture {state_id} was preserved, but checkpoint failed: {err}"),
-        format!("Resolve the checkpoint issue, then run `{recovery}`."),
-        "the Heddle capture succeeded but the Git checkpoint step failed",
-        "retrying through the canonical save path keeps the Git checkpoint repair on the supported surface",
-        format!("captured Heddle state {state_id} was preserved"),
-        recovery.clone(),
-        vec![recovery],
-    )
-}
-
-pub(crate) fn commit_blocked_by_trust_advice(
-    trust: &RepositoryVerificationState,
-) -> RecoveryAdvice {
-    repository_verification_blocked_advice(
-        "commit_blocked_by_verification",
-        format!(
-            "refusing to report nothing to commit: repository verification is blocked ({})",
-            trust.status
-        ),
-        "retrying `heddle capture`",
-        trust,
-        format!(
-            "repository verification status is {}: {}",
-            trust.status, trust.summary
-        ),
-        "claiming nothing to commit could hide a Git/Heddle/import/operation disagreement",
-        "no capture, Git checkpoint, refs, or worktree files were changed",
-        None,
     )
 }
 
@@ -401,138 +293,4 @@ fn missing_git_checkpoint_identity_advice(action: &str, retry_command: &str) -> 
             retry_command.to_string(),
         ],
     )
-}
-
-fn commit_safe_trust(mut trust: RepositoryVerificationState) -> RepositoryVerificationState {
-    if is_commit_action(&trust.recommended_action) {
-        super::verification_health::override_trust_recommended_action(&mut trust, "heddle status");
-    }
-    let status_action = "heddle status".to_string();
-    let status_template = ActionFields::from_action(&status_action).template;
-    for check in &mut trust.checks {
-        if check
-            .recommended_action
-            .as_deref()
-            .is_some_and(is_commit_action)
-        {
-            check.recommended_action = Some(status_action.clone());
-            check.recommended_action_template = status_template.clone();
-        }
-    }
-    trust
-}
-
-fn is_commit_action(action: &str) -> bool {
-    matches!(
-        action.trim(),
-        "heddle capture"
-            | "heddle capture -m \"...\""
-            | "heddle capture -m \"...\" --confidence <confidence>"
-    ) || action.trim().starts_with("heddle capture ")
-}
-
-fn checkpoint_recovery_command(message: Option<&str>, _index_only: bool) -> String {
-    format!(
-        "git commit -m {}",
-        shell_double_quoted(message.unwrap_or("commit"))
-    )
-}
-
-fn shell_double_quoted(value: &str) -> String {
-    let mut quoted = String::from("\"");
-    for ch in value.chars() {
-        match ch {
-            '\\' | '"' | '$' | '`' => {
-                quoted.push('\\');
-                quoted.push(ch);
-            }
-            '\n' => quoted.push_str("\\n"),
-            _ => quoted.push(ch),
-        }
-    }
-    quoted.push('"');
-    quoted
-}
-
-#[cfg(test)]
-mod tests {
-    use anyhow::anyhow;
-
-    use super::*;
-
-    #[test]
-    fn commit_checkpoint_failure_advice_preserves_capture_and_exact_recovery() {
-        let error = anyhow!("git write failed");
-        let advice =
-            commit_checkpoint_failed_advice("change-123", Some("say \"hello\""), &error, false);
-
-        assert_eq!(advice.kind, "commit_checkpoint_failed");
-        assert!(advice.error.contains("capture change-123 was preserved"));
-        assert!(advice.error.contains("git write failed"));
-        assert_eq!(
-            advice.primary_command,
-            "git commit -m \"say \\\"hello\\\"\""
-        );
-        assert_eq!(
-            advice.recovery_commands,
-            vec!["git commit -m \"say \\\"hello\\\"\""]
-        );
-        assert!(advice.preserved.contains("change-123"));
-    }
-
-    #[test]
-    fn commit_checkpoint_failure_advice_retries_index_snapshot_checkpoint() {
-        let error = anyhow!("git write failed");
-        let advice =
-            commit_checkpoint_failed_advice("change-456", Some("index only"), &error, true);
-
-        assert_eq!(advice.primary_command, "git commit -m \"index only\"");
-        assert_eq!(
-            advice.recovery_commands,
-            vec!["git commit -m \"index only\""]
-        );
-    }
-
-    #[test]
-    fn commit_blocked_by_trust_advice_uses_trust_recovery() {
-        let machine_contract_coverage =
-            crate::cli::commands::verification_health::machine_contract_coverage();
-        let trust = RepositoryVerificationState {
-            verified: false,
-            status: "operation_in_progress".to_string(),
-            repository_mode: "git-overlay".to_string(),
-            heddle_initialized: true,
-            git_branch: Some("main".to_string()),
-            heddle_thread: Some("main".to_string()),
-            worktree_dirty: false,
-            worktree_state: "clean".to_string(),
-            import_state: "clean".to_string(),
-            mapping_state: "clean".to_string(),
-            remote_drift: "clean".to_string(),
-            active_operation: Some("Git merge (in-progress)".to_string()),
-            default_remote: None,
-            clone_verification: "not_applicable".to_string(),
-            machine_contract: crate::cli::commands::verification_health::machine_contract_status(
-                &machine_contract_coverage,
-            )
-            .to_string(),
-            machine_contract_coverage,
-            workflow_status: "clean".to_string(),
-            workflow_summary: "no ready threads are waiting to land".to_string(),
-            summary: "Git merge is in progress".to_string(),
-            recommended_action: "heddle continue".to_string(),
-            recommended_action_template: None,
-            recovery_commands: vec!["heddle continue".to_string()],
-            recovery_action_templates: Vec::new(),
-            checks: Vec::new(),
-        };
-
-        let advice = commit_blocked_by_trust_advice(&trust);
-
-        assert_eq!(advice.kind, "commit_blocked_by_verification");
-        assert_eq!(advice.primary_command, "heddle continue");
-        assert_eq!(advice.recovery_commands, vec!["heddle continue"]);
-        assert!(advice.error.contains("repository verification is blocked"));
-        assert!(advice.unsafe_condition.contains("Git merge is in progress"));
-    }
 }

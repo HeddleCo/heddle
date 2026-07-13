@@ -451,15 +451,6 @@ impl GitOverlayMutationPreflight {
             check_verification: true,
         }
     }
-
-    pub(crate) fn commit_like() -> Self {
-        Self {
-            check_detached_head: true,
-            check_unimported_git_history: true,
-            check_raw_git_operation: true,
-            check_verification: true,
-        }
-    }
 }
 pub(crate) fn plain_git_mutation_preflight_advice(
     start: &std::path::Path,

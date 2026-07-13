@@ -648,17 +648,6 @@ pub struct ActorInfoSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct GitIndexInfoSchema {
-    pub commit_mode: String,
-    pub has_staged_changes: bool,
-    pub staged_paths: Vec<String>,
-    pub unstaged_paths: Vec<String>,
-    pub untracked_paths: Vec<String>,
-    pub will_commit: Vec<String>,
-    pub preserved_after_commit: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct GenericJsonObjectSchema {
     #[serde(flatten)]
     pub fields: BTreeMap<String, Value>,
@@ -1002,14 +991,6 @@ pub struct DiscussionTurnSchema {
 pub struct DiscussionListSchema {
     pub output_kind: String,
     pub discussions: Vec<DiscussionSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct OperationRecordSchema {
-    pub op_id: String,
-    pub command: String,
-    pub idempotency_status: String,
-    pub replayed: bool,
 }
 
 // ---- core loop write/read helpers -----------------------------------------

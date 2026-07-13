@@ -18,41 +18,13 @@ pub(crate) fn create_git_checkpoint(
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
 ) -> Result<GitCheckpointRecord> {
-    create_git_checkpoint_inner(repo, message, status_options, true, None)
-}
-
-fn create_git_checkpoint_inner(
-    repo: &Repository,
-    message: Option<&str>,
-    status_options: repo::WorktreeStatusOptions,
-    require_clean_worktree: bool,
-    precomputed_worktree_status: Option<&git_overlay_txn::GitOverlayWorktreeStatus>,
-) -> Result<GitCheckpointRecord> {
     if repo.capability() != RepositoryCapability::GitOverlay {
         return Err(anyhow!(
             git_overlay_txn::native_checkpoint_unavailable_advice(repo)
         ));
     }
-    // Compute the git-overlay worktree status ONCE up front and thread it through
-    // the two PRE-mutation consumers below: the ref-update preflight and the
-    // verification preflight. Both build the repository verification state, which
-    // runs `git_overlay_worktree_status` — a walk that re-reads + SHA-1s every
-    // tracked file. Before this, checkpoint paid that walk twice here (plus a
-    // third in `build_output`, which must stay a FRESH walk because it runs AFTER
-    // the checkpoint advances the Git ref — see `run`). Threading the exact
-    // `Result` keeps the clean/dirty classification byte-identical, and both
-    // consumers observe the SAME pre-mutation git state, so reuse is sound.
-    // A caller that has already computed this pre-mutation status (e.g. `commit`)
-    // passes it in so checkpoint does not re-walk the worktree.
-    match precomputed_worktree_status {
-        Some(status) => {
-            git_overlay_txn::preflight_checkpoint_with_worktree_status(repo, "checkpoint", status)?
-        }
-        None => {
-            let facts = git_overlay_txn::gather_mutation_facts(repo);
-            git_overlay_txn::preflight_checkpoint(repo, "checkpoint", &facts)?;
-        }
-    };
+    let facts = git_overlay_txn::gather_mutation_facts(repo);
+    git_overlay_txn::preflight_checkpoint(repo, "land", &facts)?;
 
     let user_config = UserConfig::load_default()?;
 
@@ -63,17 +35,14 @@ fn create_git_checkpoint_inner(
     // misconfigured identity slip a Git commit through). Bootstrap + new-state
     // creation fall through to `execute_save` below.
     if let Some(existing_state) = repo.current_state()? {
-        if require_clean_worktree {
-            let tree = repo.require_tree(&existing_state.tree)?;
-            let status =
-                repo.compare_worktree_cached_detailed_with_options(&tree, &status_options)?;
-            if !status.is_clean() {
-                return Err(anyhow!(dirty_worktree_advice(
-                    "checkpoint",
-                    &status,
-                    "the current Heddle state was left unchanged; these paths have not been captured",
-                )));
-            }
+        let tree = repo.require_tree(&existing_state.tree)?;
+        let status = repo.compare_worktree_cached_detailed_with_options(&tree, &status_options)?;
+        if !status.is_clean() {
+            return Err(anyhow!(dirty_worktree_advice(
+                "land",
+                &status,
+                "the current Heddle state was left unchanged; these paths have not been captured",
+            )));
         }
         if let Some(record) = repo.latest_git_checkpoint_for_state(&existing_state.state_id)? {
             return Ok(record);
@@ -117,27 +86,15 @@ fn create_git_checkpoint_inner(
             .or_else(|| Some("Bootstrap git-overlay before checkpoint".to_string())),
         confidence: None,
         attribution,
-        git_scope: if require_clean_worktree {
-            GitScope::WorktreeAll
-        } else {
-            GitScope::Staged
-        },
+        git_scope: GitScope::WorktreeAll,
         supplied_tree: None,
         reuse_current_state: true,
-        require_clean_worktree,
+        require_clean_worktree: true,
         worktree_status_options: status_options,
         run_hooks: true,
         commit_safe_post_verify: false,
         coalesce_snapshot_and_checkpoint: false,
-        precomputed_worktree_status: precomputed_worktree_status.map(|status| match status {
-            Ok(Some(s)) => Ok(Some(objects::worktree::WorktreeStatus {
-                modified: s.modified.clone(),
-                added: s.added.clone(),
-                deleted: s.deleted.clone(),
-            })),
-            Ok(None) => Ok(None),
-            Err(err) => Err(objects::HeddleError::Config(err.to_string())),
-        }),
+        precomputed_worktree_status: None,
     };
 
     let report = execute_save(repo, plan).map_err(|err| {
@@ -164,7 +121,7 @@ fn create_git_checkpoint_inner(
                 && !status.is_clean()
             {
                 return anyhow!(dirty_worktree_advice(
-                    "checkpoint",
+                    "land",
                     &status,
                     "the current Heddle state was left unchanged; these paths have not been captured",
                 ));
