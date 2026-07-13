@@ -4,7 +4,7 @@
 //! at every subtree-load site, so a missing tree was indistinguishable
 //! from an empty one and presentation paths (`status`, `ready`, `stash
 //! show`) silently rendered "no content" while mutation paths (`revert`,
-//! `cherry-pick`, `goto`) silently operated against an empty baseline.
+//! legacy tree-rewrite commands silently operated against an empty baseline.
 //!
 //! Mirrors `merge_store_integrity.rs` (the heddle#90 lock for the merge
 //! engine). Each test introduces targeted corruption (deletes the loose

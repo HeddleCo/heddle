@@ -616,38 +616,3 @@ fn test_merge_deep_nested_directories() {
         "base file should still exist"
     );
 }
-
-#[test]
-#[serial]
-fn test_cherry_pick_with_subdirectories() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-
-    fs::write(temp.path().join("root.txt"), "root").unwrap();
-    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
-
-    heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
-    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-    fs::create_dir_all(temp.path().join("src/models")).unwrap();
-    fs::write(temp.path().join("src/models/user.rs"), "struct User {}").unwrap();
-    let snapshot_output = heddle(
-        &["capture", "-m", "Add nested file", "--output", "json"],
-        Some(temp.path()),
-    )
-    .unwrap();
-    let snap: Value = serde_json::from_str(&snapshot_output).unwrap();
-    let state_id = snap["state_id"].as_str().unwrap().to_string();
-
-    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-    let result = heddle(&["cherry-pick", &state_id], Some(temp.path()));
-    assert!(
-        result.is_ok(),
-        "cherry-pick with subdirectory files should succeed: {:?}",
-        result.err()
-    );
-
-    assert!(
-        temp.path().join("src/models/user.rs").exists(),
-        "cherry-picked nested file should exist on disk"
-    );
-}

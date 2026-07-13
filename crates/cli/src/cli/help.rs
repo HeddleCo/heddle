@@ -122,11 +122,15 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
             let _ = writeln!(out);
             let _ = writeln!(
                 out,
-                "Nearby: `heddle undo`, `heddle verify`, `heddle push`, `heddle pull`."
+                "Nearby: `heddle undo` and `heddle verify`. Native Heddle repositories also use `heddle push` and `heddle pull`."
             );
             let _ = writeln!(
                 out,
-                "Start here: `heddle init`, `heddle capture`, or `heddle clone`."
+                "Start here: `heddle init` or `heddle capture`; use `heddle clone` only for a native Heddle remote."
+            );
+            let _ = writeln!(
+                out,
+                "Git Overlay source transport stays in Git: `git clone`, `git pull`, and `git push`."
             );
             let _ = writeln!(
                 out,

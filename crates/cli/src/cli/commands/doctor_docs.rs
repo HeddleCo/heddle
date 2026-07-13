@@ -416,6 +416,7 @@ fn scan_forbidden_prose(file: &str, text: &str, out: &mut Vec<DocsIssue>) {
         let verb = [
             "commit",
             "checkpoint",
+            "cherry-pick",
             "git-overlay",
             "support",
             "spool",
@@ -471,6 +472,7 @@ fn forbidden_invocation_issue(file: &str, inv: &DocsInvocation) -> Option<DocsIs
         verb,
         "commit"
             | "checkpoint"
+            | "cherry-pick"
             | "git-overlay"
             | "support"
             | "spool"

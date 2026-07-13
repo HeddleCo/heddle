@@ -283,56 +283,6 @@ fn clean_dry_run_emits_output_kind() {
 }
 
 #[test]
-fn cherry_pick_no_commit_emits_output_kind() {
-    let temp = init_and_capture();
-    fs::write(temp.path().join("feature.txt"), "added\n").expect("write feature");
-    heddle(&["capture", "-m", "feature"], Some(temp.path())).expect("feature capture");
-
-    // Resolve the feature state's id (HEAD), then move back to the seed.
-    let head = heddle_json(&["log", "--limit", "1"], &temp);
-    let feature_id = head["states"][0]["state_id"]
-        .as_str()
-        .expect("log --output json must expose state_id")
-        .to_string();
-    heddle(&["switch", "HEAD~1"], Some(temp.path())).expect("goto back to seed");
-
-    let value = heddle_json(&["cherry-pick", &feature_id, "--no-commit"], &temp);
-    assert_output_kind(&value, "cherry_pick");
-    assert_eq!(value["status"].as_str(), Some("applied"));
-    assert_eq!(value["no_commit"].as_bool(), Some(true));
-    assert_eq!(
-        value["commit"].as_str(),
-        Some(feature_id.as_str()),
-        "cherry-pick must echo the source commit id: {value}"
-    );
-}
-
-#[test]
-fn cherry_pick_commit_emits_output_kind_with_new_commit() {
-    let temp = init_and_capture();
-    fs::write(temp.path().join("feature.txt"), "added\n").expect("write feature");
-    heddle(&["capture", "-m", "feature"], Some(temp.path())).expect("feature capture");
-    let head = heddle_json(&["log", "--limit", "1"], &temp);
-    let feature_id = head["states"][0]["state_id"]
-        .as_str()
-        .expect("log JSON state_id")
-        .to_string();
-    heddle(&["switch", "HEAD~1"], Some(temp.path())).expect("goto back to seed");
-
-    let value = heddle_json(&["cherry-pick", &feature_id], &temp);
-    assert_output_kind(&value, "cherry_pick");
-    assert_eq!(value["status"].as_str(), Some("committed"));
-    assert_eq!(value["commit"].as_str(), Some(feature_id.as_str()));
-    assert!(
-        value
-            .get("new_commit")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty()),
-        "cherry-pick (committed) must report new_commit: {value}"
-    );
-}
-
-#[test]
 fn thread_operator_envelopes_emit_approved_thread_kinds() {
     let temp = init_and_capture();
     heddle(&["thread", "create", "side"], Some(temp.path())).expect("thread create side");

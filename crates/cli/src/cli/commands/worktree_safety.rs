@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared dirty-worktree guard for destructive worktree-mutation commands.
 //!
-//! Several Heddle commands (`undo`, `redo`, `cherry-pick`, `rebase`) materialize
+//! Several Heddle commands (`undo`, `revert`, `sync`) materialize
 //! a different tree into the worktree before HEAD advances. If the worktree
 //! holds modified-but-unsnapshotted tracked content or untracked files, that
 //! mutation will silently destroy them — the planner has no record they ever
@@ -23,7 +23,7 @@ use crate::cli::worktree_status_options;
 /// exist.
 ///
 /// `action` is the imperative verb shown to the user (e.g. "undo", "redo",
-/// "cherry-pick", "rebase"). It is interpolated into the error message.
+/// "undo", "revert"). It is interpolated into the error message.
 ///
 /// Returns `Ok(())` when:
 /// - The repository has no HEAD (nothing to compare against).

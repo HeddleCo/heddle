@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Production-ready features integration tests.
 //!
-//! Tests for resolve, fetch, fsck, clone, cherry-pick, rebase, bisect, blame, gc.
+//! Tests for resolve, fsck, clone, blame, and gc.
 
 use std::{fs, process::Command, str};
 

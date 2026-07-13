@@ -5046,45 +5046,6 @@ fn rebase_target_refusals_use_typed_advice() {
 }
 
 #[test]
-fn cherry_pick_missing_commit_uses_typed_advice() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
-    heddle(&["capture", "-m", "base"], Some(temp.path())).unwrap();
-
-    let output = heddle_output(
-        &["--output", "json", "cherry-pick", "hs-deadbeef1234"],
-        Some(temp.path()),
-    )
-    .expect("invoke cherry-pick target refusal");
-    assert!(
-        !output.status.success(),
-        "missing cherry-pick commit should fail"
-    );
-    assert!(
-        output.stdout.is_empty(),
-        "JSON-mode cherry-pick refusal must keep stdout quiet: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value =
-        serde_json::from_str(stderr).expect("cherry-pick refusal should emit JSON envelope");
-    assert_eq!(envelope["kind"], "cherry_pick_commit_not_found");
-    assert!(
-        envelope["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("commit 'hs-deadbeef1234' not found")),
-        "cherry-pick refusal should include full typed advice: {stderr}"
-    );
-    assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("heddle log")),
-        "cherry-pick hint should name history inspection: {stderr}"
-    );
-}
-
-#[test]
 fn switch_missing_state_uses_typed_advice() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
@@ -9944,7 +9905,7 @@ fn agent_serve_rejects_removed_foreground_flag() {
         &["--output", "json", "agent", "serve", "--foreground"],
         Some(temp.path()),
     )
-        .expect("invoke agent serve");
+    .expect("invoke agent serve");
     assert!(!output.status.success(), "removed flag must be rejected");
     assert!(
         output.stdout.is_empty(),
@@ -9952,7 +9913,10 @@ fn agent_serve_rejects_removed_foreground_flag() {
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--foreground"), "clap should name the removed flag: {stderr}");
+    assert!(
+        stderr.contains("--foreground"),
+        "clap should name the removed flag: {stderr}"
+    );
 }
 
 #[test]
@@ -10481,7 +10445,10 @@ fn agent_presence_and_provenance_outputs_match_registered_schemas() {
         &["agent", "presence", "list", "--output", "json"],
     );
     assert_schema_declares_runtime_top_level(&["agent", "presence", "list"], &actor_list);
-    assert_eq!(actor_list["output_kind"], "agent_presence_list", "{actor_list}");
+    assert_eq!(
+        actor_list["output_kind"], "agent_presence_list",
+        "{actor_list}"
+    );
     assert!(
         actor_list["presence"].as_array().is_some(),
         "presence list should emit an envelope: {actor_list}"
@@ -10490,17 +10457,13 @@ fn agent_presence_and_provenance_outputs_match_registered_schemas() {
 
     let actor_show = json_value(
         temp.path(),
-        &[
-            "agent",
-            "presence",
-            "show",
-            presence_id,
-            "--output",
-            "json",
-        ],
+        &["agent", "presence", "show", presence_id, "--output", "json"],
     );
     assert_schema_declares_runtime_top_level(&["agent", "presence", "show"], &actor_show);
-    assert_eq!(actor_show["output_kind"], "agent_presence_show", "{actor_show}");
+    assert_eq!(
+        actor_show["output_kind"], "agent_presence_show",
+        "{actor_show}"
+    );
     assert_eq!(actor_show["presence"]["session_id"], presence_id);
 
     let actor_done = json_value(
@@ -10516,7 +10479,10 @@ fn agent_presence_and_provenance_outputs_match_registered_schemas() {
         ],
     );
     assert_schema_declares_runtime_top_level(&["agent", "presence", "complete"], &actor_done);
-    assert_eq!(actor_done["output_kind"], "agent_presence_complete", "{actor_done}");
+    assert_eq!(
+        actor_done["output_kind"], "agent_presence_complete",
+        "{actor_done}"
+    );
     assert_eq!(actor_done["status"], "complete");
     assert!(actor_done.get("verification").is_some());
 
@@ -10562,18 +10528,27 @@ fn agent_presence_and_provenance_outputs_match_registered_schemas() {
     assert!(session_segment.get("segment").is_some());
     assert!(session_segment["segment"].get("policy_id").is_none());
 
-    let session_list = json_value(temp.path(), &["agent", "provenance", "list", "--output", "json"]);
+    let session_list = json_value(
+        temp.path(),
+        &["agent", "provenance", "list", "--output", "json"],
+    );
     assert_schema_declares_runtime_top_level(&["agent", "provenance", "list"], &session_list);
     assert!(
         session_list["sessions"].as_array().is_some(),
         "session list should emit an envelope with a sessions array: {session_list}"
     );
 
-    let session_show = json_value(temp.path(), &["agent", "provenance", "show", "--output", "json"]);
+    let session_show = json_value(
+        temp.path(),
+        &["agent", "provenance", "show", "--output", "json"],
+    );
     assert_schema_declares_runtime_top_level(&["agent", "provenance", "show"], &session_show);
     assert!(session_show.get("session").is_some());
 
-    let session_end = json_value(temp.path(), &["agent", "provenance", "end", "--output", "json"]);
+    let session_end = json_value(
+        temp.path(),
+        &["agent", "provenance", "end", "--output", "json"],
+    );
     assert_schema_declares_runtime_top_level(&["agent", "provenance", "end"], &session_end);
     assert_eq!(session_end["session"]["active"], false);
 }

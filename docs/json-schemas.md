@@ -99,7 +99,7 @@ specifiers. Pass any of them — they all resolve to the same change ID:
   thread's tip.
 * **Thread name** — resolves to that thread's tip.
 
-Verbs covered: `show`, `diff`, `revert`, `cherry-pick`,
+Verbs covered: `show`, `diff`, `revert`,
 `switch`, `query --attribution --state`, `log --since`, `review show`,
 `review sign`, `discuss open|list|resolve --state`, `retro --since`.
 The `heddle log --output json` `change_id` field is the canonical short form
@@ -3068,14 +3068,6 @@ required:
 {"commits_scanned":2,"commits_with_matches":1,"sessions_mined":3,"points_extracted":4,"states_updated":1,"annotations_written":4}
 ```
 
-`heddle cherry-pick --output json` emits the committed shape by default;
-with `--no-commit` the `new_commit` field is replaced by `"no_commit":
-true` and `status` is `"applied"`:
-
-```json
-{"output_kind": "cherry_pick", "status": "committed", "commit": "hd-source123", "new_commit": "hd-result456"}
-```
-
 `heddle collapse --output json` emits:
 
 ```json
@@ -3292,7 +3284,6 @@ no record exists — public-by-absence):
 The following verbs also emit `--output json`. Their shapes follow the same
 discipline; see the corresponding handler in `crates/cli/src/cli/commands/`:
 
-`heddle cherry-pick`,
 `heddle clone`, `heddle collapse`,
 `heddle context get/set`, `heddle diff`, `heddle expand`,
 `heddle discuss`, `heddle doctor docs`,

@@ -75,7 +75,7 @@ contracts below are enforced by integration tests in
 - **Dirty worktree refusal.** If you have uncommitted changes (modified
   tracked files, untracked files), `heddle undo` refuses and surfaces the
   dirty paths. Capture the changes with `heddle capture -m "..."` (or remove
-  them) and retry. The check is shared with `cherry-pick` and `sync`.
+  them) and retry. The check is shared with `revert` and `sync`.
 - **Destructive-boundary refusal.** If the state the inverse would restore
   has been removed from the object store — typically by `heddle maintenance gc --prune`
   reaching past the live oplog window — `heddle undo` refuses with a single

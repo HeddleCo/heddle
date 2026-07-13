@@ -61,7 +61,6 @@ Heuristic only: files under `crates/cli/src` defining `fn cmd_*`, sorted by LOC.
 | 228 | yes | `crates/cli/src/cli/commands/collapse.rs` | `cmd_collapse` |
 | 216 | yes | `crates/cli/src/cli/commands/operator_loop.rs` | `cmd_abort`, `cmd_continue`, `cmd_sync_smart` |
 | 212 | yes | `crates/cli/src/cli/commands/diff/diff_compute.rs` | `cmd_diff` |
-| 211 | yes | `crates/cli/src/cli/commands/cherry_pick.rs` | `cmd_cherry_pick` |
 | 203 | yes | `crates/cli/src/cli/commands/purge.rs` | `cmd_purge`, `cmd_purge_apply`, `cmd_purge_list` |
 | 202 | yes | `crates/cli/src/cli/commands/hook.rs` | `cmd_hook` |
 | 188 | yes | `crates/cli/src/cli/commands/gc.rs` | `cmd_gc` |

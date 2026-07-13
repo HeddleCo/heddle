@@ -110,7 +110,6 @@ const SWEPT: &[&str] = &[
     "review next",
     "review health",
     "resolve",
-    "cherry-pick",
     // heddle#662 — additive discriminator paths for state inspection,
     // rebase progress JSONL, and conflict-resolution success.
     "rebase",
@@ -969,18 +968,6 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             std::fs::write(t.path().join("a.txt"), "base\nwip").unwrap();
             heddle(&["stash", "push", "-m", "wip"], Some(t.path())).expect("stash push");
             (t, sv(&["stash", "show"]))
-        }
-        "cherry_pick" => {
-            let t = init_fixture();
-            std::fs::write(t.path().join("f.txt"), "base").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit base");
-            heddle(&["thread", "create", "feature"], Some(t.path())).expect("thread feature");
-            heddle(&["switch", "feature"], Some(t.path())).expect("switch feature");
-            std::fs::write(t.path().join("g.txt"), "feat").unwrap();
-            heddle(&["commit", "-m", "feature work"], Some(t.path())).expect("commit feature");
-            let src = head_state_id(t.path());
-            heddle(&["switch", "main"], Some(t.path())).expect("switch main");
-            (t, vec!["cherry-pick".to_string(), src])
         }
         "redact_apply" => {
             let t = init_fixture();

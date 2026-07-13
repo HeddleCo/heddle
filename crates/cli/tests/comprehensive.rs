@@ -18,8 +18,6 @@ use tempfile::TempDir;
 
 #[path = "comprehensive/blame.rs"]
 mod blame_comprehensive;
-#[path = "comprehensive/cherry_pick.rs"]
-mod cherry_pick_comprehensive;
 #[path = "comprehensive/concurrency.rs"]
 mod concurrency;
 #[path = "comprehensive/error_paths.rs"]

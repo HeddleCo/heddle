@@ -152,7 +152,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["context", "reason", "git", "--path", "."],
     ),
     sample(&["capture"], &["capture"]),
-    sample(&["cherry-pick"], &["cherry-pick", "abc123"]),
     sample(&["clone"], &["clone", "remote", "local"]),
     sample(
         &["collapse"],
@@ -1495,7 +1494,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
     // Wire-format-stable list. PR #251 instrumented the initial set;
     // heddle#272 swept the named-by-persona verbs (stack, goto, fork,
     // revert, purge, redact, stash, clean, discuss, context, review,
-    // cherry-pick, bisect); heddle#641 swept the remaining verbs whose
+    // bisect); heddle#641 swept the remaining verbs whose
     // runtime JSON already emits `output_kind` (abort, adopt, the agent
     // session verbs, continue, daemon stop,
     // doctor, expand, fetch, land, log,
@@ -1545,7 +1544,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "export git",
             "sync git",
             "capture",
-            "cherry-pick",
             "clone",
             "clone",
             // clone_monorepo discriminator: `clone --recursive --output json`

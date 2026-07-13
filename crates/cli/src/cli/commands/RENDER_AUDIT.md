@@ -25,7 +25,6 @@ of each file. Treat the table as a punch list, not a contract.
 | `blame.rs`                                                    | partial    |                                                    |
 | `bridge.rs`                                                   | partial    | Remaining sites are inside the Git projection subcommand dispatcher and the import-progress reporter — still to chip. |
 | `checkpoint.rs`                                               | partial    |                                                    |
-| `cherry_pick.rs`                                              | partial    |                                                    |
 | `clean.rs`                                                    | text-only  |                                                    |
 | `clone.rs`                                                    | partial    |                                                    |
 | `collapse.rs`                                                 | partial    |                                                    |

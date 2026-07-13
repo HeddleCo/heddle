@@ -1526,20 +1526,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["cherry-pick"],
-        category(
-            json_discriminators(
-                opaque_schemas(WORKTREE_MUTATION, &["cherry-pick"]),
-                &[json_discriminator(
-                    Some("cherry-pick"),
-                    "output_kind",
-                    "cherry_pick",
-                )],
-            ),
-            "states",
-        ),
-    ),
-    entry(
         &["clone"],
         front_door(
             json_discriminators(
@@ -4541,7 +4527,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             MaintenanceCommands::Index { .. } => vec!["maintenance", "index"],
             MaintenanceCommands::Monitor { .. } => vec!["maintenance", "monitor"],
         },
-        Commands::CherryPick { .. } => vec!["cherry-pick"],
         Commands::Clone(_) => vec!["clone"],
         Commands::Hook { command } => match command {
             HookCommands::List => vec!["hook", "list"],

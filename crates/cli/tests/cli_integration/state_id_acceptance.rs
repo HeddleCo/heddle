@@ -133,31 +133,6 @@ fn discuss_list_accepts_short_id() {
 }
 
 #[test]
-fn cherry_pick_accepts_short_id() {
-    let temp = setup_repo();
-    // cherry-pick needs a non-current commit. Capture another snapshot,
-    // then cherry-pick the older one (HEAD~1) by short ID.
-    fs::write(temp.path().join("two.txt"), "two\n").unwrap();
-    heddle(&["capture", "-m", "second"], Some(temp.path())).unwrap();
-    let raw = heddle(
-        &["--output", "json", "log", "--limit", "5"],
-        Some(temp.path()),
-    )
-    .unwrap();
-    let log_val: Value = serde_json::from_str(&raw).unwrap();
-    let older_short = log_val["states"][1]["state_id"].as_str().unwrap();
-
-    // `--no-commit` keeps this test scoped to argument parsing — we
-    // care that the verb accepts the short form, not that the merge
-    // semantics succeed.
-    heddle(
-        &["cherry-pick", older_short, "--no-commit"],
-        Some(temp.path()),
-    )
-    .expect("cherry-pick should accept short IDs");
-}
-
-#[test]
 fn revert_accepts_short_id() {
     let temp = setup_repo();
     fs::write(temp.path().join("two.txt"), "two\n").unwrap();
