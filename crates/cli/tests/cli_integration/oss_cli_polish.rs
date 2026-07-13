@@ -6849,10 +6849,16 @@ fn thread_show_hides_agent_internals_until_verbose() {
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
     heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
-    json_value(
-        temp.path(),
+    let reservation = heddle_output_with_env(
         &["agent", "reserve", "--thread", "main", "--output", "json"],
-    );
+        Some(temp.path()),
+        &[
+            ("HEDDLE_AGENT_PROVIDER", "test-provider"),
+            ("HEDDLE_AGENT_MODEL", "test-model"),
+        ],
+    )
+    .expect("reserve thread with explicit agent identity");
+    assert!(reservation.status.success());
 
     let text = heddle(
         &["thread", "show", "main", "--output", "text"],
@@ -6903,7 +6909,9 @@ fn thread_show_hides_agent_internals_until_verbose() {
     )
     .unwrap();
     assert!(
-        verbose.contains("Actor:") && verbose.contains("Session:") && verbose.contains("Harness:"),
+        verbose.contains("Actor: test-provider/test-model")
+            && verbose.contains("Session:")
+            && verbose.contains("Harness:"),
         "verbose thread show should expose agent internals for debugging: {verbose}"
     );
     assert!(
