@@ -129,9 +129,6 @@ schema_registry! {
     (&["export git"], ExportGitSchema),
     (&["import git"], ImportGitSchema),
     (&["sync git"], SyncGitSchema),
-    (&["stash push", "stash pop", "stash apply", "stash drop", "stash clear"], StashMutationSchema),
-    (&["stash list"], StashListSchema),
-    (&["stash show"], StashShowSchema),
     (&["revert"], RevertSchema),
     (&["doctor"], DiagnoseSchema),
     (&["doctor docs"], DoctorDocsSchema),
@@ -2839,35 +2836,6 @@ pub struct SyncGitSchema {
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
-}
-
-// ---- stash / revert -------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct StashMutationSchema {
-    pub message: String,
-    pub stash_index: Option<usize>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct StashListSchema {
-    pub output_kind: String,
-    pub stashes: Vec<StashListEntrySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct StashListEntrySchema {
-    pub index: usize,
-    pub message: Option<String>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct StashShowSchema {
-    pub output_kind: String,
-    pub modified: Vec<String>,
-    pub added: Vec<String>,
-    pub deleted: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

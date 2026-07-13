@@ -11,7 +11,7 @@
 //! worktree. It mirrors `git checkout`'s default of protecting the working copy
 //! and produces a precise error message that points the user at
 //! `heddle commit -m "..."`, `heddle capture -m "..."`, or
-//! `heddle stash push -m "..."` to preserve work first.
+//! `heddle capture -m "..."` to preserve work first.
 
 use anyhow::{Result, anyhow};
 use repo::{Repository, WorktreeStatusDetailed};

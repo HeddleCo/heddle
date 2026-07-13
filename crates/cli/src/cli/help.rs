@@ -667,41 +667,34 @@ If a command refuses, read the first `Next:` line. Heddle fails closed when it
 cannot prove the move is safe.
 "#;
 
-const GIT_CONCEPTS_TOPIC: &str = r#"Git to Heddle concept map.
+const GIT_CONCEPTS_TOPIC: &str = r#"Git and Heddle own different layers.
 
-| Git concept | Heddle concept + semantic difference |
-|-------------|--------------------------------------|
-| `git commit` | `heddle commit -m "..."`: saves Heddle state and, in Git-overlay repos, writes the matching Git Checkpoint. Advanced flows may split this into `heddle capture -m "..."` plus `heddle checkpoint -m "..."`. |
-| Git commit SHA | Heddle `hd-...` change id. Use it with `heddle show`, `log`, and `diff`; Git SHAs remain the interop handle for Git tooling. |
-| `git branch foo` | `heddle start foo` for a working thread, or `heddle thread create foo` for a ref only. A thread is a unit of work with checkout, captured history, metadata, and readiness state, not just a movable ref. |
-| `git checkout foo` / `git switch foo` | `heddle thread switch foo`. Heddle switches between thread checkouts and may auto-capture the thread you leave; raw Git checkout only moves the Git layer. |
-| `git tag v1.0` | `heddle thread marker create v1.0`. A marker names a Heddle State; it is for pinning a state in Heddle history, not for creating a signed or annotated Git tag object. |
-| `git remote add origin <url>` | `heddle remote add origin <url>`. Heddle remotes can be native Heddle endpoints, hosted addresses, local paths, or Git remotes depending on repository mode. |
-| `git push` / `git pull` | `heddle push` / `heddle pull`. Heddle pushes or pulls the selected thread/state through its remote contract and refuses when verification says the mapping is unsafe. |
-| `git fetch` | `heddle fetch`. Fetch updates remote knowledge without making your current thread's checkout silently absorb changes. |
-| `git rebase` to catch up | `heddle sync`. Sync refreshes a stale thread onto its target when replay is clean; conflicts route through `heddle resolve` / `heddle continue`. |
+In a Git Overlay repository, Git owns commits, refs, the index, and ordinary
+worktree operations. Run `git switch`, `git stash`, `git clean`, `git fetch`,
+`git merge`, and `git rebase` directly. Heddle owns coordination and durable
+sidecar data in `.heddle`: captures, provenance, threads, readiness, review,
+and safe landing.
 
-Reconciliation examples:
+Use `heddle init` to add that sidecar to an existing Git checkout. Use
+`heddle adopt` only when you want to import source history and make Heddle the
+repository authority. In a native repository, use `heddle sync`, `ready`,
+`land`, `push`, and `pull` for the managed workflow.
 
-    git branch feature/auth
-    git checkout feature/auth
-    # Heddle: create/resume an isolated unit of work instead
-    heddle start feature/auth --path ../feature-auth
+Common mappings:
 
-    git tag v1.0
-    # Heddle: pin the current State by name
-    heddle thread marker create v1.0
+| Intent | Git Overlay | Native Heddle |
+|--------|-------------|---------------|
+| Save source history | `git commit` | `heddle commit` |
+| Isolate coordinated work | `heddle start` | `heddle start` |
+| Record a granular Heddle savepoint | `heddle capture` | `heddle capture` |
+| Check integration readiness | `heddle ready` | `heddle ready` |
+| Integrate a managed thread | `heddle land` | `heddle land` |
+| Inspect source history | `git log` | `heddle log` |
 
-    git fetch origin
-    git rebase origin/main
-    # Heddle: update remote knowledge, then refresh the current thread when safe
-    heddle fetch origin
-    heddle sync
-
-For an existing Git checkout, start with `heddle status`; `heddle init` creates
-the sidecar while Git commits stay in Git storage. Use `heddle adopt` only when
-you explicitly want to import Git refs and move source authority to Heddle-native
-storage. The retained `.git` is then an explicit Git Projection adapter.
+Heddle does not shadow Git commands. Explicit `import git`, `export git`, and
+`sync git` exist because they translate data between the two authorities.
+After `heddle adopt`, the retained `.git` is an explicit Git Projection adapter;
+it no longer selects repository source authority.
 "#;
 
 const THREADS_TOPIC: &str = "Threads — Heddle's unit of in-progress work.\n\
@@ -744,7 +737,7 @@ workflow states:\n\
   `virtualized` when a mount is available, otherwise `solid`.\n\
 \n\
 A `solid` thread and a `materialized` thread are interchangeable from\n\
-the workflow's point of view — `capture`, `land`, `switch`, etc. behave\n\
+the workflow's point of view — `capture`, `ready`, and `land` behave\n\
 identically. The mode only controls bytes-on-disk semantics.\n\
 \n\
 # Isolated checkout path\n\
@@ -775,22 +768,15 @@ Resolution paths:\n\
 - `heddle land` will refresh-then-merge for you when the replay is\n\
   clean; it fails closed when manual resolution is required.\n\
 \n\
-# `switch` vs. `git checkout` vs. `thread switch`\n\
+# Changing active work\n\
 \n\
-These three look similar but operate at different layers:\n\
-\n\
-- `heddle thread switch <name>` — change which *thread* is active.\n\
+- `heddle thread switch <name>` changes which *thread* is active.\n\
   Each thread has its own checkout; switching may auto-capture\n\
   outstanding work on the thread you're leaving. Pair with the shell\n\
   hook (`heddle shell init`) to auto-cd into the target thread's\n\
   directory.\n\
-- `heddle switch <state>` — move the *current thread's* worktree to a\n\
-  specific captured state. It refuses with uncommitted changes unless\n\
-  `--force` is passed; it does not change which thread is active.\n\
-- `git checkout` — operates on the git-overlay branch and index\n\
-  directly. Heddle's thread metadata, captured state, and workflow\n\
-  state are not updated. Reach for it only when you specifically want\n\
-  the git-layer view; the thread-aware verbs are the supported path.\n\
+- In Git Overlay, `git switch` and `git checkout` remain Git operations.\n\
+  They do not change Heddle's active thread or coordination metadata.\n\
 \n\
 # Capture vs. checkpoint\n\
 \n\
@@ -831,40 +817,33 @@ Core loop:\n\
 \n\
     heddle remote add origin <url-or-path>\n\
     heddle remote set-default origin\n\
-    heddle fetch\n\
     heddle push\n\
     heddle pull\n\
     heddle verify\n\
 \n\
 Remote values may be hosted endpoints, Git URLs, file URLs, or local bare Git\n\
-paths depending on the workflow. Top-level `fetch`, `push`, and `pull` use the\n\
-default remote unless a positional remote name is supplied, for example\n\
-`heddle fetch backup`. `heddle verify` reports repository verification state\n\
-before and after remote operations.\n\
+paths depending on the workflow. `push` and `pull` use the default remote\n\
+unless a positional remote is supplied. In Git Overlay, use `git fetch` for\n\
+a Git-only remote update. `heddle verify` reports repository verification\n\
+state before and after Heddle remote operations.\n\
 \n\
 When a remote action is unsafe, Heddle reports the blocker and one primary\n\
 next command instead of falling back to raw Git.\n";
 
 const GIT_DEPENDENCIES_TOPIC: &str = "Git executable dependencies — what works without `git` on PATH.\n\
 \n\
-Supported Git Projection workflows use native/library paths and are tested with\n\
-`PATH` stripped of `git`: `init`, `status`, local/bare `clone`, `fetch`,\n\
-`push`, `pull`, `import git`, `export git`, `thread list`, `workspace`,\n\
-`log`, `show`, `diff`, `checkpoint`, `merge`,\n\
-`ready`, and `fsck`.\n\
-\n\
-Heddle is Git-compatible, not Git-binary-dependent. Public CLI runtime paths\n\
-must not spawn a `git` process; Git-format reads, writes, transport, index,\n\
-and ref updates go through native/library code.\n\
+Heddle's own commands use native/library paths for Git-format projection and\n\
+do not shell out implicitly. In Git Overlay, ordinary Git operations belong to\n\
+Git itself, so `git switch`, `git stash`, `git clean`, `git fetch`, `git merge`,\n\
+and `git rebase` naturally require the Git executable.\n\
 \n\
 If Heddle detects an externally-started raw Git sequencer operation, it leaves\n\
 Git metadata, refs, index, and worktree files unchanged and reports a Heddle\n\
 preservation command. Finish or abort that operation with the Git-compatible\n\
 tool that started it, then run `heddle verify`.\n\
 \n\
-Unsupported native Git-overlay capabilities, such as filtered/lazy Git clones,\n\
-fail closed with recovery advice instead of silently invoking a `git` binary.\n\
-`merge --git-commit` writes Git objects and refs natively.\n\
+Unsupported projection capabilities fail closed instead of silently invoking\n\
+Git. Heddle never pretends a Git operation was a native Heddle operation.\n\
 \n\
 Run `heddle help --output json` to inspect the public command surface, and\n\
 `heddle doctor` / `heddle fsck --full` when a repository reports integrity or\n\

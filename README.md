@@ -44,7 +44,7 @@ Heddle's CLI follows five operating principles — verification, disposability, 
 - Explicit principal and agent attribution
 - Provenance-backed local blame with rewrite preservation across snapshot, collapse, and merge flows
 - Semantic diff and compare
-- Semantic merge by default: `heddle merge` uses AST-item-level merge within a file when built with the default `semantic` feature (first-class Rust/Python/JS/TS; Go/C/C++/Java opt-in); `--no-semantic` opts out to hunk-only merge; does not auto-rewrite cross-file imports or call-sites
+- Semantic integration by default: `ready`, `land`, and `sync` use AST-item-level merge within a file when built with the default `semantic` feature (first-class Rust/Python/JS/TS; Go/C/C++/Java opt-in); the engine does not auto-rewrite cross-file imports or call-sites
 - Automatic state signing: device-local ed25519 identity minted on first use signs every authored state — provenance with no manual key setup
 - Git overlay: direct `.git` integration, explicit native adoption, import, export, sync
 - Byte-identical Git round-trip, CI-enforced: adopt→export reproduces identical commit/tree/blob/tag SHAs with a `git fsck`-clean result, gated per-PR by 10 deterministic fixtures

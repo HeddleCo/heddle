@@ -1014,21 +1014,21 @@ fn command_catalog_exposes_agent_metadata_for_options() {
     let json = heddle(&["help", "--output", "json"], None).unwrap();
     let parsed: Value = serde_json::from_str(&json).unwrap();
     assert!(
-        !parsed["recommended_action_placeholders"]
+        parsed["recommended_action_placeholders"]
             .as_array()
             .expect("placeholder registry should be cataloged")
             .iter()
             .any(|action| action
                 .as_str()
-                .is_some_and(|action| action.starts_with("git "))),
-        "command catalog should not recommend Git CLI recovery in a no-git runtime: {parsed}"
+                .is_some_and(|action| action == "git switch <branch>")),
+        "Git Overlay recovery should route Git-owned work directly to Git: {parsed}"
     );
     for placeholder in [
         "heddle capture -m \"...\"",
         "heddle commit -m \"...\"",
-        "heddle commit -m \"...\"",
-        "heddle stash push -m \"...\"",
-        "heddle switch <branch>",
+        "git switch <branch>",
+        "heddle ready --thread <thread>",
+        "heddle land --thread <thread>",
         "heddle clone <remote> <fresh-path>",
     ] {
         assert!(
@@ -1167,27 +1167,12 @@ fn command_catalog_exposes_agent_metadata_for_options() {
     assert_eq!(maintenance_gc["writes_heddle_refs"], false);
     assert_eq!(maintenance_gc["side_effect_class"], "object_gc");
 
-    let clean = commands
-        .iter()
-        .find(|entry| entry["display"] == "clean")
-        .expect("clean should be cataloged");
-    assert_eq!(clean["writes_worktree"], true);
-    assert_eq!(clean["writes_heddle_refs"], false);
-    assert_eq!(clean["destructive_data"], true);
-    assert_eq!(clean["side_effect_class"], "destructive_worktree_mutation");
-
-    let stash_drop = commands
-        .iter()
-        .find(|entry| entry["display"] == "stash drop")
-        .expect("stash drop should be cataloged");
-    assert_eq!(stash_drop["writes_worktree"], false);
-    assert_eq!(stash_drop["writes_heddle_refs"], false);
-    assert_eq!(stash_drop["destructive_data"], true);
-    assert_eq!(stash_drop["side_effect_class"], "destructive_data");
-    assert_eq!(
-        stash_drop["side_effects"],
-        serde_json::json!(["destructive_data"])
-    );
+    for removed in ["clean", "stash drop"] {
+        assert!(
+            commands.iter().all(|entry| entry["display"] != removed),
+            "Git-owned command `{removed}` must not be cataloged"
+        );
+    }
 
     let start = commands
         .iter()
@@ -8910,19 +8895,16 @@ fn command_catalog_exposes_public_surface_for_agents() {
         );
         assert_eq!(entry["help_visibility"], "advanced");
     }
-    let merge = commands
+    assert!(
+        commands.iter().all(|entry| entry["display"] != "merge"),
+        "manual merge must stay behind ready/land"
+    );
+    let ready = commands
         .iter()
-        .find(|entry| entry["display"] == "merge")
-        .expect("merge command should be cataloged");
-    assert_eq!(
-        merge["command_action"]["action"],
-        "heddle merge <thread> --preview"
-    );
-    assert_eq!(merge["command_action"]["argv"], Value::Null);
-    assert_eq!(
-        merge["command_action"]["template"]["argv_template"],
-        heddle_argv_json(["merge", "<thread>", "--preview"])
-    );
+        .find(|entry| entry["display"] == "ready")
+        .expect("ready command should be cataloged");
+    assert_eq!(ready["command_action"]["action"], "heddle ready");
+    assert_eq!(ready["command_action"]["executable"], true);
     let land = commands
         .iter()
         .find(|entry| entry["display"] == "land")
@@ -8959,26 +8941,12 @@ fn command_catalog_exposes_public_surface_for_agents() {
         .expect("import git should be cataloged");
     assert_eq!(bridge_import["canonical_action"], Value::Null);
     assert_eq!(bridge_import["canonical_command"], Value::Null);
-    let stash_pop = commands
-        .iter()
-        .find(|entry| entry["display"] == "stash pop")
-        .expect("stash pop command should be cataloged");
-    assert_eq!(stash_pop["canonical_action"]["command"], "undo");
-    assert_eq!(stash_pop["canonical_action"]["kind"], "conceptual_home");
-    assert_eq!(stash_pop["canonical_action"]["executable"], false);
-    let stash_push = commands
-        .iter()
-        .find(|entry| entry["display"] == "stash push")
-        .expect("stash push command should be cataloged");
-    assert_eq!(stash_push["surface"], "git_projection");
-    assert_eq!(stash_push["help_visibility"], "git_projection");
-    assert_eq!(stash_push["canonical_action"]["command"], "capture");
-    assert_eq!(stash_push["canonical_action"]["kind"], "workflow");
-    assert_eq!(stash_push["canonical_action"]["executable"], false);
-    assert_eq!(
-        stash_push["canonical_action"]["template"]["argv_template"],
-        heddle_argv_json(["capture", "-m", "<message>"])
-    );
+    for removed in ["stash pop", "stash push"] {
+        assert!(
+            commands.iter().all(|entry| entry["display"] != removed),
+            "Git-owned command `{removed}` must not be cataloged"
+        );
+    }
     assert!(
         commands
             .iter()

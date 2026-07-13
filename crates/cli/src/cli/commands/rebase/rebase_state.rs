@@ -381,7 +381,7 @@ mod tests {
 
     /// Round-trip cover: the `pending_advances` vec must survive a
     /// save+load through the line-based REBASE_STATE file. This is the
-    /// load-bearing guarantee for `heddle rebase --continue` after a
+    /// load-bearing guarantee for `heddle continue` after a
     /// conflict pause — the buffered FFs from before the pause need
     /// to come back byte-identical so the eventual `flush_rebase_batch`
     /// emits the same oplog batch as a no-pause rebase would have.

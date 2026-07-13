@@ -1369,7 +1369,7 @@ pub async fn cmd_agent_capture(
                 plan.session
             ),
             format!(
-                "Switch to the reserved thread with `heddle switch {reserved_thread}` before capturing."
+                "Switch to the reserved thread with `heddle thread switch {reserved_thread}` before capturing."
             ),
             format!(
                 "session {} owns thread {reserved_thread}, current checkout is attached to {current_thread}",
@@ -1377,8 +1377,8 @@ pub async fn cmd_agent_capture(
             ),
             "capturing from the wrong thread would attribute work to a reservation that does not own this checkout",
             "the session heartbeat was refreshed, but no capture, refs, or worktree changes were applied",
-            format!("heddle switch {reserved_thread}"),
-            vec![format!("heddle switch {reserved_thread}")],
+            format!("heddle thread switch {reserved_thread}"),
+            vec![format!("heddle thread switch {reserved_thread}")],
         )));
     }
 

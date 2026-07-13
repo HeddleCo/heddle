@@ -15,10 +15,6 @@ pub(crate) fn print_next_step_dim(action: &str) {
     print_dim_action("Next step", action, 0);
 }
 
-pub(crate) fn print_nested_next(action: &str) {
-    print_bold_action("Next", action, 2);
-}
-
 pub(crate) fn print_command(action: &str) {
     print_bold_action("command", action, 2);
 }

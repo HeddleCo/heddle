@@ -71,7 +71,8 @@ For the common agent flow, prefer:
 ```bash
 heddle start feature/auth --task "Implement auth middleware"
 heddle capture -m "Implement auth middleware"
-heddle merge feature/auth --preview
+heddle ready --thread feature/auth
+heddle land --thread feature/auth
 ```
 
 Important current behavior:

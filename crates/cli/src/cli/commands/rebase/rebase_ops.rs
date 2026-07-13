@@ -118,7 +118,7 @@ fn replay_commits_internal(
                 )? && cli.is_some()
                 {
                     println!(
-                        "Conflict applying {}. Fix conflicts and run 'heddle rebase --continue'",
+                        "Conflict applying {}. Fix conflicts and run 'heddle continue'",
                         commit_id.short()
                     );
                 }
@@ -243,7 +243,7 @@ fn resume_manual_resolution_if_present(
         )? && cli.is_some()
         {
             println!(
-                "Conflict applying {}. Capture a manual resolution, then run 'heddle rebase --continue'",
+                "Conflict applying {}. Capture a manual resolution, then run 'heddle continue'",
                 pending_commit.short()
             );
         }
@@ -532,7 +532,7 @@ fn try_auto_merge_textual_change(
 ///
 /// Routes through the AST-aware function-level merge driver from heddle#68
 /// (`semantic::merge_driver::semantic_three_way_merge`) — the same driver the
-/// `heddle merge` path uses by default (see
+/// the managed landing path uses by default (see
 /// `merge::merge_trees`, `MergeStrategy::Semantic`).
 /// `path` selects the language; parseable source merges per-item by stable
 /// identity, so a structural reshape (function reorder / add / delete) that
@@ -554,7 +554,7 @@ fn auto_merge_text_lines(
     // `current` is "ours" (the rebased-onto state) and `incoming` is "theirs"
     // (the commit being replayed); the markers are only consumed on a conflict,
     // which this caller maps to `None`, but keep the labelling consistent with
-    // the `heddle merge` path for any future surfacing.
+    // the managed landing path for future surfacing.
     let markers = merge::ConflictMarkers {
         ours: "CURRENT",
         theirs: "INCOMING",

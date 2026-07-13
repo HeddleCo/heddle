@@ -15,8 +15,6 @@ mod commands_hook;
 mod commands_integration;
 mod commands_main;
 mod commands_oplog;
-#[cfg(feature = "client")]
-mod commands_prove;
 mod commands_query;
 mod commands_redact;
 mod commands_remote;
@@ -24,9 +22,6 @@ mod commands_review;
 #[cfg(feature = "semantic")]
 mod commands_semantic;
 mod commands_shell;
-#[cfg(feature = "client")]
-mod commands_spool;
-mod commands_stash;
 mod commands_thread;
 mod commands_visibility;
 mod output_mode;
@@ -45,20 +40,17 @@ pub use commands_args::{
     AgentTaskCreateArgs, AgentTaskListArgs, AgentTaskShowArgs, AgentTaskStatusArg,
     AgentTaskUpdateArgs, CloneArgs, CollapseArgs, CommitArgs, DiagnoseArgs, DiffArgs, DoctorArgs,
     DoctorCommands, DoctorDocsArgs, DoctorSchemasArgs, ExpandArgs, InitArgs, LandArgs, LogArgs,
-    MergeArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
-    SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs,
-    SnapshotArgs, SwitchArgs, SyncArgs, ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs,
-    ThreadCapturesArgs, ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs,
-    ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs,
-    ThreadShowArgs, ThreadStartArgs, TimelineArgs, TimelineCommands, TimelineForkArgs,
-    TimelineRecordFinishArgs, TimelineRecordStartArgs, TimelineRecordToolArgs, TimelineRecoverArgs,
-    TimelineResetArgs, TimelineStatusArgs, TimelineTargetArgs, TryArgs, UndoArgs, WatchArgs,
-    WorkspaceModeArg,
+    PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
+    SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, SnapshotArgs, SyncArgs,
+    ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs,
+    ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs,
+    ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs,
+    TimelineArgs, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs,
+    TimelineRecordStartArgs, TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs,
+    TimelineStatusArgs, TimelineTargetArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
 };
 #[cfg(feature = "client")]
-pub use commands_client::{
-    AuthCommands, SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs,
-};
+pub use commands_client::AuthCommands;
 pub use commands_context::ContextCommands;
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 pub use commands_context::ContextReasonCommands;
@@ -72,14 +64,10 @@ pub use commands_hook::{HookCommands, HookInstallSource};
 pub use commands_integration::{
     IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs, IntegrationTargetArgs,
 };
-#[cfg(feature = "client")]
-pub use commands_main::PresenceCommands;
 pub use commands_main::{
     ActorCommands, Commands, DaemonCommands, FsckRepairTarget, MaintenanceCommands, SessionCommands,
 };
 pub use commands_oplog::OplogCommands;
-#[cfg(feature = "client")]
-pub use commands_prove::{ProveArgs, ProveCommands, ProveListArgs, ProveSubmitArgs};
 pub use commands_query::QueryArgs;
 pub use commands_redact::{
     PurgeApplyArgs, PurgeCommands, PurgeListArgs, RedactApplyArgs, RedactCommands, RedactListArgs,
@@ -93,11 +81,6 @@ pub use commands_review::{
 #[cfg(feature = "semantic")]
 pub use commands_semantic::{HotEventKindArg, HotSpotKeyArg, SemanticCommands};
 pub use commands_shell::{CompletionSubject, ShellCommands, ShellKind};
-#[cfg(feature = "client")]
-pub use commands_spool::{
-    SpoolAttachArgs, SpoolChildrenArgs, SpoolCommands, SpoolDetachArgs, SpoolHistoryArgs,
-};
-pub use commands_stash::StashCommands;
 pub use commands_thread::{
     ThreadCleanupArgs, ThreadCommands, ThreadListArgs, ThreadMarkerCommands,
 };

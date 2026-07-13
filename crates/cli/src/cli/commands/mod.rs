@@ -12,7 +12,6 @@ mod blame;
 mod checkpoint;
 mod cherry_pick;
 mod child_env;
-mod clean;
 mod clone;
 mod collapse;
 mod command_catalog;
@@ -27,7 +26,6 @@ mod doctor_docs;
 mod doctor_schemas;
 mod error_envelope;
 mod expand;
-mod fetch;
 mod ff_record;
 mod fsck;
 mod gc;
@@ -35,7 +33,6 @@ mod git_overlay_txn;
 mod git_projection;
 #[cfg(feature = "git-overlay")]
 mod git_projection_io;
-mod goto;
 pub(crate) mod heddleignore_defaults;
 mod history_target;
 mod hook;
@@ -53,9 +50,6 @@ mod next_action;
 mod operator_core;
 mod operator_loop;
 mod oplog;
-mod oss;
-#[cfg(feature = "client")]
-mod prove;
 mod purge;
 mod query;
 mod ready_cmd;
@@ -74,11 +68,7 @@ mod session;
 mod shell;
 mod show;
 pub(crate) mod snapshot;
-#[cfg(feature = "client")]
-mod spool;
 mod start_atomic;
-mod stash;
-mod stash_ops;
 mod status;
 mod thread;
 #[cfg(feature = "client")]
@@ -117,7 +107,6 @@ pub use agent_cmd::{
 };
 pub use checkpoint::run as cmd_checkpoint;
 pub use cherry_pick::cmd_cherry_pick;
-pub use clean::cmd_clean;
 pub use clone::{
     CLONE_CONNECTION_OUTPUT_KIND, CLONE_OUTPUT_KIND, GitOverlayBlobHydrator, cmd_clone,
     register_git_overlay_factory,
@@ -148,22 +137,15 @@ pub use error_envelope::{
     print_error_with_hint, print_error_with_hint_with_config, print_parse_error_json_envelope,
 };
 pub use expand::cmd_expand;
-pub use fetch::cmd_fetch;
 pub use fsck::cmd_fsck;
 pub use gc::cmd_gc;
-pub use git_projection::{cmd_commit_git_projection, cmd_switch_git_projection};
+pub use git_projection::cmd_commit_git_projection;
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 pub use git_projection_io::cmd_context_reason_git;
 #[cfg(feature = "git-overlay")]
 pub use git_projection_io::{cmd_export_git, cmd_import_git, cmd_sync_git};
 #[cfg(feature = "client")]
 pub use heddle_client::cmd_auth;
-#[cfg(feature = "client")]
-pub use heddle_client::cmd_support;
-#[cfg(feature = "client")]
-pub use heddle_client::{
-    PublisherConfig, cmd_presence_publish, resolve_publisher_config, run_publisher,
-};
 pub use hook::cmd_hook;
 pub use index::cmd_index;
 pub use init::cmd_init;
@@ -172,20 +154,14 @@ pub use integration::{
 };
 pub use log::{LogCommandOptions, cmd_log};
 pub use maintenance::cmd_maintenance;
-pub use merge::cmd_merge;
 pub(crate) use merge::{bench_detect_renames, bench_find_merge_base, bench_three_way_merge};
 pub use monitor::cmd_monitor;
 pub use operator_core::operator_emission_output_kinds;
 pub use operator_loop::{cmd_abort, cmd_continue, cmd_sync_smart};
 pub use oplog::cmd_oplog;
-#[cfg(feature = "git-overlay")]
-pub use oss::cmd_git_overlay_guide;
-#[cfg(feature = "client")]
-pub use prove::cmd_prove;
 pub use purge::cmd_purge;
 pub use query::run as cmd_query;
 pub use ready_cmd::cmd_ready;
-pub use rebase::cmd_rebase;
 pub use redact::cmd_redact;
 pub use remote::{cmd_pull, cmd_push, cmd_remote};
 pub use resolve::cmd_resolve;
@@ -202,9 +178,6 @@ pub use session::{
 pub use shell::cmd_shell;
 pub use show::cmd_show;
 pub use snapshot::{SnapshotAgentOverrides, cmd_snapshot};
-#[cfg(feature = "client")]
-pub use spool::cmd_spool;
-pub use stash::cmd_stash;
 pub use status::cmd_status;
 pub use thread::{cmd_start, cmd_thread_show};
 pub use thread_cmd::cmd_thread;

@@ -11,7 +11,7 @@ use heddle_core::{
     staged_commit_summary as core_staged_commit_summary, tree_leaf_name,
 };
 use objects::{
-    object::{Agent, Blob, ChangeId, ContentHash, Principal, ThreadName, Tree, TreeEntry},
+    object::{Agent, Blob, ChangeId, ContentHash, Principal, Tree, TreeEntry},
     store::ObjectStore,
     worktree::{WorktreeIgnoreMatcher, build_worktree_ignore},
 };
@@ -35,14 +35,10 @@ use super::{
         placeholder_principal_warning,
         preflight_large_capture_for_git_projection_commit_with_worktree_status, resolve_principal,
     },
-    thread_cmd::cmd_thread,
     verification_health::RepositoryVerificationState,
 };
 use crate::{
-    cli::{
-        Cli, CommitArgs, SwitchArgs, ThreadCommands, should_output_json, style,
-        worktree_status_options,
-    },
+    cli::{Cli, CommitArgs, should_output_json, style, worktree_status_options},
     config::UserConfig,
     perf::{ProfileField, emit_profile, profile_enabled},
 };
@@ -1058,58 +1054,6 @@ fn render_git_projection_commit(
 
 fn commit_scope_text(plan: &GitIndexPlan) -> &'static str {
     core_commit_scope_text(plan.commit_mode)
-}
-
-pub async fn cmd_switch_git_projection(cli: &Cli, args: SwitchArgs) -> Result<()> {
-    if args.create {
-        let path = args.target.replace('/', "-");
-        let primary = format!("heddle start {} --path ../{}", args.target, path);
-        return Err(anyhow!(RecoveryAdvice::safety_refusal(
-            "git_checkout_create_branch",
-            "`heddle switch -c` / `git checkout -b` are guided to Heddle's isolated thread flow",
-            format!(
-                "Create a Heddle thread with `{primary}` so the new work has its own checkout, provenance, and ready/land path."
-            ),
-            "Git-style branch creation would hide whether the user wants an in-place thread or an isolated checkout",
-            "Heddle did not create a branch, move HEAD, or write the worktree",
-            "repository refs, metadata, and worktree files were left unchanged",
-            primary.clone(),
-            vec![primary],
-        )));
-    }
-    let repo = cli.open_repo()?;
-    if refs::validate_ref_name(&args.target).is_ok()
-        && repo
-            .refs()
-            .get_thread(&ThreadName::new(&args.target))?
-            .is_some()
-    {
-        return cmd_thread(
-            cli,
-            ThreadCommands::Switch {
-                name: args.target,
-                print_cd_path: args.print_cd_path,
-                force: args.force,
-            },
-        )
-        .await;
-    }
-    if args.print_cd_path {
-        return Err(anyhow!(RecoveryAdvice::safety_refusal(
-            "switch_print_cd_path_requires_thread",
-            "`--print-cd-path` only applies when switching to a thread",
-            "Use `heddle switch --print-cd-path <thread>` for a materialized thread, or omit `--print-cd-path` when checking out a state.",
-            "the target did not resolve to a Heddle thread with a checkout path",
-            "checking out a state would move the worktree but could not report a thread checkout path",
-            "Heddle did not move HEAD or write the worktree",
-            "heddle switch <thread> --print-cd-path",
-            vec![
-                "heddle switch <thread> --print-cd-path".to_string(),
-                "heddle switch <state>".to_string(),
-            ],
-        )));
-    }
-    super::goto::cmd_switch_state_checkout(cli, args.target, args.force)
 }
 
 #[cfg(test)]

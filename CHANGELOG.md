@@ -195,7 +195,7 @@ public API was removed or changed in a breaking way.
 
 ### Fixed
 
-- **Rebase auto-merge uses the semantic driver.** `heddle rebase`'s content
+- **Replay auto-merge uses the semantic driver.** The legacy `rebase` command's content
   auto-merge now routes through the function-level semantic merge driver
   instead of the line-level text path, so structural reshapes (function
   reorder/add/delete) resolve cleanly instead of emitting a wide conflict
@@ -485,7 +485,7 @@ addition.
     Propagation runs unconditionally on every state walk, so the
     redact-after-peer-fetched flow re-syncs correctly even when no new
     objects are copied.
-  - `heddle fetch <remote>` no longer short-circuits when the state is
+  - The legacy `fetch <remote>` path no longer short-circuits when the state is
     already present locally; the redaction sweep needs the walk to run.
 - **Ignore-hint on `redact`/`purge` output** (#12). After a
   redact/purge, the working-tree file is unchanged — the next

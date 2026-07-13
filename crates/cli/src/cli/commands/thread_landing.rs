@@ -6,34 +6,13 @@ use repo::Repository;
 use super::command_catalog::{heddle_action, thread_flag_args};
 
 pub(crate) fn merge_preview_command(thread_id: &str) -> String {
-    // `merge` takes the thread as a POSITIONAL. A leading-dash id needs the `--`
-    // end-of-options separator (positionals can't use the `=` form), so the
-    // flags move ahead of it. (heddle#464 close-the-class.)
-    if thread_id.starts_with('-') {
-        heddle_action(vec![
-            "merge".to_string(),
-            "--preview".to_string(),
-            "--".to_string(),
-            thread_id.to_string(),
-        ])
-    } else {
-        heddle_action(["merge", thread_id, "--preview"])
-    }
+    let mut argv = vec!["ready".to_string()];
+    argv.extend(thread_flag_args(thread_id));
+    heddle_action(argv)
 }
 
 pub(crate) fn switch_thread_command(thread_id: &str) -> String {
-    // `switch` takes the thread as a POSITIONAL, so a leading-dash id needs the
-    // `--` end-of-options separator (the `=` form is flag-only). (heddle#464
-    // close-the-class.)
-    if thread_id.starts_with('-') {
-        heddle_action(vec![
-            "switch".to_string(),
-            "--".to_string(),
-            thread_id.to_string(),
-        ])
-    } else {
-        heddle_action(["switch", thread_id])
-    }
+    heddle_action(["thread", "switch", thread_id])
 }
 
 pub(crate) fn land_command_for_thread(repo: &Repository, thread_id: &str) -> String {
@@ -85,7 +64,7 @@ mod tests {
     fn landing_commands_are_stable_and_copy_pasteable() {
         assert_eq!(
             merge_preview_command("feature/demo"),
-            "heddle merge feature/demo --preview"
+            "heddle ready --thread feature/demo"
         );
         assert_eq!(
             land_local_command("feature/demo"),
@@ -101,7 +80,7 @@ mod tests {
         );
         assert_eq!(
             merge_preview_command("feature with spaces"),
-            "heddle merge 'feature with spaces' --preview"
+            "heddle ready --thread 'feature with spaces'"
         );
     }
 
@@ -140,19 +119,19 @@ mod tests {
             land_push_remote_command(id, "origin"),
             "heddle land '--thread=-foo' --push --remote origin"
         );
-        assert_eq!(merge_preview_command(id), "heddle merge --preview -- -foo");
-        assert_eq!(switch_thread_command(id), "heddle switch -- -foo");
+        assert_eq!(merge_preview_command(id), "heddle ready '--thread=-foo'");
+        assert_eq!(switch_thread_command(id), "heddle thread switch -foo");
     }
 
     #[test]
     fn switch_thread_command_is_stable_and_copy_pasteable() {
         assert_eq!(
             switch_thread_command("feature/demo"),
-            "heddle switch feature/demo"
+            "heddle thread switch feature/demo"
         );
         assert_eq!(
             switch_thread_command("feature with spaces"),
-            "heddle switch 'feature with spaces'"
+            "heddle thread switch 'feature with spaces'"
         );
     }
 }

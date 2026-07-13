@@ -19,7 +19,6 @@ use super::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
         repository_verification_primary_command,
     },
-    worktree_safety::ensure_worktree_clean,
 };
 use crate::{
     cli::{Cli, JsonOutputMode, json_output_mode_for_kind},
@@ -77,38 +76,6 @@ pub(crate) enum OperatorContinueStatus {
     Continued,
     Completed,
     Blocked,
-}
-
-pub fn cmd_rebase(
-    cli: &Cli,
-    thread: Option<&str>,
-    abort: bool,
-    cont: bool,
-    force: bool,
-) -> Result<()> {
-    // Same metadata-resolution pattern as `cmd_merge`: open at CWD to
-    // discover the active thread, then re-open at that thread's
-    // metadata-recorded worktree so commits are replayed into the
-    // thread's actual checkout. See `Repository::active_worktree_path`
-    // for fallback semantics.
-    let cwd_repo = cli.open_repo()?;
-    let target_path = cwd_repo.active_worktree_path()?;
-    let repo = if target_path == *cwd_repo.root() {
-        cwd_repo
-    } else {
-        Repository::open(&target_path)?
-    };
-
-    // Rebase replays commits onto another thread by mutating the worktree.
-    // The guard runs only on the entry path (not `--abort` / `--continue`,
-    // which need access to the in-progress state on disk). `--force` is
-    // threaded down to the repo apply layer as the explicit opt-in to discard
-    // local worktree changes during the fast-forward materialization.
-    if !force && !abort && !cont {
-        ensure_worktree_clean(&repo, "rebase")?;
-    }
-
-    run_rebase(&repo, thread, abort, cont, force, Some(cli))
 }
 
 pub(crate) fn cmd_rebase_silent(
@@ -391,14 +358,14 @@ fn rebase_target_required_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "rebase_target_required",
         "Refusing to rebase: target thread required",
-        "Inspect available threads with `heddle thread list`, then run `heddle rebase <thread>`.",
+        "Inspect available threads with `heddle thread list`, then run `heddle sync --thread <thread>`.",
         "rebase was requested without a target thread",
         "rebase would need to move the current thread and worktree onto a specific target",
         "repository state was left unchanged",
         "heddle thread list",
         vec![
             "heddle thread list".to_string(),
-            "heddle rebase <thread>".to_string(),
+            "heddle sync --thread <thread>".to_string(),
         ],
     )
 }

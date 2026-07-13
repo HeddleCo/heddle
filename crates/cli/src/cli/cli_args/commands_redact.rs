@@ -43,7 +43,7 @@ pub enum RedactCommands {
 #[derive(Clone, Debug, Subcommand)]
 pub enum RedactTrustCommands {
     /// Add an operator public key to `[redact] trusted_keys` in
-    /// `.heddle/config.toml`. Subsequent `heddle fetch`/`clone`
+    /// `.heddle/config.toml`. Subsequent `git fetch` or `heddle clone`
     /// invocations will accept signed redactions from that key.
     Add(RedactTrustAddArgs),
     /// List the currently-trusted operator keys.

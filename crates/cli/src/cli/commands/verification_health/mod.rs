@@ -32,7 +32,8 @@ use repo::{
 use super::{
     advice::RecoveryAdvice,
     command_catalog::{
-        ActionFields, build_command_catalog, heddle_action, recommended_action_template,
+        ActionFields, build_command_catalog, checked_action_from_argv, heddle_action,
+        recommended_action_template,
     },
     schemas::opaque_schema_verbs,
 };
@@ -737,9 +738,9 @@ fn detached_head_primary_recovery(repo: &Repository) -> String {
             .filter(|tip| tip.history_imported)
             .find(|tip| tip.git_commit == detached_commit)
     {
-        return heddle_action(["switch", tip.branch.as_str()]);
+        return checked_action_from_argv(["git", "switch", tip.branch.as_str()]);
     }
-    "heddle switch <branch>".to_string()
+    "git switch <branch>".to_string()
 }
 pub(crate) fn build_plain_git_verification_probe(
     start: &Path,
@@ -1081,8 +1082,8 @@ pub(crate) fn remote_drift_decision(
                 return RemoteDriftDecision {
                     status,
                     verified_as_clean: false,
-                    primary_action: Some("heddle fetch".to_string()),
-                    recovery_commands: vec!["heddle fetch".to_string()],
+                    primary_action: Some("git fetch".to_string()),
+                    recovery_commands: vec!["git fetch".to_string()],
                     requires_clean_worktree: false,
                 };
             }

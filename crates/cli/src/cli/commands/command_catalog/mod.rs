@@ -12,6 +12,8 @@ use heddle_core::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
+#[cfg(feature = "client")]
+use crate::cli::AuthCommands;
 #[cfg(feature = "semantic")]
 use crate::cli::SemanticCommands;
 #[cfg(feature = "git-overlay")]
@@ -20,15 +22,13 @@ use crate::cli::{
     ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
     HookCommands, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
     RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
-    StashCommands, ThreadCommands, ThreadMarkerCommands, TimelineCommands, VisibilityCommands,
+    ThreadCommands, ThreadMarkerCommands, TimelineCommands, VisibilityCommands,
     cli_args::{
         AgentFanoutCommands, AgentTaskCommands, DiscussCommands, ReviewCommands,
         TransactionCommands,
     },
     render::shell_quote,
 };
-#[cfg(feature = "client")]
-use crate::cli::{AuthCommands, PresenceCommands, ProveCommands, SpoolCommands, SupportCommands};
 #[cfg(feature = "git-overlay")]
 use crate::cli::{ExportCommands, ImportCommands};
 
@@ -392,7 +392,6 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle start <name> --path <empty-path>",
     "heddle start <name> --path ../<name>",
     "heddle actor show <session>",
-    "heddle stash push -m \"...\"",
     "heddle thread show <THREAD>",
     // Remote setup requires filling in a real name and URL after
     // inspecting current configuration.
@@ -408,11 +407,9 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     // Shallow Git import recovery requires choosing a complete checkout.
     "heddle import git --path <full-git-repo>",
     "heddle import git --path <full-git-repo> --ref <ref>",
-    // Detached Git-overlay recovery requires the caller to choose the
-    // branch to reattach before retrying branch-writing operations.
-    "heddle switch <branch>",
-    // Merge recovery placeholders require choosing the source thread.
-    "heddle merge <thread> --git-commit",
+    "git switch <branch>",
+    "heddle ready --thread <thread>",
+    "heddle land --thread <thread>",
 ];
 
 const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
@@ -598,12 +595,6 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         false,
     ),
     (
-        "heddle stash push -m \"...\"",
-        &["heddle", "stash", "push", "-m", "<message>"],
-        &["message"],
-        true,
-    ),
-    (
         "heddle remote add <name> <url>",
         &["heddle", "remote", "add", "<name>", "<url>"],
         &["name", "url"],
@@ -616,8 +607,14 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         false,
     ),
     (
-        "heddle merge <thread> --git-commit",
-        &["heddle", "merge", "<thread>", "--git-commit"],
+        "heddle ready --thread <thread>",
+        &["heddle", "ready", "--thread", "<thread>"],
+        &["thread"],
+        true,
+    ),
+    (
+        "heddle land --thread <thread>",
+        &["heddle", "land", "--thread", "<thread>"],
         &["thread"],
         false,
     ),
@@ -674,8 +671,8 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         false,
     ),
     (
-        "heddle switch <branch>",
-        &["heddle", "switch", "<branch>"],
+        "git switch <branch>",
+        &["git", "switch", "<branch>"],
         &["branch"],
         false,
     ),
@@ -784,14 +781,6 @@ const NETWORK_METADATA_MUTATION_NO_OP_ID: CommandContract = CommandContract {
     ..METADATA_MUTATION_NO_OP_ID
 };
 
-const NETWORK_METADATA_MUTATION_TEXT: CommandContract = CommandContract {
-    supports_json: false,
-    supports_op_id: false,
-    network_io: true,
-    json_kind: "none",
-    ..METADATA_MUTATION
-};
-
 const CONFIG_MUTATION_NO_OP_ID: CommandContract = CommandContract {
     supports_op_id: false,
     ..CONFIG_MUTATION
@@ -835,17 +824,6 @@ const WORKTREE_MUTATION: CommandContract = CommandContract {
     ..REF_MUTATION
 };
 
-const WORKTREE_MUTATION_JSONL: CommandContract = CommandContract {
-    json_kind: "jsonl",
-    ..WORKTREE_MUTATION
-};
-
-const WORKTREE_ONLY_MUTATION: CommandContract = CommandContract {
-    may_move_ref: false,
-    writes_heddle_refs: false,
-    ..WORKTREE_MUTATION
-};
-
 const REF_METADATA_WORKTREE_MUTATION: CommandContract = CommandContract {
     writes_metadata: true,
     ..WORKTREE_MUTATION
@@ -855,12 +833,6 @@ const DESTRUCTIVE_WORKTREE_MUTATION: CommandContract = CommandContract {
     destructive_requires_force: true,
     destructive_data: true,
     ..WORKTREE_MUTATION
-};
-
-const DESTRUCTIVE_WORKTREE_ONLY_MUTATION: CommandContract = CommandContract {
-    destructive_requires_force: true,
-    destructive_data: true,
-    ..WORKTREE_ONLY_MUTATION
 };
 
 const DESTRUCTIVE_DATA_MUTATION: CommandContract = CommandContract {
@@ -1110,18 +1082,6 @@ const fn exits(
         exit_codes,
         ..contract
     }
-}
-
-const fn git_projection_alias(
-    contract: CommandContract,
-    canonical_command: &'static str,
-) -> CommandContract {
-    git_projection_action(
-        contract,
-        canonical_command,
-        "direct_command",
-        "Use this native Heddle command for the same operation.",
-    )
 }
 
 const fn git_projection_action(
@@ -1600,16 +1560,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["clean"],
-        category(
-            json_discriminators(
-                documented_schemas(DESTRUCTIVE_WORKTREE_ONLY_MUTATION, &["clean"]),
-                &[json_discriminator(Some("clean"), "output_kind", "clean")],
-            ),
-            "recovery",
-        ),
-    ),
-    entry(
         &["clone"],
         front_door(
             json_discriminators(
@@ -1960,25 +1910,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["fetch"],
-        git_projection_action(
-            json_discriminators(
-                documented_schemas(
-                    CommandContract {
-                        writes_git_refs: true,
-                        network_io: true,
-                        ..REF_MUTATION
-                    },
-                    &["fetch"],
-                ),
-                &[json_discriminator(Some("fetch"), "output_kind", "fetch")],
-            ),
-            "pull",
-            "workflow",
-            "Use pull for the normal remote update workflow; inspect verification output before materializing changes.",
-        ),
-    ),
-    entry(
         &["fsck"],
         category(
             documented_schemas(
@@ -2012,10 +1943,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ),
             "recovery",
         ),
-    ),
-    entry(
-        &["git-overlay"],
-        category(documented_schemas(READ_JSON, &["git-overlay"]), "repo"),
     ),
     entry(
         &["help"],
@@ -2175,48 +2102,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         surface(opaque_schemas(READ_JSON, &["maintenance monitor"]), "admin"),
     ),
     entry(
-        &["merge"],
-        category(
-            exits(
-                surface(
-                    advertised_action(
-                        json_discriminators(
-                            documented_schemas(
-                                compact_json(WORKTREE_MUTATION),
-                                &["merge --preview"],
-                            ),
-                            &[json_discriminator(
-                                Some("merge --preview"),
-                                "output_kind",
-                                "merge",
-                            )],
-                        ),
-                        "heddle merge <thread> --preview",
-                        &["heddle", "merge", "<thread>", "--preview"],
-                        &["thread"],
-                        true,
-                        false,
-                    ),
-                    "native",
-                ),
-                &[
-                    (0, "ok"),
-                    (65, "conflict requires manual resolution"),
-                    (74, "io while writing state"),
-                ],
-            ),
-            "threads",
-        ),
-    ),
-    entry(
-        &["presence"],
-        category(feature_gated(GROUP, "client"), "collab"),
-    ),
-    entry(
-        &["presence", "publish"],
-        feature_gated(NETWORK_METADATA_MUTATION_TEXT, "client"),
-    ),
-    entry(
         &["pull"],
         exits(
             front_door(
@@ -2297,20 +2182,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 &[json_discriminator(Some("ready"), "output_kind", "ready")],
             ),
             50,
-        ),
-    ),
-    entry(
-        &["rebase"],
-        category(
-            json_discriminators(
-                opaque_schemas(WORKTREE_MUTATION_JSONL, &["rebase"]),
-                &[json_discriminator(
-                    Some("rebase"),
-                    "output_kind",
-                    "rebase_progress",
-                )],
-            ),
-            "threads",
         ),
     ),
     entry(&["redact"], category(GROUP, "recovery")),
@@ -2642,96 +2513,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["stash"],
-        git_projection_action(
-            READ_TEXT,
-            "capture",
-            "conceptual_home",
-            "Use capture, commit, and thread captures for durable Heddle saves.",
-        ),
-    ),
-    entry(
-        &["stash", "push"],
-        git_projection_action(
-            documented_schemas(WORKTREE_ONLY_MUTATION, &["stash push"]),
-            "capture",
-            "workflow",
-            "Use capture for a durable named save point before changing the worktree.",
-        ),
-    ),
-    entry(
-        &["stash", "list"],
-        git_projection_action(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["stash list"]),
-                &[json_discriminator(
-                    Some("stash list"),
-                    "output_kind",
-                    "stash_list",
-                )],
-            ),
-            "thread captures",
-            "conceptual_home",
-            "Use thread captures to inspect durable Heddle save points.",
-        ),
-    ),
-    entry(
-        &["stash", "pop"],
-        git_projection_action(
-            documented_schemas(
-                CommandContract {
-                    destructive_data: true,
-                    ..WORKTREE_ONLY_MUTATION
-                },
-                &["stash pop"],
-            ),
-            "undo",
-            "conceptual_home",
-            "Use undo to reverse the last Heddle operation; stash pop is not a direct semantic match.",
-        ),
-    ),
-    entry(
-        &["stash", "apply"],
-        git_projection_action(
-            documented_schemas(WORKTREE_ONLY_MUTATION, &["stash apply"]),
-            "undo",
-            "conceptual_home",
-            "Use undo to reverse the last Heddle operation; stash apply is not a direct semantic match.",
-        ),
-    ),
-    entry(
-        &["stash", "drop"],
-        git_projection_action(
-            documented_schemas(DESTRUCTIVE_DATA_MUTATION, &["stash drop"]),
-            "thread captures",
-            "conceptual_home",
-            "Use thread captures to inspect and manage durable Heddle save points.",
-        ),
-    ),
-    entry(
-        &["stash", "clear"],
-        git_projection_action(
-            documented_schemas(DESTRUCTIVE_DATA_MUTATION, &["stash clear"]),
-            "thread captures",
-            "conceptual_home",
-            "Use thread captures to inspect and manage durable Heddle save points.",
-        ),
-    ),
-    entry(
-        &["stash", "show"],
-        git_projection_alias(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["stash show"]),
-                &[json_discriminator(
-                    Some("stash show"),
-                    "output_kind",
-                    "stash_show",
-                )],
-            ),
-            "show",
-        ),
-    ),
-    entry(
         &["status"],
         exits(
             front_door(
@@ -2742,105 +2523,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 10,
             ),
             &[(0, "ok"), (74, "io reading workspace state")],
-        ),
-    ),
-    entry(&["spool"], category(feature_gated(GROUP, "client"), "repo")),
-    entry(
-        &["spool", "attach"],
-        category(
-            feature_gated(NETWORK_METADATA_MUTATION_TEXT, "client"),
-            "repo",
-        ),
-    ),
-    entry(
-        &["spool", "detach"],
-        category(
-            feature_gated(NETWORK_METADATA_MUTATION_TEXT, "client"),
-            "repo",
-        ),
-    ),
-    entry(
-        &["spool", "children"],
-        category(feature_gated(READ_TEXT, "client"), "repo"),
-    ),
-    entry(
-        &["spool", "governance"],
-        category(feature_gated(READ_TEXT, "client"), "repo"),
-    ),
-    entry(
-        &["spool", "membership"],
-        category(feature_gated(READ_TEXT, "client"), "repo"),
-    ),
-    entry(&["prove"], category(feature_gated(GROUP, "client"), "repo")),
-    entry(
-        &["prove", "submit"],
-        category(
-            feature_gated(NETWORK_METADATA_MUTATION_TEXT, "client"),
-            "repo",
-        ),
-    ),
-    entry(
-        &["prove", "list"],
-        category(feature_gated(READ_TEXT, "client"), "repo"),
-    ),
-    entry(
-        &["support"],
-        category(feature_gated(GROUP, "client"), "repo"),
-    ),
-    entry(
-        &["support", "grant"],
-        feature_gated(
-            json_discriminators(
-                documented_schemas(NETWORK_METADATA_MUTATION_NO_OP_ID, &["support grant"]),
-                &[json_discriminator(
-                    Some("support grant"),
-                    "output_kind",
-                    "support_grant",
-                )],
-            ),
-            "client",
-        ),
-    ),
-    entry(
-        &["support", "list"],
-        feature_gated(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["support list"]),
-                &[json_discriminator(
-                    Some("support list"),
-                    "output_kind",
-                    "support_list",
-                )],
-            ),
-            "client",
-        ),
-    ),
-    entry(
-        &["support", "revoke"],
-        feature_gated(
-            json_discriminators(
-                documented_schemas(NETWORK_METADATA_MUTATION_NO_OP_ID, &["support revoke"]),
-                &[json_discriminator(
-                    Some("support revoke"),
-                    "output_kind",
-                    "support_revoke",
-                )],
-            ),
-            "client",
-        ),
-    ),
-    entry(
-        &["switch"],
-        git_projection_alias(
-            json_discriminators(
-                documented_schemas(WORKTREE_MUTATION, &["switch"]),
-                &[json_discriminator(
-                    Some("switch"),
-                    "output_kind",
-                    "thread_switch",
-                )],
-            ),
-            "thread switch",
         ),
     ),
     entry(
@@ -4636,8 +4318,9 @@ pub(crate) fn validate_recommended_action(action: &str) -> std::result::Result<(
             .try_get_matches_from(argv)
             .map(|_| ())
             .map_err(|err| err.to_string()),
+        Some("git") => Ok(()),
         Some(other) => Err(format!(
-            "recommended action must start with `heddle` or be registered as a placeholder, found `{other}`"
+            "recommended action must start with `heddle` or `git`, found `{other}`"
         )),
         None => Ok(()),
     }
@@ -4729,8 +4412,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             Some(DoctorCommands::Docs(_)) => vec!["doctor", "docs"],
             Some(DoctorCommands::Schemas(_)) => vec!["doctor", "schemas"],
         },
-        #[cfg(feature = "git-overlay")]
-        Commands::GitOverlay => vec!["git-overlay"],
         Commands::Schemas { .. } => vec!["schemas"],
         Commands::Start(_) => vec!["start"],
         Commands::Try(_) => vec!["try"],
@@ -4754,9 +4435,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Log(_) => vec!["log"],
         Commands::Show { .. } => vec!["show"],
         Commands::Retro(_) => vec!["retro"],
-        Commands::Clean { .. } => vec!["clean"],
         Commands::Diff(_) => vec!["diff"],
-        Commands::Switch(_) => vec!["switch"],
         Commands::Discuss { command } => match command {
             DiscussCommands::Open(_) => vec!["discuss", "open"],
             DiscussCommands::Append(_) => vec!["discuss", "append"],
@@ -4846,7 +4525,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             ShellCommands::Prompt => vec!["shell", "prompt"],
         },
         Commands::Complete { .. } => vec!["complete"],
-        Commands::Merge(_) => vec!["merge"],
         Commands::Resolve(_) => vec!["resolve"],
         Commands::Fsck { .. } => vec!["fsck"],
         #[cfg(feature = "git-overlay")]
@@ -4860,7 +4538,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Oplog { command } => match command {
             OplogCommands::Recover => vec!["oplog", "recover"],
         },
-        Commands::Fetch { .. } => vec!["fetch"],
         Commands::Push(_) => vec!["push"],
         Commands::Pull(_) => vec!["pull"],
         Commands::Remote { command } => match command {
@@ -4903,35 +4580,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             IntegrationCommands::Upgrade(_) => vec!["integration", "upgrade"],
             IntegrationCommands::Relay(_) => vec!["integration", "relay"],
         },
-        Commands::Stash { command } => match command {
-            StashCommands::Push { .. } => vec!["stash", "push"],
-            StashCommands::List => vec!["stash", "list"],
-            StashCommands::Pop => vec!["stash", "pop"],
-            StashCommands::Apply => vec!["stash", "apply"],
-            StashCommands::Drop => vec!["stash", "drop"],
-            StashCommands::Clear => vec!["stash", "clear"],
-            StashCommands::Show => vec!["stash", "show"],
-        },
-        #[cfg(feature = "client")]
-        Commands::Support { command } => match command {
-            SupportCommands::Grant(_) => vec!["support", "grant"],
-            SupportCommands::List(_) => vec!["support", "list"],
-            SupportCommands::Revoke(_) => vec!["support", "revoke"],
-        },
-        #[cfg(feature = "client")]
-        Commands::Spool { command } => match command {
-            SpoolCommands::Attach(_) => vec!["spool", "attach"],
-            SpoolCommands::Detach(_) => vec!["spool", "detach"],
-            SpoolCommands::Children(_) => vec!["spool", "children"],
-            SpoolCommands::Governance(_) => vec!["spool", "governance"],
-            SpoolCommands::Membership(_) => vec!["spool", "membership"],
-        },
-        #[cfg(feature = "client")]
-        Commands::Prove(args) => match &args.command {
-            Some(ProveCommands::Submit(_)) => vec!["prove", "submit"],
-            Some(ProveCommands::List(_)) => vec!["prove", "list"],
-            None => vec!["prove"],
-        },
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => match command {
             SemanticCommands::Hot { .. } => vec!["semantic", "hot"],
@@ -4971,7 +4619,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         Commands::CherryPick { .. } => vec!["cherry-pick"],
         Commands::Clone(_) => vec!["clone"],
-        Commands::Rebase { .. } => vec!["rebase"],
         Commands::Hook { command } => match command {
             HookCommands::List => vec!["hook", "list"],
             HookCommands::Install { .. } => vec!["hook", "install"],
@@ -4991,10 +4638,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             SessionCommands::End(_) => vec!["session", "end"],
             SessionCommands::Show(_) => vec!["session", "show"],
             SessionCommands::List(_) => vec!["session", "list"],
-        },
-        #[cfg(feature = "client")]
-        Commands::Presence { command } => match command {
-            PresenceCommands::Publish { .. } => vec!["presence", "publish"],
         },
     }
 }

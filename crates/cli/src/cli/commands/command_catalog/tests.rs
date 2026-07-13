@@ -136,7 +136,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["capture"], &["capture"]),
     sample(&["checkpoint"], &["checkpoint"]),
     sample(&["cherry-pick"], &["cherry-pick", "abc123"]),
-    sample(&["clean"], &["clean"]),
     sample(&["clone"], &["clone", "remote", "local"]),
     sample(
         &["collapse"],
@@ -188,11 +187,8 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["doctor"], &["doctor"]),
     sample(&["doctor", "docs"], &["doctor", "docs"]),
     sample(&["doctor", "schemas"], &["doctor", "schemas"]),
-    sample(&["fetch"], &["fetch"]),
     sample(&["fsck"], &["fsck"]),
     sample(&["oplog", "recover"], &["oplog", "recover"]),
-    #[cfg(feature = "git-overlay")]
-    sample(&["git-overlay"], &["git-overlay"]),
     sample(&["help"], &["help"]),
     sample(&["hook", "list"], &["hook", "list"]),
     sample(&["hook", "install"], &["hook", "install", "pre-snapshot"]),
@@ -217,17 +213,10 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["maintenance", "gc"], &["maintenance", "gc"]),
     sample(&["maintenance", "index"], &["maintenance", "index"]),
     sample(&["maintenance", "monitor"], &["maintenance", "monitor"]),
-    sample(&["merge"], &["merge", "feature"]),
-    #[cfg(feature = "client")]
-    sample(
-        &["presence", "publish"],
-        &["presence", "publish", "--session", "session-1"],
-    ),
     sample(&["pull"], &["pull"]),
     sample(&["push"], &["push"]),
     sample(&["query"], &["query"]),
     sample(&["ready"], &["ready"]),
-    sample(&["rebase"], &["rebase"]),
     sample(
         &["redact", "apply"],
         &[
@@ -341,64 +330,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["land"], &["land"]),
     sample(&["show"], &["show", "HEAD"]),
     sample(&["start"], &["start", "feature"]),
-    sample(&["stash", "push"], &["stash", "push"]),
-    sample(&["stash", "list"], &["stash", "list"]),
-    sample(&["stash", "pop"], &["stash", "pop"]),
-    sample(&["stash", "apply"], &["stash", "apply"]),
-    sample(&["stash", "drop"], &["stash", "drop"]),
-    sample(&["stash", "clear"], &["stash", "clear"]),
-    sample(&["stash", "show"], &["stash", "show"]),
     sample(&["status"], &["status"]),
-    #[cfg(feature = "client")]
-    sample(
-        &["support", "grant"],
-        &[
-            "support",
-            "grant",
-            "support@heddle.dev",
-            "--namespace",
-            "heddle/platform",
-            "--reason",
-            "release verification",
-        ],
-    ),
-    #[cfg(feature = "client")]
-    sample(
-        &["support", "list"],
-        &["support", "list", "--namespace", "heddle/platform"],
-    ),
-    #[cfg(feature = "client")]
-    sample(
-        &["support", "revoke"],
-        &["support", "revoke", "00000000-0000-0000-0000-000000000000"],
-    ),
-    #[cfg(feature = "client")]
-    sample(
-        &["spool", "attach"],
-        &["spool", "attach", "acme/root", "acme/lib"],
-    ),
-    #[cfg(feature = "client")]
-    sample(
-        &["spool", "detach"],
-        &["spool", "detach", "acme/root", "libs"],
-    ),
-    #[cfg(feature = "client")]
-    sample(&["spool", "children"], &["spool", "children", "acme/root"]),
-    #[cfg(feature = "client")]
-    sample(
-        &["spool", "governance"],
-        &["spool", "governance", "acme/root"],
-    ),
-    #[cfg(feature = "client")]
-    sample(
-        &["spool", "membership"],
-        &["spool", "membership", "acme/root"],
-    ),
-    #[cfg(feature = "client")]
-    sample(&["prove", "submit"], &["prove", "submit", "chal-123"]),
-    #[cfg(feature = "client")]
-    sample(&["prove", "list"], &["prove", "list"]),
-    sample(&["switch"], &["switch", "main"]),
     sample(&["sync"], &["sync"]),
     sample(&["thread", "create"], &["thread", "create", "feature"]),
     sample(&["thread", "current"], &["thread", "current"]),
@@ -512,9 +444,8 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
         "heddle init",
         "heddle capture -m \"...\"",
         "heddle commit -m \"...\"",
-        "heddle stash push -m \"...\"",
         "heddle capture -m \"Preserve raw Git operation work\"",
-        "heddle switch <branch>",
+        "git switch <branch>",
         "heddle start feature/auth --path <dir>",
         "heddle clone <remote> <fresh-path>",
         "heddle clone <local-path> <path>",
@@ -531,7 +462,7 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
         for action in [
             "heddle import git --ref main",
             "heddle import git --ref origin/main",
-            "heddle merge origin/main --preview",
+            "heddle ready --thread origin/main",
             "heddle fsck --repair git --ref main --preview",
             "heddle fsck --repair git --prefer heddle --ref main --preview",
         ] {
@@ -578,9 +509,9 @@ fn recommended_action_templates_describe_display_only_placeholders() {
         vec!["heddle", "checkpoint", "-m", "<message>"]
     );
 
-    let switch = recommended_action_template("heddle switch <branch>")
+    let switch = recommended_action_template("git switch <branch>")
         .expect("switch placeholder should resolve");
-    assert_eq!(switch.argv_template, vec!["heddle", "switch", "<branch>"]);
+    assert_eq!(switch.argv_template, vec!["git", "switch", "<branch>"]);
     assert_eq!(switch.required_inputs, vec!["branch"]);
     assert!(!switch.agent_may_fill);
 
@@ -646,11 +577,11 @@ fn recommended_action_templates_describe_display_only_placeholders() {
     assert_eq!(import.required_inputs, vec!["path", "ref"]);
     assert!(!import.agent_may_fill);
 
-    let merge = recommended_action_template("heddle merge <thread> --git-commit")
-        .expect("merge recovery placeholder should resolve");
+    let merge = recommended_action_template("heddle land --thread <thread>")
+        .expect("land recovery placeholder should resolve");
     assert_eq!(
         merge.argv_template,
-        vec!["heddle", "merge", "<thread>", "--git-commit"]
+        vec!["heddle", "land", "--thread", "<thread>"]
     );
     assert_eq!(merge.required_inputs, vec!["thread"]);
     assert!(!merge.agent_may_fill);
@@ -666,10 +597,6 @@ fn action_fields_template_dirty_worktree_message_placeholders() {
         (
             "heddle capture -m \"...\"",
             vec!["heddle", "capture", "-m", "<message>"],
-        ),
-        (
-            "heddle stash push -m \"...\"",
-            vec!["heddle", "stash", "push", "-m", "<message>"],
         ),
     ] {
         let fields = ActionFields::from_action(action);
@@ -694,10 +621,6 @@ fn action_fields_template_argv_normalized_message_placeholders() {
             "heddle capture -m ...",
             vec!["heddle", "capture", "-m", "<message>"],
         ),
-        (
-            "heddle stash push -m ...",
-            vec!["heddle", "stash", "push", "-m", "<message>"],
-        ),
     ] {
         let fields = ActionFields::from_action(action);
         assert_eq!(fields.action.as_deref(), Some(action));
@@ -712,7 +635,7 @@ fn action_fields_template_argv_normalized_message_placeholders() {
 
 #[test]
 fn display_only_recommended_actions_must_be_templated() {
-    let err = validate_recommended_action("heddle switch <missing-template>")
+    let err = validate_recommended_action("git switch <missing-template>")
         .expect_err("unregistered display placeholder should fail validation");
     assert!(
         err.contains("structured template"),
@@ -720,7 +643,7 @@ fn display_only_recommended_actions_must_be_templated() {
     );
 
     assert!(
-        recommended_action_template("heddle switch <missing-template>").is_none(),
+        recommended_action_template("git switch <missing-template>").is_none(),
         "unregistered display placeholder must not resolve to a fillable template"
     );
 }
@@ -734,12 +657,29 @@ fn recommended_action_validator_rejects_unknown_commands() {
         "error should name the bad command: {err}"
     );
 
-    let err = validate_recommended_action("git status")
-        .expect_err("raw git action must be explicitly registered");
-    assert!(
-        err.contains("registered as a placeholder"),
-        "error should explain placeholder registration: {err}"
-    );
+    validate_recommended_action("git status").expect("Git-owned actions are valid guidance");
+}
+
+#[test]
+fn contracted_commands_are_not_parseable() {
+    for command in [
+        "clean",
+        "fetch",
+        "git-overlay",
+        "merge",
+        "presence",
+        "prove",
+        "rebase",
+        "spool",
+        "stash",
+        "support",
+        "switch",
+    ] {
+        assert!(
+            Cli::try_parse_from(["heddle", command]).is_err(),
+            "removed command `{command}` must not return to the public CLI"
+        );
+    }
 }
 
 #[test]
@@ -764,7 +704,7 @@ fn leading_dash_thread_breadcrumbs_pass_validation() {
 
 #[test]
 fn action_fields_fail_loudly_for_invalid_recommendations() {
-    let panic = std::panic::catch_unwind(|| ActionFields::from_action("git status"));
+    let panic = std::panic::catch_unwind(|| ActionFields::from_action("curl example.com"));
     assert!(
         panic.is_err(),
         "ActionFields must not silently erase invalid action sidecars"
@@ -773,36 +713,39 @@ fn action_fields_fail_loudly_for_invalid_recommendations() {
 
 #[test]
 fn recommended_action_parser_supports_shell_quoted_arguments() {
-    let template = recommended_action_template("heddle merge 'feature with spaces' --preview")
+    let template = recommended_action_template("heddle ready --thread 'feature with spaces'")
         .expect("single-quoted thread action should resolve to a template");
     assert_eq!(
         template.argv_template[1..],
-        ["merge", "feature with spaces", "--preview"]
+        ["ready", "--thread", "feature with spaces"]
     );
 
-    let template = recommended_action_template("heddle merge 'feature '\\''quoted'\\''' --preview")
+    let template = recommended_action_template("heddle ready --thread 'feature '\\''quoted'\\'''")
         .expect("shell-quoted apostrophe should resolve to a template");
     assert_eq!(
         template.argv_template[1..],
-        ["merge", "feature 'quoted'", "--preview"]
+        ["ready", "--thread", "feature 'quoted'"]
     );
 }
 
 #[test]
 fn checked_action_builder_quotes_and_validates_from_argv() {
-    let action = heddle_action(["merge", "feature with spaces", "--preview"]);
-    assert_eq!(action, "heddle merge 'feature with spaces' --preview");
+    let action = heddle_action(["ready", "--thread", "feature with spaces"]);
+    assert_eq!(action, "heddle ready --thread 'feature with spaces'");
     let template =
         recommended_action_template(&action).expect("built action should resolve to a template");
     assert_eq!(
         template.argv_template[1..],
-        ["merge", "feature with spaces", "--preview"]
+        ["ready", "--thread", "feature with spaces"]
     );
 
-    let panic = std::panic::catch_unwind(|| checked_action_from_argv(["git", "status"]));
+    let git = checked_action_from_argv(["git", "status"]);
+    assert_eq!(git, "git status");
+
+    let panic = std::panic::catch_unwind(|| checked_action_from_argv(["curl", "example.com"]));
     assert!(
         panic.is_err(),
-        "non-Heddle actions should not enter runtime advice sidecars"
+        "unowned executables should not enter runtime advice sidecars"
     );
 }
 
@@ -929,7 +872,6 @@ fn json_compact_runtime_contract_is_projection_or_rejection() {
         "capture".to_string(),
         "continue".to_string(),
         "land".to_string(),
-        "merge".to_string(),
         "ready".to_string(),
         "status".to_string(),
         "sync".to_string(),
@@ -1424,7 +1366,6 @@ fn json_kind_marks_streaming_command_surfaces() {
     let catalog = build_command_catalog();
     for (display, kind) in [
         ("watch", "jsonl"),
-        ("rebase", "jsonl"),
         ("status", "json_or_jsonl"),
         ("thread show", "json_or_jsonl"),
     ] {
@@ -1569,7 +1510,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "capture",
             "checkpoint",
             "cherry-pick",
-            "clean",
             "clone",
             "clone",
             // clone_monorepo discriminator: `clone --recursive --output json`
@@ -1598,7 +1538,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "doctor",
             "doctor docs",
             "doctor schemas",
-            "fetch",
             "oplog recover",
             "help",
             "init",
@@ -1610,13 +1549,11 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "log",
             "maintenance gc",
             "maintenance index",
-            "merge",
             "pull",
             "push",
             "query",
             "query",
             "ready",
-            "rebase",
             "redact apply",
             "redact list",
             "redact show",
@@ -1640,13 +1577,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "land",
             "show",
             "start",
-            "stash list",
-            "stash show",
             "status",
-            "support grant",
-            "support list",
-            "support revoke",
-            "switch",
             "sync",
             "thread create",
             "thread switch",
@@ -2060,15 +1991,6 @@ fn command_contract_table_drives_help_tiers() {
             None,
             false,
         ),
-        (
-            "switch",
-            "advanced",
-            "git_projection",
-            "git_projection",
-            Some("thread switch"),
-            Some("direct_command"),
-            false,
-        ),
     ] {
         let entry = catalog
             .commands
@@ -2097,27 +2019,6 @@ fn command_contract_table_drives_help_tiers() {
         assert_eq!(command_surface(display), surface);
         assert_eq!(command_help_visibility(display), visibility);
         assert_eq!(command_canonical_command(display), canonical);
-    }
-    for (display, canonical, kind) in [
-        ("stash pop", "undo", "conceptual_home"),
-        ("fetch", "pull", "workflow"),
-    ] {
-        let entry = catalog
-            .commands
-            .iter()
-            .find(|entry| entry.display == display)
-            .unwrap_or_else(|| panic!("missing command catalog entry for `{display}`"));
-        let action = entry
-            .canonical_action
-            .as_ref()
-            .unwrap_or_else(|| panic!("`{display}` should expose a canonical action"));
-        assert_eq!(action.command, canonical);
-        assert_eq!(action.kind, kind);
-        assert!(
-            !action.executable,
-            "`{display}` is not a direct command replacement"
-        );
-        assert!(!action.note.is_empty());
     }
     assert_eq!(command_help_tier("transaction"), "hidden");
 
@@ -2249,8 +2150,5 @@ fn op_id_persistence_reads_contract_table() {
 
 #[test]
 fn feature_gated_command_roots_are_catalog_owned() {
-    assert_eq!(
-        feature_gated_command_roots(),
-        &["auth", "presence", "prove", "spool", "support"]
-    );
+    assert_eq!(feature_gated_command_roots(), &["auth"]);
 }

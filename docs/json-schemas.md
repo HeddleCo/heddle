@@ -635,54 +635,6 @@ flat `array<object>` (the shape `merge --with-diff` embeds):
 
 ---
 
-## `heddle merge --preview --output json`
-
-Preview a merge without changing the worktree.
-
-### Sample
-
-```json
-{
-  "status": "preview",
-  "action": "merge",
-  "message": "Would fast-forward main to hd-feature123",
-  "fast_forward": true,
-  "preview_only": true,
-  "merge_state": null,
-  "conflicts": [],
-  "preview_summary": ["fast-forward feature/parser into main"],
-  "thread_state": "ready",
-  "freshness": "current",
-  "changed_paths": ["src/parser.rs"],
-  "changed_path_count": 1,
-  "impact_categories": [],
-  "promotion_suggested": false,
-  "heavy_impact_paths": [],
-  "merge_relation": "fast_forward",
-  "conflict_count": 0,
-  "thread_health": "ready",
-  "blockers": [],
-  "warnings": [],
-  "next_action": "heddle land --thread feature/parser --push",
-  "recommended_action": "heddle land --thread feature/parser --push",
-  "diff": {}
-}
-```
-
-### Fields
-
-| Field | Type | Optionality | Semantics |
-|-------|------|-------------|-----------|
-| `status` | string \| null | required | Preview status. |
-| `would_merge` | bool | required | Whether the preview believes the merge can proceed. |
-| `blockers` | array<string> \| null | required | Reasons merge should not proceed. |
-| `recommended_action`, `recommended_action_template` | string \| null, object \| null | required | Primary next command and its fillable template when one exists. |
-| `merge_relation` | string \| null | required | Structural relationship between the current state and incoming thread, such as `already_up_to_date`, `fast_forward`, `clean_apply`, or `path_conflicts`. |
-| `diff` | object \| null | required | Preview diff payload. |
-| `verification` | object \| null | required | Repository verification state after the preview. Preview mode does not mutate refs or the worktree, so this proves the decision surface was computed from a verified repository state. |
-
----
-
 ## `heddle start --output json`
 
 Create an isolated or lightweight thread and report where work should
@@ -1939,75 +1891,6 @@ the same ready envelope.
 
 ---
 
-## `heddle support grant --output json`
-
-```json
-{
-  "output_kind": "support_grant",
-  "id": "00000000-0000-0000-0000-000000000000",
-  "operator_email": "support@heddle.dev",
-  "namespace_path": "heddle/platform",
-  "repo_path": "",
-  "role": "admin",
-  "granted_by": "did:key:z6Mk...",
-  "granted_at": 1782432000,
-  "expires_at": 1782518400,
-  "revoked_at": 0,
-  "revoked_by": "",
-  "reason": "release verification"
-}
-```
-
----
-
-## `heddle support list --output json`
-
-```json
-{
-  "output_kind": "support_list",
-  "grants": [
-    {
-      "id": "00000000-0000-0000-0000-000000000000",
-      "operator_email": "support@heddle.dev",
-      "namespace_path": "heddle/platform",
-      "repo_path": "",
-      "role": "admin",
-      "granted_by": "did:key:z6Mk...",
-      "granted_at": 1782432000,
-      "expires_at": 1782518400,
-      "revoked_at": 0,
-      "revoked_by": "",
-      "reason": "release verification"
-    }
-  ]
-}
-```
-
----
-
-## `heddle support revoke --output json`
-
-```json
-{
-  "output_kind": "support_revoke",
-  "id": "00000000-0000-0000-0000-000000000000",
-  "revoked": true
-}
-```
-
----
-
-`heddle fetch --output json` emits:
-
-```json
-{
-  "output_kind": "fetch",
-  "remote": "origin",
-  "refs_fetched": 1,
-  "objects_fetched": 2
-}
-```
-
 `heddle pull --output json` emits:
 
 ```json
@@ -2083,7 +1966,6 @@ the same ready envelope.
 | `verification` | object \| null | required for Git-overlay `clone` | Post-clone repository verification proof; clean clones report `clone_verification: "verified"`. |
 | `remotes` | array<object> | required for `remote list` | Configured remotes. Empty if none. |
 | `name`, `url`, `source`, `is_default` | string/string/string/bool | required for `remote show` and remote entries | Remote identity and default marker. |
-| `refs_fetched`, `objects_fetched` | int | required for `fetch` | Fetch transfer counts. |
 | `pulled`, `pushed`, `success` | bool \| null | required when present | Transport result booleans. Pull reports `pulled`; push reports `pushed`. |
 | `action`, `status`, `transport` | string \| null | required for pull/push | Stable action name, outcome status, and transport kind. Git-overlay transfers report `transport: "git"`; native Heddle transfers report `transport: "heddle"`. |
 | `branch`, `old_git_head`, `new_git_head`, `old_state`, `new_state`, `states_created`, `commits_seen`, `commits_seen_scope`, `materialized_checkout`, `changed_path_count`, `changed_paths` | mixed | Git-overlay pull only | Concrete Git/Heddle movement proof for a pull, including imported commit scope and materialized path changes. |
@@ -2719,23 +2601,22 @@ instead of treating it as a global catalog option.
       "long": "output",
       "short": null,
       "value_names": ["OUTPUT"],
-      "help": "Output format. `auto` (default) renders text on a TTY and JSON when piped; `json` and `text` override regardless of stream",
+      "help": "Output format: text by default; json and json-compact provide explicit machine contracts",
       "required": false,
       "global": true
     }
   ],
   "recommended_action_placeholders": [
-    "heddle commit -m \"...\"",
-    "heddle commit -m \"...\"",
+    "heddle capture -m \"...\"",
     "heddle commit -m \"...\"",
     "heddle ready -m \"...\"",
-    "heddle stash push -m \"...\"",
     "heddle remote add <name> <url>",
     "heddle clone <remote> <path>",
     "heddle clone <remote> <new-path>",
     "heddle clone <remote> <fresh-path>",
-    "heddle switch <branch>",
-    "heddle merge <thread> --git-commit"
+    "git switch <branch>",
+    "heddle ready --thread <thread>",
+    "heddle land --thread <thread>"
   ],
   "recommended_action_templates": [
     {
@@ -3033,7 +2914,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact show",
       "redact trust add"
     ],
-    "accepted_opaque_schema_verbs_total": 47,
+    "accepted_opaque_schema_verbs_total": 46,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
@@ -3045,26 +2926,26 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact show",
       "redact trust add"
     ],
-    "advanced_scope_json_commands_total": 128,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-    "advanced_scope_mutating_commands_total": 78,
-    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-    "catalog_commands_total": 219,
-    "catalog_mutating_commands_total": 110,
-    "json_commands_total": 171,
-    "json_commands_with_accepted_opaque_schema": 47,
-    "json_commands_with_schema": 124,
+    "advanced_scope_json_commands_total": 112,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 46,
+    "advanced_scope_mutating_commands_total": 66,
+    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 26,
+    "catalog_commands_total": 190,
+    "catalog_mutating_commands_total": 94,
+    "json_commands_total": 155,
+    "json_commands_with_accepted_opaque_schema": 46,
+    "json_commands_with_schema": 109,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 104,
+    "json_mutating_commands_total": 92,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 104,
-    "mutating_commands_with_accepted_opaque_schema": 27,
-    "mutating_commands_with_schema": 77,
+    "mutating_commands_total": 92,
+    "mutating_commands_with_accepted_opaque_schema": 26,
+    "mutating_commands_with_schema": 66,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 47,
+    "opaque_schema_verbs_total": 46,
     "status": "available",
-    "summary": "219 command(s), 171 JSON command(s), 110 mutating command(s), 104 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+    "summary": "190 command(s), 155 JSON command(s), 94 mutating command(s), 92 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 46 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3102,36 +2983,10 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "219 command(s), 171 JSON command(s), 110 mutating command(s), 104 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+  "summary": "190 command(s), 155 JSON command(s), 94 mutating command(s), 92 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 46 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
-}
-```
-
----
-
-## `heddle git-overlay --output json`
-
-The built-in Git-overlay guide as structured steps. This is a guide
-surface, not repository state.
-
-```json
-{
-  "topic": "git-overlay",
-  "summary": "Use Heddle as the daily Git-overlay loop: status, diff, commit, start --path, ready, land, push, undo, verification.",
-  "steps": [
-    "heddle status",
-    "heddle adopt --ref <branch>",
-    "heddle diff",
-    "heddle commit -m <message>",
-    "heddle start <name> --path ../<name>",
-    "heddle ready",
-    "heddle land --thread <name> --no-push",
-    "heddle push",
-    "heddle undo",
-    "heddle verify"
-  ]
 }
 ```
 
@@ -3221,42 +3076,6 @@ Refresh the active or named thread, or report the verification/action blocker.
 }
 ```
 
-## `heddle clean --output json`
-
-List or remove untracked worktree paths.
-
-```json
-{
-  "output_kind": "clean",
-  "removed": ["tmp/output.txt"],
-  "dry_run": true
-}
-```
-
-## `heddle switch --output json`
-
-Switch to an existing thread, or fall through to the state-checkout
-shape when the target resolves as a state rather than a thread.
-
-```json
-{
-  "output_kind": "thread_switch",
-  "status": "completed",
-  "action": "thread_switch",
-  "name": "feature/parser",
-  "message": "Switched to thread 'feature/parser'",
-  "thread": null,
-  "path": null,
-  "execution_path": null,
-  "next_action": null,
-  "next_action_template": null,
-  "recommended_action": null,
-  "recommended_action_template": null
-}
-```
-
----
-
 ## `heddle fsck --repair git --output json`
 
 Preview or apply a ref reconciliation between Git and Heddle.
@@ -3286,53 +3105,6 @@ Preview or apply a ref reconciliation between Git and Heddle.
   ]
 }
 ```
-
-## `heddle stash push --output json`
-
-`heddle stash push|pop|apply|drop|clear --output json` emit:
-
-```json
-{
-  "message": "Saved stash@{0}",
-  "stash_index": 0
-}
-```
-
----
-
-## `heddle stash list --output json`
-
-List saved stash entries.
-
-```json
-{
-  "output_kind": "stash_list",
-  "stashes": [
-    {
-      "index": 0,
-      "message": "save parser work",
-      "created_at": "2026-05-23T23:32:39Z"
-    }
-  ]
-}
-```
-
----
-
-## `heddle stash show --output json`
-
-Show the top stash as path buckets.
-
-```json
-{
-  "output_kind": "stash_show",
-  "modified": ["src/parser.rs"],
-  "added": ["tests/parser.rs"],
-  "deleted": []
-}
-```
-
----
 
 ## `heddle revert --output json`
 
@@ -3519,12 +3291,6 @@ for a tracked file:
 {"output_kind": "query_attribution", "status": "completed", "file": "src/lib.rs", "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": null, "timestamp": "2026-01-01T00:00:00Z", "origins": null}]}
 ```
 
-`heddle rebase --output json` emits:
-
-```json
-{"output_kind": "rebase_progress", "status": "fast_forwarded", "to": "hd-result789"}
-```
-
 `heddle redact apply|list|show --output json` emit (each carries
 `output_kind` set to the snake-cased subcommand, e.g. `redact_apply`,
 `redact_list`). `signature_algorithm` is present only when the redaction
@@ -3602,20 +3368,20 @@ The following verbs also emit `--output json`. Their shapes follow the same
 discipline; see the corresponding handler in `crates/cli/src/cli/commands/`:
 
 `heddle checkpoint`, `heddle cherry-pick`,
-`heddle clean`, `heddle clone`, `heddle collapse`,
+`heddle clone`, `heddle collapse`,
 `heddle context get/set`, `heddle diff`, `heddle expand`,
-`heddle discuss`, `heddle doctor docs`, `heddle fetch`,
+`heddle discuss`, `heddle doctor docs`,
 `heddle fsck`, `heddle init`, `heddle integration`,
-`heddle maintenance`, `heddle merge`, `heddle ready`,
-`heddle rebase`, `heddle remote`, `heddle resolve`, `heddle retro`,
+`heddle maintenance`, `heddle ready`,
+`heddle remote`, `heddle resolve`, `heddle retro`,
 `heddle session`, `heddle capture`,
-`heddle support`, `heddle thread show/start`,
+`heddle thread show/start`,
 `heddle try`, `heddle undo`, `heddle watch`.
 
 Each of these:
 
 - Emits a single JSON document on `--output json` (or one document per line for streaming verbs like `watch`).
-- Uses `change_id` (not `state_id` or `id`) for state identifiers.
+- Uses `state_id` for immutable State identity and `change_id` for logical change lineage.
 - Uses `created_at` (not `timestamp` or `recorded_at`) for state-creation timestamps.
 - Serializes `Option<...>` semantic fields as explicit `null`.
 - Serializes empty collections as `[]` / `{}`.

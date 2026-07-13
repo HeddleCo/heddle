@@ -6,9 +6,8 @@
 //! `NoopWeftExtensions` from the shim crate directly. With
 //! `client` enabled, this module provides
 //! [`EnabledWeftExtensions`], which downcasts the trait's opaque
-//! arguments back to the concrete `cli::cli::AuthCommands` /
-//! `SupportCommands` / `PresenceCommands` types and delegates to the
-//! existing in-`cli` command implementations.
+//! arguments back to `cli::cli::AuthCommands` and delegates to the
+//! hosted client implementation.
 //!
 //! Step 5 of the OSS extraction plan moves the underlying command
 //! implementations out of `cli` into a separate `client`
@@ -23,11 +22,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use weft_client_shim::{CliContext, WeftExtensions};
 
-use crate::cli::{
-    AuthCommands,
-    cli_args::SupportCommands,
-    commands::{cmd_auth, cmd_presence_publish, cmd_support},
-};
+use crate::cli::{AuthCommands, commands::cmd_auth};
 
 pub struct EnabledWeftExtensions;
 
@@ -40,24 +35,6 @@ impl WeftExtensions for EnabledWeftExtensions {
     ) -> Result<()> {
         let command = downcast::<AuthCommands>(command, "AuthCommands")?;
         cmd_auth(ctx, command.clone().into()).await
-    }
-
-    async fn support(
-        &self,
-        ctx: &(dyn CliContext + 'static),
-        command: &(dyn Any + Send + Sync),
-    ) -> Result<()> {
-        let command = downcast::<SupportCommands>(command, "SupportCommands")?;
-        cmd_support(ctx, command.clone().into()).await
-    }
-
-    async fn presence_publish(
-        &self,
-        ctx: &(dyn CliContext + 'static),
-        session: String,
-        interval_secs: u64,
-    ) -> Result<()> {
-        cmd_presence_publish(ctx, session, interval_secs).await
     }
 }
 

@@ -7,42 +7,38 @@ use anyhow::Result;
 use clap::{Arg, ArgAction, CommandFactory, Parser, error::ErrorKind};
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 use cli::cli::commands::cmd_context_reason_git;
-#[cfg(feature = "client")]
-use cli::cli::commands::cmd_prove;
 #[cfg(feature = "semantic")]
 use cli::cli::commands::cmd_semantic;
-#[cfg(feature = "client")]
-use cli::cli::commands::cmd_spool;
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
     ExportCommands, ImportCommands,
     cli_args::SyncCommands,
-    commands::{cmd_export_git, cmd_git_overlay_guide, cmd_import_git, cmd_sync_git},
+    commands::{cmd_export_git, cmd_import_git, cmd_sync_git},
 };
 use cli::{
     cli::{
         ActorCommands, AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands,
         DaemonCommands, DiagnoseArgs, DiffArgs, ExpandArgs, IntegrationCommands, LogArgs,
-        MergeArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs,
+        ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs,
         SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, UndoArgs,
         cli_args::{LandArgs, SyncArgs},
         commands::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
             cmd_abort, cmd_actor_done, cmd_actor_explain, cmd_actor_list, cmd_actor_show,
             cmd_actor_spawn, cmd_adopt, cmd_agent, cmd_capture_split, cmd_checkpoint,
-            cmd_cherry_pick, cmd_clean, cmd_clone, cmd_collapse, cmd_commit_git_projection,
-            cmd_complete, cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
+            cmd_cherry_pick, cmd_clone, cmd_collapse, cmd_commit_git_projection, cmd_complete,
+            cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
             cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
             cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
             cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff, cmd_discuss,
-            cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fetch, cmd_fsck, cmd_hook,
-            cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_merge, cmd_oplog,
-            cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote,
-            cmd_resolve, cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_session_end,
-            cmd_session_list, cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell,
-            cmd_show, cmd_snapshot, cmd_start, cmd_stash, cmd_status, cmd_switch_git_projection,
-            cmd_sync_smart, cmd_thread, cmd_timeline, cmd_transaction, cmd_try, cmd_undo,
-            cmd_verify, cmd_watch, command_runtime_contract_for_command, print_error_with_hint,
+            cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fsck, cmd_hook, cmd_init,
+            cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_oplog, cmd_pull, cmd_push,
+            cmd_query, cmd_ready, cmd_redo, cmd_remote, cmd_resolve, cmd_retro, cmd_revert,
+            cmd_review, cmd_run, cmd_schemas, cmd_session_end, cmd_session_list,
+            cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell, cmd_show,
+            cmd_snapshot, cmd_start, cmd_status, cmd_sync_smart, cmd_thread, cmd_timeline,
+            cmd_transaction, cmd_try, cmd_undo, cmd_verify, cmd_watch,
+            command_runtime_contract_for_command, print_error_with_hint,
             print_parse_error_json_envelope,
         },
         render::write_json_stdout,
@@ -97,12 +93,7 @@ async fn async_main() -> Result<()> {
     #[cfg(feature = "client")]
     heddle_client::grpc_hosted::register_hosted_factory();
 
-    // Pick the WeftExtensions implementation at startup. OSS builds
-    // get NoopWeftExtensions (returns friendly errors for `auth`,
-    // `support`, `presence` commands). client builds get the
-    // EnabledWeftExtensions adapter that delegates to the existing
-    // in-cli command impls; Step 5 of the OSS extraction plan moves
-    // those impls into a separate closed crate.
+    // Pick the hosted authentication implementation at startup.
     #[cfg(feature = "client")]
     let hosted: Box<dyn weft_client_shim::WeftExtensions> =
         Box::new(cli::extensions::EnabledWeftExtensions);
@@ -336,9 +327,6 @@ async fn async_main() -> Result<()> {
 
         Commands::Schemas { verb } => cmd_schemas(&cli, verb),
 
-        #[cfg(feature = "git-overlay")]
-        Commands::GitOverlay => cmd_git_overlay_guide(&cli),
-
         Commands::Start(args) => cmd_start(&cli, args.clone()),
 
         Commands::Run(RunArgs { thread, command }) => {
@@ -485,8 +473,6 @@ async fn async_main() -> Result<()> {
             .await
         }
 
-        Commands::Clean { force, dry_run } => cmd_clean(&cli, *force, *dry_run),
-
         Commands::Diff(DiffArgs {
             from,
             to,
@@ -508,8 +494,6 @@ async fn async_main() -> Result<()> {
             *patch,
         ),
 
-        Commands::Switch(args) => cmd_switch_git_projection(&cli, args.clone()).await,
-
         Commands::Revert(RevertArgs {
             state,
             message,
@@ -530,12 +514,6 @@ async fn async_main() -> Result<()> {
                 cmd_undo(&cli, *steps, *list, *depth, *preview, *allow_redact_undo)
             }
         }
-
-        Commands::Fetch {
-            remote,
-            all,
-            insecure,
-        } => cmd_fetch(&cli, remote.clone(), *all, *insecure).await,
 
         #[cfg(feature = "git-overlay")]
         Commands::Import { command } => match command {
@@ -583,25 +561,6 @@ async fn async_main() -> Result<()> {
         Commands::Shell { command } => cmd_shell(&cli, command.clone()),
 
         Commands::Complete { subject } => cmd_complete(&cli, *subject),
-
-        Commands::Merge(MergeArgs {
-            thread,
-            message,
-            no_commit,
-            preview,
-            with_diff,
-            no_semantic,
-            git_commit,
-        }) => cmd_merge(
-            &cli,
-            thread.clone(),
-            message.clone(),
-            *no_commit,
-            *preview,
-            *with_diff,
-            *no_semantic,
-            *git_commit,
-        ),
 
         Commands::Resolve(ResolveArgs {
             path,
@@ -761,20 +720,6 @@ async fn async_main() -> Result<()> {
 
         Commands::Integration { command } => cmd_integration(&cli, command.clone()),
 
-        Commands::Stash { command } => cmd_stash(&cli, command.clone()),
-
-        #[cfg(feature = "client")]
-        Commands::Support { command } => {
-            let cmd = command.clone();
-            hosted.support(&cli, &cmd).await
-        }
-
-        #[cfg(feature = "client")]
-        Commands::Spool { command } => cmd_spool(&cli, command.clone()).await,
-
-        #[cfg(feature = "client")]
-        Commands::Prove(args) => cmd_prove(&cli, args.clone()).await,
-
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => cmd_semantic(&cli, command.clone()),
 
@@ -835,13 +780,6 @@ async fn async_main() -> Result<()> {
             .await
         }
 
-        Commands::Rebase {
-            thread,
-            abort,
-            cont,
-            force,
-        } => cmd_rebase(&cli, thread.as_deref(), *abort, *cont, *force),
-
         Commands::Hook { command } => cmd_hook(&cli, command.clone()),
 
         Commands::Actor { command } => match command {
@@ -883,18 +821,6 @@ async fn async_main() -> Result<()> {
             }
             SessionCommands::List(SessionListArgs { active }) => {
                 cmd_session_list(&cli, *active).await
-            }
-        },
-
-        #[cfg(feature = "client")]
-        Commands::Presence { command } => match command {
-            cli::cli::PresenceCommands::Publish {
-                session,
-                interval_secs,
-            } => {
-                hosted
-                    .presence_publish(&cli, session.clone(), *interval_secs)
-                    .await
             }
         },
     };

@@ -266,31 +266,6 @@ pub struct CommitArgs {
     pub force: bool,
 }
 
-/// Arguments for the Git-compatible `switch` shim.
-#[derive(Clone, Debug, clap::Args)]
-#[command(after_help = "\
-Examples:
-  heddle switch feature/auth       # switch to an existing thread
-  heddle switch hd-abc123          # move the worktree to a state
-  heddle start feature/auth --path ../feature-auth  # create an isolated thread
-")]
-pub struct SwitchArgs {
-    /// Git-style branch creation is guided to Heddle's isolated thread flow.
-    #[arg(short = 'b', short_alias = 'c')]
-    pub create: bool,
-
-    /// Thread name or state id.
-    pub target: String,
-
-    /// Discard uncommitted changes when checking out a state.
-    #[arg(short, long)]
-    pub force: bool,
-
-    /// Print only the target thread's checkout path on stdout.
-    #[arg(long, hide_short_help = true)]
-    pub print_cd_path: bool,
-}
-
 // `CheckpointArgs` lives in `commands_advanced.rs` (canonical
 // definition on main). Codex's foundation commit added a parallel
 // definition here; deleted during the rebase onto main.
@@ -643,11 +618,11 @@ Examples:
 
 Undoable operations:
   - heddle capture           (restores HEAD to the pre-capture parent)
-  - heddle merge (non-FF)    (restores HEAD + both thread refs)
-  - heddle merge (FF)        (restores HEAD + the merged-into thread ref to
+  - heddle land (non-FF)     (restores HEAD + both thread refs)
+  - heddle land (FF)         (restores HEAD + the landed-into thread ref to
                               the pre-merge tip; the merged-in thread is
                               untouched.)
-  - heddle switch            (restores HEAD to the pre-switch state)
+  - heddle thread switch     (restores HEAD to the previous thread state)
   - heddle thread create/drop/rename
   - heddle thread marker create/drop
   - heddle redact apply               (with --allow-redact-undo; removes the
@@ -657,7 +632,7 @@ Undoable operations:
   - heddle undo --redo                re-apply the most recently undone operation
 
 Not undoable (file a follow-up if you need one):
-  - heddle push / heddle fetch        (remote-affecting; out of scope)
+  - heddle push / pull                (remote-affecting; out of scope)
   - heddle redact purge apply         (destructive by design; irreversible)
   - heddle start <name> --path <dir>  (refused while the materialized worktree
                                        still exists — run `heddle thread drop
@@ -831,57 +806,6 @@ pub struct ThreadStartArgs {
     pub hydrate: bool,
 }
 
-/// Arguments for the `merge` command.
-#[derive(Clone, Debug, clap::Args)]
-#[command(after_help = "\
-Everyday managed-thread flow:
-  heddle land --thread feature/auth --no-push
-
-Advanced/manual merge examples:
-Examples:
-  heddle merge feature/auth --preview         # structured blockers + recommendation
-  heddle merge feature/auth -m 'merge auth'   # integrate with a commit message
-  heddle merge feature/auth --with-diff       # preview with the resulting diff
-  heddle merge feature/auth --no-semantic     # opt out to hunk-only merge
-")]
-pub struct MergeArgs {
-    /// Thread to merge.
-    pub thread: String,
-
-    /// Commit message for the merge.
-    #[arg(short = 'm', long)]
-    pub message: Option<String>,
-
-    /// Apply merge without committing.
-    #[arg(long)]
-    pub no_commit: bool,
-
-    /// Show semantic integration summary without applying changes.
-    #[arg(long)]
-    pub preview: bool,
-
-    /// Include the diff (parent ↔ thread tip) in the JSON output.
-    /// On `--preview`, this is the diff that *would* land. Without
-    /// `--preview` (a real merge) it echoes the diff that just landed.
-    #[arg(long = "with-diff")]
-    pub with_diff: bool,
-
-    /// Use the hunk-only merge strategy instead of the semantic merge
-    /// engine. Semantic merge is the default when the `semantic` cargo
-    /// feature is compiled in.
-    #[arg(long = "no-semantic")]
-    pub no_semantic: bool,
-
-    /// After a successful (non-preview) merge, also write a git commit
-    /// staging the paths the merge introduced. Fails if the worktree
-    /// has unrelated uncommitted changes or git is in an unexpected
-    /// state (detached HEAD, no `.git`, missing identity). With
-    /// `--preview`, the would-be git commit message is included in the
-    /// JSON output as `git_commit_preview` without writing anything.
-    #[arg(long = "git-commit")]
-    pub git_commit: bool,
-}
-
 /// Arguments for the `try` command — atomic-ephemeral-thread sugar.
 ///
 /// Implements item 3.1 from the heddle 6→8 plan: spin up an ephemeral
@@ -902,10 +826,8 @@ pub struct TryArgs {
     /// workspace strategy.
     #[arg(long, value_enum, default_value_t = WorkspaceModeArg::Materialized)]
     pub workspace: WorkspaceModeArg,
-    /// On zero exit, automatically merge the resulting thread into
-    /// the current thread. The merge runs with `--with-diff` so the
-    /// JSON payload includes the integrated diff. Default: off (the
-    /// command prints a hint pointing at `heddle merge`).
+    /// On zero exit, automatically land the resulting thread into
+    /// the current thread. Default: off.
     #[arg(long = "auto-merge")]
     pub auto_merge: bool,
 

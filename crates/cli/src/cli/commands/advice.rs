@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 
 pub(crate) const DIRTY_WORKTREE_COMMIT_COMMAND: &str = "heddle commit -m \"...\"";
 pub(crate) const DIRTY_WORKTREE_CAPTURE_COMMAND: &str = "heddle capture -m \"...\"";
-pub(crate) const DIRTY_WORKTREE_STASH_COMMAND: &str = "heddle stash push -m \"...\"";
+pub(crate) const DIRTY_WORKTREE_STASH_COMMAND: &str = "heddle capture -m \"...\"";
 pub(crate) const GIT_OVERLAY_CHECKPOINT_COMMAND: &str = "heddle checkpoint -m \"...\"";
 
 #[derive(Debug, Clone)]
@@ -461,22 +461,6 @@ impl RecoveryAdvice {
         )
     }
 
-    #[cfg(not(feature = "semantic"))]
-    pub(crate) fn feature_unavailable(command: &str, feature: &str) -> Self {
-        Self::safety_refusal(
-            "feature_unavailable",
-            format!("{command} requires building heddle with --features {feature}"),
-            format!(
-                "Use a heddle binary built with `--features {feature}`, or rerun without the feature-specific flag."
-            ),
-            format!("this heddle binary was built without the `{feature}` feature"),
-            format!("{command} cannot run because the requested analysis engine is unavailable"),
-            "repository state, refs, and worktree files were left unchanged",
-            "heddle help --output json",
-            vec!["heddle help --output json".to_string()],
-        )
-    }
-
     pub(crate) fn invalid_usage(
         kind: &'static str,
         error: impl Into<String>,
@@ -872,9 +856,9 @@ impl RecoveryAdvice {
             "updating refs/notes/heddle would replace remote Git-to-Heddle identity metadata instead of fast-forwarding it",
             "pushing would remap commits that another Heddle checkout already identified",
             "remote refs/notes/heddle was left unchanged",
-            "heddle fetch",
+            "git fetch",
             vec![
-                "heddle fetch".to_string(),
+                "git fetch".to_string(),
                 "heddle push".to_string(),
                 "heddle clone <remote> <fresh-path>".to_string(),
             ],
@@ -935,11 +919,11 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn git_overlay_remote_push_rejected(branch: &str) -> Self {
-        let primary_command = "heddle fetch".to_string();
+        let primary_command = "git fetch".to_string();
         Self::safety_refusal(
             "git_overlay_remote_diverged",
             "Remote branch does not fast-forward the local Git checkpoint",
-            "Fetch first so Heddle can inspect the remote tip locally, then run `heddle verify` for the exact integration command.",
+            "Run `git fetch` first so Heddle can inspect the remote tip locally, then run `heddle verify` for the exact integration command.",
             format!(
                 "pushing branch '{branch}' would rewrite the remote branch instead of fast-forwarding it"
             ),
@@ -1044,28 +1028,12 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn remote_name_required_for_fetch() -> Self {
-        Self::safety_refusal(
-            "remote_name_required",
-            "Refusing to fetch: remote name required unless --all is set",
-            "Run `heddle fetch <remote>` for one remote, or `heddle fetch --all` for every configured remote.",
-            "fetch was requested without a remote name and without --all",
-            "fetch updates remote refs and object storage, so the target remote set must be explicit",
-            "no remote refs or objects were written",
-            "heddle fetch --all",
-            vec![
-                "heddle fetch --all".to_string(),
-                "heddle remote list".to_string(),
-            ],
-        )
-    }
-
     pub(crate) fn git_overlay_tracking_refresh_failed(
         remote_name: &str,
         full_ref: &str,
         cause: Option<String>,
     ) -> Self {
-        let fetch_command = format!("heddle fetch {remote_name}");
+        let fetch_command = format!("git fetch {remote_name}");
         let error = match cause {
             Some(cause) => format!(
                 "Pushed to {remote_name}, but could not refresh local tracking ref {full_ref}: {cause}"

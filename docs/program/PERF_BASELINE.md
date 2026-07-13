@@ -44,7 +44,7 @@ Raw machine-readable results live under `artifacts/perf/`.
 | Memory | 32 GB (`34359738368` bytes) |
 | rustc | 1.97.0 (2d8144b78 2026-07-07) |
 | cargo | 1.97.0 (c980f4866 2026-06-30) |
-| Binary | `/tmp/heddle-w6-perf-target/release/heddle` (`heddle 0.10.0`) |
+| Binary | `/tmp/heddle-w6-perf-target/release/heddle` (version 0.10.0) |
 | Build | `CARGO_TARGET_DIR=/tmp/heddle-w6-perf-target cargo build --release -p heddle-cli --locked --features client` |
 | Trials | 5 timed + 1 warmup; **absolute multi-op + A==B self-pairs** |
 | Host noise | Single-host residual-wave machine; **not** multi-host cert. Multi-host matrix still open. |

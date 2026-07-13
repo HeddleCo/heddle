@@ -328,10 +328,10 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
             .pre_conflict_head
             .is_some_and(|head| head != current_state.change_id)
         {
-            recommended_action = "heddle rebase --continue".to_string();
+            recommended_action = "heddle continue".to_string();
         } else {
             blockers.push(
-                "refresh has a rebase in progress; capture a manual resolution in the thread checkout, then run `heddle rebase --continue`".to_string(),
+                "refresh has a replay in progress; capture the manual resolution in the thread checkout, then run `heddle continue`".to_string(),
             );
         }
     }
@@ -462,7 +462,7 @@ fn thread_resolve_rebase_followup_operator(
         .is_none_or(|head| head == current_state.change_id)
     {
         blockers.push(
-            "refresh has a rebase in progress; capture a manual resolution in the thread checkout, then run `heddle rebase --continue`".to_string(),
+            "refresh has a replay in progress; capture the manual resolution in the thread checkout, then run `heddle continue`".to_string(),
         );
     }
 

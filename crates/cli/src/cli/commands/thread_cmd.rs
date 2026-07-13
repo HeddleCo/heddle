@@ -867,7 +867,7 @@ fn thread_refresh_requires_checkout_advice(
     thread_id: &str,
     current: Option<&str>,
 ) -> RecoveryAdvice {
-    let switch_command = format!("heddle switch {thread_id}");
+    let switch_command = format!("heddle thread switch {thread_id}");
     let retry_command = format!("heddle thread refresh {thread_id}");
     let current_summary = current
         .map(|name| format!("current checkout is attached to '{name}'"))
@@ -890,7 +890,7 @@ fn thread_refresh_checkout_unavailable_advice(
     error: impl std::fmt::Display,
 ) -> RecoveryAdvice {
     let inspect_command = format!("heddle thread show {thread_id}");
-    let switch_command = format!("heddle switch {thread_id}");
+    let switch_command = format!("heddle thread switch {thread_id}");
     RecoveryAdvice::safety_refusal(
         "thread_refresh_checkout_unavailable",
         format!("Thread '{thread_id}' checkout could not be opened"),

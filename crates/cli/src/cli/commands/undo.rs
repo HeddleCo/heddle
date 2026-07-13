@@ -50,7 +50,7 @@ use crate::cli::{Cli, should_output_json, style};
 /// doing so coupled recovery to a user-writable name and let the `MarkerDelete`
 /// undo inverse collide with it.
 /// `apply_undo_batch` replays only user-marker/thread inverses, so it can never
-/// see or clobber this internal pointer. `heddle switch .undo-recovery` resolves
+/// see or clobber this internal pointer. `heddle thread switch .undo-recovery` resolves
 /// it via the reserved [`refs::UNDO_RECOVERY_HANDLE`], which `resolve_refspec`
 /// routes to the internal pointer BEFORE any user ref — and whose leading `.`
 /// makes it uncreatable as a user ref, so it is unshadowable in both directions.
@@ -225,7 +225,7 @@ pub fn cmd_undo(
         print_head(&post_undo_repo)?;
         if let Some(state) = &output.recovery_state {
             println!(
-                "Preserved pre-undo state {} as `{}` (recover with `heddle switch {}`)",
+                "Preserved pre-undo state {} as `{}` (recover with `heddle thread switch {}`)",
                 style::change_id(state),
                 UNDO_RECOVERY_MARKER,
                 UNDO_RECOVERY_MARKER,
