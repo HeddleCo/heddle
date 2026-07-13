@@ -2996,11 +2996,11 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
     );
     let neutral_repairs = neutral_preview["repairs"]
         .as_array()
-        .expect("preview should report repair choices");
+        .expect("preview should report the authority-valid repair");
     assert_eq!(
         neutral_repairs.len(),
-        2,
-        "neutral preview should report both local repair choices without biasing automation: {neutral_preview}"
+        1,
+        "preview should report only the Git-owned repair direction: {neutral_preview}"
     );
     assert!(
         neutral_repairs
@@ -3008,41 +3008,18 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
             .all(|repair| repair["repaired"] == false),
         "neutral preview must leave every repair choice unapplied: {neutral_preview}"
     );
-    let neutral_details = neutral_repairs
-        .iter()
-        .filter_map(|repair| repair["detail"].as_str())
-        .collect::<Vec<_>>();
-    assert!(
-        neutral_details.contains(&"heddle fsck repair git --prefer heddle --ref main --preview")
-            && neutral_details
-                .contains(&"heddle fsck repair git --prefer git --ref main --preview"),
-        "neutral preview should surface both prefer-heddle and prefer-git recovery paths: {neutral_preview}"
+    assert_eq!(
+        neutral_repairs[0]["detail"], "heddle fsck repair git --prefer git --ref main",
+        "preview should derive direction from Git Overlay authority"
     );
-    let no_direction = heddle_output(
+    let authority_default = heddle(
         &["--output", "json", "fsck", "repair", "git", "--ref", "main"],
         Some(&local),
     )
-    .expect("invoke non-preview reconcile without --prefer");
-    assert!(
-        !no_direction.status.success(),
-        "non-preview reconcile without --prefer should fail"
-    );
-    assert!(
-        no_direction.stdout.is_empty(),
-        "JSON refusal should keep stdout quiet: {}",
-        String::from_utf8_lossy(&no_direction.stdout)
-    );
-    let no_direction_stderr = std::str::from_utf8(&no_direction.stderr).expect("stderr utf8");
-    let no_direction_envelope: Value =
-        serde_json::from_str(no_direction_stderr).expect("no-direction envelope parses");
-    assert_eq!(
-        no_direction_envelope["kind"], "git_repair_direction_required",
-        "{no_direction_envelope}"
-    );
-    assert_eq!(
-        no_direction_envelope["primary_command"], "heddle fsck repair git --ref main --preview",
-        "{no_direction_envelope}"
-    );
+    .expect("authority-derived reconcile should succeed");
+    let authority_default: Value =
+        serde_json::from_str(&authority_default).expect("authority repair JSON parses");
+    assert_eq!(authority_default["valid"], true, "{authority_default}");
     let import_remote_json = heddle(
         &["--output", "json", "import", "git", "--ref", "origin/main"],
         Some(&local),

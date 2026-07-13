@@ -110,8 +110,6 @@ impl HeddleExitCode {
             //   that output contract (the invocation parses fine; the
             //   command rejects the requested projection)
             "nothing_to_capture"
-            | "reconcile_direction_required"
-            | "git_repair_direction_required"
             | "dirty_worktree"
             | "state_corrupted"
             | "state_not_found"
@@ -442,8 +440,6 @@ mod tests {
             ("remote_not_found", HeddleExitCode::Config),
             ("repository_not_found", HeddleExitCode::Config),
             ("nothing_to_capture", HeddleExitCode::DataErr),
-            ("reconcile_direction_required", HeddleExitCode::DataErr),
-            ("git_repair_direction_required", HeddleExitCode::DataErr),
             ("dirty_worktree", HeddleExitCode::DataErr),
             ("state_corrupted", HeddleExitCode::DataErr),
             ("state_not_found", HeddleExitCode::DataErr),

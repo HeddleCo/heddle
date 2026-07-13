@@ -2361,7 +2361,7 @@ fn git_overlay_matrix_reconcile_apply_imports_current_git_branch() {
 }
 
 #[test]
-fn git_overlay_matrix_reconcile_prefer_heddle_missing_thread_uses_typed_advice() {
+fn git_overlay_matrix_reconcile_prefer_heddle_requires_adoption() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
@@ -2377,7 +2377,7 @@ fn git_overlay_matrix_reconcile_prefer_heddle_missing_thread_uses_typed_advice()
     .expect("invoke reconcile");
     assert!(
         !output.status.success(),
-        "preferring a missing Heddle thread should fail"
+        "preferring Heddle under Git authority should fail"
     );
     assert!(
         output.stdout.is_empty(),
@@ -2386,20 +2386,19 @@ fn git_overlay_matrix_reconcile_prefer_heddle_missing_thread_uses_typed_advice()
     );
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
     let envelope: Value =
-        serde_json::from_str(stderr).expect("missing Heddle thread should emit JSON envelope");
-    assert_eq!(envelope["kind"], "git_repair_missing_heddle_thread");
+        serde_json::from_str(stderr).expect("authority refusal should emit JSON envelope");
+    assert_eq!(envelope["kind"], "git_repair_requires_adoption");
     assert!(
         envelope["error"]
             .as_str()
-            .is_some_and(|error| error.contains("no matching Heddle thread exists")),
-        "reconcile refusal should include full typed advice: {stderr}"
+            .is_some_and(|error| error.contains("Git owns source history")),
+        "reconcile refusal should name source authority: {stderr}"
     );
     assert!(
         envelope["hint"]
             .as_str()
-            .is_some_and(|hint| hint.contains("heddle adopt --ref main")
-                && hint.contains("heddle fsck repair git --prefer git --ref main")),
-        "reconcile hint should offer import and prefer-git recovery: {stderr}"
+            .is_some_and(|hint| hint.contains("heddle adopt")),
+        "reconcile hint should require adoption: {stderr}"
     );
 }
 

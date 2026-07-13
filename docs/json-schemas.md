@@ -3030,9 +3030,12 @@ Refresh the active or named thread, or report the verification/action blocker.
 }
 ```
 
-## `heddle fsck --repair git --output json`
+## `heddle fsck repair git --output json`
 
-Preview or apply a ref reconciliation between Git and Heddle.
+Preview or apply the repair direction allowed by durable source authority.
+Git Overlay repairs Git into Heddle metadata; native repositories repair a
+named Heddle ref into the retained Git projection. Supplying the opposite
+`--prefer` side is a typed refusal and changes nothing.
 
 ```json
 {
@@ -3047,13 +3050,7 @@ Preview or apply a ref reconciliation between Git and Heddle.
     {
       "name": "git_projection_ref_reconcile_preview",
       "repaired": false,
-      "detail": "heddle fsck --repair git --prefer heddle --ref main --preview",
-      "count": 0
-    },
-    {
-      "name": "git_projection_ref_reconcile_preview",
-      "repaired": false,
-      "detail": "heddle fsck --repair git --prefer git --ref main --preview",
+      "detail": "heddle fsck repair git --prefer git --ref main",
       "count": 0
     }
   ]

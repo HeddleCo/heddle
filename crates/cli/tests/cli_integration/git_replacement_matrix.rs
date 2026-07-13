@@ -784,7 +784,7 @@ fn git_replacement_matrix_git_import_export_sync_reconcile_without_git_on_path()
             "--output",
             "json",
             "fsck",
-            "--repair",
+            "repair",
             "git",
             "--ref",
             "main",
@@ -797,8 +797,8 @@ fn git_replacement_matrix_git_import_export_sync_reconcile_without_git_on_path()
     assert_eq!(reconcile["repaired"], false);
     assert_eq!(
         reconcile["repairs"].as_array().map(Vec::len),
-        Some(2),
-        "fsck git repair preview should report both local repair choices: {reconcile}"
+        Some(1),
+        "fsck git repair preview should report the authority-valid repair: {reconcile}"
     );
 
     let verify = assert_clean_json_without_git(&["--output", "json", "verify"], &work);
