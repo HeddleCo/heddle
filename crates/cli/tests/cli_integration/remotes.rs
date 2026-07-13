@@ -3,6 +3,53 @@ use objects::object::{MarkerName, ThreadName};
 
 use super::{git_overlay_fixtures::GitOverlayFixture, *};
 
+#[test]
+fn git_owned_source_commands_refuse_with_exact_git_argv() {
+    let source = TempDir::new().unwrap();
+    init_git_repo_with_branch(source.path(), "main");
+    std::fs::write(source.path().join("tracked.txt"), "tracked\n").unwrap();
+    git_commit_all(source.path(), "initial");
+
+    let destination = source.path().join("clone-destination");
+    let clone = heddle_output(
+        &[
+            "--output",
+            "json",
+            "clone",
+            source.path().to_str().unwrap(),
+            destination.to_str().unwrap(),
+        ],
+        None,
+    )
+    .unwrap();
+    assert!(!clone.status.success());
+    let clone_error: Value = serde_json::from_slice(&clone.stderr).unwrap();
+    assert_eq!(clone_error["kind"], "source_authority_direct_git");
+    assert_eq!(
+        clone_error["primary_command"],
+        format!(
+            "git clone {} {}",
+            source.path().display(),
+            destination.display()
+        )
+    );
+    assert!(!destination.exists());
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    for (args, expected) in [
+        (&["remote", "list"][..], "git remote -v"),
+        (&["push"][..], "git push"),
+        (&["pull"][..], "git pull"),
+    ] {
+        let output =
+            heddle_output(&[&["--output", "json"], args].concat(), Some(source.path())).unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["kind"], "source_authority_direct_git");
+        assert_eq!(error["primary_command"], expected);
+    }
+}
+
 fn heddle_without_git_for_remote_tests(args: &[&str], cwd: &std::path::Path) -> String {
     let output = heddle_output_with_env(args, Some(cwd), &[("PATH", ""), ("NO_COLOR", "1")])
         .expect("invoke heddle without git on PATH");

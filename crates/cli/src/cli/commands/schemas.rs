@@ -1901,30 +1901,9 @@ pub struct PullSchema {
     pub transport: Option<String>,
     pub remote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub old_git_head: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_git_head: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub old_state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ref_scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<String>,
     pub state: Option<String>,
     pub objects: Option<usize>,
-    pub states_created: Option<usize>,
-    pub commits_seen: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commits_seen_scope: Option<String>,
-    pub materialized_checkout: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub changed_path_count: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub changed_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1940,28 +1919,7 @@ pub struct PushSchema {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ref_scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_notes_ref: Option<String>,
-    /// Full ref names this push wrote at the destination (sorted; empty
-    /// for a no-op push). Present on the Git-overlay refs path; omitted
-    /// on the native Heddle transport. Verify with `git ls-remote`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refs_written: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_notes_visibility_warning: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_tracking_remote: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_remote_configured: Option<GitRemoteConfiguredSchema>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_upstream_configured: Option<GitUpstreamConfiguredSchema>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tags_included: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub force_discard_warning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<String>,
     pub state: Option<String>,
@@ -1974,18 +1932,6 @@ pub struct PushSchema {
     pub next_action_template: NullableActionTemplateSchema,
     pub recommended_action: NullableStringSchema,
     pub recommended_action_template: NullableActionTemplateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitRemoteConfiguredSchema {
-    pub name: String,
-    pub url: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitUpstreamConfiguredSchema {
-    pub branch: String,
-    pub remote: String,
 }
 
 /// Operation banner — kept opaque because the underlying

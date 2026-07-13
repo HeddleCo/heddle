@@ -8,11 +8,10 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow};
 #[cfg(feature = "client")]
 use heddle_core::{
-    HostedPushPlan, HostedPushResult, HostedPushResultFields, all_threads_mirror_coverage_note,
-    format_connected_to, format_remote_state_detail, heddle_single_push_execution_facts,
-    hosted_spool_display_path, message_indicates_already_exists,
-    multi_ref_progress_from_hosted_thread, parse_hosted_push_result, plan_hosted_push,
-    redact_internal_hosted_paths, remote_push_failure, uses_git_overlay_mirror_rpc,
+    HostedPushResult, HostedPushResultFields, format_connected_to, format_remote_state_detail,
+    heddle_single_push_execution_facts, hosted_spool_display_path,
+    message_indicates_already_exists, multi_ref_progress_from_hosted_thread,
+    parse_hosted_push_result, redact_internal_hosted_paths, remote_push_failure,
 };
 use heddle_core::{
     LocalTransferSummary, PushFailure, PushOutcome, PushPath, PushPlan, PushPlanRequest,
@@ -22,14 +21,12 @@ use heddle_core::{
     looks_like_git_remote_url, looks_like_remote_location, multi_ref_push_begin,
     multi_ref_thread_failed, multi_ref_thread_succeeded_local, multi_thread_push_execution_facts,
     named_thread_tip_mismatch_failure, plan_push, refuse_named_thread_tip_overwrite,
-    transport_error_message, uses_local_git_overlay_transport,
+    transport_error_message,
 };
 use objects::object::ThreadName;
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
-#[cfg(test)]
-use sley::Repository as SleyRepository;
 #[cfg(feature = "client")]
 use wire::ProtocolError;
 
@@ -43,7 +40,6 @@ use super::{
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 #[cfg(feature = "client")]
-use crate::cli::progress_render::{clear_line, progress_for};
 #[cfg(feature = "client")]
 use crate::client::HostedGrpcClient;
 #[cfg(feature = "client")]
@@ -118,23 +114,6 @@ pub async fn cmd_push(
 
     let has_default_remote = resolved_default_remote_name(&repo)?.is_some();
     let push_uses_hosted_network = push_target_is_hosted_network(&repo, remote.as_deref());
-    let uses_local_overlay = uses_local_git_overlay_transport(
-        repo.capability(),
-        repo.hosted_enabled(),
-        push_uses_hosted_network,
-    );
-    // Discover native-heddle local target under local overlay (I/O fact for plan).
-    let native_local_path = if uses_local_overlay {
-        let default_remote_name = if remote.is_none() {
-            resolved_default_remote_name(&repo)?
-        } else {
-            None
-        };
-        let remote_arg = remote.as_deref().or(default_remote_name.as_deref());
-        native_heddle_local_push_target(&repo, remote_arg)?
-    } else {
-        None
-    };
     // Match preflight_native_remote_transport: overlay capability never
     // treats a git URL as a native-transport mismatch.
     let remote_is_git_local_or_url = matches!(
@@ -154,7 +133,7 @@ pub async fn cmd_push(
         all_threads,
         force,
         head,
-        native_local_heddle_target: native_local_path.is_some(),
+        native_local_heddle_target: false,
         transport_mismatch,
     })
     .map_err(|blocker| map_remote_preflight_blocker(blocker, "push", remote.as_deref()))?;
@@ -186,24 +165,8 @@ pub async fn cmd_push(
     }
 
     match &plan.path {
-        PushPath::LocalNativeHeddle {
-            all_threads: path_all_threads,
-        } => {
-            let target_path = native_local_path.expect("plan selected local native heddle path");
-            if *path_all_threads {
-                push_local_all_threads(&repo, &target_path, &plan, cli).await?;
-            } else {
-                let state_id = resolve_push_state_id(
-                    &repo,
-                    &user_config,
-                    state,
-                    thread.as_deref(),
-                    plan.force,
-                )?;
-                push_local(&repo, &target_path, &state_id, &plan.track_name, &plan, cli).await?;
-            }
-            run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
-            return Ok(());
+        PushPath::LocalNativeHeddle { all_threads: _ } => {
+            unreachable!("native local remotes use the native remote target path")
         }
         PushPath::NativeRemote { .. } => {
             // Transport mismatch already refused by plan_push.
@@ -536,13 +499,6 @@ fn ensure_remote_arg_resolves(repo: &Repository, remote_arg: &str) -> Result<()>
     {
         return Ok(());
     }
-    if repo.capability() == RepositoryCapability::GitOverlay
-        && git_remote_names(repo.root())?
-            .iter()
-            .any(|name| name == remote_arg)
-    {
-        return Ok(());
-    }
     Err(anyhow!(RecoveryAdvice::remote_not_found(remote_arg)))
 }
 
@@ -551,40 +507,6 @@ pub(super) fn push_target_is_hosted_network(repo: &Repository, remote_arg: Optio
         classify_remote_spec(repo, remote_arg),
         Some(RemoteTransportKind::NetworkHeddle)
     )
-}
-
-fn native_heddle_local_push_target(
-    repo: &Repository,
-    remote_arg: Option<&str>,
-) -> Result<Option<std::path::PathBuf>> {
-    let Some(remote_arg) = remote_arg else {
-        return Ok(None);
-    };
-    let target = match resolve_remote_with_key(repo, Some(remote_arg)) {
-        Ok((target, _)) => target,
-        Err(_) => match RemoteTarget::parse(remote_arg) {
-            Ok(target) => target,
-            Err(_) => return Ok(None),
-        },
-    };
-    let RemoteTarget::Local(path) = target else {
-        return Ok(None);
-    };
-    if classify_remote_spec(repo, Some(path.to_string_lossy().as_ref())).is_some_and(|kind| {
-        matches!(
-            kind,
-            RemoteTransportKind::LocalGit | RemoteTransportKind::GitUrl
-        )
-    }) {
-        return Ok(None);
-    }
-    let Ok(target_repo) = Repository::open(&path) else {
-        return Ok(None);
-    };
-    if target_repo.capability() == RepositoryCapability::GitOverlay {
-        return Ok(None);
-    }
-    Ok(Some(target_repo.root().to_path_buf()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -602,9 +524,6 @@ pub(super) fn preflight_native_remote_transport(
     remote_arg: Option<&str>,
     action: &str,
 ) -> Result<()> {
-    if repo.capability() == RepositoryCapability::GitOverlay {
-        return Ok(());
-    }
     match classify_remote_spec(repo, remote_arg) {
         Some(RemoteTransportKind::LocalGit | RemoteTransportKind::GitUrl) => Err(anyhow!(
             RecoveryAdvice::remote_transport_mismatch(action, remote_arg.unwrap_or("<default>"))
@@ -971,36 +890,13 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
     // misleading "pushed to <thread>" line each time. Short-circuit it to a
     // single projection push below; only the non-Git-backed path loops.
     // Plan is pure (capability + flag); network bodies stay here.
-    if matches!(
-        plan_hosted_push(repo.capability(), options.all_threads),
-        HostedPushPlan::NativePerThreadFanout
-    ) {
+    if options.all_threads {
         return push_network_all_threads(repo, &mut client, &repo_path, &options).await;
     }
 
-    // Git-overlay repos DEFAULT to the Git-backed projection path (#846): ship the
-    // git format (one multi-root pack + all refs) straight through weft's git
-    // lane with no native conversion. Native heddle conversion stays opt-in via
-    // `heddle adopt`, after which the repo is no longer GitOverlay and takes the
-    // plain native push below. `progress` drives the live push line on a TTY.
-    //
-    // In `--all-threads` mode `state_id` is `None` (the fan-out resolves each
-    // thread's tip); the projection push nominates the current checkout state as
-    // its advisory `local_state` — every ref ships regardless.
-    let progress = progress_for(options.cli, repo);
-    let state_id = match options.state_id {
-        Some(state_id) => *state_id,
-        None => {
-            // --all-threads Git-backed projection+hosted: projection ships all refs, so the
-            // nominated state is advisory. Use the current checkout state.
-            let user_config = UserConfig::load_default()?;
-            ensure_current_state(
-                repo,
-                &user_config,
-                Some("Bootstrap git-overlay before push".to_string()),
-            )?
-        }
-    };
+    let state_id = *options
+        .state_id
+        .context("single-thread native push requires a resolved state")?;
     let result = push_network_one_thread(
         repo,
         &mut client,
@@ -1008,11 +904,8 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         &state_id,
         options.track_name,
         options.force,
-        &progress,
     )
     .await?;
-    // Clear the live progress line so the result message starts clean on a TTY.
-    clear_line(&progress);
 
     // CLI maps wire/protobuf transport fields → pure domain fields; core
     // parses success/failure and builds execution facts / outcome.
@@ -1044,10 +937,6 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
                 for line in &text.detail_lines {
                     println!("{line}");
                 }
-                if let Some(note) = all_threads_mirror_coverage_note(options.all_threads) {
-                    // Single Git Projection push covers every ref/thread.
-                    println!("{}", style::dim(note));
-                }
                 if let Some(new_state) = state {
                     let detail = format_remote_state_detail(&new_state);
                     if let Some(state_val) = detail.strip_prefix("remote state: ") {
@@ -1069,8 +958,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
     Ok(())
 }
 
-/// Push a single thread's state over the hosted transport, routing through the
-/// git-overlay checkpoint RPC or the plain push RPC per repo capability.
+/// Push one Heddle thread state over the hosted native transport.
 #[cfg(feature = "client")]
 async fn push_network_one_thread(
     repo: &Repository,
@@ -1079,21 +967,10 @@ async fn push_network_one_thread(
     state_id: &objects::object::StateId,
     track_name: &str,
     force: bool,
-    progress: &objects::Progress,
 ) -> Result<wire::PushComplete> {
-    let result = if uses_git_overlay_mirror_rpc(repo.capability()) {
-        // Default (heddle#846): push ALL git-overlay refs in one multi-ref
-        // git-mirror transfer through weft's git lane, with live progress.
-        // Native heddle conversion stays opt-in via `heddle adopt`.
-        client
-            .push_git_overlay_mirror(repo, repo_path, *state_id, track_name, force, progress)
-            .await?
-    } else {
-        client
-            .push(repo, repo_path, *state_id, track_name, force)
-            .await?
-    };
-    Ok(result)
+    Ok(client
+        .push(repo, repo_path, *state_id, track_name, force)
+        .await?)
 }
 
 /// `--all-threads` fan-out over the NATIVE hosted transport (heddle#838): the
@@ -1101,12 +978,6 @@ async fn push_network_one_thread(
 /// its own tip — composes with the heddle#837 fix). Not atomic; every thread is
 /// attempted, per-thread results reported, and any failure exits non-zero.
 ///
-/// This path is git-overlay-free by construction: `push_network` short-circuits
-/// git-overlay `--all-threads` to a single mirror push (which already ships
-/// every ref) before ever reaching here. The native `push` RPC does not drive
-/// live progress, so there is no transient progress line to clear between the
-/// per-thread `println!`s (a `null` handle is passed to satisfy the shared
-/// helper signature).
 #[cfg(feature = "client")]
 async fn push_network_all_threads(
     repo: &Repository,
@@ -1120,8 +991,6 @@ async fn push_network_all_threads(
     let mut pushed: Vec<String> = Vec::new();
     let mut failures: Vec<(String, String)> = Vec::new();
 
-    // Native push does not render a live progress line; pass a null handle.
-    let progress = objects::Progress::null();
     for thread in &threads {
         let outcome = push_network_one_thread(
             repo,
@@ -1130,7 +999,6 @@ async fn push_network_all_threads(
             &thread.state,
             &thread.name,
             options.force,
-            &progress,
         )
         .await;
         match outcome {
@@ -1433,19 +1301,10 @@ struct PushNetworkOptions<'a> {
 }
 
 #[cfg(test)]
-mod git_overlay_config_atomic_tests {
-    //! Crash-mid-write semantics for the Git-overlay `.git/config` writers.
-    //! Both helpers route through Sley's config editor, so section parsing,
-    //! quoting, locking, and atomic replacement stay Git-parity tested.
-    use std::fs;
-
+mod tests {
     use tempfile::TempDir;
 
     use super::*;
-
-    fn init_git_repo(root: &Path) {
-        SleyRepository::init(root).unwrap();
-    }
 
     #[test]
     fn spool_slug_from_local_name_normalizes_folder_names() {
@@ -1544,80 +1403,5 @@ mod git_overlay_config_atomic_tests {
         let remote_message = auto_provision_create_error_message("demo-repo", &remote);
         assert!(!remote_message.contains("__users/"), "{remote_message}");
         assert!(remote_message.contains("internal server error"));
-    }
-
-    #[test]
-    fn write_git_overlay_remote_recovers_from_partial_prior_write() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        init_git_repo(root);
-        let config = root.join(".git").join("config");
-
-        // Establish a clean baseline so we know what "previous full
-        // content" looks like.
-        write_git_overlay_remote(root, "origin", "https://example.com/a.git").unwrap();
-        assert!(
-            fs::read_to_string(&config)
-                .unwrap()
-                .contains("https://example.com/a.git")
-        );
-
-        // Simulate a crash mid-write by truncating the file. A
-        // non-atomic writer using `fs::write` could leave the config
-        // in exactly this shape if the process died between the
-        // `open(O_TRUNC)` and the final `write_all`.
-        fs::write(&config, "[remote \"origin\"]\n\turl = htt").unwrap();
-
-        // Re-invoke the helper. The atomic contract: the resulting
-        // file is the full, well-formed new content — never a partial.
-        write_git_overlay_remote(root, "origin", "https://example.com/b.git").unwrap();
-        let recovered = fs::read_to_string(&config).unwrap();
-        assert!(
-            recovered.contains("[remote \"origin\"]"),
-            "section header missing: {recovered}"
-        );
-        assert!(
-            recovered.contains("https://example.com/b.git"),
-            "new url missing: {recovered}"
-        );
-        assert!(
-            recovered.contains("fetch = +refs/heads/*:refs/remotes/origin/*"),
-            "fetch line missing: {recovered}"
-        );
-        assert!(
-            !recovered.contains("url = htt\n") && !recovered.trim_end().ends_with("url = htt"),
-            "partial bytes from prior crash leaked into result: {recovered}"
-        );
-    }
-
-    #[test]
-    fn write_git_overlay_branch_upstream_recovers_from_partial_prior_write() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        init_git_repo(root);
-        let config = root.join(".git").join("config");
-
-        // Baseline.
-        write_git_overlay_branch_upstream(root, "main", "origin").unwrap();
-        assert!(
-            fs::read_to_string(&config)
-                .unwrap()
-                .contains("[branch \"main\"]")
-        );
-
-        // Crash-mid-write simulation: leave the file truncated mid-key.
-        fs::write(&config, "[branch \"main\"]\n\trem").unwrap();
-
-        // The atomic helper produces a fully-formed section regardless
-        // of the prior partial state.
-        write_git_overlay_branch_upstream(root, "main", "upstream").unwrap();
-        let recovered = fs::read_to_string(&config).unwrap();
-        assert!(recovered.contains("[branch \"main\"]"), "{recovered}");
-        assert!(recovered.contains("upstream"), "{recovered}");
-        assert!(recovered.contains("merge = refs/heads/main"), "{recovered}");
-        assert!(
-            !recovered.trim_end().ends_with("rem"),
-            "partial bytes from prior crash leaked into result: {recovered}"
-        );
     }
 }
