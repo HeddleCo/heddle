@@ -11,7 +11,7 @@ use heddle_core::{
     staged_commit_summary as core_staged_commit_summary, tree_leaf_name,
 };
 use objects::{
-    object::{Agent, Blob, ContentHash, Principal, StateId, ThreadName, Tree, TreeEntry},
+    object::{Agent, Blob, ContentHash, Principal, StateId, Tree, TreeEntry},
     store::ObjectStore,
     worktree::{WorktreeIgnoreMatcher, build_worktree_ignore},
 };

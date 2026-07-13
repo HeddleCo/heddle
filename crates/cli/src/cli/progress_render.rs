@@ -135,11 +135,8 @@ impl Sink for TerminalSink {
     }
 }
 
-/// Clear the live progress line without printing a completion message. No-op
-/// for a null (inactive) handle or off a TTY (where each tick was already a
-/// standalone line, not a `\r`-overwritten one). Used by consumers that print
-/// their own final output right after the operation (e.g. `switch` printing
-/// `Now at: …`, or the hosted push path clearing the transient upload line).
+/// Clear an active TTY progress line before rendering command output.
+#[cfg(feature = "client")]
 pub(crate) fn clear_line(progress: &Progress) {
     if !progress.is_active() {
         return;
