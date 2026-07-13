@@ -192,8 +192,8 @@ impl PackedOpLog {
         Ok(read_header(path)?.head_id)
     }
 
-    pub(crate) fn is_current(path: &Path) -> Result<bool> {
-        read_header(path).map(|_| true)
+    pub(crate) fn validate_header(path: &Path) -> Result<()> {
+        read_header(path).map(|_| ())
     }
 
     /// Cheap O(1) integrity check that the EOF index footer/trailer is present
@@ -207,11 +207,10 @@ impl PackedOpLog {
     /// `header_len + FOOTER_LEN`, or the bytes now sitting at the (new) EOF are
     /// mid-entry-stream garbage rather than the footer magic.
     ///
-    /// This is the load-bearing complement to [`is_current`](Self::is_current):
-    /// `is_current` reads only the header, so it returns `true` for a truncated
-    /// oplog; pairing it with `trailer_ok` lets the format-currency gate keep the
-    /// healthy hot path O(1) (header read + footer read, no entry parse) while
-    /// still routing damaged oplogs into the salvage path.
+    /// This is the load-bearing complement to
+    /// [`validate_header`](Self::validate_header): header validation alone
+    /// succeeds for a truncated oplog; pairing it with `trailer_ok` keeps the
+    /// healthy path O(1) while routing damaged oplogs into salvage.
     ///
     /// Returns `Ok(false)` for any damaged/short/mis-framed trailer (so the
     /// caller can fall through to salvage); only genuine I/O errors propagate.
@@ -1900,7 +1899,7 @@ fn parse_header_with_cursor(bytes: &[u8]) -> Result<(PackedHeader, Cursor<'_>)> 
 
 fn read_header(path: &Path) -> Result<PackedHeader> {
     // Read only the largest supported fixed header, never the whole file: this
-    // path backs the O(1) `head_id`/`is_current` per-read reconciliation checks.
+    // path backs the O(1) `head_id`/`validate_header` reconciliation checks.
     let file = File::open(path)?;
     let mut bytes = Vec::with_capacity(V4_HEADER_LEN as usize);
     file.take(V4_HEADER_LEN).read_to_end(&mut bytes)?;
