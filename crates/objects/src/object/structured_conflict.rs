@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::object::{
-    hash::{ChangeId, ContentHash},
+    hash::{ContentHash, StateId},
     state_review::SymbolAnchor,
 };
 
@@ -70,13 +70,13 @@ pub struct ConflictSide {
     /// The state this side originated from. `None` is permitted only for the
     /// base when there is no common ancestor.
     #[serde(default)]
-    pub source_state: Option<ChangeId>,
+    pub source_state: Option<StateId>,
     pub body: String,
     pub body_hash: ContentHash,
 }
 
 impl ConflictSide {
-    pub fn from_body(source_state: Option<ChangeId>, body: impl Into<String>) -> Self {
+    pub fn from_body(source_state: Option<StateId>, body: impl Into<String>) -> Self {
         let body = body.into();
         let body_hash = ContentHash::compute(body.as_bytes());
         Self {
@@ -117,9 +117,9 @@ mod tests {
         ConflictSymbol {
             id: "c-1".into(),
             anchor: SymbolAnchor::new("src/lib.rs", "merge_target"),
-            base: ConflictSide::from_body(Some(ChangeId::from_bytes([1; 16])), "fn x() { 0 }"),
-            ours: ConflictSide::from_body(Some(ChangeId::from_bytes([2; 16])), "fn x() { 1 }"),
-            theirs: ConflictSide::from_body(Some(ChangeId::from_bytes([3; 16])), "fn x() { 2 }"),
+            base: ConflictSide::from_body(Some(StateId::from_bytes([1; 32])), "fn x() { 0 }"),
+            ours: ConflictSide::from_body(Some(StateId::from_bytes([2; 32])), "fn x() { 1 }"),
+            theirs: ConflictSide::from_body(Some(StateId::from_bytes([3; 32])), "fn x() { 2 }"),
             candidate_resolutions: vec![
                 ConflictResolution::TakeOurs,
                 ConflictResolution::TakeTheirs,

@@ -276,7 +276,7 @@ fn test_goto_missing_current_tree_fails_loud_not_silent_dirty() {
 
     // Tamper with the current (second) state's tree — `goto` reads it
     // to verify worktree cleanliness when force is false. Capture the
-    // first state's change_id at the same time so we have a real goto
+    // first state's state_id at the same time so we have a real goto
     // target (heddle has no `main~1` rev-parse syntax).
     let (current_tree_hex, first_state_id) = {
         let repo = Repository::open(temp.path()).unwrap();

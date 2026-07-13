@@ -107,7 +107,7 @@ fn state_round_trip<S: ObjectStore>(store: &S) {
         .put_tree(&tree)
         .expect("put_tree in state test failed");
     let state = State::new(tree_hash, vec![], attribution());
-    let id = state.change_id;
+    let id = state.id();
 
     store.put_state(&state).expect("put_state failed");
 
@@ -116,7 +116,7 @@ fn state_round_trip<S: ObjectStore>(store: &S) {
         .expect("get_state failed")
         .expect("state missing after put");
 
-    assert_eq!(got.change_id, id, "change_id changed after round-trip");
+    assert_eq!(got.id(), id, "state id changed after round-trip");
     assert_eq!(got.tree, tree_hash, "tree hash changed after round-trip");
 }
 
@@ -126,7 +126,7 @@ fn state_has<S: ObjectStore>(store: &S) {
         .put_tree(&tree)
         .expect("put_tree in state test failed");
     let state = State::new(tree_hash, vec![], attribution());
-    let id = state.change_id;
+    let id = state.id();
     store.put_state(&state).expect("put_state failed");
     assert!(
         store.has_state(&id).expect("has_state failed"),
@@ -140,7 +140,7 @@ fn state_list<S: ObjectStore>(store: &S) {
         .put_tree(&tree)
         .expect("put_tree in state test failed");
     let state = State::new(tree_hash, vec![], attribution());
-    let id = state.change_id;
+    let id = state.id();
     store.put_state(&state).expect("put_state failed");
     let ids = store.list_states().expect("list_states failed");
     assert!(

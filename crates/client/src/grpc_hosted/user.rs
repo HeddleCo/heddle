@@ -400,7 +400,7 @@ impl HostedGrpcClient {
                 repo_path: repo_path.to_string(),
                 source_thread: source_thread.to_string(),
                 target_thread: target_thread.to_string(),
-                source_state: objects::object::ChangeId::parse(source_state)
+                source_state: objects::object::StateId::parse(source_state)
                     .map(|id| id.as_bytes().to_vec())
                     .unwrap_or_default(),
                 note: note.unwrap_or_default().to_string(),
@@ -464,7 +464,7 @@ impl HostedGrpcClient {
                 repo_path: repo_path.to_string(),
                 source_thread: source_thread.to_string(),
                 target_thread: target_thread.to_string(),
-                source_state: objects::object::ChangeId::parse(source_state)
+                source_state: objects::object::StateId::parse(source_state)
                     .map(|id| id.as_bytes().to_vec())
                     .unwrap_or_default(),
                 gated_action: gated_action.to_string(),

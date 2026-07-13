@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::object::{
-    hash::{ChangeId, ContentHash},
+    hash::{ContentHash, StateId},
     visibility_tier::VisibilityTier,
 };
 
@@ -61,7 +61,7 @@ pub struct AnnotationRevision {
     /// The State this revision was created against.
     /// Enables retrieving the exact source as it was at annotation time.
     #[serde(default)]
-    pub created_at_state: Option<ChangeId>,
+    pub created_at_state: Option<StateId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,7 +90,7 @@ pub enum AnnotationKind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ContextTarget {
     File { path: String },
-    State { change_id: ChangeId },
+    State { state_id: StateId },
 }
 
 /// What part of a file an annotation targets.
@@ -150,14 +150,14 @@ impl Annotation {
         attribution: String,
         created_at: i64,
         source_hash: Option<ContentHash>,
-        created_at_state: Option<ChangeId>,
+        created_at_state: Option<StateId>,
     ) -> Self {
         Self {
-            annotation_id: ChangeId::generate().to_string_full(),
+            annotation_id: uuid::Uuid::now_v7().to_string(),
             scope,
             status: AnnotationStatus::Active,
             revisions: vec![AnnotationRevision {
-                revision_id: ChangeId::generate().to_string_full(),
+                revision_id: uuid::Uuid::now_v7().to_string(),
                 kind,
                 content,
                 tags,
@@ -190,10 +190,10 @@ impl Annotation {
         attribution: String,
         created_at: i64,
         source_hash: Option<ContentHash>,
-        created_at_state: Option<ChangeId>,
+        created_at_state: Option<StateId>,
     ) -> &AnnotationRevision {
         self.revisions.push(AnnotationRevision {
-            revision_id: ChangeId::generate().to_string_full(),
+            revision_id: uuid::Uuid::now_v7().to_string(),
             kind,
             content,
             tags,
@@ -317,8 +317,8 @@ impl ContextTarget {
         Ok(Self::File { path })
     }
 
-    pub fn state(change_id: ChangeId) -> Self {
-        Self::State { change_id }
+    pub fn state(state_id: StateId) -> Self {
+        Self::State { state_id }
     }
 
     pub fn validate_scope(&self, scope: &AnnotationScope) -> Result<(), ContextError> {
@@ -337,8 +337,8 @@ impl ContextTarget {
     pub fn storage_path(&self) -> PathBuf {
         match self {
             Self::File { path } => Path::new(FILE_TARGET_ROOT).join(path),
-            Self::State { change_id } => {
-                Path::new(STATE_TARGET_ROOT).join(change_id.to_string_full())
+            Self::State { state_id } => {
+                Path::new(STATE_TARGET_ROOT).join(state_id.to_string_full())
             }
         }
     }
@@ -365,9 +365,9 @@ impl ContextTarget {
                 if !state_components.as_path().as_os_str().is_empty() {
                     return None;
                 }
-                ChangeId::parse(&id.to_string_lossy())
+                StateId::parse(&id.to_string_lossy())
                     .ok()
-                    .map(|change_id| Self::State { change_id })
+                    .map(|state_id| Self::State { state_id })
             }
             _ => None,
         }
@@ -380,9 +380,9 @@ impl ContextTarget {
         }
     }
 
-    pub fn state_id(&self) -> Option<ChangeId> {
+    pub fn state_id(&self) -> Option<StateId> {
         match self {
-            Self::State { change_id } => Some(*change_id),
+            Self::State { state_id } => Some(*state_id),
             Self::File { .. } => None,
         }
     }
@@ -529,7 +529,7 @@ mod tests {
 
     #[test]
     fn roundtrips_revision_with_missing_source_hash_and_present_state() {
-        let created_at_state = ChangeId::generate();
+        let created_at_state = StateId::from_bytes([3; 32]);
         let blob = ContextBlob::new(vec![Annotation::new(
             AnnotationScope::File,
             AnnotationKind::Rationale,
@@ -648,7 +648,7 @@ mod tests {
 
     #[test]
     fn state_targets_only_allow_file_scope() {
-        let target = ContextTarget::state(ChangeId::generate());
+        let target = ContextTarget::state(StateId::from_bytes([1; 32]));
         assert!(target.validate_scope(&AnnotationScope::File).is_ok());
         assert!(matches!(
             target.validate_scope(&AnnotationScope::Lines(1, 2)),
@@ -664,7 +664,7 @@ mod tests {
             Some(file.clone())
         );
 
-        let state = ContextTarget::state(ChangeId::generate());
+        let state = ContextTarget::state(StateId::from_bytes([2; 32]));
         assert_eq!(
             ContextTarget::from_storage_path(&state.storage_path()),
             Some(state)

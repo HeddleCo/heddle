@@ -94,7 +94,7 @@ impl HostedGrpcClient {
             agent_provider: agent_provider.unwrap_or_default().to_string(),
             agent_model: agent_model.unwrap_or_default().to_string(),
             target_state_id: target_state_id
-                .and_then(|s| objects::object::ChangeId::parse(s).ok())
+                .and_then(|s| objects::object::StateId::parse(s).ok())
                 .map(|id| id.as_bytes().to_vec()),
             kind: kind as i32,
             client_operation_id: String::new(),
@@ -200,7 +200,7 @@ impl HostedGrpcClient {
             agent_provider: agent_provider.unwrap_or_default().to_string(),
             agent_model: agent_model.unwrap_or_default().to_string(),
             target_state_id: target_state_id
-                .and_then(|s| objects::object::ChangeId::parse(s).ok())
+                .and_then(|s| objects::object::StateId::parse(s).ok())
                 .map(|id| id.as_bytes().to_vec()),
             kind: kind as i32,
         });

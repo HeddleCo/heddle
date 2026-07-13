@@ -628,7 +628,7 @@ fn verify_git_overlay_clone(
     repo: &Repository,
     local_path: &Path,
     track_name: &str,
-    state_id: &objects::object::ChangeId,
+    state_id: &objects::object::StateId,
 ) -> Result<()> {
     ensure_git_excludes_heddle(local_path)?;
     refresh_git_index_to_head(local_path)?;
@@ -1411,7 +1411,7 @@ async fn clone_network(
             if let Some(state) = final_state {
                 println!(
                     "  {}",
-                    style::field("state", &style::change_id(&state.to_string()))
+                    style::field("state", &style::state_id(&state.to_string()))
                 );
             }
         }
@@ -1570,16 +1570,16 @@ async fn clone_monorepo(
 
 /// Map a transport `MonorepoNode` tree into pure core facts (no I/O).
 ///
-/// Parses content-state bytes into [`ChangeId`]; malformed/absent states map
+/// Parses content-state bytes into [`StateId`]; malformed/absent states map
 /// to `None` (empty checkout), matching prior client planner policy.
 #[cfg(feature = "client")]
 fn monorepo_node_facts_from_resolved(node: &grpc::heddle::v1::MonorepoNode) -> MonorepoNodeFacts {
-    use objects::object::ChangeId;
+    use objects::object::StateId;
 
     let content_state = node
         .content_state
         .as_deref()
-        .and_then(|bytes| ChangeId::try_from_slice(bytes).ok());
+        .and_then(|bytes| StateId::try_from_slice(bytes).ok());
     let edges = node
         .edges
         .iter()

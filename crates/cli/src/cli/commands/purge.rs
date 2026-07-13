@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use heddle_core::{PurgeApplyPlan, plan_purge_apply, purge_apply_message, purge_force_command};
-use objects::object::ChangeId;
+use objects::object::StateId;
 use oplog::OpLogRecorder;
 use repo::Repository;
 use serde::Serialize;
@@ -180,9 +180,9 @@ fn cmd_purge_list(cli: &Cli, repo: &Repository, _args: PurgeListArgs) -> Result<
     Ok(())
 }
 
-fn resolve_state(repo: &Repository, spec: &str) -> Result<ChangeId> {
+fn resolve_state(repo: &Repository, spec: &str) -> Result<StateId> {
     repo::resolve_state_for_command(repo, spec, repo::ResolvePolicy::minimal())
-        .map(|resolved| resolved.change_id)
+        .map(|resolved| resolved.state_id)
         .map_err(|error| match error {
             repo::StateResolveError::Repository(err) => err.into(),
             repo::StateResolveError::Failure(repo::StateResolveFailure::NotFound { spec }) => {
@@ -195,7 +195,7 @@ fn resolve_state(repo: &Repository, spec: &str) -> Result<ChangeId> {
 
 fn blob_at_path(
     repo: &Repository,
-    state: &ChangeId,
+    state: &StateId,
     path: &str,
 ) -> Result<objects::object::ContentHash> {
     super::redact::blob_at_path(repo, state, path)

@@ -9,7 +9,7 @@ use std::{
 };
 
 use objects::{
-    object::{Blob, ChangeId, ContentHash},
+    object::{Blob, ContentHash, StateId},
     store::{
         CompressionConfig, ObjectStore, PackBuilder, PackObjectId,
         pack::ObjectType as PackObjectType,
@@ -297,7 +297,7 @@ fn test_goto_performance() {
     for i in 0..10 {
         std::fs::write(temp.path().join("data.txt"), format!("data {}", i)).unwrap();
         let state = repo.snapshot(Some(format!("State {}", i)), None).unwrap();
-        state_ids.push(state.change_id);
+        state_ids.push(state.state_id);
     }
 
     // Time switching between states
@@ -589,7 +589,7 @@ fn encode_native_pack(objects: &[ObjectData]) -> (Vec<u8>, Vec<u8>) {
     for object in objects {
         let id = match &object.id {
             ObjectId::Hash(hash) => PackObjectId::Hash(*hash),
-            ObjectId::ChangeId(change_id) => PackObjectId::ChangeId(*change_id),
+            ObjectId::StateId(state_id) => PackObjectId::StateId(*state_id),
         };
         let obj_type = match object.obj_type {
             ObjectType::Blob => PackObjectType::Blob,
@@ -622,7 +622,7 @@ fn decode_native_pack(pack_data: &[u8], index_data: &[u8]) -> Vec<ObjectData> {
             let (obj_type, data) = reader.get_object(&id).unwrap().unwrap();
             let object_id = match id {
                 PackObjectId::Hash(hash) => ObjectId::Hash(hash),
-                PackObjectId::ChangeId(change_id) => ObjectId::ChangeId(change_id),
+                PackObjectId::StateId(state_id) => ObjectId::StateId(state_id),
             };
             let object_type = match obj_type {
                 PackObjectType::Blob => ObjectType::Blob,
@@ -650,7 +650,7 @@ fn sample_transport_objects() -> Vec<ObjectData> {
             .repeat(1024)
             .into_bytes(),
     );
-    let state_id = ChangeId::generate();
+    let state_id = StateId::from_bytes([1; 32]);
 
     vec![
         ObjectData {
@@ -666,7 +666,7 @@ fn sample_transport_objects() -> Vec<ObjectData> {
             is_delta: false,
         },
         ObjectData {
-            id: ObjectId::ChangeId(state_id),
+            id: ObjectId::StateId(state_id),
             obj_type: ObjectType::State,
             data: vec![42; 8 * 1024],
             is_delta: false,

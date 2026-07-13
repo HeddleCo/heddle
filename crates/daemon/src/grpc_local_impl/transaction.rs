@@ -23,7 +23,7 @@ use grpc::heddle::v1::{
 };
 use objects::{
     fs_atomic::write_file_atomic,
-    object::{ChangeId, OperationId, ThreadName},
+    object::{OperationId, StateId, ThreadName},
 };
 use oplog::OpRecord;
 use prost::Message;
@@ -47,7 +47,7 @@ struct TransactionSentinel {
     state: String,
     started_at_secs: i64,
     started_by_email: String,
-    /// Full `ChangeId` at begin time, recorded so a future rewind has a target.
+    /// Full `StateId` at begin time, recorded so a future rewind has a target.
     base_state: String,
     /// Verb names buffered into the transaction. Empty for now — CLI verbs
     /// do not yet route through the open transaction; that wiring is
@@ -156,14 +156,14 @@ impl TransactionService for LocalTransactionService {
                 // or from current HEAD. Either path can produce `None` if the
                 // repository has no snapshots yet — tests therefore seed at
                 // least one snapshot before calling `begin_transaction`.
-                let base_change_id = if !req.thread.is_empty() {
+                let base_state_id = if !req.thread.is_empty() {
                     repo.refs()
                         .get_thread(&ThreadName::from(req.thread.as_str()))
                         .map_err(to_status)?
                 } else {
                     repo.head().map_err(to_status)?
                 };
-                let base_state = base_change_id
+                let base_state = base_state_id
                     .ok_or_else(|| {
                         Status::failed_precondition(
                             "cannot begin transaction: no base state (repository has no snapshots)",
@@ -259,7 +259,7 @@ impl TransactionService for LocalTransactionService {
                 Ok(CommitTransactionResponse {
                     // `base_state` is a hex-display string in the sentinel
                     // file; decode back to bytes for the wire response.
-                    state_id: ChangeId::parse(&sentinel.base_state)
+                    state_id: StateId::parse(&sentinel.base_state)
                         .map(|id| id.as_bytes().to_vec())
                         .unwrap_or_default(),
                     op_count,
@@ -370,7 +370,7 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let repo = Repository::init_default(tmp.path()).expect("init repo");
         // `init_default` already seeds the empty-tree snapshot on `main`, so
-        // HEAD resolves to a real ChangeId.
+        // HEAD resolves to a real StateId.
         assert!(repo.head().expect("head").is_some(), "head should be set");
         let dedup = OperationDedupStore::open(repo.heddle_dir()).expect("dedup open");
         let service = GrpcLocalService::new(Arc::new(repo), Arc::new(dedup));
@@ -410,7 +410,7 @@ mod tests {
             state: STATE_ACTIVE.to_string(),
             started_at_secs: 1,
             started_by_email: "trap@example.com".to_string(),
-            base_state: ChangeId::from_bytes([0; 16]).to_string_full(),
+            base_state: StateId::from_bytes([0; 16]).to_string_full(),
             buffered_ops: vec!["trap-op".to_string()],
             aborted_reason: None,
         };

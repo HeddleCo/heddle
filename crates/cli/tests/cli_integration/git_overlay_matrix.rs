@@ -944,7 +944,7 @@ fn git_overlay_matrix_index_checkpoint_recovery_reuses_preserved_snapshot() {
         .current_state()
         .expect("read current state")
         .expect("failed commit should preserve a current state")
-        .change_id;
+        .state_id;
     assert_eq!(
         snapshot_count_for_change(temp.path(), &preserved),
         1,
@@ -968,7 +968,7 @@ fn git_overlay_matrix_index_checkpoint_recovery_reuses_preserved_snapshot() {
         ],
     );
     assert_eq!(recovered["output_kind"], "checkpoint");
-    assert_eq!(recovered["change_id"], preserved.short());
+    assert_eq!(recovered["state_id"], preserved.short());
     assert_eq!(
         snapshot_count_for_change(temp.path(), &preserved),
         1,
@@ -1089,7 +1089,7 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
 
     let show = json(temp.path(), &["show", "HEAD", "--output", "json"]);
     assert_git_overlay_basics(&show);
-    assert!(show["change_id"].as_str().is_some());
+    assert!(show["state_id"].as_str().is_some());
 
     let log = json(temp.path(), &["log", "--output", "json"]);
     assert_git_overlay_basics(&log);
@@ -1432,7 +1432,7 @@ fn git_overlay_matrix_new_branch_at_adopted_tip_verifies_without_setup_loop() {
     let fixture = GitOverlayFixture::adopted_main();
 
     let adopted = json(fixture.path(), &["show", "HEAD", "--output", "json"]);
-    let adopted_change = adopted["change_id"]
+    let adopted_change = adopted["state_id"]
         .as_str()
         .expect("adopted state should have short change id")
         .to_string();
@@ -1450,7 +1450,7 @@ fn git_overlay_matrix_new_branch_at_adopted_tip_verifies_without_setup_loop() {
         Value::Null,
         "a new Git branch at an already-adopted commit should not look like setup work: {status}"
     );
-    assert!(status["state"]["change_id"].as_str().is_some());
+    assert!(status["state"]["state_id"].as_str().is_some());
     assert!(status["current_state"].as_str().is_some());
 
     let status_text = fixture.heddle(&["status", "--output", "text"]).unwrap();
@@ -1491,7 +1491,7 @@ fn git_overlay_matrix_commit_after_adopt_ref_checkpoints_without_import_loop() {
         &["--output", "json", "commit", "-m", "change"],
     );
     assert_eq!(commit["output_kind"], "commit");
-    assert!(commit["change_id"].as_str().is_some());
+    assert!(commit["state_id"].as_str().is_some());
     assert!(commit["git_commit"].as_str().is_some());
     assert_eq!(commit["verification"]["verified"], true);
     assert_eq!(commit["verification"]["status"], "clean");
@@ -4250,7 +4250,7 @@ fn git_overlay_matrix_subdirectory_dirty_commands() {
     assert_eq!(diagnose["changes"]["total"], 2);
 
     let show = json(&nested, &["show", "HEAD", "--output", "json"]);
-    assert!(show["change_id"].as_str().is_some());
+    assert!(show["state_id"].as_str().is_some());
 
     let log = json(&nested, &["log", "--output", "json"]);
     assert!(
@@ -4344,7 +4344,7 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     );
 
     let show = json(temp.path(), &["show", "HEAD", "--output", "json"]);
-    assert!(show["change_id"].as_str().is_some());
+    assert!(show["state_id"].as_str().is_some());
 
     let log = json(temp.path(), &["log", "--output", "json"]);
     assert!(
@@ -4472,7 +4472,7 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
         temp.path(),
         &["--output", "json", "commit", "-m", "heddle change"],
     );
-    let heddle_state = committed["change_id"]
+    let heddle_state = committed["state_id"]
         .as_str()
         .expect("commit should report Heddle state")
         .to_string();
@@ -4833,7 +4833,7 @@ fn git_overlay_matrix_detached_head_sequence_commands() {
     );
 
     let show = json(temp.path(), &["show", "HEAD", "--output", "json"]);
-    assert!(show["change_id"].as_str().is_some());
+    assert!(show["state_id"].as_str().is_some());
 
     let log = json(temp.path(), &["log", "--output", "json"]);
     assert!(
@@ -4934,7 +4934,7 @@ fn git_overlay_matrix_detached_at_tag_status_commands() {
 
     let show = json(temp.path(), &["show", "HEAD", "--output", "json"]);
     assert_git_overlay_basics(&show);
-    assert!(show["change_id"].as_str().is_some());
+    assert!(show["state_id"].as_str().is_some());
 }
 
 #[test]
@@ -5348,7 +5348,7 @@ fn git_overlay_matrix_reopen_from_different_cwds_preserves_state_and_git_only_al
     assert_eq!(ready["captured"], true);
 
     let root_show = json(temp.path(), &["show", "HEAD", "--output", "json"]);
-    assert!(root_show["change_id"].as_str().is_some());
+    assert!(root_show["state_id"].as_str().is_some());
 
     let nested_log = json(&nested, &["log", "--output", "json"]);
     assert!(
@@ -5586,7 +5586,7 @@ fn git_overlay_matrix_symlink_status_and_ready_work() {
     assert_eq!(ready["captured"], true);
 
     let show = json(temp.path(), &["show", "HEAD", "--output", "json"]);
-    assert!(show["change_id"].as_str().is_some());
+    assert!(show["state_id"].as_str().is_some());
 }
 
 #[cfg(unix)]
@@ -6103,10 +6103,7 @@ fn collapse_records(path: &std::path::Path) -> Vec<(Vec<String>, String, Option<
         .collect()
 }
 
-fn snapshot_count_for_change(
-    path: &std::path::Path,
-    change_id: &objects::object::ChangeId,
-) -> usize {
+fn snapshot_count_for_change(path: &std::path::Path, state_id: &objects::object::StateId) -> usize {
     let repo = Repository::open(path).expect("repo should open");
     repo.oplog()
         .recent(512)
@@ -6115,7 +6112,7 @@ fn snapshot_count_for_change(
         .filter(|entry| {
             matches!(
                 &entry.operation,
-                OpRecord::Snapshot { new_state, .. } if new_state == change_id
+                OpRecord::Snapshot { new_state, .. } if new_state == state_id
             )
         })
         .count()
@@ -6244,8 +6241,8 @@ fn git_overlay_matrix_expand_squashed_land_by_state_and_git_oid() {
     let git_commit = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
     let expanded_by_git = json(temp.path(), &["expand", &git_commit]);
     assert_eq!(
-        expanded_by_git["collapsed"]["change_id"],
-        expanded["collapsed"]["change_id"]
+        expanded_by_git["collapsed"]["state_id"],
+        expanded["collapsed"]["state_id"]
     );
 
     let log = json(temp.path(), &["log", "-n", "1"]);
@@ -7480,7 +7477,7 @@ fn git_overlay_matrix_rebase_and_cherry_pick_sequences_remain_coherent() {
     );
 
     let cherry_show = json(cherry_repo.path(), &["show", "HEAD", "--output", "json"]);
-    assert!(cherry_show["change_id"].as_str().is_some());
+    assert!(cherry_show["state_id"].as_str().is_some());
 
     let before_capture_head = git_stdout(cherry_repo.path(), &["rev-parse", "HEAD"]);
     let before_capture_state = cherry_status["current_state"]

@@ -742,6 +742,7 @@ fn to_pack_object_id(id: &ObjectId) -> PackObjectId {
     match id {
         ObjectId::Hash(hash) => PackObjectId::Hash(*hash),
         ObjectId::StateId(state_id) => PackObjectId::StateId(*state_id),
+        ObjectId::StateAttachment { id, .. } => PackObjectId::Hash(*id.as_hash()),
     }
 }
 

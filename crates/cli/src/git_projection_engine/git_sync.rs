@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Sync threads/markers for Git Projection Mapping.
 
-use objects::object::{ChangeId, MarkerName, ThreadName};
+use objects::object::{MarkerName, StateId, ThreadName};
 use refs::RefExpectation;
 use sley::{
     ObjectId as SleyObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
@@ -59,20 +59,20 @@ pub fn sync_branches(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
         let Some(target) = peeled_oid(&repo, &reference.name, &reference.target)? else {
             continue;
         };
-        if let Some(change_id) = bridge.mapping.get_heddle(target) {
+        if let Some(state_id) = bridge.mapping.get_heddle(target) {
             let tn = ThreadName::new(name);
             if let Some(existing) = bridge.heddle_repo.refs().get_thread(&tn)?
-                && !thread_can_adopt_change(bridge, &existing, &change_id)?
+                && !thread_can_adopt_change(bridge, &existing, &state_id)?
             {
                 return Err(GitProjectionError::GitHeddleThreadDiverged {
                     thread: name.to_string(),
                     branch: name.to_string(),
                     thread_change: existing,
-                    branch_change: change_id,
+                    branch_change: state_id,
                 });
             }
 
-            bridge.heddle_repo.refs().set_thread(&tn, &change_id)?;
+            bridge.heddle_repo.refs().set_thread(&tn, &state_id)?;
             stats += 1;
         }
     }
@@ -82,16 +82,16 @@ pub fn sync_branches(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
 
 fn thread_can_adopt_change(
     bridge: &GitProjection<'_>,
-    existing: &ChangeId,
-    change_id: &ChangeId,
+    existing: &StateId,
+    state_id: &StateId,
 ) -> GitProjectionResult<bool> {
-    if existing == change_id {
+    if existing == state_id {
         return Ok(true);
     }
     if thread_is_unclaimed_bootstrap(bridge.heddle_repo, existing)? {
         return Ok(true);
     }
-    wire::is_ancestor(bridge.heddle_repo.store(), *existing, *change_id)
+    wire::is_ancestor(bridge.heddle_repo.store(), *existing, *state_id)
         .map_err(|err| GitProjectionError::InvalidMapping(err.to_string()))
 }
 
@@ -108,19 +108,19 @@ pub fn sync_tags(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
             continue;
         };
 
-        if let Some(change_id) = bridge.mapping.get_heddle(oid) {
+        if let Some(state_id) = bridge.mapping.get_heddle(oid) {
             let mn = MarkerName::new(name);
             match bridge.heddle_repo.refs().get_marker(&mn) {
-                Ok(Some(existing)) if existing != change_id => bridge
+                Ok(Some(existing)) if existing != state_id => bridge
                     .heddle_repo
                     .refs()
-                    .set_marker_cas(&mn, RefExpectation::Any, &change_id)?,
+                    .set_marker_cas(&mn, RefExpectation::Any, &state_id)?,
                 Ok(_) => {}
                 Err(err) => return Err(err.into()),
             }
 
             if bridge.heddle_repo.refs().get_marker(&mn)?.is_none() {
-                bridge.heddle_repo.refs().create_marker(&mn, &change_id)?;
+                bridge.heddle_repo.refs().create_marker(&mn, &state_id)?;
             }
             stats += 1;
         }

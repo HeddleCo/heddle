@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{Attribution, ChangeId, ContentHash, Principal};
+use super::{Attribution, ChangeId, ContentHash, Principal, StateId};
 
 // ── Status ──────────────────────────────────────────────────────────
 
@@ -34,6 +34,32 @@ impl Status {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChangeLineageKind {
+    CherryPick,
+    Collapse,
+    Revert,
+    GitProjection,
+}
+
+impl ChangeLineageKind {
+    fn to_byte(self) -> u8 {
+        match self {
+            Self::CherryPick => 1,
+            Self::Collapse => 2,
+            Self::Revert => 3,
+            Self::GitProjection => 4,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeLineage {
+    pub kind: ChangeLineageKind,
+    pub source_change: ChangeId,
+    pub source_state: StateId,
 }
 
 // ── StateSignature ──────────────────────────────────────────────────
@@ -182,44 +208,24 @@ fn write_optional_f32(hasher: &mut blake3::Hasher, value: Option<f32>) {
 
 // ── State ───────────────────────────────────────────────────────────
 
-/// A state is an immutable snapshot with rich metadata.
-///
-/// On-disk encoding is rmp-serde's positional struct format (a fixed-length
-/// tuple). This is sensitive to field order: inserting a field in the middle
-/// of the tuple breaks every pre-existing on-disk state. The invariant we
-/// keep going forward is:
-///
-/// > **New optional fields are added at the tail of the struct, below
-/// > `status`, with `#[serde(default)]`.** Mid-struct inserts are
-/// > forbidden. rmp-serde's positional deserializer tolerates missing
-/// > trailing fields when they have a `Default` impl, so tail-only growth
-/// > is forward-compatible automatically.
-///
-/// Required (non-optional) fields — `change_id`, `tree`, `parents`,
-/// `attribution`, `created_at`, `status` — must never move. Optional fields
-/// may be reordered only among themselves, and only at the tail.
+/// Immutable source-history state. `state_id` is recomputed from every encoded
+/// field; mutable repository metadata lives in `StateAttachment` objects.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct State {
-    pub change_id: ChangeId,
     #[serde(skip)]
-    content_hash: Option<ContentHash>,
+    pub state_id: StateId,
+    pub change_id: ChangeId,
     pub tree: ContentHash,
-    pub parents: Vec<ChangeId>,
+    pub parents: Vec<StateId>,
     pub attribution: Attribution,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
     pub created_at: DateTime<Utc>,
     pub verification: Option<Verification>,
-    pub signature: Option<StateSignature>,
     pub status: Status,
     // --- tail-only optional fields below. Add new fields here, never above. ---
     #[serde(default)]
     pub provenance: Option<ContentHash>,
-    #[serde(default)]
-    pub logical_change_id: Option<ChangeId>,
-    /// Optional context tree root for code annotations.
-    #[serde(default)]
-    pub context: Option<ContentHash>,
     /// Authoring timestamp for this state, when distinct from
     /// `created_at`.
     ///
@@ -239,28 +245,6 @@ pub struct State {
     /// byte, so native commits are unaffected beyond the format bump.
     #[serde(default)]
     pub authored_at: Option<DateTime<Utc>>,
-    /// Content hash of the state's [`RiskSignalBlob`](crate::object::RiskSignalBlob),
-    /// when present. Computed and persisted whenever risk signals fire on a
-    /// state. `None` for states from before W1 and for states where no
-    /// signals fired.
-    ///
-    /// Hash framing: a single `0` byte when `None`, `[1]` + 32-byte hash when
-    /// `Some`. Legacy states without this field deserialize as `None` and
-    /// hash byte-identical to before W1.
-    #[serde(default)]
-    pub risk_signals: Option<ContentHash>,
-    /// Content hash of the state's [`ReviewSignaturesBlob`](crate::object::ReviewSignaturesBlob),
-    /// when reviewers have signed off (read / agent-preview / agent-co-review).
-    #[serde(default)]
-    pub review_signatures: Option<ContentHash>,
-    /// Content hash of the state's [`DiscussionsBlob`](crate::object::DiscussionsBlob),
-    /// when discussions are anchored to this state.
-    #[serde(default)]
-    pub discussions: Option<ContentHash>,
-    /// Content hash of the state's [`StructuredConflict`](crate::object::StructuredConflict),
-    /// when this state captures an unresolved merge conflict as data.
-    #[serde(default)]
-    pub structured_conflicts: Option<ContentHash>,
     // --- git-fidelity fields (#564 de-lossy step 1, #565) ---
     //
     // These preserve the parts of an imported git commit that Heddle's
@@ -338,61 +322,56 @@ pub struct State {
     /// byte-exact and no conversion sneaks in.
     #[serde(default)]
     pub extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
+    pub lineage: Vec<ChangeLineage>,
 }
 
 impl State {
-    pub fn new(tree: ContentHash, parents: Vec<ChangeId>, attribution: Attribution) -> Self {
+    pub fn new(tree: ContentHash, parents: Vec<StateId>, attribution: Attribution) -> Self {
         Self::new_snapshot(tree, parents, attribution)
     }
 
     pub fn new_snapshot(
         tree: ContentHash,
-        parents: Vec<ChangeId>,
+        parents: Vec<StateId>,
         attribution: Attribution,
     ) -> Self {
-        let change_id = ChangeId::generate();
-        Self::new_with_logical_change_id(tree, parents, attribution, change_id)
+        Self::new_with_change_id(tree, parents, attribution, ChangeId::generate())
     }
 
-    pub fn new_merge(tree: ContentHash, parents: Vec<ChangeId>, attribution: Attribution) -> Self {
+    pub fn new_merge(tree: ContentHash, parents: Vec<StateId>, attribution: Attribution) -> Self {
         Self::new_snapshot(tree, parents, attribution)
     }
 
     pub fn new_refresh_of(
         tree: ContentHash,
-        parents: Vec<ChangeId>,
+        parents: Vec<StateId>,
         attribution: Attribution,
-        logical_change_id: ChangeId,
+        change_id: ChangeId,
     ) -> Self {
-        Self::new_with_logical_change_id(tree, parents, attribution, logical_change_id)
+        Self::new_with_change_id(tree, parents, attribution, change_id)
     }
 
-    pub fn new_fork_of(
-        tree: ContentHash,
-        parents: Vec<ChangeId>,
-        attribution: Attribution,
-    ) -> Self {
+    pub fn new_fork_of(tree: ContentHash, parents: Vec<StateId>, attribution: Attribution) -> Self {
         Self::new_snapshot(tree, parents, attribution)
     }
 
     pub fn new_collapse_of(
         tree: ContentHash,
-        parents: Vec<ChangeId>,
+        parents: Vec<StateId>,
         attribution: Attribution,
     ) -> Self {
         Self::new_snapshot(tree, parents, attribution)
     }
 
-    fn new_with_logical_change_id(
+    fn new_with_change_id(
         tree: ContentHash,
-        parents: Vec<ChangeId>,
+        parents: Vec<StateId>,
         attribution: Attribution,
-        logical_change_id: ChangeId,
+        change_id: ChangeId,
     ) -> Self {
-        Self {
-            change_id: ChangeId::generate(),
-            logical_change_id: Some(logical_change_id),
-            content_hash: None,
+        let mut state = Self {
+            state_id: StateId::default(),
+            change_id,
             tree,
             parents,
             attribution,
@@ -400,103 +379,42 @@ impl State {
             confidence: None,
             created_at: Utc::now(),
             verification: None,
-            signature: None,
             provenance: None,
-            context: None,
             authored_at: None,
-            risk_signals: None,
-            review_signatures: None,
-            discussions: None,
-            structured_conflicts: None,
             committer: None,
             authored_tz_offset: 0,
             committer_tz_offset: 0,
             raw_message: None,
             git_lossy: false,
             extra_headers: Vec::new(),
+            lineage: Vec::new(),
             status: Status::Draft,
-        }
+        };
+        state.refresh_state_id();
+        state
     }
 
     pub fn with_intent(mut self, intent: impl Into<String>) -> Self {
         self.intent = Some(intent.into());
-        self.content_hash = None;
+        self.refresh_state_id();
         self
     }
 
     pub fn with_confidence(mut self, confidence: f32) -> Self {
         self.confidence = Some(confidence.clamp(0.0, 1.0));
-        self.content_hash = None;
+        self.refresh_state_id();
         self
     }
 
     pub fn with_verification(mut self, verification: Verification) -> Self {
         self.verification = Some(verification);
-        self.content_hash = None;
-        self
-    }
-
-    pub fn with_signature(mut self, signature: StateSignature) -> Self {
-        self.signature = Some(signature);
+        self.refresh_state_id();
         self
     }
 
     pub fn with_provenance(mut self, provenance: ContentHash) -> Self {
         self.provenance = Some(provenance);
-        self.content_hash = None;
-        self
-    }
-
-    /// Set the context tree root.
-    pub fn with_context(mut self, context: ContentHash) -> Self {
-        self.context = Some(context);
-        self.content_hash = None;
-        self
-    }
-
-    /// Attach a [`RiskSignalBlob`](crate::object::RiskSignalBlob) hash.
-    /// Render-time tick budgeting (selecting which signals to surface) is a
-    /// view over this stored data, not part of storage itself.
-    ///
-    /// **Not part of the state hash.** Risk signals are derived data computed
-    /// *about* a state from the diff against its parent; including them in
-    /// identity would make the same logical state hash differently depending
-    /// on which signals fired. That breaks every "is this the same state?"
-    /// check in the system. See `authored_at` for the same pattern.
-    pub fn with_risk_signals(mut self, risk_signals: ContentHash) -> Self {
-        self.risk_signals = Some(risk_signals);
-        self
-    }
-
-    /// Attach a [`ReviewSignaturesBlob`](crate::object::ReviewSignaturesBlob)
-    /// hash. The state's authoring [`StateSignature`] is unaffected; review
-    /// signatures live alongside it and accumulate over time.
-    ///
-    /// **Not part of the state hash.** Review signatures accumulate
-    /// post-capture; including them in identity would mean every signature
-    /// re-keys the state. See `authored_at` for the same pattern.
-    pub fn with_review_signatures(mut self, review_signatures: ContentHash) -> Self {
-        self.review_signatures = Some(review_signatures);
-        self
-    }
-
-    /// Attach a [`DiscussionsBlob`](crate::object::DiscussionsBlob) hash.
-    ///
-    /// **Not part of the state hash.** Discussions evolve independently of
-    /// the state they're anchored to — appending a turn must not change the
-    /// state's identity. See `authored_at` for the same pattern.
-    pub fn with_discussions(mut self, discussions: ContentHash) -> Self {
-        self.discussions = Some(discussions);
-        self
-    }
-
-    /// Attach a [`StructuredConflict`](crate::object::StructuredConflict) hash.
-    ///
-    /// **Not part of the state hash.** Conflict objects describe the merge's
-    /// disagreement; the state's tree and parents already encode what's being
-    /// merged. See `authored_at` for the same pattern.
-    pub fn with_structured_conflicts(mut self, structured_conflicts: ContentHash) -> Self {
-        self.structured_conflicts = Some(structured_conflicts);
+        self.refresh_state_id();
         self
     }
 
@@ -512,7 +430,7 @@ impl State {
     /// `authored_at` field docs and `update_hash`.
     pub fn with_authored_at(mut self, timestamp: DateTime<Utc>) -> Self {
         self.authored_at = Some(timestamp);
-        self.content_hash = None;
+        self.refresh_state_id();
         self
     }
 
@@ -522,7 +440,7 @@ impl State {
     /// `update_hash`. #564 de-lossy step 1.
     pub fn with_committer(mut self, committer: Principal) -> Self {
         self.committer = Some(committer);
-        self.content_hash = None;
+        self.refresh_state_id();
         self
     }
 
@@ -531,7 +449,7 @@ impl State {
     pub fn with_tz_offsets(mut self, authored: i32, committer: i32) -> Self {
         self.authored_tz_offset = authored;
         self.committer_tz_offset = committer;
-        self.content_hash = None;
+        self.refresh_state_id();
         self
     }
 
@@ -540,7 +458,7 @@ impl State {
     /// field docs). **Part of the state hash.** #564 de-lossy step 1.
     pub fn with_raw_message(mut self, raw_message: impl AsRef<[u8]>) -> Self {
         self.raw_message = Some(raw_message.as_ref().to_vec());
-        self.content_hash = None;
+        self.refresh_state_id();
         self
     }
 
@@ -551,7 +469,7 @@ impl State {
     /// hash (see the `git_lossy` field docs).
     pub fn with_git_lossy(mut self, git_lossy: bool) -> Self {
         self.git_lossy = git_lossy;
-        self.content_hash = None;
+        self.refresh_state_id();
         self
     }
 
@@ -560,39 +478,31 @@ impl State {
     /// step 1.
     pub fn with_extra_headers(mut self, extra_headers: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
         self.extra_headers = extra_headers;
-        self.content_hash = None;
+        self.refresh_state_id();
+        self
+    }
+
+    pub fn with_lineage(mut self, lineage: Vec<ChangeLineage>) -> Self {
+        self.lineage = lineage;
+        self.refresh_state_id();
         self
     }
 
     pub fn with_status(mut self, status: Status) -> Self {
         self.status = status;
-        self.content_hash = None;
+        self.refresh_state_id();
         self
     }
 
     pub fn with_change_id(mut self, change_id: ChangeId) -> Self {
-        let previous_change_id = self.change_id;
         self.change_id = change_id;
-        if self.logical_change_id == Some(previous_change_id) || self.logical_change_id.is_none() {
-            self.logical_change_id = Some(change_id);
-            self.content_hash = None;
-        }
+        self.refresh_state_id();
         self
-    }
-
-    pub fn with_logical_change_id(mut self, logical_change_id: ChangeId) -> Self {
-        self.logical_change_id = Some(logical_change_id);
-        self.content_hash = None;
-        self
-    }
-
-    pub fn logical_change_id(&self) -> ChangeId {
-        self.logical_change_id.unwrap_or(self.change_id)
     }
 
     pub fn with_timestamp(mut self, timestamp: DateTime<Utc>) -> Self {
         self.created_at = timestamp;
-        self.content_hash = None;
+        self.refresh_state_id();
         self
     }
 
@@ -603,25 +513,13 @@ impl State {
         })
     }
 
-    /// Migration-only hash for states signed before #565 folded git-fidelity
-    /// fields into identity. Runtime callers should use [`Self::compute_hash`].
-    ///
-    /// Kept public only because repository migrations live in another crate.
-    /// Do not use for new compatibility checks; the deletion-wave migration is
-    /// the owner of this legacy recipe.
-    #[doc(hidden)]
-    pub fn compute_hash_for_legacy_signature_migration(&self) -> ContentHash {
-        let content_len = self.hash_len_core();
-        ContentHash::compute_typed_with_len("state", content_len, |hasher| {
-            self.update_hash_core(hasher);
-        })
+    pub fn hash(&mut self) -> ContentHash {
+        self.refresh_state_id();
+        self.state_id.as_content_hash()
     }
 
-    pub fn hash(&mut self) -> ContentHash {
-        if self.content_hash.is_none() {
-            self.content_hash = Some(self.compute_hash());
-        }
-        self.content_hash.expect("hash was just computed above")
+    pub fn id(&self) -> StateId {
+        StateId::from_content_hash(self.compute_hash())
     }
 
     pub fn is_root(&self) -> bool {
@@ -636,7 +534,7 @@ impl State {
         self.attribution.agent.is_some()
     }
 
-    pub fn first_parent(&self) -> Option<&ChangeId> {
+    pub fn first_parent(&self) -> Option<&StateId> {
         self.parents.first()
     }
 
@@ -644,21 +542,16 @@ impl State {
         self.hash_len_core() + self.hash_len_fidelity()
     }
 
-    /// Hashed length of the pre-#565 fields (everything through the status
-    /// byte). Mirrors [`Self::update_hash_core`]. Split out so the legacy
-    /// signature migration can reproduce the pre-#565 hash exactly.
+    /// Hashed length of the core state fields. Mirrors [`Self::update_hash_core`].
     fn hash_len_core(&self) -> u64 {
         let principal = &self.attribution.principal;
         let mut len = 0u64;
 
-        len += 1;
-        if self.logical_change_id.is_some() {
-            len += 16;
-        }
+        len += 16;
 
         len += self.tree.as_bytes().len() as u64;
         len += 4;
-        len += (self.parents.len() * 16) as u64;
+        len += (self.parents.len() * 32) as u64;
 
         len += principal.name.len() as u64 + 1;
         len += principal.email.len() as u64 + 1;
@@ -698,11 +591,6 @@ impl State {
 
         len += 1;
         if self.provenance.is_some() {
-            len += 32;
-        }
-
-        len += 1;
-        if self.context.is_some() {
             len += 32;
         }
 
@@ -747,6 +635,7 @@ impl State {
             len += 4 + key.len() as u64;
             len += 4 + value.len() as u64;
         }
+        len += 4 + (self.lineage.len() as u64 * 49);
 
         len
     }
@@ -762,12 +651,7 @@ impl State {
     fn update_hash_core(&self, hasher: &mut blake3::Hasher) {
         let principal = &self.attribution.principal;
 
-        if let Some(logical_change_id) = self.logical_change_id {
-            hasher.update(&[1]);
-            hasher.update(logical_change_id.as_bytes());
-        } else {
-            hasher.update(&[0]);
-        }
+        hasher.update(self.change_id.as_bytes());
 
         hasher.update(self.tree.as_bytes());
         hasher.update(&(self.parents.len() as u32).to_le_bytes());
@@ -814,13 +698,6 @@ impl State {
         if let Some(provenance) = self.provenance {
             hasher.update(&[1]);
             hasher.update(provenance.as_bytes());
-        } else {
-            hasher.update(&[0]);
-        }
-
-        if let Some(context) = self.context {
-            hasher.update(&[1]);
-            hasher.update(context.as_bytes());
         } else {
             hasher.update(&[0]);
         }
@@ -874,6 +751,16 @@ impl State {
             hasher.update(&(value.len() as u32).to_le_bytes());
             hasher.update(value);
         }
+        hasher.update(&(self.lineage.len() as u32).to_le_bytes());
+        for lineage in &self.lineage {
+            hasher.update(&[lineage.kind.to_byte()]);
+            hasher.update(lineage.source_change.as_bytes());
+            hasher.update(lineage.source_state.as_bytes());
+        }
+    }
+
+    fn refresh_state_id(&mut self) {
+        self.state_id = StateId::from_content_hash(self.compute_hash());
     }
 }
 
@@ -1010,11 +897,8 @@ mod tests {
     fn new_snapshot_sets_fresh_logical_identity() {
         let state =
             State::new_snapshot(ContentHash::compute(b"tree"), vec![], sample_attribution());
-        let logical_change_id = state
-            .logical_change_id
-            .expect("snapshot should set logical identity");
-        assert_ne!(state.logical_change_id(), state.change_id);
-        assert_eq!(state.logical_change_id(), logical_change_id);
+        assert!(!state.change_id.is_zero());
+        assert_eq!(state.state_id, state.id());
     }
 
     #[test]
@@ -1026,22 +910,17 @@ mod tests {
             sample_attribution(),
             logical_change_id,
         );
-        assert_eq!(state.logical_change_id(), logical_change_id);
-        assert_ne!(state.change_id, logical_change_id);
+        assert_eq!(state.change_id, logical_change_id);
     }
 
     #[test]
     fn new_merge_uses_fresh_logical_identity() {
         let state = State::new_merge(
             ContentHash::compute(b"tree"),
-            vec![ChangeId::from_bytes([1; 16]), ChangeId::from_bytes([2; 16])],
+            vec![StateId::from_bytes([1; 32]), StateId::from_bytes([2; 32])],
             sample_attribution(),
         );
-        let logical_change_id = state
-            .logical_change_id
-            .expect("merge should set logical identity");
-        assert_ne!(state.logical_change_id(), state.change_id);
-        assert_eq!(state.logical_change_id(), logical_change_id);
+        assert!(!state.change_id.is_zero());
         assert!(state.is_merge());
     }
 
@@ -1049,14 +928,12 @@ mod tests {
     fn with_change_id_invalidates_cached_hash_when_logical_identity_changes() {
         let mut state =
             State::new_snapshot(ContentHash::compute(b"tree"), vec![], sample_attribution());
-        let previous_change_id = state.change_id;
-        state = state.with_logical_change_id(previous_change_id);
         let original_hash = state.hash();
         let replacement = ChangeId::from_bytes([9; 16]);
 
         let mut updated = state.with_change_id(replacement);
 
-        assert_eq!(updated.logical_change_id(), replacement);
+        assert_eq!(updated.change_id, replacement);
         assert_ne!(updated.hash(), original_hash);
         assert_eq!(updated.hash(), updated.compute_hash());
     }
@@ -1076,10 +953,10 @@ mod tests {
         let timestamp = Utc::now();
         let logical_change_id = ChangeId::from_bytes([3; 16]);
         let state_a = State::new_snapshot(tree, vec![], attribution_a)
-            .with_logical_change_id(logical_change_id)
+            .with_change_id(logical_change_id)
             .with_timestamp(timestamp);
         let state_b = State::new_snapshot(tree, vec![], attribution_b)
-            .with_logical_change_id(logical_change_id)
+            .with_change_id(logical_change_id)
             .with_timestamp(timestamp);
 
         assert_ne!(state_a.compute_hash(), state_b.compute_hash());
@@ -1132,36 +1009,7 @@ mod tests {
         });
     }
 
-    /// Locks the contract that W1 tail-append fields (risk_signals,
-    /// review_signatures, discussions, structured_conflicts) are NOT
-    /// part of the state hash. Adding them to identity would mean the
-    /// same logical state hashes differently depending on what signals
-    /// fired, what review signatures arrived, or whether a discussion
-    /// was anchored — which would break every "same state?" check in
-    /// the system. Their persistence is independent of identity.
-    #[test]
-    fn w1_tail_fields_are_not_part_of_state_hash() {
-        let mut bare = sample_state();
-        let bare_hash = bare.hash();
-
-        let mut decorated = sample_state()
-            .with_change_id(bare.change_id)
-            .with_logical_change_id(bare.logical_change_id())
-            .with_risk_signals(ContentHash::compute(b"risk-signals-blob"))
-            .with_review_signatures(ContentHash::compute(b"review-signatures-blob"))
-            .with_discussions(ContentHash::compute(b"discussions-blob"))
-            .with_structured_conflicts(ContentHash::compute(b"conflicts-blob"));
-        decorated.created_at = bare.created_at;
-
-        assert_eq!(
-            decorated.hash(),
-            bare_hash,
-            "W1 tail fields must not affect the state hash"
-        );
-    }
-
-    /// The inverse of `w1_tail_fields_are_not_part_of_state_hash`: the
-    /// git-fidelity fields (#564 step 1) MUST be part of the hash so two
+    /// The git-fidelity fields (#564 step 1) MUST be part of the hash so two
     /// git-distinct commits can't dedup-collide. Each field, set in
     /// isolation, must move the hash.
     #[test]
@@ -1169,9 +1017,7 @@ mod tests {
         let base = sample_state();
         let base_hash = base.compute_hash();
 
-        let with_committer = sample_state()
-            .with_change_id(base.change_id)
-            .with_logical_change_id(base.logical_change_id());
+        let with_committer = sample_state().with_change_id(base.change_id);
         let mut with_committer =
             with_committer.with_committer(Principal::new("Carol", "carol@example.com"));
         with_committer.created_at = base.created_at;
@@ -1194,9 +1040,7 @@ mod tests {
             },
             |s: State| s.with_extra_headers(vec![(b"mergetag".to_vec(), b"x".to_vec())]),
         ] {
-            let seeded = sample_state()
-                .with_change_id(base.change_id)
-                .with_logical_change_id(base.logical_change_id());
+            let seeded = sample_state().with_change_id(base.change_id);
             let mut decorated = mutate(seeded);
             decorated.created_at = base.created_at;
             assert_ne!(
@@ -1207,63 +1051,19 @@ mod tests {
         }
     }
 
-    #[test]
-    fn legacy_signature_migration_hash_matches_golden_vector() {
-        let state = State::new_snapshot(
-            ContentHash::compute(b"issue-633-tree"),
-            vec![ChangeId::from_bytes([0x11; 16])],
-            Attribution::with_agent(
-                Principal::new("Legacy Author", "legacy@example.com"),
-                crate::object::Agent::new("openai", "gpt-5")
-                    .with_session("session-633", "segment-001")
-                    .with_policy("policy-legacy"),
-            ),
-        )
-        .with_logical_change_id(ChangeId::from_bytes([0x63; 16]))
-        .with_intent("freeze pre-565 hash")
-        .with_confidence(0.875)
-        .with_timestamp(DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp"))
-        .with_committer(Principal::new("Legacy Committer", "committer@example.com"))
-        .with_tz_offsets(3600, -18000)
-        .with_authored_at(DateTime::from_timestamp(1_699_999_000, 0).expect("valid timestamp"))
-        .with_raw_message(b"legacy commit message\n")
-        .with_extra_headers(vec![(b"encoding".to_vec(), b"UTF-8".to_vec())])
-        .with_status(Status::Published);
-
-        let legacy_hash = state.compute_hash_for_legacy_signature_migration();
-        // Golden vector for the pre-#565 state hash format. Legacy
-        // StateSignature migration depends on this recipe staying
-        // byte-identical to that old format; if `hash_len_core` and
-        // `update_hash_core` drift, real pre-#565 signatures become
-        // unverifiable even though round-trip tests can still pass.
-        assert_eq!(
-            legacy_hash.to_hex(),
-            "b89e1b40e681a1bf88679db7cfcacdafb1f370bc40ed5d50760dae1d4ab49dab",
-        );
-        assert_ne!(
-            legacy_hash,
-            state.compute_hash(),
-            "fixture must distinguish the pre-#565 legacy path from the current hash",
-        );
-    }
-
     /// extra_headers order is load-bearing (#566): the same pairs in a
     /// different order must hash differently.
     #[test]
     fn extra_headers_order_affects_hash() {
         let base = sample_state();
-        let one = sample_state()
-            .with_change_id(base.change_id)
-            .with_logical_change_id(base.logical_change_id());
+        let one = sample_state().with_change_id(base.change_id);
         let mut one = one.with_extra_headers(vec![
             (b"a".to_vec(), b"1".to_vec()),
             (b"b".to_vec(), b"2".to_vec()),
         ]);
         one.created_at = base.created_at;
 
-        let two = sample_state()
-            .with_change_id(base.change_id)
-            .with_logical_change_id(base.logical_change_id());
+        let two = sample_state().with_change_id(base.change_id);
         let mut two = two.with_extra_headers(vec![
             (b"b".to_vec(), b"2".to_vec()),
             (b"a".to_vec(), b"1".to_vec()),
@@ -1323,15 +1123,11 @@ mod tests {
     #[test]
     fn raw_message_with_nul_byte_changes_hash() {
         let base = sample_state();
-        let with_nul = sample_state()
-            .with_change_id(base.change_id)
-            .with_logical_change_id(base.logical_change_id());
+        let with_nul = sample_state().with_change_id(base.change_id);
         let mut a = with_nul.with_raw_message(b"a\x00b");
         a.created_at = base.created_at;
 
-        let other = sample_state()
-            .with_change_id(base.change_id)
-            .with_logical_change_id(base.logical_change_id());
+        let other = sample_state().with_change_id(base.change_id);
         let mut b = other.with_raw_message(b"a\x00c");
         b.created_at = base.created_at;
 

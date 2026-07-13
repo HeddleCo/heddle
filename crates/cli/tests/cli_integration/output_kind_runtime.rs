@@ -226,14 +226,14 @@ fn switch_emits_output_kind_with_target_metadata() {
 }
 
 #[test]
-fn revert_no_commit_emits_output_kind_without_change_id() {
+fn revert_no_commit_emits_output_kind_without_state_id() {
     let temp = init_and_capture();
     capture_second(&temp);
     let value = heddle_json(&["revert", "HEAD", "--no-commit"], &temp);
     assert_output_kind(&value, "revert");
     assert!(
-        value["change_id"].is_null(),
-        "revert --no-commit must leave change_id null: {value}"
+        value["state_id"].is_null(),
+        "revert --no-commit must leave state_id null: {value}"
     );
     assert!(
         value
@@ -245,17 +245,17 @@ fn revert_no_commit_emits_output_kind_without_change_id() {
 }
 
 #[test]
-fn revert_commit_emits_output_kind_with_new_change_id() {
+fn revert_commit_emits_output_kind_with_new_state_id() {
     let temp = init_and_capture();
     capture_second(&temp);
     let value = heddle_json(&["revert", "HEAD"], &temp);
     assert_output_kind(&value, "revert");
     assert!(
         value
-            .get("change_id")
+            .get("state_id")
             .and_then(|v| v.as_str())
             .is_some_and(|s| !s.is_empty()),
-        "revert (committed) must carry the new state's change_id: {value}"
+        "revert (committed) must carry the new state's state_id: {value}"
     );
 }
 
@@ -290,9 +290,9 @@ fn cherry_pick_no_commit_emits_output_kind() {
 
     // Resolve the feature state's id (HEAD), then move back to the seed.
     let head = heddle_json(&["log", "--limit", "1"], &temp);
-    let feature_id = head["states"][0]["change_id"]
+    let feature_id = head["states"][0]["state_id"]
         .as_str()
-        .expect("log --output json must expose change_id")
+        .expect("log --output json must expose state_id")
         .to_string();
     heddle(&["switch", "HEAD~1"], Some(temp.path())).expect("goto back to seed");
 
@@ -313,9 +313,9 @@ fn cherry_pick_commit_emits_output_kind_with_new_commit() {
     fs::write(temp.path().join("feature.txt"), "added\n").expect("write feature");
     heddle(&["capture", "-m", "feature"], Some(temp.path())).expect("feature capture");
     let head = heddle_json(&["log", "--limit", "1"], &temp);
-    let feature_id = head["states"][0]["change_id"]
+    let feature_id = head["states"][0]["state_id"]
         .as_str()
-        .expect("log JSON change_id")
+        .expect("log JSON state_id")
         .to_string();
     heddle(&["switch", "HEAD~1"], Some(temp.path())).expect("goto back to seed");
 
@@ -650,9 +650,9 @@ fn redact_apply_show_emit_output_kind() {
     // Reuse main.rs as the redaction target; redact apply doesn't
     // care that the content isn't a "real" secret.
     let log = heddle_json(&["log", "--limit", "1"], &temp);
-    let state = log["states"][0]["change_id"]
+    let state = log["states"][0]["state_id"]
         .as_str()
-        .expect("log JSON change_id")
+        .expect("log JSON state_id")
         .to_string();
 
     let apply = heddle_json(
@@ -710,9 +710,9 @@ fn redact_trust_add_and_remove_emit_output_kind() {
 fn purge_apply_emits_output_kind() {
     let temp = init_and_capture();
     let log = heddle_json(&["log", "--limit", "1"], &temp);
-    let state = log["states"][0]["change_id"]
+    let state = log["states"][0]["state_id"]
         .as_str()
-        .expect("log JSON change_id")
+        .expect("log JSON state_id")
         .to_string();
     heddle(
         &[
@@ -959,8 +959,8 @@ fn discuss_open_show_append_emit_output_kind() {
     assert_output_kind(&resolve, "discuss_resolve");
     assert_eq!(resolve["id"].as_str(), Some(discussion_id.as_str()));
     assert!(
-        resolve["resolution"].get("change_id").is_some(),
-        "discussion resolution must expose change_id, even when null: {resolve}"
+        resolve["resolution"].get("state_id").is_some(),
+        "discussion resolution must expose state_id, even when null: {resolve}"
     );
     assert!(
         resolve["resolution"].get("state_id").is_none(),
@@ -975,10 +975,10 @@ fn review_show_emits_output_kind() {
     assert_output_kind(&value, "review_show");
     assert!(
         value
-            .get("change_id")
+            .get("state_id")
             .and_then(|v| v.as_str())
             .is_some_and(|s| !s.is_empty()),
-        "review show must surface change_id: {value}"
+        "review show must surface state_id: {value}"
     );
 }
 
@@ -1002,7 +1002,7 @@ fn review_next_envelope_is_emitted_when_window_empty() {
 fn purge_list_envelope_includes_recent_apply() {
     let temp = init_and_capture();
     let log = heddle_json(&["log", "--limit", "1"], &temp);
-    let state = log["states"][0]["change_id"].as_str().unwrap().to_string();
+    let state = log["states"][0]["state_id"].as_str().unwrap().to_string();
     heddle(
         &[
             "redact", "apply", &state, "--path", "main.rs", "--reason", "test",

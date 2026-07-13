@@ -226,7 +226,7 @@ pub fn cmd_undo(
         if let Some(state) = &output.recovery_state {
             println!(
                 "Preserved pre-undo state {} as `{}` (recover with `heddle switch {}`)",
-                style::change_id(state),
+                style::state_id(state),
                 UNDO_RECOVERY_MARKER,
                 UNDO_RECOVERY_MARKER,
             );
@@ -779,10 +779,7 @@ mod tests {
         // Record a `ThreadCreate` for the name; its undo converges the name to
         // empty, removing BOTH same-name records.
         std::fs::write(temp.path().join("f.txt"), "x").unwrap();
-        let state = repo
-            .snapshot(Some("s".to_string()), None)
-            .unwrap()
-            .change_id;
+        let state = repo.snapshot(Some("s".to_string()), None).unwrap().state_id;
         let scope = repo.op_scope();
         repo.oplog()
             .record_batch_scoped(

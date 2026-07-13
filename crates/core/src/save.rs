@@ -12,7 +12,7 @@ use anyhow::{Context, Result, anyhow};
 use heddle_git_projection::{GitProjection, WriteThroughOutcome};
 use objects::{
     HeddleError, RecoveryDetails,
-    object::{Agent, Attribution, ChangeId, ContentHash, Principal, State, Tree},
+    object::{Agent, Attribution, ContentHash, Principal, State, StateId, Tree},
 };
 use oplog::{OpLogBackend, OpRecord};
 use refs::Head;
@@ -172,7 +172,7 @@ impl SavePlan {
 #[derive(Debug, Clone)]
 pub struct SaveReport {
     pub verb: SaveVerb,
-    pub change_id: ChangeId,
+    pub state_id: StateId,
     pub content_hash: ContentHash,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
@@ -410,7 +410,7 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
     let mut thread_metadata_ms = 0u128;
     let mut promotion_suggested = false;
     let mut heavy_impact_paths = Vec::new();
-    let mut snapshot_change_id: Option<ChangeId> = None;
+    let mut snapshot_state_id: Option<StateId> = None;
 
     let mut state = if plan_creates_new_state(&plan, has_current) {
         created_new_state = true;
@@ -419,7 +419,7 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
         thread_metadata_ms = execution.thread_metadata_ms;
         promotion_suggested = execution.promotion_suggested;
         heavy_impact_paths = execution.heavy_impact_paths;
-        snapshot_change_id = Some(execution.state.change_id);
+        snapshot_state_id = Some(execution.state.state_id);
         execution.state
     } else {
         repo.current_state()?
@@ -451,7 +451,7 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
             }
         }
 
-        if let Some(existing) = repo.latest_git_checkpoint_for_change(&state.change_id)? {
+        if let Some(existing) = repo.latest_git_checkpoint_for_change(&state.state_id)? {
             git_commit = Some(existing.git_commit.clone());
             git_checkpoint = Some(existing);
         } else {
@@ -460,9 +460,9 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
             let summary = checkpoint_summary(&plan, &state);
             let record = write_git_checkpoint(repo, &state, summary)?;
             if plan.coalesce_snapshot_and_checkpoint
-                && let Some(change_id) = snapshot_change_id.as_ref()
+                && let Some(state_id) = snapshot_state_id.as_ref()
             {
-                coalesce_snapshot_and_checkpoint(repo, change_id, &record.git_commit)?;
+                coalesce_snapshot_and_checkpoint(repo, state_id, &record.git_commit)?;
             }
             git_commit = Some(record.git_commit.clone());
             git_checkpoint = Some(record);
@@ -487,26 +487,26 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
     let summary = match plan.verb {
         SaveVerb::Capture => format!(
             "Captured state {} ({})",
-            state.change_id.short(),
+            state.state_id.short(),
             state.hash().short()
         ),
         SaveVerb::Commit => plan
             .intent
             .clone()
-            .unwrap_or_else(|| format!("Commit {}", state.change_id.short())),
+            .unwrap_or_else(|| format!("Commit {}", state.state_id.short())),
         SaveVerb::Checkpoint => git_checkpoint
             .as_ref()
             .map(|r| r.summary.clone())
-            .unwrap_or_else(|| format!("Checkpoint {}", state.change_id.short())),
+            .unwrap_or_else(|| format!("Checkpoint {}", state.state_id.short())),
     };
 
     Ok(SaveReport {
         verb: plan.verb,
-        change_id: state.change_id,
+        state_id: state.state_id,
         content_hash: state.hash(),
         intent: state.intent.clone(),
         confidence: state.confidence,
-        signed: state.signature.is_some(),
+        signed: repo.get_state_signature(&state.id())?.is_some(),
         git_commit,
         git_previous_commit,
         summary,
@@ -585,7 +585,7 @@ fn create_heddle_state(repo: &Repository, plan: &SavePlan) -> Result<CreatedStat
     if plan.run_hooks {
         hook_manager.run(Hook::PostSnapshot, &hook_ctx)?;
         let post_capture_payload = serde_json::json!({
-            "state_id": execution.state.change_id.to_string_full(),
+            "state_id": execution.state.state_id.to_string_full(),
         });
         if let Err(err) = hook_manager.run_with_payload(
             Hook::PostSnapshot,
@@ -617,7 +617,7 @@ fn write_git_checkpoint(
     let previous_git_oid = git_rev_parse_head(repo.root());
     let mut bridge = GitProjection::new(repo);
     let git_commit = match bridge
-        .write_through_current_checkout_with_message(state.change_id, summary.clone())?
+        .write_through_current_checkout_with_message(state.state_id, summary.clone())?
     {
         WriteThroughOutcome::Wrote(git_commit) => git_commit.to_string(),
         WriteThroughOutcome::Skipped(reason) => {
@@ -633,11 +633,11 @@ fn write_git_checkpoint(
             )));
         }
     };
-    let record = repo.record_git_checkpoint(&state.change_id, git_commit.clone(), summary)?;
+    let record = repo.record_git_checkpoint(&state.state_id, git_commit.clone(), summary)?;
     repo.oplog().record_batch_scoped(
         vec![OpRecord::GitCheckpoint {
             branch,
-            state: state.change_id,
+            state: state.state_id,
             previous_git_oid,
             new_git_oid: git_commit,
         }],
@@ -648,7 +648,7 @@ fn write_git_checkpoint(
 
 fn coalesce_snapshot_and_checkpoint(
     repo: &Repository,
-    change_id: &ChangeId,
+    state_id: &StateId,
     git_commit: &str,
 ) -> Result<()> {
     let snapshot_batch = repo
@@ -659,7 +659,7 @@ fn coalesce_snapshot_and_checkpoint(
             batch.entries.iter().any(|entry| {
                 matches!(
                     &entry.operation,
-                    OpRecord::Snapshot { new_state, .. } if new_state == change_id
+                    OpRecord::Snapshot { new_state, .. } if new_state == state_id
                 )
             })
         })
@@ -689,7 +689,7 @@ fn checkpoint_summary(plan: &SavePlan, state: &State) -> String {
     plan.intent
         .clone()
         .or_else(|| state.intent.clone())
-        .unwrap_or_else(|| format!("Checkpoint {}", state.change_id.short()))
+        .unwrap_or_else(|| format!("Checkpoint {}", state.state_id.short()))
 }
 
 fn current_thread_name(repo: &Repository) -> String {

@@ -8,7 +8,7 @@ use std::{collections::HashMap, path::PathBuf};
 use objects::{
     object::{
         Blob, ContentHash, Discussion, DiscussionResolution, DiscussionsBlob, EntryType, State,
-        StateId, Tree,
+        StateAttachment, StateAttachmentBody, StateId, Tree,
     },
     store::ObjectStore,
 };
@@ -28,7 +28,13 @@ where
         parent_state: &State,
         new_tree: &Tree,
     ) -> Result<Option<ContentHash>> {
-        let Some(parent_discussions_hash) = parent_state.discussions else {
+        let Some(parent_discussions_hash) = self
+            .latest_state_attachment(&parent_state.id(), crate::StateAttachmentKind::Discussions)?
+            .and_then(|attachment| match attachment.body {
+                StateAttachmentBody::Discussions(hash) => Some(hash),
+                _ => None,
+            })
+        else {
             return Ok(None);
         };
         let parent_blob = self
@@ -227,22 +233,25 @@ mod tests {
     ) -> State {
         let bytes = DiscussionsBlob::new(discussions).encode().unwrap();
         let hash = repo.store().put_blob(&Blob::new(bytes)).unwrap();
-        let mut decorated = state.clone().with_discussions(hash);
-        repo.put_authored_state(&mut decorated).unwrap();
-        repo.refs()
-            .set_thread(&ThreadName::new("main"), &decorated.id())
-            .unwrap();
-        repo.refs()
-            .write_head(&Head::Attached {
-                thread: ThreadName::new("main"),
-            })
-            .unwrap();
-        decorated
+        repo.put_state_attachment(&StateAttachment {
+            state_id: state.id(),
+            body: StateAttachmentBody::Discussions(hash),
+            attribution: state.attribution.clone(),
+            created_at: chrono::Utc::now(),
+            supersedes: None,
+        })
+        .unwrap();
+        state.clone()
     }
 
     fn read_discussions(repo: &Repository, state: &State) -> DiscussionsBlob {
-        let hash = state
-            .discussions
+        let hash = repo
+            .latest_state_attachment(&state.id(), crate::StateAttachmentKind::Discussions)
+            .unwrap()
+            .and_then(|attachment| match attachment.body {
+                StateAttachmentBody::Discussions(hash) => Some(hash),
+                _ => None,
+            })
             .expect("snapshot should carry discussions");
         let blob = repo.store().get_blob(&hash).unwrap().unwrap();
         DiscussionsBlob::decode(blob.content()).unwrap()

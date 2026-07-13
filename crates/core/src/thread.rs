@@ -949,7 +949,7 @@ mod tests {
             manager.save(&sample_thread(name, false)).unwrap();
             let _ = repo.refs().set_thread(
                 &ThreadName::new(name),
-                &objects::object::ChangeId::from_bytes([0u8; 16]),
+                &objects::object::StateId::from_bytes([0u8; 16]),
             );
         }
 

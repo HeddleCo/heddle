@@ -19,6 +19,9 @@ pub fn has_object(store: &impl ObjectStore, info: &ObjectInfo) -> Result<bool> {
         (ObjectId::Hash(hash), ObjectType::Blob) => Ok(store.has_blob(hash)?),
         (ObjectId::Hash(hash), ObjectType::Tree) => Ok(store.has_tree(hash)?),
         (ObjectId::StateId(state_id), ObjectType::State) => Ok(store.has_state(state_id)?),
+        (ObjectId::StateAttachment { state, id }, ObjectType::StateAttachment) => {
+            Ok(store.get_state_attachment(state, id)?.is_some())
+        }
         // Redactions are keyed by the redacted blob's hash. Two senders
         // can declare different redactions on the same blob (different
         // reason / signature / timestamp), so we conservatively report

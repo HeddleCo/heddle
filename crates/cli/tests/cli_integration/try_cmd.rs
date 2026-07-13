@@ -39,9 +39,9 @@ fn setup_repo() -> TempDir {
 fn parent_head(repo: &std::path::Path) -> String {
     let raw = heddle(&["--output", "json", "log", "--limit", "1"], Some(repo)).unwrap();
     let value: Value = serde_json::from_str(&raw).unwrap();
-    value["states"][0]["change_id_full"]
+    value["states"][0]["state_id_full"]
         .as_str()
-        .or_else(|| value["states"][0]["change_id"].as_str())
+        .or_else(|| value["states"][0]["state_id"].as_str())
         .unwrap()
         .to_string()
 }

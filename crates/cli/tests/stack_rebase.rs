@@ -159,41 +159,41 @@ fn plan_rebase_emits_bfs_steps_against_real_thread_records() {
     std::fs::write(temp.path().join("file.txt"), "base").unwrap();
     let base = repo.snapshot(Some("base".to_string()), None).unwrap();
     repo.refs()
-        .set_thread(&ThreadName::new("main"), &base.change_id)
+        .set_thread(&ThreadName::new("main"), &base.state_id)
         .unwrap();
     repo.refs()
-        .set_thread(&ThreadName::new("feat-a"), &base.change_id)
+        .set_thread(&ThreadName::new("feat-a"), &base.state_id)
         .unwrap();
 
     std::fs::write(temp.path().join("file.txt"), "feat-a content").unwrap();
     let feat_a_tip = repo.snapshot(Some("feat-a".to_string()), None).unwrap();
     repo.refs()
-        .set_thread(&ThreadName::new("feat-a"), &feat_a_tip.change_id)
+        .set_thread(&ThreadName::new("feat-a"), &feat_a_tip.state_id)
         .unwrap();
     repo.refs()
-        .set_thread(&ThreadName::new("feat-b"), &feat_a_tip.change_id)
+        .set_thread(&ThreadName::new("feat-b"), &feat_a_tip.state_id)
         .unwrap();
 
     std::fs::write(temp.path().join("file.txt"), "feat-b content").unwrap();
     let feat_b_tip = repo.snapshot(Some("feat-b".to_string()), None).unwrap();
     repo.refs()
-        .set_thread(&ThreadName::new("feat-b"), &feat_b_tip.change_id)
+        .set_thread(&ThreadName::new("feat-b"), &feat_b_tip.state_id)
         .unwrap();
 
     save_thread_record(
         &manager,
         "feat-a",
         None,
-        &base.change_id.to_string(),
-        &feat_a_tip.change_id.to_string(),
+        &base.state_id.to_string(),
+        &feat_a_tip.state_id.to_string(),
         ThreadState::Active,
     );
     save_thread_record(
         &manager,
         "feat-b",
         Some("feat-a"),
-        &feat_a_tip.change_id.to_string(),
-        &feat_b_tip.change_id.to_string(),
+        &feat_a_tip.state_id.to_string(),
+        &feat_b_tip.state_id.to_string(),
         ThreadState::Active,
     );
 
@@ -201,7 +201,7 @@ fn plan_rebase_emits_bfs_steps_against_real_thread_records() {
     std::fs::write(temp.path().join("main-only.txt"), "main work").unwrap();
     let new_main = repo.snapshot(Some("main moved".to_string()), None).unwrap();
     repo.refs()
-        .set_thread(&ThreadName::new("main"), &new_main.change_id)
+        .set_thread(&ThreadName::new("main"), &new_main.state_id)
         .unwrap();
 
     let plan = repo
@@ -220,14 +220,8 @@ fn plan_rebase_emits_bfs_steps_against_real_thread_records() {
     assert_eq!(plan.steps[1].parent_thread.as_deref(), Some("feat-a"));
 
     // Each step's `current_state` matches the live ref tip.
-    assert_eq!(
-        plan.steps[0].current_state,
-        feat_a_tip.change_id.to_string()
-    );
-    assert_eq!(
-        plan.steps[1].current_state,
-        feat_b_tip.change_id.to_string()
-    );
+    assert_eq!(plan.steps[0].current_state, feat_a_tip.state_id.to_string());
+    assert_eq!(plan.steps[1].current_state, feat_b_tip.state_id.to_string());
 
     assert!(!plan.is_no_op());
 }

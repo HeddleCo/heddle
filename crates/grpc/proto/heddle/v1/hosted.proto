@@ -816,8 +816,8 @@ message ResolveMonorepoRequest {
 // the document it captured. Newest-first. Mirrors weft
 // `governance::GovernanceHistoryEntry`.
 message GovernanceHistoryEntry {
-  // The governance-facet commit id (16-byte ChangeId).
-  bytes change_id = 1;
+  // The governance-facet state id.
+  bytes state_id = 1;
   // Access-gating visibility (`public`/`private`) as of this state.
   string visibility = 2;
   // The full non-visibility governance knobs (write_policy, child_policy,
@@ -857,8 +857,8 @@ message MembershipGrant {
 // the document (full grant set) it captured. Newest-first. Mirrors weft
 // `membership::MembershipHistoryEntry`.
 message MembershipHistoryEntry {
-  // The membership-facet commit id (16-byte ChangeId).
-  bytes change_id = 1;
+  // The membership-facet state id.
+  bytes state_id = 1;
   // Every grant held on the spool as of this state (weft
   // `MembershipDocument.grants`).
   repeated MembershipGrant grants = 2;

@@ -20,14 +20,14 @@ fn test_long_history_traversal() {
 }
 
 #[test]
-fn test_short_change_id_resolution() {
+fn test_short_state_id_resolution() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle_must_succeed(&["capture", "-m", "Test"], temp.path());
     let json_output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let status: Value = serde_json::from_str(&json_output).unwrap();
-    let full_id = status["state"]["change_id"].as_str().unwrap();
+    let full_id = status["state"]["state_id"].as_str().unwrap();
     let short_id = &full_id[..8];
     let result = heddle(&["show", short_id], Some(temp.path()));
     assert!(result.is_ok());

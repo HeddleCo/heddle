@@ -17,10 +17,10 @@
 use anyhow::{Context, Result, anyhow};
 use heddle_core::approval_plan::{
     EligibilitySummary, approval_recorded_message, approval_revoked_message,
-    approvals_empty_message, approvals_header, change_id_bytes_to_string,
-    eligibility_allowed_message, eligibility_approvals_counted_message,
-    eligibility_blocked_message, format_unix_secs_display, format_unix_secs_label,
-    plan_eligibility_summary, short_change_id, timestamp_secs_u64, unmet_requirement_line,
+    approvals_empty_message, approvals_header, eligibility_allowed_message,
+    eligibility_approvals_counted_message, eligibility_blocked_message, format_unix_secs_display,
+    format_unix_secs_label, plan_eligibility_summary, short_state_id, state_id_bytes_to_string,
+    timestamp_secs_u64, unmet_requirement_line,
 };
 use objects::object::ThreadName;
 use repo::Repository;
@@ -128,7 +128,7 @@ async fn open_heddle_client(
 fn thread_head_state(repo: &Repository, thread: &str) -> Result<String> {
     repo.refs()
         .get_thread(&ThreadName::new(thread))?
-        .map(|change_id| change_id.to_string())
+        .map(|state_id| state_id.to_string())
         .ok_or_else(|| anyhow!("thread '{thread}' has no head state"))
 }
 
@@ -152,7 +152,7 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
             repo_path: approval.repo_path,
             source_thread: approval.source_thread,
             target_thread: approval.target_thread,
-            source_state: change_id_bytes_to_string(&approval.source_state),
+            source_state: state_id_bytes_to_string(&approval.source_state),
             approver_user_id: approval.approver_user_id,
             note: approval.note,
             approved_at: ts_secs(&approval.approved_at),
@@ -191,7 +191,7 @@ pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Resul
                 repo_path: a.repo_path,
                 source_thread: a.source_thread,
                 target_thread: a.target_thread,
-                source_state: change_id_bytes_to_string(&a.source_state),
+                source_state: state_id_bytes_to_string(&a.source_state),
                 approver_user_id: a.approver_user_id,
                 note: a.note,
                 approved_at: ts_secs(&a.approved_at),
@@ -209,12 +209,12 @@ pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Resul
         for a in approvals {
             let approved_secs = ts_secs(&a.approved_at);
             let when = format_unix_secs_display(approved_secs);
-            let state_str = change_id_bytes_to_string(&a.source_state);
+            let state_str = state_id_bytes_to_string(&a.source_state);
             print!(
                 "  {id}  approver={user}  state={state}  approved_at={when}",
                 id = a.id,
                 user = a.approver_user_id,
-                state = short_change_id(&state_str),
+                state = short_state_id(&state_str),
             );
             let exp_secs = ts_secs(&a.expires_at);
             if exp_secs > 0 {
@@ -282,7 +282,7 @@ pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Re
             repo_path: a.repo_path,
             source_thread: a.source_thread,
             target_thread: a.target_thread,
-            source_state: change_id_bytes_to_string(&a.source_state),
+            source_state: state_id_bytes_to_string(&a.source_state),
             approver_user_id: a.approver_user_id,
             note: a.note,
             approved_at: ts_secs(&a.approved_at),

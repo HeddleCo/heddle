@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use objects::object::ChangeId;
+use objects::object::StateId;
 use repo::Repository as HeddleRepository;
 use sley::{ObjectId, RefPrecondition, Repository as SleyRepository};
 
@@ -198,15 +198,13 @@ pub fn mapping_mut<'a>(bridge: &'a mut GitProjection<'_>) -> &'a mut SyncMapping
     &mut bridge.mapping
 }
 
-pub fn commit_message_overrides<'a>(
-    bridge: &'a GitProjection<'_>,
-) -> &'a HashMap<ChangeId, String> {
+pub fn commit_message_overrides<'a>(bridge: &'a GitProjection<'_>) -> &'a HashMap<StateId, String> {
     &bridge.commit_message_overrides
 }
 
 pub fn set_commit_message_override(
     bridge: &mut GitProjection<'_>,
-    state_id: ChangeId,
+    state_id: StateId,
     message: String,
 ) {
     bridge.set_commit_message_override(state_id, message);
@@ -267,7 +265,7 @@ pub fn materialize_checkout_closure_from_state(
     bridge: &GitProjection<'_>,
     mirror_repo: &SleyRepository,
     object_repo: &SleyRepository,
-    tip_state_id: &ChangeId,
+    tip_state_id: &StateId,
     tip_oid: ObjectId,
     excluded: &HashSet<ObjectId>,
 ) -> GitProjectionResult<()> {

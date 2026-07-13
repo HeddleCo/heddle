@@ -6,7 +6,7 @@ use std::{collections::BTreeMap, path::Path};
 use chrono::TimeZone;
 use objects::{
     error::Result,
-    object::{ChangeId, OperationId},
+    object::{OperationId, StateId},
 };
 use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord};
 use refs::refs::{IndexedOperation, OperationLogIndex, OperationLogQuery};
@@ -64,7 +64,7 @@ pub struct QueryHit {
     pub thread: Option<String>,
     pub symbols: Vec<String>,
     pub signal_kinds: Vec<String>,
-    pub change_id: Option<String>,
+    pub state_id: Option<String>,
 }
 
 /// Query is an operator-facing inspection command, so it should answer from
@@ -162,7 +162,7 @@ fn indexed_from_oplog_entry(entry: &OpEntry) -> IndexedOperation {
         thread: thread_for(&entry.operation),
         symbols: Vec::new(),
         signal_kinds: Vec::new(),
-        change_id: primary_change_id(&entry.operation),
+        state_id: primary_state_id(&entry.operation),
     }
 }
 
@@ -216,7 +216,7 @@ fn hit_to_report(hit: IndexedOperation) -> QueryHit {
         thread: hit.thread,
         symbols: hit.symbols,
         signal_kinds: hit.signal_kinds,
-        change_id: hit.change_id.map(|id| id.to_string_full()),
+        state_id: hit.state_id.map(|id| id.to_string_full()),
     }
 }
 
@@ -252,7 +252,7 @@ fn thread_for(op: &OpRecord) -> Option<String> {
     }
 }
 
-fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
+fn primary_state_id(op: &OpRecord) -> Option<StateId> {
     match op {
         OpRecord::Snapshot { new_state, .. } => Some(*new_state),
         OpRecord::Goto { target, .. } => Some(*target),

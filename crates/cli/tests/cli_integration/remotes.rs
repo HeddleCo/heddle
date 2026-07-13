@@ -43,9 +43,9 @@ fn log_head_state(cwd: &std::path::Path) -> String {
     let log_json =
         heddle(&["--output", "json", "log", "--limit", "1"], Some(cwd)).expect("log current state");
     let log: Value = serde_json::from_str(&log_json).expect("log JSON parses");
-    log["states"][0]["change_id"]
+    log["states"][0]["state_id"]
         .as_str()
-        .expect("log entry has change_id")
+        .expect("log entry has state_id")
         .to_string()
 }
 
@@ -662,7 +662,7 @@ fn test_cli_pull_local_dirty_refusal_leaves_thread_ref_unchanged() {
         heddle(&["--output", "json", "status"], Some(&target_path)).expect("status succeeds");
     let status: Value = serde_json::from_str(&status_json).expect("status JSON parses");
     assert_eq!(
-        status["state"]["change_id"],
+        status["state"]["state_id"],
         pre_pull_ref.to_string(),
         "status must continue attributing the dirty file against the pre-pull state: {status_json}"
     );
@@ -2482,9 +2482,9 @@ fn test_cli_git_overlay_current_push_carries_notes_for_cross_clone_identity() {
     )
     .expect("heddle commit succeeds");
     let commit: Value = serde_json::from_str(&commit_json).expect("commit JSON parses");
-    let first_state = commit["change_id"]
+    let first_state = commit["state_id"]
         .as_str()
-        .expect("commit should report change_id")
+        .expect("commit should report state_id")
         .to_string();
 
     let push_text = heddle(&["push", "origin"], Some(&work)).expect("current-thread push succeeds");
@@ -2508,7 +2508,7 @@ fn test_cli_git_overlay_current_push_carries_notes_for_cross_clone_identity() {
     let clone_status_json = heddle(&["--output", "json", "status"], Some(&clone)).unwrap();
     let clone_status: Value = serde_json::from_str(&clone_status_json).expect("status JSON parses");
     assert_eq!(
-        clone_status["state"]["change_id"], first_state,
+        clone_status["state"]["state_id"], first_state,
         "clone should preserve the note-backed Heddle state id instead of deriving a second id"
     );
 
@@ -2649,7 +2649,7 @@ fn test_cli_raw_git_clone_adopt_fetches_notes_before_import() {
     )
     .expect("first Heddle commit succeeds");
     let first_commit: Value = serde_json::from_str(&first_commit_json).expect("commit JSON parses");
-    let first_state = first_commit["change_id"]
+    let first_state = first_commit["state_id"]
         .as_str()
         .expect("commit reports change id")
         .to_string();
@@ -2682,7 +2682,7 @@ fn test_cli_raw_git_clone_adopt_fetches_notes_before_import() {
     let raw_status_json = heddle(&["--output", "json", "status"], Some(&raw_clone)).unwrap();
     let raw_status: Value = serde_json::from_str(&raw_status_json).expect("status JSON parses");
     assert_eq!(
-        raw_status["state"]["change_id"], first_state,
+        raw_status["state"]["state_id"], first_state,
         "raw Git clone adoption should reuse note-backed Heddle identity instead of deriving a second id"
     );
     git_ok(&["show-ref", "--verify", "refs/notes/heddle"], &raw_clone);
@@ -3473,9 +3473,9 @@ fn test_cli_git_overlay_push_to_native_heddle_local_path_uses_heddle_sync() {
     )
     .expect("heddle commit succeeds");
     let commit: Value = serde_json::from_str(&commit_json).expect("commit JSON parses");
-    let source_state = commit["change_id"]
+    let source_state = commit["state_id"]
         .as_str()
-        .expect("commit should report change_id")
+        .expect("commit should report state_id")
         .to_string();
 
     heddle(&["init"], Some(remote.path())).expect("init native target");
@@ -3589,7 +3589,7 @@ fn push_bootstrap_with_valid_config_still_creates_state() {
         .current_state()
         .unwrap()
         .expect("valid push should bootstrap source state")
-        .change_id;
+        .state_id;
     let remote_repo = Repository::open(remote.path()).expect("open target");
     let remote_state = remote_repo
         .refs()

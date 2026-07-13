@@ -21,7 +21,7 @@
 //! | Module            | Responsibility                                       |
 //! |-------------------|-------------------------------------------------------|
 //! | [`reasoning`]     | [`ReasoningPoint`] schema — shared with the TS extractor |
-//! | [`sha_map`]       | `git_sha ↔ heddle ChangeId` persistent sidecar          |
+//! | [`sha_map`]       | `git_sha ↔ heddle StateId` persistent sidecar          |
 //! | [`git_walk`]      | reflog+refs walker → ordered commit stream            |
 //! | [`importer`]      | git tree/blob/commit → Heddle objects and refs         |
 //! | [`state_writer`]  | git commit metadata → Heddle State fields              |
@@ -86,8 +86,8 @@ pub enum IngestError {
     ThreadDiverged {
         thread: String,
         branch: String,
-        existing: objects::object::ChangeId,
-        incoming: objects::object::ChangeId,
+        existing: objects::object::StateId,
+        incoming: objects::object::StateId,
     },
     #[error("sha map: {0}")]
     ShaMap(#[from] sha_map::ShaMapError),

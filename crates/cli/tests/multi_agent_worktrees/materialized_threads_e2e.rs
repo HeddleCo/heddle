@@ -103,9 +103,9 @@ fn materialized_thread_full_lifecycle() {
     )
     .unwrap();
     let captured: Value = serde_json::from_str(&capture_json).unwrap();
-    let captured_state = captured["change_id"]
+    let captured_state = captured["state_id"]
         .as_str()
-        .expect("capture json carries change_id")
+        .expect("capture json carries state_id")
         .to_string();
     assert!(
         !captured_state.is_empty(),
@@ -210,7 +210,7 @@ fn short_status_surfaces_stale_materialized_thread_advisory() {
     .unwrap();
 
     // Force the manifest stale by rewriting its `state_id` field to
-    // an all-zero ChangeId. `assess_materialized_threads` compares
+    // an all-zero StateId. `assess_materialized_threads` compares
     // the manifest's recorded `state_id` against the live thread head
     // via `refs().get_thread(...)` — any mismatch flips the stale bit.
     // This is the same observable condition produced when the head
@@ -227,7 +227,7 @@ fn short_status_surfaces_stale_materialized_thread_advisory() {
         manifest_path.display()
     );
     let manifest = fs::read_to_string(&manifest_path).unwrap();
-    // ChangeId is `[u8; 16]` with the default serde derive, so the
+    // StateId is `[u8; 16]` with the default serde derive, so the
     // manifest's `state_id` is a 16-element integer array. Parse the
     // TOML, replace the bytes with a distinct 16-byte value (every
     // byte differs from `rand::random()` with vanishing probability),

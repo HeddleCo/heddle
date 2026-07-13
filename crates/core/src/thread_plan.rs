@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use objects::object::ChangeId;
+use objects::object::StateId;
 use repo::{ThreadId, ThreadIdError, ThreadMode};
 
 // ---------------------------------------------------------------------------
@@ -132,8 +132,8 @@ impl From<ThreadIdError> for ThreadPlanError {
 pub enum ThreadBaseError {
     /// Thread already exists at `existing`, but `--from` resolved to a different state.
     AnchorMismatch {
-        existing: ChangeId,
-        requested: ChangeId,
+        existing: StateId,
+        requested: StateId,
     },
 }
 
@@ -218,7 +218,7 @@ pub fn start_requires_clean_worktree(has_explicit_path: bool) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThreadBaseSelection {
     /// Use this already-resolved change id as the thread base.
-    Use(ChangeId),
+    Use(StateId),
     /// No existing tip and no `--from`: caller must use current HEAD / bootstrap.
     RequireCurrent,
 }
@@ -231,8 +231,8 @@ pub enum ThreadBaseSelection {
 /// 3. No existing tip + `--from` → use the resolved `--from`
 /// 4. Neither → [`ThreadBaseSelection::RequireCurrent`]
 pub fn select_thread_base(
-    requested_from: Option<ChangeId>,
-    existing_tip: Option<ChangeId>,
+    requested_from: Option<StateId>,
+    existing_tip: Option<StateId>,
 ) -> Result<ThreadBaseSelection, ThreadBaseError> {
     match (requested_from, existing_tip) {
         (Some(requested), Some(existing)) if requested != existing => {
@@ -525,8 +525,8 @@ mod tests {
 
     #[test]
     fn select_thread_base_rules() {
-        let a = ChangeId::generate();
-        let b = ChangeId::generate();
+        let a = StateId::generate();
+        let b = StateId::generate();
         assert_ne!(a, b);
 
         assert_eq!(

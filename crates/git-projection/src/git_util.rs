@@ -68,8 +68,9 @@ impl<'a> GitProjection<'a> {
             out.push('\n');
         }
         out.push('\n');
+        out.push_str(&format!("Heddle-State: {}\n", state.id().to_string_full()));
         out.push_str(&format!(
-            "Heddle-State: {}\n",
+            "Heddle-Change: {}\n",
             state.change_id.to_string_full()
         ));
         if let Some(url) = hosted_url
@@ -78,7 +79,7 @@ impl<'a> GitProjection<'a> {
             let trimmed = url.trim_end_matches('/');
             out.push_str(&format!(
                 "Heddle-URL: {trimmed}/state/{}\n",
-                state.change_id.to_string_full()
+                state.id().to_string_full()
             ));
         }
         out.push_str(&format!(
@@ -177,7 +178,7 @@ pub struct ImportStats {
 #[cfg(test)]
 mod tests {
     // ── R6 — bridge footer ─────────────────────────────────────────────
-    use objects::object::{Attribution, ChangeId, ContentHash, Principal};
+    use objects::object::{Attribution, ContentHash, Principal, StateId};
 
     use super::*;
 
@@ -194,8 +195,9 @@ mod tests {
     fn footer_emits_state_id_and_zero_omitted_when_no_url() {
         let state = sample_state();
         let msg = GitProjection::build_commit_message_with_footer(&state, None, 0);
+        assert!(msg.contains(&format!("Heddle-State: {}", state.id().to_string_full())));
         assert!(msg.contains(&format!(
-            "Heddle-State: {}",
+            "Heddle-Change: {}",
             state.change_id.to_string_full()
         )));
         assert!(msg.contains("Heddle-Annotations-Omitted: 0"));
@@ -212,17 +214,15 @@ mod tests {
         );
         assert!(msg.contains(&format!(
             "Heddle-URL: https://heddle.test/state/{}",
-            state.change_id.to_string_full()
+            state.id().to_string_full()
         )));
         assert!(msg.contains("Heddle-Annotations-Omitted: 3"));
     }
 
-    // The state_id from `change_id.to_string_full()` is referenced via
-    // `ChangeId` for the bound on `state.change_id` — keep the import.
     #[test]
-    fn change_id_round_trips_through_footer() {
+    fn state_id_round_trips_through_footer() {
         let state = sample_state();
-        let id_str = state.change_id.to_string_full();
-        let _: ChangeId = ChangeId::parse(&id_str).expect("round-trip parse");
+        let id_str = state.id().to_string_full();
+        let _: StateId = StateId::parse(&id_str).expect("round-trip parse");
     }
 }

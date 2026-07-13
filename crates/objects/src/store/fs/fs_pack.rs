@@ -154,11 +154,6 @@ impl FsStore {
     /// started with. Running GC again over an already-consolidated store
     /// is a no-op (nothing loose, one pack already covers everything).
     ///
-    /// State objects are addressed by `ChangeId` and may have a stale
-    /// packed body shadowed by a fresher loose copy (#570). We re-pack
-    /// the packed state body verbatim; the loose copy (which `prune`
-    /// never touches) keeps shadowing it on read, so the shadow semantics
-    /// are preserved across the repack.
     pub(super) fn pack_objects_impl(&self, aggressive: bool) -> Result<(u64, u64)> {
         let loose_blobs = list_hashes_from_dir(&blobs_dir(&self.root))?;
         let loose_trees = list_hashes_from_dir(&trees_dir(&self.root))?;
@@ -207,7 +202,7 @@ impl FsStore {
         // 1. Carry forward everything already in a pack so the old packs
         //    can be retired. `get_object` resolves the body + type for
         //    any id (blob/tree/state/action), and `add_id` preserves
-        //    ChangeId-keyed state objects.
+        //    content-addressed state objects.
         for id in existing_ids {
             if !seen.insert(id) {
                 continue;

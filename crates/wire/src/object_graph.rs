@@ -2,7 +2,10 @@
 use std::collections::{HashSet, VecDeque};
 
 use objects::{
-    object::{ContentHash, State, StateId, TreeEntryTarget},
+    object::{
+        ContentHash, State, StateAttachment, StateAttachmentBody, StateAttachmentId, StateId,
+        TreeEntryTarget,
+    },
     store::{ObjectStore, pack::ObjectType as PackObjectType},
 };
 use serde::{Deserialize, Serialize};
@@ -13,6 +16,10 @@ use crate::{ProtocolError, Result};
 pub enum ObjectId {
     Hash(ContentHash),
     StateId(StateId),
+    StateAttachment {
+        state: StateId,
+        id: StateAttachmentId,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +61,7 @@ pub enum ObjectType {
     /// is a sidecar record that lives outside the content-addressed pack
     /// and ships via the per-object transfer path, not the pack.
     StateVisibility,
+    StateAttachment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -64,6 +72,7 @@ pub enum ObjectTypeBucket {
     Action,
     Redaction,
     StateVisibility,
+    StateAttachment,
 }
 
 impl ObjectType {
@@ -75,6 +84,7 @@ impl ObjectType {
             ObjectType::Action => "action",
             ObjectType::Redaction => "redaction",
             ObjectType::StateVisibility => "state_visibility",
+            ObjectType::StateAttachment => "state_attachment",
         }
     }
 
@@ -86,6 +96,7 @@ impl ObjectType {
             "action" => Ok(ObjectType::Action),
             "redaction" => Ok(ObjectType::Redaction),
             "state_visibility" => Ok(ObjectType::StateVisibility),
+            "state_attachment" => Ok(ObjectType::StateAttachment),
             _ => Err(ProtocolError::InvalidState(format!(
                 "unknown object type: {value}"
             ))),
@@ -102,6 +113,7 @@ impl ObjectType {
             ObjectType::Tree => Ok(PackObjectType::Tree),
             ObjectType::State => Ok(PackObjectType::State),
             ObjectType::Action => Ok(PackObjectType::Action),
+            ObjectType::StateAttachment => Ok(PackObjectType::StateAttachment),
             ObjectType::Redaction => Err(ProtocolError::InvalidState(
                 "Redaction sidecar records cannot be packed into the content-addressed object pack"
                     .to_string(),
@@ -121,6 +133,7 @@ impl ObjectType {
             ObjectType::Action => ObjectTypeBucket::Action,
             ObjectType::Redaction => ObjectTypeBucket::Redaction,
             ObjectType::StateVisibility => ObjectTypeBucket::StateVisibility,
+            ObjectType::StateAttachment => ObjectTypeBucket::StateAttachment,
         }
     }
 }
@@ -235,6 +248,10 @@ enum StateClosureEvent<'a> {
     StateVisibility {
         state: StateId,
     },
+    StateAttachment {
+        state: StateId,
+        attachment: &'a StateAttachment,
+    },
     ExcludedState {
         id: StateId,
     },
@@ -273,6 +290,33 @@ fn walk_state_closure(
         if store.has_state_visibility_for_state(&id)? {
             visit(StateClosureEvent::StateVisibility { state: id })?;
         }
+        for attachment in store.list_state_attachments(&id)? {
+            visit(StateClosureEvent::StateAttachment {
+                state: id,
+                attachment: &attachment,
+            })?;
+            match attachment.body {
+                StateAttachmentBody::Context(root) => walk_tree_closure_filtered(
+                    store,
+                    root,
+                    &excluded_hashes,
+                    &mut seen_hashes,
+                    &mut visit,
+                )?,
+                StateAttachmentBody::RiskSignals(hash)
+                | StateAttachmentBody::ReviewSignatures(hash)
+                | StateAttachmentBody::Discussions(hash)
+                | StateAttachmentBody::StructuredConflicts(hash) => walk_blob_filtered(
+                    store,
+                    hash,
+                    BlobSource::StateMetadata,
+                    &excluded_hashes,
+                    &mut seen_hashes,
+                    &mut visit,
+                )?,
+                StateAttachmentBody::Signature(_) => {}
+            }
+        }
 
         if options.depth.map(|max| depth < max).unwrap_or(true) {
             for parent in &state.parents {
@@ -291,25 +335,6 @@ fn walk_state_closure(
             walk_tree_closure_filtered(
                 store,
                 provenance_root,
-                &excluded_hashes,
-                &mut seen_hashes,
-                &mut visit,
-            )?;
-        }
-        if let Some(context_root) = state.context {
-            walk_tree_closure_filtered(
-                store,
-                context_root,
-                &excluded_hashes,
-                &mut seen_hashes,
-                &mut visit,
-            )?;
-        }
-        for metadata_blob in state_blob_dependencies(&state) {
-            walk_blob_filtered(
-                store,
-                metadata_blob,
-                BlobSource::StateMetadata,
                 &excluded_hashes,
                 &mut seen_hashes,
                 &mut visit,
@@ -437,6 +462,18 @@ fn object_info_from_event(
                 size: bytes.len() as u64,
                 delta_base: None,
             })),
+        StateClosureEvent::StateAttachment { state, attachment } => {
+            let bytes = rmp_serde::to_vec_named(attachment)?;
+            Ok(Some(ObjectInfo {
+                id: ObjectId::StateAttachment {
+                    state,
+                    id: attachment.id(),
+                },
+                obj_type: ObjectType::StateAttachment,
+                size: bytes.len() as u64,
+                delta_base: None,
+            }))
+        }
         StateClosureEvent::ExcludedState { id } => {
             let _ = id;
             Ok(None)
@@ -477,6 +514,13 @@ fn planned_object_from_event(
         StateClosureEvent::StateVisibility { state } => Ok(Some(PlannedObject {
             id: ObjectId::StateId(state),
             obj_type: ObjectType::StateVisibility,
+        })),
+        StateClosureEvent::StateAttachment { state, attachment } => Ok(Some(PlannedObject {
+            id: ObjectId::StateAttachment {
+                state,
+                id: attachment.id(),
+            },
+            obj_type: ObjectType::StateAttachment,
         })),
         StateClosureEvent::ExcludedState { id } => {
             let _ = id;
@@ -571,26 +615,23 @@ fn collect_excluded(
         if let Some(provenance_root) = state.provenance {
             collect_tree_hashes(store, provenance_root, &mut excluded_hashes)?;
         }
-        if let Some(context_root) = state.context {
-            collect_tree_hashes(store, context_root, &mut excluded_hashes)?;
-        }
-        for metadata_blob in state_blob_dependencies(&state) {
-            excluded_hashes.insert(metadata_blob);
+        for attachment in store.list_state_attachments(&id)? {
+            match attachment.body {
+                StateAttachmentBody::Context(root) => {
+                    collect_tree_hashes(store, root, &mut excluded_hashes)?
+                }
+                StateAttachmentBody::RiskSignals(hash)
+                | StateAttachmentBody::ReviewSignatures(hash)
+                | StateAttachmentBody::Discussions(hash)
+                | StateAttachmentBody::StructuredConflicts(hash) => {
+                    excluded_hashes.insert(hash);
+                }
+                StateAttachmentBody::Signature(_) => {}
+            }
         }
     }
 
     Ok((excluded_states, excluded_hashes))
-}
-
-fn state_blob_dependencies(state: &State) -> impl Iterator<Item = ContentHash> + '_ {
-    [
-        state.risk_signals,
-        state.review_signatures,
-        state.discussions,
-        state.structured_conflicts,
-    ]
-    .into_iter()
-    .flatten()
 }
 
 fn collect_tree_hashes(
@@ -668,8 +709,9 @@ mod tests {
     use objects::{
         object::{
             Action, ActionId, Attribution, Blob, ContentHash, Discussion, DiscussionResolution,
-            DiscussionTurn, DiscussionsBlob, Principal, Redaction, State, StateId, StateVisibility,
-            SymbolAnchor, Tree, TreeEntry, VisibilityTier,
+            DiscussionTurn, DiscussionsBlob, Principal, Redaction, State, StateAttachment,
+            StateAttachmentBody, StateId, StateVisibility, SymbolAnchor, Tree, TreeEntry,
+            VisibilityTier,
         },
         store::{ObjectStore, Result as StoreResult},
     };
@@ -949,13 +991,24 @@ mod tests {
             vec![excluded_parent.state_id],
             test_attribution(),
         )
-        .with_context(context_tree_hash)
-        .with_provenance(provenance_tree_hash)
-        .with_risk_signals(risk_blob)
-        .with_review_signatures(review_blob)
-        .with_discussions(discussions_blob)
-        .with_structured_conflicts(conflicts_blob);
+        .with_provenance(provenance_tree_hash);
         repo.store().put_state(&state).expect("put state");
+        for body in [
+            StateAttachmentBody::Context(context_tree_hash),
+            StateAttachmentBody::RiskSignals(risk_blob),
+            StateAttachmentBody::ReviewSignatures(review_blob),
+            StateAttachmentBody::Discussions(discussions_blob),
+            StateAttachmentBody::StructuredConflicts(conflicts_blob),
+        ] {
+            repo.put_state_attachment(&StateAttachment {
+                state_id: state.id(),
+                body,
+                attribution: state.attribution.clone(),
+                created_at: Utc::now(),
+                supersedes: None,
+            })
+            .unwrap();
+        }
 
         repo.put_redaction(Redaction {
             redacted_blob,
@@ -1457,24 +1510,31 @@ mod tests {
             .store()
             .put_blob(&Blob::from_slice(b"structured conflicts"))
             .expect("put conflicts blob");
-        let state_with_metadata = state
-            .with_risk_signals(risk_hash)
-            .with_review_signatures(review_hash)
-            .with_discussions(discussion_hash)
-            .with_structured_conflicts(conflicts_hash);
-        repo.store()
-            .put_state(&state_with_metadata)
-            .expect("put state with metadata");
+        for body in [
+            StateAttachmentBody::RiskSignals(risk_hash),
+            StateAttachmentBody::ReviewSignatures(review_hash),
+            StateAttachmentBody::Discussions(discussion_hash),
+            StateAttachmentBody::StructuredConflicts(conflicts_hash),
+        ] {
+            repo.put_state_attachment(&StateAttachment {
+                state_id: state.id(),
+                body,
+                attribution: state.attribution.clone(),
+                created_at: Utc::now(),
+                supersedes: None,
+            })
+            .unwrap();
+        }
 
         let full = enumerate_state_closure_with_options(
             repo.store(),
-            state_with_metadata.state_id,
+            state.state_id,
             StateClosureOptions::default(),
         )
         .unwrap();
         let plan = enumerate_state_closure_plan_with_options(
             repo.store(),
-            state_with_metadata.state_id,
+            state.state_id,
             StateClosureOptions::default(),
         )
         .unwrap();

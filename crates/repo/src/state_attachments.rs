@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fs, path::PathBuf};
-
 use objects::{
-    fs_atomic::{create_dir_all_durable, write_file_atomic},
     object::{StateAttachment, StateAttachmentBody, StateAttachmentId, StateId},
     store::ObjectStore,
 };
@@ -48,27 +45,18 @@ impl Repository {
                     "state attachment can only supersede the same attachment kind".to_string(),
                 ));
             }
-            if attachment.created_at < prior.created_at {
-                return Err(HeddleError::InvalidObject(
-                    "state attachment cannot predate the record it supersedes".to_string(),
-                ));
-            }
         }
 
         let id = attachment.id();
-        let path = self.state_attachment_path(&attachment.state_id, &id);
-        if path.exists() {
+        if let Some(existing) = self.store.get_state_attachment(&attachment.state_id, &id)? {
             return match self.get_state_attachment(&attachment.state_id, &id)? {
-                Some(existing) if existing == *attachment => Ok(id),
+                Some(_) if existing == *attachment => Ok(id),
                 _ => Err(HeddleError::InvalidObject(
                     "state attachment address collision".to_string(),
                 )),
             };
         }
-        create_dir_all_durable(&self.state_attachment_dir(&attachment.state_id))?;
-        let bytes = rmp_serde::to_vec_named(attachment)?;
-        write_file_atomic(&path, &bytes)?;
-        Ok(id)
+        self.store.put_state_attachment(attachment)
     }
 
     pub fn get_state_attachment(
@@ -76,49 +64,11 @@ impl Repository {
         state_id: &StateId,
         attachment_id: &StateAttachmentId,
     ) -> Result<Option<StateAttachment>> {
-        let path = self.state_attachment_path(state_id, attachment_id);
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let attachment: StateAttachment = rmp_serde::from_slice(&bytes)?;
-        if attachment.state_id != *state_id || attachment.id() != *attachment_id {
-            return Err(HeddleError::InvalidObject(
-                "state attachment address does not match its content".to_string(),
-            ));
-        }
-        Ok(Some(attachment))
+        self.store.get_state_attachment(state_id, attachment_id)
     }
 
     pub fn list_state_attachments(&self, state_id: &StateId) -> Result<Vec<StateAttachment>> {
-        let dir = self.state_attachment_dir(state_id);
-        let entries = match fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(error.into()),
-        };
-        let mut attachments = Vec::new();
-        for entry in entries {
-            let path = entry?.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("msgpack") {
-                continue;
-            }
-            let bytes = fs::read(&path)?;
-            let attachment: StateAttachment = rmp_serde::from_slice(&bytes)?;
-            let expected_id = attachment.id();
-            if attachment.state_id != *state_id
-                || self
-                    .state_attachment_path(state_id, &expected_id)
-                    .file_name()
-                    != path.file_name()
-            {
-                return Err(HeddleError::InvalidObject(
-                    "state attachment stored under the wrong state".to_string(),
-                ));
-            }
-            attachments.push(attachment);
-        }
+        let mut attachments = self.store.list_state_attachments(state_id)?;
         attachments.sort_by_key(|attachment| (attachment.created_at, attachment.id()));
         Ok(attachments)
     }
@@ -128,26 +78,19 @@ impl Repository {
         state_id: &StateId,
         kind: StateAttachmentKind,
     ) -> Result<Option<StateAttachment>> {
-        Ok(self
+        let attachments: Vec<_> = self
             .list_state_attachments(state_id)?
             .into_iter()
             .filter(|attachment| StateAttachmentKind::of(&attachment.body) == kind)
-            .max_by_key(|attachment| (attachment.created_at, attachment.id())))
-    }
-
-    fn state_attachment_dir(&self, state_id: &StateId) -> PathBuf {
-        self.heddle_dir()
-            .join("state-attachments")
-            .join(state_id.to_string_full())
-    }
-
-    fn state_attachment_path(
-        &self,
-        state_id: &StateId,
-        attachment_id: &StateAttachmentId,
-    ) -> PathBuf {
-        self.state_attachment_dir(state_id)
-            .join(format!("{}.msgpack", attachment_id.as_hash().to_hex()))
+            .collect();
+        let superseded: std::collections::HashSet<_> = attachments
+            .iter()
+            .filter_map(|attachment| attachment.supersedes)
+            .collect();
+        Ok(attachments
+            .into_iter()
+            .filter(|attachment| !superseded.contains(&attachment.id()))
+            .max_by_key(StateAttachment::id))
     }
 }
 
@@ -196,5 +139,44 @@ mod tests {
         assert_eq!(latest, second);
         assert_eq!(repo.list_state_attachments(&state_id).unwrap().len(), 2);
         assert_eq!(repo.store().get_state(&state_id).unwrap().unwrap(), before);
+    }
+
+    #[test]
+    fn latest_follows_supersession_heads_not_wall_clock() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let state_id = repo.head().unwrap().unwrap();
+        let root = attachment(
+            state_id,
+            StateAttachmentBody::Context(ContentHash::compute(b"root")),
+        );
+        let root_id = repo.put_state_attachment(&root).unwrap();
+
+        let mut older_clock = attachment(
+            state_id,
+            StateAttachmentBody::Context(ContentHash::compute(b"older-clock")),
+        );
+        older_clock.created_at = root.created_at - Duration::seconds(10);
+        older_clock.supersedes = Some(root_id);
+        repo.put_state_attachment(&older_clock).unwrap();
+
+        let mut fork = attachment(
+            state_id,
+            StateAttachmentBody::Context(ContentHash::compute(b"fork")),
+        );
+        fork.created_at = root.created_at + Duration::seconds(10);
+        fork.supersedes = Some(root_id);
+        repo.put_state_attachment(&fork).unwrap();
+
+        let expected = [older_clock.clone(), fork.clone()]
+            .into_iter()
+            .max_by_key(StateAttachment::id)
+            .unwrap();
+        assert_eq!(
+            repo.latest_state_attachment(&state_id, StateAttachmentKind::Context)
+                .unwrap()
+                .unwrap(),
+            expected
+        );
     }
 }

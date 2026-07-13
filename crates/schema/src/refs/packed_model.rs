@@ -3,15 +3,15 @@
 
 use std::collections::HashMap;
 
-use objects::object::ChangeId;
+use objects::object::StateId;
 
 const THREADS_PREFIX: &str = "refs/threads/";
 const MARKERS_PREFIX: &str = "refs/markers/";
 
 #[derive(Clone, Debug)]
 pub struct PackedRefsModel {
-    threads: HashMap<String, ChangeId>,
-    markers: HashMap<String, ChangeId>,
+    threads: HashMap<String, StateId>,
+    markers: HashMap<String, StateId>,
 }
 
 impl PackedRefsModel {
@@ -33,7 +33,7 @@ impl PackedRefsModel {
             let (Some(id_str), Some(refname)) = (parts.next(), parts.next()) else {
                 continue;
             };
-            let id = match ChangeId::parse(id_str) {
+            let id = match StateId::parse(id_str) {
                 Ok(id) => id,
                 Err(_) => continue,
             };
@@ -69,16 +69,16 @@ impl PackedRefsModel {
         lines.join("\n") + "\n"
     }
 
-    pub fn get_thread(&self, name: &str) -> Option<ChangeId> {
+    pub fn get_thread(&self, name: &str) -> Option<StateId> {
         self.threads.get(name).copied()
     }
-    pub fn get_marker(&self, name: &str) -> Option<ChangeId> {
+    pub fn get_marker(&self, name: &str) -> Option<StateId> {
         self.markers.get(name).copied()
     }
-    pub fn set_thread(&mut self, name: &str, id: ChangeId) {
+    pub fn set_thread(&mut self, name: &str, id: StateId) {
         self.threads.insert(name.to_string(), id);
     }
-    pub fn set_marker(&mut self, name: &str, id: ChangeId) {
+    pub fn set_marker(&mut self, name: &str, id: StateId) {
         self.markers.insert(name.to_string(), id);
     }
     pub fn remove_track(&mut self, name: &str) {

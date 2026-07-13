@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use anyhow::Context;
 use anyhow::Result;
 #[cfg(feature = "client")]
-use objects::object::ChangeId;
+use objects::object::StateId;
 use objects::object::{MarkerName, ThreadName};
 #[cfg(feature = "client")]
 use objects::store::ObjectStore;
@@ -294,22 +294,22 @@ async fn fetch_local(
     // peer declared after we last synced. The internal walk is cheap
     // when no objects need copying, but it must still run for
     // `accept_wire_redactions` to fire.
-    for (track_name, change_id) in source.list_threads()? {
-        let count = source.fetch_state(repo, &change_id)?;
+    for (track_name, state_id) in source.list_threads()? {
+        let count = source.fetch_state(repo, &state_id)?;
         objects_fetched += count;
         repo.refs()
-            .set_remote_thread(remote_name, &ThreadName::new(&track_name), &change_id)?;
+            .set_remote_thread(remote_name, &ThreadName::new(&track_name), &state_id)?;
         refs_fetched += 1;
     }
 
     // Fetch all markers from source (copy locally, not as remote refs)
-    for (marker_name, change_id) in source.list_markers()? {
-        let count = source.fetch_state(repo, &change_id)?;
+    for (marker_name, state_id) in source.list_markers()? {
+        let count = source.fetch_state(repo, &state_id)?;
         objects_fetched += count;
         // Create local marker if it doesn't exist
         let mn = MarkerName::new(&marker_name);
         if repo.refs().get_marker(&mn)?.is_none() {
-            repo.refs().create_marker(&mn, &change_id)?;
+            repo.refs().create_marker(&mn, &state_id)?;
         }
     }
 
@@ -368,40 +368,40 @@ async fn fetch_network(
     let mut objects_fetched = 0;
 
     for ref_entry in &remote_refs {
-        if fetched_states.insert(ref_entry.change_id)
-            && !repo.store().has_state(&ref_entry.change_id)?
+        if fetched_states.insert(ref_entry.state_id)
+            && !repo.store().has_state(&ref_entry.state_id)?
         {
             objects_fetched += fetch_remote_state(
                 &mut client,
                 repo,
                 repo_path,
                 &ref_entry.name,
-                ref_entry.change_id,
+                ref_entry.state_id,
             )
             .await?;
         }
 
         if ref_entry.is_thread {
-            refs_to_update.push((ref_entry.name.clone(), ref_entry.change_id));
+            refs_to_update.push((ref_entry.name.clone(), ref_entry.state_id));
         } else {
-            markers_to_create.push((ref_entry.name.clone(), ref_entry.change_id));
+            markers_to_create.push((ref_entry.name.clone(), ref_entry.state_id));
         }
     }
 
     // Update remote refs
     let refs_fetched = refs_to_update.len();
-    for (track_name, change_id) in refs_to_update {
+    for (track_name, state_id) in refs_to_update {
         repo.refs().set_remote_thread(
             options.remote_name,
             &ThreadName::new(&track_name),
-            &change_id,
+            &state_id,
         )?;
     }
 
-    for (marker_name, change_id) in markers_to_create {
+    for (marker_name, state_id) in markers_to_create {
         let mn = MarkerName::new(&marker_name);
         if repo.refs().get_marker(&mn)?.is_none() {
-            repo.refs().create_marker(&mn, &change_id)?;
+            repo.refs().create_marker(&mn, &state_id)?;
         }
     }
     Ok((refs_fetched, objects_fetched))
@@ -413,7 +413,7 @@ async fn fetch_remote_state(
     repo: &Repository,
     repo_path: &str,
     remote_name: &str,
-    state_id: ChangeId,
+    state_id: StateId,
 ) -> Result<usize> {
     client
         .fetch_state(repo, repo_path, remote_name, state_id)

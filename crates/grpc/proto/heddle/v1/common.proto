@@ -4,11 +4,10 @@ package heddle.v1;
 
 message RefEntry {
   string name = 1;
-  bytes change_id = 2;
+  bytes state_id = 2;
   bool is_thread = 3;
   // Explicit revision address for two-lane storage. Native refs use
-  // `heddle:<change_id>`; Git-overlay refs use `git:<commit_oid>`.
-  // `change_id` remains populated for native refs during the transition.
+  // `heddle:<state_id>`; Git-overlay refs use `git:<commit_oid>`.
   string revision_address = 4;
 }
 

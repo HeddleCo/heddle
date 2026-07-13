@@ -791,7 +791,7 @@ pub struct BlameSchema {
 pub struct BlameLineSchema {
     pub line_number: usize,
     pub content: String,
-    pub change_id: String,
+    pub state_id: String,
     pub principal: BlamePrincipalSchema,
     pub agent: Option<BlameAgentSchema>,
     pub timestamp: String,
@@ -800,7 +800,7 @@ pub struct BlameLineSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct BlameOriginSchema {
-    pub change_id: String,
+    pub state_id: String,
     pub principal: BlamePrincipalSchema,
     pub agent: Option<BlameAgentSchema>,
     pub timestamp: String,
@@ -872,7 +872,7 @@ pub struct RetroSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RetroStateEntrySchema {
-    pub change_id: String,
+    pub state_id: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
     pub agent: Option<String>,
@@ -991,7 +991,7 @@ pub struct DiscussionEnvelopeSchema {
 pub struct DiscussionResolutionSchema {
     pub kind: String,
     pub annotation_id: Option<String>,
-    pub change_id: Option<String>,
+    pub state_id: Option<String>,
     pub reason: Option<String>,
 }
 
@@ -1051,7 +1051,7 @@ pub struct CaptureSchema {
     pub output_kind: Option<String>,
     pub status: String,
     pub action: String,
-    pub change_id: String,
+    pub state_id: String,
     pub content_hash: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
@@ -1073,7 +1073,7 @@ pub struct CommitSchema {
     pub output_kind: Option<String>,
     pub status: String,
     pub action: String,
-    pub change_id: String,
+    pub state_id: String,
     pub git_commit: Option<String>,
     pub git_previous_commit: Option<String>,
     pub summary: String,
@@ -1115,7 +1115,7 @@ pub struct CheckpointSchema {
     pub output_kind: Option<String>,
     pub status: String,
     pub action: String,
-    pub change_id: String,
+    pub state_id: String,
     pub git_commit: String,
     pub summary: String,
     pub capability: String,
@@ -1343,7 +1343,7 @@ pub struct ThreadCapturesSchema(pub Vec<ThreadCaptureEntrySchema>);
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ThreadCaptureEntrySchema {
-    pub change_id: String,
+    pub state_id: String,
     pub created_at: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
@@ -1381,8 +1381,8 @@ pub struct ThreadMoveSchema {
     pub from_thread: String,
     pub to_thread: String,
     pub moved_paths: Vec<String>,
-    pub source_change_id: Option<String>,
-    pub target_change_id: String,
+    pub source_state_id: Option<String>,
+    pub target_state_id: String,
     pub message: String,
 }
 
@@ -1484,14 +1484,14 @@ pub struct ThreadMarkerListSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ThreadMarkerEntrySchema {
     pub name: String,
-    pub change_id: String,
+    pub state_id: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ThreadMarkerOpSchema {
     pub output_kind: String,
     pub name: Option<String>,
-    pub change_id: Option<String>,
+    pub state_id: Option<String>,
     pub deleted: Option<Vec<ThreadMarkerEntrySchema>>,
     pub count: Option<usize>,
     pub message: String,
@@ -2217,7 +2217,7 @@ pub struct LogSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct StateEntrySchema {
-    pub change_id: String,
+    pub state_id: String,
     pub content_hash: String,
     pub intent: Option<String>,
     pub principal: String,
@@ -2431,8 +2431,8 @@ pub struct ExpandSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ExpandedCollapseSchema {
-    pub change_id: String,
-    pub change_id_full: String,
+    pub state_id: String,
+    pub state_id_full: String,
     pub git_commit: Option<String>,
     pub thread: Option<String>,
     pub source_count: usize,
@@ -2440,8 +2440,8 @@ pub struct ExpandedCollapseSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ExpandedCaptureSchema {
-    pub change_id: String,
-    pub change_id_full: String,
+    pub state_id: String,
+    pub state_id_full: String,
     pub content_hash: String,
     pub intent: Option<String>,
     pub principal: String,
@@ -2478,8 +2478,8 @@ pub struct ShowSchema {
     pub output_kind: String,
     pub repository_capability: String,
     pub storage_model: String,
-    pub change_id: String,
-    pub change_id_full: String,
+    pub state_id: String,
+    pub state_id_full: String,
     pub content_hash: String,
     pub tree: String,
     pub parents: Vec<String>,
@@ -2543,7 +2543,7 @@ pub struct AvailableGitRefSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReviewShowSchema {
     pub output_kind: String,
-    pub change_id: String,
+    pub state_id: String,
     pub headline: String,
     pub agent_narrative: Option<String>,
     pub files_changed: usize,
@@ -2558,20 +2558,20 @@ pub struct ReviewShowSchema {
 pub struct ReviewSignSchema {
     pub output_kind: String,
     pub signature_id: String,
-    pub change_id: String,
+    pub state_id: String,
 }
 
 /// `heddle review next --output json` emits a stable envelope keyed by
 /// `output_kind: "review_next"`. When the scan window holds a pending
 /// review, the pending state's view is flattened alongside `output_kind`
-/// (`change_id`, `headline`, `existing_signatures`) and the same view is
+/// (`state_id`, `headline`, `existing_signatures`) and the same view is
 /// echoed under `next`. When no pending review is found, only
 /// `output_kind` and `next: null` are emitted — there is no top-level
 /// `null`. Mirrors the envelope built in `review::run_next`.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReviewNextSchema {
     pub output_kind: String,
-    pub change_id: Option<String>,
+    pub state_id: Option<String>,
     pub headline: Option<String>,
     pub existing_signatures: Option<u32>,
     pub next: RequiredNullableNextState,
@@ -2601,7 +2601,7 @@ impl JsonSchema for RequiredNullableNextState {
 /// The pending review state echoed under `review next`'s `next` field.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReviewNextStateSchema {
-    pub change_id: String,
+    pub state_id: String,
     pub headline: String,
     pub existing_signatures: u32,
 }
@@ -2624,7 +2624,7 @@ pub struct ReviewHealthEntrySchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct TransactionCommitSchema {
-    pub change_id: String,
+    pub state_id: String,
     pub op_count: u32,
 }
 
@@ -2752,7 +2752,7 @@ pub struct WatchLineSchema {
     pub ts: String,
     pub thread: Option<String>,
     pub kind: String,
-    pub change_id: Option<String>,
+    pub state_id: Option<String>,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
     pub actor: Option<ActorInfoSchema>,
@@ -2873,7 +2873,7 @@ pub struct StashShowSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RevertSchema {
     pub output_kind: String,
-    pub change_id: Option<String>,
+    pub state_id: Option<String>,
     pub reverted_state: String,
     pub files_affected: Vec<String>,
     pub message: String,

@@ -11,7 +11,7 @@ use heddle_core::{
     staged_commit_summary as core_staged_commit_summary, tree_leaf_name,
 };
 use objects::{
-    object::{Agent, Blob, ChangeId, ContentHash, Principal, ThreadName, Tree, TreeEntry},
+    object::{Agent, Blob, ContentHash, Principal, StateId, ThreadName, Tree, TreeEntry},
     store::ObjectStore,
     worktree::{WorktreeIgnoreMatcher, build_worktree_ignore},
 };
@@ -58,7 +58,7 @@ struct GitProjectionCommitOutput {
     output_kind: &'static str,
     status: &'static str,
     action: &'static str,
-    change_id: String,
+    state_id: String,
     git_commit: Option<String>,
     git_previous_commit: Option<String>,
     summary: String,
@@ -210,13 +210,13 @@ pub async fn cmd_commit_git_projection(cli: &Cli, args: CommitArgs) -> Result<()
                     output_kind: "commit",
                     status: "committed",
                     action: "commit",
-                    change_id: state.change_id.short(),
+                    state_id: state.state_id.short(),
                     git_commit: Some(record.git_commit),
                     git_previous_commit,
                     summary: record.summary,
                     confidence: state.confidence,
                     git_index: None,
-                    included_pending_capture: Some(state.change_id.short()),
+                    included_pending_capture: Some(state.state_id.short()),
                     principal: state.attribution.principal.into(),
                     agent: state.attribution.agent.map(CommitAgentOutput::from),
                     placeholder_principal_warning: placeholder_principal_warning.clone(),
@@ -269,7 +269,7 @@ pub async fn cmd_commit_git_projection(cli: &Cli, args: CommitArgs) -> Result<()
             output_kind: "commit",
             status: "committed",
             action: "commit",
-            change_id: report.change_id.short(),
+            state_id: report.state_id.short(),
             git_commit: None,
             git_previous_commit: None,
             summary: report.summary,
@@ -428,7 +428,7 @@ pub async fn cmd_commit_git_projection(cli: &Cli, args: CommitArgs) -> Result<()
         output_kind: "commit",
         status: "committed",
         action: "commit",
-        change_id: report.change_id.short(),
+        state_id: report.state_id.short(),
         git_commit,
         git_previous_commit,
         summary: report
@@ -477,7 +477,7 @@ struct StagedIndexCommit<'a> {
     message: &'a str,
     confidence: Option<f32>,
     intent: GitIndexIntent,
-    pending_capture: Option<ChangeId>,
+    pending_capture: Option<StateId>,
     git_overlay_facts: &'a git_overlay_txn::GitOverlayMutationFacts,
 }
 
@@ -545,7 +545,7 @@ fn commit_staged_index(
         output_kind: "commit",
         status: "committed",
         action: "commit",
-        change_id: report.change_id.short(),
+        state_id: report.state_id.short(),
         git_commit: report.git_commit.clone(),
         git_previous_commit,
         summary: staged_commit_summary(summary_base, &intent),
@@ -900,7 +900,7 @@ fn commit_next_action(trust: &RepositoryVerificationState) -> Option<String> {
     )
 }
 
-fn pending_capture_before_commit(repo: &Repository) -> Result<Option<ChangeId>> {
+fn pending_capture_before_commit(repo: &Repository) -> Result<Option<StateId>> {
     if repo.capability() != RepositoryCapability::GitOverlay {
         return Ok(None);
     }
@@ -916,16 +916,16 @@ fn pending_capture_before_commit(repo: &Repository) -> Result<Option<ChangeId>> 
     let Some(tip) = tip.mapped_change else {
         return Ok(None);
     };
-    if tip == current.change_id {
+    if tip == current.state_id {
         return Ok(None);
     }
     if repo
-        .latest_git_checkpoint_for_change(&current.change_id)?
+        .latest_git_checkpoint_for_change(&current.state_id)?
         .is_some()
     {
         return Ok(None);
     }
-    Ok(Some(current.change_id))
+    Ok(Some(current.state_id))
 }
 
 fn with_commit_action_metadata(mut output: GitProjectionCommitOutput) -> GitProjectionCommitOutput {
@@ -996,12 +996,12 @@ fn render_git_projection_commit(
             match &output.git_commit {
                 Some(git_commit) => format!(
                     "Committed {} as Git commit {}",
-                    style::change_id(&output.change_id),
+                    style::state_id(&output.state_id),
                     style::dim(&git_commit[..std::cmp::min(12, git_commit.len())])
                 ),
                 None => format!(
                     "Committed Heddle state {}",
-                    style::change_id(&output.change_id)
+                    style::state_id(&output.state_id)
                 ),
             }
         );
@@ -1017,7 +1017,7 @@ fn render_git_projection_commit(
         if let Some(pending) = &output.included_pending_capture {
             println!(
                 "Included prior Heddle-only save {}; this Git commit checkpoints the resulting state.",
-                style::change_id(pending)
+                style::state_id(pending)
             );
         }
         println!(

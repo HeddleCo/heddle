@@ -94,7 +94,7 @@ impl fmt::Display for ContentHash {
     }
 }
 
-/// A stable change identifier (16 bytes / 128 bits).
+/// A rewrite-stable logical change identifier (16 bytes / 128 bits).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct ChangeId([u8; 16]);
 
@@ -125,10 +125,10 @@ impl ChangeId {
         &self.0
     }
 
-    /// Convert to display string (hd-XXXXXXXXXX...).
+    /// Convert to display string (hc-XXXXXXXXXX...).
     pub fn to_string_full(&self) -> String {
         format!(
-            "hd-{}",
+            "hc-{}",
             base32::encode(base32::Alphabet::Crockford, &self.0).to_lowercase()
         )
     }
@@ -139,9 +139,9 @@ impl ChangeId {
         full[..15.min(full.len())].to_string()
     }
 
-    /// Parse from string (with or without hd- prefix).
+    /// Parse from string (with or without hc- prefix).
     pub fn parse(s: &str) -> Result<Self, ChangeIdParseError> {
-        let s = s.strip_prefix("hd-").unwrap_or(s);
+        let s = s.strip_prefix("hc-").unwrap_or(s);
         let bytes = base32::decode(base32::Alphabet::Crockford, &s.to_uppercase())
             .ok_or(ChangeIdParseError::InvalidBase32)?;
         if bytes.len() != 16 {
@@ -156,6 +156,80 @@ impl ChangeId {
     pub fn is_zero(&self) -> bool {
         self.0 == [0u8; 16]
     }
+}
+
+/// Content-addressed identity of an immutable state core.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize, Default)]
+pub struct StateId([u8; 32]);
+
+impl StateId {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn from_content_hash(hash: ContentHash) -> Self {
+        Self(*hash.as_bytes())
+    }
+
+    pub fn try_from_slice(bytes: &[u8]) -> Result<Self, StateIdParseError> {
+        if bytes.len() != 32 {
+            return Err(StateIdParseError::InvalidLength);
+        }
+        let mut value = [0; 32];
+        value.copy_from_slice(bytes);
+        Ok(Self(value))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn as_content_hash(&self) -> ContentHash {
+        ContentHash::from_bytes(self.0)
+    }
+
+    pub fn to_string_full(&self) -> String {
+        format!(
+            "hs-{}",
+            base32::encode(base32::Alphabet::Crockford, &self.0).to_lowercase()
+        )
+    }
+
+    pub fn short(&self) -> String {
+        let full = self.to_string_full();
+        full[..18.min(full.len())].to_string()
+    }
+
+    pub fn parse(s: &str) -> Result<Self, StateIdParseError> {
+        let encoded = s.strip_prefix("hs-").unwrap_or(s);
+        let bytes = base32::decode(base32::Alphabet::Crockford, &encoded.to_uppercase())
+            .ok_or(StateIdParseError::InvalidBase32)?;
+        Self::try_from_slice(&bytes)
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.0 == [0; 32]
+    }
+}
+
+impl fmt::Debug for StateId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "StateId({})", self.short())
+    }
+}
+
+impl fmt::Display for StateId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.short())
+    }
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum StateIdParseError {
+    #[error("invalid base32 encoding")]
+    InvalidBase32,
+    #[error("invalid length (expected 32 bytes)")]
+    InvalidLength,
 }
 
 impl fmt::Debug for ChangeId {
@@ -222,7 +296,7 @@ mod tests {
     fn test_change_id_roundtrip() {
         let id = ChangeId::generate();
         let s = id.to_string_full();
-        assert!(s.starts_with("hd-"));
+        assert!(s.starts_with("hc-"));
         let parsed = ChangeId::parse(&s).unwrap();
         assert_eq!(id, parsed);
     }
@@ -231,7 +305,17 @@ mod tests {
     fn test_change_id_short() {
         let id = ChangeId::generate();
         let short = id.short();
-        assert!(short.starts_with("hd-"));
+        assert!(short.starts_with("hc-"));
         assert!(short.len() <= 15);
+    }
+
+    #[test]
+    fn test_state_id_roundtrip() {
+        let id = StateId::from_content_hash(ContentHash::compute(b"state"));
+        let encoded = id.to_string_full();
+
+        assert!(encoded.starts_with("hs-"));
+        assert_eq!(StateId::parse(&encoded).unwrap(), id);
+        assert_eq!(StateId::try_from_slice(id.as_bytes()).unwrap(), id);
     }
 }

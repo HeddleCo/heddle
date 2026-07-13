@@ -672,7 +672,7 @@ const GIT_CONCEPTS_TOPIC: &str = r#"Git to Heddle concept map.
 | Git concept | Heddle concept + semantic difference |
 |-------------|--------------------------------------|
 | `git commit` | `heddle commit -m "..."`: saves Heddle state and, in Git-overlay repos, writes the matching Git Checkpoint. Advanced flows may split this into `heddle capture -m "..."` plus `heddle checkpoint -m "..."`. |
-| Git commit SHA | Heddle `hd-...` change id. Use it with `heddle show`, `log`, and `diff`; Git SHAs remain the interop handle for Git tooling. |
+| Git commit SHA | Heddle `hs-...` state id. Use it with `heddle show`, `log`, and `diff`; Git SHAs remain the interop handle for Git tooling. |
 | `git branch foo` | `heddle start foo` for a working thread, or `heddle thread create foo` for a ref only. A thread is a unit of work with checkout, captured history, metadata, and readiness state, not just a movable ref. |
 | `git checkout foo` / `git switch foo` | `heddle thread switch foo`. Heddle switches between thread checkouts and may auto-capture the thread you leave; raw Git checkout only moves the Git layer. |
 | `git tag v1.0` | `heddle thread marker create v1.0`. A marker names a Heddle State; it is for pinning a state in Heddle history, not for creating a signed or annotated Git tag object. |
@@ -980,8 +980,8 @@ Export metadata for Git readers:\n\
 \n\
 Every exported commit carries a footer at the tail of the commit message:\n\
 \n\
-    Heddle-State: <change_id>\n\
-    Heddle-URL: <hosted_url>/state/<change_id>     (omitted if no hosted URL)\n\
+    Heddle-State: <state_id>\n\
+    Heddle-URL: <hosted_url>/state/<state_id>     (omitted if no hosted URL)\n\
     Heddle-Annotations-Omitted: <count>\n\
 \n\
 This is the durable record — every reader on every host sees it regardless\n\

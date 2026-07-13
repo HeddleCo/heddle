@@ -445,7 +445,6 @@ impl From<LegacyThreadRecord> for ThreadRecord {
 mod tests {
     use std::{path::PathBuf, sync::Mutex};
 
-    use crypto::StateSigningExt;
     use objects::object::{
         Annotation, AnnotationKind, AnnotationScope, Attribution, Blob, ContentHash, ContextBlob,
         ContextTarget, EntryType, Principal, SignatureStatus, State, Tree, TreeEntry,

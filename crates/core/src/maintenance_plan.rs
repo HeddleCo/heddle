@@ -67,10 +67,7 @@ impl MaintenanceInspectView {
             ),
             format!(
                 "Refs: {} threads, {} markers, {} remotes, {} remote threads",
-                self.refs_threads,
-                self.refs_markers,
-                self.refs_remotes,
-                self.refs_remote_threads
+                self.refs_threads, self.refs_markers, self.refs_remotes, self.refs_remote_threads
             ),
             format!(
                 "Ref summary index: {} (valid: {}, threads: {}, markers: {}, remotes: {}, remote threads: {})",
@@ -92,9 +89,7 @@ impl MaintenanceInspectView {
             format!("Partial fetch: {} missing blobs", self.missing_blob_count),
             format!(
                 "Pull planner cache: {} (manifests: {}, planner entries: {})",
-                self.pull_planner_status,
-                self.pull_planner_manifests,
-                self.pull_planner_entries
+                self.pull_planner_status, self.pull_planner_manifests, self.pull_planner_entries
             ),
         ]
     }
@@ -130,7 +125,10 @@ impl MaintenanceRunView {
     /// Human lines for run (stable order).
     pub fn lines(&self) -> Vec<String> {
         let mut lines = vec![
-            format!("Rebuilt commit graph: {}", yes_no(self.rebuilt_commit_graph)),
+            format!(
+                "Rebuilt commit graph: {}",
+                yes_no(self.rebuilt_commit_graph)
+            ),
             format!(
                 "Rebuilt ref summary index: {}",
                 yes_no(self.rebuilt_ref_summary_index)

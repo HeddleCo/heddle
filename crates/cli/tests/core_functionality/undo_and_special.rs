@@ -2951,7 +2951,7 @@ fn test_undo_rebase_refuses_when_pre_rebase_blob_purged() {
     // same blob hash as the pre-rebase tree.
     let log_json = heddle_must_succeed(&["--output", "json", "log", "--limit", "1"], temp.path());
     let log: Value = serde_json::from_str(&log_json).unwrap();
-    let current_state = log["states"][0]["change_id"].as_str().unwrap().to_string();
+    let current_state = log["states"][0]["state_id"].as_str().unwrap().to_string();
 
     heddle_must_succeed(
         &[

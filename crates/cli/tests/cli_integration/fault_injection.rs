@@ -147,9 +147,9 @@ fn current_main_tip(repo: &std::path::Path) -> String {
         &heddle(&["--output", "json", "log", "main", "-n", "5"], Some(repo)).expect("log"),
     )
     .unwrap();
-    log["states"][0]["change_id"]
+    log["states"][0]["state_id"]
         .as_str()
-        .expect("tip change_id")
+        .expect("tip state_id")
         .to_string()
 }
 
@@ -158,9 +158,9 @@ fn current_head_tip(repo: &std::path::Path) -> String {
         &heddle(&["--output", "json", "log", "--limit", "1"], Some(repo)).expect("log"),
     )
     .unwrap();
-    log["states"][0]["change_id"]
+    log["states"][0]["state_id"]
         .as_str()
-        .expect("tip change_id")
+        .expect("tip state_id")
         .to_string()
 }
 

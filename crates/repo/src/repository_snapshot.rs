@@ -5,7 +5,10 @@ use std::collections::BTreeSet;
 
 use objects::{
     lock::RepositoryLockExt,
-    object::{Attribution, Blob, ChangeLineage, ContentHash, State, StateId, Tree, TreeEntry},
+    object::{
+        Attribution, Blob, ChangeLineage, ContentHash, State, StateAttachment, StateAttachmentBody,
+        StateId, Tree, TreeEntry,
+    },
     store::ObjectStore,
 };
 use oplog::{IsolationKey, OpRecord};
@@ -253,12 +256,18 @@ impl SnapshotMutation<'_> {
             state = state.with_lineage(self.lineage.clone());
         }
 
-        if let Some(parent_id) = self.prev_head
+        let inherited_context = if let Some(parent_id) = self.prev_head
             && let Some(parent_state) = self.repo.store.get_state(&parent_id)?
-            && let Some(inherited) = Repository::inherit_parent_context(&parent_state)
         {
-            state = state.with_context(inherited);
-        }
+            self.repo.inherit_parent_context(&parent_state)?
+        } else {
+            None
+        };
+
+        #[cfg(feature = "tree-sitter-symbols")]
+        let mut risk_signals = None;
+        #[cfg(feature = "tree-sitter-symbols")]
+        let mut discussions = None;
 
         #[cfg(feature = "tree-sitter-symbols")]
         {
@@ -270,9 +279,7 @@ impl SnapshotMutation<'_> {
                 .repo
                 .compute_and_persist_signals(prior_state.as_ref(), &state)
             {
-                Ok(Some(hash)) => {
-                    state = state.with_risk_signals(hash);
-                }
+                Ok(Some(hash)) => risk_signals = Some(hash),
                 Ok(None) => {}
                 Err(err) => {
                     tracing::warn!(error = %err, "risk signal computation failed; continuing without signals");
@@ -284,9 +291,7 @@ impl SnapshotMutation<'_> {
                     .repo
                     .compute_and_persist_discussion_anchor_travel(parent_state, &tree)
                 {
-                    Ok(Some(hash)) => {
-                        state = state.with_discussions(hash);
-                    }
+                    Ok(Some(hash)) => discussions = Some(hash),
                     Ok(None) => {}
                     Err(err) => {
                         tracing::warn!(error = %err, "discussion anchor travel failed; continuing without discussions");
@@ -295,13 +300,34 @@ impl SnapshotMutation<'_> {
             }
         }
 
-        // Auto-sign every captured state (heddle#482) via the capture-path
-        // chokepoint. Signing is the LAST mutation before the write: it covers
-        // `compute_hash()` over the fields enriched above, so any later change
-        // would invalidate it. Best-effort — a missing key leaves the state
-        // unsigned, never fails the capture.
+        // Persist the immutable state before its independently-addressed metadata.
         let state_ref_oplog_start = std::time::Instant::now();
-        self.repo.put_authored_state(&mut state)?;
+        self.repo.put_authored_state(&state)?;
+        if let Some(context) = inherited_context {
+            self.repo.put_state_attachment(&StateAttachment {
+                state_id: state.id(),
+                body: StateAttachmentBody::Context(context),
+                attribution: state.attribution.clone(),
+                created_at: chrono::Utc::now(),
+                supersedes: None,
+            })?;
+        }
+        #[cfg(feature = "tree-sitter-symbols")]
+        for body in [
+            risk_signals.map(StateAttachmentBody::RiskSignals),
+            discussions.map(StateAttachmentBody::Discussions),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.repo.put_state_attachment(&StateAttachment {
+                state_id: state.id(),
+                body,
+                attribution: state.attribution.clone(),
+                created_at: chrono::Utc::now(),
+                supersedes: None,
+            })?;
+        }
         self.repo.store.flush_snapshot_write_batch()?;
 
         Ok(SnapshotExecution {
@@ -861,16 +887,19 @@ impl Repository {
         // Union the parents' context trees so annotations from either side
         // ride forward. Same-id collisions resolve to the newest revision;
         // see `union_parent_contexts` for the merge rules.
-        if let Some(merged_context) = self.union_parent_contexts(&[&ours_state, &theirs_state])? {
-            state = state.with_context(merged_context);
-        }
+        let merged_context = self.union_parent_contexts(&[&ours_state, &theirs_state])?;
 
-        // Auto-sign the merge state (heddle#482) via the authored-state
-        // chokepoint: the merge author vouches for this merge of parents X and
-        // Y. Each parent keeps its own author signature — they are unchanged on
-        // disk, so they stay verifiable. Last mutation before the write, same
-        // ordering rule as capture.
-        self.put_authored_state(&mut state)?;
+        // Persist the immutable merge before its independently-addressed context.
+        self.put_authored_state(&state)?;
+        if let Some(context) = merged_context {
+            self.put_state_attachment(&StateAttachment {
+                state_id: state.id(),
+                body: StateAttachmentBody::Context(context),
+                attribution: state.attribution.clone(),
+                created_at: chrono::Utc::now(),
+                supersedes: None,
+            })?;
+        }
 
         let head = self.head_ref()?;
         let thread = match &head {

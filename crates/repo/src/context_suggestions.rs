@@ -55,8 +55,8 @@ impl Repository {
         }
 
         let stale_map = staleness::check_context_staleness(self, state)?;
-        let active_context = match &state.context {
-            Some(root) => self.list_context_entries(root, None)?,
+        let active_context = match self.inherit_parent_context(state)? {
+            Some(root) => self.list_context_entries(&root, None)?,
             None => Vec::new(),
         };
 

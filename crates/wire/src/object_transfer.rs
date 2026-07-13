@@ -138,6 +138,15 @@ pub fn load_requested_object(store: &impl ObjectStore, req: &ObjectRequest) -> R
                 .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string()))?;
             (ObjectType::State, rmp_serde::to_vec_named(&state)?)
         }
+        ObjectId::StateAttachment { state, id } => {
+            let attachment = store
+                .get_state_attachment(state, id)?
+                .ok_or_else(|| ProtocolError::ObjectNotFound(id.to_string()))?;
+            (
+                ObjectType::StateAttachment,
+                rmp_serde::to_vec_named(&attachment)?,
+            )
+        }
     };
 
     Ok(ObjectData {
@@ -177,6 +186,12 @@ pub fn load_object_data(
         (ObjectId::StateId(state_id), ObjectType::StateVisibility) => store
             .get_state_visibility_bytes_for_state(state_id)?
             .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string_full()))?,
+        (ObjectId::StateAttachment { state, id }, ObjectType::StateAttachment) => {
+            let attachment = store
+                .get_state_attachment(state, id)?
+                .ok_or_else(|| ProtocolError::ObjectNotFound(id.to_string()))?;
+            rmp_serde::to_vec_named(&attachment)?
+        }
         _ => {
             return Err(ProtocolError::InvalidState(
                 "object id/type mismatch".to_string(),
@@ -218,6 +233,15 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
                 )));
             }
             store.put_state_serialized(&data.data, *state_id)?;
+        }
+        (ObjectId::StateAttachment { state, id }, ObjectType::StateAttachment) => {
+            let attachment: objects::object::StateAttachment = rmp_serde::from_slice(&data.data)?;
+            if attachment.state_id != *state || attachment.id() != *id {
+                return Err(ProtocolError::InvalidState(
+                    "state attachment id mismatch".to_string(),
+                ));
+            }
+            store.put_state_attachment(&attachment)?;
         }
         (_, ObjectType::Redaction) => {
             // Redactions ship signed and need verification before any

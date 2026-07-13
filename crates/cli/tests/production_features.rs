@@ -740,7 +740,7 @@ mod cherry_pick {
         fs::remove_dir_all(temp.path().join("web")).unwrap();
         heddle(&["capture", "-m", "drop web"], Some(temp.path())).unwrap();
 
-        // Capture the change_id of the deletion commit.
+        // Capture the state_id of the deletion commit.
         let log_output =
             heddle(&["log", "--oneline", "--output", "text"], Some(temp.path())).unwrap();
         let drop_web_id = log_output
@@ -909,7 +909,7 @@ mod blame {
             &[
                 "collapse",
                 &first.to_string_full(),
-                &head.change_id.to_string_full(),
+                &head.state_id.to_string_full(),
                 "--into",
                 "combined",
             ],
@@ -1596,7 +1596,7 @@ mod rebase {
     }
 
     #[test]
-    fn test_rebase_preserves_logical_change_identity() {
+    fn test_rebase_preserves_logical_state_identity() {
         let temp = TempDir::new().unwrap();
 
         heddle(&["init"], Some(temp.path())).unwrap();
@@ -1611,7 +1611,7 @@ mod rebase {
         let repo = repo::Repository::open(temp.path()).unwrap();
         let pre_rebase_head = repo.head().unwrap().unwrap();
         let pre_rebase_state = repo.store().get_state(&pre_rebase_head).unwrap().unwrap();
-        let original_logical = pre_rebase_state.logical_change_id();
+        let original_logical = pre_rebase_state.state_id;
 
         heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
         fs::write(temp.path().join("main.txt"), "main").unwrap();
@@ -1625,7 +1625,7 @@ mod rebase {
         let rebased_state = repo.store().get_state(&rebased_head).unwrap().unwrap();
 
         assert_ne!(rebased_head, pre_rebase_head);
-        assert_eq!(rebased_state.logical_change_id(), original_logical);
+        assert_eq!(rebased_state.state_id, original_logical);
     }
 
     #[test]
@@ -1712,7 +1712,7 @@ mod rebase {
     /// parent thread used to call `repo.goto()` (which writes
     /// `Head::Detached`) without advancing the parent thread's ref. The
     /// worktree advanced but `thread show <parent>` still reported the
-    /// original change_id and HEAD was silently detached. Mirrors the
+    /// original state_id and HEAD was silently detached. Mirrors the
     /// merge fix in `crates/cli/src/cli/commands/merge/mod.rs`.
     #[test]
     fn test_rebase_fast_forward_advances_current_thread() {
@@ -1727,7 +1727,7 @@ mod rebase {
         fs::write(temp.path().join("new.txt"), "feature work").unwrap();
         heddle(&["capture", "-m", "Feature work"], Some(temp.path())).unwrap();
 
-        // Capture the change_id at the tip of `feature` — this is the
+        // Capture the state_id at the tip of `feature` — this is the
         // fast-forward target for rebasing `main` onto `feature`.
         let feature_show = heddle(
             &["thread", "show", "feature", "--output", "json"],

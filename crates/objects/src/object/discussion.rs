@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::object::{
-    hash::ChangeId, state_attribution::Principal, state_review::SymbolAnchor,
+    hash::StateId, state_attribution::Principal, state_review::SymbolAnchor,
     visibility_tier::VisibilityTier,
 };
 
@@ -42,7 +42,7 @@ pub type DiscussionId = String;
 pub struct Discussion {
     pub id: DiscussionId,
     pub anchor: SymbolAnchor,
-    pub opened_against_state: ChangeId,
+    pub opened_against_state: StateId,
     /// Unix epoch seconds.
     pub opened_at: i64,
     #[serde(default)]
@@ -131,7 +131,7 @@ pub enum DiscussionResolution {
     ResolvedIntoAnnotation { annotation_id: String },
     /// A subsequent edit addressed the discussion's concern. The state ID
     /// pinpoints which edit was the answer.
-    ResolvedByEdit { state_id: ChangeId },
+    ResolvedByEdit { state_id: StateId },
     /// The discussion was dismissed without an annotation or follow-up
     /// edit. A non-empty reason is required so future readers know why.
     Dismissed { reason: String },
@@ -169,7 +169,7 @@ mod tests {
         Discussion {
             id: "disc-1".into(),
             anchor: SymbolAnchor::new("src/lib.rs", "foo"),
-            opened_against_state: ChangeId::from_bytes([7; 16]),
+            opened_against_state: StateId::from_bytes([7; 32]),
             opened_at: 1_700_000_000,
             thread_ref: None,
             turns: vec![DiscussionTurn {

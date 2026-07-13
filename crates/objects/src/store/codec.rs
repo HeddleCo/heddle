@@ -82,7 +82,7 @@ fn decode_body(data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::object::{Attribution, ChangeId, Operation, Principal, TreeEntry};
+    use crate::object::{Attribution, Operation, Principal, StateId, TreeEntry};
 
     #[test]
     fn encode_decode_blob_content_matches_old_recipe() {
@@ -129,7 +129,7 @@ mod tests {
         for config in compression_configs() {
             let mut action = Action::new(
                 None,
-                ChangeId::generate(),
+                StateId::from_bytes([1; 32]),
                 Operation::Snapshot,
                 "codec action",
                 attribution.clone(),

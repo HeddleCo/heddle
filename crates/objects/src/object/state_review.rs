@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::object::{hash::ChangeId, state_attribution::Principal};
+use crate::object::{hash::StateId, state_attribution::Principal};
 
 /// Stable byte prefix the signing payload begins with. Bumping this versions
 /// the payload format itself; old signatures with the old prefix continue to
@@ -152,7 +152,7 @@ impl SymbolAnchor {
 /// integers. Uses NUL byte as a field separator, which is safe because
 /// `change_id` is hex and other fields are utf-8 strings without embedded NULs.
 pub fn signing_payload(
-    state_change_id: ChangeId,
+    state_id: StateId,
     kind: ReviewKind,
     scope: &ReviewScope,
     signed_at: i64,
@@ -160,7 +160,7 @@ pub fn signing_payload(
 ) -> Vec<u8> {
     let mut buf = Vec::with_capacity(SIGNING_PAYLOAD_VERSION_TAG.len() + 256);
     buf.extend_from_slice(SIGNING_PAYLOAD_VERSION_TAG);
-    buf.extend_from_slice(state_change_id.to_string_full().as_bytes());
+    buf.extend_from_slice(state_id.to_string_full().as_bytes());
     buf.push(0);
     buf.extend_from_slice(kind.as_str().as_bytes());
     buf.push(0);
@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn signing_payload_distinguishes_scope() {
-        let id = ChangeId::from_bytes([1; 16]);
+        let id = StateId::from_bytes([1; 32]);
         let whole = signing_payload(id, ReviewKind::Read, &ReviewScope::WholeChange, 0, None);
         let one_symbol = signing_payload(
             id,
@@ -278,14 +278,14 @@ mod tests {
 
     #[test]
     fn signing_payload_starts_with_version_tag() {
-        let id = ChangeId::from_bytes([1; 16]);
+        let id = StateId::from_bytes([1; 32]);
         let payload = signing_payload(id, ReviewKind::Read, &ReviewScope::WholeChange, 0, None);
         assert!(payload.starts_with(SIGNING_PAYLOAD_VERSION_TAG));
     }
 
     #[test]
     fn signing_payload_distinguishes_kind() {
-        let id = ChangeId::from_bytes([1; 16]);
+        let id = StateId::from_bytes([1; 32]);
         let read = signing_payload(id, ReviewKind::Read, &ReviewScope::WholeChange, 0, None);
         let preview = signing_payload(
             id,

@@ -263,7 +263,7 @@ pub(crate) fn native_checkpoint_unavailable_advice(repo: &Repository) -> Recover
 }
 
 pub(crate) fn commit_checkpoint_failed_advice(
-    change_id: &str,
+    state_id: &str,
     message: Option<&str>,
     err: &anyhow::Error,
     index_only: bool,
@@ -271,11 +271,11 @@ pub(crate) fn commit_checkpoint_failed_advice(
     let recovery = checkpoint_recovery_command(message, index_only);
     RecoveryAdvice::safety_refusal(
         "commit_checkpoint_failed",
-        format!("capture {change_id} was preserved, but checkpoint failed: {err}"),
+        format!("capture {state_id} was preserved, but checkpoint failed: {err}"),
         format!("Resolve the checkpoint issue, then run `{recovery}`."),
         "the Heddle capture succeeded but the Git checkpoint step failed",
         "retrying through the canonical save path keeps the Git checkpoint repair on the supported surface",
-        format!("captured Heddle state {change_id} was preserved"),
+        format!("captured Heddle state {state_id} was preserved"),
         recovery.clone(),
         vec![recovery],
     )

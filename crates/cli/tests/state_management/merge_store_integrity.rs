@@ -97,12 +97,12 @@ fn test_merge_missing_base_subtree_fails_loud_not_silent_erase() {
             .unwrap();
         let feature_state = repo.store().get_state(&feature_tip).unwrap().unwrap();
         // Both tips have a single parent — the base capture.
-        let base_change_id = main_state.parents[0];
+        let base_state_id = main_state.parents[0];
         assert_eq!(
-            base_change_id, feature_state.parents[0],
+            base_state_id, feature_state.parents[0],
             "test setup: main and feature must share a single merge base",
         );
-        let base_state = repo.store().get_state(&base_change_id).unwrap().unwrap();
+        let base_state = repo.store().get_state(&base_state_id).unwrap().unwrap();
         let base_tree = repo.store().get_tree(&base_state.tree).unwrap().unwrap();
         let sub_entry = base_tree
             .entries()

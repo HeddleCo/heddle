@@ -74,8 +74,8 @@ pub fn marker_bulk_delete_message(prefix: &str, count: usize) -> String {
 }
 
 /// Create / delete single-marker success messages.
-pub fn marker_create_message(name: &str, change_id_short: &str) -> String {
-    format!("Created marker '{name}' at {change_id_short}")
+pub fn marker_create_message(name: &str, state_id_short: &str) -> String {
+    format!("Created marker '{name}' at {state_id_short}")
 }
 
 pub fn marker_delete_message(name: &str) -> String {

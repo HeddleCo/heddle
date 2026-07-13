@@ -11,7 +11,7 @@ use heddle_core::git_projection_io_plan::{
     ExportedRefSummaryFact, export_commits_summary, exported_refs_summary,
 };
 use ingest::{ImportOptions, LossyImportEntry};
-use objects::object::{ChangeId, ThreadName};
+use objects::object::{StateId, ThreadName};
 use refs::Head;
 use repo::Repository;
 use serde::Serialize;
@@ -633,7 +633,7 @@ pub fn cmd_context_reason_git(
 
 fn materialize_imported_attached_thread(
     bridge: &mut GitProjection<'_>,
-    attached_before: Option<&(ThreadName, ChangeId)>,
+    attached_before: Option<&(ThreadName, StateId)>,
 ) -> Result<()> {
     let Some((thread, old_state)) = attached_before else {
         return Ok(());

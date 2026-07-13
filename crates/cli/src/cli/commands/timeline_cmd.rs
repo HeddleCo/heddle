@@ -11,7 +11,7 @@ use heddle_core::{
     },
     timeline_recovery_status, timeline_tool_status,
 };
-use objects::object::{ChangeId, ContentHash};
+use objects::object::{ContentHash, StateId};
 use repo::{
     NativeToolCallRefV1, Repository, TimelineBranchId, TimelineLabel, TimelineMaterializeStatus,
     TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineStore, TimelineToolPayloadMetadata,
@@ -629,9 +629,9 @@ fn payload_hash_string(value: Option<&str>) -> Result<Option<String>> {
         .transpose()
 }
 
-fn require_current_change(repo: &Repository, context: &str) -> Result<ChangeId> {
+fn require_current_change(repo: &Repository, context: &str) -> Result<StateId> {
     repo.current_state()?
-        .map(|state| state.change_id)
+        .map(|state| state.state_id)
         .or(repo.head()?)
         .ok_or_else(|| anyhow!("{context} requires a repository state"))
 }

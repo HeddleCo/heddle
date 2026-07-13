@@ -323,7 +323,7 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
         },
     );
     let captured_state = match snapshot {
-        Ok(out) => Some(out.change_id),
+        Ok(out) => Some(out.state_id),
         Err(err) => {
             // Capture failed despite the cmd succeeding (e.g. nothing
             // changed in the worktree, or a hook vetoed). We don't
@@ -554,7 +554,7 @@ fn interpret_drop_result(
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{ChangeId, ThreadName};
+    use objects::object::{StateId, ThreadName};
 
     use super::*;
 
@@ -576,7 +576,7 @@ mod tests {
         // the legacy / synced-repo shape that the previous guard
         // missed. `thread_name_in_use` must catch it.
         let (_temp, repo) = init_repo();
-        let id = ChangeId::generate();
+        let id = StateId::generate();
         repo.refs()
             .set_thread(&ThreadName::new("ref-only-thread"), &id)
             .unwrap();
@@ -598,7 +598,7 @@ mod tests {
         // start_thread. We invoke cmd_try with all the args wired up;
         // the guard short-circuits with the precise message.
         let (_temp, repo) = init_repo();
-        let id = ChangeId::generate();
+        let id = StateId::generate();
         repo.refs()
             .set_thread(&ThreadName::new("legacy-ref-thread"), &id)
             .unwrap();

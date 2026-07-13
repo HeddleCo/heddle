@@ -171,7 +171,7 @@ message CaptureThreadRequest {
 
 message CaptureThreadResponse {
   string thread = 1;
-  bytes change_id = 2;
+  bytes state_id = 2;
   string coordination_status = 3;
 }
 

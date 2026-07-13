@@ -47,9 +47,6 @@ mod tests {
         assert_eq!(plan_collapse(2), CollapsePlan::Proceed);
         assert!(!collapse_has_source_states(0));
         assert!(collapse_has_source_states(1));
-        assert_eq!(
-            collapse_states_required_kind(),
-            "collapse_states_required"
-        );
+        assert_eq!(collapse_states_required_kind(), "collapse_states_required");
     }
 }

@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use objects::object::ChangeId;
+use objects::object::StateId;
 use serde::Serialize;
 
 // ---------------------------------------------------------------------------
@@ -698,7 +698,7 @@ pub struct MonorepoNodeFacts {
     /// Content-facet state to materialize. `None` = empty checkout at the mount.
     /// For the root this is the spool's content head; for descendants the server
     /// already pins the parent's edge-anchored state into this field.
-    pub content_state: Option<ChangeId>,
+    pub content_state: Option<StateId>,
     pub edges: Vec<MonorepoEdgeFacts>,
 }
 
@@ -706,7 +706,7 @@ pub struct MonorepoNodeFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonorepoNodePlan {
     pub spool_id: String,
-    pub content_state: Option<ChangeId>,
+    pub content_state: Option<StateId>,
     /// Destination path relative to the clone root. Root is `""`.
     pub rel_path: PathBuf,
 }
@@ -821,10 +821,10 @@ pub enum MonorepoNodeExecutionStep {
     /// Initialize a Heddle repository at the mount (`Repository::init`).
     InitRepo,
     /// Hosted fetch of the node's content-state object closure.
-    FetchContent { state: ChangeId },
+    FetchContent { state: StateId },
     /// Materialize worktree from the fetched state
     /// (`goto_from_materialized_state`).
-    MaterializeState { state: ChangeId },
+    MaterializeState { state: StateId },
     /// Seed origin/remote mapping so the placed spool tracks its upstream.
     RecordMapping,
 }
@@ -958,8 +958,8 @@ pub enum MonorepoNodeExecutionError {
     FetchWithoutMaterialize,
     /// Fetch and Materialize carry different content-state ids.
     FetchMaterializeStateMismatch {
-        fetch: ChangeId,
-        materialize: ChangeId,
+        fetch: StateId,
+        materialize: StateId,
     },
 }
 
@@ -1011,7 +1011,7 @@ fn monorepo_step_rank(step: &MonorepoNodeExecutionStep) -> u8 {
 /// - Steps appear at most once and in rank order (ValidateDest → InitRepo →
 ///   optional FetchContent → optional MaterializeState → optional RecordMapping).
 /// - InitRepo precedes Fetch / Materialize / RecordMapping.
-/// - FetchContent and MaterializeState are paired with the same [`ChangeId`].
+/// - FetchContent and MaterializeState are paired with the same [`StateId`].
 ///
 /// Does not perform I/O. Plans from [`plan_monorepo_node_steps`] always pass.
 pub fn validate_monorepo_node_execution(
@@ -1023,7 +1023,7 @@ pub fn validate_monorepo_node_execution(
 
     let mut seen_validate = false;
     let mut seen_init = false;
-    let mut pending_fetch: Option<ChangeId> = None;
+    let mut pending_fetch: Option<StateId> = None;
     let mut last_rank: Option<u8> = None;
 
     for step in steps {
@@ -1165,7 +1165,7 @@ pub struct MonorepoPlacedNodeSummary {
     pub spool_id: String,
     /// Destination path relative to the clone root. Root is `""`.
     pub rel_path: PathBuf,
-    pub content_state: Option<ChangeId>,
+    pub content_state: Option<StateId>,
     /// True when the node plan included fetch + materialize (had content).
     pub materialized_content: bool,
 }
@@ -1593,8 +1593,8 @@ mod tests {
 
     // ---- monorepo pure planning ----
 
-    fn cid(seed: u8) -> ChangeId {
-        ChangeId::from_bytes([seed; 16])
+    fn cid(seed: u8) -> StateId {
+        StateId::from_bytes([seed; 16])
     }
 
     fn leaf(spool_id: &str, content: u8) -> MonorepoNodeFacts {

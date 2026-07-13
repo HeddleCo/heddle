@@ -511,7 +511,7 @@ fn test_cli_help_verb_falls_through_to_clap() {
 }
 
 #[test]
-fn test_cli_show_accepts_short_change_id() {
+fn test_cli_show_accepts_short_state_id() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();

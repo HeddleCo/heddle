@@ -3,14 +3,14 @@
 
 use super::Result;
 use crate::{
-    object::{Blob, ChangeId, ContentHash, State, Tree},
+    object::{Blob, ContentHash, State, StateId, Tree},
     store::ObjectStore,
 };
 
 /// Read-only subset of [`ObjectStore`] needed by object graph walkers.
 pub trait ObjectSource {
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>>;
-    fn get_state(&self, id: &ChangeId) -> Result<Option<State>>;
+    fn get_state(&self, id: &StateId) -> Result<Option<State>>;
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>>;
 
     /// Zero-copy variant of `get_blob`.
@@ -28,7 +28,7 @@ impl<S: ObjectStore + ?Sized> ObjectSource for S {
     }
 
     #[inline]
-    fn get_state(&self, id: &ChangeId) -> Result<Option<State>> {
+    fn get_state(&self, id: &StateId) -> Result<Option<State>> {
         ObjectStore::get_state(self, id)
     }
 
@@ -47,6 +47,6 @@ impl<S: ObjectStore + ?Sized> ObjectSource for S {
 #[allow(async_fn_in_trait)]
 pub trait AsyncObjectSource {
     async fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>>;
-    async fn get_state(&self, id: &ChangeId) -> Result<Option<State>>;
+    async fn get_state(&self, id: &StateId) -> Result<Option<State>>;
     async fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>>;
 }

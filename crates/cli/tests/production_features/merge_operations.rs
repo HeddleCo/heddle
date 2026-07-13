@@ -636,10 +636,10 @@ fn test_cherry_pick_with_subdirectories() {
     )
     .unwrap();
     let snap: Value = serde_json::from_str(&snapshot_output).unwrap();
-    let change_id = snap["change_id"].as_str().unwrap().to_string();
+    let state_id = snap["state_id"].as_str().unwrap().to_string();
 
     heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-    let result = heddle(&["cherry-pick", &change_id], Some(temp.path()));
+    let result = heddle(&["cherry-pick", &state_id], Some(temp.path()));
     assert!(
         result.is_ok(),
         "cherry-pick with subdirectory files should succeed: {:?}",

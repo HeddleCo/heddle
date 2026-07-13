@@ -271,7 +271,7 @@ pub struct CommitArgs {
 #[command(after_help = "\
 Examples:
   heddle switch feature/auth       # switch to an existing thread
-  heddle switch hd-abc123          # move the worktree to a state
+  heddle switch hs-abc123          # move the worktree to a state
   heddle start feature/auth --path ../feature-auth  # create an isolated thread
 ")]
 pub struct SwitchArgs {

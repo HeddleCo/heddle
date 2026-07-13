@@ -77,12 +77,12 @@ pub fn check_context_staleness(
 ) -> Result<HashMap<String, StalenessStatus>, anyhow::Error> {
     let mut results = HashMap::new();
 
-    let context_root = match &current_state.context {
+    let context_root = match repo.inherit_parent_context(current_state)? {
         Some(root) => root,
         None => return Ok(results),
     };
 
-    let entries = repo.list_context_entries(context_root, None)?;
+    let entries = repo.list_context_entries(&context_root, None)?;
 
     for entry in &entries {
         for annotation in &entry.blob.annotations {

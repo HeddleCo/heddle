@@ -573,9 +573,8 @@ fn mount_capture_auto_signs() {
         let new_id = mount.capture(Some("signed capture".into())).unwrap();
 
         let repo = mount.repo_handle();
-        let state = repo.store().get_state(&new_id).unwrap().unwrap();
         assert!(
-            state.signature.is_some(),
+            repo.get_state_signature(&new_id).unwrap().is_some(),
             "mount-captured state must be auto-signed, not stored unsigned",
         );
         assert_eq!(

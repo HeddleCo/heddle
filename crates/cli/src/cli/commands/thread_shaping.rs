@@ -91,7 +91,7 @@ pub fn cmd_capture_split(
                     no_agent: false,
                 },
             )?
-            .change_id)
+            .state_id)
         },
     )
     .map_err(map_thread_shaping_anyhow_error)?;
@@ -131,7 +131,7 @@ pub fn cmd_thread_move(
                     no_agent: false,
                 },
             )?
-            .change_id)
+            .state_id)
         },
     )
     .map_err(map_thread_shaping_anyhow_error)?;
@@ -326,7 +326,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
             .ok_or_else(|| anyhow!("Thread '{}' has no current state", thread.id))?;
         if rebase_state
             .pre_conflict_head
-            .is_some_and(|head| head != current_state.change_id)
+            .is_some_and(|head| head != current_state.state_id)
         {
             recommended_action = "heddle rebase --continue".to_string();
         } else {
@@ -459,7 +459,7 @@ fn thread_resolve_rebase_followup_operator(
     let mut blockers = Vec::new();
     if rebase_state
         .pre_conflict_head
-        .is_none_or(|head| head == current_state.change_id)
+        .is_none_or(|head| head == current_state.state_id)
     {
         blockers.push(
             "refresh has a rebase in progress; capture a manual resolution in the thread checkout, then run `heddle rebase --continue`".to_string(),

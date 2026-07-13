@@ -80,11 +80,11 @@ async fn open_hosted_client(repo: &Repository, remote_name: &str) -> Result<Host
     Ok(client)
 }
 
-fn change_id_string(bytes: &[u8]) -> String {
+fn state_id_string(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }
-    objects::object::ChangeId::try_from_slice(bytes)
+    objects::object::StateId::try_from_slice(bytes)
         .map(|id| id.to_string_full())
         .unwrap_or_default()
 }
@@ -104,7 +104,7 @@ async fn cmd_spool_attach(cli: &Cli, args: SpoolAttachArgs) -> Result<()> {
         "{}",
         spool_attach_message(&args.child, &args.parent, &mount)
     );
-    let anchored = change_id_string(&edge.anchored_state_id);
+    let anchored = state_id_string(&edge.anchored_state_id);
     if !anchored.is_empty() {
         println!("  anchored state: {}", short_id(&anchored));
     }
@@ -137,7 +137,7 @@ async fn cmd_spool_children(cli: &Cli, args: SpoolChildrenArgs) -> Result<()> {
     } else {
         println!("{}", spool_children_header(children.len(), &args.parent));
         for edge in &children {
-            let anchored = change_id_string(&edge.anchored_state_id);
+            let anchored = state_id_string(&edge.anchored_state_id);
             println!(
                 "  {mount:<20} {child}  [{status}] @ {state}",
                 mount = edge.mount_name,
@@ -167,7 +167,7 @@ async fn cmd_spool_governance(cli: &Cli, args: SpoolHistoryArgs) -> Result<()> {
             args.spool
         );
         for entry in &entries {
-            let cid = change_id_string(&entry.change_id);
+            let cid = state_id_string(&entry.state_id);
             println!(
                 "  {cid}  visibility={vis}  {when}",
                 cid = short_id(&cid),
@@ -196,7 +196,7 @@ async fn cmd_spool_membership(cli: &Cli, args: SpoolHistoryArgs) -> Result<()> {
             args.spool
         );
         for entry in &entries {
-            let cid = change_id_string(&entry.change_id);
+            let cid = state_id_string(&entry.state_id);
             println!(
                 "  {cid}  {n} grant(s)  {when}",
                 cid = short_id(&cid),

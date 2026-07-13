@@ -62,7 +62,7 @@ use heddle_core::{
 };
 use objects::{
     error::{HeddleError, Result as HeddleResult},
-    object::{ChangeId, ThreadName},
+    object::{StateId, ThreadName},
 };
 use oplog::{IsolationKey, OpRecord};
 use refs::RefExpectation;
@@ -714,11 +714,11 @@ pub(crate) struct StartThread {
     /// The thread name (ref name + record key).
     pub name: String,
     /// The base state the checkout materializes / the ref points at.
-    pub base_state: ChangeId,
+    pub base_state: StateId,
     /// `Some(prior)` when a thread ref already exists (re-start reuses it via a
     /// CAS against `prior`); `None` for a brand-new thread (CAS-against-missing
     /// + a staged `ThreadCreate` commit record).
-    pub existing_thread_state: Option<ChangeId>,
+    pub existing_thread_state: Option<StateId>,
     pub thread_mode: ThreadMode,
     /// The materialization target (mount point for virtualized).
     pub abs_path: PathBuf,
@@ -1392,7 +1392,7 @@ mod tests {
     fn solid_args(
         name: &str,
         path: &std::path::Path,
-        from: &ChangeId,
+        from: &StateId,
         hydrate: bool,
     ) -> ThreadStartArgs {
         ThreadStartArgs {
@@ -1416,7 +1416,7 @@ mod tests {
     fn materialized_args(
         name: &str,
         path: &std::path::Path,
-        from: &ChangeId,
+        from: &StateId,
         hydrate: bool,
     ) -> ThreadStartArgs {
         let mut args = solid_args(name, path, from, hydrate);
@@ -1440,7 +1440,7 @@ mod tests {
 
     /// Repo with one captured state holding a tracked `a.txt` (+ optional
     /// ignored dep dirs). Returns the temp dir, repo, and base state id.
-    fn repo_with_state(deps: &[&str]) -> (TempDir, Repository, ChangeId) {
+    fn repo_with_state(deps: &[&str]) -> (TempDir, Repository, StateId) {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("a.txt"), "a").unwrap();
@@ -1452,7 +1452,7 @@ mod tests {
             }
         }
         let state = repo.snapshot(Some("s1".to_string()), None).unwrap();
-        (temp, repo, state.change_id)
+        (temp, repo, state.state_id)
     }
 
     #[test]
@@ -1582,7 +1582,7 @@ mod tests {
             .snapshot(Some("rust workspace".to_string()), None)
             .unwrap();
         let checkout = temp.path().join("iso");
-        let mut args = solid_args("iso", &checkout, &state.change_id, false);
+        let mut args = solid_args("iso", &checkout, &state.state_id, false);
         args.shared_target = true;
 
         start_thread(&repo, args).expect("shared-target start should succeed");
@@ -2041,8 +2041,8 @@ mod tests {
         let (temp, repo, base) = repo_with_state(&[]);
         let _ = &temp;
         let name = ThreadName::new("foo");
-        let advanced = ChangeId::generate();
-        let prior = ChangeId::generate();
+        let advanced = StateId::generate();
+        let prior = StateId::generate();
 
         // Brand-new case (restore_to = None → would otherwise delete). A
         // concurrent writer advanced the ref past our forward value → leave it.

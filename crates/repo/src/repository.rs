@@ -81,7 +81,6 @@ pub use repository_maintenance::{
 };
 pub use repository_materialization::WarmCanonicalStoreStats;
 pub use repository_partial_fetch::MissingBlob;
-pub use repository_signing::ResignOutcome;
 pub use repository_snapshot::{SnapshotExecution, SnapshotProfile};
 pub use repository_thread_materialize::{CheckoutMaterialization, ThreadCaptureOutcome};
 pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile};

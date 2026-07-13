@@ -2,7 +2,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use objects::{object::ChangeId, store::ObjectStore};
+use objects::{object::StateId, store::ObjectStore};
 use repo::{AudienceTier, CheckoutMaterialization, Repository};
 
 use super::super::advice::RecoveryAdvice;
@@ -399,7 +399,7 @@ fn worktree_target_not_empty_advice(path: &Path) -> RecoveryAdvice {
 pub(crate) fn write_isolated_checkout(
     repo: &Repository,
     abs_path: &Path,
-    base_state: &ChangeId,
+    base_state: &StateId,
     thread: Option<&str>,
 ) -> Result<CheckoutMaterialization> {
     let heddle_dir = abs_path.join(".heddle");
@@ -492,7 +492,7 @@ mod gate_tests {
     // closed at this entry point too.
     const COURTESY_STUB_FILENAME: &str = "HEDDLE-EMBARGO.txt";
 
-    fn embargo_head(repo: &Repository) -> ChangeId {
+    fn embargo_head(repo: &Repository) -> StateId {
         let state_id = repo
             .refs()
             .get_thread(&ThreadName::new("main"))

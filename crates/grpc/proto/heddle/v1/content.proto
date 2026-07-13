@@ -33,7 +33,7 @@ message GetRefsRequest {
 
 message MarkerInfo {
   string name = 1;
-  bytes change_id = 2; // wire convention: ids are bytes
+  bytes state_id = 2;
   // When the ref row last moved — NOT the tag's authored date (annotated-tag
   // metadata needs tag-object support; deliberately deferred).
   google.protobuf.Timestamp updated_at = 3;
@@ -272,7 +272,7 @@ message StateVerification {
 }
 
 message StateSummary {
-  bytes change_id = 1;
+  bytes state_id = 1;
   repeated bytes parents = 2;
   string intent = 3;
   google.protobuf.Timestamp created_at = 4;
@@ -281,7 +281,7 @@ message StateSummary {
   optional float confidence = 7;
   StateStatus status = 8;
   optional StateVerification verification = 9;
-  bytes logical_change_id = 10;
+  bytes change_id = 10;
 }
 
 message ListStatesResponse {
@@ -289,7 +289,7 @@ message ListStatesResponse {
 }
 
 message BlameOrigin {
-  bytes change_id = 1;
+  bytes state_id = 1;
   string author = 2;
   string timestamp = 3;
   string principal_name = 4;
@@ -301,7 +301,7 @@ message BlameOrigin {
 message BlameLine {
   uint32 line_number = 1;
   string content = 2;
-  bytes change_id = 3;
+  bytes state_id = 3;
   string author = 4;
   string timestamp = 5;
   repeated BlameOrigin origins = 6;

@@ -285,17 +285,14 @@ impl Repository {
         Ok(())
     }
 
-    /// Carry a single parent state's context tree forward onto a new
-    /// snapshot. Because context trees are content-addressed, this is a
-    /// pointer copy: the new state's `context` field gets the same
-    /// `ContentHash` as the parent. Annotations attached upstream remain
-    /// active at the new state, and the existing on-demand staleness check
-    /// (which compares the stored `source_hash` against the current bytes
-    /// at the anchor) naturally reports drift caused by the new tree.
-    ///
-    /// Returns `None` when the parent has no context tree.
-    pub fn inherit_parent_context(parent: &State) -> Option<ContentHash> {
-        parent.context
+    /// Resolve the context snapshot attached to a parent state.
+    pub fn inherit_parent_context(&self, parent: &State) -> Result<Option<ContentHash>> {
+        Ok(self
+            .latest_state_attachment(&parent.id(), crate::StateAttachmentKind::Context)?
+            .and_then(|attachment| match attachment.body {
+                objects::object::StateAttachmentBody::Context(hash) => Some(hash),
+                _ => None,
+            }))
     }
 
     /// Build a unioned context tree across multiple parent states for a
@@ -313,7 +310,12 @@ impl Repository {
     /// Returns `None` when none of the parents has any context.
     pub fn union_parent_contexts(&self, parents: &[&State]) -> Result<Option<ContentHash>> {
         // Fast paths: nothing or single-parent.
-        let mut roots: Vec<ContentHash> = parents.iter().filter_map(|p| p.context).collect();
+        let mut roots = Vec::new();
+        for parent in parents {
+            if let Some(root) = self.inherit_parent_context(parent)? {
+                roots.push(root);
+            }
+        }
         if roots.is_empty() {
             return Ok(None);
         }
@@ -444,8 +446,11 @@ fn split_path(path: &Path) -> Option<(&str, &Path)> {
 
 #[cfg(test)]
 mod tests {
-    use crypto::{Ed25519Signer, StateSigningExt};
-    use objects::object::{Annotation, AnnotationKind, Attribution, Blob, Principal, StateId};
+    use crypto::Ed25519Signer;
+    use objects::object::{
+        Annotation, AnnotationKind, Attribution, Blob, Principal, StateAttachment,
+        StateAttachmentBody, StateId,
+    };
     use tempfile::TempDir;
 
     use super::{Repository, *};
@@ -584,7 +589,7 @@ mod tests {
         let target = ContextTarget::file(path).unwrap();
         let blob = ContextBlob::new(anns);
         let root = repo.set_context_blob(None, &target, &blob).unwrap();
-        let mut state = State::new_snapshot(
+        let state = State::new_snapshot(
             ContentHash::compute(b""),
             vec![],
             objects::object::Attribution::human(objects::object::Principal::new(
@@ -592,7 +597,15 @@ mod tests {
                 "test@example.com",
             )),
         );
-        state = state.with_context(root);
+        repo.store().put_state(&state).unwrap();
+        repo.put_state_attachment(&StateAttachment {
+            state_id: state.id(),
+            body: StateAttachmentBody::Context(root),
+            attribution: state.attribution.clone(),
+            created_at: chrono::Utc::now(),
+            supersedes: None,
+        })
+        .unwrap();
         state
     }
 
@@ -619,12 +632,13 @@ mod tests {
             "src/lib.rs",
             vec![make_annotation(AnnotationScope::File, "first")],
         );
-        let inherited = Repository::inherit_parent_context(&parent);
-        assert_eq!(inherited, parent.context);
+        let inherited = repo.inherit_parent_context(&parent).unwrap();
+        assert!(inherited.is_some());
     }
 
     #[test]
     fn inherit_parent_context_yields_none_when_parent_has_none() {
+        let (_dir, repo) = setup();
         let parent = State::new_snapshot(
             ContentHash::compute(b""),
             vec![],
@@ -633,7 +647,7 @@ mod tests {
                 "test@example.com",
             )),
         );
-        assert_eq!(Repository::inherit_parent_context(&parent), None);
+        assert_eq!(repo.inherit_parent_context(&parent).unwrap(), None);
     }
 
     #[test]
@@ -670,7 +684,7 @@ mod tests {
         let merged = repo
             .union_parent_contexts(&[&parent_with, &parent_without])
             .unwrap();
-        assert_eq!(merged, parent_with.context);
+        assert_eq!(merged, repo.inherit_parent_context(&parent_with).unwrap());
     }
 
     #[test]

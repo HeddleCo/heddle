@@ -5,8 +5,8 @@
 //! A "state spec" is anything a user is likely to write to identify a
 //! captured state:
 //!
-//! * a full change ID (`hd-sqr398dvx9ayt9bf8bf5gz0jg8`)
-//! * a short change ID prefix (`hd-sqr398dvx9ay`, as printed by
+//! * a full state ID (`hs-sqr398dvx9ayt9bf8bf5gz0jg8`)
+//! * a short state ID prefix (`hs-sqr398dvx9ay`, as printed by
 //!   `heddle log --output json`)
 //! * a marker name (`failed-build-2026-05-09`)
 //! * `HEAD`, `@`, `HEAD~N`, `@~N`
@@ -15,7 +15,7 @@
 //! Resolution policy and lookup live in [`repo::resolve_state_for_command`];
 //! this layer maps structured failures to CLI [`RecoveryAdvice`] envelopes.
 //!
-//! Use [`resolve_state_id`] for the typed [`ChangeId`]. Use
+//! Use [`resolve_state_id`] for the typed [`StateId`]. Use
 //! [`resolve_state_id_bytes`] when you need the wire-form 16-byte
 //! representation (e.g. when handing it to a gRPC service stub).
 
@@ -23,7 +23,7 @@ use anyhow::{Result, anyhow};
 use heddle_core::status::next_action::canonical_adopt_ref_command;
 use objects::{
     error::HeddleError,
-    object::{ChangeId, State},
+    object::{State, StateId},
     store::ObjectStore,
 };
 use repo::{Repository, ResolvePolicy, StateResolveFailure, resolve_state_for_command};
@@ -42,7 +42,7 @@ pub(crate) fn state_resolve_failure_to_error(failure: StateResolveFailure) -> an
     }
 }
 
-/// Resolve a state spec to a typed [`ChangeId`].
+/// Resolve a state spec to a typed [`StateId`].
 ///
 /// Errors are user-facing:
 /// * `"State not found: <spec>"` when nothing matches.
@@ -50,7 +50,7 @@ pub(crate) fn state_resolve_failure_to_error(failure: StateResolveFailure) -> an
 ///   prefix matches more than one state.
 /// * A targeted import-history hint when the spec matches a tip-only
 ///   Git-overlay ref whose history we haven't pulled yet.
-pub(crate) fn resolve_state_id(repo: &Repository, spec: &str) -> Result<ChangeId> {
+pub(crate) fn resolve_state_id(repo: &Repository, spec: &str) -> Result<StateId> {
     resolve_state_id_with_policy(repo, spec, ResolvePolicy::with_git_overlay_hints())
 }
 
@@ -58,9 +58,9 @@ pub(crate) fn resolve_state_id_with_policy(
     repo: &Repository,
     spec: &str,
     policy: ResolvePolicy<'_>,
-) -> Result<ChangeId> {
+) -> Result<StateId> {
     resolve_state_for_command(repo, spec, policy)
-        .map(|resolved| resolved.change_id)
+        .map(|resolved| resolved.state_id)
         .map_err(state_resolve_error_to_anyhow)
 }
 
@@ -75,7 +75,7 @@ fn state_resolve_error_to_anyhow(error: repo::StateResolveError) -> anyhow::Erro
 ///
 /// A missing object at this point is an integrity/storage problem, not
 /// a user-supplied state-spec lookup failure.
-pub(crate) fn require_resolved_state(repo: &Repository, id: &ChangeId) -> Result<State> {
+pub(crate) fn require_resolved_state(repo: &Repository, id: &StateId) -> Result<State> {
     repo.store().get_state(id)?.ok_or_else(|| {
         anyhow::Error::new(HeddleError::MissingObject {
             object_type: "state".to_string(),

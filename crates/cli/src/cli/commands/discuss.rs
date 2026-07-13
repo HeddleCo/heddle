@@ -62,7 +62,7 @@ struct DiscussionOutput {
 struct ResolutionView {
     kind: String,
     annotation_id: Option<String>,
-    change_id: Option<String>,
+    state_id: Option<String>,
     reason: Option<String>,
 }
 
@@ -303,22 +303,22 @@ fn to_view(d: &grpc::heddle::v1::Discussion) -> DiscussionOutput {
         Some(State::Open(_)) | None => ResolutionView {
             kind: "open".into(),
             annotation_id: None,
-            change_id: None,
+            state_id: None,
             reason: None,
         },
         Some(State::IntoAnnotation(p)) => ResolutionView {
             kind: "resolved_into_annotation".into(),
             annotation_id: opt_string(p.annotation_id.clone()),
-            change_id: None,
+            state_id: None,
             reason: None,
         },
         Some(State::ByEdit(p)) => ResolutionView {
             kind: "resolved_by_edit".into(),
             annotation_id: None,
-            change_id: if p.state_id.is_empty() {
+            state_id: if p.state_id.is_empty() {
                 None
             } else {
-                objects::object::ChangeId::try_from_slice(&p.state_id)
+                objects::object::StateId::try_from_slice(&p.state_id)
                     .ok()
                     .map(|id| id.to_string_full())
             },
@@ -327,7 +327,7 @@ fn to_view(d: &grpc::heddle::v1::Discussion) -> DiscussionOutput {
         Some(State::Dismissed(p)) => ResolutionView {
             kind: "dismissed".into(),
             annotation_id: None,
-            change_id: None,
+            state_id: None,
             reason: opt_string(p.reason.clone()),
         },
     };
@@ -335,7 +335,7 @@ fn to_view(d: &grpc::heddle::v1::Discussion) -> DiscussionOutput {
         id: d.id.clone(),
         file: anchor.file,
         symbol: anchor.symbol,
-        opened_against_state: objects::object::ChangeId::try_from_slice(&d.opened_against_state)
+        opened_against_state: objects::object::StateId::try_from_slice(&d.opened_against_state)
             .map(|id| id.to_string_full())
             .unwrap_or_default(),
         opened_at_secs: d.opened_at.as_ref().map(|t| t.seconds).unwrap_or(0),

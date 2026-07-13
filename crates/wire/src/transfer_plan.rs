@@ -53,6 +53,7 @@ pub struct TransferPlanStats {
     pub actions: usize,
     pub redactions: usize,
     pub state_visibilities: usize,
+    pub state_attachments: usize,
 }
 
 impl RepositoryTransferPlan<PlannedObject> {
@@ -137,6 +138,7 @@ impl TransferPlanStats {
             ObjectTypeBucket::Action => self.actions += 1,
             ObjectTypeBucket::Redaction => self.redactions += 1,
             ObjectTypeBucket::StateVisibility => self.state_visibilities += 1,
+            ObjectTypeBucket::StateAttachment => self.state_attachments += 1,
         }
     }
 }
