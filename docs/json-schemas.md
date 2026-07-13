@@ -3285,7 +3285,7 @@ no record exists — public-by-absence):
 `heddle resolve --output json` emits:
 
 ```json
-{"output_kind": "resolve", "message": "Resolved src/lib.rs; completed merge", "resolved": ["src/lib.rs"], "remaining": [], "continued": true, "continuation_status": "continued", "continuation_message": "Completed the in-progress Heddle merge", "next_action": "heddle land --thread feature/auth", "recommended_action": "heddle land --thread feature/auth"}
+{"output_kind": "resolve", "message": "Resolved src/lib.rs; completed integration", "resolved": ["src/lib.rs"], "remaining": [], "continued": true, "continuation_status": "continued", "continuation_message": "Completed the in-progress Heddle integration", "next_action": "heddle land --thread feature/auth", "recommended_action": "heddle land --thread feature/auth"}
 ```
 
 `heddle retro --output json` emits the same shape with bounded session data;

@@ -391,6 +391,7 @@ mod tests {
     #[test]
     fn git_overlay_rejects_heddle_as_repair_authority_before_mutation() {
         let temp = TempDir::new().unwrap();
+        sley::Repository::init(temp.path()).unwrap();
         let repo = Repository::init_git_overlay_sidecar(temp.path()).unwrap();
         let head_before = repo.head().unwrap();
 
@@ -420,6 +421,7 @@ mod tests {
         assert!(native_preview[0].detail.contains("--prefer heddle"));
 
         let overlay_dir = TempDir::new().unwrap();
+        sley::Repository::init(overlay_dir.path()).unwrap();
         let overlay = Repository::init_git_overlay_sidecar(overlay_dir.path()).unwrap();
         let overlay_preview = repair_git(&overlay, Some("main".to_string()), None, true).unwrap();
         assert_eq!(overlay_preview.len(), 1);

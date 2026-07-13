@@ -1254,7 +1254,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_client_feature_gated_support_verb() {
+    fn rejects_retired_support_verb() {
         let mut issues = Vec::new();
         scan_markdown(
             "test.md",
@@ -1262,7 +1262,12 @@ mod tests {
             &cli(),
             &mut issues,
         );
-        assert!(issues.is_empty(), "got: {:?}", issues);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| matches!(issue.kind, IssueKind::RetiredCommand)),
+            "got: {issues:?}"
+        );
     }
 
     #[test]

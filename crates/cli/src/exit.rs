@@ -110,6 +110,8 @@ impl HeddleExitCode {
             //   that output contract (the invocation parses fine; the
             //   command rejects the requested projection)
             "nothing_to_capture"
+            | "git_repair_requires_adoption"
+            | "git_repair_requires_import"
             | "dirty_worktree"
             | "state_corrupted"
             | "state_not_found"

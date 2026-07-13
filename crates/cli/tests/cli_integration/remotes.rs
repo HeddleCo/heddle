@@ -6,9 +6,15 @@ use super::{git_overlay_fixtures::GitOverlayFixture, *};
 #[test]
 fn git_owned_source_commands_refuse_with_exact_git_argv() {
     let source = TempDir::new().unwrap();
-    init_git_repo_with_branch(source.path(), "main");
+    git_ok(&["init", "-b", "main"], source.path());
+    git_ok(
+        &["config", "user.email", "heddle@example.com"],
+        source.path(),
+    );
+    git_ok(&["config", "user.name", "Heddle Test"], source.path());
     std::fs::write(source.path().join("tracked.txt"), "tracked\n").unwrap();
-    git_commit_all(source.path(), "initial");
+    git_ok(&["add", "tracked.txt"], source.path());
+    git_ok(&["commit", "-m", "initial"], source.path());
 
     let destination = source.path().join("clone-destination");
     let clone = heddle_output(
