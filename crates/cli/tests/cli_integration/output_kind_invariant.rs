@@ -141,7 +141,8 @@ const SWEPT: &[&str] = &[
     "land",
     "log",
     "maintenance gc",
-    "maintenance index",
+    "maintenance inspect",
+    "maintenance refresh",
     "merge",
     "oplog recover",
     "pull",
@@ -208,9 +209,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "integration relay",
     "integration uninstall",
     "integration upgrade",
-    "maintenance inspect",
-    "maintenance monitor",
-    "maintenance run",
     "retro",
     "semantic hot",
     "session end",
@@ -263,9 +261,8 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         "switch" => Some("thread_switch"),
         // `doctor` is implemented by the diagnose module.
         "doctor" => Some("diagnose"),
-        // The maintenance wrappers emit their inner tool's kind.
+        // The garbage-collection wrapper emits its inner tool's kind.
         "maintenance gc" => Some("gc"),
-        "maintenance index" => Some("index"),
         // `redact purge` preserves the pre-consolidation wire values.
         "redact purge apply" => Some("purge_apply"),
         "redact purge list" => Some("purge_list"),
@@ -727,7 +724,7 @@ fn runtime_invocation_args(
         // being added here. Each pins runtime emission against the
         // catalog value, including the override-table verbs (`branch` →
         // `thread_list`, `doctor` → `diagnose`, `inspect` →
-        // `thread_show`, `maintenance gc`/`index` → `gc`/`index`).
+        // `thread_show`, and `maintenance gc` → `gc`).
         // `inspect` names `main` explicitly because the earlier `fork`
         // invocation leaves the shared fixture without a current
         // thread; `ready` (which rejects imported-Git-ref targets and
@@ -738,7 +735,8 @@ fn runtime_invocation_args(
         "doctor" => Some((&["doctor"], true)),
         "log" => Some((&["log"], true)),
         "maintenance gc" => Some((&["maintenance", "gc"], true)),
-        "maintenance index" => Some((&["maintenance", "index"], true)),
+        "maintenance inspect" => Some((&["maintenance", "inspect"], true)),
+        "maintenance refresh" => Some((&["maintenance", "refresh"], true)),
         "query" => Some((&["query"], true)),
         "remote list" => Some((&["remote", "list"], true)),
         "timeline status" => Some((&["timeline", "status"], true)),

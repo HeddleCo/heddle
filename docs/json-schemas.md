@@ -2619,26 +2619,87 @@ Hidden integration relay output is registered as a generic object payload.
 
 ---
 
-## `heddle maintenance index --output json`
+## `heddle maintenance inspect --output json`
 
-Maintenance index inspection emits one concrete JSON value. `--dump` places the
-human-readable dump text in `dump` instead of writing a second stdout payload.
+Maintenance inspection reports the repository's rebuildable performance
+sidecars and the repository shape they summarize. It does not change repository
+meaning.
 
 ```json
 {
-  "output_kind": "index",
-  "present": true,
-  "path": "/repo/.heddle/state/index.bin",
-  "file_entries": 12,
-  "directory_entries": 4,
-  "untracked_directory_entries": 1,
-  "snapshot_bytes": 1024,
-  "journal_bytes": 128,
-  "journal_ops": 3,
-  "journal_replay_ms": 0,
-  "dump": null
+  "output_kind": "maintenance_inspect",
+  "commit_graph": {"present": true, "node_count": 3, "bloom_covered_nodes": 3, "bytes": 512, "error": null},
+  "worktree_index": {"present": true, "file_entries": 12, "directory_entries": 4, "untracked_directory_entries": 1, "snapshot_bytes": 1024, "journal_bytes": 128, "journal_ops": 3, "journal_replay_ms": 0, "error": null},
+  "change_monitor": {"backend": "native", "status": "ready", "reason": null, "changed_path_count": 0},
+  "refs": {"total": 2, "threads": 1, "markers": 0, "remotes": 1, "remote_threads": 0, "packed_refs_present": false, "packed_refs_bytes": 0},
+  "ref_summary_index": {"present": true, "valid": true, "bytes": 256, "threads": 1, "markers": 0, "remotes": 1, "remote_threads": 0, "packed_threads": 0, "packed_markers": 0, "error": null},
+  "pack_files": {"pack_count": 1, "index_count": 1, "unpaired_pack_count": 0, "pending_install_intents": 0},
+  "partial_fetch": {"count": 0, "missing_blob_count": 0},
+  "pull_planner_cache": {"status": "ready", "present": true, "manifest_count": 1, "planner_entry_count": 3, "total_bytes": 384}
 }
 ```
+
+### Maintenance Inspect Fields
+
+| Field | Type | Semantics |
+|-------|------|-----------|
+| `output_kind` | string | Always `maintenance_inspect`. |
+| `commit_graph` | object | Presence, size, node coverage, and read error for the commit-graph sidecar. |
+| `worktree_index` | object | Snapshot and journal shape for the worktree index sidecar. |
+| `change_monitor` | object | Active backend, readiness, reason, and pending changed-path count. |
+| `refs` | object | Live ref counts and packed-refs storage facts. |
+| `ref_summary_index` | object | Validity, size, and category counts for the ref summary sidecar. |
+| `pack_files` | object | Pack/index pairing and pending install-intent counts. |
+| `partial_fetch` | object | Missing-object markers, including the missing blob count. |
+| `pull_planner_cache` | object | Cache readiness, manifest/entry counts, and storage size. |
+
+## `heddle maintenance refresh --output json`
+
+Maintenance refresh rebuilds performance sidecars and reports both the work
+performed and the resulting inspection. It may rewrite derived metadata and
+prune incomplete pack-install artifacts, but does not change repository meaning.
+
+```json
+{
+  "output_kind": "maintenance_refresh",
+  "rebuilt_commit_graph": true,
+  "rebuilt_ref_summary_index": true,
+  "rebuilt_worktree_index": true,
+  "refreshed_change_monitor": true,
+  "rebuilt_pull_planner_cache": true,
+  "pruned_pull_planner_entries": 0,
+  "pack_install_intents_recovered_completed": 0,
+  "pack_install_intents_aborted": 0,
+  "pack_install_intents_skipped_in_progress": 0,
+  "pack_install_intents_quarantined": 0,
+  "pack_install_metrics": {"installs_ok": 0, "installs_err": 0, "recover_completed": 0, "recover_aborted": 0, "recover_skipped_in_progress": 0, "recover_quarantined": 0},
+  "unpaired_packs_pruned": 0,
+  "unpaired_pack_bytes_freed": 0,
+  "report": {
+    "commit_graph": {"present": true, "node_count": 3, "bloom_covered_nodes": 3, "bytes": 512, "error": null},
+    "worktree_index": {"present": true, "file_entries": 12, "directory_entries": 4, "untracked_directory_entries": 1, "snapshot_bytes": 1024, "journal_bytes": 128, "journal_ops": 3, "journal_replay_ms": 0, "error": null},
+    "change_monitor": {"backend": "native", "status": "ready", "reason": null, "changed_path_count": 0},
+    "refs": {"total": 2, "threads": 1, "markers": 0, "remotes": 1, "remote_threads": 0, "packed_refs_present": false, "packed_refs_bytes": 0},
+    "ref_summary_index": {"present": true, "valid": true, "bytes": 256, "threads": 1, "markers": 0, "remotes": 1, "remote_threads": 0, "packed_threads": 0, "packed_markers": 0, "error": null},
+    "pack_files": {"pack_count": 1, "index_count": 1, "unpaired_pack_count": 0, "pending_install_intents": 0},
+    "partial_fetch": {"count": 0, "missing_blob_count": 0},
+    "pull_planner_cache": {"status": "ready", "present": true, "manifest_count": 1, "planner_entry_count": 3, "total_bytes": 384}
+  }
+}
+```
+
+### Maintenance Refresh Fields
+
+| Field | Type | Semantics |
+|-------|------|-----------|
+| `output_kind` | string | Always `maintenance_refresh`. |
+| `rebuilt_*`, `refreshed_*` | boolean | Whether refresh rebuilt each derived sidecar. |
+| `pruned_pull_planner_entries` | integer | Stale pull-planner entries removed. |
+| `pack_install_intents_*` | integer | Recovery disposition counts for durable pack-install intents. |
+| `pack_install_metrics` | object | Process-local install and recovery counters after refresh. |
+| `unpaired_packs_pruned` | integer | Unpaired pack files removed. |
+| `unpaired_pack_bytes_freed` | integer | Bytes recovered by pruning unpaired packs. |
+| `report` | object | The resulting maintenance-inspect report, without a second discriminator. |
 
 ## `heddle export git --output json`
 
@@ -3140,12 +3201,6 @@ itself):
 
 ```json
 {"integrations": [{"name": "github", "installed": true, "version": "1"}], "installed": true, "uninstalled": false, "upgraded": false, "issues": []}
-```
-
-`heddle maintenance inspect|run|monitor --output json` emit:
-
-```json
-{"ok": true, "tasks": [{"name": "gc", "status": "skipped"}], "objects_removed": 0, "index_updated": true, "monitoring": false}
 ```
 
 `heddle maintenance gc --output json` emits the pack/prune report (counts

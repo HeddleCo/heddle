@@ -224,7 +224,7 @@ impl Repository {
             refreshed_change_monitor = true;
         }
 
-        // `maintenance run` is the deliberate place to pay for a full-tree
+        // `maintenance refresh` is the deliberate place to pay for a full-tree
         // monitor scan and (re)materialize the native monitor sidecars
         // (`monitor-native.bin` + `fsmonitor.toml`). The status hot path
         // intentionally no-ops the native snapshot to stay cheap, so without

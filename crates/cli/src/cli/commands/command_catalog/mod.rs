@@ -2008,17 +2008,34 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["maintenance"], surface(GROUP, "admin")),
     entry(
         &["maintenance", "inspect"],
-        surface(opaque_schemas(READ_JSON, &["maintenance inspect"]), "admin"),
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["maintenance inspect"]),
+                &[json_discriminator(
+                    Some("maintenance inspect"),
+                    "output_kind",
+                    "maintenance_inspect",
+                )],
+            ),
+            "admin",
+        ),
     ),
     entry(
-        &["maintenance", "run"],
+        &["maintenance", "refresh"],
         surface(
-            opaque_schemas(
-                CommandContract {
-                    object_gc: true,
-                    ..METADATA_MUTATION
-                },
-                &["maintenance run"],
+            json_discriminators(
+                documented_schemas(
+                    CommandContract {
+                        object_gc: true,
+                        ..METADATA_MUTATION
+                    },
+                    &["maintenance refresh"],
+                ),
+                &[json_discriminator(
+                    Some("maintenance refresh"),
+                    "output_kind",
+                    "maintenance_refresh",
+                )],
             ),
             "admin",
         ),
@@ -2036,24 +2053,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ),
             "admin",
         ),
-    ),
-    entry(
-        &["maintenance", "index"],
-        surface(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["maintenance index"]),
-                &[json_discriminator(
-                    Some("maintenance index"),
-                    "output_kind",
-                    "index",
-                )],
-            ),
-            "admin",
-        ),
-    ),
-    entry(
-        &["maintenance", "monitor"],
-        surface(opaque_schemas(READ_JSON, &["maintenance monitor"]), "admin"),
     ),
     entry(
         &["pull"],
@@ -4532,10 +4531,8 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         Commands::Maintenance { command } => match command {
             MaintenanceCommands::Inspect => vec!["maintenance", "inspect"],
-            MaintenanceCommands::Run => vec!["maintenance", "run"],
+            MaintenanceCommands::Refresh => vec!["maintenance", "refresh"],
             MaintenanceCommands::Gc { .. } => vec!["maintenance", "gc"],
-            MaintenanceCommands::Index { .. } => vec!["maintenance", "index"],
-            MaintenanceCommands::Monitor { .. } => vec!["maintenance", "monitor"],
         },
         Commands::Clone(_) => vec!["clone"],
         Commands::Hook { command } => match command {

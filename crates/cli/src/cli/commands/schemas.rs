@@ -158,7 +158,8 @@ schema_registry! {
     (&["integration list", "integration doctor"], IntegrationStatusListSchema),
     (&["try"], TrySchema),
     (&["resolve"], ResolveSchema),
-    (&["maintenance index"], IndexSchema),
+    (&["maintenance inspect"], MaintenanceInspectSchema),
+    (&["maintenance refresh"], MaintenanceRefreshSchema),
     (&["error"], ErrorEnvelopeSchema),
 }
 
@@ -747,10 +748,30 @@ pub struct IntegrationStatusSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct IndexSchema {
+pub struct MaintenanceInspectSchema {
     pub output_kind: String,
+    pub commit_graph: CommitGraphInspectionSchema,
+    pub worktree_index: WorktreeIndexInspectionSchema,
+    pub change_monitor: ChangeMonitorInspectionSchema,
+    pub refs: RefCountsInspectionSchema,
+    pub ref_summary_index: RefSummaryIndexInspectionSchema,
+    pub pack_files: PackFilesInspectionSchema,
+    pub partial_fetch: PartialFetchInspectionSchema,
+    pub pull_planner_cache: PullPlannerCacheInspectionSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CommitGraphInspectionSchema {
     pub present: bool,
-    pub path: String,
+    pub node_count: usize,
+    pub bloom_covered_nodes: usize,
+    pub bytes: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WorktreeIndexInspectionSchema {
+    pub present: bool,
     pub file_entries: usize,
     pub directory_entries: usize,
     pub untracked_directory_entries: usize,
@@ -758,7 +779,104 @@ pub struct IndexSchema {
     pub journal_bytes: u64,
     pub journal_ops: usize,
     pub journal_replay_ms: u128,
-    pub dump: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ChangeMonitorInspectionSchema {
+    pub backend: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub changed_path_count: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RefCountsInspectionSchema {
+    pub total: usize,
+    pub threads: usize,
+    pub markers: usize,
+    pub remotes: usize,
+    pub remote_threads: usize,
+    pub packed_refs_present: bool,
+    pub packed_refs_bytes: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RefSummaryIndexInspectionSchema {
+    pub present: bool,
+    pub valid: bool,
+    pub bytes: u64,
+    pub threads: usize,
+    pub markers: usize,
+    pub remotes: usize,
+    pub remote_threads: usize,
+    pub packed_threads: usize,
+    pub packed_markers: usize,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PackFilesInspectionSchema {
+    pub pack_count: usize,
+    pub index_count: usize,
+    pub unpaired_pack_count: usize,
+    pub pending_install_intents: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PartialFetchInspectionSchema {
+    pub count: usize,
+    pub missing_blob_count: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PullPlannerCacheInspectionSchema {
+    pub status: String,
+    pub present: bool,
+    pub manifest_count: usize,
+    pub planner_entry_count: usize,
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MaintenanceRefreshSchema {
+    pub output_kind: String,
+    pub rebuilt_commit_graph: bool,
+    pub rebuilt_ref_summary_index: bool,
+    pub rebuilt_worktree_index: bool,
+    pub refreshed_change_monitor: bool,
+    pub rebuilt_pull_planner_cache: bool,
+    pub pruned_pull_planner_entries: usize,
+    pub pack_install_intents_recovered_completed: u64,
+    pub pack_install_intents_aborted: u64,
+    pub pack_install_intents_skipped_in_progress: u64,
+    pub pack_install_intents_quarantined: u64,
+    pub pack_install_metrics: PackInstallMetricsSchema,
+    pub unpaired_packs_pruned: u64,
+    pub unpaired_pack_bytes_freed: u64,
+    pub report: MaintenanceInspectReportSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PackInstallMetricsSchema {
+    pub installs_ok: u64,
+    pub installs_err: u64,
+    pub recover_completed: u64,
+    pub recover_aborted: u64,
+    pub recover_skipped_in_progress: u64,
+    pub recover_quarantined: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MaintenanceInspectReportSchema {
+    pub commit_graph: CommitGraphInspectionSchema,
+    pub worktree_index: WorktreeIndexInspectionSchema,
+    pub change_monitor: ChangeMonitorInspectionSchema,
+    pub refs: RefCountsInspectionSchema,
+    pub ref_summary_index: RefSummaryIndexInspectionSchema,
+    pub pack_files: PackFilesInspectionSchema,
+    pub partial_fetch: PartialFetchInspectionSchema,
+    pub pull_planner_cache: PullPlannerCacheInspectionSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

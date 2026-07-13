@@ -30,7 +30,6 @@ pub mod log_plan;
 pub mod maintenance_plan;
 pub mod marker_plan;
 pub mod merge;
-pub mod monitor_plan;
 pub mod onboarding;
 pub mod oplog_plan;
 pub mod oss_plan;

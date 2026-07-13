@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Pure maintenance inspect/run **fact** types + one human renderer each.
+//! Pure maintenance inspect/refresh **fact** types + one human renderer each.
 //!
 //! Not twenty public `format!` sentence factories. Callers pass structured
 //! fields; CLI prints `lines()`. Repo I/O stays outside this module.
@@ -95,9 +95,9 @@ impl MaintenanceInspectView {
     }
 }
 
-/// Structured facts for `heddle maintenance run` human output.
+/// Structured facts for `heddle maintenance refresh` human output.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MaintenanceRunView {
+pub struct MaintenanceRefreshView {
     pub rebuilt_commit_graph: bool,
     pub rebuilt_ref_summary_index: bool,
     pub rebuilt_worktree_index: bool,
@@ -121,8 +121,8 @@ pub struct MaintenanceRunView {
     pub pull_planner_entries_now: usize,
 }
 
-impl MaintenanceRunView {
-    /// Human lines for run (stable order).
+impl MaintenanceRefreshView {
+    /// Human lines for refresh (stable order).
     pub fn lines(&self) -> Vec<String> {
         let mut lines = vec![
             format!(
@@ -248,8 +248,8 @@ mod tests {
     }
 
     #[test]
-    fn run_view_lines_include_recover_detail() {
-        let v = MaintenanceRunView {
+    fn refresh_view_lines_include_recover_detail() {
+        let v = MaintenanceRefreshView {
             rebuilt_commit_graph: true,
             rebuilt_ref_summary_index: false,
             rebuilt_worktree_index: true,
