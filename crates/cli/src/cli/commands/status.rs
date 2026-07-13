@@ -1654,16 +1654,6 @@ mod tests {
         repo.snapshot(Some("seed".into()), None).unwrap();
 
         let cli = status_cli(repo_dir.path());
-        super::super::actor_cmd::cmd_actor_spawn(
-            &cli,
-            None,
-            true,
-            Some("codex".to_string()),
-            Some("gpt-5".to_string()),
-        )
-        .await
-        .expect("spawn attached actor");
-
         let mut output = build_status_output(&cli, false).expect("build status output");
         output.path = Some(repo_dir.path().display().to_string());
         output.execution_path = Some(repo_dir.path().display().to_string());

@@ -17,7 +17,11 @@ use super::{
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 use crate::cli::{
-    cli_args::{AgentCommands, AgentServeArgs, Cli},
+    cli_args::{
+        AgentCommands, AgentPresenceCommands, AgentProvenanceBeginArgs, AgentProvenanceCommands,
+        AgentProvenanceEndArgs, AgentProvenanceListArgs, AgentProvenanceSegmentArgs,
+        AgentProvenanceShowArgs, AgentServeArgs, Cli,
+    },
     should_output_json,
 };
 
@@ -75,6 +79,53 @@ pub async fn run(cli: &Cli, command: &AgentCommands) -> Result<()> {
         AgentCommands::List(args) => super::agent_cmd::cmd_agent_list(cli, args.clone()),
         AgentCommands::Task(command) => super::agent_cmd::cmd_agent_task(cli, command.clone()),
         AgentCommands::Fanout(command) => super::agent_cmd::cmd_agent_fanout(cli, command.clone()),
+        AgentCommands::Presence(command) => run_presence(cli, command).await,
+        AgentCommands::Provenance(command) => run_provenance(cli, command).await,
+    }
+}
+
+async fn run_presence(cli: &Cli, command: &AgentPresenceCommands) -> Result<()> {
+    match command {
+        AgentPresenceCommands::List(args) => super::agent_presence::list(cli, args.active).await,
+        AgentPresenceCommands::Show(args) => {
+            super::agent_presence::show(cli, args.session.clone()).await
+        }
+        AgentPresenceCommands::Explain(args) => {
+            super::agent_presence::explain(cli, args.session.clone()).await
+        }
+        AgentPresenceCommands::Complete(args) => {
+            super::agent_presence::complete(cli, args.session.clone()).await
+        }
+    }
+}
+
+async fn run_provenance(cli: &Cli, command: &AgentProvenanceCommands) -> Result<()> {
+    match command {
+        AgentProvenanceCommands::Begin(AgentProvenanceBeginArgs {
+            provider,
+            model,
+            policy,
+        }) => {
+            super::agent_provenance::begin(cli, provider.clone(), model.clone(), policy.clone())
+                .await
+        }
+        AgentProvenanceCommands::Segment(AgentProvenanceSegmentArgs {
+            provider,
+            model,
+            policy,
+        }) => {
+            super::agent_provenance::segment(cli, provider.clone(), model.clone(), policy.clone())
+                .await
+        }
+        AgentProvenanceCommands::End(AgentProvenanceEndArgs { session_id }) => {
+            super::agent_provenance::end(cli, session_id.clone()).await
+        }
+        AgentProvenanceCommands::Show(AgentProvenanceShowArgs { session_id }) => {
+            super::agent_provenance::show(cli, session_id.clone()).await
+        }
+        AgentProvenanceCommands::List(AgentProvenanceListArgs { active }) => {
+            super::agent_provenance::list(cli, *active).await
+        }
     }
 }
 
@@ -99,18 +150,6 @@ async fn run_serve(cli: &Cli, args: &AgentServeArgs) -> Result<()> {
         let mut config = LocalDaemonConfig::from_repo(&repo);
         if let Some(socket) = args.socket.clone() {
             config = config.with_socket(socket);
-        }
-        if !args.foreground {
-            // First-ship simplification: foreground only. Daemonization on
-            // Unix needs careful fork+setsid handling and is best layered
-            // with a battle-tested helper. The CLI tip nudges users toward
-            // `heddle agent serve --foreground &`.
-            return Err(anyhow!(RecoveryAdvice::invalid_usage(
-                "agent_background_unimplemented",
-                "background daemonization is not yet implemented; pass --foreground",
-                "Run `heddle agent serve --foreground` and background it from your shell if needed.",
-                "heddle agent serve --foreground",
-            )));
         }
         if !should_output_json(cli, Some(repo.config())) {
             eprintln!(

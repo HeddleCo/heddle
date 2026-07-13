@@ -669,9 +669,11 @@ impl RecoveryAdvice {
         };
         let hint = match explicit_selector {
             Some(selector) => format!(
-                "Start a session with `heddle session start`, or retry `heddle {command}` with `{selector}` to choose a session explicitly."
+                "Begin provenance with `heddle agent provenance begin`, or retry `heddle {command}` with `{selector}` to choose a session explicitly."
             ),
-            None => "Start a session with `heddle session start`, then retry.".to_string(),
+            None => {
+                "Begin provenance with `heddle agent provenance begin`, then retry.".to_string()
+            }
         };
         Self::safety_refusal(
             "no_current_session",

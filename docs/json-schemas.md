@@ -14,7 +14,7 @@ Schema for any verb with:
     heddle schemas                    # list registered schema verbs
     heddle schemas <verb>             # e.g. heddle schemas status
     heddle schemas log --reflog       # subcommands taking --flags work too
-    heddle schemas merge --preview --output text
+    heddle schemas agent ready --output text
     heddle schemas status
 
 (Indented as plain text rather than a fenced block so the
@@ -1090,16 +1090,15 @@ verification.
 }
 ```
 
-## `heddle actor spawn --output json`
+## `heddle agent presence show --output json`
 
-`heddle actor spawn|show --output json` emit an actor envelope with post-command
-verification. Lists are also enveloped so agents never have to special-case a raw
-array.
+Presence inspection emits an envelope with post-command verification. Lists are
+also enveloped so agents never have to special-case a raw array.
 
 ```json
 {
-  "output_kind": "actor_spawn",
-  "actor": {
+  "output_kind": "agent_presence_show",
+  "presence": {
     "session_id": "agent-4dvta2dd6as3uzjrszmq",
     "thread": "actor/agent-4dvta2dd6as3uzjrszmq",
     "base_state": "hd-sqr398dvx9ay",
@@ -1120,12 +1119,12 @@ array.
 
 ---
 
-## `heddle actor list --output json`
+## `heddle agent presence list --output json`
 
 ```json
 {
-  "output_kind": "actor_list",
-  "actors": [],
+  "output_kind": "agent_presence_list",
+  "presence": [],
   "active_only": false,
   "verification": {
     "verified": true,
@@ -1152,11 +1151,11 @@ array.
 
 ---
 
-## `heddle actor done --output json`
+## `heddle agent presence complete --output json`
 
 ```json
 {
-  "output_kind": "actor_done",
+  "output_kind": "agent_presence_complete",
   "session_id": "agent-4dvta2dd6as3uzjrszmq",
   "status": "complete",
   "thread": "actor/agent-4dvta2dd6as3uzjrszmq",
@@ -1166,11 +1165,11 @@ array.
 
 ---
 
-## `heddle actor explain --output json`
+## `heddle agent presence explain --output json`
 
 ```json
 {
-  "output_kind": "actor_explain",
+  "output_kind": "agent_presence_explain",
   "attached": false,
   "reason": "No active actor is registered for this checkout.",
   "repository": "/work/project",
@@ -1188,7 +1187,7 @@ array.
     "principal_email": "agent@example.com",
     "signals": ["CODEX_THREAD_ID"]
   },
-  "recommended_action": "heddle actor spawn --no-thread --provider openai --model gpt-5",
+  "recommended_action": "heddle agent reserve --thread main",
   "verification": {
     "verified": true,
     "status": "clean",
@@ -1216,8 +1215,7 @@ array.
 
 ## `heddle agent serve --output json`
 
-Foreground daemon success emits one JSON value when the daemon exits cleanly.
-Background startup refusals use the shared error envelope.
+The foreground daemon emits one JSON value when it exits cleanly.
 
 ```json
 {
@@ -1772,9 +1770,9 @@ the same ready envelope.
 
 ---
 
-## `heddle session start --output json`
+## `heddle agent provenance begin --output json`
 
-`heddle session start|show|end --output json` emit:
+`heddle agent provenance begin|show|end --output json` emit:
 
 ```json
 {
@@ -1797,7 +1795,7 @@ the same ready envelope.
 
 ---
 
-## `heddle session segment --output json`
+## `heddle agent provenance segment --output json`
 
 ```json
 {
@@ -1812,7 +1810,7 @@ the same ready envelope.
 
 ---
 
-## `heddle session list --output json`
+## `heddle agent provenance list --output json`
 
 ```json
 {
@@ -3331,7 +3329,7 @@ discipline; see the corresponding handler in `crates/cli/src/cli/commands/`:
 `heddle fsck`, `heddle init`, `heddle integration`,
 `heddle maintenance`, `heddle ready`,
 `heddle remote`, `heddle resolve`, `heddle retro`,
-`heddle session`, `heddle capture`,
+`heddle agent provenance`, `heddle capture`,
 `heddle thread show/start`,
 `heddle try`, `heddle undo`, `heddle watch`.
 

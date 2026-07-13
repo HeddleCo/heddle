@@ -18,7 +18,7 @@ of each file. Treat the table as a punch list, not a contract.
 
 | File                                                          | Status     | Notes                                              |
 |---------------------------------------------------------------|------------|----------------------------------------------------|
-| `actor_cmd.rs`                                                | partial    | JSON path exists; render path uses `println!`.     |
+| `agent_presence.rs`                                          | partial    | JSON path exists; render path uses `println!`.     |
 | `agent.rs`                                                    | partial    |                                                    |
 | `auth_cmd.rs`                                                 | text-only  | Auth flow needs structured output.                 |
 | `bisect.rs`                                                   | partial    |                                                    |

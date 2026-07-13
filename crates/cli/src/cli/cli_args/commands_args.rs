@@ -1267,9 +1267,9 @@ fn parse_clone_filter_spec(s: &str) -> Result<String, String> {
     }
 }
 
-/// Arguments for the `session start` command.
+/// Arguments for `agent provenance begin`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct SessionStartArgs {
+pub struct AgentProvenanceBeginArgs {
     /// Provider name (e.g., "anthropic", "openai").
     #[arg(long)]
     pub provider: String,
@@ -1283,9 +1283,9 @@ pub struct SessionStartArgs {
     pub policy: Option<String>,
 }
 
-/// Arguments for the `session segment` command.
+/// Arguments for `agent provenance segment`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct SessionSegmentArgs {
+pub struct AgentProvenanceSegmentArgs {
     /// Provider name (e.g., "anthropic", "openai").
     #[arg(long)]
     pub provider: String,
@@ -1299,23 +1299,23 @@ pub struct SessionSegmentArgs {
     pub policy: Option<String>,
 }
 
-/// Arguments for the `session end` command.
+/// Arguments for `agent provenance end`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct SessionEndArgs {
+pub struct AgentProvenanceEndArgs {
     /// Session ID to end (default: current session).
     pub session_id: Option<String>,
 }
 
-/// Arguments for the `session show` command.
+/// Arguments for `agent provenance show`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct SessionShowArgs {
+pub struct AgentProvenanceShowArgs {
     /// Session ID to show (default: current session).
     pub session_id: Option<String>,
 }
 
-/// Arguments for the `session list` command.
+/// Arguments for `agent provenance list`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct SessionListArgs {
+pub struct AgentProvenanceListArgs {
     /// Show only active sessions.
     #[arg(long)]
     pub active: bool,
@@ -1347,53 +1347,31 @@ pub struct WorktreeRemoveArgs {
     pub delete_thread: bool,
 }
 
-/// Arguments for the `actor spawn` command.
+/// Arguments for `agent presence list`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct ActorSpawnArgs {
-    /// Thread name for the actor (auto-generated if not specified).
-    #[arg(long)]
-    pub thread: Option<String>,
-
-    /// Attach the actor to the current thread instead of minting a new
-    /// `actor/<session>` thread. Use this to record the detected agent
-    /// identity without leaving a stray thread behind.
-    #[arg(long, conflicts_with = "thread")]
-    pub no_thread: bool,
-
-    /// AI provider name (e.g. `anthropic`).
-    #[arg(long)]
-    pub provider: Option<String>,
-
-    /// AI model identifier (e.g. `claude-sonnet-4-6`).
-    #[arg(long)]
-    pub model: Option<String>,
-}
-
-/// Arguments for the `actor list` command.
-#[derive(Clone, Debug, clap::Args)]
-pub struct ActorListArgs {
+pub struct AgentPresenceListArgs {
     /// Show only active actors.
     #[arg(long)]
     pub active: bool,
 }
 
-/// Arguments for the `actor show` command.
+/// Arguments for `agent presence show`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct ActorShowArgs {
+pub struct AgentPresenceShowArgs {
     /// Session ID to show (default: current thread actor).
     pub session: Option<String>,
 }
 
-/// Arguments for the `actor explain` command.
+/// Arguments for `agent presence explain`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct ActorExplainArgs {
+pub struct AgentPresenceExplainArgs {
     /// Session ID to explain (default: current thread actor).
     pub session: Option<String>,
 }
 
-/// Arguments for the `actor done` command.
+/// Arguments for `agent presence complete`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct ActorDoneArgs {
+pub struct AgentPresenceCompleteArgs {
     /// Session ID to mark as complete (default: current thread actor).
     #[arg(long)]
     pub session: Option<String>,

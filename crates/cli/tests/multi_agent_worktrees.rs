@@ -5,7 +5,7 @@
 //!
 //! 1. **Object store pointer** — `.heddle` as a file that points to a shared store.
 //! 2. **`heddle worktree add`** — create a filesystem-isolated agent checkout.
-//! 3. **Actor registry** — `heddle actor spawn / list / done`.
+//! 3. **Agent lifecycle** — writer leases plus separately inspectable presence.
 
 use std::{
     fs,

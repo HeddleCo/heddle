@@ -625,7 +625,8 @@ const DAEMON_TOPIC: &str = "Two daemons — both have legitimate uses; they are 
                          services (state-review, discussion, signal, operation-log\n\
                          query, hook) so agents avoid per-command\n\
                          process startup latency. Mode: same-user only;\n\
-                         peer-credential checks are enforced.\n";
+                         peer-credential checks are enforced. Runs in the\n\
+                         foreground until interrupted.\n";
 
 const MODEL_TOPIC: &str = r#"Heddle mental model — the everyday loop in one screen.
 

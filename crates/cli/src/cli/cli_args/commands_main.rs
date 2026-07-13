@@ -12,11 +12,9 @@ use super::{
     IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
     ShellCommands, ThreadCommands, TransactionCommands, VisibilityCommands,
     commands_args::{
-        ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
-        CloneArgs, CollapseArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs, LandArgs, LogArgs,
-        PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
-        SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, SnapshotArgs,
-        SyncArgs, ThreadStartArgs, TimelineArgs, TryArgs, UndoArgs, WatchArgs,
+        AdoptArgs, CloneArgs, CollapseArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs, LandArgs,
+        LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
+        SnapshotArgs, SyncArgs, ThreadStartArgs, TimelineArgs, TryArgs, UndoArgs, WatchArgs,
     },
 };
 #[cfg(feature = "git-overlay")]
@@ -506,18 +504,6 @@ Examples:
         #[command(subcommand)]
         command: HookCommands,
     },
-
-    /// Advanced debugging/provenance commands for Heddle actors attached to threads.
-    Actor {
-        #[command(subcommand)]
-        command: ActorCommands,
-    },
-
-    /// Advanced debugging/provenance commands for Heddle execution sessions.
-    Session {
-        #[command(subcommand)]
-        command: SessionCommands,
-    },
 }
 
 /// Maintenance subcommands.
@@ -581,50 +567,4 @@ pub enum DaemonCommands {
     /// any leftover registry entries with `fusermount -u` as a
     /// safety net before returning.
     Stop,
-}
-
-/// Actor subcommands.
-#[derive(Clone, Debug, clap::Subcommand)]
-pub enum ActorCommands {
-    /// Register a new actor lane (creates a thread + registry entry).
-    /// Does not create a filesystem-isolated checkout — for that use
-    /// `heddle start <name> --path <dir>`.
-    Spawn(ActorSpawnArgs),
-
-    /// List actors known to this repository.
-    List(ActorListArgs),
-
-    /// Show the current or selected actor.
-    Show(ActorShowArgs),
-
-    /// Explain why Heddle attached the current or selected actor.
-    Explain(ActorExplainArgs),
-
-    /// Mark the current or selected actor complete.
-    Done(ActorDoneArgs),
-}
-
-// `AgentCommands` lives in `commands_agent.rs`. Codex's foundation
-// commit added a parallel definition here; deleted during the rebase
-// onto main (which had already introduced the file). The reservation
-// variants Codex contributed are now folded into the canonical enum in
-// `commands_agent.rs`.
-
-/// Session subcommands.
-#[derive(Clone, Debug, clap::Subcommand)]
-pub enum SessionCommands {
-    /// Start a new session.
-    Start(SessionStartArgs),
-
-    /// Create a new segment (provider/model change).
-    Segment(SessionSegmentArgs),
-
-    /// End the current session.
-    End(SessionEndArgs),
-
-    /// Show session details.
-    Show(SessionShowArgs),
-
-    /// List all sessions.
-    List(SessionListArgs),
 }

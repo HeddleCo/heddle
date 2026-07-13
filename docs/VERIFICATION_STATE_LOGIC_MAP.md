@@ -114,7 +114,7 @@ flowchart TD
 | Tag import and marker agreement | Git tags visible to the checkout must map to Heddle markers. Missing markers report `tags_need_import`; disagreeing or unmapped markers report `tag_marker_mismatch`. Both are current hard blockers because tag names are user-facing refs, not optional side-branch hints. |
 | Dirty materialization | `switch`, `switch`, `pull`, `thread drop`, `thread promote`, `start --path`, `merge`, `rebase`, `cherry-pick`, and `undo` must refuse dirty work unless a command has an explicit safe preview or force path. |
 | Commit/checkpoint | Git-compatible `commit` is one logical operation: capture Heddle state, checkpoint Git, return one verification proof, and make one safe `undo` restore both when possible. A commit may not create a Heddle-only state if Git checkpoint preflight is blocked by remote divergence or import repair. |
-| Ready/land | `ready` preflights active-branch import before auto-capture and then points to `land`. `merge --preview` remains an advanced non-mutating proof surface, but it is not the everyday breadcrumb. Ready workflow guidance takes priority over local-ahead or untracked-branch push guidance. |
+| Ready/land | `ready` preflights active-branch import before auto-capture and then points to `land`. Ready workflow guidance takes priority over local-ahead or untracked-branch push guidance. |
 | Resolve | `resolve` and `thread resolve` must distinguish no operation, no conflicts, conflict resolution, and thread-review resolution. No-op resolve failures use typed errors and should point back to `status` rather than leaking object lookup internals. |
 | Undo | `undo --preview` and real `undo` share safety refusals. Both refuse dirty worktree and active-operation states before moving refs or worktree bytes. Post-undo text must report the current verification state and next action instead of claiming clean by default. |
 | Remote push/pull | Transfer commands refresh tracking and return post-transfer verification. `remote_ahead` and `remote_untracked` are verified clean publish guidance and recommend `push`; behind and diverged states are blockers. If upstream still points at the exact Git checkpoint just undone locally, verification reports `remote_contains_undone_checkpoint` and recommends `heddle push --force` with `heddle undo --redo` as the restore-work option, never `heddle pull` as the primary action. A command may not claim synced while blocking remote drift remains. |
@@ -186,7 +186,7 @@ the new behavior.
   argv metadata so machines can distinguish them from runnable commands.
 - Every refusal must say what is unsafe, what would be changed or lost, what was
   preserved, and one primary command.
-- Preview modes that exist for safety (`merge --preview`, `undo --preview`,
+- Preview modes that exist for safety (`undo --preview`,
   reconcile preview, cleanup dry-runs) must prove they do not move refs, write
   worktree bytes, or mutate the Git index.
 - Text and JSON can differ in presentation, but they must not disagree about the

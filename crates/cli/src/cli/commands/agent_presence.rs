@@ -11,14 +11,10 @@
 
 use anyhow::{Result, anyhow};
 use heddle_core::{
-    ActorEntryReport, ActorListReport, ActorSpawnError, ActorSpawnOptions, assemble_actor_entry,
-    build_spawn_entry, list_actors, mark_actor_done, plan_actor_done, plan_actor_spawn,
+    ActorEntryReport, ActorListReport, list_actors, mark_actor_done, plan_actor_done,
     show_actor_from_entry,
 };
-use objects::{
-    object::ThreadName,
-    store::{ActorPresence, ActorPresenceStore},
-};
+use objects::store::{ActorPresence, ActorPresenceStore};
 use repo::Repository;
 use serde::Serialize;
 
@@ -26,7 +22,7 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
-    thread::{find_thread_summary, thread_name_invalid_advice},
+    thread::find_thread_summary,
     verification_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
     },
@@ -36,7 +32,7 @@ use crate::cli::{Cli, should_output_json};
 #[derive(Serialize)]
 struct ActorSingleOutput {
     output_kind: &'static str,
-    actor: ActorEntryReport,
+    presence: ActorEntryReport,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
@@ -44,7 +40,7 @@ struct ActorSingleOutput {
 #[derive(Serialize)]
 struct ActorListOutput {
     output_kind: &'static str,
-    actors: Vec<ActorEntryReport>,
+    presence: Vec<ActorEntryReport>,
     active_only: bool,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
@@ -99,7 +95,7 @@ struct ActorExplainDetectedOutput {
     output_kind: &'static str,
     attached: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    active_actor: Option<serde_json::Value>,
+    active_presence: Option<serde_json::Value>,
     reason: &'static str,
     repository: String,
     detected: DetectedActorOutput,
@@ -152,106 +148,14 @@ struct ActorEnvironmentOutput {
     signals: Vec<String>,
 }
 
-pub async fn cmd_actor_spawn(
-    cli: &Cli,
-    thread: Option<String>,
-    no_thread: bool,
-    provider: Option<String>,
-    model: Option<String>,
-) -> Result<()> {
-    let repo = cli.open_repo()?;
-
-    let base_state = repo.head()?.ok_or_else(|| {
-        anyhow!(RecoveryAdvice::repository_no_head_capture_first(
-            "actor spawn"
-        ))
-    })?;
-
-    // `current_lane()` is the single source of truth for "is there a lane to
-    // attach to?": it consults the git-overlay HEAD state, so a detached Git
-    // HEAD reports no lane even when `.heddle/HEAD` still names a stale
-    // attached thread. The same predicate drives the `actor explain`
-    // recommendation, so recommend and execute never disagree.
-    let current_lane = repo.current_lane()?;
-
-    let probe = crate::harness::probe_current_process_harness(
-        &repo,
-        provider.clone().filter(|value| !value.trim().is_empty()),
-        model.clone().filter(|value| !value.trim().is_empty()),
-        None,
-    )?;
-
-    let plan = plan_actor_spawn(&ActorSpawnOptions {
-        thread,
-        no_thread,
-        current_lane,
-        provider,
-        model,
-        probe_provider: probe.provider.clone(),
-        probe_model: probe.model.clone(),
-        harness: probe.harness.clone(),
-        thinking_level: probe.thinking_level.clone(),
-        probe_source: probe.probe_source.clone(),
-        probe_confidence: probe.confidence,
-        base_state_full: base_state.to_string_full(),
-        base_state_short: base_state.short(),
-    })
-    .map_err(map_actor_spawn_error)?;
-
-    let registry = ActorPresenceStore::new(repo.heddle_dir());
-    let entry = registry.create_generated_entry(|session_id| {
-        let entry = build_spawn_entry(&plan, session_id, chrono::Utc::now());
-        let thread_name = ThreadName::new(entry.thread.clone());
-
-        // In `--no-thread` mode we attach to the existing current thread
-        // and never create a ref, so no stray thread is left behind.
-        if plan.mint_thread_if_missing && repo.refs().get_thread(&thread_name)?.is_none() {
-            repo.refs().set_thread(&thread_name, &base_state)?;
-        }
-
-        Ok(entry)
-    })?;
-
-    if should_output_json(cli, None) {
-        let output = ActorSingleOutput {
-            output_kind: "actor_spawn",
-            actor: assemble_actor_entry(&registry, &entry)?,
-            trust: build_repository_verification_state(&repo),
-        };
-        println!("{}", serde_json::to_string(&output)?);
-    } else {
-        println!("Spawned actor: {}", entry.session_id);
-        println!("Thread: {}", entry.thread);
-        println!("Base state: {}", entry.base_state);
-        if let Some(path) = &entry.path {
-            println!("Path: {}", path.display());
-        }
-        if let Some(provider) = &entry.provider {
-            println!("Provider: {}", provider);
-        }
-        if let Some(model) = &entry.model {
-            println!("Model: {}", model);
-        }
-    }
-
-    Ok(())
-}
-
-fn map_actor_spawn_error(err: ActorSpawnError) -> anyhow::Error {
-    match err {
-        ActorSpawnError::InvalidThreadName(err) => anyhow!(thread_name_invalid_advice(&err)),
-        ActorSpawnError::NoCurrentLane => anyhow!(actor_spawn_no_thread_detached_advice()),
-    }
-}
-
-pub async fn cmd_actor_list(cli: &Cli, active_only: bool) -> Result<()> {
+pub async fn list(cli: &Cli, active_only: bool) -> Result<()> {
     let repo = cli.open_repo()?;
     let report = list_actors(&repo, active_only)?;
 
     if should_output_json(cli, None) {
         let output = ActorListOutput {
-            output_kind: report.output_kind,
-            actors: report.actors,
+            output_kind: "agent_presence_list",
+            presence: report.actors,
             active_only: report.active_only,
             trust: build_repository_verification_state(&repo),
         };
@@ -263,7 +167,7 @@ pub async fn cmd_actor_list(cli: &Cli, active_only: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_actor_show(cli: &Cli, session_id: Option<String>) -> Result<()> {
+pub async fn show(cli: &Cli, session_id: Option<String>) -> Result<()> {
     let repo = cli.open_repo()?;
     let registry = ActorPresenceStore::new(repo.heddle_dir());
     let entry = resolve_actor_entry(&repo, &registry, session_id.as_deref())?;
@@ -271,8 +175,8 @@ pub async fn cmd_actor_show(cli: &Cli, session_id: Option<String>) -> Result<()>
 
     if should_output_json(cli, None) {
         let output = ActorSingleOutput {
-            output_kind: "actor_show",
-            actor: show.actor,
+            output_kind: "agent_presence_show",
+            presence: show.actor,
             trust: build_repository_verification_state(&repo),
         };
         println!("{}", serde_json::to_string(&output)?);
@@ -285,10 +189,10 @@ pub async fn cmd_actor_show(cli: &Cli, session_id: Option<String>) -> Result<()>
 
 fn render_actor_list(report: &ActorListReport) {
     if report.actors.is_empty() {
-        println!("No actors.");
+        println!("No agent presence records.");
         return;
     }
-    println!("Actors:");
+    println!("Agent presence:");
     for entry in &report.actors {
         println!(
             "  {} [{}] thread:{} base:{}",
@@ -319,7 +223,7 @@ fn render_actor_list(report: &ActorListReport) {
 }
 
 fn render_actor_show(actor: &ActorEntryReport) {
-    println!("Actor: {}", actor.session_id);
+    println!("Agent presence: {}", actor.session_id);
     println!("Thread: {}", actor.thread);
     println!("Status: {}", actor.status);
     println!("Base state: {}", actor.base_state);
@@ -365,7 +269,7 @@ fn render_actor_show(actor: &ActorEntryReport) {
     print_actor_chain(&actor.actor_chain);
 }
 
-pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()> {
+pub async fn complete(cli: &Cli, session_id: Option<String>) -> Result<()> {
     let repo = cli.open_repo()?;
     let registry = ActorPresenceStore::new(repo.heddle_dir());
     let entry = resolve_actor_entry(&repo, &registry, session_id.as_deref())?;
@@ -379,7 +283,7 @@ pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()>
 
     if should_output_json(cli, None) {
         let output = ActorDoneOutput {
-            output_kind: "actor_done",
+            output_kind: "agent_presence_complete",
             session_id: plan.session_id.clone(),
             status: "complete",
             thread: plan.thread.clone(),
@@ -392,7 +296,7 @@ pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()>
         };
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("Actor '{}' marked as complete.", plan.session_id);
+        println!("Agent presence '{}' marked as complete.", plan.session_id);
         if let Some(thread) = summary {
             println!(
                 "Thread '{}' is {}.",
@@ -412,7 +316,7 @@ fn actor_done_recommended_action(thread: &str, coordination_status: &str) -> Opt
         .then(|| super::thread_landing::land_local_command(thread))
 }
 
-pub async fn cmd_actor_explain(cli: &Cli, session_id: Option<String>) -> Result<()> {
+pub async fn explain(cli: &Cli, session_id: Option<String>) -> Result<()> {
     let repo = cli.open_repo()?;
     let registry = ActorPresenceStore::new(repo.heddle_dir());
     let entry = match resolve_actor_entry(&repo, &registry, session_id.as_deref()) {
@@ -429,7 +333,7 @@ pub async fn cmd_actor_explain(cli: &Cli, session_id: Option<String>) -> Result<
 
     if should_output_json(cli, None) {
         let output = ActorExplainOutput {
-            output_kind: "actor_explain",
+            output_kind: "agent_presence_explain",
             session_id: entry.session_id,
             thread: entry.thread,
             heddle_session_id: entry.heddle_session_id,
@@ -446,7 +350,7 @@ pub async fn cmd_actor_explain(cli: &Cli, session_id: Option<String>) -> Result<
         };
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("Actor: {}", entry.session_id);
+        println!("Agent presence: {}", entry.session_id);
         println!("Thread: {}", entry.thread);
         if let Some(heddle_session_id) = &entry.heddle_session_id {
             println!("Heddle session: {}", heddle_session_id);
@@ -498,23 +402,17 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
             .and_then(crate::attribution::clean_attribution_value),
     )?;
     let env_signals = actor_identity_env_signals();
-    // Route through the same "is there a current lane?" predicate that
-    // `actor spawn --no-thread` uses, so the recommendation is always runnable
-    // in this context. `current_lane()` is git-overlay-aware: a detached Git
-    // HEAD reports no lane even when `.heddle/HEAD` still names a stale thread.
-    let no_current_lane = repo.current_lane()?.is_none();
-    let next_action = detected_actor_next_action(
-        probe.provider.as_deref(),
-        probe.model.as_deref(),
-        no_current_lane,
-    );
+    let current_lane = repo.current_lane()?;
+    let next_action = current_lane
+        .as_deref()
+        .map(|thread| format!("heddle agent reserve --thread {thread}"));
     let next_action_template = next_action.as_deref().and_then(action_template);
 
     if should_output_json(cli, None) {
         let output = ActorExplainDetectedOutput {
-            output_kind: "actor_explain",
+            output_kind: "agent_presence_explain",
             attached: false,
-            active_actor: None,
+            active_presence: None,
             reason: "No active actor is registered for this checkout.",
             repository: repo.root().display().to_string(),
             detected: DetectedActorOutput {
@@ -543,7 +441,7 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
         };
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("Actor: none attached");
+        println!("Agent presence: none attached");
         println!("Repository: {}", repo.root().display());
         println!("Why: no active actor is registered for this checkout.");
         if let Some(harness) = &probe.harness {
@@ -570,7 +468,7 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
         if let Some(action) = next_action {
             print_next(&action);
         } else {
-            print_next("heddle actor spawn");
+            print_next("heddle thread list");
         }
     }
 
@@ -601,28 +499,6 @@ fn actor_identity_env_signals() -> Vec<String> {
     signals
 }
 
-fn detected_actor_next_action(
-    provider: Option<&str>,
-    model: Option<&str>,
-    no_current_lane: bool,
-) -> Option<String> {
-    match (provider, model) {
-        // The recommendation must be runnable as-is from the current context.
-        // With no current lane (e.g. a detached HEAD) there is no thread to
-        // attach to, so `--no-thread` would fail
-        // (`actor_spawn_no_thread_detached`); mint a dedicated thread instead.
-        // On a lane, `--no-thread` attaches the detected identity to the current
-        // thread without leaving a stray `actor/<session>`.
-        (Some(provider), Some(model)) if no_current_lane => Some(format!(
-            "heddle actor spawn --provider {provider} --model {model}"
-        )),
-        (Some(provider), Some(model)) => Some(format!(
-            "heddle actor spawn --no-thread --provider {provider} --model {model}"
-        )),
-        _ => None,
-    }
-}
-
 fn resolve_actor_entry(
     repo: &Repository,
     registry: &ActorPresenceStore,
@@ -638,9 +514,8 @@ fn resolve_actor_entry(
     // `current_lane()` consults the git-overlay HEAD state, so a detached Git
     // HEAD reports no lane even when `.heddle/HEAD` still names a stale attached
     // thread. Deriving the implicit actor lookup from it — instead of
-    // `head_ref()` / `.heddle/HEAD` directly — keeps `actor explain`/`show`/`done`
-    // in agreement with `actor spawn --no-thread`, which rejects on the same
-    // no-lane predicate. There must be exactly one answer to "current lane?".
+    // `head_ref()` / `.heddle/HEAD` directly. There must be exactly one answer
+    // to "current lane?".
     let current_lane = repo.current_lane()?;
 
     if let Some(thread) = current_lane.as_deref()
@@ -658,10 +533,7 @@ fn resolve_actor_entry(
     }
 
     // The "any active actor" fallback only applies when this checkout is on a
-    // lane. With no current lane (a detached Git HEAD whose `.heddle/HEAD` is
-    // stale, or a genuinely detached HEAD), resolving an arbitrary active actor
-    // would contradict `actor spawn --no-thread`'s rejection and re-introduce
-    // the recommend/execute split this oracle exists to prevent.
+    // lane. A detached checkout must not inherit unrelated active presence.
     if current_lane.is_some()
         && let Some(entry) = registry.active_entries()?.into_iter().next()
     {
@@ -677,36 +549,19 @@ fn is_no_active_actor_error(err: &anyhow::Error) -> bool {
         .any(|advice| advice.kind == "no_active_actor")
 }
 
-fn actor_spawn_no_thread_detached_advice() -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "actor_spawn_no_thread_detached",
-        "Cannot attach to the current thread",
-        "`--no-thread` attaches the actor to the thread HEAD points at. Check out a thread first (`heddle thread switch <name>`), or run `heddle actor spawn` without `--no-thread` to mint a dedicated thread.",
-        "HEAD is not attached to a thread, so there is no current thread to attach the actor to",
-        "minting a thread implicitly would create exactly the stray thread `--no-thread` is meant to avoid",
-        "no actor registry entries, refs, repository objects, or worktree files were changed",
-        "heddle thread switch <name>",
-        vec![
-            "heddle thread list".to_string(),
-            "heddle thread switch <name>".to_string(),
-            "heddle actor spawn".to_string(),
-        ],
-    )
-}
-
 fn no_active_actor_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "no_active_actor",
         "No active actor for this checkout",
-        "After a thread is landed or an actor is marked done, it is no longer selected implicitly. Run `heddle actor list` to inspect completed actors, or pass a session id to `heddle actor show <session>`.",
+        "After a thread is landed or agent presence is cleared, it is no longer selected implicitly. Inspect completed records or pass a session id explicitly.",
         "no active actor registry entry matches the current thread or checkout path",
         "choosing a completed actor implicitly could show the wrong session",
         "no actor registry entries, refs, repository objects, or worktree files were changed",
-        "heddle actor list",
+        "heddle agent presence list",
         vec![
-            "heddle actor list".to_string(),
-            "heddle actor explain".to_string(),
-            "heddle actor show <session>".to_string(),
+            "heddle agent presence list".to_string(),
+            "heddle agent presence explain".to_string(),
+            "heddle agent presence show <session>".to_string(),
         ],
     )
 }

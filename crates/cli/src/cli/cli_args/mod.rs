@@ -31,22 +31,26 @@ pub use cli_shared::OutputMode;
 pub use commands_advanced::{
     TransactionAbortArgs, TransactionBeginArgs, TransactionCommands, TransactionIdArgs,
 };
-pub use commands_agent::{AgentCommands, AgentFanoutCommands, AgentServeArgs, AgentTaskCommands};
+pub use commands_agent::{
+    AgentCommands, AgentFanoutCommands, AgentPresenceCommands, AgentProvenanceCommands,
+    AgentServeArgs, AgentTaskCommands,
+};
 pub use commands_args::{
-    ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
-    AgentApiListArgs, AgentCaptureArgs, AgentFanoutPlanArgs, AgentFanoutStartArgs,
-    AgentHeartbeatArgs, AgentReadyArgs, AgentReleaseArgs, AgentReleaseStatusArg, AgentReserveArgs,
-    AgentTaskCreateArgs, AgentTaskListArgs, AgentTaskShowArgs, AgentTaskStatusArg,
-    AgentTaskUpdateArgs, CloneArgs, CollapseArgs, DiagnoseArgs, DiffArgs, DoctorArgs,
-    DoctorCommands, DoctorDocsArgs, DoctorSchemasArgs, ExpandArgs, InitArgs, LandArgs, LogArgs,
-    PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
-    SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, SnapshotArgs, SyncArgs,
-    ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs,
-    ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs,
-    ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs,
-    TimelineArgs, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs,
-    TimelineRecordStartArgs, TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs,
-    TimelineStatusArgs, TimelineTargetArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
+    AdoptArgs, AgentApiListArgs, AgentCaptureArgs, AgentFanoutPlanArgs, AgentFanoutStartArgs,
+    AgentHeartbeatArgs, AgentPresenceCompleteArgs, AgentPresenceExplainArgs, AgentPresenceListArgs,
+    AgentPresenceShowArgs, AgentProvenanceBeginArgs, AgentProvenanceEndArgs,
+    AgentProvenanceListArgs, AgentProvenanceSegmentArgs, AgentProvenanceShowArgs, AgentReadyArgs,
+    AgentReleaseArgs, AgentReleaseStatusArg, AgentReserveArgs, AgentTaskCreateArgs,
+    AgentTaskListArgs, AgentTaskShowArgs, AgentTaskStatusArg, AgentTaskUpdateArgs, CloneArgs,
+    CollapseArgs, DiagnoseArgs, DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs,
+    DoctorSchemasArgs, ExpandArgs, InitArgs, LandArgs, LogArgs, PullArgs, PushArgs, ReadyArgs,
+    ResolveArgs, RetroArgs, RevertArgs, RunArgs, SnapshotArgs, SyncArgs, ThreadAbsorbArgs,
+    ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs, ThreadCheckMergeArgs,
+    ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs,
+    ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs, TimelineArgs,
+    TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs,
+    TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs,
+    TimelineTargetArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
 };
 #[cfg(feature = "client")]
 pub use commands_client::AuthCommands;
@@ -63,9 +67,7 @@ pub use commands_hook::{HookCommands, HookInstallSource};
 pub use commands_integration::{
     IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs, IntegrationTargetArgs,
 };
-pub use commands_main::{
-    ActorCommands, Commands, DaemonCommands, FsckRepairTarget, MaintenanceCommands, SessionCommands,
-};
+pub use commands_main::{Commands, DaemonCommands, FsckRepairTarget, MaintenanceCommands};
 pub use commands_oplog::OplogCommands;
 pub use commands_query::QueryArgs;
 pub use commands_redact::{

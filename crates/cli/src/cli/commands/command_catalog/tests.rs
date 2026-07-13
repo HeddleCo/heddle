@@ -26,11 +26,22 @@ struct RuntimeContractParseSample {
 const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["abort"], &["abort"]),
     sample(&["adopt"], &["adopt"]),
-    sample(&["actor", "spawn"], &["actor", "spawn"]),
-    sample(&["actor", "list"], &["actor", "list"]),
-    sample(&["actor", "show"], &["actor", "show"]),
-    sample(&["actor", "explain"], &["actor", "explain"]),
-    sample(&["actor", "done"], &["actor", "done"]),
+    sample(
+        &["agent", "presence", "list"],
+        &["agent", "presence", "list"],
+    ),
+    sample(
+        &["agent", "presence", "show"],
+        &["agent", "presence", "show"],
+    ),
+    sample(
+        &["agent", "presence", "explain"],
+        &["agent", "presence", "explain"],
+    ),
+    sample(
+        &["agent", "presence", "complete"],
+        &["agent", "presence", "complete"],
+    ),
     sample(&["agent", "serve"], &["agent", "serve"]),
     sample(&["agent", "status"], &["agent", "status"]),
     sample(&["agent", "stop"], &["agent", "stop"]),
@@ -304,10 +315,11 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     #[cfg(feature = "semantic")]
     sample(&["semantic", "hot"], &["semantic", "hot"]),
     sample(
-        &["session", "start"],
+        &["agent", "provenance", "begin"],
         &[
-            "session",
-            "start",
+            "agent",
+            "provenance",
+            "begin",
             "--provider",
             "openai",
             "--model",
@@ -315,9 +327,10 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         ],
     ),
     sample(
-        &["session", "segment"],
+        &["agent", "provenance", "segment"],
         &[
-            "session",
+            "agent",
+            "provenance",
             "segment",
             "--provider",
             "openai",
@@ -325,9 +338,18 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
             "gpt-5",
         ],
     ),
-    sample(&["session", "end"], &["session", "end"]),
-    sample(&["session", "show"], &["session", "show"]),
-    sample(&["session", "list"], &["session", "list"]),
+    sample(
+        &["agent", "provenance", "end"],
+        &["agent", "provenance", "end"],
+    ),
+    sample(
+        &["agent", "provenance", "show"],
+        &["agent", "provenance", "show"],
+    ),
+    sample(
+        &["agent", "provenance", "list"],
+        &["agent", "provenance", "list"],
+    ),
     sample(&["shell", "init"], &["shell", "init", "bash"]),
     sample(&["shell", "completion"], &["shell", "completion", "bash"]),
     sample(&["shell", "prompt"], &["shell", "prompt"]),
@@ -1235,16 +1257,16 @@ fn assert_command_effects(path: &[&str], expected: &[CommandSideEffect]) {
 #[test]
 fn sidecar_only_effect_sets_exclude_refs() {
     for path in [
-        &["actor", "done"][..],
+        &["agent", "presence", "complete"][..],
         &["agent", "heartbeat"],
         &["agent", "release"],
         &["agent", "task", "create"],
         &["agent", "task", "update"],
         &["context", "reason", "git"],
         &["review", "sign"],
-        &["session", "start"],
-        &["session", "segment"],
-        &["session", "end"],
+        &["agent", "provenance", "begin"],
+        &["agent", "provenance", "segment"],
+        &["agent", "provenance", "end"],
         &["timeline", "record-start"],
         &["timeline", "record-finish"],
         &["timeline", "fork"],
@@ -1477,7 +1499,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
     // runtime JSON already emits `output_kind` (abort, adopt, the agent
     // session verbs, continue, daemon stop,
     // doctor, expand, fetch, land, log,
-    // maintenance gc/index, merge --preview, pull, push, query, ready,
+    // maintenance gc/index, pull, push, query, ready,
     // the remote family, start, switch, sync, and the thread lifecycle
     // verbs). Any further sweep MUST extend this list and document the
     // addition.
@@ -1501,11 +1523,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // tests/cli_integration/output_kind_invariant.rs.
             "abort",
             "adopt",
-            "actor spawn",
-            "actor list",
-            "actor show",
-            "actor explain",
-            "actor done",
             "agent serve",
             "agent status",
             "agent stop",
@@ -1517,6 +1534,10 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "agent task update",
             "agent fanout plan",
             "agent fanout start",
+            "agent presence list",
+            "agent presence show",
+            "agent presence explain",
+            "agent presence complete",
             "auth logout",
             "auth status",
             "auth create-service-token",

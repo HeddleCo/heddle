@@ -999,7 +999,7 @@ fn build_attribution_with_env(
 ///
 /// Differs from the snapshot path in two ways — both intentional: it does not
 /// honor explicit `--agent-*` flag overrides (other commands don't expose
-/// those), and it does not consult the active `heddle session` chain. Use the
+/// those), and it does not consult the active `heddle agent provenance` chain. Use the
 /// snapshot path's full `resolve_*` for capture flows.
 pub(crate) fn resolve_attribution(
     repo: &Repository,

@@ -17,15 +17,13 @@ use cli::cli::{
 };
 use cli::{
     cli::{
-        ActorCommands, AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands,
-        DaemonCommands, DiagnoseArgs, DiffArgs, ExpandArgs, IntegrationCommands, LogArgs,
-        ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs,
-        SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, UndoArgs,
+        AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands, DaemonCommands,
+        DiagnoseArgs, DiffArgs, ExpandArgs, IntegrationCommands, LogArgs, ResolveArgs, RetroArgs,
+        RevertArgs, RunArgs, UndoArgs,
         cli_args::{LandArgs, SyncArgs},
         commands::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
-            cmd_abort, cmd_actor_done, cmd_actor_explain, cmd_actor_list, cmd_actor_show,
-            cmd_actor_spawn, cmd_adopt, cmd_agent, cmd_capture_split, cmd_cherry_pick, cmd_clone,
+            cmd_abort, cmd_adopt, cmd_agent, cmd_capture_split, cmd_cherry_pick, cmd_clone,
             cmd_collapse, cmd_complete, cmd_context_audit, cmd_context_check, cmd_context_edit,
             cmd_context_get, cmd_context_history, cmd_context_list, cmd_context_rm,
             cmd_context_set, cmd_context_suggest, cmd_context_supersede, cmd_continue,
@@ -33,12 +31,10 @@ use cli::{
             cmd_discuss, cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fsck, cmd_hook,
             cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_oplog, cmd_pull,
             cmd_push, cmd_query, cmd_ready, cmd_redo, cmd_remote, cmd_resolve, cmd_retro,
-            cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_session_end, cmd_session_list,
-            cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell, cmd_show,
-            cmd_snapshot, cmd_start, cmd_status, cmd_sync_smart, cmd_thread, cmd_timeline,
-            cmd_transaction, cmd_try, cmd_undo, cmd_verify, cmd_watch,
-            command_runtime_contract_for_command, print_error_with_hint,
-            print_parse_error_json_envelope,
+            cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_shell, cmd_show, cmd_snapshot,
+            cmd_start, cmd_status, cmd_sync_smart, cmd_thread, cmd_timeline, cmd_transaction,
+            cmd_try, cmd_undo, cmd_verify, cmd_watch, command_runtime_contract_for_command,
+            print_error_with_hint, print_parse_error_json_envelope,
         },
         render::write_json_stdout,
     },
@@ -770,48 +766,6 @@ async fn async_main() -> Result<()> {
         }
 
         Commands::Hook { command } => cmd_hook(&cli, command.clone()),
-
-        Commands::Actor { command } => match command {
-            ActorCommands::Spawn(args) => {
-                cmd_actor_spawn(
-                    &cli,
-                    args.thread.clone(),
-                    args.no_thread,
-                    args.provider.clone(),
-                    args.model.clone(),
-                )
-                .await
-            }
-            ActorCommands::List(args) => cmd_actor_list(&cli, args.active).await,
-            ActorCommands::Show(args) => cmd_actor_show(&cli, args.session.clone()).await,
-            ActorCommands::Explain(args) => cmd_actor_explain(&cli, args.session.clone()).await,
-            ActorCommands::Done(args) => cmd_actor_done(&cli, args.session.clone()).await,
-        },
-
-        // cmd_agent is the unified dispatcher: daemon variants
-        // (Serve/Status/Stop) plus the reservation API (Reserve/
-        // Heartbeat/Capture/Ready/Release/List).
-        Commands::Session { command } => match command {
-            SessionCommands::Start(SessionStartArgs {
-                provider,
-                model,
-                policy,
-            }) => cmd_session_start(&cli, provider.clone(), model.clone(), policy.clone()).await,
-            SessionCommands::Segment(SessionSegmentArgs {
-                provider,
-                model,
-                policy,
-            }) => cmd_session_segment(&cli, provider.clone(), model.clone(), policy.clone()).await,
-            SessionCommands::End(SessionEndArgs { session_id }) => {
-                cmd_session_end(&cli, session_id.clone()).await
-            }
-            SessionCommands::Show(SessionShowArgs { session_id }) => {
-                cmd_session_show(&cli, session_id.clone()).await
-            }
-            SessionCommands::List(SessionListArgs { active }) => {
-                cmd_session_list(&cli, *active).await
-            }
-        },
     };
 
     debug!(

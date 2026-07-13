@@ -4483,23 +4483,20 @@ fn thread_rename_rejects_unsafe_new_name() {
     );
 }
 
-/// heddle#464 close-the-class: `actor spawn --thread <name>` mints/attaches the
-/// named thread, so a user-supplied unsafe name is rejected before any ref is
-/// written. (The generated `actor/<session>` fallback is safe by construction.)
 #[test]
-fn actor_spawn_rejects_unsafe_thread_name() {
+fn removed_actor_surface_does_not_write_refs() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let out = heddle_output(&["actor", "spawn", "--thread", "bad;id"], Some(temp.path())).unwrap();
     assert!(
         !out.status.success(),
-        "actor spawn with an unsafe thread name must be rejected: stdout={}",
+        "the removed actor surface must be rejected: stdout={}",
         String::from_utf8_lossy(&out.stdout)
     );
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("is invalid"),
-        "actor spawn must explain the name is invalid: {}",
+        String::from_utf8_lossy(&out.stderr).contains("unrecognized subcommand"),
+        "clap must reject the removed command: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 

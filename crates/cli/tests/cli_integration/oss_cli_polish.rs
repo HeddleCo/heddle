@@ -2939,11 +2939,15 @@ fn core_loop_schemas_are_discoverable() {
         "doctor schemas",
         "diff",
         "git-overlay",
-        "actor spawn",
-        "actor list",
-        "actor show",
-        "actor explain",
-        "actor done",
+        "agent presence list",
+        "agent presence show",
+        "agent presence explain",
+        "agent presence complete",
+        "agent provenance begin",
+        "agent provenance segment",
+        "agent provenance end",
+        "agent provenance show",
+        "agent provenance list",
         "agent serve",
         "agent status",
         "agent stop",
@@ -9933,30 +9937,22 @@ fn integration_codex_repo_scope_uses_typed_advice_json() {
 }
 
 #[test]
-fn agent_serve_background_uses_typed_advice_json() {
+fn agent_serve_rejects_removed_foreground_flag() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).expect("init");
-    let output = heddle_output(&["--output", "json", "agent", "serve"], Some(temp.path()))
+    let output = heddle_output(
+        &["--output", "json", "agent", "serve", "--foreground"],
+        Some(temp.path()),
+    )
         .expect("invoke agent serve");
-    assert!(
-        !output.status.success(),
-        "background agent serve must refuse"
-    );
+    assert!(!output.status.success(), "removed flag must be rejected");
     assert!(
         output.stdout.is_empty(),
         "JSON-mode refusal must not write stdout: {}",
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let envelope: Value =
-        serde_json::from_str(&stderr).expect("stderr should be JSON error envelope");
-    assert_eq!(envelope["kind"], "agent_background_unimplemented");
-    assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("agent serve --foreground")),
-        "typed advice should name foreground recovery: {stderr}"
-    );
+    assert!(stderr.contains("--foreground"), "clap should name the removed flag: {stderr}");
 }
 
 #[test]
@@ -10332,12 +10328,12 @@ fn daemon_status_json_matches_command_catalog_when_absent() {
 }
 
 #[test]
-fn actor_explain_json_detects_harness_without_active_actor() {
+fn agent_presence_explain_json_detects_harness_without_active_presence() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let output = heddle_output_with_env_removed(
-        &["actor", "explain", "--output", "json"],
+        &["agent", "presence", "explain", "--output", "json"],
         Some(temp.path()),
         &[
             ("CODEX_THREAD_ID", "thread-cold-agent"),
@@ -10362,9 +10358,9 @@ fn actor_explain_json_detects_harness_without_active_actor() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|err| panic!("actor explain JSON should parse: {err}: {stdout}"));
-    assert_eq!(parsed["output_kind"], "actor_explain", "{parsed}");
+    assert_eq!(parsed["output_kind"], "agent_presence_explain", "{parsed}");
     assert_eq!(parsed["attached"], false);
-    assert!(parsed.get("active_actor").is_none());
+    assert!(parsed.get("active_presence").is_none());
     assert_eq!(parsed["detected"]["harness"], "codex");
     assert_eq!(parsed["detected"]["provider"], "openai");
     assert_eq!(parsed["detected"]["model"], "gpt-5.3-codex");
@@ -10392,22 +10388,14 @@ fn actor_explain_json_detects_harness_without_active_actor() {
     // `--no-thread` attaches the detected identity to the current thread.
     assert_eq!(
         parsed["recommended_action"],
-        "heddle actor spawn --no-thread --provider openai --model gpt-5.3-codex"
+        "heddle agent reserve --thread main"
     );
     assert_eq!(
         parsed["recommended_action_template"]["argv_template"],
-        heddle_argv_json([
-            "actor",
-            "spawn",
-            "--no-thread",
-            "--provider",
-            "openai",
-            "--model",
-            "gpt-5.3-codex"
-        ]),
-        "actor explain should expose replayable argv for the detected spawn action: {parsed}"
+        heddle_argv_json(["agent", "reserve", "--thread", "main"]),
+        "presence explain should expose replayable argv for reservation: {parsed}"
     );
-    assert_schema_declares_runtime_top_level(&["actor", "explain"], &parsed);
+    assert_schema_declares_runtime_top_level(&["agent", "presence", "explain"], &parsed);
     assert!(
         parsed.get("verification").is_some(),
         "actor explain should prove repository verify for agents: {parsed}"
@@ -10415,7 +10403,7 @@ fn actor_explain_json_detects_harness_without_active_actor() {
 }
 
 #[test]
-fn actor_explain_detached_head_recommends_minting_spawn_not_no_thread() {
+fn agent_presence_explain_detached_head_recommends_thread_inspection() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
@@ -10441,7 +10429,7 @@ fn actor_explain_detached_head_recommends_minting_spawn_not_no_thread() {
     );
 
     let output = heddle_output_with_env(
-        &["actor", "explain", "--output", "json"],
+        &["agent", "presence", "explain", "--output", "json"],
         Some(temp.path()),
         &[
             ("CODEX_THREAD_ID", "thread-cold-agent"),
@@ -10458,139 +10446,86 @@ fn actor_explain_detached_head_recommends_minting_spawn_not_no_thread() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|err| panic!("actor explain JSON should parse: {err}: {stdout}"));
-    assert_eq!(parsed["output_kind"], "actor_explain", "{parsed}");
+    assert_eq!(parsed["output_kind"], "agent_presence_explain", "{parsed}");
     assert_eq!(parsed["attached"], false);
     // Detached HEAD: recommend the minting form (mints a dedicated thread),
     // NOT `--no-thread`, which cannot succeed without a current thread.
     assert_eq!(
-        parsed["recommended_action"], "heddle actor spawn --provider openai --model gpt-5.3-codex",
-        "detached HEAD should recommend the thread-minting spawn form: {parsed}"
-    );
-    assert!(
-        !parsed["recommended_action"]
-            .as_str()
-            .expect("recommended_action should be a string")
-            .contains("--no-thread"),
-        "detached HEAD must not recommend `--no-thread`: {parsed}"
+        parsed["recommended_action"], "heddle thread list",
+        "detached HEAD should recommend an exact inspection command: {parsed}"
     );
     assert_eq!(
         parsed["recommended_action_template"]["argv_template"],
-        heddle_argv_json([
-            "actor",
-            "spawn",
-            "--provider",
-            "openai",
-            "--model",
-            "gpt-5.3-codex"
-        ]),
-        "actor explain should expose replayable argv for the minting spawn action: {parsed}"
+        heddle_argv_json(["thread", "list"]),
+        "presence explain should expose replayable inspection argv: {parsed}"
     );
 }
 
 #[test]
-fn actor_and_session_json_outputs_match_registered_schemas() {
+fn agent_presence_and_provenance_outputs_match_registered_schemas() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
     heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
 
-    let actor_list = json_value(temp.path(), &["actor", "list", "--output", "json"]);
-    assert_schema_declares_runtime_top_level(&["actor", "list"], &actor_list);
-    assert_eq!(actor_list["output_kind"], "actor_list", "{actor_list}");
+    let reservation = json_value(
+        temp.path(),
+        &["agent", "reserve", "--thread", "main", "--output", "json"],
+    );
+    let presence_id = reservation["reservation"]["actor_session_id"]
+        .as_str()
+        .expect("reserve should attach presence");
+
+    let actor_list = json_value(
+        temp.path(),
+        &["agent", "presence", "list", "--output", "json"],
+    );
+    assert_schema_declares_runtime_top_level(&["agent", "presence", "list"], &actor_list);
+    assert_eq!(actor_list["output_kind"], "agent_presence_list", "{actor_list}");
     assert!(
-        actor_list["actors"].as_array().is_some(),
-        "actor list should emit an envelope with an actors array: {actor_list}"
+        actor_list["presence"].as_array().is_some(),
+        "presence list should emit an envelope: {actor_list}"
     );
     assert!(actor_list.get("verification").is_some());
 
-    let actor_spawn = json_value(
+    let actor_show = json_value(
         temp.path(),
         &[
-            "actor",
-            "spawn",
-            "--provider",
-            "openai",
-            "--model",
-            "gpt-5",
+            "agent",
+            "presence",
+            "show",
+            presence_id,
             "--output",
             "json",
         ],
     );
-    assert_schema_declares_runtime_top_level(&["actor", "spawn"], &actor_spawn);
-    assert_eq!(actor_spawn["output_kind"], "actor_spawn", "{actor_spawn}");
-    assert!(actor_spawn.get("actor").is_some());
-    assert!(actor_spawn.get("verification").is_some());
-    assert!(actor_spawn["actor"].get("native_actor_key").is_none());
-    assert!(actor_spawn["actor"].get("heddle_session_id").is_none());
-    assert!(actor_spawn["actor"].get("probe_source").is_some());
-    let actor_session = actor_spawn["actor"]["session_id"]
-        .as_str()
-        .expect("actor spawn should return session id");
-    let actor_list_text = heddle(&["actor", "list", "--output", "text"], Some(temp.path()))
-        .expect("actor list text should render");
-    assert!(
-        actor_list_text.contains("actor: openai/gpt-5")
-            && actor_list_text.contains("detected: explicit_payload"),
-        "actor list text should surface model provenance, not just a session id: {actor_list_text}"
-    );
-
-    let actor_show = json_value(
-        temp.path(),
-        &["actor", "show", actor_session, "--output", "json"],
-    );
-    assert_schema_declares_runtime_top_level(&["actor", "show"], &actor_show);
-    assert_eq!(actor_show["output_kind"], "actor_show", "{actor_show}");
-    assert_eq!(actor_show["actor"]["session_id"], actor_session);
-    assert!(
-        actor_show["actor"]["actor_chain"].as_array().is_some(),
-        "actor show JSON should expose the same chain field as spawn/text: {actor_show}"
-    );
+    assert_schema_declares_runtime_top_level(&["agent", "presence", "show"], &actor_show);
+    assert_eq!(actor_show["output_kind"], "agent_presence_show", "{actor_show}");
+    assert_eq!(actor_show["presence"]["session_id"], presence_id);
 
     let actor_done = json_value(
         temp.path(),
         &[
-            "actor",
-            "done",
+            "agent",
+            "presence",
+            "complete",
             "--session",
-            actor_session,
+            presence_id,
             "--output",
             "json",
         ],
     );
-    assert_schema_declares_runtime_top_level(&["actor", "done"], &actor_done);
-    assert_eq!(actor_done["output_kind"], "actor_done", "{actor_done}");
+    assert_schema_declares_runtime_top_level(&["agent", "presence", "complete"], &actor_done);
+    assert_eq!(actor_done["output_kind"], "agent_presence_complete", "{actor_done}");
     assert_eq!(actor_done["status"], "complete");
     assert!(actor_done.get("verification").is_some());
-
-    let auto_actor_output = heddle_output_with_env(
-        &["actor", "spawn", "--output", "json"],
-        Some(temp.path()),
-        &[
-            ("CODEX_THREAD_ID", "thread-auto-spawn"),
-            ("CODEX_MODEL", "gpt-5.3-codex"),
-            ("CODEX_REASONING_EFFORT", "high"),
-        ],
-    )
-    .expect("auto actor spawn should run");
-    assert!(
-        auto_actor_output.status.success(),
-        "auto actor spawn should succeed: {}",
-        String::from_utf8_lossy(&auto_actor_output.stderr)
-    );
-    let auto_actor: Value =
-        serde_json::from_slice(&auto_actor_output.stdout).expect("auto actor spawn JSON");
-    assert_eq!(auto_actor["output_kind"], "actor_spawn");
-    assert_eq!(auto_actor["actor"]["harness"], "codex");
-    assert_eq!(auto_actor["actor"]["provider"], "openai");
-    assert_eq!(auto_actor["actor"]["model"], "gpt-5.3-codex");
-    assert_eq!(auto_actor["actor"]["thinking_level"], "high");
-    assert_eq!(auto_actor["actor"]["probe_source"], "app_protocol");
 
     let session_start = json_value(
         temp.path(),
         &[
-            "session",
-            "start",
+            "agent",
+            "provenance",
+            "begin",
             "--provider",
             "openai",
             "--model",
@@ -10599,7 +10534,7 @@ fn actor_and_session_json_outputs_match_registered_schemas() {
             "json",
         ],
     );
-    assert_schema_declares_runtime_top_level(&["session", "start"], &session_start);
+    assert_schema_declares_runtime_top_level(&["agent", "provenance", "begin"], &session_start);
     assert!(session_start.get("session").is_some());
     assert!(session_start.get("verification").is_some());
     assert!(session_start["session"].get("ended_at").is_none());
@@ -10612,7 +10547,8 @@ fn actor_and_session_json_outputs_match_registered_schemas() {
     let session_segment = json_value(
         temp.path(),
         &[
-            "session",
+            "agent",
+            "provenance",
             "segment",
             "--provider",
             "openai",
@@ -10622,23 +10558,23 @@ fn actor_and_session_json_outputs_match_registered_schemas() {
             "json",
         ],
     );
-    assert_schema_declares_runtime_top_level(&["session", "segment"], &session_segment);
+    assert_schema_declares_runtime_top_level(&["agent", "provenance", "segment"], &session_segment);
     assert!(session_segment.get("segment").is_some());
     assert!(session_segment["segment"].get("policy_id").is_none());
 
-    let session_list = json_value(temp.path(), &["session", "list", "--output", "json"]);
-    assert_schema_declares_runtime_top_level(&["session", "list"], &session_list);
+    let session_list = json_value(temp.path(), &["agent", "provenance", "list", "--output", "json"]);
+    assert_schema_declares_runtime_top_level(&["agent", "provenance", "list"], &session_list);
     assert!(
         session_list["sessions"].as_array().is_some(),
         "session list should emit an envelope with a sessions array: {session_list}"
     );
 
-    let session_show = json_value(temp.path(), &["session", "show", "--output", "json"]);
-    assert_schema_declares_runtime_top_level(&["session", "show"], &session_show);
+    let session_show = json_value(temp.path(), &["agent", "provenance", "show", "--output", "json"]);
+    assert_schema_declares_runtime_top_level(&["agent", "provenance", "show"], &session_show);
     assert!(session_show.get("session").is_some());
 
-    let session_end = json_value(temp.path(), &["session", "end", "--output", "json"]);
-    assert_schema_declares_runtime_top_level(&["session", "end"], &session_end);
+    let session_end = json_value(temp.path(), &["agent", "provenance", "end", "--output", "json"]);
+    assert_schema_declares_runtime_top_level(&["agent", "provenance", "end"], &session_end);
     assert_eq!(session_end["session"]["active"], false);
 }
 
@@ -11275,11 +11211,15 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         "fsck --repair git",
         "capture",
         "commit",
-        "actor spawn",
-        "actor list",
-        "actor show",
-        "actor explain",
-        "actor done",
+        "agent presence list",
+        "agent presence show",
+        "agent presence explain",
+        "agent presence complete",
+        "agent provenance begin",
+        "agent provenance segment",
+        "agent provenance end",
+        "agent provenance show",
+        "agent provenance list",
         "agent serve",
         "agent status",
         "agent stop",

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Session management commands.
+//! Provider, model, and policy provenance commands.
 
 use anyhow::Result;
 use heddle_core::session_list_status;
@@ -85,7 +85,7 @@ impl From<&SessionSegment> for SegmentOutput {
     }
 }
 
-pub async fn cmd_session_start(
+pub async fn begin(
     cli: &Cli,
     provider: String,
     model: String,
@@ -112,7 +112,7 @@ pub async fn cmd_session_start(
     Ok(())
 }
 
-pub async fn cmd_session_segment(
+pub async fn segment(
     cli: &Cli,
     provider: String,
     model: String,
@@ -123,9 +123,9 @@ pub async fn cmd_session_segment(
 
     let current_id = manager.get_current_session_id()?.ok_or_else(|| {
         anyhow::anyhow!(RecoveryAdvice::no_current_session(
-            "session segment",
+            "agent provenance segment",
             None,
-            "heddle session start",
+            "heddle agent provenance begin",
         ))
     })?;
 
@@ -144,7 +144,7 @@ pub async fn cmd_session_segment(
     Ok(())
 }
 
-pub async fn cmd_session_end(cli: &Cli, session_id: Option<String>) -> Result<()> {
+pub async fn end(cli: &Cli, session_id: Option<String>) -> Result<()> {
     let repo = cli.open_repo()?;
     let mut manager = SessionManager::new(repo.root());
 
@@ -163,7 +163,7 @@ pub async fn cmd_session_end(cli: &Cli, session_id: Option<String>) -> Result<()
     Ok(())
 }
 
-pub async fn cmd_session_show(cli: &Cli, session_id: Option<String>) -> Result<()> {
+pub async fn show(cli: &Cli, session_id: Option<String>) -> Result<()> {
     let repo = cli.open_repo()?;
     let manager = SessionManager::new(repo.root());
 
@@ -171,9 +171,9 @@ pub async fn cmd_session_show(cli: &Cli, session_id: Option<String>) -> Result<(
         Some(id) => id,
         None => manager.get_current_session_id()?.ok_or_else(|| {
             anyhow::anyhow!(RecoveryAdvice::no_current_session(
-                "session show",
+                "agent provenance show",
                 Some("<SESSION_ID>"),
-                "heddle session start",
+                "heddle agent provenance begin",
             ))
         })?,
     };
@@ -219,7 +219,7 @@ pub async fn cmd_session_show(cli: &Cli, session_id: Option<String>) -> Result<(
     Ok(())
 }
 
-pub async fn cmd_session_list(cli: &Cli, active_only: bool) -> Result<()> {
+pub async fn list(cli: &Cli, active_only: bool) -> Result<()> {
     let repo = cli.open_repo()?;
     let manager = SessionManager::new(repo.root());
 

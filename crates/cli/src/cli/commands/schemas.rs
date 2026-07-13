@@ -76,7 +76,6 @@ schema_registry! {
     (&["undo --list"], UndoListSchema),
     (&["clean"], CleanSchema),
     (&["switch"], SwitchCheckoutSchema),
-    (&["merge --preview"], MergePreviewSchema),
     (&["ready"], ReadySchema),
     (&["land"], LandSchema),
     (&["sync"], SyncSchema),
@@ -132,10 +131,10 @@ schema_registry! {
     (&["doctor"], DiagnoseSchema),
     (&["doctor docs"], DoctorDocsSchema),
     (&["doctor schemas"], DoctorSchemasSchema),
-    (&["actor spawn", "actor show"], ActorSingleSchema),
-    (&["actor list"], ActorListSchema),
-    (&["actor done"], ActorDoneSchema),
-    (&["actor explain"], ActorExplainSchema),
+    (&["agent presence show"], AgentPresenceSingleSchema),
+    (&["agent presence list"], AgentPresenceListSchema),
+    (&["agent presence complete"], AgentPresenceCompleteSchema),
+    (&["agent presence explain"], AgentPresenceExplainSchema),
     (&["agent serve"], AgentServeSchema),
     (&["agent status"], AgentDaemonStatusSchema),
     (&["agent stop"], AgentStopSchema),
@@ -149,9 +148,9 @@ schema_registry! {
     (&["auth logout"], AuthLogoutSchema),
     (&["auth status"], AuthStatusSchema),
     (&["auth create-service-token"], AuthCreateServiceTokenSchema),
-    (&["session start", "session end", "session show"], SessionEnvelopeSchema),
-    (&["session segment"], SessionSegmentEnvelopeSchema),
-    (&["session list"], SessionListSchema),
+    (&["agent provenance begin", "agent provenance end", "agent provenance show"], AgentProvenanceEnvelopeSchema),
+    (&["agent provenance segment"], AgentProvenanceSegmentEnvelopeSchema),
+    (&["agent provenance list"], AgentProvenanceListSchema),
     (&["support grant"], SupportGrantSchema),
     (&["support list"], SupportAccessListSchema),
     (&["support revoke"], SupportRevokeSchema),
@@ -1144,38 +1143,6 @@ pub struct SwitchCheckoutSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct MergePreviewSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub action: Option<String>,
-    pub message: Option<String>,
-    pub would_merge: bool,
-    pub applied: bool,
-    pub blockers: Option<Vec<String>>,
-    pub warnings: Option<Vec<String>>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub fast_forward: Option<bool>,
-    pub preview_only: Option<bool>,
-    pub merge_state: Option<String>,
-    pub conflicts: Option<Vec<String>>,
-    pub preview_summary: Option<Vec<String>>,
-    pub thread_state: Option<String>,
-    pub freshness: Option<String>,
-    pub changed_paths: Option<Vec<String>>,
-    pub changed_path_count: Option<usize>,
-    pub impact_categories: Option<Vec<String>>,
-    pub promotion_suggested: Option<bool>,
-    pub heavy_impact_paths: Option<Vec<String>>,
-    pub merge_relation: Option<String>,
-    pub conflict_count: Option<usize>,
-    pub thread_health: Option<String>,
-    pub diff: Option<Value>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct ReadySchema {
     pub output_kind: Option<String>,
     pub status: String,
@@ -1602,24 +1569,24 @@ pub struct RemoteMutationSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct ActorSingleSchema {
+pub struct AgentPresenceSingleSchema {
     pub output_kind: String,
-    pub actor: ActorEntrySchema,
+    pub presence: ActorEntrySchema,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct ActorListSchema {
+pub struct AgentPresenceListSchema {
     pub output_kind: String,
-    pub actors: Vec<ActorEntrySchema>,
+    pub presence: Vec<ActorEntrySchema>,
     pub active_only: bool,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct ActorDoneSchema {
+pub struct AgentPresenceCompleteSchema {
     pub output_kind: String,
     pub session_id: String,
     pub status: String,
@@ -1635,12 +1602,12 @@ pub struct ActorDoneSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct ActorExplainSchema {
+pub struct AgentPresenceExplainSchema {
     pub output_kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_actor: Option<Value>,
+    pub active_presence: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1874,17 +1841,17 @@ pub struct AgentFanoutCommandSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct SessionEnvelopeSchema {
+pub struct AgentProvenanceEnvelopeSchema {
     pub session: SessionEntrySchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct SessionSegmentEnvelopeSchema {
+pub struct AgentProvenanceSegmentEnvelopeSchema {
     pub segment: SessionSegmentSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct SessionListSchema {
+pub struct AgentProvenanceListSchema {
     pub sessions: Vec<SessionEntrySchema>,
     pub active_only: bool,
     #[serde(rename = "verification")]

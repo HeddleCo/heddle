@@ -19,13 +19,13 @@ use crate::cli::SemanticCommands;
 #[cfg(feature = "git-overlay")]
 use crate::cli::cli_args::SyncCommands;
 use crate::cli::{
-    ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
-    HookCommands, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
-    RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
-    ThreadCommands, ThreadMarkerCommands, TimelineCommands, VisibilityCommands,
+    AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands, HookCommands,
+    IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands, RedactCommands,
+    RedactTrustCommands, RemoteCommands, ShellCommands, ThreadCommands, ThreadMarkerCommands,
+    TimelineCommands, VisibilityCommands,
     cli_args::{
-        AgentFanoutCommands, AgentTaskCommands, DiscussCommands, ReviewCommands,
-        TransactionCommands,
+        AgentFanoutCommands, AgentPresenceCommands, AgentProvenanceCommands, AgentTaskCommands,
+        DiscussCommands, ReviewCommands, TransactionCommands,
     },
     render::shell_quote,
 };
@@ -387,10 +387,10 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle ready -m \"...\"",
     "heddle context get --path <path>",
     "heddle context set --path <path> --scope file -m \"...\"",
-    "heddle session start",
+    "heddle agent provenance begin",
     "heddle start <name> --path <empty-path>",
     "heddle start <name> --path ../<name>",
-    "heddle actor show <session>",
+    "heddle agent presence show <session>",
     "heddle thread show <THREAD>",
     // Remote setup requires filling in a real name and URL after
     // inspecting current configuration.
@@ -479,11 +479,12 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "heddle session start",
+        "heddle agent provenance begin",
         &[
             "heddle",
-            "session",
-            "start",
+            "agent",
+            "provenance",
+            "begin",
             "--provider",
             "<provider>",
             "--model",
@@ -505,8 +506,8 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "heddle actor show <session>",
-        &["heddle", "actor", "show", "<session>"],
+        "heddle agent presence show <session>",
+        &["heddle", "agent", "presence", "show", "<session>"],
         &["session"],
         true,
     ),
@@ -1122,77 +1123,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
             210,
         ),
     ),
-    entry(&["actor"], surface(GROUP, "automation")),
-    entry(
-        &["actor", "spawn"],
-        surface(
-            json_discriminators(
-                documented_schemas(REF_AND_METADATA_MUTATION, &["actor spawn"]),
-                &[json_discriminator(
-                    Some("actor spawn"),
-                    "output_kind",
-                    "actor_spawn",
-                )],
-            ),
-            "automation",
-        ),
-    ),
-    entry(
-        &["actor", "list"],
-        surface(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["actor list"]),
-                &[json_discriminator(
-                    Some("actor list"),
-                    "output_kind",
-                    "actor_list",
-                )],
-            ),
-            "automation",
-        ),
-    ),
-    entry(
-        &["actor", "show"],
-        surface(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["actor show"]),
-                &[json_discriminator(
-                    Some("actor show"),
-                    "output_kind",
-                    "actor_show",
-                )],
-            ),
-            "automation",
-        ),
-    ),
-    entry(
-        &["actor", "explain"],
-        surface(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["actor explain"]),
-                &[json_discriminator(
-                    Some("actor explain"),
-                    "output_kind",
-                    "actor_explain",
-                )],
-            ),
-            "automation",
-        ),
-    ),
-    entry(
-        &["actor", "done"],
-        surface(
-            json_discriminators(
-                documented_schemas(METADATA_MUTATION, &["actor done"]),
-                &[json_discriminator(
-                    Some("actor done"),
-                    "output_kind",
-                    "actor_done",
-                )],
-            ),
-            "automation",
-        ),
-    ),
     entry(&["agent"], surface(GROUP, "automation")),
     entry(
         &["agent", "serve"],
@@ -1372,6 +1302,99 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     "agent_fanout_start",
                 )],
             ),
+            "automation",
+        ),
+    ),
+    entry(&["agent", "presence"], surface(GROUP, "automation")),
+    entry(
+        &["agent", "presence", "list"],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["agent presence list"]),
+                &[json_discriminator(
+                    Some("agent presence list"),
+                    "output_kind",
+                    "agent_presence_list",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "presence", "show"],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["agent presence show"]),
+                &[json_discriminator(
+                    Some("agent presence show"),
+                    "output_kind",
+                    "agent_presence_show",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "presence", "explain"],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["agent presence explain"]),
+                &[json_discriminator(
+                    Some("agent presence explain"),
+                    "output_kind",
+                    "agent_presence_explain",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "presence", "complete"],
+        surface(
+            json_discriminators(
+                documented_schemas(METADATA_MUTATION, &["agent presence complete"]),
+                &[json_discriminator(
+                    Some("agent presence complete"),
+                    "output_kind",
+                    "agent_presence_complete",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(&["agent", "provenance"], surface(GROUP, "automation")),
+    entry(
+        &["agent", "provenance", "begin"],
+        surface(
+            documented_schemas(METADATA_MUTATION, &["agent provenance begin"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "provenance", "segment"],
+        surface(
+            documented_schemas(METADATA_MUTATION, &["agent provenance segment"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "provenance", "end"],
+        surface(
+            documented_schemas(METADATA_MUTATION, &["agent provenance end"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "provenance", "show"],
+        surface(
+            documented_schemas(READ_JSON, &["agent provenance show"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "provenance", "list"],
+        surface(
+            documented_schemas(READ_JSON, &["agent provenance list"]),
             "automation",
         ),
     ),
@@ -2367,42 +2390,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["semantic", "hot"],
         opaque_schemas(READ_JSON, &["semantic hot"]),
-    ),
-    entry(&["session"], surface(GROUP, "automation")),
-    entry(
-        &["session", "start"],
-        surface(
-            documented_schemas(METADATA_MUTATION, &["session start"]),
-            "automation",
-        ),
-    ),
-    entry(
-        &["session", "segment"],
-        surface(
-            documented_schemas(METADATA_MUTATION, &["session segment"]),
-            "automation",
-        ),
-    ),
-    entry(
-        &["session", "end"],
-        surface(
-            documented_schemas(METADATA_MUTATION, &["session end"]),
-            "automation",
-        ),
-    ),
-    entry(
-        &["session", "show"],
-        surface(
-            documented_schemas(READ_JSON, &["session show"]),
-            "automation",
-        ),
-    ),
-    entry(
-        &["session", "list"],
-        surface(
-            documented_schemas(READ_JSON, &["session list"]),
-            "automation",
-        ),
     ),
     entry(&["shell"], category(READ_TEXT, "repo")),
     entry(&["shell", "init"], READ_TEXT),
@@ -4556,6 +4543,19 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 AgentFanoutCommands::Plan(_) => vec!["agent", "fanout", "plan"],
                 AgentFanoutCommands::Start(_) => vec!["agent", "fanout", "start"],
             },
+            AgentCommands::Presence(command) => match command {
+                AgentPresenceCommands::List(_) => vec!["agent", "presence", "list"],
+                AgentPresenceCommands::Show(_) => vec!["agent", "presence", "show"],
+                AgentPresenceCommands::Explain(_) => vec!["agent", "presence", "explain"],
+                AgentPresenceCommands::Complete(_) => vec!["agent", "presence", "complete"],
+            },
+            AgentCommands::Provenance(command) => match command {
+                AgentProvenanceCommands::Begin(_) => vec!["agent", "provenance", "begin"],
+                AgentProvenanceCommands::Segment(_) => vec!["agent", "provenance", "segment"],
+                AgentProvenanceCommands::End(_) => vec!["agent", "provenance", "end"],
+                AgentProvenanceCommands::Show(_) => vec!["agent", "provenance", "show"],
+                AgentProvenanceCommands::List(_) => vec!["agent", "provenance", "list"],
+            },
         },
         Commands::Maintenance { command } => match command {
             MaintenanceCommands::Inspect => vec!["maintenance", "inspect"],
@@ -4571,20 +4571,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             HookCommands::Install { .. } => vec!["hook", "install"],
             HookCommands::Uninstall { .. } => vec!["hook", "uninstall"],
             HookCommands::Events { .. } => vec!["hook", "events"],
-        },
-        Commands::Actor { command } => match command {
-            ActorCommands::Spawn(_) => vec!["actor", "spawn"],
-            ActorCommands::List(_) => vec!["actor", "list"],
-            ActorCommands::Show(_) => vec!["actor", "show"],
-            ActorCommands::Explain(_) => vec!["actor", "explain"],
-            ActorCommands::Done(_) => vec!["actor", "done"],
-        },
-        Commands::Session { command } => match command {
-            SessionCommands::Start(_) => vec!["session", "start"],
-            SessionCommands::Segment(_) => vec!["session", "segment"],
-            SessionCommands::End(_) => vec!["session", "end"],
-            SessionCommands::Show(_) => vec!["session", "show"],
-            SessionCommands::List(_) => vec!["session", "list"],
         },
     }
 }

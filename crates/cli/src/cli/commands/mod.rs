@@ -2,11 +2,12 @@
 //! CLI command implementations.
 
 mod action_line;
-mod actor_cmd;
 mod adopt;
 mod advice;
 mod agent;
 mod agent_cmd;
+mod agent_presence;
+mod agent_provenance;
 mod auto_capture;
 mod blame;
 mod checkpoint;
@@ -63,7 +64,6 @@ mod run_cmd;
 mod schemas;
 #[cfg(feature = "semantic")]
 mod semantic_cmd;
-mod session;
 mod shell;
 mod show;
 pub(crate) mod snapshot;
@@ -89,17 +89,8 @@ mod workflow;
 pub(crate) mod worktree_cmd;
 mod worktree_safety;
 
-pub use actor_cmd::{
-    cmd_actor_done, cmd_actor_explain, cmd_actor_list, cmd_actor_show, cmd_actor_spawn,
-};
 pub use adopt::cmd_adopt;
 pub use advice::RecoveryAdvice;
-// `agent` (singular) is main's local-daemon dispatcher (`heddle agent
-// serve|status|stop`). `agent_cmd` is the reservation/orchestration
-// API (`heddle agent reserve|capture|ready|release|list`). They share
-// a top-level CLI namespace; the dispatcher in main.rs disambiguates
-// by subcommand. See [docs/AGENT_API.md] (TODO once docs land) for
-// the boundary.
 pub use agent::run as cmd_agent;
 pub use agent_cmd::{
     agent_api_schema, cmd_agent_capture, cmd_agent_heartbeat, cmd_agent_list, cmd_agent_ready,
@@ -170,9 +161,6 @@ pub use run_cmd::cmd_run;
 pub use schemas::{cmd_schemas, documented_schema_verbs, schema_for_verb, schema_verbs};
 #[cfg(feature = "semantic")]
 pub use semantic_cmd::cmd_semantic;
-pub use session::{
-    cmd_session_end, cmd_session_list, cmd_session_segment, cmd_session_show, cmd_session_start,
-};
 pub use shell::cmd_shell;
 pub use show::cmd_show;
 pub use snapshot::{SnapshotAgentOverrides, cmd_snapshot};

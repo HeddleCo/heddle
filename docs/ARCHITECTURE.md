@@ -167,21 +167,24 @@ Important current behavior:
 - `heddle start <thread>` records thread and agent metadata while keeping execution roots private by default
 - the oplog is still global across worktrees, so undo/redo semantics are repository-global rather than checkout-local
 
-## Threads, Actors, And Sessions
+## Threads, Presence, Leases, And Provenance
 
 Heddle's current coordination model is best understood as:
 
 - **thread** - the human-facing work context
-- **actor** - the active worker on that thread
-- **session** - the execution and provenance record for that actor
-- **segment** - a provider/model epoch within a session
+- **agent presence** - attribution and work context for an active worker
+- **writer lease** - exclusive, token-authenticated write authority for a thread
+- **provenance session** - the execution provenance record for an agent
+- **provenance segment** - a provider/model epoch within a provenance session
 
 This matters for harness integration work:
 
 - Heddle should follow supported harnesses ambiently rather than requiring users to run tools through Heddle
-- actors are stored in the lightweight registry under `.heddle/agents/`
+- presence records are stored separately from writer leases
 - harness-native identities are tracked separately from Heddle-local reconnect identifiers
-- `heddle actor ...` is the user-facing inspection surface over that registry
+- `heddle agent presence ...` inspects attribution without granting write authority
+- `heddle agent reserve|heartbeat|capture|ready|release` is the writer hot loop
+- `heddle agent provenance ...` records provider, model, and policy epochs
 
 The current harness integration logic lives in `cli`, not in `objects` or `repo`, because it is still CLI/runtime orchestration rather than a stable repository primitive.
 
