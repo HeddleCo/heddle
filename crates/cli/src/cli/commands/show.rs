@@ -141,7 +141,7 @@ fn cmd_show_with_output_kind(
             lint_warnings: v.lint_warnings,
         }),
         git_checkpoint: repo
-            .latest_git_checkpoint_for_change(&state.state_id)
+            .latest_git_checkpoint_for_state(&state.state_id)
             .ok()
             .flatten()
             .map(|record| record.git_commit),

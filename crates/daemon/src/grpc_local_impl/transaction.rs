@@ -410,7 +410,7 @@ mod tests {
             state: STATE_ACTIVE.to_string(),
             started_at_secs: 1,
             started_by_email: "trap@example.com".to_string(),
-            base_state: StateId::from_bytes([0; 16]).to_string_full(),
+            base_state: StateId::from_bytes([0; 32]).to_string_full(),
             buffered_ops: vec!["trap-op".to_string()],
             aborted_reason: None,
         };

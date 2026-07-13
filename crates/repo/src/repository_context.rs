@@ -446,11 +446,7 @@ fn split_path(path: &Path) -> Option<(&str, &Path)> {
 
 #[cfg(test)]
 mod tests {
-    use crypto::Ed25519Signer;
-    use objects::object::{
-        Annotation, AnnotationKind, Attribution, Blob, Principal, StateAttachment,
-        StateAttachmentBody, StateId,
-    };
+    use objects::object::{Annotation, AnnotationKind, StateAttachment, StateAttachmentBody};
     use tempfile::TempDir;
 
     use super::{Repository, *};
@@ -472,13 +468,6 @@ mod tests {
             None,
             None,
         )
-    }
-
-    fn legacy_context_root(repo: &Repository, path: &str, blob: &ContextBlob) -> ContentHash {
-        let bytes = blob.encode().unwrap();
-        let blob_hash = repo.store.put_blob(&Blob::new(bytes)).unwrap();
-        repo.insert_leaf_at_path(&Tree::new(), Path::new(path), blob_hash)
-            .unwrap()
     }
 
     #[test]

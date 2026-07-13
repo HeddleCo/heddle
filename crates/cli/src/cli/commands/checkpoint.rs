@@ -196,7 +196,7 @@ fn create_git_checkpoint_inner(
                 )));
             }
         }
-        if let Some(record) = repo.latest_git_checkpoint_for_change(&existing_state.state_id)? {
+        if let Some(record) = repo.latest_git_checkpoint_for_state(&existing_state.state_id)? {
             return Ok(record);
         }
         git_overlay_txn::preflight_git_checkpoint_identity_for_principal(

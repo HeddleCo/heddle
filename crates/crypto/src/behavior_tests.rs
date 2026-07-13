@@ -8,7 +8,7 @@ use tempfile::TempDir;
 
 use crate::{
     Ed25519Signer, P256Signer, Signer, SignerError, StateSignatureError, load_signer,
-    verify_payload_signature,
+    state_signature_from_signer, verify_payload_signature, verify_state_signature_bytes,
 };
 
 fn assert_verifies_with_dispatch(signer: &dyn Signer, payload: &[u8]) {

@@ -321,7 +321,7 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
         tree: state.tree.short(),
         intent: state.intent.clone(),
         git_checkpoint: repo
-            .latest_git_checkpoint_for_change(&state.state_id)
+            .latest_git_checkpoint_for_state(&state.state_id)
             .ok()
             .flatten()
             .map(|record| DiagnoseCheckpointOutput {

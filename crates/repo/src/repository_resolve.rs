@@ -20,10 +20,10 @@ impl Repository {
         }
 
         if self.capability() == super::RepositoryCapability::GitOverlay {
-            if let Some(id) = self.git_overlay_mapped_change_for_branch(spec)? {
+            if let Some(id) = self.git_overlay_mapped_state_for_branch(spec)? {
                 return Ok(Some(id));
             }
-            if let Some(id) = self.git_overlay_mapped_change_for_tag(spec)? {
+            if let Some(id) = self.git_overlay_mapped_state_for_tag(spec)? {
                 return Ok(Some(id));
             }
         }

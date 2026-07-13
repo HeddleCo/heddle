@@ -733,7 +733,7 @@ mod tests {
         let _ = hydrator.hydrate(&repo, &blake3);
 
         // Advance the local "main" thread to a fresh, distinct StateId.
-        let advanced = StateId::generate();
+        let advanced = StateId::from_bytes([1; 32]);
         assert_ne!(advanced, first_tip, "fresh StateId must differ");
         repo.refs()
             .set_thread(&ThreadName::from("main"), &advanced)
@@ -878,7 +878,7 @@ mod tests {
             repo: Arc::new(repo),
             repo_path: "org/acme/repo".to_string(),
             remote_thread: "main".to_string(),
-            target_state: StateId::generate(),
+            target_state: StateId::from_bytes([2; 32]),
             reply,
         };
         assert_send_static(&message);

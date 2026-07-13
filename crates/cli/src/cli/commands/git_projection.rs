@@ -909,14 +909,14 @@ fn pending_capture_before_commit(repo: &Repository) -> Result<Option<StateId>> {
     let Some(tip) = repo.git_overlay_branch_tip(&branch)? else {
         return Ok(None);
     };
-    let Some(tip) = tip.mapped_change else {
+    let Some(tip) = tip.mapped_state else {
         return Ok(None);
     };
     if tip == current.state_id {
         return Ok(None);
     }
     if repo
-        .latest_git_checkpoint_for_change(&current.state_id)?
+        .latest_git_checkpoint_for_state(&current.state_id)?
         .is_some()
     {
         return Ok(None);

@@ -276,6 +276,7 @@ fn test_signature_tampering_detected() {
         .latest_state_attachment(&state_id, repo::StateAttachmentKind::Signature)
         .unwrap()
         .unwrap();
+    let prior_id = prior.id();
     let objects::object::StateAttachmentBody::Signature(mut signature) = prior.body else {
         panic!("signature attachment")
     };
@@ -287,7 +288,7 @@ fn test_signature_tampering_detected() {
         body: objects::object::StateAttachmentBody::Signature(signature),
         attribution: state.attribution,
         created_at: chrono::Utc::now(),
-        supersedes: Some(prior.id()),
+        supersedes: Some(prior_id),
     })
     .unwrap();
 

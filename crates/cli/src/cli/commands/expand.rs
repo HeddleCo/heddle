@@ -70,7 +70,7 @@ pub fn cmd_expand(cli: &Cli, reference: String) -> Result<()> {
         .map(|source| require_resolved_state(&repo, source).map(ExpandedCaptureOutput::from))
         .collect::<Result<Vec<_>>>()?;
     let git_commit = repo
-        .latest_git_checkpoint_for_change(&collapse.result)
+        .latest_git_checkpoint_for_state(&collapse.result)
         .ok()
         .flatten()
         .map(|record| record.git_commit);
@@ -134,7 +134,7 @@ fn resolve_expand_target(repo: &Repository, reference: &str) -> Result<StateId> 
 }
 
 fn mapped_change_for_git_oid(repo: &Repository, git_oid: &str) -> Result<Option<StateId>> {
-    repo.git_overlay_mapped_change_for_git_commit(git_oid)
+    repo.git_overlay_mapped_state_for_git_commit(git_oid)
         .map_err(Into::into)
 }
 

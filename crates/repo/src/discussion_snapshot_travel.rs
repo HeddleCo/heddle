@@ -8,7 +8,7 @@ use std::{collections::HashMap, path::PathBuf};
 use objects::{
     object::{
         Blob, ContentHash, Discussion, DiscussionResolution, DiscussionsBlob, EntryType, State,
-        StateAttachment, StateAttachmentBody, StateId, Tree,
+        StateAttachmentBody, StateId, Tree,
     },
     store::ObjectStore,
 };
@@ -192,10 +192,9 @@ mod tests {
     use std::fs;
 
     use objects::object::{
-        Attribution, Discussion, DiscussionTurn, Principal, StateId, SymbolAnchor, ThreadName,
+        Attribution, Discussion, DiscussionTurn, Principal, StateAttachment, StateId, SymbolAnchor,
         VisibilityTier,
     };
-    use refs::Head;
     use tempfile::TempDir;
 
     use super::*;

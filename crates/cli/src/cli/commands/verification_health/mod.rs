@@ -381,7 +381,7 @@ fn uncheckpointed_heddle_state_is_ahead_of_git(repo: &Repository) -> anyhow::Res
     let Some(tip) = current_branch_tip(repo)? else {
         return Ok(false);
     };
-    let Some(mapped) = tip.mapped_change else {
+    let Some(mapped) = tip.mapped_state else {
         return Ok(false);
     };
     let Some(current) = repo.current_state()? else {
@@ -394,7 +394,7 @@ fn uncheckpointed_heddle_state_is_ahead_of_git(repo: &Repository) -> anyhow::Res
         return Ok(false);
     }
     Ok(repo
-        .latest_git_checkpoint_for_change(&current.state_id)?
+        .latest_git_checkpoint_for_state(&current.state_id)?
         .is_none())
 }
 
@@ -1124,13 +1124,13 @@ fn upstream_thread_matches_current_git_tip(repo: &Repository, upstream: &str) ->
     else {
         return false;
     };
-    repo.git_overlay_mapped_change_for_branch(upstream)
+    repo.git_overlay_mapped_state_for_branch(upstream)
         .or(Ok(None))
         .and_then(|mapped| {
             if mapped.is_some() {
                 Ok(mapped)
             } else {
-                repo.git_overlay_mapped_change_for_remote_tracking_ref(upstream)
+                repo.git_overlay_mapped_state_for_remote_tracking_ref(upstream)
             }
         })
         .ok()

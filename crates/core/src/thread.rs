@@ -663,9 +663,9 @@ fn build_thread_view(
                 .then(|| {
                     branch_tip
                         .as_ref()
-                        .and_then(|tip| tip.mapped_change)
+                        .and_then(|tip| tip.mapped_state)
                         .or_else(|| {
-                            repo.git_overlay_mapped_change_for_branch(&name)
+                            repo.git_overlay_mapped_state_for_branch(&name)
                                 .ok()
                                 .flatten()
                         })
@@ -951,7 +951,7 @@ mod tests {
             manager.save(&sample_thread(name, false)).unwrap();
             let _ = repo.refs().set_thread(
                 &ThreadName::new(name),
-                &objects::object::StateId::from_bytes([0u8; 16]),
+                &objects::object::StateId::from_bytes([0u8; 32]),
             );
         }
 

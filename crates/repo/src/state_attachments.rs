@@ -4,6 +4,8 @@ use objects::{
     object::{StateAttachment, StateAttachmentBody, StateAttachmentId, StateId},
     store::ObjectStore,
 };
+use oplog::OpLogBackend;
+use refs::RefBackend;
 
 use crate::{HeddleError, Repository, Result};
 
@@ -30,9 +32,14 @@ impl StateAttachmentKind {
     }
 }
 
-impl Repository {
+impl<R, O, S> Repository<R, O, S>
+where
+    R: RefBackend,
+    O: OpLogBackend,
+    S: ObjectStore,
+{
     pub fn put_state_attachment(&self, attachment: &StateAttachment) -> Result<StateAttachmentId> {
-        if !self.store.has_state(&attachment.state_id)? {
+        if !self.store().has_state(&attachment.state_id)? {
             return Err(HeddleError::StateNotFound(attachment.state_id));
         }
 
@@ -48,7 +55,10 @@ impl Repository {
         }
 
         let id = attachment.id();
-        if let Some(existing) = self.store.get_state_attachment(&attachment.state_id, &id)? {
+        if let Some(existing) = self
+            .store()
+            .get_state_attachment(&attachment.state_id, &id)?
+        {
             return match self.get_state_attachment(&attachment.state_id, &id)? {
                 Some(_) if existing == *attachment => Ok(id),
                 _ => Err(HeddleError::InvalidObject(
@@ -56,7 +66,7 @@ impl Repository {
                 )),
             };
         }
-        self.store.put_state_attachment(attachment)
+        self.store().put_state_attachment(attachment)
     }
 
     pub fn get_state_attachment(
@@ -64,11 +74,11 @@ impl Repository {
         state_id: &StateId,
         attachment_id: &StateAttachmentId,
     ) -> Result<Option<StateAttachment>> {
-        self.store.get_state_attachment(state_id, attachment_id)
+        self.store().get_state_attachment(state_id, attachment_id)
     }
 
     pub fn list_state_attachments(&self, state_id: &StateId) -> Result<Vec<StateAttachment>> {
-        let mut attachments = self.store.list_state_attachments(state_id)?;
+        let mut attachments = self.store().list_state_attachments(state_id)?;
         attachments.sort_by_key(|attachment| (attachment.created_at, attachment.id()));
         Ok(attachments)
     }

@@ -277,7 +277,10 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
 #[cfg(test)]
 mod tests {
     use objects::{
-        object::{Attribution, Blob, ContentHash, Principal, State, Tree, TreeEntry},
+        object::{
+            Attribution, Blob, ContentHash, Principal, State, StateAttachment, StateAttachmentBody,
+            Tree, TreeEntry,
+        },
         store::{FsStore, ObjectStore},
     };
     use tempfile::TempDir;
@@ -536,5 +539,34 @@ mod tests {
             "state-visibility",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn state_attachment_roundtrips_through_wire_data() {
+        let (_source_temp, source) = create_test_store();
+        let (_dest_temp, dest) = create_test_store();
+        let tree = source.put_tree(&Tree::new()).unwrap();
+        let state = State::new(tree, vec![], test_attribution());
+        source.put_state(&state).unwrap();
+        dest.put_state(&state).unwrap();
+        let attachment = StateAttachment {
+            state_id: state.id(),
+            body: StateAttachmentBody::RiskSignals(ContentHash::compute(b"signals")),
+            attribution: test_attribution(),
+            created_at: chrono::Utc::now(),
+            supersedes: None,
+        };
+        source.put_state_attachment(&attachment).unwrap();
+        let id = ObjectId::StateAttachment {
+            state: state.id(),
+            id: attachment.id(),
+        };
+        let data = load_object_data(&source, &id, ObjectType::StateAttachment).unwrap();
+        store_received_object(&dest, &data).unwrap();
+        assert_eq!(
+            dest.get_state_attachment(&state.id(), &attachment.id())
+                .unwrap(),
+            Some(attachment)
+        );
     }
 }

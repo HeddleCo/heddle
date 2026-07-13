@@ -1581,7 +1581,7 @@ fn source_git_parent_for_thread(
     let Some(tip) = repo.git_overlay_branch_tip(track_name)? else {
         return Ok(None);
     };
-    let Some(mapped_change) = tip.mapped_change else {
+    let Some(mapped_change) = tip.mapped_state else {
         return Ok(None);
     };
     if mapped_change == *merge_target_id {
@@ -3131,7 +3131,7 @@ mod tests {
 
     #[test]
     fn empty_diff_output_is_self_consistent_and_serializes() {
-        let id = objects::object::StateId::generate();
+        let id = objects::object::StateId::from_bytes([69; 32]);
         let out = empty_diff_output(&id);
 
         assert_eq!(out.from_state.as_deref(), Some(id.short()).as_deref());

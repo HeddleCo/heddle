@@ -525,8 +525,8 @@ mod tests {
 
     #[test]
     fn select_thread_base_rules() {
-        let a = StateId::generate();
-        let b = StateId::generate();
+        let a = StateId::from_bytes([4; 32]);
+        let b = StateId::from_bytes([5; 32]);
         assert_ne!(a, b);
 
         assert_eq!(

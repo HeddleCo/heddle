@@ -3,8 +3,8 @@ use std::{fs, path::Path};
 
 use objects::{
     object::{
-        Attribution, Blob, ContentHash, EntryType, FileMode, Principal, State, StateId, ThreadName,
-        Tree, TreeEntry,
+        Attribution, Blob, ContentHash, EntryType, FileMode, Principal, State, ThreadName, Tree,
+        TreeEntry,
     },
     store::{ObjectStore, ShallowInfo},
     util::{gitlink_placeholder_bytes, symlink_target_bytes},

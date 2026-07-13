@@ -860,7 +860,7 @@ mod tests {
     fn redaction_undo_preflight_precedence() {
         let blob = ContentHash::from_bytes([1u8; 32]);
         let redaction_id = ContentHash::from_bytes([2u8; 32]);
-        let state = StateId::from_bytes([3u8; 16]);
+        let state = StateId::from_bytes([3u8; 32]);
         let facts = RedactionUndoBatchFacts {
             purges: vec![PurgeOpRef {
                 op_id: 1,
@@ -908,7 +908,7 @@ mod tests {
         assert!(check_states_reachable(UndoHistoryAction::Undo, &[]).is_ok());
         let missing = vec![RequiredStateRef {
             op_id: 3,
-            state: StateId::from_bytes([4u8; 16]),
+            state: StateId::from_bytes([4u8; 32]),
         }];
         assert_eq!(
             check_states_reachable(UndoHistoryAction::Undo, &missing)

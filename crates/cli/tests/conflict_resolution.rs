@@ -297,9 +297,9 @@ fn merge_manager(temp: &TempDir) -> (Repository, MergeStateManager) {
 
 fn sample_ids() -> (StateId, StateId, StateId) {
     (
-        StateId::generate(),
-        StateId::generate(),
-        StateId::generate(),
+        StateId::from_bytes([12; 32]),
+        StateId::from_bytes([13; 32]),
+        StateId::from_bytes([14; 32]),
     )
 }
 
@@ -400,7 +400,7 @@ fn merge_state_carry_forward_repoints_ours_without_ending_merge() {
     let temp = TempDir::new().unwrap();
     let (_repo, manager) = merge_manager(&temp);
     let (ours, theirs, base) = sample_ids();
-    let new_ours = StateId::generate();
+    let new_ours = StateId::from_bytes([15; 32]);
 
     manager
         .start(

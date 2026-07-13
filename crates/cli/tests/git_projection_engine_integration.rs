@@ -32,7 +32,8 @@ use cli::git_projection_engine::{
 };
 use objects::{
     object::{
-        Blob, ContentHash, EntryType, FileMode, MarkerName, StateId, ThreadName, Tree, TreeEntry,
+        Blob, ChangeId, ContentHash, EntryType, FileMode, MarkerName, StateId, ThreadName, Tree,
+        TreeEntry,
     },
     store::ObjectStore,
 };
@@ -816,7 +817,7 @@ fn sync_tags_peels_annotated_tags() {
         &mut git_projection,
         git_repo.workdir().expect("workdir").to_path_buf(),
     );
-    let state_id = StateId::generate();
+    let state_id = StateId::from_bytes([61; 32]);
     test_support::mapping_mut(&mut git_projection).insert(state_id, commit_oid);
 
     let synced = sync_tags(&mut git_projection).expect("sync tags");
@@ -934,7 +935,7 @@ fn export_tree_substitutes_stub_for_redacted_blob() {
     // Declare a redaction on the blob. The redaction's `state` doesn't
     // matter for export — the store is keyed by blob hash — but we
     // populate the field so the stub renders a believable audit line.
-    let dummy_state = StateId::from_bytes([42u8; 16]);
+    let dummy_state = StateId::from_bytes([42u8; 32]);
     repo.put_redaction(Redaction {
         redacted_blob: blob_hash,
         state: dummy_state,
@@ -1975,7 +1976,7 @@ fn mapping_persists_between_runs() {
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
     let (_git_temp, git_repo) = init_git_repo();
 
-    let state_id = StateId::generate();
+    let state_id = StateId::from_bytes([62; 32]);
     let git_oid: ObjectId = "0909090909090909090909090909090909090909"
         .parse()
         .expect("oid");
@@ -2005,9 +2006,10 @@ fn mapping_rebuilds_from_heddle_notes() {
 
     let tree_oid = empty_tree_oid(&git_repo);
     let commit_oid = commit_with_tree(&git_repo, Some("refs/heads/main"), tree_oid, "base", &[]);
-    let state_id = StateId::generate();
+    let state_id = StateId::from_bytes([63; 32]);
     let note = git_notes::HeddleNote {
         state_id: state_id.to_string_full(),
+        change_id: ChangeId::from_bytes([1; 16]).to_string_full(),
         agent: None,
         confidence: None,
         status: "published".to_string(),
@@ -2038,13 +2040,14 @@ fn mapping_rebuild_prefers_heddle_notes_over_stale_cache() {
 
     let tree_oid = empty_tree_oid(&git_repo);
     let commit_oid = commit_with_tree(&git_repo, Some("refs/heads/main"), tree_oid, "base", &[]);
-    let state_id = StateId::generate();
+    let state_id = StateId::from_bytes([64; 32]);
     let stale_oid: ObjectId = "abababababababababababababababababababab"
         .parse()
         .expect("oid");
 
     let note = git_notes::HeddleNote {
         state_id: state_id.to_string_full(),
+        change_id: ChangeId::from_bytes([2; 16]).to_string_full(),
         agent: None,
         confidence: None,
         status: "published".to_string(),
@@ -2091,7 +2094,7 @@ fn mapping_rebuild_prefers_heddle_notes_over_stale_cache() {
 #[test]
 fn test_sync_mapping() {
     let mut mapping = SyncMapping::new();
-    let state_id = StateId::generate();
+    let state_id = StateId::from_bytes([65; 32]);
     let oid: ObjectId = "0101010101010101010101010101010101010101".parse().unwrap();
     mapping.insert(state_id, oid);
     assert_eq!(mapping.get_git(&state_id), Some(oid));
@@ -2120,7 +2123,7 @@ fn sync_branches_propagates_track_write_failures() {
         &mut git_projection,
         git_repo.workdir().expect("workdir").to_path_buf(),
     );
-    let state_id = StateId::generate();
+    let state_id = StateId::from_bytes([66; 32]);
     test_support::mapping_mut(&mut git_projection).insert(state_id, commit_oid);
 
     let result = sync_branches(&mut git_projection);
@@ -2152,7 +2155,7 @@ fn sync_tags_propagates_marker_write_failures() {
         &mut git_projection,
         git_repo.workdir().expect("workdir").to_path_buf(),
     );
-    let state_id = StateId::generate();
+    let state_id = StateId::from_bytes([67; 32]);
     test_support::mapping_mut(&mut git_projection).insert(state_id, commit_oid);
 
     let result = sync_tags(&mut git_projection);
@@ -2472,7 +2475,7 @@ fn failed_import_restores_mapping_and_overrides() {
     let mut git_projection = GitProjection::new(&repo);
     test_support::set_commit_message_override(
         &mut git_projection,
-        StateId::from_bytes([3; 16]),
+        StateId::from_bytes([3; 32]),
         "pre-call override".to_string(),
     );
     let pre_mapping = test_support::mapping(&git_projection).clone();

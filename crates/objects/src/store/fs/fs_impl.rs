@@ -2,10 +2,11 @@
 //! ObjectStore implementation for FsStore.
 
 use std::{
-    fs,
+    fs::{self, OpenOptions},
     path::{Path, PathBuf},
 };
 
+use fs2::FileExt;
 use heddle_format::compression::{header_uncompressed_size, is_compressed};
 use tracing::{debug, instrument, trace};
 
@@ -14,8 +15,9 @@ use super::{
     fs_io::{list_hashes_from_dir, read_file_bytes, read_file_header},
     fs_paths::{
         action_path, actions_dir, blobs_dir, hash_path, redaction_path, redactions_dir,
-        state_attachment_index_path, state_attachment_path, state_path, state_visibility_dir,
-        state_visibility_path, states_dir, trees_dir,
+        state_attachment_index_lock_path, state_attachment_index_path, state_attachment_path,
+        state_attachments_dir, state_path, state_visibility_dir, state_visibility_path, states_dir,
+        trees_dir,
     },
 };
 use crate::{
@@ -102,6 +104,70 @@ fn validate_loaded_action(requested_id: &ActionId, action: Action) -> Result<Act
 fn validate_action_serialized(data: &[u8], id: ActionId) -> Result<Action> {
     let action: Action = rmp_serde::from_slice(data)?;
     validate_loaded_action(&id, action)
+}
+
+impl FsStore {
+    fn with_state_attachment_index_lock<T>(
+        &self,
+        state: &StateId,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let path = state_attachment_index_lock_path(&self.root, state);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        file.lock_exclusive()?;
+        let result = operation();
+        file.unlock()?;
+        result
+    }
+
+    fn rebuild_state_attachment_index(&self, state: &StateId) -> Result<Vec<StateAttachmentId>> {
+        #[cfg(test)]
+        fs::write(
+            state_attachment_index_path(&self.root, state).with_extension("rebuild-marker"),
+            b"rebuilt",
+        )?;
+        let mut ids = Vec::new();
+        let dir = state_attachments_dir(&self.root, state);
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries {
+                let attachment: StateAttachment = rmp_serde::from_slice(&fs::read(entry?.path())?)?;
+                if attachment.state_id != *state {
+                    return Err(HeddleError::InvalidObject(
+                        "state attachment stored under wrong state".to_string(),
+                    ));
+                }
+                ids.push(attachment.id());
+            }
+        }
+        if let Ok(manager) = self.pack_manager().read() {
+            for pack_id in manager.list_all_ids()? {
+                let PackObjectId::Hash(hash) = pack_id else {
+                    continue;
+                };
+                let Some((ObjectType::StateAttachment, bytes)) =
+                    manager.get_hashed_object(&hash)?
+                else {
+                    continue;
+                };
+                let attachment: StateAttachment = rmp_serde::from_slice(&bytes)?;
+                if attachment.state_id == *state {
+                    ids.push(attachment.id());
+                }
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        let path = state_attachment_index_path(&self.root, state);
+        self.write_loose_object_atomic(&path, &rmp_serde::to_vec_named(&ids)?)?;
+        Ok(ids)
+    }
 }
 
 /// Validate every entry in a pack against its tagged id (checksum
@@ -867,7 +933,7 @@ impl ObjectStore for FsStore {
     ) -> Result<Option<StateAttachment>> {
         let path = state_attachment_path(&self.root, state, id);
         let bytes = if let Some(bytes) = read_file_bytes(&path)? {
-            bytes
+            bytes.as_slice().to_vec()
         } else if let Ok(manager) = self.pack_manager().read()
             && let Some((ObjectType::StateAttachment, bytes)) =
                 manager.get_hashed_object(id.as_hash())?
@@ -887,35 +953,52 @@ impl ObjectStore for FsStore {
 
     fn put_state_attachment(&self, attachment: &StateAttachment) -> Result<StateAttachmentId> {
         let id = attachment.id();
-        let path = state_attachment_path(&self.root, &attachment.state_id, &id);
-        self.write_loose_object_atomic(&path, &rmp_serde::to_vec_named(attachment)?)?;
-        let index_path = state_attachment_index_path(&self.root, &attachment.state_id);
-        let mut ids: Vec<StateAttachmentId> = read_file_bytes(&index_path)?
-            .map(|bytes| rmp_serde::from_slice(&bytes))
-            .transpose()?
-            .unwrap_or_default();
-        if !ids.contains(&id) {
-            ids.push(id);
-            ids.sort();
-            self.write_loose_object_atomic(&index_path, &rmp_serde::to_vec_named(&ids)?)?;
-        }
-        Ok(id)
+        self.with_state_attachment_index_lock(&attachment.state_id, || {
+            let index_path = state_attachment_index_path(&self.root, &attachment.state_id);
+            let mut ids: Vec<StateAttachmentId> = match read_file_bytes(&index_path)? {
+                Some(bytes) => rmp_serde::from_slice(bytes.as_slice())?,
+                None => self.rebuild_state_attachment_index(&attachment.state_id)?,
+            };
+            if !ids.contains(&id) {
+                ids.push(id);
+                ids.sort();
+                self.write_loose_object_atomic(&index_path, &rmp_serde::to_vec_named(&ids)?)?;
+            }
+            let path = state_attachment_path(&self.root, &attachment.state_id, &id);
+            self.write_loose_object_atomic(&path, &rmp_serde::to_vec_named(attachment)?)?;
+            Ok(id)
+        })
     }
 
     fn list_state_attachments(&self, state: &StateId) -> Result<Vec<StateAttachment>> {
-        let index_path = state_attachment_index_path(&self.root, state);
-        let ids: Vec<StateAttachmentId> = read_file_bytes(&index_path)?
-            .map(|bytes| rmp_serde::from_slice(&bytes))
-            .transpose()?
-            .unwrap_or_default();
-        let mut attachments = Vec::new();
-        for id in ids {
-            let attachment = self.get_state_attachment(state, &id)?.ok_or_else(|| {
-                HeddleError::InvalidObject(format!("indexed state attachment {id} is missing"))
-            })?;
-            attachments.push(attachment);
-        }
-        Ok(attachments)
+        self.with_state_attachment_index_lock(state, || {
+            let index_path = state_attachment_index_path(&self.root, state);
+            let mut ids: Vec<StateAttachmentId> = match read_file_bytes(&index_path)? {
+                Some(bytes) => rmp_serde::from_slice(bytes.as_slice())?,
+                None => self.rebuild_state_attachment_index(state)?,
+            };
+            let mut attachments = Vec::new();
+            let mut stale = false;
+            for id in &ids {
+                match self.get_state_attachment(state, id)? {
+                    Some(attachment) => attachments.push(attachment),
+                    None => stale = true,
+                }
+            }
+            if stale {
+                ids = self.rebuild_state_attachment_index(state)?;
+                attachments.clear();
+                for id in ids {
+                    let attachment = self.get_state_attachment(state, &id)?.ok_or_else(|| {
+                        HeddleError::InvalidObject(format!(
+                            "rebuilt state attachment index references missing {id}"
+                        ))
+                    })?;
+                    attachments.push(attachment);
+                }
+            }
+            Ok(attachments)
+        })
     }
 
     #[instrument(skip(self), fields(id = %id))]
@@ -1229,5 +1312,97 @@ impl ObjectStore for FsStore {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod state_attachment_tests {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+
+    use super::*;
+    use crate::object::{Attribution, Principal, StateAttachmentBody};
+    use crate::store::{CompressionConfig, pack::PackBuilder};
+
+    fn fixture(store: &FsStore) -> (State, StateAttachment) {
+        let tree = store.put_tree(&Tree::new()).unwrap();
+        let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
+        let state = State::new(tree, vec![], attribution.clone());
+        store.put_state(&state).unwrap();
+        let attachment = StateAttachment {
+            state_id: state.id(),
+            body: StateAttachmentBody::Context(ContentHash::compute(b"context")),
+            attribution,
+            created_at: Utc::now(),
+            supersedes: None,
+        };
+        (state, attachment)
+    }
+
+    #[test]
+    fn concurrent_attachment_writes_keep_every_index_entry() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(FsStore::new(temp.path()));
+        let (state, base) = fixture(&store);
+        let mut threads = Vec::new();
+        for byte in 0..16u8 {
+            let store = Arc::clone(&store);
+            let mut attachment = base.clone();
+            attachment.body = StateAttachmentBody::Context(ContentHash::compute(&[byte]));
+            threads.push(std::thread::spawn(move || {
+                store.put_state_attachment(&attachment).unwrap();
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(store.list_state_attachments(&state.id()).unwrap().len(), 16);
+    }
+
+    #[test]
+    fn missing_index_rebuilds_from_loose_objects() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = FsStore::new(temp.path());
+        let (state, attachment) = fixture(&store);
+        store.put_state_attachment(&attachment).unwrap();
+        fs::remove_file(state_attachment_index_path(&store.root, &state.id())).unwrap();
+        assert_eq!(
+            store.list_state_attachments(&state.id()).unwrap(),
+            vec![attachment]
+        );
+    }
+
+    #[test]
+    fn packed_attachment_uses_state_index_for_lookup() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = FsStore::new(temp.path());
+        let (state, attachment) = fixture(&store);
+        let mut builder = PackBuilder::new(CompressionConfig::default());
+        builder.add(
+            *attachment.id().as_hash(),
+            ObjectType::StateAttachment,
+            rmp_serde::to_vec_named(&attachment).unwrap(),
+        );
+        let (pack, index, _) = builder.build().unwrap();
+        store.install_pack(&pack, &index).unwrap();
+        fs::remove_file(state_attachment_path(
+            &store.root,
+            &state.id(),
+            &attachment.id(),
+        ))
+        .unwrap();
+        let rebuild_marker =
+            state_attachment_index_path(&store.root, &state.id()).with_extension("rebuild-marker");
+        let _ = fs::remove_file(&rebuild_marker);
+        assert_eq!(
+            store.list_state_attachments(&state.id()).unwrap(),
+            vec![attachment.clone()]
+        );
+        assert_eq!(
+            store.list_state_attachments(&state.id()).unwrap(),
+            vec![attachment]
+        );
+        assert!(!rebuild_marker.exists());
     }
 }

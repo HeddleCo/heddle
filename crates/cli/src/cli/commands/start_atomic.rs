@@ -2041,8 +2041,8 @@ mod tests {
         let (temp, repo, base) = repo_with_state(&[]);
         let _ = &temp;
         let name = ThreadName::new("foo");
-        let advanced = StateId::generate();
-        let prior = StateId::generate();
+        let advanced = StateId::from_bytes([73; 32]);
+        let prior = StateId::from_bytes([74; 32]);
 
         // Brand-new case (restore_to = None → would otherwise delete). A
         // concurrent writer advanced the ref past our forward value → leave it.

@@ -153,7 +153,7 @@ impl ObjectStore for InMemoryStore {
             .state_attachments
             .read_or_poisoned()
             .get(id)
-            .map(|bytes| rmp_serde::from_slice(bytes).map_err(Into::into))
+            .map(|bytes| rmp_serde::from_slice::<StateAttachment>(bytes))
             .transpose()?;
         Ok(attachment.filter(|attachment: &StateAttachment| attachment.state_id == *state))
     }

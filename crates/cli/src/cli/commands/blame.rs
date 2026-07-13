@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn author_display_appends_extra_origin_count() {
         let info = LineInfo {
-            state_id: StateId::generate(),
+            state_id: StateId::from_bytes([70; 32]),
             attribution: human(),
             extra_origins: 2,
             timestamp: "2026-01-01T00:00:00+00:00".to_string(),
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn author_display_single_origin_has_no_suffix() {
         let info = LineInfo {
-            state_id: StateId::generate(),
+            state_id: StateId::from_bytes([71; 32]),
             attribution: human(),
             extra_origins: 0,
             timestamp: "2026-01-01T00:00:00+00:00".to_string(),
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn state_fallback_line_info_attributes_whole_line_to_state() {
-        let state_id = StateId::generate();
+        let state_id = StateId::from_bytes([72; 32]);
         let state = State::new(ContentHash::from_bytes([7u8; 32]), vec![], agentic());
         let ts = "2026-02-03T04:05:06+00:00";
 

@@ -575,7 +575,7 @@ impl DiscussionService for LocalDiscussionService {
                         parse_visibility(&req.visibility)?
                     };
                     let discussion = Discussion {
-                        id: uuid::Uuid::now_v7().to_string(),
+                        id: objects::object::generate_discussion_id(),
                         anchor: SymbolAnchor::new(anchor_proto.file, anchor_proto.symbol),
                         opened_against_state: opened_against,
                         opened_at: now,

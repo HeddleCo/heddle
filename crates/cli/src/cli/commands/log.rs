@@ -361,7 +361,7 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
             .map(|state| {
                 let mut entry = StateEntry::from(state);
                 entry.git_checkpoint = repo
-                    .latest_git_checkpoint_for_change(&state.state_id)
+                    .latest_git_checkpoint_for_state(&state.state_id)
                     .ok()
                     .flatten()
                     .map(|record| record.git_commit);

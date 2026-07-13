@@ -576,7 +576,7 @@ mod tests {
         // the legacy / synced-repo shape that the previous guard
         // missed. `thread_name_in_use` must catch it.
         let (_temp, repo) = init_repo();
-        let id = StateId::generate();
+        let id = StateId::from_bytes([77; 32]);
         repo.refs()
             .set_thread(&ThreadName::new("ref-only-thread"), &id)
             .unwrap();
@@ -598,7 +598,7 @@ mod tests {
         // start_thread. We invoke cmd_try with all the args wired up;
         // the guard short-circuits with the precise message.
         let (_temp, repo) = init_repo();
-        let id = StateId::generate();
+        let id = StateId::from_bytes([78; 32]);
         repo.refs()
             .set_thread(&ThreadName::new("legacy-ref-thread"), &id)
             .unwrap();

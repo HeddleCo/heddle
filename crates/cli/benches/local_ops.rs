@@ -190,7 +190,7 @@ fn populate_threads(refs: &RefManager, count: usize) {
     for index in 0..count {
         refs.set_thread(
             &ThreadName::new(format!("branch-{index:05}")),
-            &StateId::generate(),
+            &StateId::from_bytes([6; 32]),
         )
         .unwrap();
     }
@@ -200,7 +200,7 @@ fn populate_markers(refs: &RefManager, count: usize) {
     for index in 0..count {
         refs.create_marker(
             &MarkerName::new(format!("marker-{index:05}")),
-            &StateId::generate(),
+            &StateId::from_bytes([7; 32]),
         )
         .unwrap();
     }
@@ -211,7 +211,7 @@ fn populate_remote_threads(refs: &RefManager, remote: &str, count: usize) {
         refs.set_remote_thread(
             remote,
             &ThreadName::new(format!("branch-{index:05}")),
-            &StateId::generate(),
+            &StateId::from_bytes([8; 32]),
         )
         .unwrap();
     }
@@ -510,7 +510,8 @@ fn bench_refs_update_thread_rebuild_summary(c: &mut Criterion) {
         let hot = ThreadName::new(format!("branch-{:05}", count / 2));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
             b.iter(|| {
-                refs.set_thread(&hot, &StateId::generate()).unwrap();
+                refs.set_thread(&hot, &StateId::from_bytes([9; 32]))
+                    .unwrap();
             });
         });
     }
@@ -525,7 +526,7 @@ fn bench_refs_update_marker_rebuild_summary(c: &mut Criterion) {
         let hot = MarkerName::new(format!("marker-{:05}", count / 2));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
             b.iter(|| {
-                refs.set_marker_cas(&hot, RefExpectation::Any, &StateId::generate())
+                refs.set_marker_cas(&hot, RefExpectation::Any, &StateId::from_bytes([10; 32]))
                     .unwrap();
             });
         });
@@ -541,7 +542,7 @@ fn bench_refs_update_remote_thread_rebuild_summary(c: &mut Criterion) {
         let hot = ThreadName::new(format!("branch-{:05}", count / 2));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
             b.iter(|| {
-                refs.set_remote_thread("origin", &hot, &StateId::generate())
+                refs.set_remote_thread("origin", &hot, &StateId::from_bytes([11; 32]))
                     .unwrap();
             });
         });

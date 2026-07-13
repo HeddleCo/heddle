@@ -952,7 +952,7 @@ fn git_overlay_matrix_index_checkpoint_recovery_reuses_preserved_snapshot() {
         "the failed commit should preserve exactly one staged-index snapshot"
     );
     assert!(
-        repo.latest_git_checkpoint_for_change(&preserved)
+        repo.latest_git_checkpoint_for_state(&preserved)
             .expect("read checkpoints")
             .is_none(),
         "the locked-index failure should not have recorded the Git checkpoint yet"
@@ -978,7 +978,7 @@ fn git_overlay_matrix_index_checkpoint_recovery_reuses_preserved_snapshot() {
 
     let repo = Repository::open(temp.path()).expect("reopen repo after recovery");
     let checkpoint = repo
-        .latest_git_checkpoint_for_change(&preserved)
+        .latest_git_checkpoint_for_state(&preserved)
         .expect("read checkpoint after recovery")
         .expect("recovery should record the Git checkpoint");
     assert_eq!(

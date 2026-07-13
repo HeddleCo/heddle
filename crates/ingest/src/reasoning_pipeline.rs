@@ -1033,7 +1033,7 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, Utc};
     use objects::{
-        object::{Blob, StateAttachmentBody, Tree, TreeEntry},
+        object::{Blob, StateAttachmentBody, StateId, Tree, TreeEntry},
         store::InMemoryStore,
     };
     use repo::{Repository, StateAttachmentKind};
@@ -1464,7 +1464,6 @@ mod tests {
     #[test]
     fn default_commits_are_sorted() {
         let mut map = ShaMap::new();
-        use objects::object::StateId;
         map.insert_commit(&"b".repeat(40), test_state_id()).unwrap();
         map.insert_commit(&"a".repeat(40), test_state_id()).unwrap();
         map.insert_commit(&"c".repeat(40), test_state_id()).unwrap();

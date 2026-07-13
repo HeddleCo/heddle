@@ -2718,7 +2718,7 @@ mod tests {
             thread: objects::object::ThreadName::new("feature"),
         };
         let detached = Head::Detached {
-            state: objects::object::StateId::generate(),
+            state: objects::object::StateId::from_bytes([75; 32]),
         };
 
         assert_eq!(
@@ -2801,7 +2801,7 @@ mod tests {
 
     fn detached_head() -> Head {
         Head::Detached {
-            state: objects::object::StateId::generate(),
+            state: objects::object::StateId::from_bytes([76; 32]),
         }
     }
 

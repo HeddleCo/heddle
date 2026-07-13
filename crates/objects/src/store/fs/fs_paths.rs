@@ -55,6 +55,12 @@ pub(super) fn state_attachment_index_path(root: &Path, state: &StateId) -> PathB
         .join(format!("{}.msgpack", state.to_string_full()))
 }
 
+pub(super) fn state_attachment_index_lock_path(root: &Path, state: &StateId) -> PathBuf {
+    objects_dir(root)
+        .join("state-attachment-index")
+        .join(format!("{}.lock", state.to_string_full()))
+}
+
 pub(super) fn action_path(root: &Path, id: &ActionId) -> PathBuf {
     actions_dir(root).join(format!("{}.action", id.as_hash().to_hex()))
 }

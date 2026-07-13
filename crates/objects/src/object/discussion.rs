@@ -38,6 +38,10 @@ versioned_msgpack_blob! {
 /// id scheme the discussion service ends up choosing (likely a UUID).
 pub type DiscussionId = String;
 
+pub fn generate_discussion_id() -> DiscussionId {
+    uuid::Uuid::now_v7().to_string()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Discussion {
     pub id: DiscussionId,

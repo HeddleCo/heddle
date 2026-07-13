@@ -443,43 +443,19 @@ impl From<LegacyThreadRecord> for ThreadRecord {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Mutex};
+    use std::path::PathBuf;
 
-    use objects::object::{
-        Annotation, AnnotationKind, AnnotationScope, Attribution, Blob, ContentHash, ContextBlob,
-        ContextTarget, EntryType, Principal, SignatureStatus, State, Tree, TreeEntry,
-    };
+    use objects::object::{Blob, ContentHash, Tree, TreeEntry};
     use serde::Serialize;
     use tempfile::TempDir;
 
     use super::*;
     use crate::{Repository, thread_record_store::FilesystemThreadRecordStore};
 
-    static SIGNING_HOME_LOCK: Mutex<()> = Mutex::new(());
-
     fn fresh_repo() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         (temp, repo)
-    }
-
-    fn with_signing_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
-        let _guard = SIGNING_HOME_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = std::env::var_os("HEDDLE_HOME");
-        unsafe {
-            std::env::set_var("HEDDLE_HOME", home);
-        }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        match previous {
-            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
-            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
-        }
-        match result {
-            Ok(value) => value,
-            Err(payload) => std::panic::resume_unwind(payload),
-        }
     }
 
     fn remove_ledger(repo: &Repository) {
@@ -538,48 +514,6 @@ mod tests {
             }],
         })
         .unwrap()
-    }
-
-    fn test_annotation(content: &str) -> Annotation {
-        Annotation::new(
-            AnnotationScope::File,
-            AnnotationKind::Rationale,
-            content.to_string(),
-            vec![],
-            "test@example.com".to_string(),
-            1700000000,
-            None,
-            None,
-        )
-    }
-
-    fn tree_path(repo: &Repository, components: &[String], blob_hash: ContentHash) -> ContentHash {
-        let mut tree = Tree::new();
-        if components.len() == 1 {
-            tree.insert(TreeEntry::file(&components[0], blob_hash, false).unwrap());
-        } else {
-            let subtree = tree_path(repo, &components[1..], blob_hash);
-            tree.insert(TreeEntry::directory(&components[0], subtree).unwrap());
-        }
-        repo.store().put_tree(&tree).unwrap()
-    }
-
-    fn legacy_context_root(repo: &Repository, path: &str, blob: &ContextBlob) -> ContentHash {
-        let bytes = blob.encode().unwrap();
-        let blob_hash = repo.store().put_blob(&Blob::new(bytes)).unwrap();
-        let components = Path::new(path)
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy().to_string())
-            .collect::<Vec<_>>();
-        tree_path(repo, &components, blob_hash)
-    }
-
-    fn unsigned_state() -> State {
-        State::new_snapshot(
-            ContentHash::compute(b"tree"),
-            vec![],
-            Attribution::human(Principal::new("Test", "test@example.com")),
-        )
     }
 
     #[test]

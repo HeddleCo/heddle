@@ -2579,7 +2579,7 @@ fn record_git_lane_checkpoint(
     )?;
     let commit_hex = commit_oid.to_hex();
     if repo
-        .latest_git_checkpoint_for_change(&state)
+        .latest_git_checkpoint_for_state(&state)
         .map_err(|err| ProtocolError::InvalidState(err.to_string()))?
         .is_some_and(|record| record.git_commit == commit_hex)
     {
@@ -3017,7 +3017,7 @@ mod tests {
         assert_eq!(update.kind, GrpcGitRefKind::Branch as i32);
         assert_eq!(update.target_oid.as_ref(), commit_oid.as_bytes());
         let checkpoint = update.checkpoint.expect("checkpoint");
-        assert_eq!(checkpoint.heddle_state_id.as_ref(), state.as_bytes());
+        assert_eq!(checkpoint.heddle_state_id.as_slice(), state.as_bytes());
         assert_eq!(checkpoint.git_commit_oid.as_ref(), commit_oid.as_bytes());
         assert_eq!(checkpoint.thread, "main");
     }

@@ -451,7 +451,7 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
             }
         }
 
-        if let Some(existing) = repo.latest_git_checkpoint_for_change(&state.state_id)? {
+        if let Some(existing) = repo.latest_git_checkpoint_for_state(&state.state_id)? {
             git_commit = Some(existing.git_commit.clone());
             git_checkpoint = Some(existing);
         } else {

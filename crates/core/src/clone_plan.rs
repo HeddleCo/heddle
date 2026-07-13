@@ -1594,7 +1594,7 @@ mod tests {
     // ---- monorepo pure planning ----
 
     fn cid(seed: u8) -> StateId {
-        StateId::from_bytes([seed; 16])
+        StateId::from_bytes([seed; 32])
     }
 
     fn leaf(spool_id: &str, content: u8) -> MonorepoNodeFacts {

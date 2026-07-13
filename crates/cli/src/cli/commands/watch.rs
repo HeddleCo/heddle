@@ -786,8 +786,8 @@ mod tests {
     #[test]
     fn drain_pending_emits_only_above_watermark() {
         let (_tmp, heddle_dir) = synthetic_repo();
-        let cid_a = StateId::generate();
-        let cid_b = StateId::generate();
+        let cid_a = StateId::from_bytes([79; 32]);
+        let cid_b = StateId::from_bytes([80; 32]);
         let ids = write_entries(
             &heddle_dir,
             vec![
@@ -826,7 +826,7 @@ mod tests {
             json: true,
             filter: Some(vec!["snapshot".into()]),
         };
-        let snap_id = StateId::generate();
+        let snap_id = StateId::from_bytes([81; 32]);
         let snap = EmittedEntry {
             entry: make_entry(
                 1,
@@ -849,7 +849,7 @@ mod tests {
                 2,
                 OpRecord::ThreadCreate {
                     name: "x".into(),
-                    state: StateId::generate(),
+                    state: StateId::from_bytes([82; 32]),
                     manager_snapshot: None,
                 },
             ),
@@ -870,7 +870,7 @@ mod tests {
             json: true,
             filter: None,
         };
-        let cid = StateId::generate();
+        let cid = StateId::from_bytes([83; 32]);
         let entry = EmittedEntry {
             entry: make_entry(
                 7,
@@ -916,7 +916,7 @@ mod tests {
             json: false,
             filter: None,
         };
-        let cid = StateId::generate();
+        let cid = StateId::from_bytes([84; 32]);
         let entry = EmittedEntry {
             entry: make_entry(
                 1,
@@ -950,7 +950,7 @@ mod tests {
         // change-id so the state_id column is never blank for a
         // real op. (Goto/Fork/Collapse have no thread but they do
         // have an associated state.)
-        let cid = StateId::generate();
+        let cid = StateId::from_bytes([85; 32]);
         for op in [
             OpRecord::Snapshot {
                 new_state: cid,

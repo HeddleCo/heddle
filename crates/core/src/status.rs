@@ -863,7 +863,7 @@ fn tag_mapping_check(repo: &Repository) -> anyhow::Result<Option<RepositoryVerif
         let marker = repo
             .refs()
             .get_marker(&objects::object::MarkerName::new(&tip.tag))?;
-        match (marker, tip.mapped_change) {
+        match (marker, tip.mapped_state) {
             (Some(existing), Some(mapped)) if existing == mapped => {}
             (Some(existing), Some(mapped)) => mismatched.push(format!(
                 "{} (marker {}; Git tag {})",
@@ -953,7 +953,7 @@ fn detached_head_primary_recovery(repo: &Repository) -> String {
 }
 
 fn branch_tip_needs_reconcile(repo: &Repository, tip: &GitOverlayBranchTip) -> bool {
-    let Some(mapped) = tip.mapped_change else {
+    let Some(mapped) = tip.mapped_state else {
         return false;
     };
     let Ok(Some(current)) = thread_tip_for_branch(repo, &tip.branch) else {
@@ -974,13 +974,13 @@ fn clean_git_branch_reconcile_check(
     let Some(current_change) = thread_tip_for_branch(repo, &tip.branch)? else {
         return Ok(None);
     };
-    let Some(mapped) = tip.mapped_change else {
+    let Some(mapped) = tip.mapped_state else {
         return Ok(None);
     };
     let relation = mapped_change_relation(repo, &mapped, &current_change);
     if relation == "git_behind_heddle"
         && repo
-            .latest_git_checkpoint_for_change(&current_change)?
+            .latest_git_checkpoint_for_state(&current_change)?
             .is_none()
         && heddle_worktree_is_clean(repo)
     {
@@ -1266,13 +1266,13 @@ fn upstream_thread_matches_current_git_tip(repo: &Repository, upstream: &str) ->
     else {
         return false;
     };
-    repo.git_overlay_mapped_change_for_branch(upstream)
+    repo.git_overlay_mapped_state_for_branch(upstream)
         .or(Ok(None))
         .and_then(|mapped| {
             if mapped.is_some() {
                 Ok(mapped)
             } else {
-                repo.git_overlay_mapped_change_for_remote_tracking_ref(upstream)
+                repo.git_overlay_mapped_state_for_remote_tracking_ref(upstream)
             }
         })
         .ok()
@@ -2129,7 +2129,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         current_state
             .as_ref()
             .and_then(|state| {
-                repo.latest_git_checkpoint_for_change(&state.state_id)
+                repo.latest_git_checkpoint_for_state(&state.state_id)
                     .ok()
                     .flatten()
             })

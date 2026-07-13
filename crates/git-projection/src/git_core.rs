@@ -1623,7 +1623,7 @@ impl<'a> GitProjection<'a> {
             git_oid
         } else if let Some(git_commit) = self
             .heddle_repo
-            .git_overlay_mapped_git_commit_for_change(state_id)
+            .git_overlay_mapped_git_commit_for_state(state_id)
             .map_err(|error| GitProjectionError::Git(error.to_string()))?
         {
             ObjectId::from_hex(mirror_repo.object_format(), &git_commit)
@@ -4099,7 +4099,7 @@ fn resolve_mapped_git_oid(
         return Ok(Some(git_oid));
     }
     if let Some(git_commit) = heddle_repo
-        .git_overlay_mapped_git_commit_for_change(state_id)
+        .git_overlay_mapped_git_commit_for_state(state_id)
         .map_err(|error| GitProjectionError::Git(error.to_string()))?
     {
         let oid = ObjectId::from_hex(object_repo.object_format(), &git_commit)

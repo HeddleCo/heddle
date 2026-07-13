@@ -98,9 +98,10 @@ pub(crate) fn state_from_commit(
             ))
         })?;
         if state.id() != source_state {
+            let source_change = state.change_id;
             state = state.with_lineage(vec![ChangeLineage {
                 kind: ChangeLineageKind::GitProjection,
-                source_change: state.change_id,
+                source_change,
                 source_state,
             }]);
         }

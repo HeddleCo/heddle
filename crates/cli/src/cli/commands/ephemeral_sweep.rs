@@ -69,7 +69,7 @@ pub fn run_ephemeral_sweep(repo: &Repository) -> Result<Vec<CollapsedThread>> {
         // collapsed without producing a state" marker.
         let final_state = entry
             .final_state
-            .unwrap_or_else(|| StateId::from_bytes([0; 16]));
+            .unwrap_or_else(|| StateId::from_bytes([0; 32]));
         ops.push(OpRecord::EphemeralThreadCollapse {
             thread: entry.thread_name.clone(),
             final_state,
