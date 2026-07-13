@@ -5,7 +5,8 @@ oplog `OpRecord` payload schema changed with no version discriminator; the new r
 silently misparsed legacy bytes and bricked pre-cutover repos. **Scope:** every on-disk
 format a v0.3.0 binary writes, audited against the discipline below; the bump/migration
 rules every post-0.3 format change must follow; the test floor; the pre-1.0 exception
-ledger. All file:line citations are at origin/main `86bd10e8` (post-#352 collapse).
+ledger. Evidence links name current files and invariants rather than pinning line
+numbers that drift during schema work.
 
 This doc is the linking target for the fidelity-epic issues (#564/#593/#575/#606),
 the packed-oplog work (#618), and any future format change. A format-touching PR that
@@ -29,8 +30,8 @@ to do with today’s bytes.
 
 | # | Surface (path under `.heddle/` unless noted) | Codec | Version stamp | Old↦new behavior today | Evidence |
 |---|---|---|---|---|---|
-| 1 | **oplog container** `oplog.bin` | binary | `LMOPLOG\0` magic + `version: u32`; v4 = latest, v2/v3 decode-only migration sources | refuse: `unsupported oplog version {n}` from `load()` dispatch; eager atomic (temp+rename) migration of v2/v3/stale-v4 on open via `ensure_latest` | `crates/oplog/src/oplog/packed_oplog.rs:28` (magic), `:59-62` (sealed `V2/V3/V4`, `Latest = V4`), `:1018-1028` (`load()` refusal), `:247-276` (`ensure_latest` migrate + `write_file_atomic`), `:284-302` (`read_head_id` refuses non-latest) |
-| 2 | **OpRecord payload schema** (entries inside #1) | rmp-serde, positional | `record_schema_version: u32` in the v4 header; sealed decode-only schema types v1 (`pre-atomic-v1`), v2 (`atomic-no-head-v2`), v3 (`current-v3`) | refuse: `unsupported OpRecord schema version {n}` (`schema_version_from_u32`); reader selects decode path by stored version, never probes — except the legacy `parse_unversioned_entry` path reachable only from v2/v3 containers | `crates/oplog/src/oplog/op_record_codec.rs:9-18` (invariant), `:20-25` (#352 exception, §6), `packed_oplog.rs:122-157` (v4 decode selects by header schema), `:1513-1527` (probe path, v2/v3 only) |
+| 1 | **oplog container** `oplog.bin` | binary | `LMOPLOG\0` magic + `version: u32`; v4 is the only supported container | refuse V2/V3 without decoding or rewriting; current V4 files retain atomic truncation salvage | `crates/oplog/src/oplog/packed_oplog.rs` (header validation, current-file salvage, refusal tests) |
+| 2 | **OpRecord payload schema** (entries inside #1) | rmp-serde, positional | `record_schema_version: u32` in the V4 header; schema 4 is the StateId-native format | refuse schemas 1–3 before payload decoding because their 16-byte ChangeIds cannot be derived into content-addressed StateIds; reject unknown future schemas separately | `crates/schema/src/op_record/codec.rs` (schema selection and StateId-v4 codec), `crates/oplog/src/oplog/packed_oplog.rs` (header refusal tests) |
 | 3 | **oplog EOF index footer** | binary | `LMOPIDX\0` + `INDEX_VERSION = 1` | refuse (`unsupported oplog index version`) | `packed_oplog.rs:29-30,905` |
 | 4 | **packfiles** `objects/packs/*.pack` | binary | `LMPK` magic + `version = 3` + blake3 trailer; object type 5 is `StateAttachment` | refuse: `Unsupported pack version` / `Pack checksum mismatch`; unknown entry `ObjectType`/id-tag byte also refuses | `crates/objects/src/store/pack/mod.rs` (`pack_container_spec`, `ObjectType`), `shared.rs` (`verify_container`) |
 | 5 | **pack index** `*.idx` | binary | `LMI\0` + `INDEX_VERSION = 2` | refuse | `pack_index.rs:6-7,69-78` |
@@ -48,10 +49,10 @@ to do with today’s bytes.
 | 17 | **thread records** `thread_records/*.json` + `Thread` JSON | serde_json (named) | NONE — but self-describing; `#[serde(default)]` throughout, unknown fields ignored | additive changes tolerated both directions; renames/type changes refuse | `crates/repo/src/thread_storage.rs:24-60`, `thread_record_store.rs` |
 | 18 | **thread manifest** `manifest.toml` | TOML | `SCHEMA_VERSION: u32 = 3`, strict `!=` refuse | refuse, with the **model error message**: “manifest at … uses schema {x} but this binary speaks {y}” | `crates/repo/src/thread_manifest.rs:48,346-356` |
 | 19 | **repo config** `config.toml` | TOML | `[repository] version = 3`, enforced on open | refuse newer with `RepositoryFormatTooNew`; refuse older with `RepositoryFormatMigrationRequired`; neither path rewrites the config | `crates/repo/src/repo_config.rs`, `repository.rs` |
-| 20 | **migration ledger** `state/schema_versions.toml` | TOML set of applied migration ids | self-describing | declarative forward-only migration framework, idempotent, atomic save; 1 registered migration | `crates/repo/src/migration.rs:1-30,119-153,163-168` |
+| 20 | **migration ledger** `state/schema_versions.toml` | TOML set of applied migration ids | self-describing | declarative forward-only migration framework, idempotent, atomic save; 2 registered migrations | `crates/repo/src/migration.rs` |
 | 21 | **JSON state sidecars**: stash, sessions, merge state, `REBASE_STATE`/`BISECT_*` etc. | serde_json (named) | NONE | additive-tolerant; ⚠️ list paths skip unreadable entries silently (`let Ok(..) else continue`) | `crates/repo/src/stash.rs:67,91`, `session_storage.rs:125,150`, `merge_state.rs:190,213` |
 | 22 | **identity** `identity.toml` / `device-identity.toml`; agents `agents/*.toml`; `fsmonitor.toml`; `lazy-hydrator.toml`; `shallow` (text id list); worktree `objectstore` pointer (text path) | TOML/text | NONE | tolerant / parse-error refuse; agents are ephemeral runtime state | `identity.rs:188-319`, `agent_registry.rs:4`, `shallow.rs:22-25` |
-| 23 | **git-bridge mirror** + `git-projection/git-projection-mapping.json` | real git repo + JSON | NONE on the mapping | additive-tolerant JSON sidecar plus `refs/notes/heddle` rebuild path; the mirror itself is git-format (sley/git-owned). Legacy `.heddle/git/bridge-mapping.json` migration and `Heddle-Change-Id` trailer rebuild paths are removed. Mirror is slated for deletion (#568) | `crates/cli/src/bridge/git_mapping.rs:20-37,70-122`; `crates/cli/src/bridge/git_notes.rs` |
+| 23 | **Git projection mirror** + `git-projection/git-projection-mapping.json` | Sley Git repository + JSON | NONE on the mapping | additive-tolerant local served/export cache plus `refs/notes/heddle` rebuild path; `.git` remains authoritative in Git Overlay repositories and the mirror remains non-authoritative | `crates/git-projection/src/git_mapping.rs`, `crates/git-projection/src/git_notes.rs`, ADR-0042 |
 | 24 | **legacy `heddle-submodule:` gitlink blob convention** | in-band magic prefix inside ordinary blob *content* | NONE | removed from runtime import/export. Current trees use ADR-0041 first-class, format-aware Gitlink entries; `0003_canonicalize_tree_entries` rewrites old unversioned tree bytes to V2. The old marker parser is retained only in `objects::legacy` for a future Sley-proof migration that converts proven legacy gitlink blobs and preserves ambiguous magic blobs as ordinary files. | `objects/src/legacy.rs`, `docs/adr/0041-first-class-gitlinks.md` |
 | 25 | **reftable** `REFT01\0\0` | binary | magic, no version int | **dead spike — no production writer**; if ever revived it enters this policy with a migration from refs-text and a real version int | `crates/refs/src/refs/reftable_model.rs:41` |
 
@@ -72,9 +73,7 @@ Verified 2026-06-12 against rmp-serde 1.x (the workspace’s codec):
 Durable data (anything a user would grieve losing) MUST carry magic + version
 (binary) or a schema-version field (TOML/JSON/rmp). The reader **selects a decode path
 by version; it never blind-deserializes and hopes, and never probe-decodes** (probing
-is what #449 weaponized; the only sanctioned probe is the frozen
-`parse_unversioned_entry` path for pre-versioned v2/v3 oplogs,
-`packed_oplog.rs:1513-1527`). Rebuildable **caches** (rows 13–16) may instead
+is what #449 weaponized). Rebuildable **caches** (rows 13–16) may instead
 refuse-and-rebuild — that is their version policy, and it must be a deliberate,
 caller-visible fallback (the `repository_tree.rs:230-236` pattern), not an accident.
 
@@ -130,8 +129,8 @@ half-understood file.
 - All migrations are **forward-only** (no downgrade rewriters; downgrade = R3 refusal)
   and registered in `migration.rs::MIGRATIONS`, recorded in
   `state/schema_versions.toml`. Idempotent; atomic temp+rename writes only.
-- **Eager rewrite-on-open** is the default for bounded files (the
-  `PackedOpLog::ensure_latest` model, `packed_oplog.rs:247-276`). **Lazy/rewrite-on-read**
+- **Eager rewrite-on-open** is the default for bounded files when a lossless
+  migration exists. **Lazy/rewrite-on-read**
   is permitted only for content-addressed object payloads where eager rewriting the
   whole store is unbounded — but #593-class type changes should still migrate eagerly
   (states are small; the rewrite is ID-stable per row 8 note).
@@ -159,13 +158,12 @@ next refs-format touch.
 
 Each stamped surface keeps, in-tree:
 1. **A checked-in golden fixture per legacy version** ever shipped (or, pre-public,
-   per version still decodable), with a round-trip test: current binary decodes the
-   fixture and re-encodes to the latest version losslessly. The op-record fixtures
-   (`op_record_codec.rs` tests + `tests_support` frozen encoders) are the template.
-2. **An old-reads-new refusal test**: the *frozen previous* decoder must refuse (not
-   misparse) bytes encoded by the current schema — exactly
-   `migration_sensitive_legacy_shapes_do_not_decode_as_current`
-   (`op_record_codec.rs`) generalized. For unstamped-but-grandfathered surfaces
+   per version still recognized), with either a lossless migration test or an
+   immutable refusal test. The real ChangeId-era oplog fixture is the refusal
+   template: repeated opens leave its bytes and directory contents unchanged.
+2. **An old/new boundary test**: either a supported frozen decoder refuses new
+   bytes without misparsing them, or the current reader refuses a checked-in old
+   fixture before payload decoding. For unstamped-but-grandfathered surfaces
    (State/Tree), this is the LengthMismatch/type-error assertion.
 3. **A golden-bytes format-lock test (the CI guard, recommendation for the issue’s
    stretch goal):** serialize one canonical exemplar of each surface and byte-compare
@@ -181,12 +179,13 @@ Each stamped surface keeps, in-tree:
 
 Pre-1.0, the no-backcompat stance sometimes justifies skipping a bump/migration. An
 exception is legitimate ONLY if: (a) no public binary ever wrote the old bytes, (b)
-the exception **documents itself in the codec header** at the change site, and (c) it
-is recorded here. The #352 entry is the template:
+the exception documents itself at the change site, and (c) it is recorded here.
+The #352 entry remains as historical context; repository format v3 and OpRecord
+schema 4 supersede its decode path:
 
 | Date | Change | Exception taken | Self-documentation | Why safe |
 |---|---|---|---|---|
-| 2026-06-12 | #352 V2 OpRecord variant collapse (`ThreadCreateV2`→`ThreadCreate`, `FastForwardV2`→`FastForward`), commit `86bd10e8` | Rewrote the frozen v1/v2 schema mirrors to the collapsed shapes instead of adding a v4 record schema; old dev oplogs containing those records no longer decode | `op_record_codec.rs:20-25`: “Documented exception (#352, pre-v0.3.0)… This exception must not be repeated once public binaries exist.” | No production oplogs exist pre-0.3; dev logs discardable |
+| 2026-06-12 | #352 V2 OpRecord variant collapse (`ThreadCreateV2`→`ThreadCreate`, `FastForwardV2`→`FastForward`), commit `86bd10e8` | Rewrote the then-frozen v1/v2 schema mirrors; repository format v3 later retired those decoders and schema 4 established the StateId-native boundary | Historical; the old codec arms no longer exist | No production oplogs exist pre-0.3; dev logs are refused without mutation |
 
 **This lane closes the day v0.3.0 binaries are public.** From then on every format
 change follows §3 in full.

@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use objects::{
     object::{Blob, ThreadName, Tree, TreeEntry},
@@ -25,6 +28,63 @@ fn create_test_repo() -> (TempDir, Repository) {
     let temp_dir = TempDir::new().unwrap();
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     (temp_dir, repo)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TreeEntrySnapshot {
+    Directory,
+    File(Vec<u8>),
+    Symlink(PathBuf),
+}
+
+fn snapshot_directory(root: &Path) -> Vec<(PathBuf, TreeEntrySnapshot)> {
+    fn visit(root: &Path, directory: &Path, snapshot: &mut Vec<(PathBuf, TreeEntrySnapshot)>) {
+        let mut entries = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+
+        for path in entries {
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            let file_type = fs::symlink_metadata(&path).unwrap().file_type();
+            if file_type.is_dir() {
+                snapshot.push((relative, TreeEntrySnapshot::Directory));
+                visit(root, &path, snapshot);
+            } else if file_type.is_file() {
+                snapshot.push((relative, TreeEntrySnapshot::File(fs::read(path).unwrap())));
+            } else if file_type.is_symlink() {
+                snapshot.push((
+                    relative,
+                    TreeEntrySnapshot::Symlink(fs::read_link(path).unwrap()),
+                ));
+            } else {
+                panic!(
+                    "unsupported filesystem entry in repository snapshot: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    let mut snapshot = Vec::new();
+    visit(root, root, &mut snapshot);
+    snapshot
+}
+
+fn decode_hex_fixture(source: &str) -> Vec<u8> {
+    let compact = source
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect::<Vec<_>>();
+    assert_eq!(compact.len() % 2, 0, "hex fixture must contain byte pairs");
+    compact
+        .chunks_exact(2)
+        .map(|pair| {
+            let digits = std::str::from_utf8(pair).unwrap();
+            u8::from_str_radix(digits, 16).unwrap()
+        })
+        .collect()
 }
 
 #[cfg(unix)]
@@ -197,6 +257,44 @@ fn open_refuses_v2_as_migration_required_without_rewriting_fixture() {
         }
     ));
     assert_eq!(fs::read_to_string(config_path).unwrap(), fixture);
+}
+
+#[test]
+fn open_refuses_legacy_oplog_before_mutating_repository() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    assert_eq!(repo.config().repository.version, SUPPORTED_REPO_FORMAT);
+
+    let heddle_dir = repo.heddle_dir().to_path_buf();
+    let oplog_path = heddle_dir.join("oplog/oplog.bin");
+    drop(repo);
+
+    let legacy_oplog = decode_hex_fixture(include_str!(
+        "../tests/fixtures/issue-449-legacy-pre-atomic/oplog.bin.hex"
+    ));
+    assert_eq!(legacy_oplog.len(), 704, "historical fixture length changed");
+    assert_eq!(&legacy_oplog[..12], b"LMOPLOG\0\x02\0\0\0");
+    fs::write(&oplog_path, legacy_oplog).unwrap();
+    let before = snapshot_directory(&heddle_dir);
+
+    let error = match Repository::open(temp_dir.path()) {
+        Ok(_) => panic!("legacy oplog must block repository open"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        HeddleError::StorageFormatMigrationRequired {
+            ref storage,
+            found: 2,
+            required: 4,
+        } if storage == "packed oplog container"
+    ));
+    assert_eq!(
+        snapshot_directory(&heddle_dir),
+        before,
+        "refusing a legacy oplog must not mutate any .heddle entry"
+    );
 }
 
 /// Mutating commands historically bootstrap plain Git via `Repository::open`.

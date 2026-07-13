@@ -353,7 +353,7 @@ mod tests {
         .unwrap();
         assert_eq!(state_data.obj_type, ObjectType::State);
         assert_eq!(
-            rmp_serde::from_slice::<State>(&state_data.data).unwrap(),
+            objects::store::codec::decode_state(&state_data.data).unwrap(),
             state
         );
         store_received_object(&dest, &state_data).unwrap();

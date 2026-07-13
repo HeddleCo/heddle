@@ -171,7 +171,9 @@ impl HeddleExitCode {
                     // (initialize/point at one), not an IO failure.
                     objects::error::HeddleError::RepositoryNotFound(_) => return Self::Config,
                     objects::error::HeddleError::RepositoryFormatTooNew { .. }
-                    | objects::error::HeddleError::RepositoryFormatMigrationRequired { .. } => {
+                    | objects::error::HeddleError::RepositoryFormatMigrationRequired { .. }
+                    | objects::error::HeddleError::StorageFormatTooNew { .. }
+                    | objects::error::HeddleError::StorageFormatMigrationRequired { .. } => {
                         return Self::DataErr;
                     }
                     objects::error::HeddleError::StateNotFound(_)
@@ -411,6 +413,17 @@ mod tests {
             path: std::path::PathBuf::from("/tmp/config.toml"),
             found: 2,
             required: 3,
+        }
+        .into();
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn storage_format_migration_required_is_data_err() {
+        let err: anyhow::Error = objects::error::HeddleError::StorageFormatMigrationRequired {
+            storage: "packed oplog container".to_string(),
+            found: 2,
+            required: 4,
         }
         .into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);

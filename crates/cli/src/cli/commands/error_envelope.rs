@@ -554,6 +554,55 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                         extra_json_fields: serde_json::Map::new(),
                     };
                 }
+                HeddleError::StorageFormatTooNew {
+                    storage,
+                    found,
+                    supported,
+                } => {
+                    return ErrorClassification {
+                        kind: "storage_format_too_new".to_string(),
+                        human_error: Some(heddle_err.to_string()),
+                        hint: "Upgrade heddle to a binary that supports this storage format."
+                            .to_string(),
+                        unsafe_condition: format!(
+                            "{storage} format {found} is newer than this binary's supported format {supported}"
+                        ),
+                        would_change: format!(
+                            "opening the newer {storage} could misread persisted repository history"
+                        ),
+                        preserved:
+                            "repository objects, refs, metadata, and worktree files were left unchanged"
+                                .to_string(),
+                        primary_command: "heddle status".to_string(),
+                        recovery_commands: vec!["heddle status".to_string()],
+                        extra_json_fields: serde_json::Map::new(),
+                    };
+                }
+                HeddleError::StorageFormatMigrationRequired {
+                    storage,
+                    found,
+                    required,
+                } => {
+                    return ErrorClassification {
+                        kind: "storage_format_migration_required".to_string(),
+                        human_error: Some(heddle_err.to_string()),
+                        hint: format!(
+                            "This alpha repository contains {storage} format {found}. Back it up, then recreate it or re-adopt its Git history as format {required}."
+                        ),
+                        unsafe_condition: format!(
+                            "{storage} format {found} is incompatible with required format {required}"
+                        ),
+                        would_change: format!(
+                            "opening the legacy {storage} could misread persisted repository history"
+                        ),
+                        preserved:
+                            "repository objects, refs, metadata, and worktree files were left unchanged"
+                                .to_string(),
+                        primary_command: "heddle help adopt".to_string(),
+                        recovery_commands: vec!["heddle help adopt".to_string()],
+                        extra_json_fields: serde_json::Map::new(),
+                    };
+                }
                 HeddleError::RepositoryExists(_) => {
                     return ErrorClassification::known(
                         "repository_exists",
@@ -811,6 +860,33 @@ mod tests {
         assert_eq!(classified.kind, "repository_format_migration_required");
         assert_eq!(classified.primary_command, "heddle help adopt");
         assert!(classified.preserved.contains("config"));
+        assert!(classified.recovery_commands.iter().all(|command| {
+            crate::cli::commands::command_catalog::validate_recommended_action(command).is_ok()
+        }));
+        assert!(
+            [
+                classified.kind.as_str(),
+                classified.hint.as_str(),
+                classified.unsafe_condition.as_str(),
+                classified.would_change.as_str(),
+            ]
+            .iter()
+            .all(|value| !value.contains("corrupt"))
+        );
+    }
+
+    #[test]
+    fn legacy_storage_format_is_migration_refusal_not_corruption() {
+        let err = anyhow!(HeddleError::StorageFormatMigrationRequired {
+            storage: "packed oplog container".to_string(),
+            found: 2,
+            required: 4,
+        });
+
+        let classified = classify_error(&err);
+        assert_eq!(classified.kind, "storage_format_migration_required");
+        assert_eq!(classified.primary_command, "heddle help adopt");
+        assert!(classified.preserved.contains("left unchanged"));
         assert!(classified.recovery_commands.iter().all(|command| {
             crate::cli::commands::command_catalog::validate_recommended_action(command).is_ok()
         }));

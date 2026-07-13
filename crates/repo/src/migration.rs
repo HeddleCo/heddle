@@ -39,7 +39,6 @@ use objects::{
     legacy,
     store::ObjectStore,
 };
-use oplog::OpLogBackend;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -84,7 +83,6 @@ pub struct PlannedDeletionMigration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SchemaTarget {
-    OpLog,
     ContextBlobs,
     ThreadRecords,
     OperationIndex,
@@ -202,12 +200,6 @@ pub static MIGRATIONS: &[Migration] = &[
         applies_to: SchemaTarget::Trees,
         run: run_canonicalize_tree_entries,
     },
-    Migration {
-        id: "0006_canonicalize_packed_oplog",
-        description: "Rewrite packed oplog files into the latest container and record schema",
-        applies_to: SchemaTarget::OpLog,
-        run: run_canonicalize_packed_oplog,
-    },
 ];
 
 /// Returns true when every registered migration id is already recorded in
@@ -290,10 +282,6 @@ fn run_canonicalize_thread_records(ctx: &mut MigrationCtx<'_>) -> Result<()> {
         store.save_record(&record)?;
     }
     Ok(())
-}
-
-fn run_canonicalize_packed_oplog(ctx: &mut MigrationCtx<'_>) -> Result<()> {
-    ctx.repo.oplog().migrate_to_current_format()
 }
 
 fn run_canonicalize_tree_entries(ctx: &mut MigrationCtx<'_>) -> Result<()> {
@@ -565,7 +553,6 @@ mod tests {
             vec![
                 "0002_canonicalize_thread_records",
                 "0003_canonicalize_tree_entries",
-                "0006_canonicalize_packed_oplog",
             ],
             "the deletion-wave migration ids must stay ordered and reviewable",
         );

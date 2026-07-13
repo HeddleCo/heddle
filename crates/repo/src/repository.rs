@@ -461,6 +461,7 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
             .map(|p| objects::object::Principal::new(&p.name, &p.email))
             .unwrap_or_else(|| objects::object::Principal::new("<unknown>", ""));
         let oplog = OpLog::new(&heddle_dir, actor.clone());
+        oplog.validate_current_format()?;
         let shallow = ShallowInfo::load(&heddle_dir)?;
         // Inject the oplog-backed read + write chokepoints (heddle#330 §2.2):
         // every logical read reconciles against the committed oplog tail, and

@@ -169,6 +169,22 @@ pub enum HeddleError {
         found: u32,
         required: u32,
     },
+    #[error(
+        "{storage} uses format {found}, but this binary supports {supported}; upgrade Heddle before opening it"
+    )]
+    StorageFormatTooNew {
+        storage: String,
+        found: u32,
+        supported: u32,
+    },
+    #[error(
+        "{storage} predates required format {required} (found {found}); recreate the repository or re-adopt its Git history with this Heddle version"
+    )]
+    StorageFormatMigrationRequired {
+        storage: String,
+        found: u32,
+        required: u32,
+    },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("repository lock unavailable: {0}")]
