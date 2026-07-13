@@ -7,8 +7,8 @@ use anyhow::{Result, anyhow};
 use heddle_core::{fit_author as core_fit_author, summarize_context_line};
 use objects::{
     object::{
-        AnnotationStatus, Attribution, ChangeId, ContentHash, ContextTarget, FileProvenance,
-        ProvenanceError, Tree,
+        AnnotationStatus, Attribution, ContentHash, ContextTarget, FileProvenance, ProvenanceError,
+        StateId, Tree,
     },
     store::ObjectStore,
 };
@@ -62,7 +62,7 @@ fn attribution_parts(attribution: &Attribution) -> (PrincipalInfo, Option<AgentI
 struct BlameLine {
     line_number: usize,
     content: String,
-    change_id: String,
+    state_id: String,
     principal: PrincipalInfo,
     agent: Option<AgentInfo>,
     timestamp: String,
@@ -82,7 +82,7 @@ struct BlameOutput {
 
 #[derive(Clone, Serialize)]
 struct BlameOrigin {
-    change_id: String,
+    state_id: String,
     principal: PrincipalInfo,
     agent: Option<AgentInfo>,
     timestamp: String,
@@ -98,7 +98,7 @@ struct ContextSnippet {
 
 #[derive(Clone)]
 struct LineInfo {
-    change_id: ChangeId,
+    state_id: StateId,
     attribution: Attribution,
     /// Count of additional origins beyond the primary, used only to
     /// render the `+N` suffix in the human-readable author column.
@@ -209,7 +209,7 @@ fn cmd_blame_with_output_kind(
                 BlameLine {
                     line_number: i + 1,
                     content: line.to_string(),
-                    change_id: info.change_id.to_string(),
+                    state_id: info.state_id.to_string(),
                     principal,
                     agent,
                     timestamp: info.timestamp,
@@ -252,7 +252,7 @@ fn cmd_blame_with_output_kind(
             });
             println!(
                 "{:12} {:20} {}",
-                info.change_id.short(),
+                info.state_id.short(),
                 fit_author(&info.author_display(), 20),
                 line
             );
@@ -266,18 +266,18 @@ fn cmd_blame_with_output_kind(
 /// a line (e.g. freshly bootstrapped git-overlay): attribute the whole
 /// line to the selected state.
 fn state_fallback_line_info(
-    state_id: ChangeId,
+    state_id: StateId,
     state: &objects::object::State,
     display_ts: &str,
 ) -> LineInfo {
     let (principal, agent) = attribution_parts(&state.attribution);
     LineInfo {
-        change_id: state_id,
+        state_id,
         attribution: state.attribution.clone(),
         extra_origins: 0,
         timestamp: display_ts.to_string(),
         origins: vec![BlameOrigin {
-            change_id: state_id.to_string(),
+            state_id: state_id.to_string(),
             principal,
             agent,
             timestamp: display_ts.to_string(),
@@ -290,11 +290,11 @@ fn collect_file_context(
     state: &objects::object::State,
     file: &str,
 ) -> Result<Vec<ContextSnippet>> {
-    let Some(context_root) = &state.context else {
+    let Some(context_root) = repo.inherit_parent_context(state)? else {
         return Ok(Vec::new());
     };
     let target = ContextTarget::file(file.to_string())?;
-    let Some(blob) = repo.get_context_blob(context_root, &target)? else {
+    let Some(blob) = repo.get_context_blob(&context_root, &target)? else {
         return Ok(Vec::new());
     };
     Ok(blob
@@ -382,7 +382,7 @@ fn compute_blame_from_provenance(provenance: &FileProvenance) -> Result<HashMap<
                 let origin = &provenance.origins[*origin_index as usize];
                 let (principal, agent) = attribution_parts(&origin.attribution);
                 BlameOrigin {
-                    change_id: origin.state_id.to_string(),
+                    state_id: origin.state_id.to_string(),
                     principal,
                     agent,
                     // Prefer the authoring time when we have it
@@ -401,7 +401,7 @@ fn compute_blame_from_provenance(provenance: &FileProvenance) -> Result<HashMap<
         infos.insert(
             index,
             LineInfo {
-                change_id: primary.state_id,
+                state_id: primary.state_id,
                 attribution: primary.attribution.clone(),
                 extra_origins: origins.len().saturating_sub(1),
                 // Same author-vs-committer preference as the per-
@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn author_display_appends_extra_origin_count() {
         let info = LineInfo {
-            change_id: ChangeId::generate(),
+            state_id: StateId::from_bytes([70; 32]),
             attribution: human(),
             extra_origins: 2,
             timestamp: "2026-01-01T00:00:00+00:00".to_string(),
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn author_display_single_origin_has_no_suffix() {
         let info = LineInfo {
-            change_id: ChangeId::generate(),
+            state_id: StateId::from_bytes([71; 32]),
             attribution: human(),
             extra_origins: 0,
             timestamp: "2026-01-01T00:00:00+00:00".to_string(),
@@ -512,13 +512,13 @@ mod tests {
 
     #[test]
     fn state_fallback_line_info_attributes_whole_line_to_state() {
-        let state_id = ChangeId::generate();
+        let state_id = StateId::from_bytes([72; 32]);
         let state = State::new(ContentHash::from_bytes([7u8; 32]), vec![], agentic());
         let ts = "2026-02-03T04:05:06+00:00";
 
         let info = state_fallback_line_info(state_id, &state, ts);
 
-        assert_eq!(info.change_id, state_id);
+        assert_eq!(info.state_id, state_id);
         assert_eq!(info.extra_origins, 0);
         assert_eq!(info.timestamp, ts);
         assert_eq!(info.attribution, state.attribution);
@@ -526,7 +526,7 @@ mod tests {
         // structured shape the JSON renderer emits.
         assert_eq!(info.origins.len(), 1);
         let origin = &info.origins[0];
-        assert_eq!(origin.change_id, state_id.to_string());
+        assert_eq!(origin.state_id, state_id.to_string());
         assert_eq!(origin.timestamp, ts);
         assert_eq!(origin.principal.name, "Ada Lovelace");
         assert_eq!(

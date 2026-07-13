@@ -169,7 +169,7 @@ mod tests {
         assert!(
             signals
                 .iter()
-                .all(|signal| signal.computed_against == Some(new.change_id)),
+                .all(|signal| signal.computed_against == Some(new.state_id)),
             "all registered modules should stamp computed_against on emitted signals: {signals:?}"
         );
     }

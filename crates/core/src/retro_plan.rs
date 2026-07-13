@@ -196,10 +196,10 @@ pub fn is_path_like_token(token: &str) -> bool {
             .any(|c| c.is_ascii_alphabetic() || matches!(c, '-' | '_'))
 }
 
-/// Short display prefix for a change id (`hd-` + 8 hex when present).
-pub fn short_change_id(id: &str) -> &str {
-    let id_no_prefix = id.strip_prefix("hd-").unwrap_or(id);
-    let prefix_len = if id.starts_with("hd-") { 3 } else { 0 };
+/// Short display prefix for a state id (`hs-` + 8 characters when present).
+pub fn short_state_id(id: &str) -> &str {
+    let id_no_prefix = id.strip_prefix("hs-").unwrap_or(id);
+    let prefix_len = if id.starts_with("hs-") { 3 } else { 0 };
     let take = std::cmp::min(8, id_no_prefix.len());
     &id[..(prefix_len + take)]
 }
@@ -325,8 +325,8 @@ mod tests {
 
     #[test]
     fn short_id_and_header() {
-        assert_eq!(short_change_id("hd-abcdef0123456789"), "hd-abcdef01");
-        assert_eq!(short_change_id("short"), "short");
+        assert_eq!(short_state_id("hs-abcdef0123456789"), "hs-abcdef01");
+        assert_eq!(short_state_id("short"), "short");
         let line = retro_header_line(None, None, Some(42));
         assert!(line.contains("since=<default-window>"));
         assert!(line.contains("until=<no-head>"));

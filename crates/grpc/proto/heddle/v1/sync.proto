@@ -2,14 +2,24 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "heddle/v1/common.proto";
 import "heddle/v1/threads.proto";
 
 service RepoSyncService {
-  rpc ListRefs(ListRefsRequest) returns (ListRefsResponse);
-  rpc UpdateRef(UpdateRefRequest) returns (UpdateRefResponse);
-  rpc Push(stream PushMessage) returns (stream PushMessage);
-  rpc Pull(stream PullMessage) returns (stream PullMessage);
+  rpc ListRefs(ListRefsRequest) returns (ListRefsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc UpdateRef(UpdateRefRequest) returns (UpdateRefResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc Push(stream PushMessage) returns (stream PushMessage) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc Pull(stream PullMessage) returns (stream PullMessage) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_TRANSIENT_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 }
 
 message ListRefsRequest {
@@ -31,12 +41,11 @@ message UpdateRefRequest {
   string new_value = 6;
   ThreadMetadata thread_metadata = 7;
   // Explicit two-lane revision addresses. Native callers should send
-  // `heddle:<change_id>` here; git-overlay callers send `git:<commit_oid>`.
+  // `heddle:<state_id>` here; git-overlay callers send `git:<commit_oid>`.
   // `old_value` / `new_value` remain populated for Heddle-native refs.
   string old_revision_address = 8;
   string new_revision_address = 9;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message UpdateRefResponse {
@@ -94,13 +103,13 @@ message PushRequest {
   PartialFetchStatus partial_fetch_status = 8;
   bool allow_partial_fetch = 9;
   ThreadMetadata thread_metadata = 10;
-  // Explicit revision being published. Native repos use `heddle:<change_id>`;
+  // Explicit revision being published. Native repos use `heddle:<state_id>`;
   // git-overlay repos use `git:<commit_oid>` and stream Git objects on the Git
   // lane rather than importing the commit as a Heddle state.
   string local_revision_address = 11;
   // Idempotency on the stream-opening message. The PushMessage
   // envelope itself isn't the operation — PushRequest is.
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message PushReady {
@@ -207,7 +216,7 @@ message GitRefUpdateTransfer {
 }
 
 message GitCheckpointTransfer {
-  bytes heddle_change_id = 1;
+  bytes heddle_state_id = 1;
   bytes git_commit_oid = 2;
   string thread = 3;
   string metadata_json = 4;
@@ -247,7 +256,7 @@ message PullRequest {
   string target_revision_address = 11;
   // Idempotency on the stream-opening message. The PullMessage
   // envelope itself isn't the operation — PullRequest is.
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message PullReady {

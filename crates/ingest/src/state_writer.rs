@@ -30,7 +30,10 @@
 //! transcript matcher fills those in later.
 
 use chrono::{DateTime, Utc};
-use objects::object::{Agent, Attribution, ChangeId, ContentHash, Principal, State, Status};
+use objects::object::{
+    Agent, Attribution, ChangeId, ChangeLineage, ChangeLineageKind, ContentHash, Principal, State,
+    StateId, Status,
+};
 use serde::Deserialize;
 
 use crate::{
@@ -41,7 +44,7 @@ use crate::{
 pub(crate) fn state_from_commit(
     commit: &CommitEntry,
     tree: ContentHash,
-    parents: Vec<ChangeId>,
+    parents: Vec<StateId>,
     git_lossy: bool,
 ) -> crate::Result<State> {
     // A lossy string view, derived once for the parsers that need text
@@ -50,6 +53,23 @@ pub(crate) fn state_from_commit(
     // though these ASCII-footer parsers read a lossy view.
     let message = String::from_utf8_lossy(&commit.message);
     let note = read_heddle_note(commit)?;
+    if let Some(note) = note.as_ref()
+        && let Some(mut source_state) = note.source_state.clone()
+    {
+        let source_id = source_state.id();
+        if source_id.to_string_full() != note.state_id
+            || source_state.change_id.to_string_full() != note.change_id
+            || source_state.tree != tree
+            || source_state.parents != parents
+        {
+            return Err(IngestError::Git(format!(
+                "embedded Heddle state for commit {} does not match its note, tree, or parents",
+                commit.sha
+            )));
+        }
+        source_state.state_id = source_id;
+        return Ok(source_state);
+    }
     let identity = resolve_identity(commit, note.as_ref())?;
     let attribution = parse_attribution_with_note(&commit.author, &message, note.as_ref());
     let status = note_status(note.as_ref());
@@ -86,6 +106,22 @@ pub(crate) fn state_from_commit(
         .with_status(status);
     if let Some(confidence) = note.as_ref().and_then(|note| note.confidence) {
         state = state.with_confidence(confidence);
+    }
+    if let Some(note) = note {
+        let source_state = StateId::parse(&note.state_id).map_err(|error| {
+            IngestError::Git(format!(
+                "invalid Heddle note state_id for commit {}: {error}",
+                commit.sha
+            ))
+        })?;
+        if state.id() != source_state {
+            let source_change = state.change_id;
+            state = state.with_lineage(vec![ChangeLineage {
+                kind: ChangeLineageKind::GitProjection,
+                source_change,
+                source_state,
+            }]);
+        }
     }
     Ok(state)
 }
@@ -127,7 +163,10 @@ fn parse_attribution_with_note(
 
 #[derive(Debug, Deserialize)]
 struct HeddleNote {
+    state_id: String,
     change_id: String,
+    #[serde(default)]
+    source_state: Option<State>,
     #[serde(default)]
     agent: Option<HeddleNoteAgent>,
     #[serde(default)]
@@ -184,7 +223,7 @@ fn resolve_identity(commit: &CommitEntry, note: Option<&HeddleNote>) -> crate::R
             ))
         });
     }
-    deterministic_change_id_from_git_sha(&commit.sha)
+    change_id_from_git_oid(&commit.sha)
 }
 
 fn note_status(note: Option<&HeddleNote>) -> Status {
@@ -213,22 +252,25 @@ fn parse_trailers(message: &str) -> std::collections::HashMap<String, String> {
     trailers
 }
 
-fn deterministic_change_id_from_git_sha(sha: &str) -> crate::Result<ChangeId> {
+fn change_id_from_git_oid(sha: &str) -> crate::Result<ChangeId> {
     let trimmed = sha.trim();
-    if trimmed.len() < 32 || !trimmed.chars().take(32).all(|c| c.is_ascii_hexdigit()) {
+    if !matches!(trimmed.len(), 40 | 64) || !trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(IngestError::Git(format!(
             "commit {sha} cannot seed deterministic Heddle identity: expected full hex SHA"
         )));
     }
-    let mut bytes = [0u8; 16];
-    for (idx, slot) in bytes.iter_mut().enumerate() {
+    let mut oid = Vec::with_capacity(trimmed.len() / 2);
+    for idx in 0..trimmed.len() / 2 {
         let pair = &trimmed[idx * 2..idx * 2 + 2];
-        *slot = u8::from_str_radix(pair, 16).map_err(|error| {
+        oid.push(u8::from_str_radix(pair, 16).map_err(|error| {
             IngestError::Git(format!(
                 "commit {sha} cannot seed deterministic Heddle identity: {error}"
             ))
-        })?;
+        })?);
     }
+    let digest = ContentHash::compute_typed("git-change", &oid);
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
     Ok(ChangeId::from_bytes(bytes))
 }
 
@@ -392,6 +434,7 @@ mod tests {
         commit.heddle_note = Some(
             format!(
                 r#"{{
+  "state_id": "{}",
   "change_id": "{}",
   "status": "published",
   "confidence": 0.875,
@@ -402,6 +445,7 @@ mod tests {
     "agent": {{"provider": "anthropic", "model": "claude-opus"}}
   }}
 }}"#,
+                StateId::from_bytes([0x24; 32]).to_string_full(),
                 expected_id.to_string_full()
             )
             .into_bytes(),

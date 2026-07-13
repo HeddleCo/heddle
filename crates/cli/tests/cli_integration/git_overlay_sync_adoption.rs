@@ -33,7 +33,7 @@ fn ingest_mapped_change(path: &std::path::Path, git_sha: &str) -> Option<String>
     let map_path = path.join(".heddle").join("ingest").join("sha_map.sqlite");
     let map = ingest::ShaMap::open(map_path).expect("open ingest SHA map");
     map.get_commit(git_sha)
-        .map(|change_id| change_id.to_string_full())
+        .map(|state_id| state_id.to_string_full())
 }
 
 #[test]

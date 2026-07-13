@@ -6,6 +6,9 @@ mod executor;
 mod rename_matcher;
 mod renames;
 
+#[cfg(test)]
+mod tests;
+
 use std::{error::Error, fmt, path::Path};
 
 use anyhow::{Result, anyhow};

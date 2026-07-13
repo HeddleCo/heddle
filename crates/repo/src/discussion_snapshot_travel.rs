@@ -7,8 +7,8 @@ use std::{collections::HashMap, path::PathBuf};
 
 use objects::{
     object::{
-        Blob, ChangeId, ContentHash, Discussion, DiscussionResolution, DiscussionsBlob, EntryType,
-        State, Tree,
+        Blob, ContentHash, Discussion, DiscussionResolution, DiscussionsBlob, EntryType, State,
+        StateAttachmentBody, StateId, Tree,
     },
     store::ObjectStore,
 };
@@ -28,7 +28,13 @@ where
         parent_state: &State,
         new_tree: &Tree,
     ) -> Result<Option<ContentHash>> {
-        let Some(parent_discussions_hash) = parent_state.discussions else {
+        let Some(parent_discussions_hash) = self
+            .latest_state_attachment(&parent_state.id(), crate::StateAttachmentKind::Discussions)?
+            .and_then(|attachment| match attachment.body {
+                StateAttachmentBody::Discussions(hash) => Some(hash),
+                _ => None,
+            })
+        else {
             return Ok(None);
         };
         let parent_blob = self
@@ -91,7 +97,7 @@ where
     fn collect_discussion_baseline_file_bytes(
         &self,
         discussions: &[Discussion],
-    ) -> Result<HashMap<ChangeId, HashMap<String, Vec<u8>>>> {
+    ) -> Result<HashMap<StateId, HashMap<String, Vec<u8>>>> {
         let mut baselines = HashMap::new();
         for discussion in discussions {
             if baselines.contains_key(&discussion.opened_against_state) {
@@ -161,16 +167,16 @@ fn missing_object(object_type: &str, hash: ContentHash) -> HeddleError {
     }
 }
 
-fn missing_state(change_id: ChangeId) -> HeddleError {
+fn missing_state(state_id: StateId) -> HeddleError {
     HeddleError::MissingObject {
         object_type: "state".to_string(),
-        id: change_id.to_string_full(),
+        id: state_id.to_string_full(),
     }
 }
 
 fn group_discussions_by_opened_state(
     discussions: Vec<Discussion>,
-) -> HashMap<ChangeId, Vec<Discussion>> {
+) -> HashMap<StateId, Vec<Discussion>> {
     let mut grouped = HashMap::new();
     for discussion in discussions {
         grouped
@@ -186,10 +192,9 @@ mod tests {
     use std::fs;
 
     use objects::object::{
-        Attribution, ChangeId, Discussion, DiscussionTurn, Principal, SymbolAnchor, ThreadName,
+        Attribution, Discussion, DiscussionTurn, Principal, StateAttachment, StateId, SymbolAnchor,
         VisibilityTier,
     };
-    use refs::Head;
     use tempfile::TempDir;
 
     use super::*;
@@ -200,7 +205,7 @@ mod tests {
         (temp_dir, repo)
     }
 
-    fn discussion(id: &str, state: ChangeId, file: &str, symbol: &str) -> Discussion {
+    fn discussion(id: &str, state: StateId, file: &str, symbol: &str) -> Discussion {
         Discussion {
             id: id.to_string(),
             anchor: SymbolAnchor::new(file, symbol),
@@ -227,22 +232,25 @@ mod tests {
     ) -> State {
         let bytes = DiscussionsBlob::new(discussions).encode().unwrap();
         let hash = repo.store().put_blob(&Blob::new(bytes)).unwrap();
-        let mut decorated = state.clone().with_discussions(hash);
-        repo.put_authored_state(&mut decorated).unwrap();
-        repo.refs()
-            .set_thread(&ThreadName::new("main"), &decorated.change_id)
-            .unwrap();
-        repo.refs()
-            .write_head(&Head::Attached {
-                thread: ThreadName::new("main"),
-            })
-            .unwrap();
-        decorated
+        repo.put_state_attachment(&StateAttachment {
+            state_id: state.id(),
+            body: StateAttachmentBody::Discussions(hash),
+            attribution: state.attribution.clone(),
+            created_at: chrono::Utc::now(),
+            supersedes: None,
+        })
+        .unwrap();
+        state.clone()
     }
 
     fn read_discussions(repo: &Repository, state: &State) -> DiscussionsBlob {
-        let hash = state
-            .discussions
+        let hash = repo
+            .latest_state_attachment(&state.id(), crate::StateAttachmentKind::Discussions)
+            .unwrap()
+            .and_then(|attachment| match attachment.body {
+                StateAttachmentBody::Discussions(hash) => Some(hash),
+                _ => None,
+            })
             .expect("snapshot should carry discussions");
         let blob = repo.store().get_blob(&hash).unwrap().unwrap();
         DiscussionsBlob::decode(blob.content()).unwrap()
@@ -266,7 +274,7 @@ mod tests {
         attach_discussions_to_main_head(
             &repo,
             &first,
-            vec![discussion("d1", first.change_id, "src.rs", "foo")],
+            vec![discussion("d1", first.id(), "src.rs", "foo")],
         );
 
         fs::write(
@@ -305,7 +313,7 @@ mod tests {
         attach_discussions_to_main_head(
             &repo,
             &first,
-            vec![discussion("d1", first.change_id, "src.rs", "foo")],
+            vec![discussion("d1", first.id(), "src.rs", "foo")],
         );
 
         fs::write(
@@ -361,7 +369,7 @@ mod tests {
         attach_discussions_to_main_head(
             &repo,
             &first,
-            vec![discussion("d1", first.change_id, "src.rs", "foo")],
+            vec![discussion("d1", first.id(), "src.rs", "foo")],
         );
 
         fs::write(

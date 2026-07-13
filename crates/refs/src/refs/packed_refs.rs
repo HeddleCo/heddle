@@ -5,7 +5,7 @@ use std::path::Path;
 
 use objects::{
     error::{HeddleError, Result},
-    object::ChangeId,
+    object::StateId,
 };
 
 use super::PackedRefsModel as CorePackedRefs;
@@ -43,19 +43,19 @@ impl PackedRefs {
         Ok(write_file_atomic(path, content.as_bytes())?)
     }
 
-    pub fn get_thread(&self, name: &str) -> Option<ChangeId> {
+    pub fn get_thread(&self, name: &str) -> Option<StateId> {
         self.inner.get_thread(name)
     }
 
-    pub fn get_marker(&self, name: &str) -> Option<ChangeId> {
+    pub fn get_marker(&self, name: &str) -> Option<StateId> {
         self.inner.get_marker(name)
     }
 
-    pub fn set_thread(&mut self, name: &str, id: ChangeId) {
+    pub fn set_thread(&mut self, name: &str, id: StateId) {
         self.inner.set_thread(name, id);
     }
 
-    pub fn set_marker(&mut self, name: &str, id: ChangeId) {
+    pub fn set_marker(&mut self, name: &str, id: StateId) {
         self.inner.set_marker(name, id);
     }
 

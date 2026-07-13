@@ -38,7 +38,7 @@ Grouped by owning subsystem. Severity: **P0** blocks trustworthy certification, 
 | P1 | Core-loop budgets only ignored smoke test | cli | Startup + status | Promote paired release smoke + artifact store |
 | P2 | Repeated repo/Sley open on status/verify paths | repo/core | Repeated open | Cache handles in session facade |
 | P3 | Worktree full scans where index/fsmonitor could help | repo | Full scan | Profile first; watchman optional |
-| P4 | Criterion benches not gated for regression | CI | No fail-on-reg | Interim: store weekly artifacts; later: threshold on common ops |
+| P4 | Criterion benches not gated for regression | CI | No fail-on-reg | Interim: store manual-run artifacts; later: threshold on common ops |
 | P5 | CLI cold dep graph historically huge | cli packaging | Compile/startup | Keep server out of OSS CLI (done direction); continue dep audits |
 
 ## P2 — long tail

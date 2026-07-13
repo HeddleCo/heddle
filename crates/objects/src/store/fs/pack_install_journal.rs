@@ -176,7 +176,8 @@ pub(crate) fn try_acquire_pack_name_lock(
     let locks = packs_dir.join(PACK_LOCKS_DIR_NAME);
     create_dir_all_durable(&locks)?;
     let lock = RepoLock::at(locks.join(format!("{pack_name}.lock")));
-    lock.try_write().map_err(|e| io::Error::other(e.to_string()))
+    lock.try_write()
+        .map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// Short global listing lock (intent dir scan only).
@@ -344,12 +345,9 @@ fn assert_under_packs(packs_dir: &Path, candidate: &Path) -> io::Result<()> {
     let packs_canon = fs::canonicalize(packs_dir)?;
 
     let rel = candidate.strip_prefix(packs_dir).or_else(|_| {
-        candidate.strip_prefix(&packs_canon).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "path is not under packs_dir",
-            )
-        })
+        candidate
+            .strip_prefix(&packs_canon)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path is not under packs_dir"))
     })?;
 
     for c in rel.components() {
@@ -987,8 +985,7 @@ pub fn install_pack_files_journaled(
     src_index_path: &Path,
     pack_name: &str,
 ) -> io::Result<()> {
-    match install_pack_files_journaled_inner(packs_dir, src_pack_path, src_index_path, pack_name)
-    {
+    match install_pack_files_journaled_inner(packs_dir, src_pack_path, src_index_path, pack_name) {
         Ok(()) => {
             metric_inc(&METRIC_INSTALLS_OK);
             Ok(())
@@ -1465,8 +1462,8 @@ mod tests {
             let packs = packs_b.as_path();
             planted_b.wait();
             // While pack lock is held, recover try_locks and skips — must not abort.
-            let mid =
-                recover_pack_install_intents_with_ttl(packs, Some(1)).expect("recover under pack lock");
+            let mid = recover_pack_install_intents_with_ttl(packs, Some(1))
+                .expect("recover under pack lock");
             assert_eq!(mid.aborted, 0, "must not abort live install: {mid:?}");
             assert!(
                 mid.skipped_in_progress >= 1 || dst_pack_path(packs, &pack_id("dd")).exists(),
@@ -1503,7 +1500,10 @@ mod tests {
         assert_eq!(report.completed, 1);
         assert!(dst_pack.exists());
         assert!(dst_idx_path(&packs, &pack_id("ee")).exists());
-        assert_eq!(fs::read(dst_idx_path(&packs, &pack_id("ee"))).unwrap(), b"idx-x");
+        assert_eq!(
+            fs::read(dst_idx_path(&packs, &pack_id("ee"))).unwrap(),
+            b"idx-x"
+        );
     }
 
     #[test]
@@ -1748,7 +1748,8 @@ mod tests {
         })
         .expect_err("fault should fire");
         assert!(
-            err.to_string().contains("pack_install_after_intent_prepared"),
+            err.to_string()
+                .contains("pack_install_after_intent_prepared"),
             "err={err}"
         );
         // Process-global counters can race under parallel tests; assert non-decreasing delta.
@@ -1940,10 +1941,7 @@ mod tests {
         );
         // existing_pair must refuse a symlink-out destination (error or false).
         let pair = existing_pair_matches_pack_name(&packs, &name);
-        assert!(
-            pair.as_ref().map(|v| !v).unwrap_or(true),
-            "pair={pair:?}"
-        );
+        assert!(pair.as_ref().map(|v| !v).unwrap_or(true), "pair={pair:?}");
     }
 
     #[cfg(unix)]

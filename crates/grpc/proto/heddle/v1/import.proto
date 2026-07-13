@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "heddle/v1/hosted.proto";
 import "heddle/v1/common.proto";
 
@@ -19,7 +21,9 @@ service ImportService {
   // the import runs asynchronously in the weft import worker (LISTEN/NOTIFY +
   // backup poll, lease-claimed for horizontal scale). Caller identity (user_id)
   // comes from the biscuit subject — NOT a request field.
-  rpc CreateImportJob(CreateImportJobRequest) returns (CreateImportJobResponse);
+  rpc CreateImportJob(CreateImportJobRequest) returns (CreateImportJobResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
   // Detached + reattachable live progress for one or more import jobs
   // (weft#489). Emits a snapshot event per job immediately, then tails the
@@ -27,7 +31,9 @@ service ImportService {
   // batch. A client disconnect cancels only the stream, never the job (the
   // worker owns the job via its lease). Mirrors the planned StreamAdoptProgress
   // (weft#386) shape.
-  rpc StreamImportProgress(StreamImportProgressRequest) returns (stream ImportProgressEvent);
+  rpc StreamImportProgress(StreamImportProgressRequest) returns (stream ImportProgressEvent) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 }
 
 // Which provider a token-authed import targets (weft#485). GitHub App imports
@@ -80,7 +86,7 @@ message CreateImportJobRequest {
   // one (the #379 personal-namespace behavior, kept for CLI callers).
   string target_spool_path = 9;
   // Idempotency key. A retry-safe double-submit returns the SAME job_id.
-  string client_operation_id = 10;
+  string client_operation_id = 10 [(heddle.v1.idempotency_key) = true];
 }
 
 message CreateImportJobResponse {

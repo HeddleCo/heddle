@@ -169,23 +169,6 @@ pub trait WeftExtensions: Send + Sync {
         ctx: &(dyn CliContext + 'static),
         command: &(dyn Any + Send + Sync),
     ) -> Result<()>;
-
-    /// `heddle support <subcommand>` — hosted-side support and
-    /// diagnostic operations.
-    async fn support(
-        &self,
-        ctx: &(dyn CliContext + 'static),
-        command: &(dyn Any + Send + Sync),
-    ) -> Result<()>;
-
-    /// `heddle presence publish` — stream presence/heartbeat over the
-    /// websocket transport to the hosted backend.
-    async fn presence_publish(
-        &self,
-        ctx: &(dyn CliContext + 'static),
-        session: String,
-        interval_secs: u64,
-    ) -> Result<()>;
 }
 
 /// Noop implementation used in OSS builds. Every method returns the
@@ -201,23 +184,6 @@ impl WeftExtensions for NoopWeftExtensions {
         _command: &(dyn Any + Send + Sync),
     ) -> Result<()> {
         Err(anyhow!(not_enabled_error("auth")))
-    }
-
-    async fn support(
-        &self,
-        _ctx: &(dyn CliContext + 'static),
-        _command: &(dyn Any + Send + Sync),
-    ) -> Result<()> {
-        Err(anyhow!(not_enabled_error("support")))
-    }
-
-    async fn presence_publish(
-        &self,
-        _ctx: &(dyn CliContext + 'static),
-        _session: String,
-        _interval_secs: u64,
-    ) -> Result<()> {
-        Err(anyhow!(not_enabled_error("presence publish")))
     }
 }
 

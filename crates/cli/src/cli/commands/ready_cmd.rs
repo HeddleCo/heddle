@@ -298,7 +298,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
                 no_agent: false,
             },
         )?;
-        captured_state = Some(snapshot.change_id);
+        captured_state = Some(snapshot.state_id);
         thread = manager
             .load(&thread.id)?
             .or_else(|| current_thread(&repo).ok().flatten())
@@ -517,7 +517,7 @@ fn ready_blocked_by_missing_intent(output: &ReadyOutput) -> bool {
             .operator
             .recommended_action
             .as_deref()
-            .is_some_and(|action| action == "heddle commit -m \"...\"")
+            .is_some_and(|action| action == "heddle capture -m \"...\"")
 }
 
 fn write_trust_blocked_setup(recommended_action: Option<&str>) {
@@ -642,7 +642,7 @@ fn missing_ready_capture_intent_output(
             format!("uncaptured path(s): {shown}, and {overflow} more")
         }
     };
-    let recommended_action = "heddle commit -m \"...\"".to_string();
+    let recommended_action = "heddle capture -m \"...\"".to_string();
     Ok(ReadyOutput {
         operator: OperatorCommandOutput {
             status: "blocked".to_string(),
@@ -790,7 +790,7 @@ fn ready_merge_type_summary(report: &ThreadPreviewReport) -> String {
 
 fn ready_captured_label(summary: &ReadyReadinessSummary) -> String {
     match summary.captured_state.as_deref() {
-        Some(state) => format!("yes (state {})", style::change_id(state)),
+        Some(state) => format!("yes (state {})", style::state_id(state)),
         None if summary.captured => "yes".to_string(),
         None => "no".to_string(),
     }
@@ -859,9 +859,9 @@ mod tests {
     }
 
     #[test]
-    fn ready_suppresses_self_merge_when_thread_has_no_target() {
+    fn ready_suppresses_land_when_thread_has_no_target() {
         assert_eq!(
-            ready_report_recommended_action(&report("no_target", "heddle merge main --preview")),
+            ready_report_recommended_action(&report("no_target", "heddle land --thread main")),
             None
         );
     }
@@ -871,9 +871,9 @@ mod tests {
         assert_eq!(
             ready_report_recommended_action(&report(
                 "fast_forward",
-                "heddle land --thread feature --no-push"
+                "heddle land --thread feature"
             )),
-            Some("heddle land --thread feature --no-push".to_string())
+            Some("heddle land --thread feature".to_string())
         );
     }
 }

@@ -62,6 +62,6 @@ Conflict resolution should use explicit command wording such as `heddle discuss 
 <!-- doctor-docs:planned -->
 `heddle discuss visibility` should be a first-class advanced or hosted-aware subcommand. Visibility is policy-sensitive, can conflict, and may require Weft validation; it should not be an incidental flag on unrelated commands.
 
-**Status:** proposed
+**Status:** accepted
 
 **Considered Options:** Introducing a new command would avoid breaking the current `discuss` output, but it would fragment the collaboration surface. The name already matches the intended concept, and Heddle is pre-1.0, so the command should keep the name while changing internals and schemas deliberately.

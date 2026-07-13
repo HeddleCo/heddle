@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Initialize command.
 
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::{Result, bail};
 use heddle_core::{
-    InitPrincipalPlan, init_side_effects as core_init_side_effects, resolve_absolute_path,
+    InitPrincipalPlan, OnboardingFacts, OnboardingMode,
+    init_side_effects as core_init_side_effects, plan_repository_onboarding, resolve_absolute_path,
     select_init_principal,
 };
 use objects::object::Principal;
@@ -78,46 +79,93 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
 
     info!(path = %path.display(), "Initializing repository");
 
-    // If the directory already has a `.git` (or is inside one), leave the
-    // `main` thread unseeded: the user almost certainly wants to import from
-    // Git next, and pre-seeding would make `main` point at a throwaway
-    // empty-tree snapshot. Otherwise, seed `main` so the repo is immediately
-    // usable for snapshot/history/etc.
-    let has_git = SleyRepository::discover(&path).is_ok();
-
-    let repo = if has_git {
-        Repository::bootstrap_git_overlay(&path)?
-    } else {
-        Repository::init_default(&path)?
+    let mut user_config = UserConfig::load_default()?;
+    let principal = match (args.principal_name.clone(), args.principal_email.clone()) {
+        (Some(name), Some(email)) => Some((name, email)),
+        (Some(_), None) => {
+            bail!(RecoveryAdvice::init_principal_field_required(
+                "--principal-email"
+            ))
+        }
+        (None, Some(_)) => {
+            bail!(RecoveryAdvice::init_principal_field_required(
+                "--principal-name"
+            ))
+        }
+        (None, None) => None,
     };
+    let staged_principal = if let Some((name, email)) = principal {
+        user_config.set_principal(name.clone(), email.clone());
+        Some((name, email, user_config.stage_default()?))
+    } else {
+        None
+    };
+
+    let git = SleyRepository::discover(&path).ok();
+    let existing_repo = if path.join(".heddle").exists() {
+        Some(Repository::open(&path)?)
+    } else {
+        None
+    };
+    let heddle_mode = existing_repo.as_ref().map(|repo| match repo.capability() {
+        RepositoryCapability::GitOverlay => OnboardingMode::GitOverlay,
+        RepositoryCapability::NativeHeddle => OnboardingMode::Native,
+    });
+    let onboarding = plan_repository_onboarding(OnboardingFacts {
+        git_worktree: git.is_some(),
+        git_has_commits: git
+            .as_ref()
+            .and_then(|repo| repo.head().ok())
+            .and_then(|head| head.oid)
+            .is_some(),
+        heddle_mode,
+    });
+    let git_detected = git.is_some();
+
+    let created_repository = existing_repo.is_none();
+    let repo = match existing_repo {
+        Some(repo) => repo,
+        None => match onboarding.mode {
+            OnboardingMode::GitOverlay => Repository::init_git_overlay_sidecar(&path)?,
+            OnboardingMode::Native => Repository::init_default(&path)?,
+        },
+    };
+
+    let principal_configured = staged_principal.is_some();
+    if let Some((name, email, staged)) = staged_principal {
+        match staged.publish() {
+            Ok(config_path) => {
+                info!(principal_name = %name, principal_email = %email, "Principal configured");
+                debug!(config_path = %config_path.display(), "User config updated");
+            }
+            Err(error) => {
+                let principal_published = UserConfig::load_default()
+                    .ok()
+                    .and_then(|config| config.principal)
+                    .is_some_and(|principal| principal.name == name && principal.email == email);
+                if created_repository && !principal_published {
+                    rollback_new_repository(repo, &path).map_err(|rollback_error| {
+                        anyhow::anyhow!(
+                            "failed to save principal config: {error}; repository rollback also failed: {rollback_error}"
+                        )
+                    })?;
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    if created_repository && onboarding.mode == OnboardingMode::GitOverlay {
+        Repository::ensure_git_overlay_local_excludes(&path)?;
+    }
 
     debug!(heddle_dir = %repo.heddle_dir().display(), "Repository initialized");
 
     let installed_heddleignore = false;
 
-    let mut user_config = UserConfig::load_default()?;
-    let mut principal_configured = false;
-    if args.principal_name.is_some() || args.principal_email.is_some() {
-        let name = args.principal_name.clone().ok_or_else(|| {
-            anyhow::anyhow!(RecoveryAdvice::init_principal_field_required(
-                "--principal-name"
-            ))
-        })?;
-        let email = args.principal_email.clone().ok_or_else(|| {
-            anyhow::anyhow!(RecoveryAdvice::init_principal_field_required(
-                "--principal-email"
-            ))
-        })?;
-        user_config.set_principal(name.clone(), email.clone());
-        let config_path = user_config.save_default()?;
-        info!(principal_name = %name, principal_email = %email, "Principal configured");
-        debug!(config_path = %config_path.display(), "User config updated");
-        principal_configured = true;
-    }
-
     super::maybe_prompt_init_install(cli, &repo, &args)?;
 
-    let repo_is_git_overlay = has_git;
+    let repo_is_git_overlay = onboarding.mode == OnboardingMode::GitOverlay;
     let message = if repo_is_git_overlay {
         format!(
             "Initialized Heddle data in {} for Git-overlay workflows",
@@ -133,12 +181,12 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     let trust = build_repository_verification_state(&repo);
     // Init must never end without a next step (heddle#644). When the repo has
     // existing Git history the trust state recommends the exact setup command;
-    // when it doesn't, point at the first save — `heddle commit` records the
+    // when it doesn't, point at the first Heddle save boundary.
     // first state and, in Git-overlay repos, the matching Git checkpoint.
     let next_action = if !trust.recommended_action.is_empty() {
         Some(trust.recommended_action.clone())
     } else {
-        Some("heddle commit -m \"...\"".to_string())
+        Some("heddle capture -m \"...\"".to_string())
     };
     let principal_status = init_principal_status(&repo, &user_config)?;
     let placeholder_principal_warning = principal_status
@@ -154,7 +202,7 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
         action: "init".to_string(),
         path: repo.heddle_dir().to_path_buf(),
         repository_mode: repo.capability_label().to_string(),
-        git_detected: repo_is_git_overlay,
+        git_detected,
         heddle_initialized: true,
         installed_heddleignore,
         principal_configured,
@@ -171,6 +219,16 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     };
 
     render_init(&output, should_output_json(cli, Some(repo.config())))
+}
+
+fn rollback_new_repository(repo: Repository, root: &std::path::Path) -> Result<()> {
+    let heddle_dir = repo.heddle_dir().to_path_buf();
+    if heddle_dir != root.join(".heddle") {
+        bail!("refusing to roll back non-root Heddle metadata");
+    }
+    drop(repo);
+    fs::remove_dir_all(heddle_dir)?;
+    Ok(())
 }
 
 fn absolute_path(path: &std::path::Path) -> Result<PathBuf> {

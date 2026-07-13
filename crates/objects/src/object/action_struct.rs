@@ -4,7 +4,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{ActionId, Attribution, ChangeId, ContentHash, Operation, SemanticChange};
+use super::{ActionId, Attribution, ContentHash, Operation, SemanticChange, StateId};
 
 /// An action records an operation between states.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -14,10 +14,10 @@ pub struct Action {
     id: Option<ActionId>,
 
     /// Source state (None for initial state).
-    pub from_state: Option<ChangeId>,
+    pub from_state: Option<StateId>,
 
     /// Destination state.
-    pub to_state: ChangeId,
+    pub to_state: StateId,
 
     /// Type of operation.
     pub operation: Operation,
@@ -38,8 +38,8 @@ pub struct Action {
 impl Action {
     /// Create a new action.
     pub fn new(
-        from_state: Option<ChangeId>,
-        to_state: ChangeId,
+        from_state: Option<StateId>,
+        to_state: StateId,
         operation: Operation,
         description: impl Into<String>,
         attribution: Attribution,
@@ -80,8 +80,8 @@ impl Action {
     pub fn compute_id(&self) -> ActionId {
         #[derive(Serialize)]
         struct ActionIdentity<'a> {
-            from_state: Option<&'a ChangeId>,
-            to_state: &'a ChangeId,
+            from_state: Option<&'a StateId>,
+            to_state: &'a StateId,
             operation: &'a Operation,
             description: &'a str,
             semantic_changes: &'a [SemanticChange],
@@ -124,7 +124,7 @@ mod tests {
     fn sample_action() -> Action {
         Action::new(
             None,
-            ChangeId::from_bytes([1; 16]),
+            StateId::from_bytes([1; 32]),
             Operation::Snapshot,
             "capture state",
             Attribution::human(Principal::new("Alice", "alice@example.com")),
@@ -151,7 +151,7 @@ mod tests {
         let base = sample_action().with_timestamp(Utc.timestamp_opt(1_700_000_000, 10).unwrap());
         let agent_authored = Action::new(
             None,
-            ChangeId::from_bytes([1; 16]),
+            StateId::from_bytes([1; 32]),
             Operation::Snapshot,
             "capture state",
             Attribution::with_agent(

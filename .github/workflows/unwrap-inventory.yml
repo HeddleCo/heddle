@@ -40,7 +40,8 @@ jobs:
           set +e
           cargo metadata --format-version 1 --no-deps > cargo-metadata.json
           metadata_status=$?
-          cargo clippy --locked --message-format=json --workspace --all-targets -- \
+          cargo clippy --locked --message-format=json --workspace \
+            --lib --bins --examples -- \
             -W clippy::unwrap_used \
             -W clippy::expect_used \
             -W clippy::panic \

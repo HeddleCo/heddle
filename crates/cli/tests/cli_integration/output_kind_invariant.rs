@@ -49,7 +49,6 @@ const SWEPT: &[&str] = &[
     "verify",
     "init",
     "capture",
-    "checkpoint",
     "commit",
     "clone",
     "diff",
@@ -64,11 +63,10 @@ const SWEPT: &[&str] = &[
     "sync git",
     "status",
     // heddle#272 — output_kind sweep on the named-by-persona verbs.
-    "actor spawn",
-    "actor list",
-    "actor show",
-    "actor explain",
-    "actor done",
+    "agent presence list",
+    "agent presence show",
+    "agent presence explain",
+    "agent presence complete",
     "auth logout",
     "auth status",
     "auth create-service-token",
@@ -85,15 +83,10 @@ const SWEPT: &[&str] = &[
     "visibility promote",
     "visibility show",
     "visibility list",
-    "stash list",
-    "stash show",
-    "support grant",
-    "support list",
-    "support revoke",
-    "clean",
     "discuss open",
     "discuss append",
     "discuss resolve",
+    "discuss reopen",
     "discuss list",
     "discuss show",
     "context set",
@@ -111,10 +104,8 @@ const SWEPT: &[&str] = &[
     "review next",
     "review health",
     "resolve",
-    "cherry-pick",
     // heddle#662 — additive discriminator paths for state inspection,
     // rebase progress JSONL, and conflict-resolution success.
-    "rebase",
     "show",
     // heddle#641 — swept the remaining verbs whose runtime JSON already
     // emits `output_kind`. Every value below was probed live against the
@@ -139,12 +130,11 @@ const SWEPT: &[&str] = &[
     "daemon stop",
     "doctor",
     "expand",
-    "fetch",
     "land",
     "log",
     "maintenance gc",
-    "maintenance index",
-    "merge",
+    "maintenance inspect",
+    "maintenance refresh",
     "oplog recover",
     "pull",
     "push",
@@ -156,7 +146,6 @@ const SWEPT: &[&str] = &[
     "remote set-default",
     "remote show",
     "start",
-    "switch",
     "sync",
     "timeline status",
     "timeline record-start",
@@ -192,6 +181,11 @@ const KIND_FIELD_EXCEPTIONS: &[&str] = &["help"];
 const UNSWEPT_TODO: &[&str] = &[
     "agent heartbeat",
     "agent list",
+    "agent provenance begin",
+    "agent provenance end",
+    "agent provenance list",
+    "agent provenance segment",
+    "agent provenance show",
     "agent release",
     "agent reserve",
     "context reason git",
@@ -199,6 +193,7 @@ const UNSWEPT_TODO: &[&str] = &[
     "daemon serve",
     "daemon status",
     "fsck",
+    "fsck repair git",
     "git-overlay",
     "hook events",
     "hook install",
@@ -210,9 +205,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "integration relay",
     "integration uninstall",
     "integration upgrade",
-    "maintenance inspect",
-    "maintenance monitor",
-    "maintenance run",
     "retro",
     "semantic hot",
     "session end",
@@ -220,11 +212,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "session segment",
     "session show",
     "session start",
-    "stash apply",
-    "stash clear",
-    "stash drop",
-    "stash pop",
-    "stash push",
     "thread absorb",
     "thread approvals",
     "thread approve",
@@ -232,10 +219,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "thread check-merge",
     "thread current",
     "thread move",
-    "transaction abort",
-    "transaction begin",
-    "transaction commit",
-    "transaction status",
     "try",
     "watch",
 ];
@@ -266,18 +249,11 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         "agent capture" => Some("capture"),
         "agent ready" => Some("ready"),
         "start" => Some("thread_start"),
-        "switch" => Some("thread_switch"),
-        // `doctor` is implemented by the diagnose module.
-        "doctor" => Some("diagnose"),
-        // The maintenance wrappers emit their inner tool's kind.
+        // The garbage-collection wrapper emits its inner tool's kind.
         "maintenance gc" => Some("gc"),
-        "maintenance index" => Some("index"),
         // `redact purge` preserves the pre-consolidation wire values.
         "redact purge apply" => Some("purge_apply"),
         "redact purge list" => Some("purge_list"),
-        // Rebase emits JSONL progress records rather than a single
-        // command-shaped object.
-        "rebase" => Some("rebase_progress"),
         // Timeline navigation subcommands intentionally share one action
         // envelope so agents can handle fork/reset/recover uniformly.
         "timeline fork" | "timeline reset" | "timeline recover" => Some("timeline_action"),
@@ -702,16 +678,6 @@ fn init_fixture() -> TempDir {
     temp
 }
 
-fn init_rebase_fast_forward_fixture() -> TempDir {
-    let temp = init_fixture();
-    heddle(&["thread", "create", "feature"], Some(temp.path())).expect("thread create feature");
-    heddle(&["thread", "switch", "feature"], Some(temp.path())).expect("switch feature");
-    std::fs::write(temp.path().join("feat.txt"), "feature work\n").expect("write feature file");
-    heddle(&["capture", "-m", "feature"], Some(temp.path())).expect("feature capture");
-    heddle(&["thread", "switch", "main"], Some(temp.path())).expect("switch main");
-    temp
-}
-
 /// Invocations for swept verbs we exercise at runtime. Per-verb argv +
 /// whether the verb is expected to exit zero. Some named verbs need a
 /// non-trivial fixture (e.g. `revert` requires a state to revert); we
@@ -723,7 +689,6 @@ fn runtime_invocation_args(
         "redact purge list" => Some((&["redact", "purge", "list"], true)),
         "redact list" => Some((&["redact", "list"], true)),
         "redact trust list" => Some((&["redact", "trust", "list"], true)),
-        "stash list" => Some((&["stash", "list"], true)),
         "discuss list" => Some((&["discuss", "list"], true)),
         "context list" => Some((&["context", "list"], true)),
         "review next" => Some((&["review", "next"], true)),
@@ -732,8 +697,8 @@ fn runtime_invocation_args(
         // payload) in the shared init'd fixture, verified live before
         // being added here. Each pins runtime emission against the
         // catalog value, including the override-table verbs (`branch` →
-        // `thread_list`, `doctor` → `diagnose`, `inspect` →
-        // `thread_show`, `maintenance gc`/`index` → `gc`/`index`).
+        // `thread_list`, `inspect` → `thread_show`, and `maintenance gc` →
+        // `gc`).
         // `inspect` names `main` explicitly because the earlier `fork`
         // invocation leaves the shared fixture without a current
         // thread; `ready` (which rejects imported-Git-ref targets and
@@ -744,7 +709,8 @@ fn runtime_invocation_args(
         "doctor" => Some((&["doctor"], true)),
         "log" => Some((&["log"], true)),
         "maintenance gc" => Some((&["maintenance", "gc"], true)),
-        "maintenance index" => Some((&["maintenance", "index"], true)),
+        "maintenance inspect" => Some((&["maintenance", "inspect"], true)),
+        "maintenance refresh" => Some((&["maintenance", "refresh"], true)),
         "query" => Some((&["query"], true)),
         "remote list" => Some((&["remote", "list"], true)),
         "timeline status" => Some((&["timeline", "status"], true)),
@@ -925,14 +891,14 @@ fn sv(args: &[&str]) -> Vec<String> {
     args.iter().map(|s| s.to_string()).collect()
 }
 
-/// `change_id` of the current HEAD state in `dir` (first `log` record).
-fn head_change_id(dir: &std::path::Path) -> String {
+/// `state_id` of the current HEAD state in `dir` (first `log` record).
+fn head_state_id(dir: &std::path::Path) -> String {
     let stdout = heddle(&["--output", "json", "log"], Some(dir)).expect("heddle log");
     let first = stdout.lines().next().unwrap_or("");
     let parsed: Value = serde_json::from_str(first).expect("log stdout is JSON");
-    parsed["states"][0]["change_id"]
+    parsed["states"][0]["state_id"]
         .as_str()
-        .expect("log states[0].change_id")
+        .expect("log states[0].state_id")
         .to_string()
 }
 
@@ -945,52 +911,109 @@ fn head_change_id(dir: &std::path::Path) -> String {
 /// with a documented sample and a *generic* schema (one that pins none of the
 /// real fields, as the inline `serde_json::json!` verbs do) MUST appear in this
 /// match or the invariant test fails demanding it.
-fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
-    let case = match output_kind {
-        "clean" => {
-            let t = init_fixture();
-            std::fs::write(t.path().join("untracked.txt"), "junk").unwrap();
-            (t, sv(&["clean", "--dry-run"]))
+struct RuntimeDocCase {
+    _fixture: TempDir,
+    cwd: std::path::PathBuf,
+    argv: Vec<String>,
+}
+
+impl RuntimeDocCase {
+    fn at_root(fixture: TempDir, argv: Vec<String>) -> Self {
+        let cwd = fixture.path().to_path_buf();
+        Self {
+            _fixture: fixture,
+            cwd,
+            argv,
         }
+    }
+}
+
+fn init_repo_at(path: &std::path::Path) {
+    std::fs::create_dir_all(path).expect("create fixture repository directory");
+    heddle(
+        &[
+            "init",
+            "--principal-name",
+            "Heddle Test",
+            "--principal-email",
+            "heddle@test.example",
+        ],
+        Some(path),
+    )
+    .expect("initialize fixture repository");
+}
+
+fn transport_runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
+    let fixture = TempDir::new().expect("transport fixture");
+    let remote = fixture.path().join("remote");
+    let checkout = fixture.path().join("checkout");
+
+    init_repo_at(&remote);
+    std::fs::write(remote.join("base.txt"), "base\n").expect("write remote base");
+    heddle(&["capture", "-m", "base"], Some(&remote)).expect("capture remote base");
+
+    if output_kind == "clone" {
+        return Some(RuntimeDocCase {
+            cwd: fixture.path().to_path_buf(),
+            argv: vec![
+                "clone".to_string(),
+                remote.to_string_lossy().into_owned(),
+                checkout.to_string_lossy().into_owned(),
+            ],
+            _fixture: fixture,
+        });
+    }
+
+    heddle(
+        &[
+            "clone",
+            remote.to_str().expect("UTF-8 remote path"),
+            checkout.to_str().expect("UTF-8 checkout path"),
+        ],
+        Some(fixture.path()),
+    )
+    .expect("clone transport fixture");
+
+    let argv = match output_kind {
+        "pull" => {
+            std::fs::write(remote.join("base.txt"), "remote update\n")
+                .expect("write remote update");
+            heddle(&["capture", "-m", "remote update"], Some(&remote))
+                .expect("capture remote update");
+            sv(&["pull"])
+        }
+        _ => return None,
+    };
+    Some(RuntimeDocCase {
+        _fixture: fixture,
+        cwd: checkout,
+        argv,
+    })
+}
+
+fn runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
+    if matches!(output_kind, "clone" | "pull") {
+        return transport_runtime_doc_case(output_kind);
+    }
+    let case = match output_kind {
         "thread_switch" => {
             let t = init_fixture();
             std::fs::write(t.path().join("a.txt"), "base").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
-            (t, sv(&["switch", "main"]))
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture");
+            (t, sv(&["thread", "switch", "main"]))
         }
         "revert" => {
             let t = init_fixture();
             std::fs::write(t.path().join("a.txt"), "base").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit base");
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture base");
             std::fs::write(t.path().join("a.txt"), "base\nmore").unwrap();
-            heddle(&["commit", "-m", "second"], Some(t.path())).expect("commit second");
+            heddle(&["capture", "-m", "second"], Some(t.path())).expect("capture second");
             (t, sv(&["revert", "HEAD"]))
-        }
-        "stash_list" => (init_fixture(), sv(&["stash", "list"])),
-        "stash_show" => {
-            let t = init_fixture();
-            std::fs::write(t.path().join("a.txt"), "base").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
-            std::fs::write(t.path().join("a.txt"), "base\nwip").unwrap();
-            heddle(&["stash", "push", "-m", "wip"], Some(t.path())).expect("stash push");
-            (t, sv(&["stash", "show"]))
-        }
-        "cherry_pick" => {
-            let t = init_fixture();
-            std::fs::write(t.path().join("f.txt"), "base").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit base");
-            heddle(&["thread", "create", "feature"], Some(t.path())).expect("thread feature");
-            heddle(&["switch", "feature"], Some(t.path())).expect("switch feature");
-            std::fs::write(t.path().join("g.txt"), "feat").unwrap();
-            heddle(&["commit", "-m", "feature work"], Some(t.path())).expect("commit feature");
-            let src = head_change_id(t.path());
-            heddle(&["switch", "main"], Some(t.path())).expect("switch main");
-            (t, vec!["cherry-pick".to_string(), src])
         }
         "redact_apply" => {
             let t = init_fixture();
             std::fs::write(t.path().join("secrets.env"), "TOKEN=abc").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture");
             (
                 t,
                 sv(&[
@@ -1007,7 +1030,7 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         "purge_apply" => {
             let t = init_fixture();
             std::fs::write(t.path().join("secrets.env"), "TOKEN=abc").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture");
             heddle(
                 &[
                     "redact",
@@ -1038,7 +1061,7 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             let t = init_fixture();
             std::fs::create_dir_all(t.path().join("src")).unwrap();
             std::fs::write(t.path().join("src/lib.rs"), "pub fn run() {}\n").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture");
             (
                 t,
                 sv(&["query", "--attribution", "src/lib.rs", "--context"]),
@@ -1061,7 +1084,7 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         "discuss_open" => {
             let t = init_fixture();
             std::fs::write(t.path().join("a.txt"), "fn verify(){}").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture");
             (
                 t,
                 sv(&["discuss", "open", "a.txt", "verify", "check edge case"]),
@@ -1071,7 +1094,7 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         "context_set" => {
             let t = init_fixture();
             std::fs::write(t.path().join("a.txt"), "code").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture");
             (
                 t,
                 sv(&[
@@ -1090,14 +1113,14 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         "review_show" => {
             let t = init_fixture();
             std::fs::write(t.path().join("a.txt"), "fn verify(){}").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
-            let cid = head_change_id(t.path());
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture");
+            let cid = head_state_id(t.path());
             (t, vec!["review".to_string(), "show".to_string(), cid])
         }
         "review_next" => {
             let t = init_fixture();
             std::fs::write(t.path().join("a.txt"), "base").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture");
             heddle(
                 &["start", "review-next", "--workspace", "solid"],
                 Some(t.path()),
@@ -1109,13 +1132,13 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         "visibility_set" => {
             let t = init_fixture();
             std::fs::write(t.path().join("a.txt"), "base").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture");
             (t, sv(&["visibility", "set", "HEAD", "--tier", "internal"]))
         }
         "visibility_promote" => {
             let t = init_fixture();
             std::fs::write(t.path().join("a.txt"), "base").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture");
             heddle(
                 &[
                     "visibility",
@@ -1137,7 +1160,7 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         "visibility_show" => {
             let t = init_fixture();
             std::fs::write(t.path().join("a.txt"), "base").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture");
             heddle(
                 &["visibility", "set", "HEAD", "--tier", "internal"],
                 Some(t.path()),
@@ -1148,7 +1171,7 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         "visibility_list" => {
             let t = init_fixture();
             std::fs::write(t.path().join("a.txt"), "base").unwrap();
-            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture");
             heddle(
                 &["visibility", "set", "HEAD", "--tier", "internal"],
                 Some(t.path()),
@@ -1159,10 +1182,6 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         // heddle#641 — the newly-swept generic-schema verbs. Their opaque
         // mirrors pin no fields, so the documented sample must be compared
         // against the live payload here.
-        "rebase_progress" => (
-            init_rebase_fast_forward_fixture(),
-            sv(&["rebase", "feature"]),
-        ),
         "gc" => (init_fixture(), sv(&["maintenance", "gc"])),
         // Stopping a daemon that is not running still exits 0 with the
         // full `daemon_stop` payload, so a bare init fixture suffices.
@@ -1196,8 +1215,8 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             let t = init_fixture();
             for i in 1..=3 {
                 std::fs::write(t.path().join("f.txt"), format!("v{i}")).unwrap();
-                heddle(&["commit", "-m", &format!("c{i}")], Some(t.path()))
-                    .expect("commit fixture capture");
+                heddle(&["capture", "-m", &format!("c{i}")], Some(t.path()))
+                    .expect("fixture capture");
             }
             let oplog = t.path().join(".heddle/oplog/oplog.bin");
             let bytes = std::fs::read(&oplog).expect("read fixture oplog");
@@ -1211,7 +1230,7 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         "timeline_log" => (init_fixture(), sv(&["log", "--timeline"])),
         _ => return None,
     };
-    Some(case)
+    Some(RuntimeDocCase::at_root(case.0, case.1))
 }
 
 /// Top-level property names declared by the registered schema for `verb`, or
@@ -1300,12 +1319,20 @@ fn doc_samples_match_runtime_for_every_catalog_discriminator() {
             continue;
         }
 
-        if let Some((fixture, argv)) = runtime_doc_case(value) {
+        // Push payload variants are already exercised by the dedicated native
+        // and Git-overlay remote matrices. Recreating those transport cases in
+        // this catalog sweep can block on transport behavior unrelated to the
+        // discriminator contract this module owns.
+        if value == "push" {
+            continue;
+        }
+
+        if let Some(case) = runtime_doc_case(value) {
             let argv_refs: Vec<&str> = std::iter::once("--output")
                 .chain(std::iter::once("json"))
-                .chain(argv.iter().map(String::as_str))
+                .chain(case.argv.iter().map(String::as_str))
                 .collect();
-            let runtime_keys = runtime_top_level_keys(&argv_refs, fixture.path());
+            let runtime_keys = runtime_top_level_keys(&argv_refs, &case.cwd);
             if !runtime_keys.contains("output_kind") {
                 failures.push(format!(
                     "{value} ({displays:?}): runtime payload is missing `output_kind` (keys: {runtime_keys:?})"
@@ -1467,7 +1494,8 @@ fn emitted_output_kind(argv: &[&str], dir: &std::path::Path) -> String {
 
 /// Close-the-class guard for the heddle#473 verb consolidation: a command can
 /// emit MORE than one `output_kind` from a single command path — `undo` emits
-/// `undo` (the rewind / `--preview`) and `undo_list` (`--list`). Every value a
+/// `undo` (the rewind / `--preview`), `undo_list` (`--list`), and
+/// `undo_recover` (`--recover`). Every value a
 /// handler can emit must be in that command's advertised catalog discriminator
 /// set, or an agent that validates responses against `heddle help --output
 /// json` rejects the off-contract record.
@@ -1489,6 +1517,7 @@ fn folded_verb_flag_variants_emit_only_advertised_output_kinds() {
             "undo".to_string(),
             "undo_list".to_string(),
             "redo".to_string(),
+            "undo_recover".to_string(),
         ])),
         "catalog must advertise all undo-mode output_kinds; advertised: {undo_advertised:?}"
     );
@@ -1497,18 +1526,25 @@ fn folded_verb_flag_variants_emit_only_advertised_output_kinds() {
     // one batch to redo.
     let temp = init_fixture();
     std::fs::write(temp.path().join("a.txt"), "one").unwrap();
-    heddle(&["commit", "-m", "first"], Some(temp.path())).expect("commit first");
+    heddle(&["capture", "-m", "first"], Some(temp.path())).expect("capture first");
     std::fs::write(temp.path().join("a.txt"), "two").unwrap();
-    heddle(&["commit", "-m", "second"], Some(temp.path())).expect("commit second");
+    heddle(&["capture", "-m", "second"], Some(temp.path())).expect("capture second");
 
     // Drive each JSON-emitting variant, in an order that keeps the repo
     // consistent: undo --list (read-only) → undo (rewinds, making a redo
-    // available) → undo --redo (re-applies). Each case names the command display whose
-    // advertised set must contain the emitted kind.
+    // available) → undo --redo (re-applies) → undo → undo --recover. The
+    // second undo recreates a clean recovery baseline before recovery restores
+    // it as worktree changes.
     let cases: &[(&[&str], &str, &str)] = &[
         (&["--output", "json", "undo", "--list"], "undo_list", "undo"),
         (&["--output", "json", "undo"], "undo", "undo"),
         (&["--output", "json", "undo", "--redo"], "redo", "undo"),
+        (&["--output", "json", "undo"], "undo", "undo"),
+        (
+            &["--output", "json", "undo", "--recover"],
+            "undo_recover",
+            "undo",
+        ),
     ];
 
     let mut failures = Vec::new();

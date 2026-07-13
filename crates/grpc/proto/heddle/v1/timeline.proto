@@ -2,33 +2,67 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 // Agent timeline object store. This service is the local daemon bridge used by
 // harnesses like OpenCode: clients submit typed operations, while the daemon
 // stores canonical versioned Heddle timeline operation objects and returns
 // their content-addressed ids.
 service TimelineService {
-  rpc RecordOperation(RecordTimelineOperationRequest) returns (AgentTimelineOperationRecord);
-  rpc GetOperation(GetTimelineOperationRequest) returns (AgentTimelineOperationRecord);
-  rpc GetTimelineStatus(GetTimelineStatusRequest) returns (AgentTimelineStatus);
-  rpc GetTimelineNavigation(GetTimelineNavigationRequest) returns (TimelineNavigationSnapshot);
-  rpc ListTimelineSteps(ListTimelineStepsRequest) returns (ListTimelineStepsResponse);
-  rpc ResolveNativeToolCall(ResolveNativeToolCallRequest) returns (AgentTimelineStepSummary);
-  rpc SeekToStep(SeekTimelineToStepRequest) returns (TimelineCursorMoveResponse);
-  rpc SeekToNativeToolCall(SeekTimelineToNativeToolCallRequest) returns (TimelineCursorMoveResponse);
-  rpc UndoToolCall(TimelineCursorRequest) returns (TimelineCursorMoveResponse);
-  rpc RedoToolCall(TimelineCursorRequest) returns (TimelineCursorMoveResponse);
-  rpc CreateTimelineBranch(CreateTimelineBranchRequest) returns (CreateTimelineBranchResponse);
-  rpc PreviewTimelineSeek(PreviewTimelineSeekRequest) returns (TimelineSeekPreview);
-  rpc MaterializeTimelineCursor(MaterializeTimelineCursorRequest) returns (TimelineMaterializeResponse);
-  rpc ForkTimelineFromSelector(ForkTimelineFromSelectorRequest) returns (ForkTimelineFromSelectorResponse);
-  rpc ResetTimelineCursor(ResetTimelineCursorRequest) returns (ResetTimelineCursorResponse);
-  rpc RecoverTimelineMaterialization(RecoverTimelineMaterializationRequest) returns (RecoverTimelineMaterializationResponse);
+  rpc RecordOperation(RecordTimelineOperationRequest) returns (AgentTimelineOperationRecord) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc GetOperation(GetTimelineOperationRequest) returns (AgentTimelineOperationRecord) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetTimelineStatus(GetTimelineStatusRequest) returns (AgentTimelineStatus) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetTimelineNavigation(GetTimelineNavigationRequest) returns (TimelineNavigationSnapshot) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc ListTimelineSteps(ListTimelineStepsRequest) returns (ListTimelineStepsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc ResolveNativeToolCall(ResolveNativeToolCallRequest) returns (AgentTimelineStepSummary) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc SeekToStep(SeekTimelineToStepRequest) returns (TimelineCursorMoveResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc SeekToNativeToolCall(SeekTimelineToNativeToolCallRequest) returns (TimelineCursorMoveResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc UndoToolCall(TimelineCursorRequest) returns (TimelineCursorMoveResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc RedoToolCall(TimelineCursorRequest) returns (TimelineCursorMoveResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc CreateTimelineBranch(CreateTimelineBranchRequest) returns (CreateTimelineBranchResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc PreviewTimelineSeek(PreviewTimelineSeekRequest) returns (TimelineSeekPreview) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc MaterializeTimelineCursor(MaterializeTimelineCursorRequest) returns (TimelineMaterializeResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ForkTimelineFromSelector(ForkTimelineFromSelectorRequest) returns (ForkTimelineFromSelectorResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ResetTimelineCursor(ResetTimelineCursorRequest) returns (ResetTimelineCursorResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc RecoverTimelineMaterialization(RecoverTimelineMaterializationRequest) returns (RecoverTimelineMaterializationResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 }
 
 message RecordTimelineOperationRequest {
   string repo_path = 1;
   AgentTimelineOperationDraft operation = 2;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message GetTimelineOperationRequest {
@@ -73,7 +107,7 @@ message SeekTimelineToStepRequest {
   string branch_id = 3;
   string step_id = 4;
   string reason = 5;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message SeekTimelineToNativeToolCallRequest {
@@ -84,14 +118,14 @@ message SeekTimelineToNativeToolCallRequest {
   string message_id = 5;
   string tool_call_id = 6;
   string reason = 7;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message TimelineCursorRequest {
   string repo_path = 1;
   string thread = 2;
   string branch_id = 3;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message TimelineCursorMoveResponse {
@@ -105,7 +139,7 @@ message CreateTimelineBranchRequest {
   string from_step_id = 3;
   string branch_id = 4;
   string reason = 5;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message CreateTimelineBranchResponse {
@@ -126,7 +160,7 @@ message MaterializeTimelineCursorRequest {
   string repo_path = 1;
   TimelineSeekSelector selector = 2;
   TimelineMaterializeMode mode = 3;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message ForkTimelineFromSelectorRequest {
@@ -134,7 +168,7 @@ message ForkTimelineFromSelectorRequest {
   TimelineSeekSelector selector = 2;
   string branch_id = 3;
   string reason = 4;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message ForkTimelineFromSelectorResponse {
@@ -150,7 +184,7 @@ message ResetTimelineCursorRequest {
   TimelineSeekSelector selector = 2;
   TimelineMaterializeMode mode = 3;
   bool materialize_checkout = 4;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message ResetTimelineCursorResponse {
@@ -162,7 +196,7 @@ message ResetTimelineCursorResponse {
 message RecoverTimelineMaterializationRequest {
   string repo_path = 1;
   string thread = 2;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message RecoverTimelineMaterializationResponse {

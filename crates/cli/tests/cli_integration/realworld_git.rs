@@ -522,7 +522,7 @@ fn realworld_git_annotated_tag_rename_round_trips() {
 /// thread.
 #[test]
 #[ignore = "nightly real-world matrix: cherry-pick distinctness"]
-fn realworld_git_cherry_pick_assigns_distinct_change_ids() {
+fn realworld_git_cherry_pick_assigns_distinct_state_ids() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
@@ -594,14 +594,8 @@ fn realworld_git_cherry_pick_assigns_distinct_change_ids() {
         &heddle_with_host_git(&["--output", "json", "log", "feature/b", "-n", "1"], &work).unwrap(),
     )
     .unwrap();
-    let id_a = log_a["states"][0]["change_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let id_b = log_b["states"][0]["change_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_a = log_a["states"][0]["state_id"].as_str().unwrap().to_string();
+    let id_b = log_b["states"][0]["state_id"].as_str().unwrap().to_string();
     assert_ne!(
         id_a, id_b,
         "cherry-picked commits must mint distinct heddle change ids — got {id_a} on both"
@@ -649,19 +643,19 @@ fn realworld_git_gc_prunes_unreachable_mapping_entries() {
         .join("git-projection")
         .join("git-projection-mapping.json");
     let mapping_text = std::fs::read_to_string(&mapping_path).expect("mapping json");
-    let original_entries = mapping_text.matches("\"change_id\"").count();
+    let original_entries = mapping_text.matches("\"state_id\"").count();
 
     // Inject a fabricated entry pointing at a never-reachable oid.
-    // The format is the same `entries: [{change_id, git_oid}]`
+    // The format is the same `entries: [{state_id, git_oid}]`
     // sidecar gix-bridge writes; we splice a row in.
     let mut value: Value = serde_json::from_str(&mapping_text).unwrap();
     let entries = value["entries"].as_array_mut().unwrap();
-    // Synthetic change_id: 26 lowercase base32 chars after the
-    // `hd-` prefix (the encoding `ChangeId::parse` enforces). Pairs
+    // Synthetic state_id: 52 lowercase base32 chars after the
+    // `hs-` prefix (the encoding `StateId::parse` enforces). Pairs
     // with a synthetic git oid that no real ref points at, so gc
     // must treat the row as garbage.
     entries.push(serde_json::json!({
-        "change_id": "hd-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "state_id": "hs-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "git_oid": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
     }));
     std::fs::write(&mapping_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
@@ -766,7 +760,7 @@ fn realworld_fixtures_clone_and_import_round_trip() {
 ///   8. Conflict markers name the lanes (CURRENT (...) / INCOMING (...))
 ///   9. Stale thread with non-overlapping edits rebases automatically
 ///  10. Raw Git branch is discovered as a tip-only mirror with import hint
-///  11. `heddle checkpoint` produces a Git-facing commit
+///  11. `heddle commit` projects captured work into Git history
 ///  12. Raw-Git sequencer conflicts get a no-git preservation handoff
 ///  13. Heddle-native recovery names unresolved files
 ///
@@ -942,7 +936,7 @@ fn marketing_moments_walkthrough_against_real_fixture() {
         "(M3/M5) all three agent threads should report `ahead` after capture: {post_capture_threads}"
     );
 
-    // ── (6, 7, 8) Merge first thread; remaining stay stale + conflict-aware ──
+    // ── (6, 7, 8) Land first thread; remaining stay stale + conflict-aware ──
     // The marketing claim is that we get clean lane-named markers and
     // `heddle continue` as the single recovery verb. We validate the
     // verb exists and accepts a no-op invocation when no operation is
@@ -950,21 +944,27 @@ fn marketing_moments_walkthrough_against_real_fixture() {
     // git_overlay_matrix tests using synthetic conflicts.
     let _ = heddle_with_host_git(&["ready", "--thread", "agent/risk-copy"], &work)
         .unwrap_or_else(|err| panic!("(M6) ready failed for risk-copy: {err}"));
-    let merge_first = heddle_with_host_git(
-        &["merge", "agent/risk-copy", "-m", "Merge risk copy thread"],
+    let land_first = heddle_with_host_git(
+        &[
+            "land",
+            "--thread",
+            "agent/risk-copy",
+            "-m",
+            "Land risk copy thread",
+        ],
         &work,
     );
     assert!(
-        merge_first.is_ok(),
-        "(M6) first thread merge should succeed: {merge_first:?}"
+        land_first.is_ok(),
+        "(M6) first thread land should succeed: {land_first:?}"
     );
-    // After the first merge, the other agent threads are stale and
+    // After the first land, the other agent threads are stale and
     // should be reported with a non-`merged` coordination status.
-    let post_merge: Value = serde_json::from_str(
+    let post_land: Value = serde_json::from_str(
         &heddle_with_host_git(&["--output", "json", "thread", "list"], &work).unwrap(),
     )
     .unwrap();
-    let stale_remaining: Vec<&str> = post_merge["threads"]
+    let stale_remaining: Vec<&str> = post_land["threads"]
         .as_array()
         .unwrap()
         .iter()
@@ -980,28 +980,21 @@ fn marketing_moments_walkthrough_against_real_fixture() {
     assert_eq!(
         stale_remaining.len(),
         2,
-        "(M6) the two un-merged agent threads should still be visible after merging risk-copy: {post_merge}"
+        "(M6) the two unlanded agent threads should still be visible after landing risk-copy: {post_land}"
     );
 
-    // ── (11) `heddle checkpoint` bundles captures into a Git commit ──
-    let checkpoint_out = heddle_with_host_git(
-        &[
-            "--output",
-            "json",
-            "checkpoint",
-            "-m",
-            "Checkpoint integrated work",
-        ],
+    // ── (11) `heddle commit` projects captured work into a Git commit ──
+    let commit_out = heddle_with_host_git(
+        &["--output", "json", "commit", "-m", "Commit integrated work"],
         &work,
     )
-    .unwrap_or_else(|err| panic!("(M11) checkpoint failed: {err}"));
-    let checkpoint: Value =
-        serde_json::from_str(&checkpoint_out).expect("(M11) checkpoint output should parse");
+    .unwrap_or_else(|err| panic!("(M11) commit failed: {err}"));
+    let commit: Value =
+        serde_json::from_str(&commit_out).expect("(M11) commit output should parse");
+    assert_eq!(commit["output_kind"], "commit", "{commit_out}");
     assert!(
-        checkpoint["state"].as_str().is_some()
-            || checkpoint["change_id"].as_str().is_some()
-            || checkpoint["recorded"].as_bool().unwrap_or(false),
-        "(M11) checkpoint should report the new state/change_id: {checkpoint_out}"
+        commit["git_commit"].as_str().is_some(),
+        "(M11) commit should report the projected Git commit: {commit_out}"
     );
 
     // ── (7) Heddle-native recovery verbs are wired ──

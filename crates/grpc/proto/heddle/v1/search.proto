@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 // ───────────────────────────────────────────────────────────────
 // SearchService — caller-scoped global entity search (Tier 1).
 // Spike: weft#445 (docs/spikes/search-service.md §3); impl: weft#446.
@@ -12,7 +14,9 @@ service SearchService {
   // Caller-scoped global entity search (Tier 1). Every result is authorized;
   // repo-scoped hits pass the caller's readable-set + per-hit door, and an
   // unreadable repo's hits never surface.
-  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc Search(SearchRequest) returns (SearchResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 }
 
 // Request-side scope filter only. The response has no entity-kind enum: the

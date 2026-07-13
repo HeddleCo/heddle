@@ -5,14 +5,7 @@ use tempfile::TempDir;
 
 use super::{heddle, heddle_output};
 
-const BANNED_NEXT_ACTION_FRAGMENTS: &[&str] = &[
-    "heddle checkpoint",
-    "heddle capture",
-    "heddle ship",
-    "heddle merge",
-    "heddle thread refresh",
-    "heddle thread resolve",
-];
+const BANNED_NEXT_ACTION_FRAGMENTS: &[&str] = &["heddle thread refresh", "heddle thread resolve"];
 
 fn json(args: &[&str], cwd: &std::path::Path) -> Value {
     let output = heddle_output(args, Some(cwd))
@@ -31,7 +24,7 @@ fn setup_native_repo() -> TempDir {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
-    heddle(&["commit", "-m", "base"], Some(temp.path())).unwrap();
+    heddle(&["capture", "-m", "base"], Some(temp.path())).unwrap();
     temp
 }
 
@@ -88,12 +81,12 @@ fn assert_no_banned_next_actions(value: &Value) {
 }
 
 #[test]
-fn native_dirty_status_and_thread_list_suggest_commit_not_capture_or_checkpoint() {
+fn native_dirty_status_and_thread_list_suggest_capture() {
     let repo = setup_native_repo();
     std::fs::write(repo.path().join("dirty.txt"), "dirty\n").unwrap();
 
     let status = json(&["--output", "json", "status"], repo.path());
-    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle capture -m \"...\"");
     assert_no_banned_next_actions(&status);
 
     let threads = json(&["--output", "json", "thread", "list"], repo.path());
@@ -101,13 +94,13 @@ fn native_dirty_status_and_thread_list_suggest_commit_not_capture_or_checkpoint(
 }
 
 #[test]
-fn dirty_isolated_checkout_suggests_commit_and_never_checkpoint() {
+fn dirty_isolated_checkout_suggests_capture() {
     let (_main, checkout_owner, execution_path) = setup_managed_thread("feature/dirty");
     let checkout = std::path::Path::new(&execution_path);
     std::fs::write(checkout.join("dirty.txt"), "dirty\n").unwrap();
 
     let status = json(&["--output", "json", "status"], checkout);
-    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle capture -m \"...\"");
     assert_no_banned_next_actions(&status);
 
     drop(checkout_owner);
@@ -118,7 +111,7 @@ fn ready_thread_surfaces_land_across_ready_show_and_list() {
     let (main, checkout_owner, execution_path) = setup_managed_thread("feature/ready-land");
     let checkout = std::path::Path::new(&execution_path);
     std::fs::write(checkout.join("feature.txt"), "feature\n").unwrap();
-    heddle(&["commit", "-m", "feature"], Some(checkout)).unwrap();
+    heddle(&["capture", "-m", "feature"], Some(checkout)).unwrap();
 
     let ready = json(
         &[
@@ -132,11 +125,11 @@ fn ready_thread_surfaces_land_across_ready_show_and_list() {
     );
     assert_eq!(
         ready["recommended_action"],
-        "heddle land --thread feature/ready-land --no-push"
+        "heddle land --thread feature/ready-land"
     );
     assert_eq!(
         ready["report"]["recommended_action"],
-        "heddle land --thread feature/ready-land --no-push"
+        "heddle land --thread feature/ready-land"
     );
     assert_no_banned_next_actions(&ready);
 
@@ -146,7 +139,7 @@ fn ready_thread_surfaces_land_across_ready_show_and_list() {
     );
     assert_eq!(
         shown["next_action"],
-        "heddle land --thread feature/ready-land --no-push"
+        "heddle land --thread feature/ready-land"
     );
     assert_no_banned_next_actions(&shown);
 
@@ -159,7 +152,7 @@ fn ready_thread_surfaces_land_across_ready_show_and_list() {
         .expect("thread list should include ready thread");
     assert_eq!(
         thread["recommended_action"],
-        "heddle land --thread feature/ready-land --no-push"
+        "heddle land --thread feature/ready-land"
     );
     assert_no_banned_next_actions(&listed);
 
@@ -171,10 +164,10 @@ fn ready_clean_stale_managed_thread_refreshes_and_surfaces_land() {
     let (main, checkout_owner, execution_path) = setup_managed_thread("feature/stale-sync");
     let checkout = std::path::Path::new(&execution_path);
     std::fs::write(checkout.join("feature.txt"), "feature\n").unwrap();
-    heddle(&["commit", "-m", "feature"], Some(checkout)).unwrap();
+    heddle(&["capture", "-m", "feature"], Some(checkout)).unwrap();
 
     std::fs::write(main.path().join("base.txt"), "base changed\n").unwrap();
-    heddle(&["commit", "-m", "advance main"], Some(main.path())).unwrap();
+    heddle(&["capture", "-m", "advance main"], Some(main.path())).unwrap();
 
     let ready = json(
         &[
@@ -192,11 +185,11 @@ fn ready_clean_stale_managed_thread_refreshes_and_surfaces_land() {
     );
     assert_eq!(
         ready["recommended_action"],
-        "heddle land --thread feature/stale-sync --no-push"
+        "heddle land --thread feature/stale-sync"
     );
     assert_eq!(
         ready["report"]["recommended_action"],
-        "heddle land --thread feature/stale-sync --no-push"
+        "heddle land --thread feature/stale-sync"
     );
     assert_eq!(ready["report"]["freshness"], "current", "{ready}");
     assert_no_banned_next_actions(&ready);
@@ -207,7 +200,7 @@ fn ready_clean_stale_managed_thread_refreshes_and_surfaces_land() {
     );
     assert_eq!(
         shown["next_action"],
-        "heddle land --thread feature/stale-sync --no-push"
+        "heddle land --thread feature/stale-sync"
     );
     assert_eq!(shown["freshness"], "current", "{shown}");
     assert_no_banned_next_actions(&shown);
@@ -229,10 +222,10 @@ fn sync_conflicting_stale_thread_emits_runnable_resolve_breadcrumb() {
     // conflicts. (Disjoint-file edits 3-way merge cleanly — that path is
     // covered by `stale_managed_thread_suggests_sync_not_refresh_or_merge_preview`.)
     std::fs::write(checkout.join("base.txt"), "thread change\n").unwrap();
-    heddle(&["commit", "-m", "thread edit"], Some(checkout)).unwrap();
+    heddle(&["capture", "-m", "thread edit"], Some(checkout)).unwrap();
 
     std::fs::write(main.path().join("base.txt"), "main change\n").unwrap();
-    heddle(&["commit", "-m", "advance main"], Some(main.path())).unwrap();
+    heddle(&["capture", "-m", "advance main"], Some(main.path())).unwrap();
 
     let sync = json(
         &[

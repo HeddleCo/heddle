@@ -11,25 +11,18 @@ use crate::cli::render::write_stdout;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NextActionValidationContext<'a> {
     pub(crate) emitting_command: &'a [&'a str],
-    pub(crate) repository_capability: Option<repo::RepositoryCapability>,
 }
 
 impl<'a> NextActionValidationContext<'a> {
     pub(crate) fn new(
         emitting_command: &'a [&'a str],
-        repository_capability: repo::RepositoryCapability,
+        _repository_capability: repo::RepositoryCapability,
     ) -> Self {
-        Self {
-            emitting_command,
-            repository_capability: Some(repository_capability),
-        }
+        Self { emitting_command }
     }
 
     pub(crate) fn without_repo(emitting_command: &'a [&'a str]) -> Self {
-        Self {
-            emitting_command,
-            repository_capability: None,
-        }
+        Self { emitting_command }
     }
 }
 
@@ -166,7 +159,6 @@ pub(crate) fn validate_next_action(
         return Ok(());
     };
 
-    reject_wrong_repo_type(action, &command_path, context)?;
     reject_demoted_breadcrumbs(action, &command_path)?;
     reject_self_loop(action, &command_path, context)?;
     Ok(())
@@ -220,21 +212,6 @@ fn reject_demoted_breadcrumbs(action: &str, command_path: &[&str]) -> Result<()>
     }
 }
 
-fn reject_wrong_repo_type(
-    action: &str,
-    command_path: &[&str],
-    context: NextActionValidationContext<'_>,
-) -> Result<()> {
-    if command_path == ["checkpoint"]
-        && context.repository_capability != Some(repo::RepositoryCapability::GitOverlay)
-    {
-        return Err(next_action_validation_error(format!(
-            "next_action `{action}` is not executable from this repository type"
-        )));
-    }
-    Ok(())
-}
-
 fn reject_self_loop(
     action: &str,
     command_path: &[&str],
@@ -285,9 +262,8 @@ mod tests {
     fn validator_accepts_canonical_everyday_actions() {
         for action in [
             "heddle capture -m \"...\"",
-            "heddle commit -m \"...\"",
             "heddle ready --thread feature",
-            "heddle land --thread feature --no-push",
+            "heddle land --thread feature",
             "heddle sync --thread feature",
             "heddle resolve --list",
             "heddle continue",
@@ -312,22 +288,6 @@ mod tests {
                 "`{action}` should be rejected as a next_action"
             );
         }
-    }
-
-    #[test]
-    fn validator_rejects_wrong_repo_type_checkpoint_before_demoted_class() {
-        let err = validate_next_action("heddle checkpoint -m \"...\"", ctx(&["status"]))
-            .expect_err("native repositories must not receive checkpoint breadcrumbs");
-        assert!(err.to_string().contains("not executable"));
-    }
-
-    #[test]
-    fn validator_accepts_checkpoint_for_git_overlay_repositories() {
-        validate_next_action(
-            "heddle checkpoint -m \"...\"",
-            NextActionValidationContext::new(&["status"], repo::RepositoryCapability::GitOverlay),
-        )
-        .expect("git-overlay repositories may use checkpoint as a next action");
     }
 
     #[test]
@@ -383,7 +343,7 @@ mod tests {
     fn recursive_validator_covers_nested_recommended_actions() {
         let payload = json!({
             "output_kind": "status",
-            "recommended_action": "heddle commit -m \"...\"",
+            "recommended_action": "heddle capture -m \"...\"",
             "verification": {
                 "checks": [
                     {"name": "Workflow", "recommended_action": "heddle thread resolve feature"}

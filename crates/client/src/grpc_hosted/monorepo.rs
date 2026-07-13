@@ -28,7 +28,7 @@
 use std::path::{Path, PathBuf};
 
 use grpc::heddle::v1::{EdgeSkip, MonorepoNode};
-use objects::object::ChangeId;
+use objects::object::StateId;
 
 /// A single per-spool clone operation the planner emits. The CLI reuses the
 /// existing hosted-clone path to satisfy each of these.
@@ -38,7 +38,7 @@ pub struct MonorepoCloneOp {
     pub spool_id: String,
     /// The content-facet state to materialize this spool at. `None` when the
     /// spool has no content head yet (empty checkout).
-    pub content_state: Option<ChangeId>,
+    pub content_state: Option<StateId>,
     /// Destination path RELATIVE to the clone root. The root spool is `""`
     /// (the destination root itself); each child mounts at
     /// `<parent>/<mount_name>`.
@@ -109,7 +109,7 @@ impl MonorepoClonePlan {
         let content_state = node
             .content_state
             .as_deref()
-            .and_then(|bytes| ChangeId::try_from_slice(bytes).ok());
+            .and_then(|bytes| StateId::try_from_slice(bytes).ok());
         self.ops.push(MonorepoCloneOp {
             spool_id: node.spool_id.clone(),
             content_state,
@@ -146,8 +146,8 @@ mod tests {
 
     use super::*;
 
-    fn cid(seed: u8) -> ChangeId {
-        ChangeId::from_bytes([seed; 16])
+    fn cid(seed: u8) -> StateId {
+        StateId::from_bytes([seed; 32])
     }
 
     fn cid_bytes(seed: u8) -> Vec<u8> {

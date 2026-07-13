@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+import "google/protobuf/descriptor.proto";
+
+// Observable side effects of one RPC invocation.
+enum RpcEffect {
+  RPC_EFFECT_UNSPECIFIED = 0;
+  RPC_EFFECT_READ_ONLY = 1;
+  RPC_EFFECT_TRANSIENT_WRITE = 2;
+  RPC_EFFECT_DURABLE_WRITE = 3;
+}
+
+// Command-attempt deduplication exposed to callers. NONE does not imply that a
+// read is unsafe to repeat; it means no request key deduplicates an invocation.
+enum RpcDeduplication {
+  RPC_DEDUPLICATION_UNSPECIFIED = 0;
+  RPC_DEDUPLICATION_NONE = 1;
+  RPC_DEDUPLICATION_CLIENT_OPERATION_ID = 2;
+}
+
+message RpcContract {
+  RpcEffect effect = 1;
+  RpcDeduplication deduplication = 2;
+}
+
+extend google.protobuf.MethodOptions {
+  RpcContract rpc_contract = 50001;
+}
+
+extend google.protobuf.FieldOptions {
+  bool idempotency_key = 50002;
+}

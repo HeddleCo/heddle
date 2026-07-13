@@ -62,7 +62,7 @@ use heddle_core::{
 };
 use objects::{
     error::{HeddleError, Result as HeddleResult},
-    object::{ChangeId, ThreadName},
+    object::{StateId, ThreadName},
 };
 use oplog::{IsolationKey, OpRecord};
 use refs::RefExpectation;
@@ -714,11 +714,11 @@ pub(crate) struct StartThread {
     /// The thread name (ref name + record key).
     pub name: String,
     /// The base state the checkout materializes / the ref points at.
-    pub base_state: ChangeId,
+    pub base_state: StateId,
     /// `Some(prior)` when a thread ref already exists (re-start reuses it via a
     /// CAS against `prior`); `None` for a brand-new thread (CAS-against-missing
     /// + a staged `ThreadCreate` commit record).
-    pub existing_thread_state: Option<ChangeId>,
+    pub existing_thread_state: Option<StateId>,
     pub thread_mode: ThreadMode,
     /// The materialization target (mount point for virtualized).
     pub abs_path: PathBuf,
@@ -735,6 +735,7 @@ pub(crate) struct StartThread {
     pub hydrate: bool,
     /// Mount ownership for the virtualized path (unused for solid/materialized).
     pub mount_ownership: MountOwnership,
+    pub interactive_setup: bool,
     /// The fully-built thread record; `shared_target_dir` is reconciled with the
     /// cargo-config outcome inside `apply` before it is converged onto disk.
     pub record: Thread,
@@ -1083,15 +1084,21 @@ impl StartThread {
         let fwd_name = self.name.clone();
         let inv_name = self.name.clone();
         let ownership = self.mount_ownership;
+        let interactive_setup = self.interactive_setup;
         let mounted_owner = Rc::new(Cell::new(None));
         let fwd_owner = Rc::clone(&mounted_owner);
         let inv_owner = Rc::clone(&mounted_owner);
         let inv_root = root.clone();
         tx.step(
             move || {
-                let outcome =
-                    mount_lifecycle::establish_virtualized_mount(&root, &fwd_name, &abs, ownership)
-                        .map_err(apply_error)?;
+                let outcome = mount_lifecycle::establish_virtualized_mount(
+                    &root,
+                    &fwd_name,
+                    &abs,
+                    ownership,
+                    interactive_setup,
+                )
+                .map_err(apply_error)?;
                 fwd_owner.set(Some(outcome.owner));
                 Ok(outcome)
             },
@@ -1392,7 +1399,7 @@ mod tests {
     fn solid_args(
         name: &str,
         path: &std::path::Path,
-        from: &ChangeId,
+        from: &StateId,
         hydrate: bool,
     ) -> ThreadStartArgs {
         ThreadStartArgs {
@@ -1408,6 +1415,7 @@ mod tests {
             print_cd_path: false,
             daemon: false,
             no_daemon: true,
+            interactive_setup: false,
             shared_target: false,
             hydrate,
         }
@@ -1416,7 +1424,7 @@ mod tests {
     fn materialized_args(
         name: &str,
         path: &std::path::Path,
-        from: &ChangeId,
+        from: &StateId,
         hydrate: bool,
     ) -> ThreadStartArgs {
         let mut args = solid_args(name, path, from, hydrate);
@@ -1440,7 +1448,7 @@ mod tests {
 
     /// Repo with one captured state holding a tracked `a.txt` (+ optional
     /// ignored dep dirs). Returns the temp dir, repo, and base state id.
-    fn repo_with_state(deps: &[&str]) -> (TempDir, Repository, ChangeId) {
+    fn repo_with_state(deps: &[&str]) -> (TempDir, Repository, StateId) {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("a.txt"), "a").unwrap();
@@ -1452,7 +1460,7 @@ mod tests {
             }
         }
         let state = repo.snapshot(Some("s1".to_string()), None).unwrap();
-        (temp, repo, state.change_id)
+        (temp, repo, state.state_id)
     }
 
     #[test]
@@ -1582,7 +1590,7 @@ mod tests {
             .snapshot(Some("rust workspace".to_string()), None)
             .unwrap();
         let checkout = temp.path().join("iso");
-        let mut args = solid_args("iso", &checkout, &state.change_id, false);
+        let mut args = solid_args("iso", &checkout, &state.state_id, false);
         args.shared_target = true;
 
         start_thread(&repo, args).expect("shared-target start should succeed");
@@ -1933,7 +1941,7 @@ mod tests {
 
     /// cid 3335586969 (the new sibling): a committed-before-bookkeeping retry.
     /// The start transaction committed (checkout + ref + record + commit marker),
-    /// then a crash interrupted the post-commit `AgentRegistry` reservation — so
+    /// then a crash interrupted the post-commit `ActorPresenceStore` reservation — so
     /// there is NO live reservation, yet the checkout is now NON-EMPTY. The retry
     /// must be RECOGNIZED as a committed retry (the epoch re-derived from the
     /// durable Active record yields the SAME key) and short-circuit exactly-once,
@@ -1945,7 +1953,7 @@ mod tests {
         let checkout = temp.path().join("iso");
 
         // A first start fully succeeds: checkout + ref + Active record + commit
-        // marker + the post-commit AgentRegistry reservation.
+        // marker + the post-commit ActorPresenceStore reservation.
         start_thread(&repo, solid_args("iso", &checkout, &state, false))
             .expect("first start should succeed");
         assert!(
@@ -1960,7 +1968,7 @@ mod tests {
         let entry = find_active_thread_entry(&repo, "iso")
             .unwrap()
             .expect("the first start created a reservation");
-        objects::store::AgentRegistry::new(repo.heddle_dir())
+        objects::store::ActorPresenceStore::new(repo.heddle_dir())
             .delete(&entry.session_id)
             .unwrap();
         assert!(
@@ -2041,8 +2049,8 @@ mod tests {
         let (temp, repo, base) = repo_with_state(&[]);
         let _ = &temp;
         let name = ThreadName::new("foo");
-        let advanced = ChangeId::generate();
-        let prior = ChangeId::generate();
+        let advanced = StateId::from_bytes([73; 32]);
+        let prior = StateId::from_bytes([74; 32]);
 
         // Brand-new case (restore_to = None → would otherwise delete). A
         // concurrent writer advanced the ref past our forward value → leave it.

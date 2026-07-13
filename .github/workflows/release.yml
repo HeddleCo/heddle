@@ -61,6 +61,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   BIN_NAME: heddle
+  FSMONITOR_WORKER_NAME: heddle-fsmonitor-worker
   CRATE_NAME: heddle-cli
 
 jobs:
@@ -281,6 +282,7 @@ jobs:
           stage="heddle-${{ steps.ver.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "dist/${stage}"
           cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/${stage}/"
+          cp "target/${{ matrix.target }}/release/${FSMONITOR_WORKER_NAME}" "dist/${stage}/"
           cp README.md LICENSE NOTICE "dist/${stage}/"
           tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
           ( cd dist && shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256" )
@@ -294,6 +296,7 @@ jobs:
           $stage = "heddle-${{ steps.ver.outputs.tag }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$stage" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${env:BIN_NAME}.exe" "dist/$stage/"
+          Copy-Item "target/${{ matrix.target }}/release/${env:FSMONITOR_WORKER_NAME}.exe" "dist/$stage/"
           Copy-Item README.md, LICENSE, NOTICE "dist/$stage/"
           Compress-Archive -Path "dist/$stage" -DestinationPath "dist/$stage.zip"
           $hash = (Get-FileHash -Algorithm SHA256 "dist/$stage.zip").Hash.ToLower()
@@ -423,7 +426,7 @@ jobs:
           chmod 0600 "$key_path"
           echo "HEDDLE_NOTARY_KEY=$key_path" >> "$GITHUB_ENV"
 
-      - name: Build, sign, notarize, and package Heddle.app
+      - name: Build, sign, notarize, and package macOS artifacts
         shell: bash
         env:
           HEDDLE_TAG: ${{ needs.validate-tag.outputs.tag }}
@@ -444,6 +447,7 @@ jobs:
             stage="heddle-${TAG}-${target}"
             mkdir -p "dist/${stage}"
             cp "target/${target}/release/${BIN_NAME}" "dist/${stage}/"
+            cp "target/${target}/release/${FSMONITOR_WORKER_NAME}" "dist/${stage}/"
             cp README.md LICENSE NOTICE "dist/${stage}/"
             tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
             ( cd dist && shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256" )

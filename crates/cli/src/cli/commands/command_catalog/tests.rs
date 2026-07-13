@@ -26,11 +26,22 @@ struct RuntimeContractParseSample {
 const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["abort"], &["abort"]),
     sample(&["adopt"], &["adopt"]),
-    sample(&["actor", "spawn"], &["actor", "spawn"]),
-    sample(&["actor", "list"], &["actor", "list"]),
-    sample(&["actor", "show"], &["actor", "show"]),
-    sample(&["actor", "explain"], &["actor", "explain"]),
-    sample(&["actor", "done"], &["actor", "done"]),
+    sample(
+        &["agent", "presence", "list"],
+        &["agent", "presence", "list"],
+    ),
+    sample(
+        &["agent", "presence", "show"],
+        &["agent", "presence", "show"],
+    ),
+    sample(
+        &["agent", "presence", "explain"],
+        &["agent", "presence", "explain"],
+    ),
+    sample(
+        &["agent", "presence", "complete"],
+        &["agent", "presence", "complete"],
+    ),
     sample(&["agent", "serve"], &["agent", "serve"]),
     sample(&["agent", "status"], &["agent", "status"]),
     sample(&["agent", "stop"], &["agent", "stop"]),
@@ -40,19 +51,26 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(
         &["agent", "heartbeat"],
-        &["agent", "heartbeat", "--session", "session-1"],
+        &[
+            "agent",
+            "heartbeat",
+            "--lease",
+            "lease-1",
+            "--token",
+            "token",
+        ],
     ),
     sample(
         &["agent", "capture"],
-        &["agent", "capture", "--session", "session-1"],
+        &["agent", "capture", "--lease", "lease-1", "--token", "token"],
     ),
     sample(
         &["agent", "ready"],
-        &["agent", "ready", "--session", "session-1"],
+        &["agent", "ready", "--lease", "lease-1", "--token", "token"],
     ),
     sample(
         &["agent", "release"],
-        &["agent", "release", "--session", "session-1"],
+        &["agent", "release", "--lease", "lease-1", "--token", "token"],
     ),
     sample(&["agent", "list"], &["agent", "list"]),
     sample(
@@ -103,7 +121,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         ],
     ),
     #[cfg(feature = "client")]
-    sample(&["auth", "login"], &["auth", "login", "--no-browser"]),
+    sample(&["auth", "login"], &["auth", "login", "--open-browser"]),
     #[cfg(feature = "client")]
     sample(&["auth", "logout"], &["auth", "logout"]),
     #[cfg(feature = "client")]
@@ -134,15 +152,12 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["context", "reason", "git", "--path", "."],
     ),
     sample(&["capture"], &["capture"]),
-    sample(&["checkpoint"], &["checkpoint"]),
-    sample(&["cherry-pick"], &["cherry-pick", "abc123"]),
-    sample(&["clean"], &["clean"]),
     sample(&["clone"], &["clone", "remote", "local"]),
+    sample(&["commit"], &["commit"]),
     sample(
         &["collapse"],
         &["collapse", "s1", "s2", "--into", "squashed"],
     ),
-    sample(&["commit"], &["commit"]),
     sample(&["continue"], &["continue"]),
     sample(&["expand"], &["expand", "HEAD"]),
     sample(
@@ -183,16 +198,27 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["discuss", "resolve"],
         &["discuss", "resolve", "discussion-1", "--mode", "dismiss"],
     ),
+    sample(
+        &["discuss", "reopen"],
+        &[
+            "discuss",
+            "reopen",
+            "discussion-1",
+            "--reason",
+            "new evidence",
+        ],
+    ),
     sample(&["discuss", "list"], &["discuss", "list"]),
     sample(&["discuss", "show"], &["discuss", "show", "discussion-1"]),
     sample(&["doctor"], &["doctor"]),
     sample(&["doctor", "docs"], &["doctor", "docs"]),
     sample(&["doctor", "schemas"], &["doctor", "schemas"]),
-    sample(&["fetch"], &["fetch"]),
     sample(&["fsck"], &["fsck"]),
+    sample(
+        &["fsck", "repair", "git"],
+        &["fsck", "repair", "git", "--ref", "main", "--preview"],
+    ),
     sample(&["oplog", "recover"], &["oplog", "recover"]),
-    #[cfg(feature = "git-overlay")]
-    sample(&["git-overlay"], &["git-overlay"]),
     sample(&["help"], &["help"]),
     sample(&["hook", "list"], &["hook", "list"]),
     sample(&["hook", "install"], &["hook", "install", "pre-snapshot"]),
@@ -213,21 +239,12 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(&["log"], &["log"]),
     sample(&["maintenance", "inspect"], &["maintenance", "inspect"]),
-    sample(&["maintenance", "run"], &["maintenance", "run"]),
+    sample(&["maintenance", "refresh"], &["maintenance", "refresh"]),
     sample(&["maintenance", "gc"], &["maintenance", "gc"]),
-    sample(&["maintenance", "index"], &["maintenance", "index"]),
-    sample(&["maintenance", "monitor"], &["maintenance", "monitor"]),
-    sample(&["merge"], &["merge", "feature"]),
-    #[cfg(feature = "client")]
-    sample(
-        &["presence", "publish"],
-        &["presence", "publish", "--session", "session-1"],
-    ),
     sample(&["pull"], &["pull"]),
     sample(&["push"], &["push"]),
     sample(&["query"], &["query"]),
     sample(&["ready"], &["ready"]),
-    sample(&["rebase"], &["rebase"]),
     sample(
         &["redact", "apply"],
         &[
@@ -310,10 +327,11 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     #[cfg(feature = "semantic")]
     sample(&["semantic", "hot"], &["semantic", "hot"]),
     sample(
-        &["session", "start"],
+        &["agent", "provenance", "begin"],
         &[
-            "session",
-            "start",
+            "agent",
+            "provenance",
+            "begin",
             "--provider",
             "openai",
             "--model",
@@ -321,9 +339,10 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         ],
     ),
     sample(
-        &["session", "segment"],
+        &["agent", "provenance", "segment"],
         &[
-            "session",
+            "agent",
+            "provenance",
             "segment",
             "--provider",
             "openai",
@@ -331,9 +350,18 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
             "gpt-5",
         ],
     ),
-    sample(&["session", "end"], &["session", "end"]),
-    sample(&["session", "show"], &["session", "show"]),
-    sample(&["session", "list"], &["session", "list"]),
+    sample(
+        &["agent", "provenance", "end"],
+        &["agent", "provenance", "end"],
+    ),
+    sample(
+        &["agent", "provenance", "show"],
+        &["agent", "provenance", "show"],
+    ),
+    sample(
+        &["agent", "provenance", "list"],
+        &["agent", "provenance", "list"],
+    ),
     sample(&["shell", "init"], &["shell", "init", "bash"]),
     sample(&["shell", "completion"], &["shell", "completion", "bash"]),
     sample(&["shell", "prompt"], &["shell", "prompt"]),
@@ -341,64 +369,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["land"], &["land"]),
     sample(&["show"], &["show", "HEAD"]),
     sample(&["start"], &["start", "feature"]),
-    sample(&["stash", "push"], &["stash", "push"]),
-    sample(&["stash", "list"], &["stash", "list"]),
-    sample(&["stash", "pop"], &["stash", "pop"]),
-    sample(&["stash", "apply"], &["stash", "apply"]),
-    sample(&["stash", "drop"], &["stash", "drop"]),
-    sample(&["stash", "clear"], &["stash", "clear"]),
-    sample(&["stash", "show"], &["stash", "show"]),
     sample(&["status"], &["status"]),
-    #[cfg(feature = "client")]
-    sample(
-        &["support", "grant"],
-        &[
-            "support",
-            "grant",
-            "support@heddle.dev",
-            "--namespace",
-            "heddle/platform",
-            "--reason",
-            "release verification",
-        ],
-    ),
-    #[cfg(feature = "client")]
-    sample(
-        &["support", "list"],
-        &["support", "list", "--namespace", "heddle/platform"],
-    ),
-    #[cfg(feature = "client")]
-    sample(
-        &["support", "revoke"],
-        &["support", "revoke", "00000000-0000-0000-0000-000000000000"],
-    ),
-    #[cfg(feature = "client")]
-    sample(
-        &["spool", "attach"],
-        &["spool", "attach", "acme/root", "acme/lib"],
-    ),
-    #[cfg(feature = "client")]
-    sample(
-        &["spool", "detach"],
-        &["spool", "detach", "acme/root", "libs"],
-    ),
-    #[cfg(feature = "client")]
-    sample(&["spool", "children"], &["spool", "children", "acme/root"]),
-    #[cfg(feature = "client")]
-    sample(
-        &["spool", "governance"],
-        &["spool", "governance", "acme/root"],
-    ),
-    #[cfg(feature = "client")]
-    sample(
-        &["spool", "membership"],
-        &["spool", "membership", "acme/root"],
-    ),
-    #[cfg(feature = "client")]
-    sample(&["prove", "submit"], &["prove", "submit", "chal-123"]),
-    #[cfg(feature = "client")]
-    sample(&["prove", "list"], &["prove", "list"]),
-    sample(&["switch"], &["switch", "main"]),
     sample(&["sync"], &["sync"]),
     sample(&["thread", "create"], &["thread", "create", "feature"]),
     sample(&["thread", "current"], &["thread", "current"]),
@@ -472,16 +443,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["timeline", "reset", "--step", "tls-abc"],
     ),
     sample(&["timeline", "recover"], &["timeline", "recover"]),
-    sample(&["transaction", "begin"], &["transaction", "begin"]),
-    sample(
-        &["transaction", "commit"],
-        &["transaction", "commit", "tx-1"],
-    ),
-    sample(&["transaction", "abort"], &["transaction", "abort", "tx-1"]),
-    sample(
-        &["transaction", "status"],
-        &["transaction", "status", "tx-1"],
-    ),
     sample(&["verify"], &["verify"]),
     sample(
         &["visibility", "set"],
@@ -512,9 +473,8 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
         "heddle init",
         "heddle capture -m \"...\"",
         "heddle commit -m \"...\"",
-        "heddle stash push -m \"...\"",
         "heddle capture -m \"Preserve raw Git operation work\"",
-        "heddle switch <branch>",
+        "heddle thread switch <branch>",
         "heddle start feature/auth --path <dir>",
         "heddle clone <remote> <fresh-path>",
         "heddle clone <local-path> <path>",
@@ -531,14 +491,37 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
         for action in [
             "heddle import git --ref main",
             "heddle import git --ref origin/main",
-            "heddle merge origin/main --preview",
-            "heddle fsck --repair git --ref main --preview",
-            "heddle fsck --repair git --prefer heddle --ref main --preview",
+            "heddle ready --thread origin/main",
+            "heddle fsck repair git --ref main --preview",
+            "heddle fsck repair git --prefer heddle --ref main --preview",
         ] {
             validate_recommended_action(action)
                 .unwrap_or_else(|err| panic!("expected `{action}` to validate: {err}"));
         }
     }
+}
+
+#[test]
+fn recommended_actions_reject_external_git_commands() {
+    let error = validate_recommended_action("git fetch origin").expect_err("external Git action");
+    assert!(error.contains("must start with `heddle`"), "{error}");
+}
+
+#[test]
+fn commit_catalog_action_matches_optional_message_runtime() {
+    let catalog = build_command_catalog();
+    let commit = catalog
+        .command_by_display("commit")
+        .expect("commit should be cataloged");
+    let action = commit
+        .command_action
+        .as_ref()
+        .expect("commit should advertise an executable action");
+    assert_eq!(
+        action.argv.as_ref(),
+        Some(&vec!["heddle".to_string(), "commit".to_string()])
+    );
+    assert!(action.executable);
 }
 
 #[test]
@@ -571,16 +554,12 @@ fn recommended_action_templates_describe_display_only_placeholders() {
     assert_eq!(commit.required_inputs, vec!["message"]);
     assert!(commit.agent_may_fill);
 
-    let template = recommended_action_template("heddle checkpoint -m \"...\"")
-        .expect("checkpoint placeholder should resolve");
-    assert_eq!(
-        template.argv_template,
-        vec!["heddle", "checkpoint", "-m", "<message>"]
-    );
-
-    let switch = recommended_action_template("heddle switch <branch>")
+    let switch = recommended_action_template("heddle thread switch <branch>")
         .expect("switch placeholder should resolve");
-    assert_eq!(switch.argv_template, vec!["heddle", "switch", "<branch>"]);
+    assert_eq!(
+        switch.argv_template,
+        vec!["heddle", "thread", "switch", "<branch>"]
+    );
     assert_eq!(switch.required_inputs, vec!["branch"]);
     assert!(!switch.agent_may_fill);
 
@@ -646,11 +625,11 @@ fn recommended_action_templates_describe_display_only_placeholders() {
     assert_eq!(import.required_inputs, vec!["path", "ref"]);
     assert!(!import.agent_may_fill);
 
-    let merge = recommended_action_template("heddle merge <thread> --git-commit")
-        .expect("merge recovery placeholder should resolve");
+    let merge = recommended_action_template("heddle land --thread <thread>")
+        .expect("land recovery placeholder should resolve");
     assert_eq!(
         merge.argv_template,
-        vec!["heddle", "merge", "<thread>", "--git-commit"]
+        vec!["heddle", "land", "--thread", "<thread>"]
     );
     assert_eq!(merge.required_inputs, vec!["thread"]);
     assert!(!merge.agent_may_fill);
@@ -658,61 +637,39 @@ fn recommended_action_templates_describe_display_only_placeholders() {
 
 #[test]
 fn action_fields_template_dirty_worktree_message_placeholders() {
-    for (action, expected_argv_template) in [
-        (
-            "heddle commit -m \"...\"",
-            vec!["heddle", "commit", "-m", "<message>"],
-        ),
-        (
-            "heddle capture -m \"...\"",
-            vec!["heddle", "capture", "-m", "<message>"],
-        ),
-        (
-            "heddle stash push -m \"...\"",
-            vec!["heddle", "stash", "push", "-m", "<message>"],
-        ),
-    ] {
-        let fields = ActionFields::from_action(action);
-        assert_eq!(fields.action.as_deref(), Some(action));
-        let template = fields
-            .template
-            .unwrap_or_else(|| panic!("`{action}` should expose a structured template"));
-        assert_eq!(template.argv_template, expected_argv_template);
-        assert_eq!(template.required_inputs, vec!["message"]);
-        assert!(template.agent_may_fill);
-    }
+    let action = "heddle capture -m \"...\"";
+    let fields = ActionFields::from_action(action);
+    assert_eq!(fields.action.as_deref(), Some(action));
+    let template = fields
+        .template
+        .unwrap_or_else(|| panic!("`{action}` should expose a structured template"));
+    assert_eq!(
+        template.argv_template,
+        vec!["heddle", "capture", "-m", "<message>"]
+    );
+    assert_eq!(template.required_inputs, vec!["message"]);
+    assert!(template.agent_may_fill);
 }
 
 #[test]
 fn action_fields_template_argv_normalized_message_placeholders() {
-    for (action, expected_argv_template) in [
-        (
-            "heddle commit -m ...",
-            vec!["heddle", "commit", "-m", "<message>"],
-        ),
-        (
-            "heddle capture -m ...",
-            vec!["heddle", "capture", "-m", "<message>"],
-        ),
-        (
-            "heddle stash push -m ...",
-            vec!["heddle", "stash", "push", "-m", "<message>"],
-        ),
-    ] {
-        let fields = ActionFields::from_action(action);
-        assert_eq!(fields.action.as_deref(), Some(action));
-        let template = fields
-            .template
-            .unwrap_or_else(|| panic!("`{action}` should expose a structured template"));
-        assert_eq!(template.argv_template, expected_argv_template);
-        assert_eq!(template.required_inputs, vec!["message"]);
-        assert!(template.agent_may_fill);
-    }
+    let action = "heddle capture -m ...";
+    let fields = ActionFields::from_action(action);
+    assert_eq!(fields.action.as_deref(), Some(action));
+    let template = fields
+        .template
+        .unwrap_or_else(|| panic!("`{action}` should expose a structured template"));
+    assert_eq!(
+        template.argv_template,
+        vec!["heddle", "capture", "-m", "<message>"]
+    );
+    assert_eq!(template.required_inputs, vec!["message"]);
+    assert!(template.agent_may_fill);
 }
 
 #[test]
 fn display_only_recommended_actions_must_be_templated() {
-    let err = validate_recommended_action("heddle switch <missing-template>")
+    let err = validate_recommended_action("heddle thread switch <missing-template>")
         .expect_err("unregistered display placeholder should fail validation");
     assert!(
         err.contains("structured template"),
@@ -720,7 +677,7 @@ fn display_only_recommended_actions_must_be_templated() {
     );
 
     assert!(
-        recommended_action_template("heddle switch <missing-template>").is_none(),
+        recommended_action_template("heddle thread switch <missing-template>").is_none(),
         "unregistered display placeholder must not resolve to a fillable template"
     );
 }
@@ -735,11 +692,30 @@ fn recommended_action_validator_rejects_unknown_commands() {
     );
 
     let err = validate_recommended_action("git status")
-        .expect_err("raw git action must be explicitly registered");
-    assert!(
-        err.contains("registered as a placeholder"),
-        "error should explain placeholder registration: {err}"
-    );
+        .expect_err("external Git commands are not Heddle recovery actions");
+    assert!(err.contains("must start with `heddle`"), "{err}");
+}
+
+#[test]
+fn contracted_commands_are_not_parseable() {
+    for command in [
+        "clean",
+        "fetch",
+        "git-overlay",
+        "merge",
+        "presence",
+        "prove",
+        "rebase",
+        "spool",
+        "stash",
+        "support",
+        "switch",
+    ] {
+        assert!(
+            Cli::try_parse_from(["heddle", command]).is_err(),
+            "removed command `{command}` must not return to the public CLI"
+        );
+    }
 }
 
 #[test]
@@ -764,7 +740,7 @@ fn leading_dash_thread_breadcrumbs_pass_validation() {
 
 #[test]
 fn action_fields_fail_loudly_for_invalid_recommendations() {
-    let panic = std::panic::catch_unwind(|| ActionFields::from_action("git status"));
+    let panic = std::panic::catch_unwind(|| ActionFields::from_action("curl example.com"));
     assert!(
         panic.is_err(),
         "ActionFields must not silently erase invalid action sidecars"
@@ -773,37 +749,39 @@ fn action_fields_fail_loudly_for_invalid_recommendations() {
 
 #[test]
 fn recommended_action_parser_supports_shell_quoted_arguments() {
-    let template = recommended_action_template("heddle merge 'feature with spaces' --preview")
+    let template = recommended_action_template("heddle ready --thread 'feature with spaces'")
         .expect("single-quoted thread action should resolve to a template");
     assert_eq!(
         template.argv_template[1..],
-        ["merge", "feature with spaces", "--preview"]
+        ["ready", "--thread", "feature with spaces"]
     );
 
-    let template = recommended_action_template("heddle merge 'feature '\\''quoted'\\''' --preview")
+    let template = recommended_action_template("heddle ready --thread 'feature '\\''quoted'\\'''")
         .expect("shell-quoted apostrophe should resolve to a template");
     assert_eq!(
         template.argv_template[1..],
-        ["merge", "feature 'quoted'", "--preview"]
+        ["ready", "--thread", "feature 'quoted'"]
     );
 }
 
 #[test]
 fn checked_action_builder_quotes_and_validates_from_argv() {
-    let action = heddle_action(["merge", "feature with spaces", "--preview"]);
-    assert_eq!(action, "heddle merge 'feature with spaces' --preview");
+    let action = heddle_action(["ready", "--thread", "feature with spaces"]);
+    assert_eq!(action, "heddle ready --thread 'feature with spaces'");
     let template =
         recommended_action_template(&action).expect("built action should resolve to a template");
     assert_eq!(
         template.argv_template[1..],
-        ["merge", "feature with spaces", "--preview"]
+        ["ready", "--thread", "feature with spaces"]
     );
 
-    let panic = std::panic::catch_unwind(|| checked_action_from_argv(["git", "status"]));
-    assert!(
-        panic.is_err(),
-        "non-Heddle actions should not enter runtime advice sidecars"
-    );
+    for argv in [["git", "status"], ["curl", "example.com"]] {
+        let panic = std::panic::catch_unwind(|| checked_action_from_argv(argv));
+        assert!(
+            panic.is_err(),
+            "unowned executables should not enter runtime advice sidecars"
+        );
+    }
 }
 
 #[test]
@@ -929,7 +907,6 @@ fn json_compact_runtime_contract_is_projection_or_rejection() {
         "capture".to_string(),
         "continue".to_string(),
         "land".to_string(),
-        "merge".to_string(),
         "ready".to_string(),
         "status".to_string(),
         "sync".to_string(),
@@ -983,6 +960,38 @@ fn json_compact_runtime_contract_is_projection_or_rejection() {
     }
 }
 
+#[test]
+fn leaf_catalog_entries_publish_exact_output_modes() {
+    let catalog = build_command_catalog();
+    for command in catalog
+        .commands
+        .iter()
+        .filter(|entry| !entry.has_subcommands)
+    {
+        assert_eq!(
+            command.output_modes.first().map(String::as_str),
+            Some("text")
+        );
+        assert_eq!(
+            command.output_modes.iter().any(|mode| mode == "json"),
+            command.supports_json,
+            "{} must expose its JSON support without trial execution",
+            command.display,
+        );
+        assert_eq!(
+            command
+                .output_modes
+                .iter()
+                .any(|mode| mode == "json-compact"),
+            raw_command_contract_for_path(command.path.iter().map(String::as_str))
+                .expect("catalog entries have command contracts")
+                .supports_json_compact,
+            "{} must expose its compact projection without trial execution",
+            command.display,
+        );
+    }
+}
+
 fn contract_paths_with_children(
     entries: &[&'static CommandContractEntry],
 ) -> BTreeSet<Vec<&'static str>> {
@@ -1019,7 +1028,12 @@ fn command_contract_metadata_is_internally_consistent() {
         assert!(
             matches!(
                 contract.surface,
-                "native" | "git_projection" | "automation" | "admin" | "internal"
+                "native"
+                    | "source_authority"
+                    | "git_projection"
+                    | "automation"
+                    | "admin"
+                    | "internal"
             ),
             "`{display}` has unknown product surface `{}`",
             contract.surface
@@ -1105,6 +1119,7 @@ fn command_contract_metadata_is_internally_consistent() {
                     && !contract.writes_heddle_refs
                     && !contract.writes_git_refs
                     && !contract.writes_worktree
+                    && !contract.writes_metadata
                     && !contract.writes_config
                     && !contract.writes_hooks
                     && !contract.network_io
@@ -1128,37 +1143,47 @@ fn command_contract_metadata_is_internally_consistent() {
         if contract.observe_only {
             assert_eq!(
                 effects,
-                vec!["observe_only"],
+                vec![CommandSideEffect::ObserveOnly],
                 "`{display}` observe-only side_effects must stay exact"
             );
         } else {
             for (flag, effect) in [
-                (contract.may_initialize, "initialize"),
-                (contract.may_import_git, "import_git"),
-                (contract.writes_heddle_refs, "writes_heddle_refs"),
-                (contract.writes_git_refs, "writes_git_refs"),
-                (contract.writes_worktree, "writes_worktree"),
-                (contract.writes_config, "writes_config"),
-                (contract.writes_hooks, "writes_hooks"),
-                (contract.network_io, "network_io"),
-                (contract.daemon_process, "daemon_process"),
-                (contract.object_gc, "object_gc"),
-                (contract.external_command, "external_command"),
+                (contract.may_initialize, CommandSideEffect::Initialize),
+                (contract.may_import_git, CommandSideEffect::ImportGit),
+                (
+                    contract.writes_heddle_refs,
+                    CommandSideEffect::WritesHeddleRefs,
+                ),
+                (contract.writes_git_refs, CommandSideEffect::WritesGitRefs),
+                (contract.writes_worktree, CommandSideEffect::WritesWorktree),
+                (contract.writes_metadata, CommandSideEffect::WritesMetadata),
+                (contract.writes_config, CommandSideEffect::WritesConfig),
+                (contract.writes_hooks, CommandSideEffect::WritesHooks),
+                (contract.network_io, CommandSideEffect::NetworkIo),
+                (contract.daemon_process, CommandSideEffect::DaemonProcess),
+                (contract.object_gc, CommandSideEffect::ObjectGc),
+                (
+                    contract.external_command,
+                    CommandSideEffect::ExternalCommand,
+                ),
                 (
                     contract.destructive_requires_force,
-                    "destructive_requires_force",
+                    CommandSideEffect::DestructiveRequiresForce,
                 ),
-                (contract.destructive_data, "destructive_data"),
+                (
+                    contract.destructive_data,
+                    CommandSideEffect::DestructiveData,
+                ),
             ] {
                 assert_eq!(
                     effects.contains(&effect),
                     flag,
-                    "`{display}` side_effects must mirror `{effect}`"
+                    "`{display}` side_effects must mirror `{effect:?}`"
                 );
             }
             if contract.may_write_worktree && !contract.writes_worktree {
                 assert!(
-                    effects.contains(&"may_write_worktree"),
+                    effects.contains(&CommandSideEffect::MayWriteWorktree),
                     "`{display}` side_effects must preserve flag-sensitive worktree writes"
                 );
             }
@@ -1202,6 +1227,200 @@ fn command_contract_metadata_is_internally_consistent() {
     }
 }
 
+#[test]
+fn every_mutating_leaf_declares_a_concrete_side_effect() {
+    let paths_with_children = contract_paths_with_children(&CONTRACTS.iter().collect::<Vec<_>>());
+
+    for entry in CONTRACTS {
+        if paths_with_children.contains(entry.path) || !entry.contract.mutates {
+            continue;
+        }
+        let declares_concrete_effect = entry.contract.writes_heddle_refs
+            || entry.contract.writes_git_refs
+            || entry.contract.writes_worktree
+            || entry.contract.writes_metadata
+            || entry.contract.writes_config
+            || entry.contract.writes_hooks
+            || entry.contract.network_io
+            || entry.contract.daemon_process
+            || entry.contract.object_gc
+            || entry.contract.external_command;
+        assert!(
+            declares_concrete_effect,
+            "mutating leaf `{}` must declare a concrete write, process, or network effect",
+            entry.path.join(" ")
+        );
+        let effects = side_effects(entry.contract);
+        assert!(
+            !effects.is_empty(),
+            "mutating leaf `{}` must declare a concrete side effect",
+            entry.path.join(" ")
+        );
+        assert_ne!(
+            side_effect_class(entry.contract),
+            "none",
+            "mutating leaf `{}` must have a concrete side-effect class",
+            entry.path.join(" ")
+        );
+    }
+}
+
+#[test]
+fn observe_only_leaves_declare_no_mutation_effects() {
+    let paths_with_children = contract_paths_with_children(&CONTRACTS.iter().collect::<Vec<_>>());
+
+    for entry in CONTRACTS {
+        if paths_with_children.contains(entry.path) || !entry.contract.observe_only {
+            continue;
+        }
+        assert_eq!(
+            side_effects(entry.contract),
+            vec![CommandSideEffect::ObserveOnly],
+            "observe-only leaf `{}` must declare no mutation effects",
+            entry.path.join(" ")
+        );
+    }
+}
+
+fn assert_command_effects(path: &[&str], expected: &[CommandSideEffect]) {
+    let contract = raw_command_contract_for_path(path.iter().copied())
+        .unwrap_or_else(|| panic!("missing contract for `{}`", path.join(" ")));
+    assert_eq!(side_effects(contract), expected, "`{}`", path.join(" "));
+}
+
+#[test]
+fn sidecar_only_effect_sets_exclude_refs() {
+    for path in [
+        &["agent", "presence", "complete"][..],
+        &["agent", "heartbeat"],
+        &["agent", "release"],
+        &["agent", "task", "create"],
+        &["agent", "task", "update"],
+        &["context", "reason", "git"],
+        &["discuss", "open"],
+        &["discuss", "append"],
+        &["discuss", "resolve"],
+        &["discuss", "reopen"],
+        &["review", "sign"],
+        &["agent", "provenance", "begin"],
+        &["agent", "provenance", "segment"],
+        &["agent", "provenance", "end"],
+        &["timeline", "record-start"],
+        &["timeline", "record-finish"],
+        &["timeline", "fork"],
+        &["timeline", "recover"],
+        &["visibility", "set"],
+        &["visibility", "promote"],
+    ] {
+        assert_command_effects(path, &[CommandSideEffect::WritesMetadata]);
+    }
+}
+
+#[test]
+fn state_attached_effect_sets_include_refs() {
+    for path in [
+        &["context", "set"][..],
+        &["context", "edit"],
+        &["context", "supersede"],
+        &["context", "rm"],
+    ] {
+        assert_command_effects(
+            path,
+            &[
+                CommandSideEffect::WritesHeddleRefs,
+                CommandSideEffect::WritesMetadata,
+            ],
+        );
+    }
+}
+
+#[test]
+fn materializer_effect_sets_include_refs_metadata_and_worktree() {
+    for path in [&["timeline", "reset"][..], &["integration", "relay"]] {
+        assert_command_effects(
+            path,
+            &[
+                CommandSideEffect::WritesHeddleRefs,
+                CommandSideEffect::WritesWorktree,
+                CommandSideEffect::WritesMetadata,
+            ],
+        );
+    }
+}
+
+#[test]
+fn integration_installer_effect_sets_include_config_and_hooks() {
+    for path in [
+        &["integration", "install"][..],
+        &["integration", "uninstall"],
+        &["integration", "upgrade"],
+    ] {
+        assert_command_effects(
+            path,
+            &[
+                CommandSideEffect::WritesMetadata,
+                CommandSideEffect::WritesConfig,
+                CommandSideEffect::WritesHooks,
+            ],
+        );
+    }
+}
+
+#[test]
+fn credential_and_trust_effect_sets_are_config_scoped() {
+    for path in [
+        &["auth", "logout"][..],
+        &["redact", "trust", "add"],
+        &["redact", "trust", "remove"],
+    ] {
+        assert_command_effects(path, &[CommandSideEffect::WritesConfig]);
+    }
+    assert_command_effects(
+        &["auth", "login"],
+        &[
+            CommandSideEffect::WritesConfig,
+            CommandSideEffect::NetworkIo,
+        ],
+    );
+}
+
+#[test]
+fn fsck_observation_has_no_side_effects() {
+    assert_command_effects(&["fsck"], &[CommandSideEffect::ObserveOnly]);
+    let contract = raw_command_contract_for_path(["fsck"]).expect("fsck contract");
+    assert!(contract.observe_only);
+    assert!(!contract.supports_op_id);
+}
+
+#[test]
+fn fsck_repair_git_has_explicit_mutation_effects() {
+    assert_command_effects(
+        &["fsck", "repair", "git"],
+        &[
+            CommandSideEffect::ImportGit,
+            CommandSideEffect::WritesHeddleRefs,
+            CommandSideEffect::WritesGitRefs,
+            CommandSideEffect::WritesWorktree,
+            CommandSideEffect::WritesMetadata,
+        ],
+    );
+    let contract =
+        raw_command_contract_for_path(["fsck", "repair", "git"]).expect("fsck repair git contract");
+    assert!(contract.supports_op_id);
+    assert!(!contract.persists_op_id);
+}
+
+#[test]
+fn sync_git_adopt_note_is_authority_neutral() {
+    let contract = raw_command_contract_for_path(["sync", "git"]).expect("sync git contract");
+    assert_eq!(
+        contract.canonical_note,
+        Some(
+            "Use adopt to initialize Heddle from an existing Git repository and import its history."
+        )
+    );
+}
+
 #[cfg(not(feature = "git-overlay"))]
 #[test]
 fn native_only_catalog_excludes_git_overlay_commands() {
@@ -1229,7 +1448,6 @@ fn json_kind_marks_streaming_command_surfaces() {
     let catalog = build_command_catalog();
     for (display, kind) in [
         ("watch", "jsonl"),
-        ("rebase", "jsonl"),
         ("status", "json_or_jsonl"),
         ("thread show", "json_or_jsonl"),
     ] {
@@ -1321,11 +1539,11 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
     // Wire-format-stable list. PR #251 instrumented the initial set;
     // heddle#272 swept the named-by-persona verbs (stack, goto, fork,
     // revert, purge, redact, stash, clean, discuss, context, review,
-    // cherry-pick, bisect); heddle#641 swept the remaining verbs whose
+    // bisect); heddle#641 swept the remaining verbs whose
     // runtime JSON already emits `output_kind` (abort, adopt, the agent
     // session verbs, continue, daemon stop,
     // doctor, expand, fetch, land, log,
-    // maintenance gc/index, merge --preview, pull, push, query, ready,
+    // maintenance inspect/refresh/gc, pull, push, query, ready,
     // the remote family, start, switch, sync, and the thread lifecycle
     // verbs). Any further sweep MUST extend this list and document the
     // addition.
@@ -1349,11 +1567,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // tests/cli_integration/output_kind_invariant.rs.
             "abort",
             "adopt",
-            "actor spawn",
-            "actor list",
-            "actor show",
-            "actor explain",
-            "actor done",
             "agent serve",
             "agent status",
             "agent stop",
@@ -1365,6 +1578,10 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "agent task update",
             "agent fanout plan",
             "agent fanout start",
+            "agent presence list",
+            "agent presence show",
+            "agent presence explain",
+            "agent presence complete",
             "auth logout",
             "auth status",
             "auth create-service-token",
@@ -1372,16 +1589,13 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "export git",
             "sync git",
             "capture",
-            "checkpoint",
-            "cherry-pick",
-            "clean",
             "clone",
             "clone",
             // clone_monorepo discriminator: `clone --recursive --output json`
             // (Spool epic P9) emits a monorepo summary record.
             "clone",
-            "expand",
             "commit",
+            "expand",
             "continue",
             "context set",
             "context get",
@@ -1398,12 +1612,12 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "discuss open",
             "discuss append",
             "discuss resolve",
+            "discuss reopen",
             "discuss list",
             "discuss show",
             "doctor",
             "doctor docs",
             "doctor schemas",
-            "fetch",
             "oplog recover",
             "help",
             "init",
@@ -1413,15 +1627,14 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "log",
             "log",
             "log",
+            "maintenance inspect",
+            "maintenance refresh",
             "maintenance gc",
-            "maintenance index",
-            "merge",
             "pull",
             "push",
             "query",
             "query",
             "ready",
-            "rebase",
             "redact apply",
             "redact list",
             "redact show",
@@ -1445,13 +1658,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "land",
             "show",
             "start",
-            "stash list",
-            "stash show",
             "status",
-            "support grant",
-            "support list",
-            "support revoke",
-            "switch",
             "sync",
             "thread create",
             "thread switch",
@@ -1479,6 +1686,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "visibility promote",
             "visibility show",
             "visibility list",
+            "undo",
             "undo",
             "undo",
             "undo",
@@ -1803,11 +2011,30 @@ fn catalog_option_lookup_includes_globals_and_finite_values() {
     let fsck_options = catalog
         .options_for_display("fsck")
         .expect("fsck should be cataloged");
-    let repair = fsck_options
+    for mutation_option in ["ref", "prefer", "preview"] {
+        assert!(
+            fsck_options
+                .iter()
+                .all(|option| option.long.as_deref() != Some(mutation_option)),
+            "bare fsck must not expose --{mutation_option}"
+        );
+    }
+    let repair_options = catalog
+        .options_for_display("fsck repair git")
+        .expect("fsck repair git should be cataloged");
+    let prefer = repair_options
         .iter()
-        .find(|option| option.long.as_deref() == Some("repair"))
-        .expect("fsck --repair should be cataloged");
-    assert_eq!(repair.possible_values, vec!["git"]);
+        .find(|option| option.long.as_deref() == Some("prefer"))
+        .expect("fsck repair git --prefer should be cataloged");
+    assert_eq!(prefer.possible_values, vec!["git", "heddle"]);
+    for expected in ["ref", "preview"] {
+        assert!(
+            repair_options
+                .iter()
+                .any(|option| option.long.as_deref() == Some(expected)),
+            "fsck repair git --{expected} should be cataloged"
+        );
+    }
 
     let integration_install_options = catalog
         .options_for_display("integration install")
@@ -1830,13 +2057,18 @@ fn command_contract_table_drives_help_tiers() {
         (
             "verify", "everyday", "native", "everyday", None, None, false,
         ),
-        (
-            "commit", "everyday", "native", "everyday", None, None, false,
-        ),
         ("land", "everyday", "native", "everyday", None, None, false),
-        ("push", "everyday", "native", "everyday", None, None, false),
         (
-            "capture", "advanced", "native", "advanced", None, None, false,
+            "push",
+            "everyday",
+            "source_authority",
+            "everyday",
+            None,
+            None,
+            false,
+        ),
+        (
+            "capture", "everyday", "native", "everyday", None, None, false,
         ),
         (
             "thread create",
@@ -1854,24 +2086,6 @@ fn command_contract_table_drives_help_tiers() {
             "advanced",
             None,
             None,
-            false,
-        ),
-        (
-            "checkpoint",
-            "advanced",
-            "native",
-            "advanced",
-            None,
-            None,
-            false,
-        ),
-        (
-            "switch",
-            "advanced",
-            "git_projection",
-            "git_projection",
-            Some("thread switch"),
-            Some("direct_command"),
             false,
         ),
     ] {
@@ -1903,29 +2117,6 @@ fn command_contract_table_drives_help_tiers() {
         assert_eq!(command_help_visibility(display), visibility);
         assert_eq!(command_canonical_command(display), canonical);
     }
-    for (display, canonical, kind) in [
-        ("stash pop", "undo", "conceptual_home"),
-        ("fetch", "pull", "workflow"),
-    ] {
-        let entry = catalog
-            .commands
-            .iter()
-            .find(|entry| entry.display == display)
-            .unwrap_or_else(|| panic!("missing command catalog entry for `{display}`"));
-        let action = entry
-            .canonical_action
-            .as_ref()
-            .unwrap_or_else(|| panic!("`{display}` should expose a canonical action"));
-        assert_eq!(action.command, canonical);
-        assert_eq!(action.kind, kind);
-        assert!(
-            !action.executable,
-            "`{display}` is not a direct command replacement"
-        );
-        assert!(!action.note.is_empty());
-    }
-    assert_eq!(command_help_tier("transaction"), "hidden");
-
     let thread_list = catalog
         .commands
         .iter()
@@ -1938,7 +2129,7 @@ fn command_contract_table_drives_help_tiers() {
 fn parsed_command_op_id_support_reads_contract_table() {
     for (argv, expected) in [
         (vec!["heddle", "status"], false),
-        (vec!["heddle", "commit", "-m", "checkpoint"], true),
+        (vec!["heddle", "capture", "-m", "checkpoint"], true),
         (vec!["heddle", "thread", "list"], false),
         (vec!["heddle", "thread", "drop", "feature"], true),
     ] {
@@ -2014,7 +2205,6 @@ fn op_id_persistence_reads_contract_table() {
     for (display, persists, store_scope) in [
         ("capture", false, "repository"),
         ("review sign", false, "repository"),
-        ("commit", false, "repository"),
         ("status", false, "none"),
         ("init", false, "bootstrap"),
         ("adopt", false, "bootstrap"),
@@ -2054,8 +2244,5 @@ fn op_id_persistence_reads_contract_table() {
 
 #[test]
 fn feature_gated_command_roots_are_catalog_owned() {
-    assert_eq!(
-        feature_gated_command_roots(),
-        &["auth", "presence", "prove", "spool", "support"]
-    );
+    assert_eq!(feature_gated_command_roots(), &["auth"]);
 }

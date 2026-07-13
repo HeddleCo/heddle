@@ -8,7 +8,7 @@ use std::{
 
 use objects::{
     object::{
-        ChangeId, TimelineBranchId, TimelineCursorMoveReason, TimelineLabel, TimelineOperationId,
+        StateId, TimelineBranchId, TimelineCursorMoveReason, TimelineLabel, TimelineOperationId,
     },
     store::ObjectStore,
 };
@@ -72,7 +72,7 @@ pub enum TimelineMaterializationBlocker {
     /// The physical checkout has no known current state to compare against.
     CheckoutStateUnknown,
     /// The state object exists, but its tree is unavailable.
-    MissingTree(ChangeId),
+    MissingTree(StateId),
 }
 
 /// Preview of a timeline seek before optional physical materialization.
@@ -81,8 +81,8 @@ pub struct TimelineSeekPreview {
     pub thread: String,
     pub current_branch_id: Option<crate::TimelineBranchId>,
     pub current_step_id: Option<TimelineStepId>,
-    pub current_state: Option<ChangeId>,
-    pub checkout_state: Option<ChangeId>,
+    pub current_state: Option<StateId>,
+    pub checkout_state: Option<StateId>,
     pub target: TimelineSeekTarget,
     pub changed_paths: Vec<String>,
     pub worktree_status: Option<WorktreeStatusDetailed>,
@@ -117,8 +117,8 @@ pub enum TimelineMaterializationRecoveryStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TimelineMaterializationRecoveryBlocker {
     CheckoutNotAtTarget {
-        checkout_state: Option<ChangeId>,
-        target_state: ChangeId,
+        checkout_state: Option<StateId>,
+        target_state: StateId,
     },
 }
 
@@ -432,7 +432,7 @@ impl Repository {
         })
     }
 
-    fn tree_for_materialization_state(&self, state_id: &ChangeId) -> Result<objects::object::Tree> {
+    fn tree_for_materialization_state(&self, state_id: &StateId) -> Result<objects::object::Tree> {
         let state = self
             .store()
             .get_state(state_id)?
@@ -739,14 +739,12 @@ mod tests {
         TimelineNativeToolKey::from(&native(call))
     }
 
-    fn write_state(repo: &Repository, root: &Path, path: &str, content: &str) -> ChangeId {
+    fn write_state(repo: &Repository, root: &Path, path: &str, content: &str) -> StateId {
         fs::write(root.join(path), content).unwrap();
-        repo.snapshot(Some(path.to_string()), None)
-            .unwrap()
-            .change_id
+        repo.snapshot(Some(path.to_string()), None).unwrap().id()
     }
 
-    fn write_timeline(store: &TimelineStore, state0: ChangeId, state1: ChangeId, state2: ChangeId) {
+    fn write_timeline(store: &TimelineStore, state0: StateId, state1: StateId, state2: StateId) {
         store
             .write_operation(&TimelineOperationEnvelope::new(
                 TimelineOperationBodyV1::BranchCreated(BranchCreatedV1 {
@@ -830,9 +828,9 @@ mod tests {
 
     fn write_timeline_with_child_branch(
         store: &TimelineStore,
-        state0: ChangeId,
-        state1: ChangeId,
-        state2: ChangeId,
+        state0: StateId,
+        state1: StateId,
+        state2: StateId,
     ) {
         store
             .write_operation(&TimelineOperationEnvelope::new(

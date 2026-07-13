@@ -1,27 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Process liveness detection for reservation reaping.
-//!
-//! `heddle agent reserve` is a one-shot command — the CLI process exits as
-//! soon as the reservation has been recorded. Holding a per-session
-//! `flock` for the life of that process therefore buys nothing: the
-//! kernel releases the lock on `exit(2)` long before the next agent ever
-//! needs to check liveness.
-//!
-//! We instead record `(pid, boot_id)` at reservation time and check
-//! liveness on demand with `kill(pid, 0)` plus a boot-id comparison.
-//! `ESRCH` means the process is gone. A boot id mismatch means the host
-//! rebooted and the PID has been reused — the original owner is also
-//! gone.
+//! Heartbeat-lease liveness for agent reservations.
+
+use chrono::{DateTime, Duration, Utc};
+
+pub const AGENT_LEASE_DURATION: Duration = Duration::minutes(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Liveness {
-    /// The recorded process is still running on the current boot.
+    /// The heartbeat lease is current and any recorded process is alive.
     Alive,
-    /// The recorded process is gone (or the boot id has rolled).
+    /// The lease expired, the process exited, or the host rebooted.
     Dead,
-    /// Insufficient information; default to leaving the entry alone so
-    /// we never reap a live owner on missing fields.
-    Unknown,
+}
+
+impl std::fmt::Display for Liveness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Alive => write!(f, "alive"),
+            Self::Dead => write!(f, "dead"),
+        }
+    }
 }
 
 /// Best-effort current boot identifier.
@@ -91,21 +89,29 @@ pub fn process_alive(_pid: u32) -> bool {
     true
 }
 
-/// Combined check: PID is alive *and* the recorded boot id matches the
-/// current boot id (when both are known). Missing fields collapse to
-/// `Unknown` — callers should not reap on `Unknown`.
-pub fn is_owner_alive(pid: Option<u32>, recorded_boot_id: Option<&str>) -> Liveness {
-    let Some(pid) = pid else {
-        return Liveness::Unknown;
-    };
-
-    if !process_alive(pid) {
+/// Evaluate a heartbeat lease, using PID and boot identity as early death
+/// signals when a long-lived owner process was explicitly recorded.
+pub fn reservation_liveness_at(
+    pid: Option<u32>,
+    recorded_boot_id: Option<&str>,
+    heartbeat_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Liveness {
+    if pid.is_some_and(|pid| !process_alive(pid)) {
         return Liveness::Dead;
     }
 
-    match (recorded_boot_id, current_boot_id()) {
-        (Some(recorded), Some(current)) if recorded != current => Liveness::Dead,
-        _ => Liveness::Alive,
+    if matches!(
+        (recorded_boot_id, current_boot_id()),
+        (Some(recorded), Some(current)) if recorded != current
+    ) {
+        return Liveness::Dead;
+    }
+
+    match heartbeat_at {
+        Some(heartbeat) if now <= heartbeat + AGENT_LEASE_DURATION => Liveness::Alive,
+        Some(_) => Liveness::Dead,
+        None => Liveness::Dead,
     }
 }
 
@@ -133,16 +139,24 @@ mod tests {
     }
 
     #[test]
-    fn is_owner_alive_unknown_without_pid() {
-        assert_eq!(is_owner_alive(None, Some("boot")), Liveness::Unknown);
+    fn reservation_is_alive_from_fresh_heartbeat_without_pid() {
+        let now = Utc::now();
+        assert_eq!(
+            reservation_liveness_at(None, None, Some(now), now),
+            Liveness::Alive
+        );
     }
 
     #[test]
-    fn is_owner_alive_dead_when_boot_id_mismatches() {
+    fn reservation_is_dead_when_boot_id_mismatches() {
+        let now = Utc::now();
         let pid = std::process::id();
-        let liveness = is_owner_alive(Some(pid), Some("definitely-not-the-current-boot-id"));
-        // If we can derive a real boot id on this platform the answer
-        // is Dead; if we can't, the function falls through to Alive.
+        let liveness = reservation_liveness_at(
+            Some(pid),
+            Some("definitely-not-the-current-boot-id"),
+            Some(now),
+            now,
+        );
         if current_boot_id().is_some() {
             assert_eq!(liveness, Liveness::Dead);
         } else {
@@ -151,17 +165,47 @@ mod tests {
     }
 
     #[test]
-    fn is_owner_alive_alive_when_self_pid_and_matching_or_missing_boot_id() {
+    fn reservation_is_alive_when_lease_and_process_are_current() {
+        let now = Utc::now();
         let pid = std::process::id();
         let boot = current_boot_id();
-        assert_eq!(is_owner_alive(Some(pid), boot.as_deref()), Liveness::Alive);
+        assert_eq!(
+            reservation_liveness_at(Some(pid), boot.as_deref(), Some(now), now),
+            Liveness::Alive
+        );
     }
 
     #[test]
-    fn is_owner_alive_dead_when_pid_is_dead() {
-        // PID 0x7fff_ffff is never assigned on Linux/macOS; treat as a
-        // dead-pid proxy.
-        let liveness = is_owner_alive(Some(0x7fff_ffff), current_boot_id().as_deref());
+    fn reservation_is_dead_when_pid_is_dead() {
+        let now = Utc::now();
+        let liveness = reservation_liveness_at(
+            Some(0x7fff_ffff),
+            current_boot_id().as_deref(),
+            Some(now),
+            now,
+        );
         assert_eq!(liveness, Liveness::Dead);
+    }
+
+    #[test]
+    fn reservation_is_dead_when_heartbeat_lease_expires() {
+        let now = Utc::now();
+        assert_eq!(
+            reservation_liveness_at(
+                None,
+                None,
+                Some(now - AGENT_LEASE_DURATION - Duration::seconds(1)),
+                now,
+            ),
+            Liveness::Dead
+        );
+    }
+
+    #[test]
+    fn reservation_is_dead_without_heartbeat() {
+        assert_eq!(
+            reservation_liveness_at(None, None, None, Utc::now()),
+            Liveness::Dead
+        );
     }
 }

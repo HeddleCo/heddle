@@ -362,9 +362,9 @@ export class Heddle {
     return this.run("diff", args, options);
   }
 
-  /** `heddle fetch` — fetch objects/refs from a remote. Mutating. */
-  fetch(args: readonly string[] = [], options: RunOptions = {}) {
-    return this.run("fetch", args, options);
+  /** `heddle pull` — synchronize from a remote. Mutating. */
+  pull(args: readonly string[] = [], options: RunOptions = {}) {
+    return this.run("pull", args, options);
   }
 
   /** `heddle push` — push to a remote. Mutating. */

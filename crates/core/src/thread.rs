@@ -20,7 +20,9 @@ use chrono::Utc;
 use cli_shared::UserConfig;
 use objects::{
     object::{ThreadName, Tree},
-    store::{AgentEntry, AgentRegistry, AgentStatus, AgentTaskRecord, AgentTaskStore},
+    store::{
+        ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStore,
+    },
 };
 use repo::{
     AgentUsageSummary, GitOverlayBranchTip, GitRemoteTrackingStatus, Repository,
@@ -322,10 +324,10 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadListEntry
         .into_iter()
         .map(|tip| (tip.branch.clone(), tip))
         .collect::<HashMap<_, _>>();
-    let registry = AgentRegistry::new(repo.heddle_dir());
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let task_store = AgentTaskStore::new(repo.heddle_dir());
     let thread_manager = ThreadManager::new(repo.heddle_dir());
-    let mut entries_by_thread: HashMap<String, Vec<AgentEntry>> = HashMap::new();
+    let mut entries_by_thread: HashMap<String, Vec<ActorPresence>> = HashMap::new();
     let mut threads_by_name: HashMap<String, Thread> = HashMap::new();
     for entry in registry.list()? {
         entries_by_thread
@@ -430,9 +432,12 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadListEntry
                 summary.recommended_action.clear();
             } else {
                 summary.recommended_action = if branch_tip.branch.starts_with('-') {
-                    format!("heddle switch -- {}", shell_quote(&branch_tip.branch))
+                    format!(
+                        "heddle thread switch -- {}",
+                        shell_quote(&branch_tip.branch)
+                    )
                 } else {
-                    format!("heddle switch {}", shell_quote(&branch_tip.branch))
+                    format!("heddle thread switch {}", shell_quote(&branch_tip.branch))
                 };
             }
         }
@@ -457,6 +462,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadListEntry
                     import_hint.as_ref(),
                     Some(&summary.recommended_action),
                 )
+                .with_source_authority(repo.source_authority())
                 .current_thread(Some(&summary.thread_health)),
             );
             summary.recommended_action = contextual_thread_action(
@@ -621,15 +627,15 @@ fn stack_depth(summaries_by_name: &HashMap<String, ThreadListEntry>, thread: &st
     depth
 }
 
-fn primary_agent_entry(entries: &[AgentEntry]) -> Option<&AgentEntry> {
+fn primary_agent_entry(entries: &[ActorPresence]) -> Option<&ActorPresence> {
     entries
         .iter()
-        .filter(|entry| entry.status == AgentStatus::Active)
+        .filter(|entry| entry.status == ActorPresenceStatus::Active)
         .max_by_key(|entry| entry.started_at)
         .or_else(|| entries.iter().max_by_key(|entry| entry.started_at))
 }
 
-fn task_assignment_id_from_entries(entries: &[AgentEntry]) -> Option<String> {
+fn task_assignment_id_from_entries(entries: &[ActorPresence]) -> Option<String> {
     primary_agent_entry(entries).and_then(|entry| entry.task_assignment_id.clone())
 }
 
@@ -650,7 +656,7 @@ fn build_thread_view(
     repo: &Repository,
     is_current: bool,
     name: String,
-    entries: Vec<AgentEntry>,
+    entries: Vec<ActorPresence>,
     thread: Option<Thread>,
     branch_tip: Option<GitOverlayBranchTip>,
 ) -> Result<(ThreadView, CoordinationStatus)> {
@@ -661,9 +667,9 @@ fn build_thread_view(
                 .then(|| {
                     branch_tip
                         .as_ref()
-                        .and_then(|tip| tip.mapped_change)
+                        .and_then(|tip| tip.mapped_state)
                         .or_else(|| {
-                            repo.git_overlay_mapped_change_for_branch(&name)
+                            repo.git_overlay_mapped_state_for_branch(&name)
                                 .ok()
                                 .flatten()
                         })
@@ -672,13 +678,13 @@ fn build_thread_view(
         })
         .map(|id| id.short());
     let has_heddle_tip = current_state.is_some();
-    let active: Vec<&AgentEntry> = entries
+    let active: Vec<&ActorPresence> = entries
         .iter()
-        .filter(|entry| entry.status == AgentStatus::Active)
+        .filter(|entry| entry.status == ActorPresenceStatus::Active)
         .collect();
-    let complete: Vec<&AgentEntry> = entries
+    let complete: Vec<&ActorPresence> = entries
         .iter()
-        .filter(|entry| entry.status == AgentStatus::Complete)
+        .filter(|entry| entry.status == ActorPresenceStatus::Complete)
         .collect();
 
     let primary = active
@@ -949,7 +955,7 @@ mod tests {
             manager.save(&sample_thread(name, false)).unwrap();
             let _ = repo.refs().set_thread(
                 &ThreadName::new(name),
-                &objects::object::ChangeId::from_bytes([0u8; 16]),
+                &objects::object::StateId::from_bytes([0u8; 32]),
             );
         }
 
@@ -1110,7 +1116,7 @@ mod tests {
                 is_isolated: false,
                 thread_health: "git_backed".into(),
                 blockers: vec![],
-                recommended_action: "heddle switch origin/main".into(),
+                recommended_action: "heddle thread switch origin/main".into(),
                 recommended_action_template: None,
                 git_branch_tip: Some("deadbeef".into()),
                 history_imported: false,

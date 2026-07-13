@@ -14,7 +14,7 @@
 //! drive expiry without mocking the clock.
 
 use chrono::{DateTime, Utc};
-use objects::object::ChangeId;
+use objects::object::StateId;
 
 use crate::{ThreadRecord, ThreadState};
 
@@ -24,7 +24,7 @@ use crate::{ThreadRecord, ThreadState};
 pub struct CollapsedThread {
     pub thread_id: String,
     pub thread_name: String,
-    pub final_state: Option<ChangeId>,
+    pub final_state: Option<StateId>,
     pub expired_at: DateTime<Utc>,
 }
 
@@ -61,8 +61,8 @@ pub fn collapse_expired_ephemeral_threads(
         let final_state = record
             .current_state
             .as_deref()
-            .and_then(|s| ChangeId::parse(s).ok())
-            .or_else(|| ChangeId::parse(&record.base_state).ok());
+            .and_then(|s| StateId::parse(s).ok())
+            .or_else(|| StateId::parse(&record.base_state).ok());
         collapsed.push(CollapsedThread {
             thread_id: record.id.clone(),
             thread_name: record.thread.clone(),
@@ -91,8 +91,8 @@ mod tests {
             parent_thread: None,
             mode: crate::ThreadMode::Materialized,
             state,
-            base_state: ChangeId::from_bytes([1; 16]).to_string_full(),
-            base_root: ChangeId::from_bytes([2; 16]).to_string_full(),
+            base_state: StateId::from_bytes([1; 32]).to_string_full(),
+            base_root: StateId::from_bytes([2; 32]).to_string_full(),
             current_state: None,
             merged_state: None,
             task: None,

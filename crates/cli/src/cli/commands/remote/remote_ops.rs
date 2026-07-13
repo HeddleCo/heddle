@@ -8,32 +8,40 @@ use std::path::Path;
 use anyhow::{Context, Result};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::{HostedAuthMode, PullMaterialization};
-use heddle_core::{
-    GitConfigContext, LocalTransferSummary, PullFailure, PullOutcome, PullPlan, PullPlanRequest,
-    RemoteInfo, RemoteListReport, build_pull_outcome, format_pull_outcome_text,
-    format_pulling_from, git_overlay_pull_execution_facts, heddle_pull_execution_facts_from_local,
-    is_native_transport_mismatch, list_plain_git_remotes, list_remotes, local_pull_changed,
-    merged_remote_items, plan_pull, pull_should_materialize, show_plain_git_remote, show_remote,
-};
 #[cfg(feature = "client")]
 use heddle_core::{
     HostedPullResult, HostedPullResultFields, format_connected_to,
     heddle_pull_execution_facts_from_hosted, parse_hosted_pull_result, pull_tip_changed,
 };
+use heddle_core::{
+    LocalTransferSummary, PullFailure, PullOutcome, PullPlan, PullPlanRequest, RemoteInfo,
+    RemoteListReport, build_pull_outcome, format_pull_outcome_text, format_pulling_from,
+    git_overlay_pull_execution_facts, heddle_pull_execution_facts_from_local,
+    is_native_transport_mismatch, list_plain_git_remotes, list_remotes, local_pull_changed,
+    plan_pull, pull_should_materialize, show_plain_git_remote, show_remote,
+};
 // Re-export under the historical crate-local names for sibling modules.
 pub(crate) use heddle_core::{resolve_default_remote_name, resolved_default_remote_name};
+use heddle_git_projection::credential::EmbeddingSafeCredentialProvider;
 use objects::{
-    object::{ChangeId, ThreadName, Tree},
+    object::{StateId, ThreadName, Tree},
     store::ObjectStore,
 };
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
-use sley::{ConfigEdit, ConfigEditPlan, RemoteConfigSet, Repository as SleyRepository};
+use sley::{
+    ConfigEdit, ConfigEditPlan, ConfigEditScope, HeadUpdateOptions, RefChange, ReferenceTarget,
+    RemoteConfigRefusal, RemoteConfigRemove, RemoteConfigSet, Repository as SleyRepository,
+    remote::{
+        FetchOptions, PackGenerationProgress, ProgressSink as SleyProgressSink, TransferProgress,
+    },
+};
 
 use super::super::{
     action_line::print_next,
     advice::RecoveryAdvice,
+    import_progress::ImportProgress,
     verification_health::{
         RepositoryVerificationState, build_plain_git_verification_probe,
         build_repository_verification_state,
@@ -43,11 +51,14 @@ use super::super::{
 #[cfg(feature = "client")]
 use crate::client::HostedGrpcClient;
 use crate::{
-    cli::{Cli, RemoteCommands, should_output_json, style},
+    cli::{
+        Cli, RemoteCommands,
+        progress_render::{finish_line, format_transfer_bytes, progress_for},
+        should_output_json, style,
+    },
     client::LocalSync,
     config::UserConfig,
-    git_projection_engine::{GitProjection, git_core::GitPullOutcome},
-    remote::{Remote, RemoteConfig, RemoteError, RemoteTarget, resolve_remote_with_key},
+    remote::{Remote, RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
 
 #[derive(Serialize)]
@@ -59,57 +70,17 @@ struct RemoteMutationOutput {
     url: Option<String>,
     default: Option<String>,
     message: String,
-    #[allow(dead_code)]
-    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
 
-/// CLI machine envelope: domain [`PullOutcome`] plus skipped verification state.
+/// CLI machine envelope: domain [`PullOutcome`] plus repository verification.
 #[derive(Serialize)]
 struct PullOutput {
     #[serde(flatten)]
     outcome: PullOutcome,
-    #[allow(dead_code)]
-    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
-}
-
-struct GitOverlayPullOutputInput {
-    plan: PullPlan,
-    remote: String,
-    branch: Option<String>,
-    old_git_head: Option<String>,
-    new_git_head: Option<String>,
-    old_state: Option<ChangeId>,
-    new_state: Option<ChangeId>,
-    changed_paths: Vec<String>,
-    outcome: GitPullOutcome,
-    trust: RepositoryVerificationState,
-}
-
-fn git_overlay_pull_output(input: GitOverlayPullOutputInput) -> PullOutput {
-    let outcome = build_pull_outcome(
-        Some(&input.plan),
-        git_overlay_pull_execution_facts(
-            input.remote,
-            input.branch,
-            input.old_git_head,
-            input.new_git_head,
-            input.old_state.map(|state| state.to_string()),
-            input.new_state.map(|state| state.to_string()),
-            input.outcome.changed,
-            input.outcome.states_created,
-            input.outcome.commits_seen,
-            input.outcome.materialized_checkout,
-            input.changed_paths,
-        ),
-    );
-    PullOutput {
-        outcome,
-        trust: input.trust,
-    }
 }
 
 fn heddle_pull_output_from_local(
@@ -189,7 +160,7 @@ fn render_pull_outcome_text(outcome: &PullOutcome, trust: &RepositoryVerificatio
             println!(
                 "{} pulled {} from {} ({})",
                 style::ok_marker(),
-                style::change_id(state),
+                style::state_id(state),
                 style::bold(thread),
                 style::count(objects, "object")
             );
@@ -201,7 +172,7 @@ fn render_pull_outcome_text(outcome: &PullOutcome, trust: &RepositoryVerificatio
             );
             for line in &text.detail_lines {
                 if let Some(state) = line.strip_prefix("state: ") {
-                    println!("{}", style::field("state", &style::change_id(state)));
+                    println!("{}", style::field("state", &style::state_id(state)));
                 } else {
                     println!("{line}");
                 }
@@ -258,12 +229,20 @@ pub async fn cmd_pull(
     insecure: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
-    let has_default_remote = resolved_default_remote_name(&repo)?.is_some();
-    let pull_uses_hosted_network = super::push_target_is_hosted_network(&repo, remote.as_deref());
+    let default_remote = resolved_default_remote_name(&repo)?;
+    let has_default_remote = default_remote.is_some();
+    let configured_remote_name = match remote.as_deref() {
+        Some(name) => RemoteConfig::open(&repo)
+            .ok()
+            .and_then(|config| config.get(name).ok())
+            .map(|_| name.to_string()),
+        None => default_remote,
+    };
+    let pull_uses_hosted_network = super::pull_target_is_hosted_network(&repo, remote.as_deref());
     // Match preflight_native_remote_transport: overlay capability never
     // treats a git URL as a native-transport mismatch.
     let remote_is_git_local_or_url = matches!(
-        super::classify_remote_spec(&repo, remote.as_deref()),
+        super::classify_pull_remote_spec(&repo, remote.as_deref()),
         Some(super::RemoteTransportKind::LocalGit | super::RemoteTransportKind::GitUrl)
     );
     let transport_mismatch =
@@ -271,7 +250,6 @@ pub async fn cmd_pull(
     let head = repo.head_ref()?;
     let plan = plan_pull(&PullPlanRequest {
         capability: repo.capability(),
-        hosted_enabled: repo.hosted_enabled(),
         uses_hosted_network: pull_uses_hosted_network,
         remote: remote.clone(),
         has_default_remote,
@@ -283,43 +261,14 @@ pub async fn cmd_pull(
     })
     .map_err(|blocker| super::map_remote_preflight_blocker(blocker, "pull", remote.as_deref()))?;
 
-    if plan.uses_local_git_overlay {
-        // Dirty-worktree policy from plan; enforcement stays CLI-owned.
-        if plan.requires_clean_worktree {
-            ensure_worktree_clean(&repo, "pull")?;
-        }
-        let remote_name = resolve_default_remote_name(&repo, plan.remote.as_deref())?;
-        let branch = repo.git_overlay_current_branch()?;
-        let old_git_head = git_checkout_head_oid(repo.root());
-        let old_state = repo.head()?;
-        let mut bridge = GitProjection::new(&repo);
-        let outcome = bridge.pull(&remote_name)?;
-        let new_git_head = git_checkout_head_oid(repo.root());
-        let new_state = repo.head()?;
-        let changed_paths =
-            changed_paths_between_states(&repo, old_state.as_ref(), new_state.as_ref())?;
-        let verification = build_repository_verification_state(&repo);
-        let output = git_overlay_pull_output(GitOverlayPullOutputInput {
-            plan: plan.clone(),
-            remote: remote_name.clone(),
-            branch,
-            old_git_head,
-            new_git_head,
-            old_state,
-            new_state,
-            changed_paths,
-            outcome,
-            trust: verification,
-        });
-        if should_output_json(cli, Some(repo.config())) {
-            crate::cli::render::write_json_stdout(&output)?;
-        } else {
-            render_pull_outcome_text(&output.outcome, &output.trust);
-        }
-        return Ok(());
+    let remote_thread = plan.remote_thread.as_str();
+    let local_thread_name = plan.local_thread.as_deref();
+    if plan.requires_clean_worktree {
+        ensure_worktree_clean(&repo, "pull")?;
     }
-
-    // Transport mismatch already refused by plan_pull.
+    if plan.uses_local_git_overlay {
+        return pull_git_overlay(&repo, &plan, thread.as_deref(), insecure, cli);
+    }
 
     let user_config = UserConfig::load_default()?;
     #[cfg(not(feature = "client"))]
@@ -329,12 +278,6 @@ pub async fn cmd_pull(
     #[cfg(not(feature = "client"))]
     let (target, _server_key) = resolve_remote_with_key(&repo, plan.remote.as_deref())?;
 
-    let remote_thread = plan.remote_thread.as_str();
-    let local_thread_name = plan.local_thread.as_deref();
-    if plan.requires_clean_worktree {
-        ensure_worktree_clean(&repo, "pull")?;
-    }
-
     match target {
         RemoteTarget::Local(path) => {
             pull_local(
@@ -342,9 +285,9 @@ pub async fn cmd_pull(
                 &path,
                 remote_thread,
                 local_thread_name,
+                configured_remote_name.as_deref(),
                 &plan,
                 cli,
-                plan.lazy,
             )
             .await?;
         }
@@ -377,16 +320,567 @@ pub async fn cmd_pull(
     Ok(())
 }
 
+struct GitPullProgress {
+    progress: objects::Progress,
+    received_bytes: u64,
+    received_objects: u64,
+}
+
+impl SleyProgressSink for GitPullProgress {
+    fn transfer(&mut self, event: TransferProgress) {
+        self.received_bytes = event.received_bytes;
+        if let Some(total) = event.total_objects {
+            self.progress.set_total(total as usize);
+        }
+        let received = event.received_objects.saturating_sub(self.received_objects);
+        self.received_objects = event.received_objects;
+        self.progress.inc(received as usize);
+    }
+
+    fn pack_generation(&mut self, event: &PackGenerationProgress) {
+        let _ = event;
+    }
+
+    fn message(&mut self, message: &str) {
+        let _ = message;
+    }
+}
+
+fn pull_git_overlay(
+    repo: &Repository,
+    plan: &PullPlan,
+    requested_thread: Option<&str>,
+    insecure: bool,
+    cli: &Cli,
+) -> Result<()> {
+    if plan.lazy {
+        return Err(git_pull_lazy_advice());
+    }
+    if insecure {
+        return Err(git_pull_insecure_advice());
+    }
+
+    let remote_name = resolve_default_remote_name(repo, plan.remote.as_deref())?;
+    let git = SleyRepository::discover(repo.root()).map_err(anyhow::Error::new)?;
+    if !git.remote_names()?.iter().any(|name| name == &remote_name) {
+        return Err(git_pull_unconfigured_remote_advice(&remote_name));
+    }
+    let current_branch = repo.git_overlay_current_branch()?;
+    let local_branch = plan
+        .local_thread
+        .as_deref()
+        .or(current_branch.as_deref())
+        .context("cannot pull into a detached Git checkout without --local-thread")?;
+    let git_config = git.config_snapshot().map_err(anyhow::Error::new)?;
+    let remote_branch = match (
+        requested_thread,
+        git_config.get("branch", Some(local_branch), "merge"),
+    ) {
+        (Some(requested), _) => requested.to_string(),
+        (None, Some(merge_ref)) => merge_ref
+            .strip_prefix("refs/heads/")
+            .with_context(|| {
+                format!(
+                    "branch.{local_branch}.merge must name a branch under refs/heads/, not {merge_ref}"
+                )
+            })?
+            .to_string(),
+        (None, None) => plan.remote_thread.clone(),
+    };
+    let local_ref = format!("refs/heads/{local_branch}");
+    let remote_ref = format!("refs/heads/{remote_branch}");
+    let old_oid = git
+        .find_reference(&local_ref)
+        .map_err(anyhow::Error::new)?
+        .and_then(|reference| reference.peeled_oid(&git).ok().flatten());
+    let old_state = repo.refs().get_thread(&ThreadName::new(local_branch))?;
+
+    let progress = progress_for(cli, repo);
+    progress.set_phase("streaming Git objects");
+    let mut sley_progress = GitPullProgress {
+        progress: progress.clone(),
+        received_bytes: 0,
+        received_objects: 0,
+    };
+    let mut credentials = EmbeddingSafeCredentialProvider::new(&git_config);
+    let fetch_refspecs = vec![remote_ref.clone(), "+refs/notes/*:refs/notes/*".to_string()];
+    let outcome = git
+        .fetch(
+            &remote_name,
+            &fetch_refspecs,
+            git_pull_fetch_options(&remote_branch),
+            &mut credentials,
+            &mut sley_progress,
+        )
+        .map_err(|error| git_pull_fetch_advice(&remote_name, &remote_branch, &error))?;
+    finish_line(
+        &progress,
+        &format!(
+            "[done] streamed {} Git objects ({} received)",
+            sley_progress.received_objects,
+            format_transfer_bytes(sley_progress.received_bytes)
+        ),
+    );
+
+    let new_oid = outcome
+        .ref_updates
+        .iter()
+        .find(|update| update.src == remote_ref)
+        .map(|update| update.oid)
+        .with_context(|| format!("Remote branch {remote_branch} was not found"))?;
+    if let Some(old_oid) = old_oid
+        && old_oid != new_oid
+        && !git
+            .rev_graph()
+            .is_ancestor(old_oid, new_oid)
+            .map_err(anyhow::Error::new)?
+    {
+        return Err(git_pull_diverged_advice(
+            local_branch,
+            &remote_name,
+            &remote_branch,
+        ));
+    }
+
+    let staging_ref = publish_git_pull_tracking_ref(&git, &remote_name, &remote_branch, new_oid)?;
+
+    let mut import_progress = ImportProgress::start(
+        cli,
+        repo,
+        &format!("{remote_name}/{remote_branch}"),
+        &remote_name,
+    );
+    import_progress.begin_commit_import();
+    let mut on_import = |event| import_progress.commit_tick(event);
+    let (stats, mapping) = ingest::import_git_into_scoped_with_options_and_progress(
+        repo.root(),
+        repo.root(),
+        ingest::ImportOptions::default(),
+        ingest::ImportScope::refs(vec![staging_ref.clone()]),
+        Some(&mut on_import),
+    )
+    .map_err(|error| git_pull_import_advice(&remote_name, &remote_branch, &error))?;
+    import_progress.begin_ref_write();
+    import_progress.finish();
+    let new_state = mapping.get_commit(&new_oid.to_string()).ok_or_else(|| {
+        git_pull_import_advice(
+            &remote_name,
+            &remote_branch,
+            &"the fetched commit was not mapped",
+        )
+    })?;
+
+    let changed = old_oid != Some(new_oid);
+    let materialized = current_branch.as_deref() == Some(local_branch) && changed;
+    if changed {
+        publish_git_pull_branch(
+            repo,
+            &git,
+            &git_config,
+            &local_ref,
+            old_oid,
+            new_oid,
+            materialized,
+        )?;
+    }
+    if old_state.as_ref() != Some(&new_state)
+        && let Err(error) = repo
+            .refs()
+            .set_thread(&ThreadName::new(local_branch), &new_state)
+    {
+        let rollback = changed.then(|| {
+            rollback_git_pull_branch(
+                repo,
+                &git,
+                &git_config,
+                &local_ref,
+                old_oid,
+                new_oid,
+                materialized,
+            )
+        });
+        return Err(git_pull_metadata_publish_advice(
+            local_branch,
+            changed,
+            &error,
+            rollback.as_ref().and_then(|result| result.as_ref().err()),
+        ));
+    }
+    let changed_paths = changed_paths_between_states(repo, old_state.as_ref(), Some(&new_state))?;
+    let output = PullOutput {
+        outcome: build_pull_outcome(
+            Some(plan),
+            git_overlay_pull_execution_facts(
+                remote_name,
+                Some(local_branch.to_string()),
+                old_oid.map(|oid| oid.to_string()),
+                Some(new_oid.to_string()),
+                old_state.map(|state| state.to_string()),
+                Some(new_state.to_string()),
+                changed,
+                stats.states_created,
+                stats.commits_imported,
+                materialized,
+                changed_paths,
+            ),
+        ),
+        trust: build_repository_verification_state(repo),
+    };
+    if should_output_json(cli, Some(repo.config())) {
+        crate::cli::render::write_json_stdout(&output)?;
+    } else {
+        render_pull_outcome_text(&output.outcome, &output.trust);
+    }
+    Ok(())
+}
+
+fn git_pull_fetch_options(remote_thread: &str) -> FetchOptions {
+    FetchOptions {
+        quiet: true,
+        progress: None,
+        auto_follow_tags: false,
+        fetch_all_tags: false,
+        prune: false,
+        prune_tags: false,
+        dry_run: false,
+        force: false,
+        append: false,
+        write_fetch_head: true,
+        tag_option_explicit: true,
+        prune_option_explicit: true,
+        prune_tags_option_explicit: true,
+        refmap: Some(Vec::new()),
+        depth: None,
+        merge_srcs: vec![format!("refs/heads/{remote_thread}")],
+        filter: None,
+        filter_auto: false,
+        refetch: false,
+        cloning: false,
+        record_promisor_refs: false,
+        update_shallow: false,
+        reject_shallow: false,
+        deepen_relative: false,
+        update_head_ok: false,
+        deepen_since: None,
+        deepen_not: Vec::new(),
+        ssh_options: None,
+        upload_pack_command: None,
+        atomic: true,
+        negotiation_restrict: None,
+        negotiation_include: None,
+    }
+}
+
+fn publish_git_pull_tracking_ref(
+    git: &SleyRepository,
+    remote_name: &str,
+    remote_branch: &str,
+    new_oid: sley::ObjectId,
+) -> Result<String> {
+    let tracking_ref = format!("refs/remotes/{remote_name}/{remote_branch}");
+    let old_tracking = git.references().read_ref(&tracking_ref)?;
+    let mut tracking = RefChange::new(tracking_ref.as_str(), ReferenceTarget::Direct(new_oid))?;
+    tracking.expected = old_tracking;
+    git.apply_ref_changes(&[tracking])
+        .map_err(anyhow::Error::new)?;
+    Ok(tracking_ref)
+}
+
+fn publish_git_pull_branch(
+    repo: &Repository,
+    git: &SleyRepository,
+    config: &sley::GitConfig,
+    local_ref: &str,
+    old_oid: Option<sley::ObjectId>,
+    new_oid: sley::ObjectId,
+    materialized: bool,
+) -> Result<()> {
+    if materialized {
+        sley::plumbing::sley_worktree::checkout_detached_filtered(
+            repo.root(),
+            git.git_dir(),
+            git.object_format(),
+            &new_oid,
+            b"Heddle <heddle@localhost> 0 +0000".to_vec(),
+            b"heddle pull: prepare fast-forward".to_vec(),
+            config,
+        )
+        .map_err(|error| git_pull_checkout_advice(local_ref, &error))?;
+    }
+
+    let mut branch = RefChange::new(local_ref, ReferenceTarget::Direct(new_oid))?;
+    branch.expected = old_oid.map(ReferenceTarget::Direct);
+    let mut changes = vec![branch];
+    if materialized {
+        let mut head = RefChange::new("HEAD", ReferenceTarget::Symbolic(local_ref.to_string()))?;
+        head.expected = Some(ReferenceTarget::Direct(new_oid));
+        changes.push(head);
+    }
+    if let Err(error) = git.apply_ref_changes(&changes) {
+        let rollback =
+            rollback_git_pull_branch(repo, git, config, local_ref, old_oid, new_oid, materialized);
+        return Err(git_pull_publish_advice(
+            local_ref,
+            &error,
+            rollback.err().as_ref(),
+        ));
+    }
+    Ok(())
+}
+
+fn rollback_git_pull_branch(
+    repo: &Repository,
+    git: &SleyRepository,
+    config: &sley::GitConfig,
+    local_ref: &str,
+    old_oid: Option<sley::ObjectId>,
+    new_oid: sley::ObjectId,
+    materialized: bool,
+) -> Result<()> {
+    let old_oid = old_oid.context("the previous branch was unborn")?;
+    if materialized {
+        sley::plumbing::sley_worktree::checkout_detached_filtered(
+            repo.root(),
+            git.git_dir(),
+            git.object_format(),
+            &old_oid,
+            b"Heddle <heddle@localhost> 0 +0000".to_vec(),
+            b"heddle pull: roll back failed fast-forward".to_vec(),
+            config,
+        )?;
+    }
+
+    let current = git.references().read_ref(local_ref)?;
+    let mut branch = RefChange::new(local_ref, ReferenceTarget::Direct(old_oid))?;
+    branch.expected = current.or(Some(ReferenceTarget::Direct(new_oid)));
+    git.apply_ref_changes(&[branch])?;
+    if materialized {
+        git.set_head_symref(
+            local_ref,
+            HeadUpdateOptions::new()
+                .expect_current(ReferenceTarget::Direct(old_oid))
+                .reflog("heddle pull: reattach after rollback"),
+        )?;
+    }
+    Ok(())
+}
+
+fn git_pull_fetch_advice(
+    remote: &str,
+    remote_branch: &str,
+    error: &impl std::fmt::Display,
+) -> anyhow::Error {
+    let retry = format!("heddle pull {remote} {remote_branch}");
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_pull_fetch_failed",
+        format!("Could not fetch {remote}/{remote_branch}: {error}"),
+        format!("Fix the remote or credentials, then retry `{retry}`."),
+        format!("Sley could not complete the Git fetch: {error}"),
+        "publishing the fetched Git branch could leave an incomplete object graph",
+        "the local branch, Heddle thread, index, and worktree were not advanced",
+        retry.clone(),
+        vec![retry, "heddle verify".to_string()],
+    )
+    .into()
+}
+
+fn git_pull_lazy_advice() -> anyhow::Error {
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_pull_lazy_unsupported",
+        "Git Overlay pull cannot use --lazy",
+        "Pull the complete Git history, or adopt the repository before using native lazy transfer.",
+        "the Git Overlay importer requires a complete commit and tree closure",
+        "a partial fetch could publish a branch whose Heddle mapping cannot be completed",
+        "Git refs, Heddle metadata, the index, and worktree were left unchanged",
+        "heddle pull",
+        vec!["heddle pull".to_string(), "heddle adopt".to_string()],
+    )
+    .into()
+}
+
+fn git_pull_insecure_advice() -> anyhow::Error {
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_pull_insecure_unsupported",
+        "Git Overlay pull cannot use --insecure",
+        "Configure trusted transport credentials and retry without --insecure.",
+        "Sley's Git transport does not expose a per-operation insecure TLS policy",
+        "silently ignoring the flag would misrepresent the transport security policy",
+        "no connection was opened and Git refs, Heddle metadata, the index, and worktree were left unchanged",
+        "heddle pull",
+        vec!["heddle pull".to_string()],
+    )
+    .into()
+}
+
+fn git_pull_unconfigured_remote_advice(remote: &str) -> anyhow::Error {
+    let configure = format!("heddle remote add <name> {remote}");
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_pull_requires_configured_remote",
+        format!("Git Overlay pull requires a configured remote; '{remote}' is not configured"),
+        format!("Configure the URL first with `{configure}`, then pull by name."),
+        "an unconfigured URL has no durable remote-tracking ref",
+        "importing through an internal staging ref would leak transport plumbing into repository history",
+        "fetched objects may be cached, but the local branch, Heddle thread, index, and worktree were not advanced",
+        configure.clone(),
+        vec![configure],
+    )
+    .into()
+}
+
+fn git_pull_diverged_advice(
+    local_branch: &str,
+    remote: &str,
+    remote_branch: &str,
+) -> anyhow::Error {
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_pull_diverged",
+        format!("Cannot fast-forward {local_branch} from {remote}/{remote_branch}"),
+        "Inspect both histories and reconcile them explicitly before pulling again.",
+        "the remote tip is not a descendant of the local branch tip",
+        "advancing the branch would discard or merge divergent Git history",
+        "the local branch, Heddle thread, index, and worktree remain at their prior tip",
+        "heddle status",
+        vec!["heddle status".to_string(), "heddle log".to_string()],
+    )
+    .into()
+}
+
+fn git_pull_import_advice(
+    remote: &str,
+    remote_branch: &str,
+    error: &impl std::fmt::Display,
+) -> anyhow::Error {
+    let retry = format!("heddle pull {remote} {remote_branch}");
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_pull_import_failed",
+        format!("Fetched {remote}/{remote_branch}, but could not prepare Heddle metadata: {error}"),
+        format!("The local branch was not advanced. Fix the import error, then retry `{retry}`."),
+        format!("Heddle could not map the fetched commit: {error}"),
+        "advancing Git before its Heddle state exists would split repository authority",
+        "the local branch, index, and worktree remain at their prior tip; the remote-tracking ref records the fetched tip",
+        retry.clone(),
+        vec![retry, "heddle verify".to_string()],
+    )
+    .into()
+}
+
+fn git_pull_publish_advice(
+    local_ref: &str,
+    error: &impl std::fmt::Display,
+    rollback_error: Option<&anyhow::Error>,
+) -> anyhow::Error {
+    let (hint, preserved) = match rollback_error {
+        Some(rollback) => (
+            format!(
+                "Publication failed and rollback also failed: {rollback}. Run `heddle verify` before continuing."
+            ),
+            "the fetched objects and prepared Heddle mapping are durable; the checkout may be detached at the fetched tip",
+        ),
+        None => (
+            "The branch publication was rolled back. Inspect `heddle verify`, then retry the pull."
+                .to_string(),
+            "the local branch, index, and worktree were restored; fetched objects and remote tracking remain available",
+        ),
+    };
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_pull_publish_failed",
+        format!("Could not publish the fast-forward to {local_ref}: {error}"),
+        hint,
+        format!("the checked ref transaction failed: {error}"),
+        "continuing without reconciliation could leave Git and Heddle pointers at different tips",
+        preserved,
+        "heddle verify",
+        vec!["heddle verify".to_string(), "heddle pull".to_string()],
+    )
+    .into()
+}
+
+fn git_pull_checkout_advice(local_ref: &str, error: &impl std::fmt::Display) -> anyhow::Error {
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_pull_checkout_failed",
+        format!("Could not prepare the worktree for {local_ref}: {error}"),
+        "Run `heddle verify` before retrying the pull.",
+        format!("Sley could not complete the detached checkout: {error}"),
+        "publishing the branch after an incomplete checkout would split refs from the worktree",
+        "the local branch and Heddle thread were not advanced; fetched objects and remote tracking remain available",
+        "heddle verify",
+        vec!["heddle verify".to_string(), "heddle pull".to_string()],
+    )
+    .into()
+}
+
+fn git_pull_metadata_publish_advice(
+    local_branch: &str,
+    git_changed: bool,
+    error: &impl std::fmt::Display,
+    rollback_error: Option<&anyhow::Error>,
+) -> anyhow::Error {
+    if !git_changed {
+        return RecoveryAdvice::safety_refusal(
+            "git_overlay_pull_metadata_publish_failed",
+            format!("Could not publish the Heddle mapping for {local_branch}: {error}"),
+            "The Git branch is already at the fetched tip. Run `heddle verify`, then retry the pull.",
+            format!("the Heddle thread update failed: {error}"),
+            "continuing without the mapping would leave Heddle metadata behind Git",
+            "Git refs, the index, and worktree were left unchanged",
+            "heddle verify",
+            vec!["heddle verify".to_string(), "heddle pull".to_string()],
+        )
+        .into();
+    }
+    let mut advice =
+        git_pull_publish_advice(&format!("refs/heads/{local_branch}"), error, rollback_error);
+    if let Some(recovery) = advice.downcast_mut::<RecoveryAdvice>() {
+        recovery.kind = "git_overlay_pull_metadata_publish_failed";
+        recovery.error =
+            format!("Git advanced, but Heddle could not publish {local_branch}: {error}");
+    }
+    advice
+}
+
+fn changed_paths_between_states(
+    repo: &Repository,
+    old_state: Option<&StateId>,
+    new_state: Option<&StateId>,
+) -> Result<Vec<String>> {
+    if old_state == new_state {
+        return Ok(Vec::new());
+    }
+    let Some(new_state) = new_state else {
+        return Ok(Vec::new());
+    };
+    let new_state = repo
+        .store()
+        .get_state(new_state)?
+        .context("new pulled state was not found in Heddle storage")?;
+    let old_tree = match old_state {
+        Some(old_state) => repo
+            .store()
+            .get_state(old_state)?
+            .map(|state| state.tree)
+            .unwrap_or_else(|| Tree::new().hash()),
+        None => Tree::new().hash(),
+    };
+    let mut paths = repo
+        .diff_trees(&old_tree, &new_state.tree)?
+        .iter()
+        .map(|change| change.path.clone())
+        .collect::<Vec<_>>();
+    paths.sort_unstable();
+    paths.dedup();
+    Ok(paths)
+}
+
 async fn pull_local(
     repo: &Repository,
     source_path: &std::path::Path,
     remote_thread: &str,
     local_thread: Option<&str>,
+    configured_remote_name: Option<&str>,
     plan: &PullPlan,
     cli: &Cli,
-    lazy: bool,
 ) -> Result<()> {
-    if lazy {
+    if plan.lazy {
         return Err(map_pull_failure(PullFailure::LocalLazyUnsupported {
             source_path: source_path.display().to_string(),
         }));
@@ -414,7 +908,7 @@ async fn pull_local(
         .get_thread(&ThreadName::new(remote_thread))?
         .context(format!("Thread {} not found in source", remote_thread))?;
 
-    let objects_copied = source.fetch_state(repo, &state_id)?;
+    let objects_copied = source.fetch_state(repo, &state_id)? + source.fetch_markers(repo)?;
 
     let track_to_update = local_thread.unwrap_or(remote_thread);
     let track_tn = ThreadName::new(track_to_update);
@@ -452,6 +946,14 @@ async fn pull_local(
     } else {
         repo.refs().set_thread(&track_tn, &state_id)?;
     }
+    if let Some(remote_name) = configured_remote_name {
+        repo.refs()
+            .set_remote_thread(remote_name, &ThreadName::new(remote_thread), &state_id)?;
+    }
+
+    let remote_label = configured_remote_name
+        .map(str::to_string)
+        .unwrap_or_else(|| source_path.display().to_string());
 
     if should_output_json(cli, Some(repo.config())) {
         let summary = LocalTransferSummary {
@@ -461,7 +963,7 @@ async fn pull_local(
         let output = heddle_pull_output_from_local(
             Some(plan),
             changed,
-            source_path.display().to_string(),
+            remote_label.clone(),
             track_to_update.to_string(),
             &summary,
             build_repository_verification_state(repo),
@@ -475,28 +977,17 @@ async fn pull_local(
         let output = heddle_pull_output_from_local(
             Some(plan),
             changed,
-            source_path.display().to_string(),
+            remote_label,
             remote_thread.to_string(),
             &summary,
             build_repository_verification_state(repo),
         );
         let text = format_pull_outcome_text(&output.outcome, 8);
-        println!(
-            "{} pulled {} from {} ({})",
-            style::ok_marker(),
-            style::change_id(&state_id.short().to_string()),
-            style::bold(remote_thread),
-            style::count(objects_copied, "object")
-        );
-        debug_assert!(
-            text.headline.contains(remote_thread) || text.headline.contains("pulled"),
-            "domain headline: {}",
-            text.headline
-        );
+        println!("{} {}", style::ok_marker(), text.headline);
         // Domain detail lines (e.g. hosted state field when objects omitted).
         for line in &text.detail_lines {
             if let Some(state) = line.strip_prefix("state: ") {
-                println!("{}", style::field("state", &style::change_id(state)));
+                println!("{}", style::field("state", &style::state_id(state)));
             } else {
                 println!("{line}");
             }
@@ -504,44 +995,6 @@ async fn pull_local(
     }
 
     Ok(())
-}
-
-fn git_checkout_head_oid(root: &Path) -> Option<String> {
-    let git = SleyRepository::discover(root).ok()?;
-    git.head().ok()?.oid.map(|oid| oid.to_string())
-}
-
-fn changed_paths_between_states(
-    repo: &Repository,
-    old_state: Option<&ChangeId>,
-    new_state: Option<&ChangeId>,
-) -> Result<Vec<String>> {
-    if old_state == new_state {
-        return Ok(Vec::new());
-    }
-    let Some(new_state) = new_state else {
-        return Ok(Vec::new());
-    };
-    let new_state = repo
-        .store()
-        .get_state(new_state)?
-        .context("new pulled state was not found in Heddle storage")?;
-    let old_tree = match old_state {
-        Some(old_state) => repo
-            .store()
-            .get_state(old_state)?
-            .map(|state| state.tree)
-            .unwrap_or_else(|| Tree::new().hash()),
-        None => Tree::new().hash(),
-    };
-    let mut paths = repo
-        .diff_trees(&old_tree, &new_state.tree)?
-        .iter()
-        .map(|change| change.path.clone())
-        .collect::<Vec<_>>();
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
 }
 
 #[cfg(feature = "client")]
@@ -583,7 +1036,7 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
         )
         .await?;
 
-    // Keep typed ChangeId for ref/worktree I/O; map string fields for pure parse.
+    // Keep typed StateId for ref/worktree I/O; map string fields for pure parse.
     let final_state_id = result.final_state;
     let fields = HostedPullResultFields {
         success: result.success,
@@ -671,8 +1124,10 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
     match &command {
         RemoteCommands::List => {
             if let Some(probe) = build_plain_git_verification_probe(start)? {
-                let output = list_plain_git_remotes(&probe.root);
-                render_remote_list(&output, should_output_json(cli, None))?;
+                render_remote_list(
+                    &list_plain_git_remotes(&probe.root),
+                    should_output_json(cli, None),
+                )?;
                 return Ok(());
             }
         }
@@ -690,6 +1145,9 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
     }
 
     let repo = Repository::open(start)?;
+    if repo.capability() == RepositoryCapability::GitOverlay {
+        return cmd_git_overlay_remote(cli, &repo, command);
+    }
 
     match command {
         RemoteCommands::List => {
@@ -699,16 +1157,7 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
         }
         RemoteCommands::Add { name, url } => {
             super::preflight_native_remote_transport(&repo, Some(&url), "remote add")?;
-            // When heddle has no default yet, core's resolved default falls
-            // through to git-overlay rules (upstream / origin / sole remote),
-            // matching the previous private `git_overlay_default_remote_name`.
-            let git_overlay_default_before = (repo.capability()
-                == RepositoryCapability::GitOverlay)
-                .then(|| resolved_default_remote_name(&repo).ok().flatten())
-                .flatten();
-            sync_git_overlay_remote_add(&repo, &name, &url)?;
             let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::new)?;
-            let default_was_empty = cfg.default_name().is_none();
             cfg.add(
                 &name,
                 Remote {
@@ -717,13 +1166,6 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
                 },
             )
             .map_err(anyhow::Error::new)?;
-            if default_was_empty
-                && git_overlay_default_before
-                    .as_deref()
-                    .is_some_and(|default| default != name)
-            {
-                cfg.clear_default().map_err(anyhow::Error::new)?;
-            }
             let default = resolved_default_remote_name(&repo)?;
             render_remote_mutation(
                 RemoteMutationOutput {
@@ -741,20 +1183,8 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             Ok(())
         }
         RemoteCommands::Remove { name } => {
-            if !merged_remote_items(&repo)?.contains_key(&name) {
-                return Err(RecoveryAdvice::remote_not_found(&name).into());
-            }
-            // Remove the git-overlay side FIRST so its uneditable-include
-            // refusal (raised before any file is touched) leaves the Heddle
-            // config unmutated. Persisting the Heddle removal ahead of this
-            // fallible step stranded the repo in partial state: the Heddle
-            // remote gone, the Git remote still present.
-            sync_git_overlay_remote_remove(&repo, &name)?;
             let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::new)?;
-            match cfg.remove(&name) {
-                Ok(()) | Err(RemoteError::NotFound(_)) => {}
-                Err(err) => return Err(anyhow::Error::msg(err)),
-            }
+            cfg.remove(&name).map_err(anyhow::Error::msg)?;
             render_remote_mutation(
                 RemoteMutationOutput {
                     output_kind: "remote_remove",
@@ -771,29 +1201,7 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             Ok(())
         }
         RemoteCommands::SetDefault { name } => {
-            let items = merged_remote_items(&repo)?;
-            let (url, _source) = items
-                .get(&name)
-                .cloned()
-                .ok_or_else(|| RecoveryAdvice::remote_not_found(&name))?;
             let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::new)?;
-            // Git-overlay remotes added via `git remote add` only live in
-            // `.git/config`. `merged_remote_items` surfaces them in
-            // `remote list/show`, but `RemoteConfig::set_default` would
-            // reject them as NotFound. Adopt the URL into
-            // `.heddle/remotes.toml` first so `default_name()`-driven
-            // readers (including `resolve_remote_with_key`) can resolve
-            // it, then set the default explicitly.
-            if cfg.get(&name).is_err() {
-                cfg.add(
-                    &name,
-                    Remote {
-                        url,
-                        insecure: false,
-                    },
-                )
-                .map_err(anyhow::Error::new)?;
-            }
             cfg.set_default(&name).map_err(anyhow::Error::new)?;
             render_remote_mutation(
                 RemoteMutationOutput {
@@ -819,9 +1227,217 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
     }
 }
 
+fn cmd_git_overlay_remote(cli: &Cli, repo: &Repository, command: RemoteCommands) -> Result<()> {
+    let git = SleyRepository::discover(repo.root()).map_err(anyhow::Error::new)?;
+    let json = should_output_json(cli, Some(repo.config()));
+    match command {
+        RemoteCommands::List => render_remote_list(&list_git_overlay_remotes(repo, &git)?, json),
+        RemoteCommands::Show { name } => {
+            let output = show_git_overlay_remote(repo, &git, &name)?
+                .ok_or_else(|| RecoveryAdvice::remote_not_found(&name))?;
+            render_remote_info(&output, json)
+        }
+        RemoteCommands::Add { name, url } => {
+            if git.remote_config_with_sources()?.get(&name).is_some() {
+                anyhow::bail!("Remote '{name}' already exists");
+            }
+            let set = RemoteConfigSet::new(&name)
+                .with_url(&url)
+                .with_fetch_refspec(format!("+refs/heads/*:refs/remotes/{name}/*"));
+            let plan = git
+                .plan_remote_set(set, ConfigEditScope::Local)?
+                .with_fsync(true);
+            git.apply_config_edit_plan(plan)?;
+            render_remote_mutation(
+                RemoteMutationOutput {
+                    output_kind: "remote_add",
+                    status: "completed",
+                    action: "remote_add",
+                    name,
+                    url: Some(url),
+                    default: resolved_default_remote_name(repo)?,
+                    message: "Added remote".to_string(),
+                    trust: build_repository_verification_state(repo),
+                },
+                json,
+            )
+        }
+        RemoteCommands::Remove { name } => {
+            remove_git_overlay_remote(&git, &name)?;
+            render_remote_mutation(
+                RemoteMutationOutput {
+                    output_kind: "remote_remove",
+                    status: "completed",
+                    action: "remote_remove",
+                    name,
+                    url: None,
+                    default: resolved_default_remote_name(repo)?,
+                    message: "Removed remote".to_string(),
+                    trust: build_repository_verification_state(repo),
+                },
+                json,
+            )
+        }
+        RemoteCommands::SetDefault { name } => {
+            if git.remote_config_with_sources()?.get(&name).is_none() {
+                return Err(RecoveryAdvice::remote_not_found(&name).into());
+            }
+            let branch = repo
+                .git_overlay_current_branch()?
+                .context("cannot set the Git Overlay default from a detached checkout")?;
+            set_git_overlay_default(&git, &branch, &name)?;
+            render_remote_mutation(
+                RemoteMutationOutput {
+                    output_kind: "remote_set_default",
+                    status: "completed",
+                    action: "remote_set_default",
+                    name: name.clone(),
+                    url: None,
+                    default: Some(name),
+                    message: "Set default remote".to_string(),
+                    trust: build_repository_verification_state(repo),
+                },
+                json,
+            )
+        }
+    }
+}
+
+fn list_git_overlay_remotes(repo: &Repository, git: &SleyRepository) -> Result<RemoteListReport> {
+    let default = resolved_default_remote_name(repo)?;
+    let snapshot = git.remote_config_with_sources()?;
+    let mut remotes = snapshot
+        .remotes
+        .into_iter()
+        .map(|remote| {
+            let url = remote
+                .urls()
+                .into_iter()
+                .next()
+                .or_else(|| remote.push_urls().into_iter().next())
+                .unwrap_or_default()
+                .to_string();
+            RemoteInfo {
+                output_kind: None,
+                is_default: default.as_deref() == Some(remote.name.as_str()),
+                name: remote.name,
+                url,
+                source: "git".to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+    remotes.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(RemoteListReport {
+        output_kind: "remote_list",
+        remotes,
+    })
+}
+
+fn show_git_overlay_remote(
+    repo: &Repository,
+    git: &SleyRepository,
+    name: &str,
+) -> Result<Option<RemoteInfo>> {
+    let default = resolved_default_remote_name(repo)?;
+    let snapshot = git.remote_config_with_sources()?;
+    Ok(snapshot.get(name).map(|remote| RemoteInfo {
+        output_kind: Some("remote_show"),
+        name: remote.name.clone(),
+        url: remote
+            .urls()
+            .into_iter()
+            .next()
+            .or_else(|| remote.push_urls().into_iter().next())
+            .unwrap_or_default()
+            .to_string(),
+        source: "git".to_string(),
+        is_default: default.as_deref() == Some(name),
+    }))
+}
+
+fn remove_git_overlay_remote(git: &SleyRepository, name: &str) -> Result<()> {
+    let snapshot = git.remote_config_with_sources()?;
+    let remote = snapshot
+        .get(name)
+        .ok_or_else(|| RecoveryAdvice::remote_not_found(name))?;
+    let mut paths = Vec::new();
+    for source in &remote.sources {
+        if let Some(RemoteConfigRefusal::ExternalInclude { path }) = &source.refusal {
+            return Err(git_remote_external_config_advice(name, path));
+        }
+        if let Some(path) = &source.target_path {
+            if !git_owns_config_path(git, path) {
+                return Err(git_remote_external_config_advice(name, path));
+            }
+            if paths.contains(path) {
+                continue;
+            }
+            paths.push(path.clone());
+        }
+    }
+    if paths.is_empty() {
+        anyhow::bail!("Remote '{name}' is not defined in an editable repository config");
+    }
+    if paths.len() != 1 {
+        anyhow::bail!(
+            "Remote '{name}' is defined in multiple Git config files; refusing a non-atomic removal"
+        );
+    }
+    let plan = git
+        .plan_remote_remove(
+            RemoteConfigRemove::new(name),
+            ConfigEditScope::Path(paths.remove(0)),
+        )?
+        .with_fsync(true);
+    git.apply_config_edit_plan(plan)?;
+    Ok(())
+}
+
+fn git_owns_config_path(git: &SleyRepository, path: &Path) -> bool {
+    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    [git.git_dir(), git.common_dir()].into_iter().any(|root| {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        target.starts_with(root)
+    })
+}
+
+fn git_remote_external_config_advice(name: &str, path: &Path) -> anyhow::Error {
+    RecoveryAdvice::safety_refusal(
+        "git_remote_in_included_config",
+        format!(
+            "Remote '{name}' is defined outside this repository: {}",
+            path.display()
+        ),
+        "Move the remote into this repository's Git config, then retry.",
+        "the remote is owned by an external Git config file",
+        "editing it would change configuration shared with other repositories",
+        "the repository Git config and Heddle metadata were left unchanged",
+        "heddle remote show <name>",
+        vec!["heddle remote show <name>".to_string()],
+    )
+    .into()
+}
+
+fn set_git_overlay_default(git: &SleyRepository, branch: &str, name: &str) -> Result<()> {
+    let branch_remote = format!("branch.{branch}.remote");
+    let branch_merge = format!("branch.{branch}.merge");
+    let merge_target = git
+        .config_snapshot()?
+        .get("branch", Some(branch), "merge")
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("refs/heads/{branch}"));
+    let mut plan = ConfigEditPlan::new(git.common_dir().join("config"))
+        .with_operation(ConfigEdit::set("remote.pushDefault", name)?)
+        .with_fsync(true);
+    plan = plan
+        .with_operation(ConfigEdit::set(&branch_remote, name)?)
+        .with_operation(ConfigEdit::set(&branch_merge, merge_target)?);
+    git.apply_config_edit_plan(plan).map_err(anyhow::Error::new)
+}
+
 fn render_remote_mutation(output: RemoteMutationOutput, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(&output)?);
+        crate::cli::render::write_json_stdout(&output)?;
     } else {
         println!(
             "{} {} {}",
@@ -838,7 +1454,7 @@ fn render_remote_mutation(output: RemoteMutationOutput, json: bool) -> Result<()
 
 fn render_remote_list(output: &RemoteListReport, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(output)?);
+        crate::cli::render::write_json_stdout(output)?;
     } else if output.remotes.is_empty() {
         println!("{}", style::dim("No remotes configured"));
         println!("{}", style::field("next", "heddle remote add <name> <url>"));
@@ -862,7 +1478,7 @@ fn render_remote_list(output: &RemoteListReport, json: bool) -> Result<()> {
 
 fn render_remote_info(output: &RemoteInfo, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(output)?);
+        crate::cli::render::write_json_stdout(output)?;
     } else {
         println!("{}", style::section("Remote"));
         println!("  {}", style::field("name", &style::bold(&output.name)));
@@ -873,90 +1489,6 @@ fn render_remote_info(output: &RemoteInfo, json: bool) -> Result<()> {
             style::field("default", if output.is_default { "yes" } else { "no" })
         );
     }
-    Ok(())
-}
-
-fn map_included_config_error(err: heddle_core::IncludedGitRemoteConfigError) -> anyhow::Error {
-    RecoveryAdvice::git_remote_in_included_config(&err.name, &err.path).into()
-}
-
-fn sync_git_overlay_remote_add(repo: &Repository, name: &str, url: &str) -> Result<()> {
-    if repo.capability() != RepositoryCapability::GitOverlay {
-        return Ok(());
-    }
-    validate_git_overlay_remote_name(name)?;
-    let ctx = GitConfigContext::discover(repo.root())
-        .context("Git-overlay remote add requires a writable Git config")?;
-    let config_path = ctx
-        .write_file_for(name)
-        .map_err(map_included_config_error)?;
-    upsert_git_remote_config(repo.root(), &config_path, name, url)
-}
-
-fn sync_git_overlay_remote_remove(repo: &Repository, name: &str) -> Result<()> {
-    if repo.capability() != RepositoryCapability::GitOverlay {
-        return Ok(());
-    }
-    let Some(ctx) = GitConfigContext::discover(repo.root()) else {
-        return Ok(());
-    };
-    for config_path in ctx
-        .remove_files_for(name)
-        .map_err(map_included_config_error)?
-    {
-        remove_git_remote_config(repo.root(), &config_path, name)?;
-    }
-    Ok(())
-}
-
-fn validate_git_overlay_remote_name(name: &str) -> Result<()> {
-    if name.trim().is_empty()
-        || name.starts_with('-')
-        || name.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
-        || name
-            .chars()
-            .any(|ch| matches!(ch, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
-        || name.contains("..")
-        || name.contains("//")
-        || name.starts_with('/')
-        || name.ends_with('/')
-        || name.starts_with('.')
-        || name.ends_with(".lock")
-    {
-        anyhow::bail!(RecoveryAdvice::git_remote_name_invalid(name));
-    }
-    Ok(())
-}
-
-/// Add or replace the `[remote "<name>"]` section in a single physical config
-/// file. Every existing definition of the remote in that file is dropped before
-/// a fresh canonical section is appended, so an upsert replaces rather than
-/// appends a duplicate that the first-seen section would win over on the next
-/// read.
-fn upsert_git_remote_config(root: &Path, config_path: &Path, name: &str, url: &str) -> Result<()> {
-    let git = SleyRepository::discover(root).map_err(anyhow::Error::new)?;
-    let remote = RemoteConfigSet::new(name)
-        .with_url(url)
-        .with_fetch_refspec(format!("+refs/heads/*:refs/remotes/{name}/*"));
-    let plan = ConfigEditPlan::new(config_path).with_operation(ConfigEdit::replace_section(
-        "remote",
-        Some(remote.name),
-        remote.entries,
-    ));
-    git.apply_config_edit_plan(plan)
-        .map_err(anyhow::Error::new)?;
-    Ok(())
-}
-
-/// Remove every `[remote "<name>"]` section from a single physical config file
-/// that uses the normal quoted subsection form. No-ops when the file is absent
-/// or defines no such remote.
-fn remove_git_remote_config(root: &Path, config_path: &Path, name: &str) -> Result<()> {
-    let git = SleyRepository::discover(root).map_err(anyhow::Error::new)?;
-    let plan = ConfigEditPlan::new(config_path)
-        .with_operation(ConfigEdit::remove_section("remote", Some(name.to_string())));
-    git.apply_config_edit_plan(plan)
-        .map_err(anyhow::Error::new)?;
     Ok(())
 }
 
@@ -977,292 +1509,43 @@ struct PullNetworkOptions<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
-    use heddle_core::plain_git_remote_items;
-
     use super::*;
 
-    fn init_git(root: &Path) {
-        SleyRepository::init(root).expect("init git repo");
-    }
-
-    // Pure pull-thread selection and capability routing live in
-    // heddle_core::remote. These tests keep mutation/write-target invariants
-    // for the CLI git-overlay sync path.
-
     #[test]
-    fn remove_clears_worktree_layer_when_extension_enabled() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        init_git(tmp.path());
-        let git_dir = tmp.path().join(".git");
-        fs::write(
-            git_dir.join("config"),
-            "[extensions]\n\tworktreeConfig = true\n\
-             [remote \"origin\"]\n\turl = https://example.com/common\n",
-        )
-        .unwrap();
-        fs::write(
-            git_dir.join("config.worktree"),
-            "[remote \"origin\"]\n\turl = https://example.com/worktree\n",
-        )
-        .unwrap();
+    fn git_pull_progress_keeps_transfer_phase_and_exact_counts() {
+        let progress = objects::Progress::null();
+        progress.set_phase("streaming Git objects");
+        let mut pull = GitPullProgress {
+            progress: progress.clone(),
+            received_bytes: 0,
+            received_objects: 0,
+        };
 
-        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
-        for path in ctx.remove_files_for("origin").unwrap() {
-            remove_git_remote_config(tmp.path(), &path, "origin").unwrap();
-        }
+        pull.transfer(TransferProgress {
+            received_bytes: 1024,
+            received_objects: 3,
+            total_objects: Some(8),
+            indexed_deltas: 0,
+        });
+        pull.transfer(TransferProgress {
+            received_bytes: 4096,
+            received_objects: 5,
+            total_objects: Some(8),
+            indexed_deltas: 1,
+        });
+        pull.message("remote: counting objects");
 
-        // The visible (per-worktree) remote must be gone after a remove;
-        // a common-only removal would leave it winning on the next read.
-        assert!(!plain_git_remote_items(tmp.path()).contains_key("origin"));
+        assert_eq!(pull.received_bytes, 4096);
+        assert_eq!(pull.received_objects, 5);
+        assert_eq!(progress.done(), 5);
+        assert_eq!(progress.total(), 8);
+        assert_eq!(progress.phase(), "streaming Git objects");
     }
 
     #[test]
-    fn add_targets_worktree_layer_so_next_read_reflects_it() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        init_git(tmp.path());
-        let git_dir = tmp.path().join(".git");
-        fs::write(
-            git_dir.join("config"),
-            "[extensions]\n\tworktreeConfig = true\n",
-        )
-        .unwrap();
-        fs::write(
-            git_dir.join("config.worktree"),
-            "[remote \"origin\"]\n\turl = https://example.com/old\n",
-        )
-        .unwrap();
-
-        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
-        upsert_git_remote_config(
-            tmp.path(),
-            &ctx.write_file_for("origin").unwrap(),
-            "origin",
-            "https://example.com/new",
-        )
-        .unwrap();
-
-        // The upsert must hit the per-worktree layer (where the remote
-        // lives and wins on read); writing to common would leave the
-        // stale per-worktree url winning, a silent read/write divergence.
-        assert_eq!(
-            plain_git_remote_items(tmp.path())
-                .get("origin")
-                .map(String::as_str),
-            Some("https://example.com/new"),
-        );
-    }
-
-    #[test]
-    fn remove_clears_remote_defined_via_include_path() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        init_git(tmp.path());
-        let git_dir = tmp.path().join(".git");
-        fs::write(
-            git_dir.join("extra.config"),
-            "[remote \"upstream\"]\n\turl = https://example.com/upstream\n",
-        )
-        .unwrap();
-        fs::write(git_dir.join("config"), "[include]\n\tpath = extra.config\n").unwrap();
-
-        // The reader follows the include, so the remote is visible...
-        assert!(plain_git_remote_items(tmp.path()).contains_key("upstream"));
-
-        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
-        for path in ctx.remove_files_for("upstream").unwrap() {
-            remove_git_remote_config(tmp.path(), &path, "upstream").unwrap();
-        }
-
-        // ...and a remove must clear the section from the *included* file
-        // it actually lives in, not no-op against the including config.
-        assert!(!plain_git_remote_items(tmp.path()).contains_key("upstream"));
-    }
-
-    #[test]
-    fn write_to_included_remote_targets_the_defining_file() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        init_git(tmp.path());
-        let git_dir = tmp.path().join(".git");
-        fs::write(
-            git_dir.join("extra.config"),
-            "[remote \"origin\"]\n\turl = https://example.com/old\n",
-        )
-        .unwrap();
-        fs::write(git_dir.join("config"), "[include]\n\tpath = extra.config\n").unwrap();
-
-        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
-        let target = ctx.write_file_for("origin").unwrap();
-        assert_eq!(target, git_dir.join("extra.config"));
-        upsert_git_remote_config(tmp.path(), &target, "origin", "https://example.com/new").unwrap();
-
-        assert_eq!(
-            plain_git_remote_items(tmp.path())
-                .get("origin")
-                .map(String::as_str),
-            Some("https://example.com/new"),
-        );
-    }
-
-    #[test]
-    fn write_to_remote_in_external_include_errors_rather_than_no_ops() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        init_git(tmp.path());
-        let git_dir = tmp.path().join(".git");
-        // An included config that lives *outside* the repository's Git tree.
-        let external = tmp.path().join("external.config");
-        fs::write(
-            &external,
-            "[remote \"origin\"]\n\turl = https://example.com/external\n",
-        )
-        .unwrap();
-        fs::write(
-            git_dir.join("config"),
-            format!("[include]\n\tpath = {}\n", external.display()),
-        )
-        .unwrap();
-
-        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
-        assert!(ctx.write_file_for("origin").is_err());
-        assert!(ctx.remove_files_for("origin").is_err());
-    }
-
-    #[test]
-    fn add_new_remote_targets_common_layer() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        init_git(tmp.path());
-        let git_dir = tmp.path().join(".git");
-        fs::write(
-            git_dir.join("config"),
-            "[extensions]\n\tworktreeConfig = true\n",
-        )
-        .unwrap();
-
-        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
-        // A brand-new remote (no layer defines it yet) follows git's
-        // default: the common config.
-        assert_eq!(
-            ctx.write_file_for("origin").unwrap(),
-            git_dir.join("config")
-        );
-        upsert_git_remote_config(
-            tmp.path(),
-            &ctx.write_file_for("origin").unwrap(),
-            "origin",
-            "https://example.com/new",
-        )
-        .unwrap();
-        assert_eq!(
-            plain_git_remote_items(tmp.path())
-                .get("origin")
-                .map(String::as_str),
-            Some("https://example.com/new"),
-        );
-    }
-
-    #[test]
-    fn remove_clears_comment_suffixed_remote_header() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        init_git(tmp.path());
-        let git_dir = tmp.path().join(".git");
-        // A valid Git header Sley accepts but the hand-rolled writer didn't:
-        // an inline comment trails the `[remote "origin"]` header.
-        fs::write(
-            git_dir.join("config"),
-            "[remote \"origin\"] # primary mirror\n\turl = https://example.com/repo\n",
-        )
-        .unwrap();
-
-        // The reader resolves it, so it shows up in `remote list`...
-        assert!(plain_git_remote_items(tmp.path()).contains_key("origin"));
-
-        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
-        for path in ctx.remove_files_for("origin").unwrap() {
-            remove_git_remote_config(tmp.path(), &path, "origin").unwrap();
-        }
-
-        // ...so a remove must actually clear it, not silently no-op against a
-        // header form the writer can't parse.
-        assert!(!plain_git_remote_items(tmp.path()).contains_key("origin"));
-    }
-
-    #[test]
-    fn remove_clears_dotted_remote_header() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        init_git(tmp.path());
-        let git_dir = tmp.path().join(".git");
-        // The legacy dotted subsection form, equally valid to Sley.
-        fs::write(
-            git_dir.join("config"),
-            "[remote.origin]\n\turl = https://example.com/repo\n",
-        )
-        .unwrap();
-
-        assert!(plain_git_remote_items(tmp.path()).contains_key("origin"));
-
-        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
-        for path in ctx.remove_files_for("origin").unwrap() {
-            remove_git_remote_config(tmp.path(), &path, "origin").unwrap();
-        }
-
-        assert!(!plain_git_remote_items(tmp.path()).contains_key("origin"));
-    }
-
-    #[test]
-    fn upsert_replaces_comment_suffixed_remote_header_without_duplicating() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        init_git(tmp.path());
-        let git_dir = tmp.path().join(".git");
-        fs::write(
-            git_dir.join("config"),
-            "[remote \"origin\"] # primary mirror\n\turl = https://example.com/old\n",
-        )
-        .unwrap();
-
-        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
-        upsert_git_remote_config(
-            tmp.path(),
-            &ctx.write_file_for("origin").unwrap(),
-            "origin",
-            "https://example.com/new",
-        )
-        .unwrap();
-
-        // The upsert must update the existing section, not append a second
-        // `[remote "origin"]` the first-seen (stale) section wins over on read.
-        assert_eq!(
-            plain_git_remote_items(tmp.path())
-                .get("origin")
-                .map(String::as_str),
-            Some("https://example.com/new"),
-        );
-    }
-
-    #[test]
-    fn upsert_replaces_dotted_remote_header() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        init_git(tmp.path());
-        let git_dir = tmp.path().join(".git");
-        fs::write(
-            git_dir.join("config"),
-            "[remote.origin]\n\turl = https://example.com/old\n",
-        )
-        .unwrap();
-
-        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
-        upsert_git_remote_config(
-            tmp.path(),
-            &ctx.write_file_for("origin").unwrap(),
-            "origin",
-            "https://example.com/new",
-        )
-        .unwrap();
-
-        assert_eq!(
-            plain_git_remote_items(tmp.path())
-                .get("origin")
-                .map(String::as_str),
-            Some("https://example.com/new"),
-        );
+    fn transfer_byte_formatter_uses_binary_units() {
+        assert_eq!(format_transfer_bytes(42), "42 B");
+        assert_eq!(format_transfer_bytes(1536), "1.5 KiB");
+        assert_eq!(format_transfer_bytes(3 * 1024 * 1024), "3.0 MiB");
     }
 }

@@ -3,16 +3,16 @@
 
 use std::{fs, path::PathBuf};
 
-use objects::{fs_atomic::write_file_atomic, lock::RepoLock, object::ChangeId};
+use objects::{fs_atomic::write_file_atomic, lock::RepoLock, object::StateId};
 use serde::{Deserialize, Serialize};
 
 use crate::{Repository, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MergeState {
-    pub ours: ChangeId,
-    pub theirs: ChangeId,
-    pub base: Option<ChangeId>,
+    pub ours: StateId,
+    pub theirs: StateId,
+    pub base: Option<StateId>,
     pub conflicts: Vec<String>,
     pub resolved: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -49,9 +49,9 @@ impl MergeStateManager {
 
     pub fn start(
         &self,
-        ours: ChangeId,
-        theirs: ChangeId,
-        base: Option<ChangeId>,
+        ours: StateId,
+        theirs: StateId,
+        base: Option<StateId>,
         conflicts: Vec<String>,
     ) -> Result<()> {
         let _lock = self.write_lock()?;
@@ -172,7 +172,7 @@ impl MergeStateManager {
     /// checkpoint so subsequent `--ours` resolves pull from the latest
     /// WIP rather than the pre-merge baseline. `theirs`, `base`,
     /// `conflicts`, and `resolved` are preserved untouched.
-    pub fn carry_forward(&self, new_ours: ChangeId) -> Result<MergeState> {
+    pub fn carry_forward(&self, new_ours: StateId) -> Result<MergeState> {
         let _lock = self.write_lock()?;
         let mut state = self
             .load_unlocked()?
@@ -247,11 +247,11 @@ mod tests {
         (temp, MergeStateManager::new(&heddle_dir))
     }
 
-    fn sample_state_ids() -> (ChangeId, ChangeId, ChangeId) {
+    fn sample_state_ids() -> (StateId, StateId, StateId) {
         (
-            ChangeId::generate(),
-            ChangeId::generate(),
-            ChangeId::generate(),
+            crate::test_state_id(),
+            crate::test_state_id(),
+            crate::test_state_id(),
         )
     }
 

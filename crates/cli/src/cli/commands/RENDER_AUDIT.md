@@ -18,14 +18,13 @@ of each file. Treat the table as a punch list, not a contract.
 
 | File                                                          | Status     | Notes                                              |
 |---------------------------------------------------------------|------------|----------------------------------------------------|
-| `actor_cmd.rs`                                                | partial    | JSON path exists; render path uses `println!`.     |
+| `agent_presence.rs`                                          | partial    | JSON path exists; render path uses `println!`.     |
 | `agent.rs`                                                    | partial    |                                                    |
 | `auth_cmd.rs`                                                 | text-only  | Auth flow needs structured output.                 |
 | `bisect.rs`                                                   | partial    |                                                    |
 | `blame.rs`                                                    | partial    |                                                    |
 | `bridge.rs`                                                   | partial    | Remaining sites are inside the Git projection subcommand dispatcher and the import-progress reporter — still to chip. |
 | `checkpoint.rs`                                               | partial    |                                                    |
-| `cherry_pick.rs`                                              | partial    |                                                    |
 | `clean.rs`                                                    | text-only  |                                                    |
 | `clone.rs`                                                    | partial    |                                                    |
 | `collapse.rs`                                                 | partial    |                                                    |
@@ -34,7 +33,7 @@ of each file. Treat the table as a punch list, not a contract.
 | `context/context_mutate.rs`                                   | partial    |                                                    |
 | `context/context_query.rs`                                    | partial    |                                                    |
 | `daemon/cmd.rs`                                               | partial    |                                                    |
-| `diagnose.rs`                                                 | partial    |                                                    |
+| `doctor.rs`                                                   | partial    |                                                    |
 | `diff/diff_output.rs`                                         | compliant  | Canonical example.                                 |
 | `discuss.rs`                                                  | partial    |                                                    |
 | `fetch.rs`                                                    | partial    |                                                    |

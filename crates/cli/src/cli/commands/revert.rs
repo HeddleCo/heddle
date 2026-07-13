@@ -9,7 +9,7 @@ use heddle_core::{
     default_revert_commit_message, no_changes_to_revert_kind, no_changes_to_revert_summary,
     plan_revert, revert_inspect_command, revert_success_message,
 };
-use objects::object::{Attribution, FileChangeSet, Tree};
+use objects::object::{Attribution, ChangeLineage, ChangeLineageKind, FileChangeSet, Tree};
 use repo::{DiffKind, Repository};
 use serde::Serialize;
 
@@ -23,7 +23,7 @@ use crate::cli::{Cli, should_output_json};
 #[derive(Serialize)]
 struct RevertOutput {
     output_kind: &'static str,
-    change_id: Option<String>,
+    state_id: Option<String>,
     reverted_state: String,
     files_affected: Vec<String>,
     message: String,
@@ -86,7 +86,7 @@ pub fn cmd_revert(
         let facts = RevertSuccessFacts {
             outcome: RevertOutcome::AppliedNotCommitted,
             state_short: &target_short,
-            new_change_id_short: None,
+            new_state_id_short: None,
         };
         let success_message = revert_success_message(
             &facts,
@@ -101,7 +101,7 @@ pub fn cmd_revert(
                 "{}",
                 serde_json::to_string(&RevertOutput {
                     output_kind: "revert",
-                    change_id: None,
+                    state_id: None,
                     reverted_state: target_short,
                     files_affected,
                     message: success_message,
@@ -119,12 +119,21 @@ pub fn cmd_revert(
     let revert_message = message.unwrap_or_else(|| default_revert_commit_message(&target_short));
 
     let attribution = Attribution::human(repo.get_principal()?);
-    let new_state = repo.snapshot_with_attribution(Some(revert_message), None, attribution)?;
-    let new_short = new_state.change_id.short();
+    let new_state = repo.snapshot_with_attribution_and_lineage(
+        Some(revert_message),
+        None,
+        attribution,
+        vec![ChangeLineage {
+            kind: ChangeLineageKind::Revert,
+            source_change: target_state.change_id,
+            source_state: target_state.id(),
+        }],
+    )?;
+    let new_short = new_state.state_id.short();
     let facts = RevertSuccessFacts {
         outcome: RevertOutcome::Committed,
         state_short: &target_short,
-        new_change_id_short: Some(&new_short),
+        new_state_id_short: Some(&new_short),
     };
     let success_message = revert_success_message(
         &facts,
@@ -140,7 +149,7 @@ pub fn cmd_revert(
             "{}",
             serde_json::to_string(&RevertOutput {
                 output_kind: "revert",
-                change_id: Some(new_short),
+                state_id: Some(new_short),
                 reverted_state: target_short,
                 files_affected,
                 message: success_message,

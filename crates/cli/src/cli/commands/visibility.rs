@@ -12,7 +12,7 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use heddle_core::visibility_tier_label;
-use objects::object::{ChangeId, StateVisibility, VisibilityTier};
+use objects::object::{StateId, StateVisibility, VisibilityTier};
 use repo::{Repository, VisibilityCommitKind};
 use serde::Serialize;
 
@@ -36,7 +36,7 @@ fn tier_label(tier: &VisibilityTier) -> Option<&str> {
     visibility_tier_label(tier)
 }
 
-fn resolve_state(repo: &Repository, spec: &str) -> Result<ChangeId> {
+fn resolve_state(repo: &Repository, spec: &str) -> Result<StateId> {
     repo.resolve_state(spec)
         .with_context(|| format!("resolve state '{}'", spec))?
         .ok_or_else(|| anyhow!("state '{}' not found", spec))

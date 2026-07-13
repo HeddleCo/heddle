@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Local-mode `SignalService`. Reads risk signals attached to states by W1
-//! (`State.risk_signals`) and reports per-signal fire rates over a rolling
+//! Local-mode `SignalService`. Reads risk-signal attachments and reports
+//! per-signal fire rates over a rolling
 //! window. The actual signal *computation* lands in R3 (`crates/state_review`);
 //! this service exposes whatever's already on disk.
 
@@ -14,10 +14,10 @@ use grpc::heddle::v1::{
     SubscribeSignalUpdatesRequest, signal_service_server::SignalService,
 };
 use objects::{
-    object::{ChangeId, RiskSignal, RiskSignalBlob, State},
+    object::{RiskSignal, RiskSignalBlob, State, StateAttachmentBody, StateId},
     store::ObjectStore,
 };
-use repo::Repository;
+use repo::{Repository, StateAttachmentKind};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
@@ -51,18 +51,16 @@ impl SignalService for LocalSignalService {
         if req.state_id.is_empty() {
             return Err(Status::invalid_argument("state_id is required"));
         }
-        let change_id = ChangeId::try_from_slice(&req.state_id)
+        let state_id = StateId::try_from_slice(&req.state_id)
             .map_err(|err| Status::invalid_argument(format!("invalid state_id: {err}")))?;
         let state = self
             .repo()
             .store()
-            .get_state(&change_id)
+            .get_state(&state_id)
             .map_err(to_status)?
-            .ok_or_else(|| Status::not_found(format!("state {change_id} not found")))?;
+            .ok_or_else(|| Status::not_found(format!("state {state_id} not found")))?;
         // Real R3 computation lives in `crates/state_review`. For W2 this
-        // service surfaces whatever signals already live on the state via
-        // `state.risk_signals`. When R3 wires through, replace this with
-        // a call into `state_review::registry::run_all`.
+        // service surfaces whatever signals already live in its attachment.
         let signals = load_signals(self.repo(), &state)?;
         let proto_signals = signals
             .iter()
@@ -142,8 +140,14 @@ const DEFAULT_HEALTH_WINDOW: usize = 200;
 const MAX_HEALTH_WINDOW: u32 = 5_000;
 
 fn load_signals(repo: &Repository, state: &State) -> Result<Vec<RiskSignal>, Status> {
-    let Some(hash) = state.risk_signals else {
+    let Some(attachment) = repo
+        .latest_state_attachment(&state.state_id, StateAttachmentKind::RiskSignals)
+        .map_err(to_status)?
+    else {
         return Ok(Vec::new());
+    };
+    let StateAttachmentBody::RiskSignals(hash) = attachment.body else {
+        unreachable!()
     };
     let blob = repo
         .store()
@@ -152,13 +156,13 @@ fn load_signals(repo: &Repository, state: &State) -> Result<Vec<RiskSignal>, Sta
         .ok_or_else(|| {
             Status::data_loss(format!(
                 "risk_signals blob {hash} referenced by state {} is missing",
-                state.change_id
+                state.state_id
             ))
         })?;
     let parsed = RiskSignalBlob::decode(blob.content()).map_err(|err| {
         Status::internal(format!(
             "failed to decode risk signals on state {}: {err}",
-            state.change_id
+            state.state_id
         ))
     })?;
     Ok(parsed.signals)
@@ -213,7 +217,9 @@ fn make_path_symbol(file: &str, symbol: &str) -> PathSymbolRef {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{Attribution, Blob, Principal, ProducerId, RiskSignalKind, SignalAnchor};
+    use objects::object::{
+        Attribution, Blob, Principal, ProducerId, RiskSignalKind, SignalAnchor, StateAttachment,
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -231,21 +237,22 @@ mod tests {
         LocalSignalService::new(GrpcLocalService::new(std::sync::Arc::new(repo), dedup))
     }
 
-    fn snapshot_with_signals(repo: &Repository, signals: Vec<RiskSignal>) -> ChangeId {
+    fn snapshot_with_signals(repo: &Repository, signals: Vec<RiskSignal>) -> StateId {
         let attribution = Attribution::human(Principal::new("Alice", "alice@example.com"));
         let snapshot = repo
             .snapshot_with_attribution(Some("test snapshot".to_string()), None, attribution)
             .unwrap();
         let blob = RiskSignalBlob::new(signals).encode().unwrap();
         let hash = repo.store().put_blob(&Blob::new(blob)).unwrap();
-        let state = repo
-            .store()
-            .get_state(&snapshot.change_id)
-            .unwrap()
-            .unwrap();
-        let updated = state.with_risk_signals(hash);
-        repo.store().put_state(&updated).unwrap();
-        snapshot.change_id
+        let attachment = StateAttachment {
+            state_id: snapshot.state_id,
+            body: StateAttachmentBody::RiskSignals(hash),
+            attribution: Attribution::human(Principal::new("Alice", "alice@example.com")),
+            created_at: chrono::Utc::now(),
+            supersedes: None,
+        };
+        repo.put_state_attachment(&attachment).unwrap();
+        snapshot.state_id
     }
 
     fn sample_signal(kind: RiskSignalKind, reason: &str) -> RiskSignal {
@@ -293,7 +300,7 @@ mod tests {
         let resp = svc
             .compute_state_signals(Request::new(ComputeStateSignalsRequest {
                 repo_path: String::new(),
-                state_id: snap.change_id.as_bytes().to_vec(),
+                state_id: snap.state_id.as_bytes().to_vec(),
                 prior_state_id: Vec::new(),
             }))
             .await

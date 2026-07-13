@@ -36,19 +36,19 @@ use std::{
 };
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use objects::{fs_atomic::write_file_atomic, object::ChangeId};
+use objects::{fs_atomic::write_file_atomic, object::StateId};
 use refs::{PackedRefsModel, ReftableModel};
 use tempfile::TempDir;
 
 const SIZES: &[usize] = &[10_000, 50_000, 100_000];
 
-/// Build a deterministic ChangeId from an index; spreads bytes across the
-/// 16-byte payload so we don't accidentally pick a degenerate shape.
-fn cid_for(i: usize) -> ChangeId {
-    let mut bytes = [0u8; 16];
-    let raw = (i as u128).wrapping_mul(0x9E37_79B9_7F4A_7C15_9E37_79B9_7F4A_7C15);
-    bytes.copy_from_slice(&raw.to_le_bytes());
-    ChangeId::from_bytes(bytes)
+fn state_id_for(i: usize) -> StateId {
+    let first = (i as u128).wrapping_mul(0x9E37_79B9_7F4A_7C15_9E37_79B9_7F4A_7C15);
+    let second = first.rotate_left(59) ^ 0x6A09_E667_F3BC_C908_BB67_AE85_84CA_A73B;
+    let mut bytes = [0; 32];
+    bytes[..16].copy_from_slice(&first.to_le_bytes());
+    bytes[16..].copy_from_slice(&second.to_le_bytes());
+    StateId::from_bytes(bytes)
 }
 
 fn name_for(i: usize) -> String {
@@ -61,7 +61,7 @@ fn name_for(i: usize) -> String {
 fn build_packed(n: usize) -> PackedRefsModel {
     let mut m = PackedRefsModel::new();
     for i in 0..n {
-        m.set_thread(&name_for(i), cid_for(i));
+        m.set_thread(&name_for(i), state_id_for(i));
     }
     m
 }
@@ -69,7 +69,7 @@ fn build_packed(n: usize) -> PackedRefsModel {
 fn build_reftable(n: usize) -> ReftableModel {
     let mut m = ReftableModel::new();
     for i in 0..n {
-        m.set_thread(&name_for(i), cid_for(i));
+        m.set_thread(&name_for(i), state_id_for(i));
     }
     m
 }
@@ -213,7 +213,7 @@ fn bench_append_one_persist(c: &mut Criterion) {
     for &n in SIZES {
         let layout = lay_out(n);
         let new_name = format!("feature/new-{n:06}");
-        let new_id = cid_for(n + 1);
+        let new_id = state_id_for(n + 1);
 
         g.bench_with_input(BenchmarkId::new("packed", n), &layout, |b, layout| {
             b.iter_batched(

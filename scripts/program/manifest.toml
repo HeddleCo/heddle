@@ -283,8 +283,8 @@ replacement = "roundtrip-fidelity + commit-conformance"
 
 [[exclusions]]
 id = "mount-fuse-benches"
-reason = "Platform/prereq heavy; weekly benchmark workflow owns"
-replacement = "suite=perf / CI benchmarks.yml"
+reason = "Platform/prereq heavy; manual benchmark workflow owns"
+replacement = "suite=perf / manually dispatch benchmarks.yml"
 
 [[exclusions]]
 id = "coverage-llvm-cov"

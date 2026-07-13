@@ -3,13 +3,13 @@
 
 use std::{io::Read, path::Path};
 
-use objects::{fs_atomic::write_file_atomic, object::VisibilityTier};
+use objects::{error::HeddleError, fs_atomic::write_file_atomic, object::VisibilityTier};
 use serde::{Deserialize, Serialize};
 
 use super::Result;
 use crate::FsMonitorConfig;
 
-pub(crate) const SUPPORTED_REPO_FORMAT: u32 = 2;
+pub(crate) const SUPPORTED_REPO_FORMAT: u32 = 3;
 
 /// Repository configuration stored in `.heddle/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,6 +240,14 @@ pub struct HostedConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepositoryConfig {
     pub version: u32,
+    pub source_authority: RepositorySourceAuthority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RepositorySourceAuthority {
+    Native,
+    GitOverlay,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -397,6 +405,7 @@ impl Default for RepoConfig {
         Self {
             repository: RepositoryConfig {
                 version: SUPPORTED_REPO_FORMAT,
+                source_authority: RepositorySourceAuthority::Native,
             },
             principal: None,
             agent: AgentConfig::default(),
@@ -439,6 +448,35 @@ impl RepoConfig {
         })
     }
 
+    pub fn load_for_repository(path: &Path) -> Result<Self> {
+        let contents = std::fs::read_to_string(path)?;
+        let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if let Some(value) = invalid_output_format_value(&contents) {
+            return Err(HeddleError::ConfigInvalidValue {
+                path: resolved,
+                key: "output.format".to_string(),
+                value,
+                valid_values: vec!["'text'".to_string(), "'json'".to_string()],
+            });
+        }
+        let version = repository_format_version(&contents, &resolved)?;
+        if version > SUPPORTED_REPO_FORMAT {
+            return Err(HeddleError::RepositoryFormatTooNew {
+                path: resolved,
+                found: version,
+                supported: SUPPORTED_REPO_FORMAT,
+            });
+        }
+        if version < SUPPORTED_REPO_FORMAT {
+            return Err(HeddleError::RepositoryFormatMigrationRequired {
+                path: resolved,
+                found: version,
+                required: SUPPORTED_REPO_FORMAT,
+            });
+        }
+        Self::load(path)
+    }
+
     /// Save configuration to a file.
     pub fn save(&self, path: &Path) -> Result<()> {
         let contents = toml::to_string_pretty(self)?;
@@ -453,6 +491,25 @@ impl RepoConfig {
             email: email.into(),
         });
     }
+}
+
+#[derive(Deserialize)]
+struct RepositoryFormatProbe {
+    repository: RepositoryVersionProbe,
+}
+
+#[derive(Deserialize)]
+struct RepositoryVersionProbe {
+    version: u32,
+}
+
+fn repository_format_version(contents: &str, path: &Path) -> Result<u32> {
+    toml::from_str::<RepositoryFormatProbe>(contents)
+        .map(|probe| probe.repository.version)
+        .map_err(|source| HeddleError::ConfigParse {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 fn invalid_output_format_value(contents: &str) -> Option<String> {
@@ -476,6 +533,10 @@ mod tests {
 
         assert_eq!(config.worktree.ignore, vec![".heddle".to_string()]);
         assert_eq!(config.worktree.fsmonitor.mode, crate::FsMonitorMode::Off);
+        assert_eq!(
+            config.repository.source_authority,
+            RepositorySourceAuthority::Native
+        );
         assert_eq!(config.output.format, None);
         assert!(config.policies.default_policy.is_none());
     }
@@ -484,11 +545,12 @@ mod tests {
     fn test_defaults_deserialize_when_missing() {
         let toml = r#"
 [repository]
-version = 1
+version = 3
+source_authority = "native"
 "#;
         let config: RepoConfig = toml::from_str(toml).expect("config should deserialize");
 
-        assert_eq!(config.repository.version, 1);
+        assert_eq!(config.repository.version, 3);
         assert_eq!(config.output.format, None);
         assert!(config.policies.default_policy.is_none());
         assert!(config.agent.provider.is_none());
@@ -499,7 +561,8 @@ version = 1
     fn output_format_text_and_json_parse_normally() {
         let toml_text = r#"
 [repository]
-version = 1
+version = 3
+source_authority = "native"
 [output]
 format = "text"
 "#;
@@ -508,7 +571,8 @@ format = "text"
 
         let toml_json = r#"
 [repository]
-version = 1
+version = 3
+source_authority = "native"
 [output]
 format = "json"
 "#;
@@ -524,7 +588,8 @@ format = "json"
         // JSON-when-piped surprise that motivated #271.
         let toml_auto = r#"
 [repository]
-version = 1
+version = 3
+source_authority = "native"
 [output]
 format = "auto"
 "#;
@@ -543,6 +608,30 @@ format = "auto"
             message.contains("'text'") && message.contains("'json'"),
             "error should list the valid values: {message}"
         );
+    }
+
+    #[test]
+    fn v3_requires_explicit_source_authority() {
+        let error = toml::from_str::<RepoConfig>("[repository]\nversion = 3\n")
+            .expect_err("v3 authority must be explicit");
+        assert!(error.to_string().contains("source_authority"));
+    }
+
+    #[test]
+    fn legacy_config_requires_explicit_migration() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("config.toml");
+        std::fs::write(&path, "[repository]\nversion = 2\n").unwrap();
+
+        let error = RepoConfig::load_for_repository(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            HeddleError::RepositoryFormatMigrationRequired {
+                found: 2,
+                required: SUPPORTED_REPO_FORMAT,
+                ..
+            }
+        ));
     }
 
     #[test]

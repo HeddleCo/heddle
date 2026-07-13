@@ -2,11 +2,17 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "google/protobuf/timestamp.proto";
 
 service RepoEventService {
-  rpc SubscribeRepoEvents(SubscribeRepoEventsRequest) returns (stream RepoEvent);
-  rpc SubscribeRepoEventsMulti(SubscribeRepoEventsMultiRequest) returns (stream RepoEvent);
+  rpc SubscribeRepoEvents(SubscribeRepoEventsRequest) returns (stream RepoEvent) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc SubscribeRepoEventsMulti(SubscribeRepoEventsMultiRequest) returns (stream RepoEvent) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 }
 
 message SubscribeRepoEventsRequest {

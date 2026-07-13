@@ -1,592 +1,156 @@
 // SPDX-License-Identifier: Apache-2.0
+use objects::store::{ActorPresenceStore, WriterLeaseStore};
+
 use super::*;
 
-fn expect_json_reserve_failure(args: &[&str], cwd: &std::path::Path) -> Value {
-    let output = heddle_output(args, Some(cwd)).expect("invoke reserve failure");
-    assert!(
-        !output.status.success(),
-        "reservation attempt should fail for args {args:?}"
-    );
-    let stdout = str::from_utf8(&output.stdout).unwrap_or("");
-    assert!(
-        stdout.trim().is_empty(),
-        "JSON-mode reservation failures must not emit a success-shaped stdout object: {stdout}"
-    );
-    let stderr = str::from_utf8(&output.stderr).unwrap_or("");
-    serde_json::from_str(stderr.trim()).expect("reservation failure should emit JSON envelope")
-}
-
 #[test]
-fn thread_start_rejects_second_active_writer_for_same_thread() {
+fn thread_start_creates_presence_without_writer_authority() {
     let main = setup_repo("base.txt", "shared base");
-    let first = TempDir::new().unwrap();
-    let second = TempDir::new().unwrap();
+    let checkout = TempDir::new().unwrap();
 
     heddle(
         &[
             "start",
-            "feature/reserved",
+            "feature/presence-only",
             "--workspace",
             "materialized",
             "--path",
-            first.path().to_str().unwrap(),
+            checkout.path().to_str().unwrap(),
         ],
         Some(main.path()),
     )
     .unwrap();
 
-    let err = heddle(
-        &[
-            "start",
-            "feature/reserved",
-            "--workspace",
-            "materialized",
-            "--path",
-            second.path().to_str().unwrap(),
-        ],
-        Some(main.path()),
-    )
-    .expect_err("second active writer should be rejected");
+    let presence = ActorPresenceStore::new(main.path().join(".heddle").as_path())
+        .active_entries()
+        .unwrap();
     assert!(
-        err.contains("already has an active reservation"),
-        "thread reservation conflict should be explicit: {err}"
+        presence
+            .iter()
+            .any(|entry| entry.thread == "feature/presence-only")
     );
+    let leases = WriterLeaseStore::new(main.path().join(".heddle").as_path())
+        .list()
+        .unwrap();
+    assert!(leases.is_empty(), "start must not mint writer authority");
 }
 
 #[test]
-fn agent_api_reserve_heartbeat_release_round_trips_json() {
+fn agent_api_requires_the_returned_bearer_token() {
     let main = setup_repo("base.txt", "shared base");
+    let reserved: Value = serde_json::from_str(
+        &heddle(&["agent", "reserve", "--thread", "main"], Some(main.path())).unwrap(),
+    )
+    .unwrap();
+    let lease_id = reserved["reservation"]["lease_id"].as_str().unwrap();
+    let token = reserved["token"].as_str().unwrap();
+    assert!(lease_id.starts_with("lease-"));
+    assert!(token.starts_with("hwl_"));
 
-    let reserved: Value = inject_post_verification_at(
-        main.path(),
-        serde_json::from_str(
-            &heddle(
-                &[
-                    "agent",
-                    "reserve",
-                    "--thread",
-                    "feature/api",
-                    "--task",
-                    "exercise stable API",
-                ],
-                Some(main.path()),
-            )
-            .unwrap(),
+    let wrong = heddle(
+        &[
+            "agent",
+            "heartbeat",
+            "--lease",
+            lease_id,
+            "--token",
+            "wrong-token",
+        ],
+        Some(main.path()),
+    )
+    .expect_err("wrong token must fail");
+    assert!(wrong.contains("token did not match"));
+
+    let heartbeat: Value = serde_json::from_str(
+        &heddle(
+            &["agent", "heartbeat", "--lease", lease_id, "--token", token],
+            Some(main.path()),
         )
         .unwrap(),
-    );
-    let reservation = &reserved["reservation"];
-    let session = reservation["session_id"].as_str().unwrap().to_string();
-    assert_eq!(reservation["thread"], "feature/api");
-    assert!(reservation["reservation_token"].as_str().is_some());
-    assert!(reserved["verification"].is_object());
-
-    let heartbeat: Value = inject_post_verification_at(
-        main.path(),
-        serde_json::from_str(
-            &heddle(
-                &["agent", "heartbeat", "--session", &session],
-                Some(main.path()),
-            )
-            .unwrap(),
-        )
-        .unwrap(),
-    );
-    assert_eq!(heartbeat["reservation"]["session_id"], session);
-    assert!(heartbeat["verification"].is_object());
-
-    let released: Value = inject_post_verification_at(
-        main.path(),
-        serde_json::from_str(
-            &heddle(
-                &[
-                    "agent",
-                    "release",
-                    "--session",
-                    &session,
-                    "--status",
-                    "complete",
-                ],
-                Some(main.path()),
-            )
-            .unwrap(),
-        )
-        .unwrap(),
-    );
-    assert_eq!(released["reservation"]["status"], "complete");
-    assert!(released["verification"].is_object());
+    )
+    .unwrap();
+    assert_eq!(heartbeat["reservation"]["lease_id"], lease_id);
+    assert!(heartbeat.get("token").is_none());
 
     let listed: Value = serde_json::from_str(
         &heddle(&["--output", "json", "agent", "list"], Some(main.path())).unwrap(),
     )
     .unwrap();
-    assert_eq!(listed["reservations"].as_array().unwrap().len(), 1);
-    assert!(listed["verification"].is_object());
-}
+    assert!(listed["reservations"][0].get("token").is_none());
+    assert!(listed["reservations"][0].get("token_hash").is_none());
 
-/// `agent reserve` must distinguish three cases:
-///   1. existing reservation owned by a *live* process at the same
-///      anchor → `live_owner` JSON conflict
-///   2. existing reservation owned by a *live* process at a *different*
-///      anchor → `anchor_drift` JSON conflict
-///   3. existing reservation whose owning process is *dead* → reaped,
-///      new reservation succeeds
-///
-/// One-shot CLI invocations exit before the next call runs, so we
-/// simulate a live owner by rewriting the entry's recorded pid to the
-/// test-runner pid (always alive while the test is in progress).
-#[test]
-fn agent_api_reserve_emits_structured_live_owner_and_anchor_drift_conflicts() {
-    let main = setup_repo("base.txt", "shared base");
-
-    let reserved: Value = serde_json::from_str(
-        &heddle(
-            &[
-                "agent",
-                "reserve",
-                "--thread",
-                "feature/conflict",
-                "--task",
-                "first writer",
-            ],
-            Some(main.path()),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let reservation = &reserved["reservation"];
-    let session = reservation["session_id"].as_str().unwrap().to_string();
-    let anchor_state = reservation["anchor_state"].as_str().unwrap().to_string();
-
-    // Pin the recorded pid to this test-runner process so the live-
-    // owner branch fires reliably, and clear boot_id to keep the check
-    // platform-independent (boot_id mismatch would otherwise reap on
-    // hosts that expose one).
-    let entry_path = main
+    let lease_path = main
         .path()
         .join(".heddle")
-        .join("agents")
-        .join(format!("{session}.toml"));
-    let entry_text = std::fs::read_to_string(&entry_path).unwrap();
-    // Pin pid to the test-runner process; leave boot_id alone so the
-    // liveness check sees a live owner on the current boot.
-    let lines: Vec<String> = entry_text
-        .lines()
-        .map(|line| {
-            if line.starts_with("pid = ") {
-                format!("pid = {}", std::process::id())
-            } else {
-                line.to_string()
-            }
-        })
-        .collect();
-    std::fs::write(&entry_path, lines.join("\n")).unwrap();
-
-    // Same-anchor live owner → live_owner conflict.
-    let live_conflict = expect_json_reserve_failure(
-        &[
-            "--output",
-            "json",
-            "agent",
-            "reserve",
-            "--thread",
-            "feature/conflict",
-        ],
-        main.path(),
-    );
-    assert_eq!(live_conflict["kind"], "live_owner");
-    assert!(
-        live_conflict["error"]
-            .as_str()
-            .is_some_and(|error| error.contains(&session)),
-        "live_owner conflict should name the existing session: {live_conflict}"
-    );
-    assert!(
-        live_conflict["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("heddle thread show feature/conflict")),
-        "live_owner conflict should include a recovery hint: {live_conflict}"
-    );
-
-    // Different anchor while owner is alive → anchor_drift conflict.
-    // We synthesize a divergent anchor by snapshotting on main while
-    // the existing reservation still records the original anchor.
-    std::fs::write(main.path().join("base.txt"), "advanced base").unwrap();
-    heddle(
-        &["capture", "-m", "advance main for drift test"],
-        Some(main.path()),
-    )
-    .unwrap();
-
-    let drift_conflict = expect_json_reserve_failure(
-        &[
-            "--output",
-            "json",
-            "agent",
-            "reserve",
-            "--thread",
-            "feature/conflict",
-        ],
-        main.path(),
-    );
-    assert_eq!(drift_conflict["kind"], "anchor_drift");
-    assert!(
-        drift_conflict["error"]
-            .as_str()
-            .is_some_and(|error| error.contains(&anchor_state)),
-        "anchor_drift conflict should expose reserved anchor: {drift_conflict}"
-    );
-
-    // Now mark the recorded pid as dead. The next reserve must reap
-    // the abandoned entry and succeed.
-    let entry_text = std::fs::read_to_string(&entry_path).unwrap();
-    let lines: Vec<String> = entry_text
-        .lines()
-        .map(|line| {
-            if line.starts_with("pid = ") {
-                "pid = 2147483647".to_string() // 0x7fff_ffff is unassignable
-            } else if line.starts_with("boot_id = ") {
-                "boot_id = \"definitely-stale-boot\"".to_string()
-            } else {
-                line.to_string()
-            }
-        })
-        .collect();
-    std::fs::write(&entry_path, lines.join("\n")).unwrap();
-
-    // Request the original anchor so the ref-side drift check doesn't
-    // fire and we exercise the registry reap path cleanly.
-    let reaped = heddle(
-        &[
-            "agent",
-            "reserve",
-            "--thread",
-            "feature/conflict",
-            "--anchor",
-            &anchor_state,
-        ],
-        Some(main.path()),
-    )
-    .expect("dead-owner reservation must succeed after reap");
-    let reaped: Value = serde_json::from_str(&reaped).unwrap();
-    assert_ne!(
-        reaped["reservation"]["session_id"], session,
-        "reaped should mint new id"
-    );
-    assert_eq!(reaped["reservation"]["status"], "active");
-
-    // Old entry should be marked Abandoned, not deleted.
-    let stale = std::fs::read_to_string(&entry_path).unwrap();
-    assert!(
-        stale.contains("status = \"abandoned\""),
-        "reaped entry must record abandoned status: {stale}"
-    );
+        .join("writer-leases")
+        .join(format!("{lease_id}.toml"));
+    let persisted = std::fs::read_to_string(lease_path).unwrap();
+    assert!(!persisted.contains(token));
 }
 
 #[test]
-fn agent_api_reserve_anchor_drift_without_owner_uses_error_envelope_only() {
+fn agent_capture_and_ready_require_authenticated_writer_authority() {
     let main = setup_repo("base.txt", "shared base");
-
     let reserved: Value = serde_json::from_str(
-        &heddle(
-            &["agent", "reserve", "--thread", "feature/no-owner"],
-            Some(main.path()),
-        )
-        .unwrap(),
+        &heddle(&["agent", "reserve", "--thread", "main"], Some(main.path())).unwrap(),
     )
     .unwrap();
-    let session = reserved["reservation"]["session_id"].as_str().unwrap();
-    let anchor_state = reserved["reservation"]["anchor_state"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let lease_id = reserved["reservation"]["lease_id"].as_str().unwrap();
+    let token = reserved["token"].as_str().unwrap();
 
-    heddle(
-        &[
-            "agent",
-            "release",
-            "--session",
-            session,
-            "--status",
-            "complete",
-        ],
-        Some(main.path()),
-    )
-    .unwrap();
-
-    std::fs::write(main.path().join("base.txt"), "advanced base").unwrap();
-    heddle(
-        &["capture", "-m", "advance main for ownerless drift test"],
-        Some(main.path()),
-    )
-    .unwrap();
-
-    let drift_conflict = expect_json_reserve_failure(
-        &[
-            "--output",
-            "json",
-            "agent",
-            "reserve",
-            "--thread",
-            "feature/no-owner",
-        ],
-        main.path(),
-    );
-    assert_eq!(drift_conflict["kind"], "anchor_drift");
-    assert!(
-        drift_conflict["error"]
-            .as_str()
-            .is_some_and(|error| error.contains(&anchor_state)),
-        "anchor_drift conflict should expose the existing anchor: {drift_conflict}"
-    );
-    assert!(
-        drift_conflict["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("Refresh the thread")),
-        "anchor_drift conflict should include a recovery hint: {drift_conflict}"
-    );
-}
-
-/// `heddle agent reserve --hold-for-pid PID` binds the reservation's
-/// liveness to an external process — typically the orchestrator that
-/// wraps the heddle CLI. The contract this test protects:
-///
-///   1. While the held pid is alive, a second reservation attempt
-///      sees a `live_owner` conflict (no recycling).
-///   2. When the held pid dies, the reaper picks up the dead-pid
-///      signal and the next reservation succeeds.
-///
-/// We simulate the orchestrator with a long-running `sleep` so we
-/// have a real, killable pid; SIGKILL gives us the harshest possible
-/// "process gone" signal (no Drop guards, no graceful release).
-#[test]
-fn agent_reserve_hold_for_pid_binds_reservation_to_external_process() {
-    use std::process::Command;
-    let main = setup_repo("base.txt", "shared base");
-
-    // Spawn a long-running helper that stands in for the
-    // orchestrator. `sleep 60` is portable and exits cleanly on
-    // SIGKILL.
-    let mut helper = Command::new("sleep")
-        .arg("60")
-        .spawn()
-        .expect("spawn sleep helper as fake orchestrator");
-    let helper_pid = helper.id();
-
-    // Reserve with the helper's pid as the liveness binding.
-    let reserved: Value = serde_json::from_str(
-        &heddle(
-            &[
-                "agent",
-                "reserve",
-                "--thread",
-                "feature/held",
-                "--hold-for-pid",
-                &helper_pid.to_string(),
-            ],
-            Some(main.path()),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let session = reserved["reservation"]["session_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    // The recorded pid in the .toml entry should be the helper, not
-    // the heddle CLI process (which has already exited by now).
-    let entry_path = main
-        .path()
-        .join(".heddle")
-        .join("agents")
-        .join(format!("{session}.toml"));
-    let entry_text = std::fs::read_to_string(&entry_path).unwrap();
-    assert!(
-        entry_text.contains(&format!("pid = {helper_pid}")),
-        "reservation must record the held pid, not the CLI pid: {entry_text}"
-    );
-
-    // While the helper is alive: a second reserve attempt must see
-    // the live owner.
-    let live_conflict = expect_json_reserve_failure(
-        &[
-            "--output",
-            "json",
-            "agent",
-            "reserve",
-            "--thread",
-            "feature/held",
-        ],
-        main.path(),
-    );
-    assert_eq!(live_conflict["kind"], "live_owner");
-    assert!(
-        live_conflict["error"]
-            .as_str()
-            .is_some_and(|error| error.contains(&session)),
-        "live_owner conflict must point at the held session: {live_conflict}"
-    );
-
-    // Kill the helper and reap. SIGKILL is the harshest case — no
-    // signal handler runs, no graceful release. The next reservation
-    // attempt must succeed via the dead-pid path.
-    helper.kill().expect("kill helper");
-    let _ = helper.wait();
-
-    let recovered: Value = serde_json::from_str(
-        &heddle(
-            &["agent", "reserve", "--thread", "feature/held"],
-            Some(main.path()),
-        )
-        .expect("post-SIGKILL reservation must succeed via dead-pid reap"),
-    )
-    .unwrap();
-    let new_session = recovered["reservation"]["session_id"].as_str().unwrap();
-    assert_ne!(
-        new_session, session,
-        "post-reap reservation must mint a fresh session id"
-    );
-    assert_eq!(recovered["reservation"]["status"], "active");
-
-    // The original entry should be marked Abandoned, not silently
-    // overwritten.
-    let stale = std::fs::read_to_string(&entry_path).unwrap();
-    assert!(
-        stale.contains("status = \"abandoned\""),
-        "reaped held reservation must record abandoned status: {stale}"
-    );
-}
-
-/// `heddle agent capture --session SID` and `heddle agent ready
-/// --session SID` must verify the caller still owns an Active
-/// reservation on the thread. Releasing the reservation should
-/// cause subsequent calls to fail with a clear "no longer active"
-/// error so an orchestrator can re-reserve before retrying.
-#[test]
-fn agent_api_capture_and_ready_require_active_session() {
-    let main = setup_repo("base.txt", "shared base");
-
-    // Reserve on the main thread so capture/ready have a live owner
-    // pointing at a real anchor.
-    let reserved_output = heddle_output_with_env(
-        &["agent", "reserve", "--thread", "main"],
-        Some(main.path()),
-        &[
-            ("CODEX_THREAD_ID", "thread-agent-api"),
-            ("CODEX_MODEL", "gpt-5.3-codex"),
-            ("CODEX_REASONING_EFFORT", "high"),
-        ],
-    )
-    .expect("agent reserve with ambient harness env should run");
-    assert!(
-        reserved_output.status.success(),
-        "agent reserve should succeed: {}",
-        str::from_utf8(&reserved_output.stderr).unwrap_or("")
-    );
-    let reserved: Value = serde_json::from_slice(&reserved_output.stdout).unwrap();
-    let session = reserved["reservation"]["session_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert_eq!(reserved["reservation"]["harness"], "codex");
-    assert_eq!(reserved["reservation"]["provider"], "openai");
-    assert_eq!(reserved["reservation"]["model"], "gpt-5.3-codex");
-    assert_eq!(reserved["reservation"]["thinking_level"], "high");
-    assert_eq!(reserved["reservation"]["probe_source"], "app_protocol");
-
-    // Live session: capture should succeed.
     fs::write(main.path().join("first.txt"), "first").unwrap();
-    let capture: Value = serde_json::from_str(
-        &heddle(
-            &[
-                "--output",
-                "json",
-                "agent",
-                "capture",
-                "--session",
-                &session,
-                "-m",
-                "first agent capture",
-            ],
-            Some(main.path()),
-        )
-        .unwrap(),
+    let capture_output = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "capture",
+            "--lease",
+            lease_id,
+            "--token",
+            token,
+            "-m",
+            "authenticated capture",
+        ],
+        Some(main.path()),
+        &[
+            ("HEDDLE_AGENT_PROVIDER", "openai"),
+            ("HEDDLE_AGENT_MODEL", "gpt-5.3-codex"),
+        ],
     )
     .unwrap();
-    assert_eq!(capture["intent"], "first agent capture");
-    assert!(capture["change_id"].as_str().unwrap().starts_with("hd-"));
+    assert!(
+        capture_output.status.success(),
+        "authenticated capture should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&capture_output.stdout),
+        String::from_utf8_lossy(&capture_output.stderr)
+    );
+    let capture: Value = serde_json::from_slice(&capture_output.stdout).unwrap();
+    assert_eq!(capture["intent"], "authenticated capture");
+    assert!(capture["state_id"].as_str().unwrap().starts_with("hs-"));
     let log: Value = serde_json::from_str(
         &heddle(&["--output", "json", "log", "-n", "1"], Some(main.path())).unwrap(),
     )
     .unwrap();
     assert_eq!(
         log["states"][0]["agent"], "openai/gpt-5.3-codex",
-        "agent capture should preserve the reservation's ambient harness model even when the capture process has no model env: {log}"
+        "agent capture should preserve its explicit harness model: {log}"
     );
 
-    // Live session: ready should also succeed.
-    let ready: Value = serde_json::from_str(
-        &heddle(
-            &["--output", "json", "agent", "ready", "--session", &session],
-            Some(main.path()),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(ready["report"]["thread"], "main");
-
-    // Release the reservation; capture and ready must now refuse.
     heddle(
         &[
-            "agent",
-            "release",
-            "--session",
-            &session,
-            "--status",
-            "complete",
+            "agent", "release", "--lease", lease_id, "--token", token, "--status", "complete",
         ],
         Some(main.path()),
     )
     .unwrap();
 
-    let capture_err = heddle(
-        &[
-            "agent",
-            "capture",
-            "--session",
-            &session,
-            "-m",
-            "after release",
-        ],
+    let error = heddle(
+        &["agent", "ready", "--lease", lease_id, "--token", token],
         Some(main.path()),
     )
-    .expect_err("capture after release must fail");
-    assert!(
-        capture_err.contains("no longer active"),
-        "released session should refuse capture: {capture_err}"
-    );
-
-    let ready_err = heddle(
-        &["agent", "ready", "--session", &session],
-        Some(main.path()),
-    )
-    .expect_err("ready after release must fail");
-    assert!(
-        ready_err.contains("no longer active"),
-        "released session should refuse ready: {ready_err}"
-    );
-
-    // Bogus session id likewise rejected.
-    let bogus = heddle(
-        &["agent", "capture", "--session", "agent-nope", "-m", "nope"],
-        Some(main.path()),
-    )
-    .expect_err("bogus session id must fail");
-    assert!(
-        bogus.contains("not found"),
-        "bogus session should report not found: {bogus}"
-    );
+    .expect_err("released lease must fail");
+    assert!(error.contains("no longer active"));
 }
 
 #[test]
@@ -660,7 +224,7 @@ fn thread_captures_lists_granular_history_for_thread() {
 /// spawned with `start --agent-provider X --agent-model Y`, every
 /// subsequent `heddle capture` from that thread's worktree must tag the
 /// captured state with that agent. Before the fix, the thread's actor
-/// only showed up in `heddle status` (read from `AgentRegistry`); the
+/// only showed up in `heddle status` (read from `ActorPresenceStore`); the
 /// capture handler never consulted it, so every state landed with
 /// `attribution.agent = None` and `Principal: Unknown`. That broke the
 /// "who/what wrote this line" provenance moment in the demo and left
@@ -816,7 +380,7 @@ fn parallel_agents_visible_from_main_repo() {
 }
 
 #[test]
-fn merge_agent_track_into_main() {
+fn land_agent_thread_into_main() {
     let main = setup_repo("base.txt", "base");
     let agent_tmp = TempDir::new().unwrap();
 
@@ -836,16 +400,16 @@ fn merge_agent_track_into_main() {
     fs::write(agent_tmp.path().join("added.txt"), "new feature").unwrap();
     heddle(&["capture", "-m", "add feature"], Some(agent_tmp.path())).unwrap();
 
-    let result = heddle(&["merge", "feature/to-merge"], Some(main.path()));
+    let result = heddle(&["land", "--thread", "feature/to-merge"], Some(main.path()));
     assert!(
         result.is_ok(),
-        "merging agent thread into main should succeed: {:?}",
+        "landing agent thread into main should succeed: {:?}",
         result.err()
     );
 
     assert!(
         main.path().join("added.txt").exists(),
-        "merged file should appear in main repo"
+        "landed file should appear in main repo"
     );
 }
 
@@ -970,7 +534,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     assert_eq!(ready["report"]["merge_relation"], "fast_forward");
     assert_eq!(
         ready["report"]["recommended_action"],
-        "heddle land --thread feature/native-cli --no-push"
+        "heddle land --thread feature/native-cli"
     );
 
     let thread_show_json = heddle(
@@ -982,13 +546,16 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     assert_eq!(thread_show["thread_state"], "ready");
     assert_eq!(
         thread_show["recommended_action"].as_str(),
-        Some("heddle land --thread feature/native-cli --no-push")
+        Some("heddle land --thread feature/native-cli")
     );
 
-    let actor_list_json = heddle(&["--output", "json", "actor", "list"], Some(main.path()))
-        .expect("actor list should succeed");
+    let actor_list_json = heddle(
+        &["--output", "json", "agent", "presence", "list"],
+        Some(main.path()),
+    )
+    .expect("actor list should succeed");
     let actor_list: Value = serde_json::from_str(&actor_list_json).unwrap();
-    let actor_session = actor_list["actors"]
+    let actor_session = actor_list["presence"]
         .as_array()
         .unwrap()
         .iter()
@@ -999,8 +566,9 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
         &[
             "--output",
             "json",
-            "actor",
-            "done",
+            "agent",
+            "presence",
+            "complete",
             "--session",
             actor_session,
         ],
@@ -1010,12 +578,12 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     let actor_done: Value = serde_json::from_str(&actor_done_json).unwrap();
     assert_eq!(actor_done["coordination_status"], "merge-ready");
     assert_eq!(
-        actor_done["recommended_action"], "heddle land --thread feature/native-cli --no-push",
+        actor_done["recommended_action"], "heddle land --thread feature/native-cli",
         "actor completion should keep agents on the canonical land path: {actor_done}"
     );
     assert_eq!(
         actor_done["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["land", "--thread", "feature/native-cli", "--no-push"]),
+        heddle_argv_json(["land", "--thread", "feature/native-cli"]),
         "{actor_done}"
     );
 }
@@ -1281,8 +849,11 @@ fn land_auto_captures_and_merges_clean_thread() {
         "auto_integrated"
     );
 
-    let actor_show = heddle_output(&["--output", "json", "actor", "show"], Some(main.path()))
-        .expect("invoke actor show after land");
+    let actor_show = heddle_output(
+        &["--output", "json", "agent", "presence", "show"],
+        Some(main.path()),
+    )
+    .expect("invoke actor show after land");
     assert!(
         !actor_show.status.success(),
         "actor show should not select the merged actor implicitly after land"
@@ -1291,7 +862,7 @@ fn land_auto_captures_and_merges_clean_thread() {
     let envelope: Value = serde_json::from_str(stderr.trim())
         .unwrap_or_else(|err| panic!("actor show failure should be JSON: {err}: {stderr}"));
     assert_eq!(envelope["kind"], "no_active_actor");
-    assert_eq!(envelope["primary_command"], "heddle actor list");
+    assert_eq!(envelope["primary_command"], "heddle agent presence list");
     assert!(
         envelope["hint"]
             .as_str()
@@ -1579,11 +1150,11 @@ fn undo_is_scoped_to_the_current_thread() {
 
     assert_ne!(
         auth_thread["current_state"].as_str().unwrap(),
-        auth_snapshot["change_id"].as_str().unwrap()
+        auth_snapshot["state_id"].as_str().unwrap()
     );
     assert_eq!(
         search_thread["current_state"].as_str().unwrap(),
-        search_snapshot["change_id"].as_str().unwrap()
+        search_snapshot["state_id"].as_str().unwrap()
     );
 
     heddle(&["undo", "--redo"], Some(&auth_path)).unwrap();
@@ -1634,7 +1205,7 @@ fn thread_and_workspace_json_match_dirty_current_checkout() {
 }
 
 #[test]
-fn lightweight_thread_capture_marks_heavy_impact_and_merge_preview_reports_it() {
+fn lightweight_thread_capture_marks_heavy_impact_and_ready_blocks_it() {
     let main = setup_repo("base.txt", "base");
 
     let start_json = heddle(
@@ -1674,29 +1245,32 @@ fn lightweight_thread_capture_marks_heavy_impact_and_merge_preview_reports_it() 
             .any(|value| value.as_str() == Some("Cargo.toml"))
     );
 
-    let preview_json = heddle(
-        &["--output", "json", "merge", "feature/deps", "--preview"],
+    let ready_output = heddle_output(
+        &["--output", "json", "ready", "--thread", "feature/deps"],
         Some(main.path()),
     )
     .unwrap();
-    let preview: Value = serde_json::from_str(&preview_json).unwrap();
-    assert_eq!(preview["preview_only"], true);
-    assert_eq!(preview["promotion_suggested"], true);
-    assert_eq!(preview["heavy_impact_paths"][0], "Cargo.toml");
+    assert!(
+        !ready_output.status.success(),
+        "heavy-impact readiness must block"
+    );
+    let ready: Value = serde_json::from_slice(&ready_output.stdout).unwrap();
+    assert_eq!(ready["status"], "blocked");
+    assert_eq!(ready["report"]["heavy_impact_paths"][0], "Cargo.toml");
     assert_eq!(
-        preview["recommended_action"].as_str(),
-        Some("heddle land --thread feature/deps --no-push"),
-        "merge preview should suggest landing while surfacing heavy-impact review as advisory: {preview}"
+        ready["recommended_action"],
+        Value::Null,
+        "blocked readiness must not recommend landing: {ready}"
     );
     assert!(
-        preview["warnings"]
+        ready["blockers"]
             .as_array()
             .unwrap()
             .iter()
             .any(|value| value
                 .as_str()
                 .is_some_and(|warning| warning.contains("Heavy-impact change: Cargo.toml"))),
-        "merge preview should keep the heavy-impact review warning: {preview}"
+        "ready should explain the heavy-impact blocker: {ready}"
     );
 }
 
@@ -2203,7 +1777,7 @@ fn log_never_surfaces_unknown_principal_after_init() {
 // can never succeed (the thread still holds an active reservation, so `start`
 // returns `active_thread_reservation`), and the JSON `recovery_commands` list
 // was only the same `land` that just failed — a dead loop. The fix points the
-// recovery at `heddle switch <thread>`, which rebuilds the dedicated worktree at
+// recovery at `heddle thread switch <thread>`, which rebuilds the dedicated worktree at
 // the recorded path so the follow-up `land` succeeds.
 #[test]
 fn land_worktree_missing_recovery_points_at_switch_not_failing_loop() {
@@ -2234,14 +1808,7 @@ fn land_worktree_missing_recovery_points_at_switch_not_failing_loop() {
     fs::remove_dir_all(thread_path).expect("remove thread worktree dir");
 
     let output = heddle_output(
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/gone",
-            "--no-push",
-        ],
+        &["--output", "json", "land", "--thread", "feature/gone"],
         Some(main.path()),
     )
     .expect("land invocation runs");
@@ -2257,7 +1824,7 @@ fn land_worktree_missing_recovery_points_at_switch_not_failing_loop() {
     assert_eq!(envelope["kind"], "thread_worktree_missing");
     let primary = envelope["primary_command"].as_str().unwrap_or_default();
     assert_eq!(
-        primary, "heddle switch feature/gone",
+        primary, "heddle thread switch feature/gone",
         "primary recovery must rematerialize the existing thread via switch"
     );
 
@@ -2268,10 +1835,10 @@ fn land_worktree_missing_recovery_points_at_switch_not_failing_loop() {
         .map(|v| v.as_str().unwrap_or_default().to_string())
         .collect();
     assert!(
-        recovery.contains(&"heddle switch feature/gone".to_string()),
+        recovery.contains(&"heddle thread switch feature/gone".to_string()),
         "recovery_commands must include the rematerialize command: {recovery:?}"
     );
-    let land_command = "heddle land --thread feature/gone --no-push".to_string();
+    let land_command = "heddle land --thread feature/gone".to_string();
     assert!(
         recovery != vec![land_command.clone()],
         "recovery_commands must not be just the failing land command (the old dead loop): {recovery:?}"
@@ -2280,7 +1847,7 @@ fn land_worktree_missing_recovery_points_at_switch_not_failing_loop() {
     // checkout first.
     let switch_idx = recovery
         .iter()
-        .position(|c| c == "heddle switch feature/gone");
+        .position(|c| c == "heddle thread switch feature/gone");
     let land_idx = recovery.iter().position(|c| c == &land_command);
     if let (Some(s), Some(l)) = (switch_idx, land_idx) {
         assert!(s < l, "switch must precede the land retry: {recovery:?}");

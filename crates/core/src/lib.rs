@@ -5,8 +5,6 @@ pub mod actor;
 pub mod agent_fanout;
 pub mod agent_ops;
 pub mod approval_plan;
-pub mod cherry_pick_plan;
-pub mod clean_plan;
 pub mod clone_plan;
 pub mod collapse_plan;
 pub mod completion_plan;
@@ -14,9 +12,9 @@ pub mod context;
 pub mod context_plan;
 pub mod contract;
 pub mod daemon_plan;
-pub mod diagnose_plan;
 pub mod diff;
 pub mod doctor_docs_plan;
+pub mod doctor_plan;
 pub mod doctor_schemas_plan;
 pub mod fsck;
 pub mod gc_plan;
@@ -31,7 +29,7 @@ pub mod log_plan;
 pub mod maintenance_plan;
 pub mod marker_plan;
 pub mod merge;
-pub mod monitor_plan;
+pub mod onboarding;
 pub mod oplog_plan;
 pub mod oss_plan;
 pub mod prove_plan;
@@ -47,10 +45,9 @@ pub mod run_plan;
 pub mod save;
 pub mod semantic_plan;
 pub mod shell_plan;
+pub mod source_authority;
 pub mod spool_plan;
-pub mod stash_plan;
 pub mod status;
-pub mod switch_plan;
 pub mod thread;
 pub mod thread_lifecycle;
 pub mod thread_materialize;
@@ -66,11 +63,9 @@ pub mod workflow;
 
 pub use actor::{
     ActorChainEntry, ActorDoneOptions, ActorDonePlan, ActorEntryReport, ActorListReport,
-    ActorShowReport, ActorSpawnAttachMode, ActorSpawnError, ActorSpawnOptions, ActorSpawnPlan,
-    ActorSpawnThreadSource, assemble_actor_entry, build_spawn_entry, complete_actor_entry,
-    default_actor_thread_name, filter_actors, filter_actors_ref, is_explicit_identity, list_actors,
-    list_actors_from_registry, mark_actor_done, nonempty_attr, plan_actor_done, plan_actor_spawn,
-    resolve_spawn_thread_name, show_actor_by_session, show_actor_from_entry,
+    ActorShowReport, assemble_actor_entry, complete_actor_entry, filter_actors, filter_actors_ref,
+    list_actors, list_actors_from_registry, mark_actor_done, plan_actor_done,
+    show_actor_by_session, show_actor_from_entry,
 };
 pub use agent_fanout::{
     FanoutBaseFacts, FanoutBaseSelection, FanoutCommandSpec, FanoutLaneAvailability,
@@ -83,30 +78,18 @@ pub use agent_fanout::{
 };
 pub use agent_ops::{
     AgentCaptureOptions, AgentCapturePlan, AgentCapturePlanError, AgentCaptureThreadCheck,
-    AgentExplainReport, AgentReadyOptions, AgentReadyPlan, AgentReadyPlanError, AgentReleaseKind,
-    AgentReservationListReport, AgentReservationReport, AgentSessionUse, apply_agent_heartbeat,
-    apply_agent_release, assemble_agent_explain, assemble_agent_reservation,
-    assemble_agent_reservation_list, check_agent_capture_thread, classify_agent_session_use,
+    AgentExplainReport, AgentReadyOptions, AgentReadyPlan, AgentReadyPlanError,
+    AgentReservationListReport, AgentReservationReport, assemble_agent_explain,
+    assemble_agent_reservation, assemble_agent_reservation_list, check_agent_capture_thread,
     default_attach_reason_message, filter_agent_reservations, filter_agent_reservations_ref,
-    plan_agent_capture, plan_agent_ready, session_is_active, touch_agent_heartbeat,
-    touch_agent_release,
+    plan_agent_capture, plan_agent_ready,
 };
 pub use approval_plan::{
     EligibilitySummary, approval_recorded_message, approval_revoked_message,
-    approvals_empty_message, approvals_header, change_id_bytes_to_string,
-    eligibility_allowed_message, eligibility_approvals_counted_message,
-    eligibility_blocked_message, format_unix_secs_display, format_unix_secs_label,
-    plan_eligibility_summary, short_change_id, timestamp_secs_u64, unmet_requirement_line,
-};
-pub use cherry_pick_plan::{
-    CherryPickOutcome, CherryPickResolvePlan, CherryPickSuccessFacts,
-    cherry_pick_commit_not_found_kind, cherry_pick_commit_not_found_summary,
-    cherry_pick_human_message, cherry_pick_json_status, cherry_pick_should_refuse_not_found,
-    cherry_pick_status_applied, cherry_pick_status_committed, default_cherry_pick_commit_message,
-    plan_cherry_pick_resolve,
-};
-pub use clean_plan::{
-    clean_empty_message, clean_path_line, clean_paths_header, clean_result_lines, clean_result_text,
+    approvals_empty_message, approvals_header, eligibility_allowed_message,
+    eligibility_approvals_counted_message, eligibility_blocked_message, format_unix_secs_display,
+    format_unix_secs_label, plan_eligibility_summary, short_state_id, state_id_bytes_to_string,
+    timestamp_secs_u64, unmet_requirement_line,
 };
 pub use clone_plan::{
     AdoptPlan, AdoptPlanError, AdoptPlanOptions, CloneMode, ClonePlan, ClonePlanError,
@@ -200,6 +183,10 @@ pub use objects::{
     CollectingWarnings, HeddleError, NoopProgress, NoopWarnings, ProgressEvent, ProgressSink,
     TaskId, Warning, WarningSink,
 };
+pub use onboarding::{
+    OnboardingAction, OnboardingFacts, OnboardingMode, OnboardingPlan, OnboardingRepositoryState,
+    plan_repository_onboarding,
+};
 pub use oplog_plan::{
     OPLOG_RECOVER_DEFAULT_STRATEGY, OplogRecoverFacts, OplogRecoverStatus,
     oplog_recover_damaged_bytes, oplog_recover_damaged_range_display, oplog_recover_detail_fields,
@@ -251,10 +238,10 @@ pub use remote::{
     pull_should_materialize, pull_status, pull_tip_changed, pull_will_materialize,
     push_scope_label, push_status, redact_internal_hosted_paths, refuse_named_thread_tip_overwrite,
     remote_advice_kind, remote_missing_blocker, remote_pull_failure, remote_push_failure,
-    remote_urls_match, resolve_default_remote_name, resolved_default_remote_name,
-    show_plain_git_remote, show_remote, summarize_pull_outcome, summarize_push_outcome,
-    transport_error_message, transport_mismatch_blocker, uses_git_overlay_mirror_rpc,
-    uses_local_git_overlay_transport,
+    remote_urls_match, resolve_default_push_remote_name, resolve_default_remote_name,
+    resolved_default_remote_name, show_plain_git_remote, show_remote, summarize_pull_outcome,
+    summarize_push_outcome, transport_error_message, transport_mismatch_blocker,
+    uses_git_overlay_mirror_rpc, uses_local_git_overlay_transport,
 };
 pub use resolve_plan::{
     ResolveSideSelection, contains_line_start_conflict_markers, path_is_active_conflict,
@@ -277,14 +264,6 @@ pub use semantic_plan::{
 };
 #[cfg(feature = "semantic")]
 pub use semantic_plan::{hot_event_kind_token, human_hot_event_kind, map_hot_event_kind};
-pub use stash_plan::{
-    STASH_DEFAULT_LIST_MESSAGE, StashEntryOpPlan, StashMessageMode, StashMutationReport,
-    StashOutcomeStatus, StashPushPlan, StashShowBuckets, StashShowChangeKind,
-    bucket_stash_show_changes, format_stash_list_line, plan_stash_entry_op, plan_stash_push,
-    stash_entry_op_should_refuse, stash_list_entry_message, stash_list_is_empty,
-    stash_mutation_message, stash_push_should_refuse, stash_show_change_prefix,
-    stash_show_is_empty, stash_stack_is_empty,
-};
 pub use status::{
     ActorInfo, ChangesInfo, CoordinationStatus, FastShortStatusProfile, FastShortStatusReport,
     GitImportGuidanceReport, GitIndexPlan, MaterializedThreadInfo, ParallelThreadInfo,
@@ -380,16 +359,15 @@ pub use verify::{
 pub use visibility_plan::{visibility_tier_kind, visibility_tier_label};
 pub use workflow::{
     AUTO_LAND_CONFIDENCE_RECOVERY_ACTION, AUTO_LAND_CONFIDENCE_THRESHOLD, AutoLandPolicyInput,
-    LandPushOptions, LandPushPlan, LandPushPlanError, ReadyDecision, ReadyDecisionInput,
-    auto_land_confidence_recovery_action, auto_land_policy_blockers, change_id_matches_display,
-    change_id_matches_op_display, classify_ready_decision, has_integration_target,
+    ReadyDecision, ReadyDecisionInput, auto_land_confidence_recovery_action,
+    auto_land_policy_blockers, classify_ready_decision, has_integration_target,
     integrated_land_next_action, integration_blocker_recommended_action, integration_blockers,
     is_heavy_impact_advisory, is_integration_clear, is_manual_review_blocker,
     land_blockers_for_preview, land_checkpoint_message, land_performed_steps, land_skipped_steps,
     land_text_step, land_warnings_for_preview, non_staleness_blockers, op_targets_merge_state,
-    plan_land_push, quote_recommended_action_arg, ready_freshness_summary,
-    ready_integration_summary, ready_merge_type_label, ready_merge_type_summary,
-    ready_report_recommended_action, ready_scoped_next_action, ready_status_summary,
-    ready_verification_preflight_blocks, ready_verification_status_blocks, recovery_scope_checkout,
-    rewrite_land_action_for_default_remote, scope_action_to_repo, should_squash_land,
+    quote_recommended_action_arg, ready_freshness_summary, ready_integration_summary,
+    ready_merge_type_label, ready_merge_type_summary, ready_report_recommended_action,
+    ready_scoped_next_action, ready_status_summary, ready_verification_preflight_blocks,
+    ready_verification_status_blocks, recovery_scope_checkout, scope_action_to_repo,
+    should_squash_land, state_id_matches_display, state_id_matches_op_display,
 };

@@ -8,9 +8,9 @@ use super::commands_git_projection::SyncCommands;
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
-  heddle init                                  # initialize the current directory
-  heddle init my-project                       # initialize a subdirectory
-  heddle init --principal-name 'Ada Lovelace'  # set attribution at init time
+  heddle init                                                    # initialize here; existing Git becomes Git Overlay
+  heddle init my-project                                         # initialize a native Heddle subdirectory
+  heddle init --principal-name 'Ada Lovelace' --principal-email ada@example.com
 ")]
 pub struct InitArgs {
     /// Directory to initialize (default: current directory).
@@ -45,41 +45,32 @@ pub struct InitArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
-  heddle adopt                                # convert all local Git refs into native Heddle storage
-  heddle adopt --ref main                     # convert one branch or tag
-  heddle adopt ../repo --ref main --ref v1.0  # convert selected refs in another repo
+  heddle adopt                                # adopt all local Git refs into native Heddle storage
+  heddle adopt --ref main                     # adopt one branch or tag
+  heddle adopt ../repo --ref main --ref v1.0  # adopt selected refs in another repo
 
-Adoption converts Git history metadata into Heddle-native storage without modifying existing Git worktree changes.
+Adoption imports Git refs, makes Heddle the source authority, and retains `.git` for explicit Git Projection. Normal Git Overlay setup uses `heddle init` instead.
 ")]
 pub struct AdoptArgs {
-    /// Git repository to convert into Heddle-native storage (default: current directory).
+    /// Git repository to adopt into native Heddle storage (default: current directory).
     pub path: Option<std::path::PathBuf>,
 
-    /// Git branch or tag to convert. Repeat to convert selected refs; omit to convert all refs.
+    /// Git branch or tag to adopt. Repeat for selected refs; omit to adopt all refs.
     #[arg(long = "ref", value_name = "REF")]
     pub refs: Vec<String>,
 }
 
-/// Arguments for the `diagnose` command.
-#[derive(Clone, Debug, clap::Args)]
-pub struct DiagnoseArgs {
-    /// Include local timing for the diagnosis read path.
-    #[arg(long)]
-    pub profile: bool,
-}
-
 /// Arguments for the `doctor` command (and its subcommands).
 ///
-/// `heddle doctor` with no subcommand runs the legacy diagnose summary
-/// (repository, thread, actor, workspace health). `heddle doctor docs`
+/// `heddle doctor` with no subcommand reports repository, thread, actor,
+/// and workspace health. `heddle doctor docs`
 /// runs the documentation truthfulness checker — see [`DoctorDocsArgs`]
 /// for that surface.
 #[derive(Clone, Debug, clap::Args)]
 pub struct DoctorArgs {
     /// Include local timing for the diagnosis read path.
     ///
-    /// Only honoured when no subcommand is given (i.e. when `heddle
-    /// doctor` runs the legacy diagnose summary). Subcommands like
+    /// Only honoured when no subcommand is given. Subcommands like
     /// `heddle doctor docs` ignore it.
     #[arg(long, global = false)]
     pub profile: bool,
@@ -227,73 +218,23 @@ pub struct SnapshotArgs {
     pub paths: Vec<String>,
 }
 
-/// Arguments for the Git-compatible `commit` shim.
-///
-/// This is the daily-driver save path: it records a recoverable Heddle
-/// state, plus the matching Git checkpoint in Git-overlay repositories.
+/// Arguments for the Git-overlay `commit` command.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
-Behavior:
-  Heddle's commit auto-switches on the Git index: with nothing staged it commits all worktree paths (like `git commit -a`, incl. untracked); with staged paths it commits only the index (like `git commit`). Pass `--no-all` to force index-only even when nothing is staged; pass `--all` to include unstaged/untracked paths even when the index has staged paths.
-
 Examples:
-  heddle commit -m 'add login route'        # save work; Git-overlay repos also checkpoint Git
-  heddle commit -m 'wip' --confidence 0.6   # record honest confidence
-  heddle commit --no-all -m 'index only'    # commit only the Git index, never sweep the worktree
-  heddle commit --all -m 'save everything'  # include unstaged/untracked paths even when the Git index is staged
+  heddle capture -m 'add login route'
+  heddle commit
+  heddle commit -m 'add login route'
+
+Behavior:
+  Commits the complete captured tree and replaces the Git index with that tree.
+  Git pre-commit and commit-msg hooks are not run.
 ")]
 pub struct CommitArgs {
-    /// Commit/capture message. `--intent` is a deliberate alias: agents
-    /// (and humans) may prefer it to record WHY the change was made, not
-    /// just what changed — intent is first-class in Heddle's state model.
-    #[arg(short = 'm', long = "message", visible_alias = "intent")]
+    /// Git commit message. Defaults to the current capture intent.
+    #[arg(short = 'm', long = "message")]
     pub message: Option<String>,
-
-    /// Confidence level for the captured Heddle state (0.0-1.0).
-    #[arg(long, value_parser = parse_confidence)]
-    pub confidence: Option<f32>,
-
-    /// Include unstaged and untracked paths when the Git index already has staged changes.
-    #[arg(long)]
-    pub all: bool,
-
-    /// Force an index-only commit even when nothing is staged, instead of sweeping the worktree.
-    #[arg(long = "no-all", conflicts_with = "all")]
-    pub no_all: bool,
-
-    /// Allow a large or deletion-heavy capture without the safety preflight.
-    #[arg(short, long)]
-    pub force: bool,
 }
-
-/// Arguments for the Git-compatible `switch` shim.
-#[derive(Clone, Debug, clap::Args)]
-#[command(after_help = "\
-Examples:
-  heddle switch feature/auth       # switch to an existing thread
-  heddle switch hd-abc123          # move the worktree to a state
-  heddle start feature/auth --path ../feature-auth  # create an isolated thread
-")]
-pub struct SwitchArgs {
-    /// Git-style branch creation is guided to Heddle's isolated thread flow.
-    #[arg(short = 'b', short_alias = 'c')]
-    pub create: bool,
-
-    /// Thread name or state id.
-    pub target: String,
-
-    /// Discard uncommitted changes when checking out a state.
-    #[arg(short, long)]
-    pub force: bool,
-
-    /// Print only the target thread's checkout path on stdout.
-    #[arg(long, hide_short_help = true)]
-    pub print_cd_path: bool,
-}
-
-// `CheckpointArgs` lives in `commands_advanced.rs` (canonical
-// definition on main). Codex's foundation commit added a parallel
-// definition here; deleted during the rebase onto main.
 
 /// Arguments for the `log` command.
 #[derive(Clone, Debug, clap::Args)]
@@ -583,7 +524,7 @@ pub struct RetroArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Patch compatibility:
-  --patch output targets a clean `git apply` round-trip; patch(1) support is best-effort — use `git apply` for git extended headers (type changes, mode bits, empty add/delete hunks).
+  --patch output uses Git-compatible unified diff, including extended headers for type and mode changes.
 ")]
 pub struct DiffArgs {
     /// Base state (default: HEAD).
@@ -612,7 +553,7 @@ pub struct DiffArgs {
     #[arg(long)]
     pub context: bool,
 
-    /// Output patch in standard unified-diff format. Targets a clean `git apply` round-trip; `patch(1)` is best-effort.
+    /// Output a Git-compatible unified diff.
     #[arg(short = 'p', long = "patch")]
     pub patch: bool,
 }
@@ -638,16 +579,17 @@ pub struct RevertArgs {
 Examples:
   heddle undo                # roll back the most recent operation
   heddle undo -n 3           # roll back the last three operations
+  heddle undo --recover      # restore the state preserved by the last undo
   heddle undo --list         # preview undoable operations on this thread
   heddle undo --dry-run      # show what would change without applying
 
 Undoable operations:
   - heddle capture           (restores HEAD to the pre-capture parent)
-  - heddle merge (non-FF)    (restores HEAD + both thread refs)
-  - heddle merge (FF)        (restores HEAD + the merged-into thread ref to
+  - heddle land (non-FF)     (restores HEAD + both thread refs)
+  - heddle land (FF)         (restores HEAD + the landed-into thread ref to
                               the pre-merge tip; the merged-in thread is
                               untouched.)
-  - heddle switch            (restores HEAD to the pre-switch state)
+  - heddle thread switch     (restores HEAD to the previous thread state)
   - heddle thread create/drop/rename
   - heddle thread marker create/drop
   - heddle redact apply               (with --allow-redact-undo; removes the
@@ -657,7 +599,7 @@ Undoable operations:
   - heddle undo --redo                re-apply the most recently undone operation
 
 Not undoable (file a follow-up if you need one):
-  - heddle push / heddle fetch        (remote-affecting; out of scope)
+  - heddle push / pull                (remote-affecting; out of scope)
   - heddle redact purge apply         (destructive by design; irreversible)
   - heddle start <name> --path <dir>  (refused while the materialized worktree
                                        still exists — run `heddle thread drop
@@ -666,7 +608,6 @@ Not undoable (file a follow-up if you need one):
   - cross-worktree shared-backend undo (no worktree registry yet; single-
                                         worktree usage is the supported
                                         configuration for 0.3)
-  - redo across CLI invocations       (use `heddle undo --redo` in the same shell)
 ")]
 pub struct UndoArgs {
     /// Undo N operations.
@@ -689,6 +630,14 @@ pub struct UndoArgs {
     /// Re-apply operations that a prior `undo` rewound.
     #[arg(long, conflicts_with = "list")]
     pub redo: bool,
+
+    /// Restore the checkout-local state preserved by the most recent undo as
+    /// worktree changes. HEAD and the current thread remain unchanged.
+    #[arg(
+        long,
+        conflicts_with_all = ["steps", "list", "preview", "redo", "allow_redact_undo"]
+    )]
+    pub recover: bool,
 
     /// Explicit opt-in for undoing a `heddle redact apply`. The inverse
     /// removes the redaction record so subsequent materializes restore
@@ -726,7 +675,7 @@ Examples:
   heddle start scratch --path ../scratch            # place the checkout explicitly
   heddle start fix-flake --task 'fix CI flake'      # attach a task description
 
-Isolated checkouts are Heddle-managed working directories. They do not contain a .git directory; use Heddle commands inside them, and run raw Git commands from the parent Git-overlay repo when needed.
+Isolated checkouts are Heddle-managed working directories. They do not contain a .git directory; use Heddle commands inside them, and run Git-authority operations through Heddle from the parent Git-overlay repository.
 
 `heddle start <name> --path <dir>` is the one-step form of the advanced split flow: `heddle thread create <name>` creates the ref now, and `heddle thread promote <name> --path <dir>` materializes it later. Use the split form only when you intentionally need ref-first, checkout-later staging.
 
@@ -806,6 +755,12 @@ pub struct ThreadStartArgs {
     )]
     pub no_daemon: bool,
 
+    /// Allow this invocation to open System Settings and wait briefly for
+    /// FSKit approval. Requires an interactive terminal; otherwise setup
+    /// fails before opening a GUI.
+    #[arg(long)]
+    pub interactive_setup: bool,
+
     /// Redirect cargo's `target/` directory to a workspace-wide shared
     /// path (`.heddle/targets/<workspace-fingerprint>/`) instead of
     /// letting cargo create a per-thread `target/`. Saves multiples of
@@ -831,57 +786,6 @@ pub struct ThreadStartArgs {
     pub hydrate: bool,
 }
 
-/// Arguments for the `merge` command.
-#[derive(Clone, Debug, clap::Args)]
-#[command(after_help = "\
-Everyday managed-thread flow:
-  heddle land --thread feature/auth --no-push
-
-Advanced/manual merge examples:
-Examples:
-  heddle merge feature/auth --preview         # structured blockers + recommendation
-  heddle merge feature/auth -m 'merge auth'   # integrate with a commit message
-  heddle merge feature/auth --with-diff       # preview with the resulting diff
-  heddle merge feature/auth --no-semantic     # opt out to hunk-only merge
-")]
-pub struct MergeArgs {
-    /// Thread to merge.
-    pub thread: String,
-
-    /// Commit message for the merge.
-    #[arg(short = 'm', long)]
-    pub message: Option<String>,
-
-    /// Apply merge without committing.
-    #[arg(long)]
-    pub no_commit: bool,
-
-    /// Show semantic integration summary without applying changes.
-    #[arg(long)]
-    pub preview: bool,
-
-    /// Include the diff (parent ↔ thread tip) in the JSON output.
-    /// On `--preview`, this is the diff that *would* land. Without
-    /// `--preview` (a real merge) it echoes the diff that just landed.
-    #[arg(long = "with-diff")]
-    pub with_diff: bool,
-
-    /// Use the hunk-only merge strategy instead of the semantic merge
-    /// engine. Semantic merge is the default when the `semantic` cargo
-    /// feature is compiled in.
-    #[arg(long = "no-semantic")]
-    pub no_semantic: bool,
-
-    /// After a successful (non-preview) merge, also write a git commit
-    /// staging the paths the merge introduced. Fails if the worktree
-    /// has unrelated uncommitted changes or git is in an unexpected
-    /// state (detached HEAD, no `.git`, missing identity). With
-    /// `--preview`, the would-be git commit message is included in the
-    /// JSON output as `git_commit_preview` without writing anything.
-    #[arg(long = "git-commit")]
-    pub git_commit: bool,
-}
-
 /// Arguments for the `try` command — atomic-ephemeral-thread sugar.
 ///
 /// Implements item 3.1 from the heddle 6→8 plan: spin up an ephemeral
@@ -902,10 +806,8 @@ pub struct TryArgs {
     /// workspace strategy.
     #[arg(long, value_enum, default_value_t = WorkspaceModeArg::Materialized)]
     pub workspace: WorkspaceModeArg,
-    /// On zero exit, automatically merge the resulting thread into
-    /// the current thread. The merge runs with `--with-diff` so the
-    /// JSON payload includes the integrated diff. Default: off (the
-    /// command prints a hint pointing at `heddle merge`).
+    /// On zero exit, automatically land the resulting thread into
+    /// the current thread. Default: off.
     #[arg(long = "auto-merge")]
     pub auto_merge: bool,
 
@@ -965,7 +867,7 @@ pub struct SyncArgs {
 /// Arguments for the `land` command.
 #[derive(Clone, Debug, clap::Args)]
 pub struct LandArgs {
-    /// Thread to capture, integrate, and optionally push (default: current thread).
+    /// Thread to capture and integrate (default: current thread).
     #[arg(long = "thread")]
     pub thread: Option<String>,
 
@@ -976,18 +878,6 @@ pub struct LandArgs {
     /// Preserve per-State Git export instead of squashing the landed thread.
     #[arg(long)]
     pub no_squash: bool,
-
-    /// Push after integration completes.
-    #[arg(long)]
-    pub push: bool,
-
-    /// Skip push even if defaults would otherwise allow it.
-    #[arg(long)]
-    pub no_push: bool,
-
-    /// Remote to push to when `--push` is used.
-    #[arg(long)]
-    pub remote: Option<String>,
 }
 
 /// Arguments for `thread show`.
@@ -1231,7 +1121,7 @@ pub struct ResolveArgs {
 /// option-only thread selector.
 #[derive(Clone, Debug, clap::Args)]
 pub struct RemoteOperationArgs {
-    /// Remote name, local path, URL, or hosted address.
+    /// Heddle remote name, native repository path, or hosted address.
     pub remote: Option<String>,
 
     /// Thread to act on.
@@ -1246,8 +1136,14 @@ pub struct RemoteOperationArgs {
 
 /// Arguments for the `push` command.
 #[derive(Clone, Debug, clap::Args)]
+#[command(after_help = "\
+Git Overlay refs:
+  A normal push writes refs/heads/<thread> and refs/notes/heddle.
+  --all-threads writes every refs/heads/<thread> and refs/tags/<tag>, plus refs/notes/heddle.
+  JSON output lists changed refs in refs_written; verify with git ls-remote <remote>.
+")]
 pub struct PushArgs {
-    /// Remote name, local path, URL, or hosted address.
+    /// Heddle remote name, native repository path, or hosted address.
     pub remote: Option<String>,
 
     /// Thread to push.
@@ -1266,30 +1162,7 @@ pub struct PushArgs {
     #[arg(short, long)]
     pub force: bool,
 
-    /// Ad-hoc dual-push: after the primary push to the heddle remote
-    /// succeeds, also push to the named Git remote (default
-    /// `origin`). Use `--mirror` alone for `origin`, or `--mirror=<name>`
-    /// to target a specific Git remote. The secondary Git remote push is best-effort:
-    /// if it fails, the primary push is still reported as successful
-    /// and the mirror failure surfaces as a warning.
-    ///
-    /// `require_equals` pairs with `default_missing_value` (clap
-    /// requires both, or the next token after `--mirror` would be
-    /// swallowed as the Git remote mirror value — silently consuming the
-    /// positional primary remote).
-    #[arg(
-        long,
-        value_name = "REMOTE",
-        num_args = 0..=1,
-        require_equals = true,
-        default_missing_value = "origin",
-    )]
-    pub mirror: Option<String>,
-
-    /// Push every Heddle thread, Git tag visible to this checkout, and Heddle note ref in Git-overlay mode.
-    ///
-    /// Without this flag, Git-overlay push sends the current branch plus
-    /// refs/notes/heddle and skips Git tags.
+    /// Push every thread. In Git Overlay, also include every local Git tag.
     #[arg(long)]
     pub all_threads: bool,
 
@@ -1309,7 +1182,7 @@ impl PushArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Advanced (hidden) flags:
-  --lazy leaves blob content absent by design and hydrates it explicitly later. Hosted/network Heddle remotes only; Git-overlay pulls reject it today — lazy hydration over the Git transport is planned for v0.3.1.
+  --lazy leaves blob content absent by design and hydrates it explicitly later. Hosted/network Heddle remotes only.
 ")]
 pub struct PullArgs {
     #[command(flatten)]
@@ -1334,12 +1207,12 @@ pub struct PullArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Behavior:
-  Git-overlay clones land on the remote's default branch; Heddle remotes check out `main` (pass --thread to pick another). --depth N limits history on Heddle remotes only. Never prompts. Full details: `heddle help clone`.
+  Clones native Heddle or Git repositories and checks out the selected default branch. Git transport runs through Sley and does not require a Git executable. Never prompts. Full details: `heddle help clone`.
 
 Advanced/planned flags: see `heddle help clone`.
 
 Examples:
-  heddle clone https://example.com/repo.git ./clone   # Git repo: lands on the remote's default branch
+  heddle clone ../native-repo ./clone                # local native Heddle repository
   heddle clone heddle://host/repo ./clone --depth 1   # shallow Heddle clone: tip plus immediate parents
 ")]
 pub struct CloneArgs {
@@ -1357,10 +1230,8 @@ pub struct CloneArgs {
     #[arg(long)]
     pub depth: Option<u32>,
 
-    // Hosted/network remotes only; Git-overlay clones reject it today —
-    // lazy hydration over the Git transport is planned for v0.3.1. The
-    // user-facing exposition lives in the after-help breadcrumb above and
-    // `heddle help clone`.
+    // Hosted/network remotes only. The user-facing exposition lives in the
+    // after-help breadcrumb above and `heddle help clone`.
     /// Leave blob content absent by design and hydrate it explicitly later.
     #[arg(long, hide = true)]
     pub lazy: bool,
@@ -1371,9 +1242,8 @@ pub struct CloneArgs {
 
     // Only `blob:none` is accepted (a synonym for --lazy on hosted
     // remotes); git-style filters such as `tree:0` or `blob:limit=…` are
-    // rejected at parse time, and Git-overlay clones reject the flag at
-    // runtime until v0.3.1. See the after-help breadcrumb and
-    // `heddle help clone`.
+    // rejected at parse time. See the after-help breadcrumb and `heddle help
+    // clone`.
     /// Partial-clone filter spec (`blob:none` only).
     #[arg(long, hide = true, value_name = "SPEC", value_parser = parse_clone_filter_spec)]
     pub filter: Option<String>,
@@ -1394,9 +1264,9 @@ fn parse_clone_filter_spec(s: &str) -> Result<String, String> {
     }
 }
 
-/// Arguments for the `session start` command.
+/// Arguments for `agent provenance begin`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct SessionStartArgs {
+pub struct AgentProvenanceBeginArgs {
     /// Provider name (e.g., "anthropic", "openai").
     #[arg(long)]
     pub provider: String,
@@ -1410,9 +1280,9 @@ pub struct SessionStartArgs {
     pub policy: Option<String>,
 }
 
-/// Arguments for the `session segment` command.
+/// Arguments for `agent provenance segment`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct SessionSegmentArgs {
+pub struct AgentProvenanceSegmentArgs {
     /// Provider name (e.g., "anthropic", "openai").
     #[arg(long)]
     pub provider: String,
@@ -1426,23 +1296,23 @@ pub struct SessionSegmentArgs {
     pub policy: Option<String>,
 }
 
-/// Arguments for the `session end` command.
+/// Arguments for `agent provenance end`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct SessionEndArgs {
+pub struct AgentProvenanceEndArgs {
     /// Session ID to end (default: current session).
     pub session_id: Option<String>,
 }
 
-/// Arguments for the `session show` command.
+/// Arguments for `agent provenance show`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct SessionShowArgs {
+pub struct AgentProvenanceShowArgs {
     /// Session ID to show (default: current session).
     pub session_id: Option<String>,
 }
 
-/// Arguments for the `session list` command.
+/// Arguments for `agent provenance list`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct SessionListArgs {
+pub struct AgentProvenanceListArgs {
     /// Show only active sessions.
     #[arg(long)]
     pub active: bool,
@@ -1474,53 +1344,31 @@ pub struct WorktreeRemoveArgs {
     pub delete_thread: bool,
 }
 
-/// Arguments for the `actor spawn` command.
+/// Arguments for `agent presence list`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct ActorSpawnArgs {
-    /// Thread name for the actor (auto-generated if not specified).
-    #[arg(long)]
-    pub thread: Option<String>,
-
-    /// Attach the actor to the current thread instead of minting a new
-    /// `actor/<session>` thread. Use this to record the detected agent
-    /// identity without leaving a stray thread behind.
-    #[arg(long, conflicts_with = "thread")]
-    pub no_thread: bool,
-
-    /// AI provider name (e.g. `anthropic`).
-    #[arg(long)]
-    pub provider: Option<String>,
-
-    /// AI model identifier (e.g. `claude-sonnet-4-6`).
-    #[arg(long)]
-    pub model: Option<String>,
-}
-
-/// Arguments for the `actor list` command.
-#[derive(Clone, Debug, clap::Args)]
-pub struct ActorListArgs {
+pub struct AgentPresenceListArgs {
     /// Show only active actors.
     #[arg(long)]
     pub active: bool,
 }
 
-/// Arguments for the `actor show` command.
+/// Arguments for `agent presence show`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct ActorShowArgs {
+pub struct AgentPresenceShowArgs {
     /// Session ID to show (default: current thread actor).
     pub session: Option<String>,
 }
 
-/// Arguments for the `actor explain` command.
+/// Arguments for `agent presence explain`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct ActorExplainArgs {
+pub struct AgentPresenceExplainArgs {
     /// Session ID to explain (default: current thread actor).
     pub session: Option<String>,
 }
 
-/// Arguments for the `actor done` command.
+/// Arguments for `agent presence complete`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct ActorDoneArgs {
+pub struct AgentPresenceCompleteArgs {
     /// Session ID to mark as complete (default: current thread actor).
     #[arg(long)]
     pub session: Option<String>,
@@ -1545,18 +1393,7 @@ pub struct AgentReserveArgs {
     #[arg(long)]
     pub task_id: Option<String>,
 
-    /// Bind the reservation's liveness to an external process pid
-    /// instead of this one-shot CLI invocation's pid.
-    ///
-    /// `heddle agent reserve` exits as soon as the reservation is
-    /// recorded, so its own pid is dead by the time another agent
-    /// checks liveness — that means the dead-pid reaper would
-    /// immediately recycle the reservation. With `--hold-for-pid`
-    /// the orchestrator passes its own (long-lived) pid; the
-    /// reservation lives as long as that process does, and a SIGKILL
-    /// or normal exit on the orchestrator triggers automatic reap.
-    ///
-    /// This is the daemon-ownership pattern without shipping a daemon.
+    /// Reap the lease early when this long-lived owner process exits.
     #[arg(long, value_name = "PID")]
     pub hold_for_pid: Option<u32>,
 }
@@ -1564,17 +1401,25 @@ pub struct AgentReserveArgs {
 /// Arguments for `agent heartbeat`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct AgentHeartbeatArgs {
-    /// Agent session id.
+    /// Writer lease id returned by `agent reserve`.
     #[arg(long)]
-    pub session: String,
+    pub lease: String,
+
+    /// Bearer token returned by `agent reserve`.
+    #[arg(long, env = "HEDDLE_RESERVATION_TOKEN", hide_env_values = true)]
+    pub token: String,
 }
 
 /// Arguments for `agent release`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct AgentReleaseArgs {
-    /// Agent session id.
+    /// Writer lease id returned by `agent reserve`.
     #[arg(long)]
-    pub session: String,
+    pub lease: String,
+
+    /// Bearer token returned by `agent reserve`.
+    #[arg(long, env = "HEDDLE_RESERVATION_TOKEN", hide_env_values = true)]
+    pub token: String,
 
     /// Terminal status to record.
     #[arg(long, default_value = "complete")]
@@ -1754,14 +1599,16 @@ pub struct AgentFanoutStartArgs {
     pub coordination_discussion_id: Option<String>,
 }
 
-/// Arguments for `agent capture`. Mirrors `heddle capture` with an
-/// extra `--session` guard so an orchestrator can prove it owns the
-/// thread before writing.
+/// Arguments for `agent capture` under a current reservation lease.
 #[derive(Clone, Debug, clap::Args)]
 pub struct AgentCaptureArgs {
-    /// Agent session id obtained from `agent reserve`.
+    /// Writer lease id returned by `agent reserve`.
     #[arg(long)]
-    pub session: String,
+    pub lease: String,
+
+    /// Bearer token returned by `agent reserve`.
+    #[arg(long, env = "HEDDLE_RESERVATION_TOKEN", hide_env_values = true)]
+    pub token: String,
 
     /// Capture intent / commit message.
     #[arg(long, short = 'm', alias = "intent")]
@@ -1772,13 +1619,16 @@ pub struct AgentCaptureArgs {
     pub confidence: Option<f32>,
 }
 
-/// Arguments for `agent ready`. Mirrors `heddle ready` with the same
-/// `--session` guard.
+/// Arguments for `agent ready` under a writer lease.
 #[derive(Clone, Debug, clap::Args)]
 pub struct AgentReadyArgs {
-    /// Agent session id obtained from `agent reserve`.
+    /// Writer lease id returned by `agent reserve`.
     #[arg(long)]
-    pub session: String,
+    pub lease: String,
+
+    /// Bearer token returned by `agent reserve`.
+    #[arg(long, env = "HEDDLE_RESERVATION_TOKEN", hide_env_values = true)]
+    pub token: String,
 
     /// Optional summary message.
     #[arg(long, short = 'm')]

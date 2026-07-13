@@ -14,7 +14,7 @@ Schema for any verb with:
     heddle schemas                    # list registered schema verbs
     heddle schemas <verb>             # e.g. heddle schemas status
     heddle schemas log --reflog       # subcommands taking --flags work too
-    heddle schemas merge --preview --output text
+    heddle schemas agent ready --output text
     heddle schemas status
 
 (Indented as plain text rather than a fenced block so the
@@ -99,8 +99,8 @@ specifiers. Pass any of them — they all resolve to the same change ID:
   thread's tip.
 * **Thread name** — resolves to that thread's tip.
 
-Verbs covered: `show`, `diff`, `revert`, `cherry-pick`,
-`switch`, `query --attribution --state`, `log --since`, `review show`,
+Verbs covered: `show`, `diff`, `revert`, `query --attribution --state`,
+`log --since`, `review show`,
 `review sign`, `discuss open|list|resolve --state`, `retro --since`.
 The `heddle log --output json` `change_id` field is the canonical short form
 that downstream verbs consume.
@@ -132,8 +132,8 @@ metadata only; it does not import Git history or write Git-tracked files.
     "left Git-tracked files untouched"
   ],
   "message": "Initialized Heddle data in /repo/.heddle for Git-overlay workflows",
-  "next_action": "heddle adopt --ref main",
-  "recommended_action": "heddle adopt --ref main"
+  "next_action": "heddle capture -m \"...\"",
+  "recommended_action": "heddle capture -m \"...\""
 }
 ```
 
@@ -148,7 +148,7 @@ metadata only; it does not import Git history or write Git-tracked files.
 | `installed_heddleignore`, `principal_configured` | bool | required | Side effects outside `.heddle`, if any. `installed_heddleignore` is currently false; init does not install ignore-policy files. Git-overlay init uses local Git excludes only for Heddle metadata. |
 | `side_effects` | array<string> | required | Human-readable, machine-preserved list of what init changed or intentionally left untouched. |
 | `message` | string | required | Human summary. |
-| `next_action`, `recommended_action` | string \| null | required | Primary verification-guided next command. In a Git repo this is the explicit `heddle adopt --ref <branch>` command. |
+| `next_action`, `recommended_action` | string \| null | required | Primary verification-guided next command. Git Overlay init proceeds directly to the normal save loop. |
 
 Note: the `verification` block is intentionally omitted from mutation
 replies. Run `heddle verify --output json` (or `heddle status --output
@@ -347,22 +347,22 @@ standard recovery fields plus nested verification proof:
 {
   "error": "Repository is not verified: dirty_worktree",
   "exit_code": 1,
-  "hint": "Run `heddle commit -m <message>` to clear the primary verification blocker.",
+  "hint": "Run `heddle capture -m <message>` to clear the primary verification blocker.",
   "kind": "verify_failed",
   "unsafe_condition": "worktree has unsaved changes",
   "would_change": "`heddle verify` is a strict proof gate and returns nonzero until every verification check is clean",
   "preserved": "verify is observe-only; repository objects, refs, index, and worktree files were left unchanged",
-  "primary_command": "heddle commit -m <message>",
+  "primary_command": "heddle capture -m <message>",
   "primary_command_template": {
-    "action": "heddle commit -m <message>",
+    "action": "heddle capture -m <message>",
     "argv_template": ["heddle", "commit", "-m", "<message>"],
     "required_inputs": ["message"],
     "agent_may_fill": true
   },
-  "recovery_commands": ["heddle commit -m <message>", "heddle verify"],
+  "recovery_commands": ["heddle capture -m <message>", "heddle verify"],
   "recovery_action_templates": [
     {
-      "action": "heddle commit -m <message>",
+      "action": "heddle capture -m <message>",
       "argv_template": ["heddle", "commit", "-m", "<message>"],
       "required_inputs": ["message"],
       "agent_may_fill": true
@@ -384,12 +384,10 @@ standard recovery fields plus nested verification proof:
 ## Core loop mutation schemas
 
 These verbs are the everyday loop agents use after discovery through
-`heddle help --output json`: capture state, save it as a
-Git-compatible commit when needed, undo/redo the last logical
-operation, and ask whether a thread is ready. The lower-level
-`checkpoint` command is documented here as an advanced native surface
-for writing a Git-facing commit boundary; the first-run loop should
-prefer `commit`.
+`heddle help --output json`: capture state, undo/redo the last logical
+operation, and ask whether a thread is ready. In Git Overlay repositories,
+`heddle commit` writes the captured state to the authoritative `.git` store
+through Sley; it does not require a Git executable.
 
 `heddle capture --output json` emits:
 
@@ -398,7 +396,7 @@ prefer `commit`.
   "output_kind": "capture",
   "status": "captured",
   "action": "capture",
-  "change_id": "hd-capture123",
+  "state_id": "hd-capture123",
   "content_hash": "deadbeef",
   "intent": "tighten parser validation",
   "confidence": 0.86,
@@ -414,42 +412,21 @@ prefer `commit`.
 }
 ```
 
-`heddle checkpoint --output json` emits:
-
-```json
-{
-  "output_kind": "checkpoint",
-  "status": "checkpointed",
-  "action": "checkpoint",
-  "change_id": "hd-capture123",
-  "git_commit": "abc123",
-  "summary": "wrote Git checkpoint abc123 for hd-capture123",
-  "capability": "git-overlay",
-  "storage_model": "git+heddle-sidecar",
-  "committed_at": "2026-05-23T00:00:00Z"
-}
-```
-
-`heddle commit --output json` emits:
+`heddle commit --output json` emits after writing the current captured state
+to Git Overlay source history. `-m/--message` is optional and defaults to the
+capture intent. The command commits the complete captured tree, replaces the
+Git index with that tree, and does not run Git `pre-commit` or `commit-msg`
+hooks.
 
 ```json
 {
   "output_kind": "commit",
   "status": "committed",
-  "action": "commit",
-  "change_id": "hd-capture123",
-  "git_commit": "abc123",
-  "summary": "captured Heddle state and wrote Git checkpoint",
-  "confidence": 0.9,
-  "principal": {"name": "Ada Agent", "email": "ada-agent@example.com"},
-  "agent": {
-    "provider": "codex",
-    "model": "gpt-5-codex"
-  },
-  "next_action": null,
-  "next_action_template": null,
+  "state_id": "hd-head456",
+  "git_commit": "e97f61a",
+  "summary": "committed",
   "recommended_action": null,
-  "recommended_action_template": null
+  "verification": {"verified":true,"status":"clean","repository_mode":"git-overlay","heddle_initialized":true,"git_branch":"main","heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"clean","mapping_state":"clean","remote_drift":"clean","active_operation":null,"default_remote":"origin","clone_verification":"verified","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Git overlay and Heddle agree","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}
 }
 ```
 
@@ -462,10 +439,33 @@ prefer `commit`.
   "action": "undo",
   "message": "restored previous logical operation",
   "batches": [],
-  "next_action": null,
-  "next_action_template": null,
+  "next_action": "heddle undo --recover",
+  "next_action_template": {"program": "heddle", "args": ["undo", "--recover"], "placeholders": []},
   "recommended_action": null,
-  "recommended_action_template": null
+  "recommended_action_template": null,
+  "recovery_state": "hd-before123",
+  "recovery_marker": ".undo-recovery"
+}
+```
+
+`heddle undo --recover` emits JSON when invoked with `--output json`. It
+materializes the checkout-local state preserved by the most recent undo as
+dirty worktree changes. `HEAD` and the attached thread remain unchanged, so
+the recovered work can be captured as new history:
+
+```json
+{
+  "output_kind": "undo_recover",
+  "status": "completed",
+  "action": "recover",
+  "message": "restored the state preserved by the most recent undo as worktree changes",
+  "batches": [],
+  "next_action": "heddle capture -m \"...\"",
+  "next_action_template": {"program": "heddle", "args": ["capture", "-m", "<message>"], "placeholders": ["message"]},
+  "recommended_action": "heddle capture -m \"...\"",
+  "recommended_action_template": {"program": "heddle", "args": ["capture", "-m", "<message>"], "placeholders": ["message"]},
+  "recovery_state": "hd-before123",
+  "recovery_marker": ".undo-recovery"
 }
 ```
 
@@ -509,8 +509,8 @@ saves a Heddle state without recommending a Git checkpoint.
   "message": "Thread 'feature/parser' is ready to integrate",
   "blockers": [],
   "warnings": [],
-  "next_action": "heddle land --thread feature/parser --no-push",
-  "recommended_action": "heddle land --thread feature/parser --no-push",
+  "next_action": "heddle land --thread feature/parser",
+  "recommended_action": "heddle land --thread feature/parser",
   "captured": true,
   "captured_state": "hd-sqr398dvx9ay",
   "thread_state": "ready",
@@ -534,7 +534,7 @@ saves a Heddle state without recommending a Git checkpoint.
     "blockers": []
   },
   "report": {},
-  "verification": {}
+  "verification": {"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":"origin","clone_verification":"verified","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}
 }
 ```
 
@@ -552,10 +552,8 @@ saves a Heddle state without recommending a Git checkpoint.
   "git_commit": "abc123",
   "synced": false,
   "integrated": true,
-  "pushed": false,
-  "pushed_remote": null,
   "performed_steps": ["merge", "checkpoint"],
-  "skipped_steps": ["capture(no changes)", "sync(current)", "push(not requested)"],
+  "skipped_steps": ["capture(no changes)", "sync(current)"],
   "merge_state": "hd-land123",
   "chosen_path": "capture_sync_merge_checkpoint"
 }
@@ -565,23 +563,22 @@ saves a Heddle state without recommending a Git checkpoint.
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
-| `change_id` | string | required when present | Stable Heddle state ID for the captured or committed state. |
+| `change_id` | string | required when present | Stable Heddle state ID for the captured state. |
+| `state_id`, `git_commit` | string | required for `commit` | Captured Heddle state and the Git commit written to the authoritative `.git` store. |
 | `content_hash` | string | required for `capture` | Short content hash for the captured state. |
 | `intent` | string \| null | required for `capture` | User-provided intent/message, when supplied. |
 | `confidence` | number \| null | required for `capture` | Agent or human confidence score, when supplied. |
-| `principal`, `agent` | object / object \| null | required for `capture`/`commit` | Accountable principal and optional agent/model provenance recorded on the captured state. |
+| `principal`, `agent` | object / object \| null | required for `capture` | Accountable principal and optional agent/model provenance recorded on the captured state. |
 | `promotion_suggested`, `heavy_impact_paths` | bool / array<string> | required for `capture` | Thread-promotion signal. Empty array if none. |
-| `output_kind`, `status` | string \| null | required when present | Stable output discriminator and machine status; `undo` and `undo --redo` report `completed` or `preview`. |
+| `output_kind`, `status` | string \| null | required when present | Stable output discriminator and machine status; `undo`, `undo --redo`, and `undo --recover` report `completed`; undo/redo previews report `preview`. |
 | `message`, `summary` | string \| null | required when present | Human-readable result. |
 | `next_action`, `recommended_action` | string \| null | required | Primary next command, if one is known. |
 | `next_action_template`, `recommended_action_template` | object \| null | required | Fillable template metadata (`argv_template`, `required_inputs`, `agent_may_fill`) for the next/recommended command; present for every valid action, `null` when none. |
-| `git_commit` | string \| null | required for `checkpoint`/`commit` | Git commit OID produced by the checkpoint path; `null` for native Heddle commits. |
-| `capability`, `storage_model`, `committed_at` | string | required for `checkpoint` | Repository mode, storage model, and checkpoint timestamp. |
-| `status` | string | required for `capture`/`checkpoint`/`commit`/`ready`/`land` | Machine-stable success status for the operation. |
-| `action` | string | required for `capture`/`checkpoint`/`commit`/`undo`/`undo --redo`/`land` | Logical operation name. |
-| `batches` | array<object> | required for `undo`/`undo --redo` | Oplog batches affected by the operation. Empty if none are reported. |
+| `status` | string | required for `capture`/`ready`/`land` | Machine-stable success status for the operation. |
+| `action` | string | required for `capture`/`undo`/`undo --redo`/`undo --recover`/`land` | Logical operation name. Recovery reports `recover`. |
+| `batches` | array<object> | required for `undo`/`undo --redo`/`undo --recover` | Oplog batches affected by the operation. Recovery reports an empty array. |
 | `thread_state`, `readiness`, `report` | string \| null / object / object | required for `ready` | Readiness result, stable human/machine summary, and structured preview report. `readiness` always carries the same fields; non-applicable checks/integration/freshness/merge details are represented with explicit `not_run`, `not checked`, or `n/a` values and reasons rather than omitted. |
-| `thread`, `captured`, `checkpointed`, `synced`, `integrated`, `pushed`, `pushed_remote` | string / bool / string \| null | required for `land` | Thread landed, which local/publish steps completed, and the remote name pushed when publish ran. |
+| `thread`, `captured`, `checkpointed`, `synced`, `integrated` | string / bool | required for `land` | Thread landed and which local integration steps completed. |
 | `performed_steps`, `skipped_steps`, `merge_state`, `chosen_path` | array<string> / string \| null / string | required for `land` | Machine-readable path through the land loop and the merge state landed, when one exists. |
 | `verification` | object \| null | required | Post-operation verification proof. `null` only for undo / undo --redo paths that cannot compute it. |
 
@@ -613,7 +610,7 @@ add/modify/delete badges from `diff` alone:
 ```
 
 A state-to-state diff (`heddle diff <a> <b>`) instead emits `changes` as a
-flat `array<object>` (the shape `merge --with-diff` embeds):
+flat `array<object>`:
 
 ```json
 {
@@ -632,54 +629,6 @@ flat `array<object>` (the shape `merge --with-diff` embeds):
 | `changes` | object \| array<object> | required | Worktree mode: `{modified, added, deleted}` category arrays (each entry carries `path`, `kind`, and the other per-file diff fields; a `renamed` entry buckets under `modified`). State-to-state mode: a flat `array<object>` of file-level or semantic changes. Empty when there are no changes. |
 | `semantic_changes` | array<object> \| null | optional | Semantic diff entries when semantic analysis is requested and available. |
 | `context`, `broader_guidance` | array<object> \| null | optional | Context snippets and broader guidance when requested. |
-
----
-
-## `heddle merge --preview --output json`
-
-Preview a merge without changing the worktree.
-
-### Sample
-
-```json
-{
-  "status": "preview",
-  "action": "merge",
-  "message": "Would fast-forward main to hd-feature123",
-  "fast_forward": true,
-  "preview_only": true,
-  "merge_state": null,
-  "conflicts": [],
-  "preview_summary": ["fast-forward feature/parser into main"],
-  "thread_state": "ready",
-  "freshness": "current",
-  "changed_paths": ["src/parser.rs"],
-  "changed_path_count": 1,
-  "impact_categories": [],
-  "promotion_suggested": false,
-  "heavy_impact_paths": [],
-  "merge_relation": "fast_forward",
-  "conflict_count": 0,
-  "thread_health": "ready",
-  "blockers": [],
-  "warnings": [],
-  "next_action": "heddle land --thread feature/parser --push",
-  "recommended_action": "heddle land --thread feature/parser --push",
-  "diff": {}
-}
-```
-
-### Fields
-
-| Field | Type | Optionality | Semantics |
-|-------|------|-------------|-----------|
-| `status` | string \| null | required | Preview status. |
-| `would_merge` | bool | required | Whether the preview believes the merge can proceed. |
-| `blockers` | array<string> \| null | required | Reasons merge should not proceed. |
-| `recommended_action`, `recommended_action_template` | string \| null, object \| null | required | Primary next command and its fillable template when one exists. |
-| `merge_relation` | string \| null | required | Structural relationship between the current state and incoming thread, such as `already_up_to_date`, `fast_forward`, `clean_apply`, or `path_conflicts`. |
-| `diff` | object \| null | required | Preview diff payload. |
-| `verification` | object \| null | required | Repository verification state after the preview. Preview mode does not mutate refs or the worktree, so this proves the decision surface was computed from a verified repository state. |
 
 ---
 
@@ -710,7 +659,7 @@ continue.
 | `message` | string | required | Human-readable result. |
 | `thread` | object \| null | required | Thread summary when available. |
 | `path`, `execution_path` | string \| null | required | Materialized checkout path and effective execution path. |
-| `fskit_readiness` | object \| null | optional | macOS FSKit enable state for virtualized starts when the CLI made an FSKit-specific decision; includes `state`, `backend`, `action`, and optional `settings_url`. |
+| `fskit_readiness` | object \| null | optional | macOS FSKit enable state for virtualized starts when the CLI made an FSKit-specific decision; includes `state`, `backend`, `action`, and optional `settings_url`. Disabled FSKit fails without opening System Settings; an interactive terminal may opt into the bounded approval flow with `--interactive-setup`. |
 | `verification` | object \| null | required | Post-start verification proof. |
 
 ---
@@ -804,8 +753,8 @@ Move captured paths between isolated threads.
   "from_thread": "feature/parser",
   "to_thread": "feature/tests",
   "moved_paths": ["src/parser.rs"],
-  "source_change_id": "hd-src123",
-  "target_change_id": "hd-tgt456",
+  "source_state_id": "hd-src123",
+  "target_state_id": "hd-tgt456",
   "message": "Moved selected paths between threads"
 }
 ```
@@ -841,8 +790,8 @@ Report manual follow-up after a blocked or refreshed thread.
   "message": "Thread requires a manual follow-up",
   "blockers": [],
   "warnings": [],
-  "next_action": "heddle land --thread feature/parser --no-push",
-  "recommended_action": "heddle land --thread feature/parser --no-push",
+  "next_action": "heddle land --thread feature/parser",
+  "recommended_action": "heddle land --thread feature/parser",
   "thread": "feature/parser"
 }
 ```
@@ -1080,7 +1029,7 @@ verification.
   "markers": [
     {
       "name": "verified-parser",
-      "change_id": "hd-def456"
+      "state_id": "hd-def456"
     }
   ]
 }
@@ -1092,7 +1041,7 @@ verification.
 {
   "output_kind": "thread_marker_create",
   "name": "verified-parser",
-  "change_id": "hd-def456",
+  "state_id": "hd-def456",
   "message": "Created marker 'verified-parser' at hd-def456"
 }
 ```
@@ -1103,7 +1052,7 @@ verification.
 {
   "output_kind": "thread_marker_delete",
   "name": "verified-parser",
-  "change_id": null,
+  "state_id": null,
   "message": "Deleted marker 'verified-parser'"
 }
 ```
@@ -1114,7 +1063,7 @@ verification.
 {
   "output_kind": "thread_marker_show",
   "name": "verified-parser",
-  "change_id": "hd-def456",
+  "state_id": "hd-def456",
   "message": "Marker 'verified-parser' -> hd-def456"
 }
 ```
@@ -1132,13 +1081,14 @@ verification.
   "status": "cloned",
   "success": true,
   "cloned": true,
-  "transport": "git",
-  "remote": "file:///tmp/source.git",
+  "transport": "heddle",
+  "remote": "heddle://example.com/team/repo",
   "local": "work",
   "branch": "main",
-  "repository_capability": "git-overlay",
-  "commits_imported": 3,
-  "states_created": 3
+  "repository_capability": "native-heddle",
+  "objects": 42,
+  "state": "hs-head456",
+  "verification": {"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":"origin","clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}
 }
 ```
 
@@ -1150,8 +1100,8 @@ verification.
   "remotes": [
     {
       "name": "origin",
-      "url": "file:///tmp/source.git",
-      "source": "git",
+      "url": "heddle://example.com/team/repo",
+      "source": "heddle",
       "is_default": true
     }
   ]
@@ -1164,8 +1114,8 @@ verification.
 {
   "output_kind": "remote_show",
   "name": "origin",
-  "url": "file:///tmp/source.git",
-  "source": "git",
+  "url": "heddle://example.com/team/repo",
+  "source": "heddle",
   "is_default": true
 }
 ```
@@ -1178,22 +1128,22 @@ verification.
   "status": "completed",
   "action": "remote_add",
   "name": "origin",
-  "url": "file:///tmp/source.git",
+  "url": "heddle://example.com/team/repo",
   "default": null,
-  "message": "Added remote"
+  "message": "Added remote",
+  "verification": {"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":"origin","clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}
 }
 ```
 
-## `heddle actor spawn --output json`
+## `heddle agent presence show --output json`
 
-`heddle actor spawn|show --output json` emit an actor envelope with post-command
-verification. Lists are also enveloped so agents never have to special-case a raw
-array.
+Presence inspection emits an envelope with post-command verification. Lists are
+also enveloped so agents never have to special-case a raw array.
 
 ```json
 {
-  "output_kind": "actor_spawn",
-  "actor": {
+  "output_kind": "agent_presence_show",
+  "presence": {
     "session_id": "agent-4dvta2dd6as3uzjrszmq",
     "thread": "actor/agent-4dvta2dd6as3uzjrszmq",
     "base_state": "hd-sqr398dvx9ay",
@@ -1214,12 +1164,12 @@ array.
 
 ---
 
-## `heddle actor list --output json`
+## `heddle agent presence list --output json`
 
 ```json
 {
-  "output_kind": "actor_list",
-  "actors": [],
+  "output_kind": "agent_presence_list",
+  "presence": [],
   "active_only": false,
   "verification": {
     "verified": true,
@@ -1246,11 +1196,11 @@ array.
 
 ---
 
-## `heddle actor done --output json`
+## `heddle agent presence complete --output json`
 
 ```json
 {
-  "output_kind": "actor_done",
+  "output_kind": "agent_presence_complete",
   "session_id": "agent-4dvta2dd6as3uzjrszmq",
   "status": "complete",
   "thread": "actor/agent-4dvta2dd6as3uzjrszmq",
@@ -1260,11 +1210,11 @@ array.
 
 ---
 
-## `heddle actor explain --output json`
+## `heddle agent presence explain --output json`
 
 ```json
 {
-  "output_kind": "actor_explain",
+  "output_kind": "agent_presence_explain",
   "attached": false,
   "reason": "No active actor is registered for this checkout.",
   "repository": "/work/project",
@@ -1282,7 +1232,7 @@ array.
     "principal_email": "agent@example.com",
     "signals": ["CODEX_THREAD_ID"]
   },
-  "recommended_action": "heddle actor spawn --no-thread --provider openai --model gpt-5",
+  "recommended_action": "heddle agent reserve --thread main",
   "verification": {
     "verified": true,
     "status": "clean",
@@ -1310,8 +1260,7 @@ array.
 
 ## `heddle agent serve --output json`
 
-Foreground daemon success emits one JSON value when the daemon exits cleanly.
-Background startup refusals use the shared error envelope.
+The foreground daemon emits one JSON value when it exits cleanly.
 
 ```json
 {
@@ -1374,34 +1323,48 @@ Background startup refusals use the shared error envelope.
 
 ## `heddle agent reserve --output json`
 
-`heddle agent reserve|heartbeat|release --output json` emit:
+`heddle agent reserve --output json` emits the bearer token once. Heartbeat
+and release emit the same reservation shape without `token`:
 
 ```json
 {
   "reservation": {
-    "session_id": "agent-kvd9yn2z5kk3ehm0x8be",
-    "reservation_token": "agent-k3f2w58q7f8rmm3qj0v8",
+    "lease_id": "lease-kvd9yn2z5kk3ehm0x8be",
+    "actor_session_id": "agent-k3f2w58q7f8rmm3qj0v8",
     "thread": "main",
     "anchor_state": "hd-sqr398dvx9ay",
     "anchor_root": "32fc0aff",
+    "task_assignment_id": null,
     "status": "active",
     "path": null,
-    "task": "implement parser",
-    "provider": "openai",
-    "model": "gpt-5",
-    "harness": "codex",
-    "thinking_level": "high",
-    "probe_source": "app_protocol",
-    "probe_confidence": 0.98
-  }
+    "heartbeat_at": "2026-07-12T23:15:00Z",
+    "lease_expires_at": "2026-07-12T23:20:00Z",
+    "liveness": "alive"
+  },
+  "token": "hwl_secret-token-material",
+  "verification": {"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":"origin","clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}
 }
+```
+
+---
+
+## `heddle agent heartbeat --output json`
+
+```json
+{"reservation":{"lease_id":"lease-kvd9yn2z5kk3ehm0x8be","actor_session_id":"agent-k3f2w58q7f8rmm3qj0v8","thread":"main","anchor_state":"hd-sqr398dvx9ay","anchor_root":"32fc0aff","task_assignment_id":null,"status":"active","path":null,"heartbeat_at":"2026-07-12T23:16:00Z","lease_expires_at":"2026-07-12T23:21:00Z","liveness":"alive"},"token":null,"verification":{"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":null,"clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}}
+```
+
+## `heddle agent release --output json`
+
+```json
+{"reservation":{"lease_id":"lease-kvd9yn2z5kk3ehm0x8be","actor_session_id":"agent-k3f2w58q7f8rmm3qj0v8","thread":"main","anchor_state":"hd-sqr398dvx9ay","anchor_root":"32fc0aff","task_assignment_id":null,"status":"released","path":null,"heartbeat_at":"2026-07-12T23:16:00Z","lease_expires_at":"2026-07-12T23:16:00Z","liveness":"released"},"token":null,"verification":{"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":null,"clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}}
 ```
 
 ---
 
 ## `heddle agent capture --output json`
 
-`agent capture` is the session-validated form of `capture`; the success
+`agent capture` is the token-authenticated writer-lease form of `capture`; the success
 shape is the same capture envelope.
 
 ```json
@@ -1409,7 +1372,7 @@ shape is the same capture envelope.
   "output_kind": "capture",
   "status": "captured",
   "action": "capture",
-  "change_id": "hd-sqr398dvx9ay",
+  "state_id": "hd-sqr398dvx9ay",
   "content_hash": "sha256:...",
   "intent": "agent capture",
   "confidence": 0.8,
@@ -1423,7 +1386,7 @@ shape is the same capture envelope.
 
 ## `heddle agent ready --output json`
 
-`agent ready` is the session-validated form of `ready`; the success shape is
+`agent ready` is the token-authenticated writer-lease form of `ready`; the success shape is
 the same ready envelope.
 
 ```json
@@ -1868,9 +1831,9 @@ the same ready envelope.
 
 ---
 
-## `heddle session start --output json`
+## `heddle agent provenance begin --output json`
 
-`heddle session start|show|end --output json` emit:
+`heddle agent provenance begin|show|end --output json` emit:
 
 ```json
 {
@@ -1893,7 +1856,7 @@ the same ready envelope.
 
 ---
 
-## `heddle session segment --output json`
+## `heddle agent provenance segment --output json`
 
 ```json
 {
@@ -1908,7 +1871,7 @@ the same ready envelope.
 
 ---
 
-## `heddle session list --output json`
+## `heddle agent provenance list --output json`
 
 ```json
 {
@@ -1939,75 +1902,6 @@ the same ready envelope.
 
 ---
 
-## `heddle support grant --output json`
-
-```json
-{
-  "output_kind": "support_grant",
-  "id": "00000000-0000-0000-0000-000000000000",
-  "operator_email": "support@heddle.dev",
-  "namespace_path": "heddle/platform",
-  "repo_path": "",
-  "role": "admin",
-  "granted_by": "did:key:z6Mk...",
-  "granted_at": 1782432000,
-  "expires_at": 1782518400,
-  "revoked_at": 0,
-  "revoked_by": "",
-  "reason": "release verification"
-}
-```
-
----
-
-## `heddle support list --output json`
-
-```json
-{
-  "output_kind": "support_list",
-  "grants": [
-    {
-      "id": "00000000-0000-0000-0000-000000000000",
-      "operator_email": "support@heddle.dev",
-      "namespace_path": "heddle/platform",
-      "repo_path": "",
-      "role": "admin",
-      "granted_by": "did:key:z6Mk...",
-      "granted_at": 1782432000,
-      "expires_at": 1782518400,
-      "revoked_at": 0,
-      "revoked_by": "",
-      "reason": "release verification"
-    }
-  ]
-}
-```
-
----
-
-## `heddle support revoke --output json`
-
-```json
-{
-  "output_kind": "support_revoke",
-  "id": "00000000-0000-0000-0000-000000000000",
-  "revoked": true
-}
-```
-
----
-
-`heddle fetch --output json` emits:
-
-```json
-{
-  "output_kind": "fetch",
-  "remote": "origin",
-  "refs_fetched": 1,
-  "objects_fetched": 2
-}
-```
-
 `heddle pull --output json` emits:
 
 ```json
@@ -2018,26 +1912,16 @@ the same ready envelope.
   "pulled": true,
   "changed": true,
   "success": true,
-  "transport": "git",
+  "transport": "heddle",
   "remote": "origin",
-  "branch": "main",
-  "old_git_head": "1111111111111111111111111111111111111111",
-  "new_git_head": "2222222222222222222222222222222222222222",
-  "old_state": "hd-old123",
-  "new_state": "hd-head456",
-  "states_created": 1,
-  "commits_seen": 1,
-  "commits_seen_scope": "branches_and_heddle_notes",
-  "materialized_checkout": true,
-  "changed_path_count": 1,
-  "changed_paths": ["src/app.rs"]
+  "thread": "main",
+  "state": "hs-head456",
+  "objects": 12,
+  "verification": {"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":"origin","clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}
 }
 ```
 
 `heddle push --output json` emits:
-
-`heddle push <remote> <thread>` is accepted as a Git-shaped alias for
-`heddle push <remote> --thread <thread>`; the JSON output contract is the same.
 
 ```json
 {
@@ -2047,29 +1931,18 @@ the same ready envelope.
   "pushed": true,
   "changed": true,
   "success": true,
-  "transport": "git",
+  "transport": "heddle",
   "remote": "origin",
   "push_scope": "current_thread",
-  "ref_scope": "branch_and_heddle_notes",
-  "git_notes_ref": "refs/notes/heddle",
-  "refs_written": ["refs/heads/main", "refs/notes/heddle"],
-  "git_notes_visibility_warning": "ordinary `git log --all` may show Heddle metadata commits from refs/notes/heddle",
-  "git_tracking_remote": "origin",
-  "git_remote_configured": {
-    "name": "origin",
-    "url": "file:///tmp/example.git"
-  },
-  "git_upstream_configured": {
-    "branch": "main",
-    "remote": "origin"
-  },
-  "tags_included": false,
   "force": false,
   "thread": "main",
+  "state": "hs-head456",
+  "objects": 12,
   "next_action": null,
   "next_action_template": null,
   "recommended_action": null,
-  "recommended_action_template": null
+  "recommended_action_template": null,
+  "verification": {}
 }
 ```
 
@@ -2078,30 +1951,26 @@ the same ready envelope.
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
 | `output_kind`, `action`, `status`, `success`, `cloned`, `transport`, `remote`, `local`, `branch`, `repository_capability` | mixed | required for successful `clone` | Stable clone envelope, transport, source, destination, checked-out branch, and initialized repository capability. |
-| `commits_imported`, `states_created` | int \| null | required for Git-overlay `clone` | Import counts reported after clone verification. |
-| `objects`, `state` | int/string \| null | native/hosted Heddle clone only | Transferred object count and resulting Heddle state when the transport is native Heddle rather than Git-overlay. |
-| `verification` | object \| null | required for Git-overlay `clone` | Post-clone repository verification proof; clean clones report `clone_verification: "verified"`. |
+| `objects`, `state` | int/string \| null | Heddle clone | Transferred object count and resulting Heddle state. |
+| `commits_imported`, `states_created` | int | Git Overlay clone | Git commits streamed through Sley and Heddle states created during overlay initialization. |
 | `remotes` | array<object> | required for `remote list` | Configured remotes. Empty if none. |
 | `name`, `url`, `source`, `is_default` | string/string/string/bool | required for `remote show` and remote entries | Remote identity and default marker. |
-| `refs_fetched`, `objects_fetched` | int | required for `fetch` | Fetch transfer counts. |
 | `pulled`, `pushed`, `success` | bool \| null | required when present | Transport result booleans. Pull reports `pulled`; push reports `pushed`. |
-| `action`, `status`, `transport` | string \| null | required for pull/push | Stable action name, outcome status, and transport kind. Git-overlay transfers report `transport: "git"`; native Heddle transfers report `transport: "heddle"`. |
-| `branch`, `old_git_head`, `new_git_head`, `old_state`, `new_state`, `states_created`, `commits_seen`, `commits_seen_scope`, `materialized_checkout`, `changed_path_count`, `changed_paths` | mixed | Git-overlay pull only | Concrete Git/Heddle movement proof for a pull, including imported commit scope and materialized path changes. |
-| `state`, `objects` | string/int \| null | native Heddle pull/push only | Resulting native Heddle state and transferred object count. Git-overlay transfers report Git ref publication details instead. |
-| `push_scope`, `ref_scope`, `tags_included`, `thread` | string/bool \| null | Git-overlay push only | Whether the push published only the current thread or all threads, the concrete Git ref scope, whether tags were included, and the thread whose branch was pushed. |
-| `force`, `force_discard_warning` | bool/string \| null | Git-overlay push only | Present for Git-overlay push. `force_discard_warning` is non-null when `--force` may move remote refs backward or discard remote-only commits. |
-| `git_notes_ref`, `git_notes_visibility_warning` | string \| null | Git-overlay push only | Heddle metadata notes ref carried with the push and the human-visible Git disclosure for that ref. |
-| `refs_written` | array<string> \| null | push | The fully-qualified Git refs this invocation actually wrote (e.g. `refs/heads/<thread>`, `refs/notes/heddle`); empty when the push was a no-op. Lets callers verify the round-trip with `git ls-remote`. |
-| `git_tracking_remote`, `git_remote_configured`, `git_upstream_configured` | mixed | Git-overlay push only | Git config side effects when Heddle configures a remote or branch upstream during push. |
+| `action`, `status`, `transport` | string | required for pull/push | Stable action name, outcome status, and authority transport (`git` or `heddle`). |
+| `state`, `objects` | string/int \| null | pull/push | Resulting Heddle state and transferred object count. |
+| `push_scope`, `thread` | string \| null | push | Whether the push published the current thread or all threads, and the named thread when applicable. |
+| `force` | bool \| null | push | Whether Heddle-native ref protection was explicitly overridden. |
 | `next_action`, `recommended_action`, `next_action_template`, `recommended_action_template` | mixed | required for push | Post-push action metadata promoted from verification; all are `null` when the push closes the remote loop. |
-| `verification` | object | required for pull/push | Post-transfer verification proof. |
+| `verification` | object | required for clone, remote mutations, pull, push, and commit | Post-operation repository verification proof. Observe-only `remote list` and `remote show` do not emit this field. |
 
 ---
 
 ## `heddle adopt --output json`
 
 One-command Git adoption. Initializes Heddle sidecar data when needed,
-imports the requested Git refs, and returns the post-adoption verification proof.
+imports the requested Git refs, atomically moves Repository Source Authority to
+native Heddle, and returns the post-adoption verification proof. The existing
+`.git` remains available through explicit Git Projection commands.
 
 ### Sample
 
@@ -2125,7 +1994,7 @@ imports the requested Git refs, and returns the post-adoption verification proof
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
-| `adopted`, `initialized`, `already_in_sync` | bool | required | Adoption outcome, whether `.heddle/` was created, and whether import found no new states. |
+| `adopted`, `initialized`, `already_in_sync` | bool | required | Adoption outcome, whether `.heddle/` was created, and whether import found no new states. A successful result has native Heddle source authority. |
 | `path` | string | required | Path to the Heddle sidecar data. |
 | `refs` | array<string> | required | Refs explicitly requested with `--ref`; empty means all local refs were imported. |
 | `commits_imported`, `states_created`, `branches_synced`, `tags_synced` | int | required | Git import counts. |
@@ -2136,10 +2005,9 @@ imports the requested Git refs, and returns the post-adoption verification proof
 
 ## `heddle status --output json`
 
-Canonical surface for Git-overlay state. Recovery actions intentionally
-name `heddle import git ...` for imported Heddle repositories; native
-first-run flows should use the `heddle adopt --ref <branch>` recommendation
-from `status`, `init`, and `verification`.
+Canonical surface for Git Overlay and native Heddle state. Plain Git first-run
+flows recommend `heddle init`; Git Overlay reconciliation uses explicit
+`heddle import git ...`; `heddle adopt` is the explicit authority transition.
 
 `verification` is the public proof block. Legacy `git_overlay_import_hint`
 and `git_overlay_health` sidecars are internal render data, not public JSON
@@ -2437,8 +2305,8 @@ State detail view, pretty-printed.
   "output_kind": "show",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
-  "change_id": "hd-def456",
-  "change_id_full": "hd-def4561234567890abcdef",
+  "state_id": "hd-def456",
+  "state_id_full": "hd-def4561234567890abcdef",
   "content_hash": "deadbeef…",
   "tree": "…",
   "parents": ["hd-abc123"],
@@ -2542,7 +2410,7 @@ for the field-level definition. Notable invariants:
 
 - `current` is `null` when on detached HEAD.
 - `threads` is empty when the repo has no threads.
-- `available_git_refs` contains Git refs that Heddle can adopt but has
+- `available_git_refs` contains Git refs that Heddle can import but has
   not yet modeled as active/imported threads.
 - `repository_label` is the human-facing identity; `repository_context`
   is present when the command is run inside a managed child checkout.
@@ -2579,7 +2447,7 @@ set should filter the returned `commands` array by `display`, `tier`,
 | `commands[].display` | string | required | Joined command path. |
 | `commands[].aliases` | array<string> | required | Alternate command spellings advertised by the command contract table. |
 | `commands[].tier` | string | required | Derived discovery tier for broad filtering (`everyday`, `advanced`, or `hidden`). |
-| `commands[].surface` | string | required | Product surface from the command contract table (`native`, `git_projection`, `automation`, `admin`, or `internal`). |
+| `commands[].surface` | string | required | Product surface from the command contract table (`native`, `source_authority`, `git_projection`, `automation`, `admin`, or `internal`). `source_authority` commands dispatch through the repository's Git Overlay or Native Heddle adapter. |
 | `commands[].help_visibility` | string | required | Human discovery placement from the command contract table (`everyday`, `advanced`, `git_projection`, or `hidden`). |
 | `commands[].help_rank` | int | required | Stable ordering key for human command discovery. Lower ranks appear earlier. |
 | `commands[].canonical_command` | string \| null | required | Canonical Heddle command for Git-shaped aliases; `null` for native commands. |
@@ -2588,6 +2456,7 @@ set should filter the returned `commands` array by `display`, `tier`,
 | `commands[].summary` | string | required | First help line. |
 | `commands[].has_subcommands` | bool | required | Whether the command has public children. |
 | `commands[].supports_json` | bool | required | Whether the command supports JSON output. |
+| `commands[].output_modes` | array<string> | required | Exact output modes accepted by this command (`text`, optionally `json`, and optionally `json-compact`). Agents should inspect this field instead of probing commands and handling an unsupported-mode failure. |
 | `commands[].mutates` | bool | required | Whether the command can change repository or process state. |
 | `commands[].supports_op_id` | bool | required | Whether the command accepts caller-supplied idempotent `--op-id` / `HEDDLE_OPERATION_ID`. |
 | `commands[].persists_op_id` | bool | required | Whether the command contract may preserve a generated op-id across an interrupted retry loop. This is currently false for all commands; agents should supply explicit ids when they need replay. |
@@ -2624,8 +2493,8 @@ set should filter the returned `commands` array by `display`, `tier`,
 `command_action` is the per-command action contract. For example, `push`
 advertises executable argv `["/path/to/heddle", "push"]`, while `adopt`
 advertises the fillable template `["/path/to/heddle", "adopt", "--ref",
-"<branch>"]` and `merge` advertises `["/path/to/heddle", "merge",
-"<thread>", "--preview"]`.
+"<branch>"]` and `land` advertises `["/path/to/heddle", "land", "--thread",
+"<thread>"]`.
 Agents should execute `argv` directly and fill `template.argv_template`
 only when they can supply every `required_inputs` value and
 `agent_may_fill` is true.
@@ -2671,6 +2540,7 @@ instead of treating it as a global catalog option.
       "summary": "Show repository status",
       "has_subcommands": false,
       "supports_json": true,
+      "output_modes": ["text", "json", "json-compact"],
       "mutates": false,
       "supports_op_id": false,
       "persists_op_id": false,
@@ -2718,28 +2588,27 @@ instead of treating it as a global catalog option.
       "long": "output",
       "short": null,
       "value_names": ["OUTPUT"],
-      "help": "Output format. `auto` (default) renders text on a TTY and JSON when piped; `json` and `text` override regardless of stream",
+      "help": "Output format: text by default; json and json-compact provide explicit machine contracts",
       "required": false,
       "global": true
     }
   ],
   "recommended_action_placeholders": [
-    "heddle commit -m \"...\"",
-    "heddle commit -m \"...\"",
+    "heddle capture -m \"...\"",
     "heddle commit -m \"...\"",
     "heddle ready -m \"...\"",
-    "heddle stash push -m \"...\"",
     "heddle remote add <name> <url>",
     "heddle clone <remote> <path>",
     "heddle clone <remote> <new-path>",
     "heddle clone <remote> <fresh-path>",
-    "heddle switch <branch>",
-    "heddle merge <thread> --git-commit"
+    "heddle thread switch <branch>",
+    "heddle ready --thread <thread>",
+    "heddle land --thread <thread>"
   ],
   "recommended_action_templates": [
     {
-      "action": "heddle commit -m \"...\"",
-      "argv_template": ["/path/to/heddle", "commit", "-m", "<message>"],
+      "action": "heddle capture -m \"...\"",
+      "argv_template": ["/path/to/heddle", "capture", "-m", "<message>"],
       "required_inputs": ["message"],
       "agent_may_fill": true
     }
@@ -2755,7 +2624,7 @@ Hosted-review payload for a single state.
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
-| `change_id` | string | required | Renamed from `state_id`. |
+| `state_id` | string | required | Physical state identifier. |
 | `headline` | string | required | |
 | `agent_narrative` | string \| null | required | |
 | `files_changed` | int | required | |
@@ -2768,7 +2637,7 @@ Hosted-review payload for a single state.
 ```json
 {
   "output_kind": "review_show",
-  "change_id": "hd-def456",
+  "state_id": "hd-def456",
   "headline": "Tighten parser recovery",
   "agent_narrative": null,
   "files_changed": 3,
@@ -2783,19 +2652,19 @@ Hosted-review payload for a single state.
 `heddle review sign --output json` emits:
 
 ```json
-{"output_kind": "review_sign", "signature_id": "...", "change_id": "..."}
+{"output_kind": "review_sign", "signature_id": "...", "state_id": "..."}
 ```
 
 `heddle review next --output json` emits a stable envelope keyed by
 `output_kind: "review_next"`. When the scan window holds a pending
 review, the pending state's view is flattened alongside `output_kind`
-(`change_id`, `headline`, `existing_signatures`) and the same view is
+(`state_id`, `headline`, `existing_signatures`) and the same view is
 echoed under `next`. When the scan window holds no pending review, the
 payload carries only `output_kind` and `next: null` — never a
 top-level `null`.
 
 ```json
-{"output_kind": "review_next", "change_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": 0, "next": {"change_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": 0}}
+{"output_kind": "review_next", "state_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": 0, "next": {"state_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": 0}}
 ```
 
 `heddle review health --output json` emits:
@@ -2803,30 +2672,6 @@ top-level `null`.
 ```json
 {"output_kind": "review_health", "entries": [{"module_id": "...", "fire_rate": 0.42, "warn": false}], "window_states": 12}
 ```
-
----
-
-## `heddle transaction commit`
-
-```json
-{"change_id": "hd-def456", "op_count": 7}
-```
-
-`change_id` was previously named `state_id`; the rename matches the
-canonical naming for state identifiers across the CLI.
-
----
-
-## `heddle transaction begin|abort|status --output json`
-
-Hidden transaction-management commands are schema-backed so agents can
-discover and validate internal recovery flows.
-
-```json
-{"status": "ok"}
-```
-
----
 
 ## `heddle integration relay --output json`
 
@@ -2838,26 +2683,87 @@ Hidden integration relay output is registered as a generic object payload.
 
 ---
 
-## `heddle maintenance index --output json`
+## `heddle maintenance inspect --output json`
 
-Maintenance index inspection emits one concrete JSON value. `--dump` places the
-human-readable dump text in `dump` instead of writing a second stdout payload.
+Maintenance inspection reports the repository's rebuildable performance
+sidecars and the repository shape they summarize. It does not change repository
+meaning.
 
 ```json
 {
-  "output_kind": "index",
-  "present": true,
-  "path": "/repo/.heddle/state/index.bin",
-  "file_entries": 12,
-  "directory_entries": 4,
-  "untracked_directory_entries": 1,
-  "snapshot_bytes": 1024,
-  "journal_bytes": 128,
-  "journal_ops": 3,
-  "journal_replay_ms": 0,
-  "dump": null
+  "output_kind": "maintenance_inspect",
+  "commit_graph": {"present": true, "node_count": 3, "bloom_covered_nodes": 3, "bytes": 512, "error": null},
+  "worktree_index": {"present": true, "file_entries": 12, "directory_entries": 4, "untracked_directory_entries": 1, "snapshot_bytes": 1024, "journal_bytes": 128, "journal_ops": 3, "journal_replay_ms": 0, "error": null},
+  "change_monitor": {"backend": "native", "status": "ready", "reason": null, "changed_path_count": 0},
+  "refs": {"total": 2, "threads": 1, "markers": 0, "remotes": 1, "remote_threads": 0, "packed_refs_present": false, "packed_refs_bytes": 0},
+  "ref_summary_index": {"present": true, "valid": true, "bytes": 256, "threads": 1, "markers": 0, "remotes": 1, "remote_threads": 0, "packed_threads": 0, "packed_markers": 0, "error": null},
+  "pack_files": {"pack_count": 1, "index_count": 1, "unpaired_pack_count": 0, "pending_install_intents": 0},
+  "partial_fetch": {"count": 0, "missing_blob_count": 0},
+  "pull_planner_cache": {"status": "ready", "present": true, "manifest_count": 1, "planner_entry_count": 3, "total_bytes": 384}
 }
 ```
+
+### Maintenance Inspect Fields
+
+| Field | Type | Semantics |
+|-------|------|-----------|
+| `output_kind` | string | Always `maintenance_inspect`. |
+| `commit_graph` | object | Presence, size, node coverage, and read error for the commit-graph sidecar. |
+| `worktree_index` | object | Snapshot and journal shape for the worktree index sidecar. |
+| `change_monitor` | object | Active backend, readiness, reason, and pending changed-path count. |
+| `refs` | object | Live ref counts and packed-refs storage facts. |
+| `ref_summary_index` | object | Validity, size, and category counts for the ref summary sidecar. |
+| `pack_files` | object | Pack/index pairing and pending install-intent counts. |
+| `partial_fetch` | object | Missing-object markers, including the missing blob count. |
+| `pull_planner_cache` | object | Cache readiness, manifest/entry counts, and storage size. |
+
+## `heddle maintenance refresh --output json`
+
+Maintenance refresh rebuilds performance sidecars and reports both the work
+performed and the resulting inspection. It may rewrite derived metadata and
+prune incomplete pack-install artifacts, but does not change repository meaning.
+
+```json
+{
+  "output_kind": "maintenance_refresh",
+  "rebuilt_commit_graph": true,
+  "rebuilt_ref_summary_index": true,
+  "rebuilt_worktree_index": true,
+  "refreshed_change_monitor": true,
+  "rebuilt_pull_planner_cache": true,
+  "pruned_pull_planner_entries": 0,
+  "pack_install_intents_recovered_completed": 0,
+  "pack_install_intents_aborted": 0,
+  "pack_install_intents_skipped_in_progress": 0,
+  "pack_install_intents_quarantined": 0,
+  "pack_install_metrics": {"installs_ok": 0, "installs_err": 0, "recover_completed": 0, "recover_aborted": 0, "recover_skipped_in_progress": 0, "recover_quarantined": 0},
+  "unpaired_packs_pruned": 0,
+  "unpaired_pack_bytes_freed": 0,
+  "report": {
+    "commit_graph": {"present": true, "node_count": 3, "bloom_covered_nodes": 3, "bytes": 512, "error": null},
+    "worktree_index": {"present": true, "file_entries": 12, "directory_entries": 4, "untracked_directory_entries": 1, "snapshot_bytes": 1024, "journal_bytes": 128, "journal_ops": 3, "journal_replay_ms": 0, "error": null},
+    "change_monitor": {"backend": "native", "status": "ready", "reason": null, "changed_path_count": 0},
+    "refs": {"total": 2, "threads": 1, "markers": 0, "remotes": 1, "remote_threads": 0, "packed_refs_present": false, "packed_refs_bytes": 0},
+    "ref_summary_index": {"present": true, "valid": true, "bytes": 256, "threads": 1, "markers": 0, "remotes": 1, "remote_threads": 0, "packed_threads": 0, "packed_markers": 0, "error": null},
+    "pack_files": {"pack_count": 1, "index_count": 1, "unpaired_pack_count": 0, "pending_install_intents": 0},
+    "partial_fetch": {"count": 0, "missing_blob_count": 0},
+    "pull_planner_cache": {"status": "ready", "present": true, "manifest_count": 1, "planner_entry_count": 3, "total_bytes": 384}
+  }
+}
+```
+
+### Maintenance Refresh Fields
+
+| Field | Type | Semantics |
+|-------|------|-----------|
+| `output_kind` | string | Always `maintenance_refresh`. |
+| `rebuilt_*`, `refreshed_*` | boolean | Whether refresh rebuilt each derived sidecar. |
+| `pruned_pull_planner_entries` | integer | Stale pull-planner entries removed. |
+| `pack_install_intents_*` | integer | Recovery disposition counts for durable pack-install intents. |
+| `pack_install_metrics` | object | Process-local install and recovery counters after refresh. |
+| `unpaired_packs_pruned` | integer | Unpaired pack files removed. |
+| `unpaired_pack_bytes_freed` | integer | Bytes recovered by pruning unpaired packs. |
+| `report` | object | The resulting maintenance-inspect report, without a second discriminator. |
 
 ## `heddle export git --output json`
 
@@ -2961,7 +2867,7 @@ data, not JSON contract fields.
 
 ```json
 {
-  "output_kind": "diagnose",
+  "output_kind": "doctor",
   "repository": "/work/project",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
@@ -2973,7 +2879,7 @@ data, not JSON contract fields.
   "state": null,
   "changes": {"modified": [], "added": [], "deleted": []},
   "workspace": {"thread_count": 0},
-  "health": {"status": "clean"},
+  "health": {"output_kind": "doctor_health", "status": "clean"},
   "recommended_action": "",
   "recovery_commands": [],
   "profile": null
@@ -3024,46 +2930,46 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
   "command_contract_schema_coverage": {
     "accepted_opaque_schema_examples": [
       "help",
-      "transaction begin",
-      "transaction abort",
-      "transaction status",
       "redact apply",
       "redact list",
       "redact show",
-      "redact trust add"
+      "redact trust add",
+      "redact trust list",
+      "redact trust remove",
+      "redact purge apply"
     ],
-    "accepted_opaque_schema_verbs_total": 47,
+    "accepted_opaque_schema_verbs_total": 39,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
-      "transaction begin",
-      "transaction abort",
-      "transaction status",
       "redact apply",
       "redact list",
       "redact show",
-      "redact trust add"
+      "redact trust add",
+      "redact trust list",
+      "redact trust remove",
+      "redact purge apply"
     ],
-    "advanced_scope_json_commands_total": 128,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-    "advanced_scope_mutating_commands_total": 78,
-    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-    "catalog_commands_total": 219,
-    "catalog_mutating_commands_total": 110,
-    "json_commands_total": 171,
-    "json_commands_with_accepted_opaque_schema": 47,
-    "json_commands_with_schema": 124,
+    "advanced_scope_json_commands_total": 105,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
+    "advanced_scope_mutating_commands_total": 61,
+    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 22,
+    "catalog_commands_total": 183,
+    "catalog_mutating_commands_total": 89,
+    "json_commands_total": 148,
+    "json_commands_with_accepted_opaque_schema": 39,
+    "json_commands_with_schema": 109,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 104,
+    "json_mutating_commands_total": 87,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 104,
-    "mutating_commands_with_accepted_opaque_schema": 27,
-    "mutating_commands_with_schema": 77,
+    "mutating_commands_total": 87,
+    "mutating_commands_with_accepted_opaque_schema": 22,
+    "mutating_commands_with_schema": 65,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 47,
+    "opaque_schema_verbs_total": 39,
     "status": "available",
-    "summary": "219 command(s), 171 JSON command(s), 110 mutating command(s), 104 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+    "summary": "183 command(s), 148 JSON command(s), 89 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3101,36 +3007,10 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "219 command(s), 171 JSON command(s), 110 mutating command(s), 104 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+  "summary": "183 command(s), 148 JSON command(s), 89 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
-}
-```
-
----
-
-## `heddle git-overlay --output json`
-
-The built-in Git-overlay guide as structured steps. This is a guide
-surface, not repository state.
-
-```json
-{
-  "topic": "git-overlay",
-  "summary": "Use Heddle as the daily Git-overlay loop: status, diff, commit, start --path, ready, land, push, undo, verification.",
-  "steps": [
-    "heddle status",
-    "heddle adopt --ref <branch>",
-    "heddle diff",
-    "heddle commit -m <message>",
-    "heddle start <name> --path ../<name>",
-    "heddle ready",
-    "heddle land --thread <name> --no-push",
-    "heddle push",
-    "heddle undo",
-    "heddle verify"
-  ]
 }
 ```
 
@@ -3145,7 +3025,7 @@ surface, not repository state.
   "ts": "2026-05-23T00:00:00Z",
   "thread": "main",
   "kind": "snapshot",
-  "change_id": "hd-sqr398dvx9ay",
+  "state_id": "hd-sqr398dvx9ay",
   "intent": "capture parser fix",
   "confidence": 0.91,
   "actor": {"provider": "openai", "model": "gpt-5"},
@@ -3220,45 +3100,12 @@ Refresh the active or named thread, or report the verification/action blocker.
 }
 ```
 
-## `heddle clean --output json`
+## `heddle fsck repair git --output json`
 
-List or remove untracked worktree paths.
-
-```json
-{
-  "output_kind": "clean",
-  "removed": ["tmp/output.txt"],
-  "dry_run": true
-}
-```
-
-## `heddle switch --output json`
-
-Switch to an existing thread, or fall through to the state-checkout
-shape when the target resolves as a state rather than a thread.
-
-```json
-{
-  "output_kind": "thread_switch",
-  "status": "completed",
-  "action": "thread_switch",
-  "name": "feature/parser",
-  "message": "Switched to thread 'feature/parser'",
-  "thread": null,
-  "path": null,
-  "execution_path": null,
-  "next_action": null,
-  "next_action_template": null,
-  "recommended_action": null,
-  "recommended_action_template": null
-}
-```
-
----
-
-## `heddle fsck --repair git --output json`
-
-Preview or apply a ref reconciliation between Git and Heddle.
+Preview or apply the repair direction allowed by durable source authority.
+Git Overlay repairs Git into Heddle metadata; native repositories repair a
+named Heddle ref into the retained Git projection. Supplying the opposite
+`--prefer` side is a typed refusal and changes nothing.
 
 ```json
 {
@@ -3273,75 +3120,22 @@ Preview or apply a ref reconciliation between Git and Heddle.
     {
       "name": "git_projection_ref_reconcile_preview",
       "repaired": false,
-      "detail": "heddle fsck --repair git --prefer heddle --ref main --preview",
-      "count": 0
-    },
-    {
-      "name": "git_projection_ref_reconcile_preview",
-      "repaired": false,
-      "detail": "heddle fsck --repair git --prefer git --ref main --preview",
+      "detail": "heddle fsck repair git --prefer git --ref main",
       "count": 0
     }
   ]
 }
 ```
-
-## `heddle stash push --output json`
-
-`heddle stash push|pop|apply|drop|clear --output json` emit:
-
-```json
-{
-  "message": "Saved stash@{0}",
-  "stash_index": 0
-}
-```
-
----
-
-## `heddle stash list --output json`
-
-List saved stash entries.
-
-```json
-{
-  "output_kind": "stash_list",
-  "stashes": [
-    {
-      "index": 0,
-      "message": "save parser work",
-      "created_at": "2026-05-23T23:32:39Z"
-    }
-  ]
-}
-```
-
----
-
-## `heddle stash show --output json`
-
-Show the top stash as path buckets.
-
-```json
-{
-  "output_kind": "stash_show",
-  "modified": ["src/parser.rs"],
-  "added": ["tests/parser.rs"],
-  "deleted": []
-}
-```
-
----
 
 ## `heddle revert --output json`
 
-Apply the inverse of a state. With `--no-commit`, `change_id` is
+Apply the inverse of a state. With `--no-commit`, `state_id` is
 `null`; otherwise it is the new revert state.
 
 ```json
 {
   "output_kind": "revert",
-  "change_id": null,
+  "state_id": null,
   "reverted_state": "hd-sqr398dvx9ay",
   "files_affected": ["M src/parser.rs"],
   "message": "Changes applied to worktree (not committed)"
@@ -3371,14 +3165,6 @@ required:
 
 ```json
 {"commits_scanned":2,"commits_with_matches":1,"sessions_mined":3,"points_extracted":4,"states_updated":1,"annotations_written":4}
-```
-
-`heddle cherry-pick --output json` emits the committed shape by default;
-with `--no-commit` the `new_commit` field is replaced by `"no_commit":
-true` and `status` is `"applied"`:
-
-```json
-{"output_kind": "cherry_pick", "status": "committed", "commit": "hd-source123", "new_commit": "hd-result456"}
 ```
 
 `heddle collapse --output json` emits:
@@ -3419,18 +3205,30 @@ nothing to stop — both exit 0):
 {"output_kind": "daemon_stop", "action": "daemon stop", "status": "not_running"}
 ```
 
-`heddle discuss open|append|resolve|show --output json` emit (each carries
-`output_kind` set to the snake-cased subcommand, e.g. `discuss_open`,
-`discuss_append`):
+`heddle discuss open|append|resolve|reopen --output json` emit a write
+outcome and the resulting materialized discussion. The operation id is the
+durable collaboration-log address; `disposition` is `created`,
+`existing_operation`, or `idempotent_replay`:
 
 ```json
-{"output_kind": "discuss_open", "id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "change_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}
+{"output_kind":"discuss_open","operation_id":"co-01abc","disposition":"created","discussion":{"id":"disc-018f47ea-4a54-7c89-b012-3456789abcde","title":"Please check this edge case.","anchor":{"kind":"symbol","state_id":"hs-01abc","path":"src/lib.rs","symbol":"verify"},"visibility":"team:platform","status":"open","resolution":null,"conflict_operation_ids":[],"head_operation_ids":["co-01abc"],"display_head_operation_id":"co-01abc","turns":[{"operation_id":"co-01abc","author_name":"A. Engineer","author_email":"a@example.com","agent":null,"occurred_at_ms":1767225600000,"body":"Please check this edge case.","content_hash":"0123456789abcdef"}]}}
 ```
+
+## `heddle discuss show --output json`
+
+`heddle discuss show --output json` uses the same discussion object beneath
+the `discuss_show` discriminator:
+
+```json
+{"output_kind":"discuss_show","discussion":{"id":"disc-018f47ea-4a54-7c89-b012-3456789abcde","title":"Please check this edge case.","anchor":{"kind":"symbol","state_id":"hs-01abc","change_id":null,"path":"src/lib.rs","symbol":"verify"},"visibility":"team:platform","status":"open","resolution":null,"conflict_operation_ids":[],"head_operation_ids":["co-01abc"],"display_head_operation_id":"co-01abc","turns":[]}}
+```
+
+## `heddle discuss list --output json`
 
 `heddle discuss list --output json` emits:
 
 ```json
-{"output_kind": "discuss_list", "discussions": [{"id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "change_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}]}
+{"output_kind":"discuss_list","discussions":[]}
 ```
 
 `heddle fsck --output json` emits:
@@ -3481,12 +3279,6 @@ itself):
 {"integrations": [{"name": "github", "installed": true, "version": "1"}], "installed": true, "uninstalled": false, "upgraded": false, "issues": []}
 ```
 
-`heddle maintenance inspect|run|monitor --output json` emit:
-
-```json
-{"ok": true, "tasks": [{"name": "gc", "status": "skipped"}], "objects_removed": 0, "index_updated": true, "monitoring": false}
-```
-
 `heddle maintenance gc --output json` emits the pack/prune report (counts
 are zero on a fresh repository; `pinned_redactions` / `preserved_redactions`
 report redacted blobs the collector refused to touch; `consolidated_mirror_loose`
@@ -3516,12 +3308,6 @@ for a tracked file:
 
 ```json
 {"output_kind": "query_attribution", "status": "completed", "file": "src/lib.rs", "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": null, "timestamp": "2026-01-01T00:00:00Z", "origins": null}]}
-```
-
-`heddle rebase --output json` emits:
-
-```json
-{"output_kind": "rebase_progress", "status": "fast_forwarded", "to": "hd-result789"}
 ```
 
 `heddle redact apply|list|show --output json` emit (each carries
@@ -3578,7 +3364,7 @@ no record exists — public-by-absence):
 `heddle resolve --output json` emits:
 
 ```json
-{"output_kind": "resolve", "message": "Resolved src/lib.rs; completed merge", "resolved": ["src/lib.rs"], "remaining": [], "continued": true, "continuation_status": "continued", "continuation_message": "Completed the in-progress Heddle merge", "next_action": "heddle land --thread feature/auth --no-push", "recommended_action": "heddle land --thread feature/auth --no-push"}
+{"output_kind": "resolve", "message": "Resolved src/lib.rs; completed integration", "resolved": ["src/lib.rs"], "remaining": [], "continued": true, "continuation_status": "continued", "continuation_message": "Completed the in-progress Heddle integration", "next_action": "heddle land --thread feature/auth", "recommended_action": "heddle land --thread feature/auth"}
 ```
 
 `heddle retro --output json` emits the same shape with bounded session data;
@@ -3600,21 +3386,20 @@ no record exists — public-by-absence):
 The following verbs also emit `--output json`. Their shapes follow the same
 discipline; see the corresponding handler in `crates/cli/src/cli/commands/`:
 
-`heddle checkpoint`, `heddle cherry-pick`,
-`heddle clean`, `heddle clone`, `heddle collapse`,
+`heddle clone`, `heddle collapse`,
 `heddle context get/set`, `heddle diff`, `heddle expand`,
-`heddle discuss`, `heddle doctor docs`, `heddle fetch`,
+`heddle discuss`, `heddle doctor docs`,
 `heddle fsck`, `heddle init`, `heddle integration`,
-`heddle maintenance`, `heddle merge`, `heddle ready`,
-`heddle rebase`, `heddle remote`, `heddle resolve`, `heddle retro`,
-`heddle session`, `heddle capture`,
-`heddle support`, `heddle thread show/start`,
+`heddle maintenance`, `heddle ready`,
+`heddle remote`, `heddle resolve`, `heddle retro`,
+`heddle agent provenance`, `heddle capture`,
+`heddle thread show/start`,
 `heddle try`, `heddle undo`, `heddle watch`.
 
 Each of these:
 
 - Emits a single JSON document on `--output json` (or one document per line for streaming verbs like `watch`).
-- Uses `change_id` (not `state_id` or `id`) for state identifiers.
+- Uses `state_id` for immutable State identity and `change_id` for logical change lineage.
 - Uses `created_at` (not `timestamp` or `recorded_at`) for state-creation timestamps.
 - Serializes `Option<...>` semantic fields as explicit `null`.
 - Serializes empty collections as `[]` / `{}`.

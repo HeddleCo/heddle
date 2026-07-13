@@ -11,7 +11,7 @@ add a verb, change a flag, or argue for a new output field.
 Outputs say what they mean. Field names are stable across verbs, optional
 fields serialize as explicit `null` rather than disappearing, and empty
 collections come back as `[]` — never omitted. An agent that reads
-`heddle merge --output json` and then `heddle status --output json` finds `change_id`,
+`heddle ready --output json` and then `heddle status --output json` finds `change_id`,
 `current_state`, and `confidence` carrying the same meaning in both places.
 
 The full contract lives in [docs/json-schemas.md](json-schemas.md): stable
@@ -63,7 +63,7 @@ enough to deserve a name.
 
 Less to remember. The everyday `heddle help` follows the core loop:
 inspect, adopt or clone, save work, isolate a thread, prove readiness,
-preview advanced integration, land or push, undo, inspect history, and recover.
+check integration, land or push, undo, inspect history, and recover.
 The exact verb list comes from the command contract table so human help
 and `heddle help --output json` do not drift. Collaboration and
 annotation surfaces such as `review`, `discuss`, and `context` stay
@@ -75,7 +75,7 @@ State IDs follow the same logic. Every state-taking verb accepts the same
 specifiers — full change ID, 4-character-or-longer prefix, marker name,
 `HEAD`, `HEAD~N`, thread name — so the muscle memory you build on
 `heddle show` carries to `heddle diff`, `heddle revert`,
-`heddle switch`, `heddle query --attribution --state`, `heddle review show`,
+`heddle query --attribution --state`, `heddle review show`,
 and `heddle retro --since`. One acceptance rule, every state-taking verb.
 
 Restraint in defaults: child thread workflows can share a Cargo target
@@ -89,8 +89,8 @@ Claims match behavior. The `MergeOutput` schema separates `blockers`
 (reasons the operation could not advance state) from `warnings`
 (non-blocking nudges when state did advance) — and the `status` field
 follows the truth: `"blocked"` flips when there are real blockers, even
-if the underlying heddle merge itself completed
-([`crates/cli/src/cli/commands/merge/mod.rs`](../crates/cli/src/cli/commands/merge/mod.rs),
+if the underlying integration engine itself completed
+([`crates/core/src/merge/mod.rs`](../crates/core/src/merge/mod.rs),
 [`crates/cli/src/cli/commands/operator_core.rs`](../crates/cli/src/cli/commands/operator_core.rs)).
 A merge that landed but couldn't write its git commit doesn't get to
 report `"completed"`.

@@ -52,10 +52,9 @@ hard gate and clears the weighted score thresholds.
 Release thresholds:
 
 - Everyday commands must score **A or better**: `init`, `adopt`, `status`,
-  `verify`, `start`, `capture`, `commit`, `log`, `show`, `diff`, `merge`,
-  `resolve`, `undo`, `thread`, `doctor`, `diagnose`, `help`, `version`.
-  Git projection commands, including `import git`, `export git`, `sync git`,
-  and `checkpoint`, must meet the
+  `verify`, `start`, `capture`, `commit`, `log`, `show`, `diff`, `ready`,
+  `land`, `resolve`, `undo`, `thread`, `doctor`, `help`, `version`.
+  Git projection commands, including `import git`, `export git`, and `sync git`, must meet the
   same hard gates but are evaluated as explicit Git projection surfaces rather than
   the native first-run loop.
 - Advanced commands must score **B or better** unless hidden from curated help.

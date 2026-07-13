@@ -30,25 +30,24 @@ core/CLI verification ownership and internal naming cleanup.
 - Legacy direct-path context reads were removed from the normal context API.
   `Repository::get_context_blob`, `list_context_entries`, `set_context_blob`,
   and `remove_context_target` now operate on canonical `__files/<path>` /
-  `__states/<id>` entries only. The direct-path reader is private to
-  `0004_canonicalize_context_roots`.
+  `__states/<id>` entries only. Repository format v3 does not carry the old
+  layout forward.
 - Top-level `ThreadRecord` serde defaults were removed from the live durable
   reader. Old minimal TOML is parsed only by the private, migration-only
   `LegacyThreadRecord` used by `0002_canonicalize_thread_records`, then
   rewritten as current canonical TOML.
-- The pre-fidelity state hash is no longer a normal-looking public API.
-  `State::compute_hash_for_legacy_signature_migration()` is hidden and owned by
-  `0005`; ordinary signing tests no longer exercise it as live behavior.
-- `PackedOpLog::load` is current-format only. V2/V3 containers and old
-  OpRecord schemas decode only through `PackedOpLog::ensure_latest`, which is
-  now driven by registered migration `0006_canonicalize_packed_oplog`.
+- The pre-fidelity state-hash compatibility path was removed at the repository
+  format v3 boundary.
+- `PackedOpLog` accepts only the V4 container with the StateId-native OpRecord
+  schema. V2/V3 containers and record schemas 1–3 are refused without being
+  rewritten; repository format v3 is the history-format boundary.
 - The deprecated ignore-driven worktree descendant remover was deleted.
   `revert` now uses the tree-driven tracked-removal interface when it can prove
   the target state contains a subtree for the path, and otherwise refuses the
   unexpected file-vs-directory mismatch instead of recursing by current ignore
   rules.
-- The current Git command projection path now lives under `git_projection` internals. User-facing `commit` / `switch` behavior is
-  unchanged; the code no longer looks like a legacy compatibility shim.
+- Git command projection now lives under `git_projection` internals. `commit`
+  remains the porcelain verb; the broad `switch` surface was retired.
 - `maintenance index` and `maintenance monitor` graduated from hidden clap
   subcommands to discoverable admin maintenance commands. Their machine
   contracts were already cataloged under the admin surface.
@@ -58,54 +57,12 @@ Lane 6 registered the first deletion-prep migrations in
 
 - `0002_canonicalize_thread_records`
 - `0003_canonicalize_tree_entries`
-- `0004_canonicalize_context_roots`
-- `0005_resecure_pre_fidelity_signatures`
-- `0006_canonicalize_packed_oplog`
 
 These migrations are durable gates. The current deletion pass moved the
 remaining old readers behind those gates rather than leaving them mixed into
 normal runtime code.
 
-## Migration-Gated Compatibility Now Localized
-
-### Legacy context direct-path fallback
-
-Context file targets now read and write only the canonical `__files/<path>`
-layout. The direct-path fallback is migration-only because `State.context`
-participates in `State::compute_hash()`, so rewriting historical states from
-direct-path roots to canonical roots changes author-signature input.
-
-Registered migration: `0004_canonicalize_context_roots`.
-
-Current migration behavior:
-- Rewrites unsigned states and locally owned signed states from direct-path
-  context roots to canonical roots. For signed states, it computes the old hash
-  candidates before rewriting and calls `Repository::resign_if_owned` after the
-  new root is attached.
-- Preserves signed states whose key is not owned by this repo and fails the
-  migration gate instead of recording the migration as applied.
-- Normal reads no longer call the direct-path fallback; failed migrations leave
-  old direct-path data intentionally invisible until it is migrated or handled
-  by the owning key.
-
-Deletion-prep tests:
-- `repository_context::tests::direct_context_canonicalization_requires_signature_decision`
-  signs a state that points at a legacy direct-path context root and proves a
-  naive canonical-root rewrite invalidates the signature.
-- `repository_context::tests::legacy_direct_file_context_is_migration_only`
-  proves normal reads ignore direct-path leaves while the migration walker can
-  still canonicalize them.
-- `migration::tests::migration_0003_canonicalizes_owned_signed_context_root_and_resigns`
-  proves the registered migration rewrites and re-signs locally owned signed
-  context roots.
-
-Verification:
-- Signed-state fixture with a locally owned legacy context root re-signs and
-  verifies after migration.
-- Foreign signed legacy context root is either preserved and reported or rejected
-  by the chosen contract.
-- `cargo test -p heddle-repo repository_context::tests:: -- --nocapture`
-- `cargo test -p heddle-repo repository_signing::tests:: -- --nocapture`
+## Compatibility and Refusal Boundaries
 
 ### Thread-record serde defaults
 
@@ -137,46 +94,16 @@ Verification:
 - `cargo test -p heddle-cli --test multi_agent_worktrees -- --nocapture`
 - `cargo test -p heddle-cli --test cli_integration thread -- --nocapture`
 
-### Pre-fidelity state-signature compatibility
-
-The legacy pre-fidelity state hash is now a hidden migration-only helper used to
-verify states signed before the git-fidelity hash bump.
-
-Registered migration: `0005_resecure_pre_fidelity_signatures`.
-
-Current migration behavior:
-- Scans signed states, verifies the existing signature against both the current
-  hash and `compute_hash_for_legacy_signature_migration()`, and re-signs only
-  when `Repository::resign_if_owned` reports `Resigned`.
-- Unsigned states remain unsigned; they do not need compatibility handling.
-- Foreign valid pre-fidelity signatures are preserved and fail the migration
-  gate instead of being laundered into this repo's identity.
-- Normal signing tests no longer exercise the pre-fidelity recipe; only the
-  migration and golden-vector tests keep it alive.
-
-Deletion-prep tests:
-- Existing unsigned-state coverage remains
-  `repository_signing::tests::resign_if_owned_reports_unsigned`.
-- `migration::tests::migration_0005_resigns_owned_pre_fidelity_signature`
-  proves the registered migration re-signs owned legacy signatures.
-- `migration::tests::migration_0005_refuses_to_mark_foreign_pre_fidelity_signature_complete`
-  proves foreign valid pre-fidelity signatures block the migration ledger.
-
-Verification:
-- `cargo test -p heddle-repo repository_signing::tests:: -- --nocapture`
-- `cargo test -p heddle-cli --test cli_integration verify -- --nocapture`
-
 ### Old packed-oplog schemas
 
-Normal packed-oplog loads now accept only latest container + current OpRecord
-schema. Old V2/V3 containers and old per-record schemas remain decodable only
-through `PackedOpLog::ensure_latest`.
+Normal packed-oplog loads accept only the V4 container with StateId-native
+OpRecord schema 4. Old V2/V3 containers and record schemas 1–3 contain
+16-byte ChangeIds that cannot be converted into content-derived StateIds from
+the oplog alone. They are therefore refused before entry decoding and are
+never rewritten.
 
-Registered migration: `0006_canonicalize_packed_oplog`.
-
-Verification:
+Refusal verification:
 - `cargo test -p heddle-oplog packed_oplog -- --nocapture`
-- `cargo test -p heddle-repo migration::tests:: -- --nocapture`
 
 ## Product Or Sley-Gated Cleanup
 
@@ -192,7 +119,7 @@ Removed runtime writers/readers:
 - `crates/ingest/src/importer.rs` now writes first-class Gitlink tree entries.
 - `crates/cli/src/cli/commands/git_projection.rs` now writes first-class Gitlink
   entries for Git-index gitlinks.
-- `crates/cli/src/git_projection_engine/git_export.rs` now emits Git gitlinks only from
+- `crates/git-projection/src/git_export.rs` now emits Git gitlinks only from
   first-class Gitlink targets and never sniffs ordinary blob content.
 
 Completed deletion direction:

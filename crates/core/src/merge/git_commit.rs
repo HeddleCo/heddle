@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow};
 use heddle_git_projection::{git_core::LocalGitIdentity, git_export};
 use objects::{
     HeddleError, RecoveryDetails,
-    object::{Attribution, ChangeId},
+    object::{Attribution, StateId},
     store::ObjectStore,
 };
 use repo::Repository;
@@ -212,7 +212,7 @@ pub fn build_commit_message(
 /// Write a Git checkpoint commit for the landed Heddle merge state.
 pub fn write_git_commit(
     repo: &Repository,
-    state_id: &ChangeId,
+    state_id: &StateId,
     paths: &[String],
     message: &str,
     extra_parents: &[String],
@@ -370,7 +370,7 @@ fn merge_git_commit_failed_advice(stage: &'static str, detail: String) -> Heddle
     HeddleError::recovery(RecoveryDetails::safety_refusal(
         "merge_git_commit_failed",
         format!("{stage} failed while finalizing merge --git-commit: {detail}"),
-        "Resolve the Git checkout issue, then run `heddle commit -m \"...\"`; do not rerun `heddle merge`.",
+        "Resolve the Git checkout issue, then run `heddle capture -m \"...\"` and `heddle commit -m \"...\"`; do not rerun the integration.",
         format!("{stage} failed after Heddle merge commit coordination started"),
         "retrying the Heddle merge could duplicate or obscure the already-landed Heddle merge state",
         "the Heddle merge state is preserved; the Git commit writer did not report a completed commit",

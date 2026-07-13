@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Fork note: this module mirrors the Git projection note/mapping logic from
-//! `crates/cli/src/git_projection_engine/git_notes.rs` and
-//! `crates/cli/src/git_projection_engine/git_mapping.rs`. Until Git projection support is fully extracted
+//! `crates/git-projection/src/git_notes.rs` and
+//! `crates/git-projection/src/git_mapping.rs`. Until Git projection support is fully extracted
 //! into `heddle-core`, we keep the behavior aligned (notably required note
 //! fields and skip-on-deserialization-failure semantics).
 use std::{
@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use objects::{error::Result, object::ChangeId, store::ObjectStore};
+use objects::{error::Result, object::StateId, store::ObjectStore};
 use repo::Repository;
 use serde::Deserialize;
 use sley::{ObjectFormat, ObjectId, Repository as SleyRepository};
@@ -39,19 +39,19 @@ pub(crate) fn check_git_projection(
         invalid_fsck_config(format!("Git Projection Mapping check failed: {err}"))
     })?;
 
-    for (change_id, git_oid) in mapping.iter() {
+    for (state_id, git_oid) in mapping.iter() {
         *objects_checked += 1;
         if mirror.read_object(git_oid).is_err() {
             errors.push(make_error(
                 "git-projection-mapping",
                 &format!("mapped Git object {git_oid} is missing from the legacy Bridge Mirror"),
-                Some(change_id.to_string()),
+                Some(state_id.to_string()),
             ));
         }
-        if repo.store().get_state(change_id)?.is_none() {
+        if repo.store().get_state(state_id)?.is_none() {
             errors.push(make_error(
                 "git-projection-mapping",
-                &format!("mapped Heddle state {change_id} is missing from the store"),
+                &format!("mapped Heddle state {state_id} is missing from the store"),
                 Some(git_oid.to_string()),
             ));
         }
@@ -61,19 +61,19 @@ pub(crate) fn check_git_projection(
         .map_err(|err| invalid_fsck_config(format!("Git projection notes check failed: {err}")))?
     {
         *objects_checked += 1;
-        let Ok(change_id) = ChangeId::parse(&note.change_id) else {
+        let Ok(state_id) = StateId::parse(&note.state_id) else {
             errors.push(make_error(
                 "git-projection-notes",
                 &format!("note for {git_oid} contains an invalid Heddle change id"),
-                Some(note.change_id),
+                Some(note.state_id),
             ));
             continue;
         };
-        if mapping.get_git(&change_id) != Some(git_oid) {
+        if mapping.get_git(&state_id) != Some(git_oid) {
             errors.push(make_error(
                 "git-projection-notes",
                 &format!("note for {git_oid} does not round-trip through Git Projection Mapping"),
-                Some(change_id.to_string()),
+                Some(state_id.to_string()),
             ));
         }
     }
@@ -178,9 +178,9 @@ fn read_mapping_cache_from_disk(repo: &Repository) -> std::result::Result<SyncMa
 
     let mut mapping = SyncMapping::new();
     for entry in file.entries {
-        let change_id = ChangeId::parse(&entry.change_id).map_err(|err| err.to_string())?;
+        let state_id = StateId::parse(&entry.state_id).map_err(|err| err.to_string())?;
         let git_oid = parse_stored_git_oid(&entry.git_oid)?;
-        mapping.insert_checked(change_id, git_oid)?;
+        mapping.insert_checked(state_id, git_oid)?;
     }
 
     Ok(mapping)
@@ -211,7 +211,7 @@ fn parse_stored_git_oid(value: &str) -> std::result::Result<ObjectId, String> {
 
 #[derive(Debug, Deserialize)]
 struct MappingEntry {
-    change_id: String,
+    state_id: String,
     git_oid: String,
 }
 
@@ -222,8 +222,8 @@ struct MappingFile {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct SyncMapping {
-    heddle_to_git: HashMap<ChangeId, ObjectId>,
-    git_to_heddle: HashMap<ObjectId, ChangeId>,
+    heddle_to_git: HashMap<StateId, ObjectId>,
+    git_to_heddle: HashMap<ObjectId, StateId>,
 }
 
 impl SyncMapping {
@@ -231,57 +231,57 @@ impl SyncMapping {
         Self::default()
     }
 
-    fn insert(&mut self, change_id: ChangeId, git_oid: ObjectId) {
-        if let Some(previous_git) = self.heddle_to_git.remove(&change_id) {
+    fn insert(&mut self, state_id: StateId, git_oid: ObjectId) {
+        if let Some(previous_git) = self.heddle_to_git.remove(&state_id) {
             self.git_to_heddle.remove(&previous_git);
         }
         if let Some(previous_change) = self.git_to_heddle.remove(&git_oid) {
             self.heddle_to_git.remove(&previous_change);
         }
-        self.heddle_to_git.insert(change_id, git_oid);
-        self.git_to_heddle.insert(git_oid, change_id);
+        self.heddle_to_git.insert(state_id, git_oid);
+        self.git_to_heddle.insert(git_oid, state_id);
     }
 
     fn insert_checked(
         &mut self,
-        change_id: ChangeId,
+        state_id: StateId,
         git_oid: ObjectId,
     ) -> std::result::Result<(), String> {
-        if let Some(existing) = self.heddle_to_git.get(&change_id)
+        if let Some(existing) = self.heddle_to_git.get(&state_id)
             && *existing != git_oid
         {
             return Err(format!(
                 "change id {} mapped to {} (new {})",
-                change_id, existing, git_oid
+                state_id, existing, git_oid
             ));
         }
 
         if let Some(existing) = self.git_to_heddle.get(&git_oid)
-            && *existing != change_id
+            && *existing != state_id
         {
             return Err(format!(
                 "git oid {} mapped to {} (new {})",
-                git_oid, existing, change_id
+                git_oid, existing, state_id
             ));
         }
 
-        self.insert(change_id, git_oid);
+        self.insert(state_id, git_oid);
         Ok(())
     }
 
-    fn get_git(&self, change_id: &ChangeId) -> Option<ObjectId> {
-        self.heddle_to_git.get(change_id).copied()
+    fn get_git(&self, state_id: &StateId) -> Option<ObjectId> {
+        self.heddle_to_git.get(state_id).copied()
     }
 
-    fn has_heddle(&self, change_id: &ChangeId) -> bool {
-        self.heddle_to_git.contains_key(change_id)
+    fn has_heddle(&self, state_id: &StateId) -> bool {
+        self.heddle_to_git.contains_key(state_id)
     }
 
     fn has_git(&self, git_oid: ObjectId) -> bool {
         self.git_to_heddle.contains_key(&git_oid)
     }
 
-    fn iter(&self) -> impl Iterator<Item = (&ChangeId, &ObjectId)> {
+    fn iter(&self) -> impl Iterator<Item = (&StateId, &ObjectId)> {
         self.heddle_to_git.iter()
     }
 }
@@ -294,21 +294,21 @@ struct GitIdentityIndex {
 impl GitIdentityIndex {
     fn from_notes(repo: &SleyRepository) -> std::result::Result<Self, String> {
         let mut index = Self::default();
-        for (change_id, git_oid) in read_identity_mappings(repo)? {
-            index.mapping.insert_checked(change_id, git_oid)?;
+        for (state_id, git_oid) in read_identity_mappings(repo)? {
+            index.mapping.insert_checked(state_id, git_oid)?;
         }
         Ok(index)
     }
 
     fn fill_gaps_from_cache(&mut self, cache: &SyncMapping) {
-        for (change_id, git_oid) in cache.iter() {
-            if self.mapping.get_git(change_id) == Some(*git_oid) {
+        for (state_id, git_oid) in cache.iter() {
+            if self.mapping.get_git(state_id) == Some(*git_oid) {
                 continue;
             }
-            if self.mapping.has_heddle(change_id) || self.mapping.has_git(*git_oid) {
+            if self.mapping.has_heddle(state_id) || self.mapping.has_git(*git_oid) {
                 continue;
             }
-            self.mapping.insert(*change_id, *git_oid);
+            self.mapping.insert(*state_id, *git_oid);
         }
     }
 
@@ -319,12 +319,12 @@ impl GitIdentityIndex {
 
 fn read_identity_mappings(
     repo: &SleyRepository,
-) -> std::result::Result<Vec<(ChangeId, ObjectId)>, String> {
+) -> std::result::Result<Vec<(StateId, ObjectId)>, String> {
     read_all_notes(repo)?
         .into_iter()
         .map(|(oid, note)| {
-            let change_id = ChangeId::parse(&note.change_id).map_err(|err| err.to_string())?;
-            Ok((change_id, oid))
+            let state_id = StateId::parse(&note.state_id).map_err(|err| err.to_string())?;
+            Ok((state_id, oid))
         })
         .collect()
 }
@@ -356,7 +356,7 @@ fn notes_ref() -> sley::notes::NotesRef {
 
 #[derive(Debug, Clone, Deserialize)]
 struct HeddleNote {
-    change_id: String,
+    state_id: String,
     #[allow(dead_code)]
     status: String,
 }
@@ -371,7 +371,7 @@ mod tests {
 
     use super::*;
 
-    fn write_projection_mapping(repo: &Repository, change_id: &str, git_oid: &sley::ObjectId) {
+    fn write_projection_mapping(repo: &Repository, state_id: &str, git_oid: &sley::ObjectId) {
         let mapping_path = repo
             .heddle_dir()
             .join("git-projection")
@@ -379,7 +379,7 @@ mod tests {
         let mapping_parent = mapping_path.parent().expect("mapping path has parent");
         fs::create_dir_all(mapping_parent).expect("create Git projection mapping directory");
         let contents =
-            format!(r#"{{"entries":[{{"change_id":"{change_id}","git_oid":"{git_oid}"}}]}}"#);
+            format!(r#"{{"entries":[{{"state_id":"{state_id}","git_oid":"{git_oid}"}}]}}"#);
         std::fs::write(&mapping_path, contents).expect("write Git projection mapping");
     }
 
@@ -411,15 +411,13 @@ mod tests {
         let temp = TempDir::new().expect("create temp dir");
         let repo = Repository::init_default(temp.path()).expect("init repo");
 
-        let state_change_id = objects::object::ChangeId::generate();
         let tree = repo.store().put_tree(&Tree::new()).expect("write tree");
         let state = State::new(
             tree,
             Vec::new(),
             Attribution::human(Principal::new("Test User", "test@example.com")),
-        )
-        .with_change_id(state_change_id);
-        let state_change_id = state.change_id.to_string_full();
+        );
+        let state_state_id = state.state_id.to_string_full();
         repo.store().put_state(&state).expect("store state");
 
         let mirror_path = repo.heddle_dir().join("git");
@@ -431,14 +429,14 @@ mod tests {
             .write_blob("valid-note")
             .expect("write valid note blob");
         let foreign_note = format!(
-            r#"{{"change_id":"{}"}}"#,
-            objects::object::ChangeId::generate()
+            r#"{{"state_id":"{}"}}"#,
+            objects::object::StateId::from_bytes([0x44; 32])
         );
         let valid_note = format!(
-            r#"{{"change_id":"{}","status":"published"}}"#,
-            state_change_id
+            r#"{{"state_id":"{}","status":"published"}}"#,
+            state_state_id
         );
-        write_projection_mapping(&repo, &state_change_id, &valid_note_target);
+        write_projection_mapping(&repo, &state_state_id, &valid_note_target);
         write_bridge_note(&mirror, foreign_note_target, &foreign_note);
         write_bridge_note(&mirror, valid_note_target, &valid_note);
 

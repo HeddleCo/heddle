@@ -19,7 +19,7 @@ pub fn default_mount_name(child_path: &str) -> &str {
 
 /// First 12 characters of a change-id / state string for human display.
 ///
-/// Same truncation as [`crate::approval_plan::short_change_id`].
+/// Same truncation as [`crate::approval_plan::short_state_id`].
 pub fn short_id(id: &str) -> &str {
     &id[..id.len().min(12)]
 }

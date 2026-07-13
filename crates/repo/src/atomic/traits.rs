@@ -20,7 +20,7 @@ use crate::Repository;
 /// appends to the oplog itself; it hands the records to the executor so the
 /// append happens once, last (heddle#330 §2.2 phase 4).
 pub struct StagedCommit<T> {
-    /// The value produced on a committed run (e.g. the new `ChangeId`).
+    /// The value produced on a committed run (e.g. the new `StateId`).
     pub output: T,
     /// Records to append at the single commit point. A composite mutation
     /// merges its enrolled children's records into this vector so the whole
@@ -94,7 +94,7 @@ pub trait AtomicMutation {
     /// ONLY on a crash-retry that dedup-hits an already-committed
     /// `transaction_id`: this run re-ran `apply` and may have produced a
     /// *different* output than what was persisted — e.g. a freshly generated
-    /// `ChangeId` — so returning this run's value would hand the caller an
+    /// `StateId` — so returning this run's value would hand the caller an
     /// identity that does not match the committed record. Derive the committed
     /// identity from `committed_records` (the prior batch, marker stripped).
     ///

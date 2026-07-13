@@ -720,7 +720,7 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
         let data = rmp_serde::to_vec_named(&state)
             .map_err(|e| IngestError::Other(format!("serialize state for import pack: {e}")))?;
         self.builder.add_id(
-            PackObjectId::ChangeId(state.change_id),
+            PackObjectId::StateId(state.id()),
             PackObjectType::State,
             data,
         )?;
@@ -728,7 +728,7 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
         self.stats.states += 1;
 
         self.map
-            .insert_commit(&commit.sha, state.change_id)
+            .insert_commit(&commit.sha, state.state_id)
             .map_err(IngestError::from)?;
         Ok(true)
     }
@@ -1468,7 +1468,7 @@ mod tests {
             .expect("get_state must succeed for an imported commit")
             .expect("imported main state should exist in the store");
         assert_eq!(
-            state.change_id, main_cid,
+            state.state_id, main_cid,
             "round-tripped state's change id should match the ref target"
         );
 

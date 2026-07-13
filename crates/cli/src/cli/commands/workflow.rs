@@ -3,8 +3,7 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result, anyhow};
 use heddle_core::{
-    AutoLandPolicyInput, LandPushOptions, LandPushPlanError,
-    auto_land_policy_blockers as core_auto_land_policy_blockers,
+    AutoLandPolicyInput, auto_land_policy_blockers as core_auto_land_policy_blockers,
     integrated_land_next_action as core_integrated_land_next_action,
     integration_blocker_recommended_action as core_integration_blocker_recommended_action,
     integration_blockers as core_integration_blockers,
@@ -14,12 +13,13 @@ use heddle_core::{
     land_skipped_steps as core_land_skipped_steps, land_text_step as core_land_text_step,
     land_warnings_for_preview as core_land_warnings_for_preview,
     non_staleness_blockers as core_non_staleness_blockers,
-    op_targets_merge_state as core_op_targets_merge_state, plan_land_push,
+    op_targets_merge_state as core_op_targets_merge_state,
     recovery_scope_checkout as core_recovery_scope_checkout,
     should_squash_land as core_should_squash_land,
 };
+use heddle_git_projection::GitProjection;
 use objects::{
-    object::{ChangeId, State, ThreadName},
+    object::{State, StateId, ThreadName},
     store::ObjectStore,
 };
 use oplog::{OpBatch, OpLogBackend, OpRecord};
@@ -29,7 +29,7 @@ use serde::Serialize;
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    checkpoint::create_git_checkpoint,
+    checkpoint::{GitCheckpointRequest, create_git_checkpoint},
     collapse::{CollapsePublishedRef, collapse_resolved_states},
     git_overlay_txn,
     merge::{build_thread_preview_report, merge_thread_into_current},
@@ -58,7 +58,6 @@ use crate::{
         output_is_compact, should_output_json, style, worktree_status_options,
     },
     config::UserConfig,
-    git_projection_engine::GitProjection,
 };
 
 #[derive(Serialize)]
@@ -83,8 +82,6 @@ struct LandOutput {
     git_commit: Option<String>,
     synced: bool,
     integrated: bool,
-    pushed: bool,
-    pushed_remote: Option<String>,
     performed_steps: Vec<String>,
     skipped_steps: Vec<String>,
     merge_state: Option<String>,
@@ -292,7 +289,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         let land_command = land_local_command(&thread.id);
         // `heddle start` would refuse here — the thread still holds an active
         // reservation, so it returns `active_reservation_advice` and the
-        // operator is stuck. `heddle switch` rebuilds the dedicated worktree at
+        // operator is stuck. `heddle thread switch` rebuilds the dedicated worktree at
         // the recorded `execution_path` from the thread's current state (see
         // `cmd_thread_switch`), which is exactly the path this `land` reads, so
         // the rebuild clears the blocker and the follow-up `land` succeeds.
@@ -312,39 +309,6 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             switch_command.clone(),
             vec![switch_command, land_command],
         )));
-    };
-    let push_plan = match plan_land_push(&LandPushOptions {
-        push: args.push,
-        no_push: args.no_push,
-        remote: args.remote.clone(),
-    }) {
-        Ok(plan) => plan,
-        Err(LandPushPlanError::OptionConflict) => {
-            return Err(anyhow!(RecoveryAdvice::land_push_option_conflict(
-                &thread.id
-            )));
-        }
-        Err(LandPushPlanError::RemoteRequiresPush { remote }) => {
-            return Err(anyhow!(RecoveryAdvice::land_remote_requires_push(
-                &thread.id, &remote,
-            )));
-        }
-    };
-    let should_push = push_plan.should_push;
-    let planned_push_remote = if should_push {
-        match push_plan
-            .remote
-            .or(super::remote::resolved_default_remote_name(&repo)?)
-        {
-            Some(remote) => Some(remote),
-            None => {
-                return Err(anyhow!(RecoveryAdvice::land_push_remote_missing(
-                    &thread.id
-                )));
-            }
-        }
-    } else {
-        None
     };
     let remote_synced = sync_remote_before_land_if_needed(&repo, &thread.id)?;
     git_overlay_txn::preflight_land_checkpoint(&repo, &thread.id)?;
@@ -425,13 +389,11 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                     git_commit: None,
                     synced: false,
                     integrated: false,
-                    pushed: false,
-                    pushed_remote: None,
                     merge_state: None,
                     trust: build_repository_verification_state(&repo),
                     chosen_path: "blocked".to_string(),
-                    performed_steps: land_performed_steps(captured, false, false, false, false),
-                    skipped_steps: land_skipped_steps(captured, false, false, false, false),
+                    performed_steps: land_performed_steps(captured, false, false, false),
+                    skipped_steps: land_skipped_steps(captured, false, false, false),
                 },
             );
         }
@@ -480,15 +442,11 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                         git_commit: None,
                         synced: false,
                         integrated: false,
-                        pushed: false,
-                        pushed_remote: None,
                         merge_state: None,
                         trust: build_repository_verification_state(&repo),
                         chosen_path: "blocked".to_string(),
-                        performed_steps: land_performed_steps(
-                            captured, synced, false, false, false,
-                        ),
-                        skipped_steps: land_skipped_steps(captured, synced, false, false, false),
+                        performed_steps: land_performed_steps(captured, synced, false, false),
+                        skipped_steps: land_skipped_steps(captured, synced, false, false),
                     },
                 );
             }
@@ -540,14 +498,18 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             );
             let record = create_git_checkpoint(
                 &repo,
-                Some(&checkpoint_message),
+                GitCheckpointRequest {
+                    action: "land",
+                    message: Some(&checkpoint_message),
+                    retry_command: "heddle land --thread <name>",
+                },
                 worktree_status_options(Some(repo.config())),
             )
             .map_err(|error| {
                 anyhow!(RecoveryAdvice::land_checkpoint_partial_failure(
                     &merge_thread.id,
                     error,
-                    land_performed_steps(captured, synced, true, false, false),
+                    land_performed_steps(captured, synced, true, false),
                 ))
             })?;
             checkpointed = true;
@@ -562,34 +524,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         .context(
             "land completed but failed to record manual integration and Git checkpoint as one undo batch",
         )?;
-        let mut pushed = false;
-        let mut pushed_remote = None;
-        if should_push {
-            let remote_name = push_after_land(
-                cli,
-                &repo,
-                planned_push_remote.clone(),
-                Some(merge_state.clone()),
-            )
-            .await
-            .map_err(|error| {
-                anyhow!(RecoveryAdvice::land_push_partial_failure(
-                    &merge_thread.id,
-                    error,
-                    land_performed_steps(captured, synced, true, checkpointed, false),
-                    git_commit.as_deref(),
-                    planned_push_remote.as_deref(),
-                ))
-            })?;
-            pushed = true;
-            pushed_remote = Some(remote_name);
-        }
         let resolved_manually = merge_thread
             .integration_policy_result
             .conflicts_resolved_manually;
         clear_manual_resolution_state(&repo, &merge_thread.id)?;
         let trust = git_overlay_txn::post_verify(&repo);
-        let post_land_action = integrated_land_next_action(true, pushed, &trust);
+        let post_land_action = integrated_land_next_action(true, &trust);
         let mut operator = OperatorCommandOutput {
             status: "landed".to_string(),
             action: OperatorAction::Land,
@@ -632,18 +572,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 git_commit,
                 synced,
                 integrated: true,
-                pushed,
-                pushed_remote,
                 merge_state: Some(merge_state),
                 trust,
-                performed_steps: land_performed_steps(captured, synced, true, checkpointed, pushed),
-                skipped_steps: land_skipped_steps(captured, synced, true, checkpointed, pushed),
+                performed_steps: land_performed_steps(captured, synced, true, checkpointed),
+                skipped_steps: land_skipped_steps(captured, synced, true, checkpointed),
                 chosen_path: if checkpointed {
-                    if pushed {
-                        "capture_sync_manual_resolution_checkpoint_push".to_string()
-                    } else {
-                        "capture_sync_manual_resolution_checkpoint".to_string()
-                    }
+                    "capture_sync_manual_resolution_checkpoint".to_string()
                 } else {
                     "capture_sync_manual_resolution".to_string()
                 },
@@ -688,13 +622,11 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                     git_commit: None,
                     synced: false,
                     integrated: false,
-                    pushed: false,
-                    pushed_remote: None,
                     merge_state: None,
                     trust: build_repository_verification_state(&repo),
                     chosen_path: "blocked".to_string(),
-                    performed_steps: land_performed_steps(captured, synced, false, false, false),
-                    skipped_steps: land_skipped_steps(captured, synced, false, false, false),
+                    performed_steps: land_performed_steps(captured, synced, false, false),
+                    skipped_steps: land_skipped_steps(captured, synced, false, false),
                 },
             );
         }
@@ -725,13 +657,11 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 git_commit: None,
                 synced,
                 integrated: false,
-                pushed: false,
-                pushed_remote: None,
                 merge_state: None,
                 trust: build_repository_verification_state(&repo),
                 chosen_path: "blocked".to_string(),
-                performed_steps: land_performed_steps(captured, synced, false, false, false),
-                skipped_steps: land_skipped_steps(captured, synced, false, false, false),
+                performed_steps: land_performed_steps(captured, synced, false, false),
+                skipped_steps: land_skipped_steps(captured, synced, false, false),
             },
         );
     }
@@ -798,14 +728,18 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         );
         let record = create_git_checkpoint(
             &repo,
-            Some(&checkpoint_message),
+            GitCheckpointRequest {
+                action: "land",
+                message: Some(&checkpoint_message),
+                retry_command: "heddle land --thread <name>",
+            },
             worktree_status_options(Some(repo.config())),
         )
         .map_err(|error| {
             anyhow!(RecoveryAdvice::land_checkpoint_partial_failure(
                 &merge_thread.id,
                 error,
-                land_performed_steps(captured, synced, integrated, false, false),
+                land_performed_steps(captured, synced, integrated, false),
             ))
         })?;
         checkpointed = true;
@@ -819,35 +753,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     )
     .context("land completed but failed to record merge and Git checkpoint as one undo batch")?;
 
-    let mut pushed = false;
-    let mut pushed_remote = None;
-    if integrated && should_push {
-        let remote_name = push_after_land(
-            cli,
-            &repo,
-            planned_push_remote.clone(),
-            merge_output.merge_state.clone(),
-        )
-        .await
-        .map_err(|error| {
-            anyhow!(RecoveryAdvice::land_push_partial_failure(
-                &merge_thread.id,
-                error,
-                land_performed_steps(captured, synced, integrated, checkpointed, false),
-                git_commit.as_deref(),
-                planned_push_remote.as_deref(),
-            ))
-        })?;
-        pushed = true;
-        pushed_remote = Some(remote_name);
-    }
-
     if integrated {
         clear_manual_resolution_state(&repo, &merge_thread.id)?;
     }
 
     let trust = git_overlay_txn::post_verify(&repo);
-    let integrated_next_action = integrated_land_next_action(integrated, pushed, &trust);
+    let integrated_next_action = integrated_land_next_action(integrated, &trust);
     let mut operator = OperatorCommandOutput {
         status: if integrated { "landed" } else { "blocked" }.to_string(),
         action: OperatorAction::Land,
@@ -886,22 +797,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             git_commit,
             synced,
             integrated,
-            pushed,
-            pushed_remote,
             merge_state: merge_output.merge_state.clone(),
             trust,
-            performed_steps: land_performed_steps(
-                captured,
-                synced,
-                integrated,
-                checkpointed,
-                pushed,
-            ),
-            skipped_steps: land_skipped_steps(captured, synced, integrated, checkpointed, pushed),
+            performed_steps: land_performed_steps(captured, synced, integrated, checkpointed),
+            skipped_steps: land_skipped_steps(captured, synced, integrated, checkpointed),
             chosen_path: if integrated {
-                if pushed {
-                    "capture_sync_merge_checkpoint_push"
-                } else if checkpointed {
+                if checkpointed {
                     "capture_sync_merge_checkpoint"
                 } else {
                     "capture_sync_merge"
@@ -1005,7 +906,7 @@ fn collapse_thread_for_land(
     user_config: &UserConfig,
     thread: &Thread,
     message: Option<&str>,
-) -> Result<Option<ChangeId>> {
+) -> Result<Option<StateId>> {
     let sources = thread_source_states(repo, thread)?;
     if sources.len() <= 1 {
         return Ok(None);
@@ -1022,7 +923,7 @@ fn collapse_thread_for_land(
         None,
         CollapsePublishedRef::Thread(ThreadName::new(&thread.id)),
     )?;
-    Ok(Some(result.change_id))
+    Ok(Some(result.state_id))
 }
 
 fn thread_source_states(repo: &Repository, thread: &Thread) -> Result<Vec<State>> {
@@ -1042,9 +943,9 @@ fn thread_source_states(repo: &Repository, thread: &Thread) -> Result<Vec<State>
 
 fn collect_thread_sources(
     repo: &Repository,
-    state_id: ChangeId,
-    excluded: &HashSet<ChangeId>,
-    visited: &mut HashSet<ChangeId>,
+    state_id: StateId,
+    excluded: &HashSet<StateId>,
+    visited: &mut HashSet<StateId>,
     ordered: &mut Vec<State>,
 ) -> Result<()> {
     if excluded.contains(&state_id) || !visited.insert(state_id) {
@@ -1060,7 +961,7 @@ fn collect_thread_sources(
     Ok(())
 }
 
-fn reachable_state_set(repo: &Repository, root: ChangeId) -> Result<HashSet<ChangeId>> {
+fn reachable_state_set(repo: &Repository, root: StateId) -> Result<HashSet<StateId>> {
     let mut reachable = HashSet::new();
     let mut stack = vec![root];
     while let Some(state_id) = stack.pop() {
@@ -1074,34 +975,13 @@ fn reachable_state_set(repo: &Repository, root: ChangeId) -> Result<HashSet<Chan
     Ok(reachable)
 }
 
-async fn push_after_land(
-    cli: &Cli,
-    repo: &Repository,
-    remote: Option<String>,
-    state: Option<String>,
-) -> Result<String> {
-    if repo.capability() == repo::RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
-        let (remote_name, _, _, _, _, _) =
-            super::remote::push_git_overlay_refs(repo, remote.as_deref(), false, false)?;
-        Ok(remote_name)
-    } else {
-        let pushed_remote = remote
-            .clone()
-            .or(super::remote::resolved_default_remote_name(repo)?)
-            .unwrap_or_else(|| "default".to_string());
-        super::remote::cmd_push(cli, remote, None, state, false, false, None, false).await?;
-        Ok(pushed_remote)
-    }
-}
-
 fn land_performed_steps(
     captured: bool,
     synced: bool,
     integrated: bool,
     checkpointed: bool,
-    pushed: bool,
 ) -> Vec<String> {
-    core_land_performed_steps(captured, synced, integrated, checkpointed, pushed)
+    core_land_performed_steps(captured, synced, integrated, checkpointed)
 }
 
 fn land_skipped_steps(
@@ -1109,17 +989,15 @@ fn land_skipped_steps(
     synced: bool,
     integrated: bool,
     checkpointed: bool,
-    pushed: bool,
 ) -> Vec<String> {
-    core_land_skipped_steps(captured, synced, integrated, checkpointed, pushed)
+    core_land_skipped_steps(captured, synced, integrated, checkpointed)
 }
 
 fn integrated_land_next_action(
     integrated: bool,
-    pushed: bool,
     trust: &RepositoryVerificationState,
 ) -> Option<String> {
-    core_integrated_land_next_action(integrated, pushed, &trust.recommended_action)
+    core_integrated_land_next_action(integrated, &trust.recommended_action)
 }
 
 fn land_checkpoint_message(
@@ -1213,7 +1091,7 @@ fn coalesce_land_integration_and_checkpoint(
     repo: &Repository,
     merge_state: Option<&str>,
     git_commit: Option<&str>,
-    collapse_state: Option<&ChangeId>,
+    collapse_state: Option<&StateId>,
 ) -> Result<()> {
     let Some(merge_state) = merge_state else {
         return Ok(());
@@ -1234,10 +1112,7 @@ fn coalesce_land_integration_and_checkpoint(
     Ok(())
 }
 
-fn find_recent_land_collapse_batch(
-    repo: &Repository,
-    collapse_state: &ChangeId,
-) -> Result<OpBatch> {
+fn find_recent_land_collapse_batch(repo: &Repository, collapse_state: &StateId) -> Result<OpBatch> {
     repo.oplog()
         .recent_batches_scoped(12, Some(&repo.op_scope()))?
         .into_iter()
@@ -1480,16 +1355,6 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
         println!("  {}", style::field("thread", &style::bold(&output.thread)));
         if output.integrated {
             println!("  {}", style::field("landed", "on parent"));
-            let push_status = if output.pushed {
-                output
-                    .pushed_remote
-                    .as_deref()
-                    .map(|remote| format!("pushed to {remote}"))
-                    .unwrap_or_else(|| "pushed".to_string())
-            } else {
-                "not pushed".to_string()
-            };
-            println!("  {}", style::field("push", &push_status));
         } else {
             if !output.performed_steps.is_empty() {
                 println!(
@@ -1599,10 +1464,6 @@ mod tests {
         }
     }
 
-    // heddle#464 bug 2: the confidence/verification policy-blocker recovery used
-    // to be a bare `heddle commit ... --confidence`, which commits the CURRENT
-    // checkout. Run from the parent of an isolated thread, that never updates the
-    // blocked thread's state. Scope it to the thread's checkout via `--repo`.
     #[test]
     fn confidence_blocker_recovery_scopes_to_thread_checkout() {
         let blockers = vec!["confidence 0.40 is below the auto-land threshold of 0.75".to_string()];
@@ -1613,7 +1474,7 @@ mod tests {
         .expect("a confidence blocker must yield a recovery action");
         assert_eq!(
             action,
-            "heddle --repo /work/threads/agent-thread commit -m \"...\" --confidence <confidence>"
+            "heddle --repo /work/threads/agent-thread capture -m \"...\" --confidence <confidence>"
         );
         validate_recommended_action(&action)
             .unwrap_or_else(|e| panic!("scoped recovery must validate: {e}"));
@@ -1629,7 +1490,7 @@ mod tests {
         .expect("a verification blocker must yield a recovery action");
         assert_eq!(
             action,
-            "heddle --repo /work/threads/agent-thread commit -m \"...\" --confidence <confidence>"
+            "heddle --repo /work/threads/agent-thread capture -m \"...\" --confidence <confidence>"
         );
         validate_recommended_action(&action)
             .unwrap_or_else(|e| panic!("scoped recovery must validate: {e}"));
@@ -1688,7 +1549,7 @@ mod tests {
                 "Heavy-impact change: crates/wire/src/lib.rs — review broader impact before merging"
                     .to_string(),
             ],
-            recommended_action: "heddle land --thread agent-thread --no-push".to_string(),
+            recommended_action: "heddle land --thread agent-thread".to_string(),
             recommended_action_template: None,
             thread_health: "review".to_string(),
         };

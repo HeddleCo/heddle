@@ -14,7 +14,7 @@ The SAFE class of intentional panics, including mutex-poison `.lock().expect(...
 
 ## Current Inventory
 
-Counts below are unique primary clippy diagnostics from `cargo clippy --workspace --all-targets -- -W clippy::unwrap_used -W clippy::expect_used -W clippy::panic`, excluding test and bench targets and paths under `tests/` or `benches/`.
+Counts below are unique primary clippy diagnostics from `cargo clippy --workspace --lib --bins --examples -- -W clippy::unwrap_used -W clippy::expect_used -W clippy::panic`, excluding paths under `tests/` or `benches/`.
 
 | crate | unwrap_used | expect_used | panic |
 |---|---:|---:|---:|

@@ -9,7 +9,7 @@
 //!
 //! The file is an rmp-serde-encoded [`StateVisibilityBlob`] — every
 //! visibility declaration on the same state lives in the same file, keyed by
-//! the state's `ChangeId`. This mirrors the per-blob redactions sidecar
+//! the state's `StateId`. This mirrors the per-blob redactions sidecar
 //! (`crates/repo/src/repository_redaction.rs`), one level up: redaction is
 //! keyed by a blob hash, commit visibility by a state id.
 //!
@@ -31,7 +31,7 @@ use chrono::Utc;
 use objects::{
     fs_atomic::write_file_atomic,
     lock::RepositoryLockExt,
-    object::{ChangeId, ContentHash, StateVisibility, StateVisibilityBlob, VisibilityTier},
+    object::{ContentHash, StateId, StateVisibility, StateVisibilityBlob, VisibilityTier},
 };
 use oplog::{OpLogRecorder, OpRecord, VisibilitySidecarSnapshots};
 
@@ -409,7 +409,7 @@ impl Repository {
     /// `None` a `Set`.
     fn append_visibility_audit(
         &self,
-        state: &ChangeId,
+        state: &StateId,
         put: &PutVisibilityOutcome,
         tier: &VisibilityTier,
         superseded: Option<ContentHash>,
@@ -449,10 +449,7 @@ impl Repository {
     /// Return the raw rmp-encoded `StateVisibilityBlob` bytes for the given
     /// state, or `Ok(None)` if no sidecar exists. The bytes are the
     /// wire-transfer payload, not a re-serialized view.
-    pub fn get_state_visibility_bytes_for_state(
-        &self,
-        state: &ChangeId,
-    ) -> Result<Option<Vec<u8>>> {
+    pub fn get_state_visibility_bytes_for_state(&self, state: &StateId) -> Result<Option<Vec<u8>>> {
         let path = self.state_visibility_path_for_state(state);
         match fs::read(&path) {
             Ok(bytes) => Ok(Some(bytes)),
@@ -466,7 +463,7 @@ impl Repository {
     /// and each record is persisted through `put_state_visibility` so
     /// validation and public-by-absence normalization run at the same
     /// boundary as local writes.
-    pub fn accept_wire_state_visibility(&self, state: ChangeId, bytes: &[u8]) -> Result<()> {
+    pub fn accept_wire_state_visibility(&self, state: StateId, bytes: &[u8]) -> Result<()> {
         let incoming = StateVisibilityBlob::decode(bytes).with_context(|| {
             format!(
                 "decode incoming state visibility for state {}",
@@ -496,7 +493,7 @@ impl Repository {
     /// Load all visibility records targeting `state`. Returns an empty
     /// [`StateVisibilityBlob`] (not an error) when none exist — callers can
     /// treat the result uniformly.
-    pub fn get_state_visibility_for_state(&self, state: &ChangeId) -> Result<StateVisibilityBlob> {
+    pub fn get_state_visibility_for_state(&self, state: &StateId) -> Result<StateVisibilityBlob> {
         let path = self.state_visibility_path_for_state(state);
         if !path.exists() {
             return Ok(StateVisibilityBlob::empty());
@@ -514,7 +511,7 @@ impl Repository {
     /// invariant — true iff the effective tier is non-public — explicit and
     /// robust against any blob a future path might introduce. This is the
     /// query the serve-side gate keys off.
-    pub fn has_visibility_for_state(&self, state: &ChangeId) -> Result<bool> {
+    pub fn has_visibility_for_state(&self, state: &StateId) -> Result<bool> {
         Ok(self
             .get_state_visibility_for_state(state)?
             .latest()?
@@ -526,7 +523,7 @@ impl Repository {
     /// Pure over the persisted records — never wall-clock (an `embargo_until`
     /// is materialized into a superseding record before it can change the
     /// effective tier, see the spike §5.4).
-    pub fn effective_state_visibility(&self, state: &ChangeId) -> Result<Option<StateVisibility>> {
+    pub fn effective_state_visibility(&self, state: &StateId) -> Result<Option<StateVisibility>> {
         Ok(self
             .get_state_visibility_for_state(state)?
             .latest()?
@@ -537,7 +534,7 @@ impl Repository {
     /// [`VisibilityTier::Public`] when the state is public-by-absence. This is
     /// the single resolution the checkout courtesy stub and the bridge
     /// frontier both key off, so they agree on who-sees-what.
-    pub fn effective_visibility_tier(&self, state: &ChangeId) -> Result<VisibilityTier> {
+    pub fn effective_visibility_tier(&self, state: &StateId) -> Result<VisibilityTier> {
         Ok(self
             .effective_state_visibility(state)?
             .map(|record| record.tier)
@@ -547,7 +544,7 @@ impl Repository {
     /// Walk every visibility sidecar file in the repo. Returns
     /// `(state_id, blob)` pairs so callers can correlate. Used by listing
     /// surfaces and the GC's "never collect a visibility record" guard.
-    pub fn list_all_state_visibility(&self) -> Result<Vec<(ChangeId, StateVisibilityBlob)>> {
+    pub fn list_all_state_visibility(&self) -> Result<Vec<(StateId, StateVisibilityBlob)>> {
         let dir = self.state_visibility_dir();
         if !dir.exists() {
             return Ok(Vec::new());
@@ -556,7 +553,7 @@ impl Repository {
         for entry in fs::read_dir(&dir).with_context(|| format!("read '{}'", dir.display()))? {
             let entry = entry.with_context(|| format!("entry in '{}'", dir.display()))?;
             let path = entry.path();
-            // Only `.bin` files whose stem parses as a ChangeId. Editor
+            // Only `.bin` files whose stem parses as a StateId. Editor
             // backups and partial writes are skipped, never fatal.
             if path.extension().and_then(|e| e.to_str()) != Some("bin") {
                 continue;
@@ -564,7 +561,7 @@ impl Repository {
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let Ok(state) = ChangeId::parse(stem) else {
+            let Ok(state) = StateId::parse(stem) else {
                 continue;
             };
             let bytes = fs::read(&path).with_context(|| format!("read '{}'", path.display()))?;
@@ -618,7 +615,7 @@ impl Repository {
     /// forgets to).
     ///
     /// Idempotent: a state that already carries a visibility record is left
-    /// untouched, so a re-capture that mints the same `ChangeId` never
+    /// untouched, so a re-capture that mints the same `StateId` never
     /// double-binds, and a caller that explicitly set a tier before this runs is
     /// respected. Returns the binding to fold when one was written.
     ///
@@ -639,7 +636,7 @@ impl Repository {
     /// passes `false` (the sidecar write takes the lock itself).
     pub fn stage_default_visibility_binding(
         &self,
-        state: &ChangeId,
+        state: &StateId,
         lock_held: bool,
     ) -> Result<Option<DefaultVisibilityBinding>> {
         let tier = self.resolve_capture_default_visibility();
@@ -710,7 +707,7 @@ impl Repository {
     /// [`restore_redaction_sidecar`](Self::restore_redaction_sidecar).
     pub fn restore_state_visibility_sidecar(
         &self,
-        state: &ChangeId,
+        state: &StateId,
         snapshot: Option<Vec<u8>>,
     ) -> Result<()> {
         let path = self.state_visibility_path_for_state(state);
@@ -757,7 +754,7 @@ impl Repository {
     /// this adds the physical serialization that detection alone cannot provide.
     pub fn restore_state_visibility_sidecar_if_unchanged(
         &self,
-        state: &ChangeId,
+        state: &StateId,
         expected_current: &Option<Vec<u8>>,
         target: Option<Vec<u8>>,
     ) -> Result<VisibilitySidecarRestore> {
@@ -783,7 +780,7 @@ impl Repository {
 
     /// `<heddle_dir>/visibility/<change-id>.bin` — the visibility sidecar
     /// for a specific state.
-    pub(crate) fn state_visibility_path_for_state(&self, state: &ChangeId) -> PathBuf {
+    pub(crate) fn state_visibility_path_for_state(&self, state: &StateId) -> PathBuf {
         self.state_visibility_dir()
             .join(format!("{}.bin", state.to_string_full()))
     }
@@ -867,21 +864,18 @@ mod tests {
 
     /// A repo whose `[review.discussion] default_visibility` is pinned to
     /// `tier_toml`, so the capture-time binding resolves a non-public default.
-    fn repo_with_default(tier_toml: &str) -> (TempDir, Repository) {
+    fn repo_with_internal_default() -> (TempDir, Repository) {
         let dir = TempDir::new().unwrap();
         Repository::init_default(dir.path()).unwrap();
-        std::fs::write(
-            dir.path().join(".heddle/config.toml"),
-            format!(
-                "[repository]\nversion = 1\n\n[review.discussion]\ndefault_visibility = {tier_toml}\n"
-            ),
-        )
-        .unwrap();
+        let config_path = dir.path().join(".heddle/config.toml");
+        let mut config = crate::repository::repo_config::RepoConfig::load(&config_path).unwrap();
+        config.review.discussion.default_visibility = VisibilityTier::Internal;
+        config.save(&config_path).unwrap();
         let repo = Repository::open(dir.path()).unwrap();
         (dir, repo)
     }
 
-    fn sample_record(state: ChangeId, tier: VisibilityTier) -> StateVisibility {
+    fn sample_record(state: StateId, tier: VisibilityTier) -> StateVisibility {
         StateVisibility {
             state,
             tier,
@@ -899,7 +893,7 @@ mod tests {
     #[test]
     fn put_then_read_back_and_has_visibility_true() {
         let (_dir, repo) = fresh_repo();
-        let state = ChangeId::from_bytes([5u8; 16]);
+        let state = StateId::from_bytes([5u8; 32]);
         let record = sample_record(
             state,
             VisibilityTier::Restricted {
@@ -924,8 +918,8 @@ mod tests {
     #[test]
     fn put_rejects_invalid_records_before_persisting_and_round_trips_valid_record() {
         let (_dir, repo) = fresh_repo();
-        let team_state = ChangeId::from_bytes([31u8; 16]);
-        let restricted_state = ChangeId::from_bytes([32u8; 16]);
+        let team_state = StateId::from_bytes([31u8; 32]);
+        let restricted_state = StateId::from_bytes([32u8; 32]);
 
         let empty_team = sample_record(
             team_state,
@@ -986,11 +980,11 @@ mod tests {
         // The keystone: a state with no record resolves to public, so the
         // query returns false. No file is written for the public tier.
         let (_dir, repo) = fresh_repo();
-        let with_record = ChangeId::from_bytes([1u8; 16]);
+        let with_record = StateId::from_bytes([1u8; 32]);
         repo.put_state_visibility(sample_record(with_record, VisibilityTier::Internal))
             .expect("put visibility");
 
-        let no_record = ChangeId::from_bytes([2u8; 16]);
+        let no_record = StateId::from_bytes([2u8; 32]);
         assert!(
             !repo
                 .has_visibility_for_state(&no_record)
@@ -1009,7 +1003,7 @@ mod tests {
     #[test]
     fn put_is_idempotent_on_identical_record() {
         let (_dir, repo) = fresh_repo();
-        let state = ChangeId::from_bytes([7u8; 16]);
+        let state = StateId::from_bytes([7u8; 32]);
         let record = sample_record(state, VisibilityTier::Internal);
         let id1 = repo.put_state_visibility(record.clone()).expect("put").id;
         let id2 = repo.put_state_visibility(record).expect("re-put").id;
@@ -1030,7 +1024,7 @@ mod tests {
         // A promotion appends a superseding record; both live in the same
         // per-state sidecar file.
         let (_dir, repo) = fresh_repo();
-        let state = ChangeId::from_bytes([8u8; 16]);
+        let state = StateId::from_bytes([8u8; 32]);
         let first = sample_record(
             state,
             VisibilityTier::Restricted {
@@ -1061,8 +1055,8 @@ mod tests {
     #[test]
     fn list_all_returns_every_state_with_a_record() {
         let (_dir, repo) = fresh_repo();
-        let a = ChangeId::from_bytes([10u8; 16]);
-        let b = ChangeId::from_bytes([11u8; 16]);
+        let a = StateId::from_bytes([10u8; 32]);
+        let b = StateId::from_bytes([11u8; 32]);
         repo.put_state_visibility(sample_record(a, VisibilityTier::Internal))
             .unwrap();
         repo.put_state_visibility(sample_record(
@@ -1073,7 +1067,7 @@ mod tests {
         ))
         .unwrap();
 
-        let mut listed: Vec<ChangeId> = repo
+        let mut listed: Vec<StateId> = repo
             .list_all_state_visibility()
             .expect("list all")
             .into_iter()
@@ -1094,7 +1088,7 @@ mod tests {
         // dropping the others. With it, every record survives.
         let (_dir, repo) = fresh_repo();
         let repo = Arc::new(repo);
-        let state = ChangeId::from_bytes([42u8; 16]);
+        let state = StateId::from_bytes([42u8; 32]);
 
         const N: u32 = 8;
         let mut handles = Vec::new();
@@ -1135,7 +1129,7 @@ mod tests {
         // public-by-absence, so has_visibility_for_state is false and get
         // resolves to an empty (public) blob.
         let (_dir, repo) = fresh_repo();
-        let state = ChangeId::from_bytes([20u8; 16]);
+        let state = StateId::from_bytes([20u8; 32]);
         repo.put_state_visibility(sample_record(state, VisibilityTier::Public))
             .expect("public put");
 
@@ -1165,7 +1159,7 @@ mod tests {
         // drop the whole state back to public-by-absence (record removed),
         // not leave a lingering non-public classification.
         let (_dir, repo) = fresh_repo();
-        let state = ChangeId::from_bytes([21u8; 16]);
+        let state = StateId::from_bytes([21u8; 32]);
         let private = sample_record(
             state,
             VisibilityTier::Restricted {
@@ -1210,7 +1204,7 @@ mod tests {
         // stale None. Deterministic: drive the two puts through the primitive in
         // order; the returned prior is what the call site records in the oplog.
         let (_dir, repo) = fresh_repo();
-        let state = ChangeId::from_bytes([99u8; 16]);
+        let state = StateId::from_bytes([99u8; 32]);
 
         // B's write lands first, onto a record-free state.
         let b = StateVisibility {
@@ -1279,8 +1273,8 @@ mod tests {
         // the write lock (heddle#317 r5). Models a `visibility set` that landed
         // before the bind: bind sees the record, skips, and stages no oplog
         // entry. Driven end-to-end through `stage_default_visibility_binding`.
-        let (_dir, repo) = repo_with_default("\"Internal\"");
-        let state = ChangeId::from_bytes([77u8; 16]);
+        let (_dir, repo) = repo_with_internal_default();
+        let state = StateId::from_bytes([77u8; 32]);
 
         // A user (or a racer) already set a team-scoped tier on this state.
         let existing = sample_record(
@@ -1323,7 +1317,7 @@ mod tests {
 
         // On a genuinely record-free state, bind DOES write and stage a record
         // whose before-image is public-by-absence.
-        let fresh = ChangeId::from_bytes([78u8; 16]);
+        let fresh = StateId::from_bytes([78u8; 32]);
         let staged = repo
             .stage_default_visibility_binding(&fresh, false)
             .expect("bind on a fresh state")
@@ -1400,7 +1394,7 @@ mod tests {
         // recorded oplog order is [A, B] (B latest) and B's before-image is A's
         // record, so undoing B restores A — not public-by-absence.
         let (_dir, repo) = fresh_repo();
-        let state = ChangeId::from_bytes([55u8; 16]);
+        let state = StateId::from_bytes([55u8; 32]);
 
         // A commits first, onto a record-free state.
         let a = StateVisibility {
@@ -1486,7 +1480,7 @@ mod tests {
         // oplog agree. (`declared_at` is still re-stamped under the lock for a
         // monotonic audit trail, asserted below, but no longer decides the pick.)
         let (_dir, repo) = fresh_repo();
-        let state = ChangeId::from_bytes([57u8; 16]);
+        let state = StateId::from_bytes([57u8; 32]);
 
         // A is minted first with an EARLIER would-be declared_at...
         let a = StateVisibility {
@@ -1559,7 +1553,7 @@ mod tests {
         // wall-clock tie-break. (Pure wall-clock independence of `latest()` is
         // pinned by the objects-crate `latest_ignores_wall_clock_declared_at`.)
         let (_dir, repo) = fresh_repo();
-        let state = ChangeId::from_bytes([58u8; 16]);
+        let state = StateId::from_bytes([58u8; 32]);
 
         let a_out = repo
             .commit_state_visibility(
@@ -1622,7 +1616,7 @@ mod tests {
         // the post-return invariant: once the primitive returns, the sidecar is on
         // disk AND a matching StateVisibilitySet audit entry exists alongside it.
         let (_dir, repo) = fresh_repo();
-        let state = ChangeId::from_bytes([56u8; 16]);
+        let state = StateId::from_bytes([56u8; 32]);
 
         // Before the commit: no sidecar, no audit entry.
         assert!(
@@ -1686,7 +1680,7 @@ mod tests {
         let (_dir, repo) = fresh_repo();
 
         // Arm 1: a fresh (public-by-absence) state. Rollback removes the sidecar.
-        let fresh = ChangeId::from_bytes([66u8; 16]);
+        let fresh = StateId::from_bytes([66u8; 32]);
         let record = sample_record(fresh, VisibilityTier::Internal);
         let err = with_visibility_commit_fault(VisibilityCommitFault::Append, || {
             repo.commit_state_visibility(record, VisibilityCommitKind::Set)
@@ -1713,7 +1707,7 @@ mod tests {
 
         // Arm 2: a state already carrying a record. Rollback restores THAT
         // record exactly, not absence.
-        let seeded = ChangeId::from_bytes([67u8; 16]);
+        let seeded = StateId::from_bytes([67u8; 32]);
         repo.commit_state_visibility(
             sample_record(
                 seeded,
@@ -1762,8 +1756,8 @@ mod tests {
         // staged sidecar must be rewound so no orphaned non-public sidecar is
         // left for a state whose snapshot batch never committed. Driven through
         // the fold-and-rewind chokepoint with a deterministic commit fault.
-        let (_dir, repo) = repo_with_default("\"Internal\"");
-        let state = ChangeId::from_bytes([88u8; 16]);
+        let (_dir, repo) = repo_with_internal_default();
+        let state = StateId::from_bytes([88u8; 32]);
         assert!(
             !repo
                 .has_visibility_for_state(&state)
@@ -1798,7 +1792,7 @@ mod tests {
         // narrowing or lateral (same-rank) change is rejected with a clear error
         // and must go through `set`.
         let (_dir, repo) = fresh_repo();
-        let state = ChangeId::from_bytes([90u8; 16]);
+        let state = StateId::from_bytes([90u8; 32]);
 
         // Seed a restricted (most-restrictive) record.
         repo.commit_state_visibility(

@@ -16,7 +16,7 @@
 //! rewinds HEAD on its own.
 
 use anyhow::{Result, anyhow};
-use objects::object::{ChangeId, ThreadName};
+use objects::object::{StateId, ThreadName};
 use oplog::{OpLogRecorder, OpRecord};
 use refs::Head;
 use repo::Repository;
@@ -45,7 +45,7 @@ use super::advice::RecoveryAdvice;
 pub(super) fn record_ff_advance(
     repo: &Repository,
     source_thread: &str,
-    post_target_id: &ChangeId,
+    post_target_id: &StateId,
 ) -> Result<()> {
     let head_before = repo.head_ref()?;
     let pre_target_id = match &head_before {
@@ -69,7 +69,7 @@ pub(super) fn record_ff_advance(
 pub(super) fn record_ff_advance_discard_local(
     repo: &Repository,
     source_thread: &str,
-    post_target_id: &ChangeId,
+    post_target_id: &StateId,
 ) -> Result<()> {
     let head_before = repo.head_ref()?;
     let pre_target_id = match &head_before {
@@ -105,7 +105,7 @@ pub(super) fn record_ff_advance_discard_local(
 pub(super) fn ff_advance_deferred(
     repo: &Repository,
     source_thread: &str,
-    post_target_id: &ChangeId,
+    post_target_id: &StateId,
     discard_local_changes: bool,
 ) -> Result<OpRecord> {
     let head_before = repo.head_ref()?;
@@ -133,7 +133,7 @@ pub(super) fn ff_advance_deferred(
     })
 }
 
-fn attached_thread_tip(repo: &Repository, thread: &ThreadName) -> Result<ChangeId> {
+fn attached_thread_tip(repo: &Repository, thread: &ThreadName) -> Result<StateId> {
     repo.refs()
         .get_thread(thread)?
         .ok_or_else(|| anyhow!(attached_thread_missing_ref_advice(thread)))
@@ -156,10 +156,10 @@ fn record_ff_advance_inner(
     repo: &Repository,
     source_thread: &str,
     head_before: &Head,
-    pre_target_id: &ChangeId,
-    post_target_id: &ChangeId,
+    pre_target_id: &StateId,
+    post_target_id: &StateId,
     discard_local_changes: bool,
-    materialized_baseline: Option<Option<ChangeId>>,
+    materialized_baseline: Option<Option<StateId>>,
 ) -> Result<()> {
     if discard_local_changes {
         repo.fast_forward_attached_without_record_discard_local(post_target_id)?;
@@ -209,11 +209,11 @@ mod tests {
         root: &std::path::Path,
         name: &str,
         content: &str,
-    ) -> ChangeId {
+    ) -> StateId {
         fs::write(root.join(name), content).unwrap();
         repo.snapshot(Some(name.to_string()), None)
             .unwrap()
-            .change_id
+            .state_id
     }
 
     #[test]
@@ -270,7 +270,7 @@ mod tests {
         let target = repo
             .snapshot(Some("target".to_string()), None)
             .unwrap()
-            .change_id;
+            .state_id;
 
         repo.goto(&base).unwrap();
         repo.refs()

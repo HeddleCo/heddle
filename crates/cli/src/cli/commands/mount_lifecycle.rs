@@ -37,6 +37,15 @@ pub(crate) struct SpawnedMount {
     pub fskit_readiness: Option<FskitReadinessReport>,
 }
 
+#[cfg(any(all(target_os = "macos", feature = "mount"), test))]
+fn fskit_interactive_setup_allowed(
+    explicitly_enabled: bool,
+    stdin_is_terminal: bool,
+    stderr_is_terminal: bool,
+) -> bool {
+    explicitly_enabled && stdin_is_terminal && stderr_is_terminal
+}
+
 /// Kernel/user-space backend that actually owns a virtualized mount.
 #[allow(dead_code)] // Variants are target-gated; a single-host check sees only one subset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,6 +208,7 @@ mod linux {
         repo: Repository,
         thread_id: &str,
         mountpoint: &Path,
+        _interactive_setup: bool,
     ) -> Result<super::SpawnedMount> {
         std::fs::create_dir_all(mountpoint)
             .with_context(|| format!("create mount point {}", mountpoint.display()))?;
@@ -279,11 +289,11 @@ mod linux {
 #[cfg(all(target_os = "macos", feature = "mount"))]
 mod macos {
     use std::{
-        io::{self, IsTerminal, Write},
+        io::{self, IsTerminal},
         path::{Path, PathBuf},
         process::Command,
         sync::Mutex,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use anyhow::{Context, Result, anyhow};
@@ -291,7 +301,7 @@ mod macos {
         ContentAddressedMount, NfsSession, NfsShell,
         fskit::readiness::{self, Readiness},
     };
-    use objects::sync::LockExt;
+    use objects::{HeddleError, RecoveryDetails, sync::LockExt};
     use repo::Repository;
     use tracing::{debug, info, warn};
 
@@ -306,6 +316,7 @@ mod macos {
         "x-apple.systempreferences:com.apple.LoginItems-Settings.extension?Extensions";
     const FSKIT_INSTALL_HINT: &str = "FSKit fast path available — install the host app: brew install --cask heddle (or download from https://github.com/HeddleCo/heddle/releases)";
     const FSKIT_POLL_INTERVAL: Duration = Duration::from_millis(1_500);
+    const FSKIT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
     const FSKIT_WAIT_MESSAGE: &str =
         "Waiting for macOS to report Heddle enabled in File System Extensions";
     const FSKIT_SPINNER_FRAMES: [char; 4] = ['|', '/', '-', '\\'];
@@ -468,10 +479,8 @@ mod macos {
         repo: Repository,
         thread_id: &str,
         mountpoint: &Path,
+        interactive_setup: bool,
     ) -> Result<super::SpawnedMount> {
-        std::fs::create_dir_all(mountpoint)
-            .with_context(|| format!("create mount point {}", mountpoint.display()))?;
-
         let root = repo.root().to_path_buf();
         let outcome = if macos_supports_fskit() {
             match readiness::probe() {
@@ -495,10 +504,18 @@ mod macos {
                 }
                 Readiness::NeedsApproval => {
                     let settings_url = settings_deep_link().url;
+                    if !super::fskit_interactive_setup_allowed(
+                        interactive_setup,
+                        io::stdin().is_terminal(),
+                        io::stderr().is_terminal(),
+                    ) {
+                        return Err(anyhow!(HeddleError::recovery(fskit_approval_required(
+                            settings_url,
+                        ))));
+                    }
                     print_needs_approval_block(settings_url);
-                    wait_for_enter_to_open_settings(settings_url);
-                    open_settings(settings_url);
-                    wait_for_fskit_ready();
+                    open_settings(settings_url)?;
+                    wait_for_fskit_ready(settings_url)?;
                     info!(
                         thread = thread_id,
                         "FSKit extension enabled during poll; using `mount -F -t heddle`"
@@ -642,65 +659,66 @@ mod macos {
              3. If the By App view does not apply the change, stay on By Category / Extension Type; macOS controls this approval UI.\n\
              \n\
              Settings URL: {settings_url}\n\
-             Heddle will keep waiting here until macOS reports the extension enabled. Press Ctrl-C to stop.\n"
+             Heddle will wait up to 120 seconds for macOS to report the extension enabled.\n"
         );
     }
 
-    fn wait_for_enter_to_open_settings(settings_url: &str) {
-        if io::stdin().is_terminal() {
-            let mut stderr = io::stderr();
-            let _ = write!(
-                stderr,
-                "Press Enter to open System Settings, or Ctrl-C to stop."
-            );
-            let _ = stderr.flush();
-
-            let mut input = String::new();
-            let _ = io::stdin().read_line(&mut input);
-            let _ = writeln!(stderr, "Opening System Settings: {settings_url}");
-        } else {
-            eprintln!("Opening System Settings: {settings_url}");
-        }
+    fn open_settings(url: &str) -> Result<()> {
+        Command::new("open")
+            .arg(url)
+            .spawn()
+            .context("open System Settings for FSKit approval")?;
+        Ok(())
     }
 
-    fn open_settings(url: &str) {
-        let _ = Command::new("open").arg(url).status();
-    }
-
-    fn wait_for_fskit_ready() {
-        let mut stderr = io::stderr();
-        let interactive = stderr.is_terminal();
+    fn wait_for_fskit_ready(settings_url: &str) -> Result<()> {
+        let started = Instant::now();
         let mut frame_index = 0usize;
-
-        if !interactive {
-            eprintln!("{FSKIT_WAIT_MESSAGE}. Press Ctrl-C to stop waiting.");
-        }
 
         loop {
             if readiness::probe() == Readiness::Ready {
-                if interactive {
-                    let _ = writeln!(
-                        stderr,
-                        "\rHeddle FSKit extension enabled; continuing. {FSKIT_LINE_CLEAR_PADDING}"
-                    );
-                } else {
-                    eprintln!("Heddle FSKit extension enabled; continuing.");
-                }
-                return;
-            }
-
-            if interactive {
-                let frame = FSKIT_SPINNER_FRAMES[frame_index % FSKIT_SPINNER_FRAMES.len()];
-                let _ = write!(
-                    stderr,
-                    "\r{frame} {FSKIT_WAIT_MESSAGE}. Press Ctrl-C to stop."
+                eprintln!(
+                    "\rHeddle FSKit extension enabled; continuing. {FSKIT_LINE_CLEAR_PADDING}"
                 );
-                let _ = stderr.flush();
-                frame_index = frame_index.wrapping_add(1);
+                return Ok(());
             }
 
+            if started.elapsed() >= FSKIT_APPROVAL_TIMEOUT {
+                return Err(anyhow!(HeddleError::recovery(fskit_approval_timeout(
+                    settings_url,
+                    FSKIT_APPROVAL_TIMEOUT.as_secs(),
+                ))));
+            }
+
+            let frame = FSKIT_SPINNER_FRAMES[frame_index % FSKIT_SPINNER_FRAMES.len()];
+            eprint!("\r{frame} {FSKIT_WAIT_MESSAGE}.");
+            frame_index = frame_index.wrapping_add(1);
             std::thread::sleep(FSKIT_POLL_INTERVAL);
         }
+    }
+
+    fn fskit_approval_required(settings_url: &str) -> RecoveryDetails {
+        RecoveryDetails::safety_refusal(
+            "fskit_approval_required",
+            "macOS must approve the Heddle FSKit extension before this virtualized workspace can start",
+            format!("Rerun from a terminal with `--interactive-setup`, or enable Heddle at {settings_url}."),
+            "FSKit is installed but disabled, and this invocation cannot run interactive setup",
+            "opening System Settings or waiting for approval would block automation unexpectedly",
+            "System Settings was not opened and repository state was left unchanged",
+        )
+        .with_recovery_commands(vec!["heddle start --help".to_string()])
+    }
+
+    fn fskit_approval_timeout(settings_url: &str, timeout_seconds: u64) -> RecoveryDetails {
+        RecoveryDetails::safety_refusal(
+            "fskit_approval_timeout",
+            format!("macOS did not report the Heddle FSKit extension enabled within {timeout_seconds} seconds"),
+            format!("Enable Heddle at {settings_url}, then rerun the original start command."),
+            "the bounded interactive FSKit approval window expired",
+            "waiting without a deadline would leave the CLI blocked indefinitely",
+            "the virtualized workspace was not mounted and repository state was left unchanged",
+        )
+        .with_recovery_commands(vec!["heddle start --help".to_string()])
     }
 
     fn mount_via_nfs(
@@ -708,6 +726,8 @@ mod macos {
         thread_id: &str,
         mountpoint: &Path,
     ) -> Result<MountedSession> {
+        std::fs::create_dir_all(mountpoint)
+            .with_context(|| format!("create mount point {}", mountpoint.display()))?;
         let repo = Repository::open(repo_root)
             .with_context(|| format!("reopen repo for NFS mount at {}", repo_root.display()))?;
         let mount = ContentAddressedMount::new(repo, thread_id)
@@ -732,6 +752,8 @@ mod macos {
         mountpoint: &Path,
         success: FsKitMountReport,
     ) -> Result<MacOsMountOutcome> {
+        std::fs::create_dir_all(mountpoint)
+            .with_context(|| format!("create mount point {}", mountpoint.display()))?;
         match FsKitMount::mount(repo_root, thread_id, mountpoint) {
             Ok(mount) => Ok(MacOsMountOutcome {
                 mounted: MountedSession::fskit(mount),
@@ -843,6 +865,7 @@ mod windows {
         repo: Repository,
         thread_id: &str,
         mountpoint: &Path,
+        _interactive_setup: bool,
     ) -> Result<super::SpawnedMount> {
         std::fs::create_dir_all(mountpoint)
             .with_context(|| format!("create mount point {}", mountpoint.display()))?;
@@ -986,6 +1009,7 @@ mod stub {
         _repo: repo::Repository,
         _thread_id: &str,
         _mountpoint: &Path,
+        _interactive_setup: bool,
     ) -> Result<super::SpawnedMount> {
         Err(super::virtualized_unsupported_error())
     }
@@ -1062,6 +1086,7 @@ pub(crate) fn establish_virtualized_mount(
     thread_id: &str,
     mountpoint: &Path,
     ownership: MountOwnership,
+    interactive_setup: bool,
 ) -> anyhow::Result<VirtualizedMountOutcome> {
     match ownership {
         MountOwnership::PreferDaemon => {
@@ -1074,6 +1099,7 @@ pub(crate) fn establish_virtualized_mount(
                     repo_root.to_path_buf(),
                     thread_id.to_string(),
                     mountpoint.to_path_buf(),
+                    interactive_setup,
                 ),
                 DaemonAttemptResolution::Fatal(err) => Err(err),
             }
@@ -1082,6 +1108,7 @@ pub(crate) fn establish_virtualized_mount(
             repo_root.to_path_buf(),
             thread_id.to_string(),
             mountpoint.to_path_buf(),
+            interactive_setup,
         ),
     }
 }
@@ -1090,10 +1117,12 @@ fn spawn_in_process_mount(
     repo_root: std::path::PathBuf,
     thread_id: String,
     mountpoint: std::path::PathBuf,
+    interactive_setup: bool,
 ) -> anyhow::Result<VirtualizedMountOutcome> {
     run_mount_io("in-process-spawn", move || {
         let mount_repo = repo::Repository::open(&repo_root)?;
-        let mounted = spawn_mount_for_thread(mount_repo, &thread_id, &mountpoint)?;
+        let mounted =
+            spawn_mount_for_thread(mount_repo, &thread_id, &mountpoint, interactive_setup)?;
         Ok(VirtualizedMountOutcome::in_process(mounted))
     })
 }
@@ -1177,6 +1206,14 @@ mod tests {
             MountOwnership::from_flags(true, false),
             MountOwnership::PreferDaemon,
         );
+    }
+
+    #[test]
+    fn fskit_setup_requires_explicit_opt_in_and_two_terminals() {
+        assert!(fskit_interactive_setup_allowed(true, true, true));
+        assert!(!fskit_interactive_setup_allowed(false, true, true));
+        assert!(!fskit_interactive_setup_allowed(true, false, true));
+        assert!(!fskit_interactive_setup_allowed(true, true, false));
     }
 
     /// `--no-daemon` opts out and pins us to the in-process

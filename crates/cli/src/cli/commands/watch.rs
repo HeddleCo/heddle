@@ -50,7 +50,7 @@ use heddle_core::watch_plan::{
     watch_passes_filter,
 };
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use objects::{object::ChangeId, store::ObjectStore};
+use objects::{object::StateId, store::ObjectStore};
 use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord};
 use repo::Repository;
 use serde::Serialize;
@@ -58,7 +58,7 @@ use serde::Serialize;
 use super::{advice::RecoveryAdvice, command_runtime_contract};
 use crate::cli::{
     Cli, JsonOutputMode, WatchArgs, json_output_mode_for_kind,
-    style::{accent, change_id as style_change_id, confidence as style_confidence, dim, warn},
+    style::{accent, confidence as style_confidence, dim, state_id as style_state_id, warn},
 };
 
 /// Truncation budget for intent text in columnar mode. Long intents
@@ -398,7 +398,7 @@ fn drain_pending(
 fn annotate_entry(entry: OpEntry, repo: &Repository) -> EmittedEntry {
     let kind = kind_for(&entry.operation);
     let thread = thread_for(&entry.operation, &kind);
-    let change = primary_change_id(&entry.operation);
+    let change = primary_state_id(&entry.operation);
     let (intent, confidence, actor) = match &change {
         Some(id) => state_lookup(repo, id),
         None => (None, None, None),
@@ -407,7 +407,7 @@ fn annotate_entry(entry: OpEntry, repo: &Repository) -> EmittedEntry {
         entry,
         kind,
         thread,
-        change_id: change,
+        state_id: change,
         intent,
         confidence,
         actor,
@@ -421,9 +421,9 @@ fn annotate_entry(entry: OpEntry, repo: &Repository) -> EmittedEntry {
 ///    legitimately may not be locally present.
 fn state_lookup(
     repo: &Repository,
-    change_id: &ChangeId,
+    state_id: &StateId,
 ) -> (Option<String>, Option<f32>, Option<ActorInfo>) {
-    let Ok(Some(state)) = repo.store().get_state(change_id) else {
+    let Ok(Some(state)) = repo.store().get_state(state_id) else {
         return (None, None, None);
     };
     let actor = state.attribution.agent.as_ref().map(|agent| ActorInfo {
@@ -473,9 +473,9 @@ fn thread_for(op: &OpRecord, _kind: &str) -> Option<String> {
 }
 
 /// Pick the change-id that best identifies this op for state lookup
-/// and for the `change_id` column. For Snapshot/Goto/ThreadUpdate
+/// and for the `state_id` column. For Snapshot/Goto/ThreadUpdate
 /// this is the new state; for ThreadCreate it's the seeded state.
-fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
+fn primary_state_id(op: &OpRecord) -> Option<StateId> {
     match op {
         OpRecord::Snapshot { new_state, .. } => Some(*new_state),
         OpRecord::Goto { target, .. } => Some(*target),
@@ -512,7 +512,7 @@ struct EmittedEntry {
     entry: OpEntry,
     kind: String,
     thread: Option<String>,
-    change_id: Option<ChangeId>,
+    state_id: Option<StateId>,
     intent: Option<String>,
     confidence: Option<f32>,
     actor: Option<ActorInfo>,
@@ -535,7 +535,7 @@ struct WatchLineJson<'a> {
     ts: String,
     thread: Option<&'a str>,
     kind: &'a str,
-    change_id: Option<String>,
+    state_id: Option<String>,
     intent: Option<&'a str>,
     confidence: Option<f32>,
     actor: Option<&'a ActorInfo>,
@@ -577,7 +577,7 @@ impl Renderer {
             ts: e.entry.timestamp.to_rfc3339_opts(SecondsFormat::Secs, true),
             thread: e.thread.as_deref(),
             kind: e.kind.as_str(),
-            change_id: e.change_id.as_ref().map(|id| id.to_string_full()),
+            state_id: e.state_id.as_ref().map(|id| id.to_string_full()),
             intent: e.intent.as_deref(),
             confidence: e.confidence,
             actor: e.actor.as_ref(),
@@ -593,7 +593,7 @@ impl Renderer {
 
     /// Columnar text mode. Widths are tuned for an 80-col terminal:
     /// `HH:MM:SS` (8) + 2sp + thread (28) + 2sp + kind (15) + 2sp +
-    /// change_id (15) + 2sp + intent (50) + 2sp + confidence (10) ≈
+    /// state_id (15) + 2sp + intent (50) + 2sp + confidence (10) ≈
     /// 132 chars worst-case. Most rows are well under that because
     /// `dim()` wraps the timestamp/change-id in escapes that don't
     /// add visible width.
@@ -607,10 +607,10 @@ impl Renderer {
         let kind_pad = pad_right(kind_plain, 15);
         let kind_field = kind_styled + &" ".repeat(kind_pad.len() - kind_plain.len());
         let change = e
-            .change_id
+            .state_id
             .map(|id| id.short())
             .unwrap_or_else(|| "-".to_string());
-        let change_field = pad_right(&style_change_id(&change), 15 + ansi_overhead(&change));
+        let change_field = pad_right(&style_state_id(&change), 15 + ansi_overhead(&change));
         let intent = truncate(e.intent.as_deref().unwrap_or(""), INTENT_DISPLAY_WIDTH);
         let intent_padded = pad_right(&intent, INTENT_DISPLAY_WIDTH);
         let confidence_field = match e.confidence {
@@ -692,14 +692,14 @@ fn visible_width(s: &str) -> usize {
 /// Used to compensate when we want a `pad_right` target that already
 /// accounts for the escape overhead — see `render_text`.
 fn ansi_overhead(plain: &str) -> usize {
-    let styled = style_change_id(plain);
+    let styled = style_state_id(plain);
     styled.len() - plain.len()
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use objects::object::ChangeId;
+    use objects::object::StateId;
     use oplog::{OpEntry, OpRecord};
     use tempfile::TempDir;
 
@@ -786,8 +786,8 @@ mod tests {
     #[test]
     fn drain_pending_emits_only_above_watermark() {
         let (_tmp, heddle_dir) = synthetic_repo();
-        let cid_a = ChangeId::generate();
-        let cid_b = ChangeId::generate();
+        let cid_a = StateId::from_bytes([79; 32]);
+        let cid_b = StateId::from_bytes([80; 32]);
         let ids = write_entries(
             &heddle_dir,
             vec![
@@ -826,7 +826,7 @@ mod tests {
             json: true,
             filter: Some(vec!["snapshot".into()]),
         };
-        let snap_id = ChangeId::generate();
+        let snap_id = StateId::from_bytes([81; 32]);
         let snap = EmittedEntry {
             entry: make_entry(
                 1,
@@ -839,7 +839,7 @@ mod tests {
             ),
             kind: "snapshot".into(),
             thread: None,
-            change_id: None,
+            state_id: None,
             intent: None,
             confidence: None,
             actor: None,
@@ -849,13 +849,13 @@ mod tests {
                 2,
                 OpRecord::ThreadCreate {
                     name: "x".into(),
-                    state: ChangeId::generate(),
+                    state: StateId::from_bytes([82; 32]),
                     manager_snapshot: None,
                 },
             ),
             kind: "thread_create".into(),
             thread: Some("x".into()),
-            change_id: None,
+            state_id: None,
             intent: None,
             confidence: None,
             actor: None,
@@ -870,7 +870,7 @@ mod tests {
             json: true,
             filter: None,
         };
-        let cid = ChangeId::generate();
+        let cid = StateId::from_bytes([83; 32]);
         let entry = EmittedEntry {
             entry: make_entry(
                 7,
@@ -883,7 +883,7 @@ mod tests {
             ),
             kind: "snapshot".into(),
             thread: Some("modulo-race/approach-anthropic".into()),
-            change_id: Some(cid),
+            state_id: Some(cid),
             intent: Some("feat(modulo): error-returning impl".into()),
             confidence: Some(0.92),
             actor: Some(ActorInfo {
@@ -898,7 +898,7 @@ mod tests {
         assert_eq!(value["confidence"], 0.92);
         assert_eq!(value["actor"]["provider"], "anthropic");
         assert_eq!(value["id"], 7);
-        assert!(value["change_id"].is_string());
+        assert!(value["state_id"].is_string());
         assert!(value["ts"].as_str().unwrap().ends_with('Z'));
     }
 
@@ -916,7 +916,7 @@ mod tests {
             json: false,
             filter: None,
         };
-        let cid = ChangeId::generate();
+        let cid = StateId::from_bytes([84; 32]);
         let entry = EmittedEntry {
             entry: make_entry(
                 1,
@@ -929,7 +929,7 @@ mod tests {
             ),
             kind: "snapshot".into(),
             thread: Some("modulo-race/approach-anthropic".into()),
-            change_id: Some(cid),
+            state_id: Some(cid),
             intent: Some("feat(modulo): error-returning impl".into()),
             confidence: Some(0.92),
             actor: None,
@@ -945,12 +945,12 @@ mod tests {
     }
 
     #[test]
-    fn primary_change_id_covers_all_variants() {
+    fn primary_state_id_covers_all_variants() {
         // Smoke test: every OpRecord variant resolves to *some*
-        // change-id so the change_id column is never blank for a
+        // change-id so the state_id column is never blank for a
         // real op. (Goto/Fork/Collapse have no thread but they do
         // have an associated state.)
-        let cid = ChangeId::generate();
+        let cid = StateId::from_bytes([85; 32]);
         for op in [
             OpRecord::Snapshot {
                 new_state: cid,
@@ -999,7 +999,7 @@ mod tests {
                 state: cid,
             },
         ] {
-            assert!(primary_change_id(&op).is_some());
+            assert!(primary_state_id(&op).is_some());
         }
     }
 }

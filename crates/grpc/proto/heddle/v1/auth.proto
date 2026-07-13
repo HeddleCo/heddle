@@ -2,58 +2,110 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "heddle/v1/common.proto";
 
 service AuthService {
-  rpc BeginWebAuthnRegistration(BeginWebAuthnRegistrationRequest) returns (AuthChallengeResponse);
-  rpc RegisterPublicKey(RegisterPublicKeyRequest) returns (AccessTokenResponse);
-  rpc BeginWebAuthnAuthentication(BeginWebAuthnAuthenticationRequest) returns (AuthChallengeResponse);
-  rpc FinishWebAuthnAuthentication(FinishWebAuthnAuthenticationRequest) returns (AccessTokenResponse);
-  rpc CreateDeviceAuthorization(CreateDeviceAuthorizationRequest) returns (DeviceAuthorizationResponse);
-  rpc ApproveDeviceAuthorization(ApproveDeviceAuthorizationRequest) returns (AccessTokenResponse);
-  rpc ExchangeDeviceAuthorization(ExchangeDeviceAuthorizationRequest) returns (AccessTokenResponse);
-  rpc WaitForDeviceAuthorization(WaitForDeviceAuthorizationRequest) returns (stream DeviceAuthorizationEvent);
-  rpc RotateCredential(RotateCredentialRequest) returns (IssuedCredentialResponse);
-  rpc RevokeCredential(RevokeCredentialRequest) returns (RevokeCredentialResponse);
-  rpc CreateServiceAccount(CreateServiceAccountRequest) returns (ServiceAccountResponse);
-  rpc IssueServiceAccountCredential(IssueServiceAccountCredentialRequest) returns (IssuedCredentialResponse);
-  rpc RevokeServiceAccount(RevokeServiceAccountRequest) returns (DeleteResponse);
-  rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
-  rpc RecordSubscription(RecordSubscriptionRequest) returns (RecordSubscriptionResponse);
-  rpc IntrospectCredential(IntrospectCredentialRequest) returns (CredentialInfo);
-  rpc ListServiceAccounts(ListServiceAccountsRequest) returns (ListServiceAccountsResponse);
-  rpc ListScopeCapabilities(ListScopeCapabilitiesRequest) returns (ListScopeCapabilitiesResponse);
-  rpc LinkOAuthIdentity(LinkOAuthIdentityRequest) returns (AccessTokenResponse);
-  rpc StoreProviderToken(StoreProviderTokenRequest) returns (StoreProviderTokenResponse);
+  rpc BeginWebAuthnRegistration(BeginWebAuthnRegistrationRequest) returns (AuthChallengeResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_TRANSIENT_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc RegisterPublicKey(RegisterPublicKeyRequest) returns (AccessTokenResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc BeginWebAuthnAuthentication(BeginWebAuthnAuthenticationRequest) returns (AuthChallengeResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_TRANSIENT_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc FinishWebAuthnAuthentication(FinishWebAuthnAuthenticationRequest) returns (AccessTokenResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_TRANSIENT_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc CreateDeviceAuthorization(CreateDeviceAuthorizationRequest) returns (DeviceAuthorizationResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_TRANSIENT_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ApproveDeviceAuthorization(ApproveDeviceAuthorizationRequest) returns (AccessTokenResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_TRANSIENT_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ExchangeDeviceAuthorization(ExchangeDeviceAuthorizationRequest) returns (AccessTokenResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_TRANSIENT_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc WaitForDeviceAuthorization(WaitForDeviceAuthorizationRequest) returns (stream DeviceAuthorizationEvent) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc RotateCredential(RotateCredentialRequest) returns (IssuedCredentialResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc RevokeCredential(RevokeCredentialRequest) returns (RevokeCredentialResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc CreateServiceAccount(CreateServiceAccountRequest) returns (ServiceAccountResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc IssueServiceAccountCredential(IssueServiceAccountCredentialRequest) returns (IssuedCredentialResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc RevokeServiceAccount(RevokeServiceAccountRequest) returns (DeleteResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc RecordSubscription(RecordSubscriptionRequest) returns (RecordSubscriptionResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc IntrospectCredential(IntrospectCredentialRequest) returns (CredentialInfo) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc ListServiceAccounts(ListServiceAccountsRequest) returns (ListServiceAccountsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc ListScopeCapabilities(ListScopeCapabilitiesRequest) returns (ListScopeCapabilitiesResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc LinkOAuthIdentity(LinkOAuthIdentityRequest) returns (AccessTokenResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc StoreProviderToken(StoreProviderTokenRequest) returns (StoreProviderTokenResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // Verify the single-use token emailed to a signup address. On success
   // the server marks the signup_email_verification challenge satisfied
   // and returns a bootstrap-scope Biscuit the client presents on the
   // subsequent `BeginWebAuthnRegistration` call. Closes the latent
   // duplicate-username takeover surface named in HeddleCo/weft#120 §1
   // and tracked by HeddleCo/weft#181.
-  rpc VerifySignupEmail(VerifySignupEmailRequest) returns (VerifySignupEmailResponse);
-  rpc AnalyzeExternalDiff(AnalyzeExternalDiffRequest) returns (AnalyzeExternalDiffResponse);
+  rpc VerifySignupEmail(VerifySignupEmailRequest) returns (VerifySignupEmailResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc AnalyzeExternalDiff(AnalyzeExternalDiffRequest) returns (AnalyzeExternalDiffResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 
   // Public lookup of an invitation's shape (namespace path + role) by id.
   // Intentionally exposes no PII (email, invited_by) so the unauth'd
   // `/invite/[id]` page can still show a useful CTA. Returns
   // `exists: false, valid: false` when the id is unknown or malformed.
-  rpc GetInvitationSummary(GetInvitationSummaryRequest) returns (InvitationSummary);
+  rpc GetInvitationSummary(GetInvitationSummaryRequest) returns (InvitationSummary) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 
   // List the caller's active sessions. Drives the Active Sessions
   // UI (Settings → Active sessions). Surfaces user-agent
   // and IP captured at issue time + last-used timestamp so users
   // can spot unfamiliar devices.
-  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 
   // Revoke a single Biscuit session by rev_id. Per-row revoke from
   // the Active Sessions UI; also used by the logout flow on the
   // caller's own session. Pushes the rev_id into `session_blocklist`
   // and broadcasts via Postgres LISTEN/NOTIFY so every server
   // instance's revocation cache rejects the next request.
-  rpc RevokeSession(RevokeSessionRequest) returns (DeleteResponse);
+  rpc RevokeSession(RevokeSessionRequest) returns (DeleteResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
   // Mint a fresh Biscuit for a long-lived process (CLI, service
   // account, agent). Unauthenticated at the bearer level: the proof
@@ -69,7 +121,9 @@ service AuthService {
   // The requested_scope field is an attenuation hint: the server
   // clamps it down to what the keypair owner was originally granted
   // — never up.
-  rpc MintBiscuit(MintBiscuitRequest) returns (AccessTokenResponse);
+  rpc MintBiscuit(MintBiscuitRequest) returns (AccessTokenResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_TRANSIENT_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
   // Issue a short-lived presence-scoped Biscuit derived from the
   // caller's existing session bearer. The returned token is the
@@ -83,7 +137,9 @@ service AuthService {
   // capture) it can only subscribe to presence and only for 5
   // minutes — and revoking the parent session kills it via cascade
   // rev-id rejection.
-  rpc IssuePresenceToken(IssuePresenceTokenRequest) returns (IssuePresenceTokenResponse);
+  rpc IssuePresenceToken(IssuePresenceTokenRequest) returns (IssuePresenceTokenResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_TRANSIENT_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
   // Mint a fresh anonymous Biscuit for a browser that has no
   // session cookie yet. Unauthenticated — the response IS the
@@ -97,7 +153,9 @@ service AuthService {
   // `WEFT_MINT_TURNSTILE_REQUIRED=true`, requires a valid
   // Turnstile token. See HeddleCo/weft#189 and
   // `docs/auth/anon-biscuit-spike.md` §3 + §7.1.
-  rpc MintAnonBiscuit(MintAnonBiscuitRequest) returns (MintAnonBiscuitResponse);
+  rpc MintAnonBiscuit(MintAnonBiscuitRequest) returns (MintAnonBiscuitResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_TRANSIENT_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
   // ── Account recovery (E2 self-sovereign-auth, weft#120 §8) ────────────────
   // The recovery subtree lets a user who has lost every enrolled device
@@ -109,57 +167,59 @@ service AuthService {
   // credential-revocation cascade. Handlers live in weft
   // (weft#182/#183/#185/#186); this proto is the contract only.
 
-  // Generic entry point for declaring a recovery method. Dispatches to the
-  // per-kind completion RPCs below based on `kind`. Drives the recovery menu
-  // (weft#120 §3.3); on first successful declaration the server promotes the
-  // caller's bootstrap-scope Biscuit to full scope (the §Q2 trigger).
-  // weft#182.
-  rpc DeclareRecoveryMethod(DeclareRecoveryMethodRequest) returns (DeclareRecoveryMethodResponse);
+  // Declare one typed recovery method. The oneof case is the method kind.
+  // Drives the recovery menu (weft#120 §3.3); on first successful declaration
+  // the server promotes the caller's bootstrap-scope Biscuit to full scope
+  // (the §Q2 trigger). weft#182.
+  rpc DeclareRecoveryMethod(DeclareRecoveryMethodRequest) returns (DeclareRecoveryMethodResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
-  // Register a WebAuthn recovery credential as a time-locked recovery method
-  // (`kind=time_locked_webauthn`). `window_secs` governs the veto window on a
-  // future BeginRecovery (default 7d; 0 = instant, i.e. opt out of the veto
-  // window). weft#182 §8-2 / weft#183 §8-3.
-  rpc DeclareHardwareKeyRecovery(DeclareHardwareKeyRecoveryRequest) returns (DeclareRecoveryMethodResponse);
+  rpc DeclareHardwareKeyRecovery(DeclareHardwareKeyRecoveryRequest) returns (DeclareRecoveryMethodResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
-  // Declare a set of social guardians plus an M-of-N threshold
-  // (`kind=social`). No proof flow here — that rides on SubmitRecoveryProof's
-  // social variant (weft#185 §8-5). Guardian-side signing UX is a tapestry
-  // follow-up, out of scope for the server.
-  rpc DeclareSocialGuardians(DeclareSocialGuardiansRequest) returns (DeclareRecoveryMethodResponse);
+  rpc DeclareSocialGuardians(DeclareSocialGuardiansRequest) returns (DeclareRecoveryMethodResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
-  // Declare a paper-code (mnemonic) recovery method (`kind=paper_code`). The
-  // plaintext mnemonic is generated client-side and NEVER leaves the client
-  // (weft#120 §3.3 / §Q3): the request carries only the argon2id-hashed
-  // verifier, its salt, and the KDF params. The server rejects any request
-  // carrying plaintext bytes. weft#186 §8-6.
-  rpc DeclarePaperCode(DeclarePaperCodeRequest) returns (DeclareRecoveryMethodResponse);
+  rpc DeclarePaperCode(DeclarePaperCodeRequest) returns (DeclareRecoveryMethodResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
   // Start a recovery attempt for a username. Surfaces a veto bearer token to
   // all of the user's existing devices (LISTEN/NOTIFY, mirrors weft#103's
   // `pubkey_revoked` listener). Returns the attempt id + the window deadline
   // so the device-less client knows when CompleteRecovery becomes eligible.
   // weft#183 §8-3.
-  rpc BeginRecovery(BeginRecoveryRequest) returns (BeginRecoveryResponse);
+  rpc BeginRecovery(BeginRecoveryRequest) returns (BeginRecoveryResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
   // Submit proof against the pre-declared recovery method for an in-flight
   // attempt. The proof variant must match the declared method's kind:
   // a WebAuthn assertion (`time_locked_webauthn`), M-of-N guardian signatures
   // (`social`), or an argon2id hash of the typed mnemonic (`paper_code`).
   // weft#183/#185/#186.
-  rpc SubmitRecoveryProof(SubmitRecoveryProofRequest) returns (SubmitRecoveryProofResponse);
+  rpc SubmitRecoveryProof(SubmitRecoveryProofRequest) returns (SubmitRecoveryProofResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
   // Cancel an in-flight recovery attempt. The caller presents a veto bearer
   // token issued by BeginRecovery to one of the user's existing devices;
   // valid only within the window. weft#183 §8-3.
-  rpc VetoRecovery(VetoRecoveryRequest) returns (VetoRecoveryResponse);
+  rpc VetoRecovery(VetoRecoveryRequest) returns (VetoRecoveryResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
   // Complete a recovery attempt after `window_secs` has elapsed without a
   // veto and the proof has been accepted. Performs the credential-revocation
   // cascade (revokes all existing credentials for the user, mints a fresh
   // device_roots row from the recovery proof) and returns an AccessToken for
   // the recovered identity. weft#183 §8-3.
-  rpc CompleteRecovery(CompleteRecoveryRequest) returns (AccessTokenResponse);
+  rpc CompleteRecovery(CompleteRecoveryRequest) returns (AccessTokenResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 }
 
 message BeginWebAuthnRegistrationRequest {
@@ -187,8 +247,7 @@ message RegisterPublicKeyRequest {
   // (see the three `device_binding_*` fields). Closes
   // HeddleCo/weft#131.
   bytes device_public_key = 5;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
   // === Device-key binding proof (HeddleCo/weft#131) ===
   // Required iff `device_public_key` is non-empty. Together these
   // carry a WebAuthn assertion (`navigator.credentials.get()`
@@ -239,16 +298,14 @@ message FinishWebAuthnAuthenticationRequest {
   // Client-side device pubkey the client wants the access token bound
   // to. Server validates this against the user's active device_roots.
   bytes device_public_key = 7;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message CreateDeviceAuthorizationRequest {
   string device_name = 1;
   bytes device_public_key = 2;
   string scope = 3;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message ApproveDeviceAuthorizationRequest {
@@ -256,8 +313,7 @@ message ApproveDeviceAuthorizationRequest {
   string provider = 2;
   string model = 3;
   bool default_agent_policy = 4;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message ExchangeDeviceAuthorizationRequest {
@@ -278,15 +334,13 @@ message DeviceAuthorizationEvent {
 message RotateCredentialRequest {
   string credential_id = 1;
   bytes public_key = 2;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message RevokeCredentialRequest {
   string credential_id = 1;
   string reason = 2;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message RevokeCredentialResponse {
@@ -297,8 +351,7 @@ message CreateServiceAccountRequest {
   string subject = 1;
   string display_name = 2;
   string scope = 3;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message IssueServiceAccountCredentialRequest {
@@ -308,8 +361,7 @@ message IssueServiceAccountCredentialRequest {
   // 0 = never expires. Otherwise the credential Biscuit's expiry and
   // the `issued_credentials.expires_at` row are both set to now + ttl_secs.
   google.protobuf.Duration ttl_secs = 4;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message AuthChallengeResponse {
@@ -390,8 +442,7 @@ message ActiveSession {
 message RevokeSessionRequest {
   // The session id to revoke (from ActiveSession.id).
   string session_id = 1;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 // Caller authenticates with their normal session bearer in the
@@ -399,8 +450,7 @@ message RevokeSessionRequest {
 // gRPC). No body fields — the response is purely a function of the
 // caller's identity and a fixed 5-minute TTL.
 message IssuePresenceTokenRequest {
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message IssuePresenceTokenResponse {
@@ -444,8 +494,7 @@ message MintBiscuitRequest {
     // OidcProof oidc = 12;  // Future: federated CI token exchange.
   }
 
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 // Proof of possession via Ed25519 signature. The server looks up
@@ -501,7 +550,7 @@ message MintAnonBiscuitRequest {
   // continuity token. When absent or invalid, the server creates a
   // fresh anon profile instead.
   string anon_continuity_token = 2;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message MintAnonBiscuitResponse {
@@ -651,8 +700,7 @@ message ServiceAccountResponse {
 
 message RevokeServiceAccountRequest {
   string service_account_id = 1;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message ListServiceAccountsRequest {}
@@ -795,11 +843,9 @@ message InvitationSummary {
 
 // ── Account recovery (E2 self-sovereign-auth, weft#120 §8) ──────────────────
 //
-// Declaration phase (weft#182) — the generic dispatcher + the per-kind
-// completion requests. All declaration RPCs return the same
-// DeclareRecoveryMethodResponse. The persisted substrate is a
-// `recovery_methods` row keyed on `(user_id, kind)` with `kind_data jsonb`,
-// `declared_at`, and `window_secs`.
+// Declaration phase (weft#182) — the generic dispatcher and per-kind requests
+// share one response. The persisted substrate is a `recovery_methods` row keyed
+// on `(user_id, kind)` with `kind_data jsonb`, `declared_at`, and `window_secs`.
 
 // Canonical recovery-method kinds. Mirrors the `recovery_methods.kind`
 // column. `RECOVERY_METHOD_KIND_UNSPECIFIED` is rejected by the server.
@@ -823,8 +869,7 @@ message DeclareRecoveryMethodRequest {
     DeclareSocialGuardiansRequest social = 3;
     DeclarePaperCodeRequest paper_code = 4;
   }
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 // Shared response for all declaration RPCs. `bootstrap_promoted` is true when
@@ -855,8 +900,7 @@ message DeclareHardwareKeyRecoveryRequest {
   // Veto window applied to a future BeginRecovery against this credential.
   // Default 7 days; 0 = instant (the user opts out of the veto window).
   google.protobuf.Duration window_secs = 5;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 // Declare social guardians + an M-of-N threshold (`kind=social`). weft#185.
@@ -868,8 +912,7 @@ message DeclareSocialGuardiansRequest {
   // M in "M of N": the number of guardian signatures required to recover.
   // Must satisfy 1 <= threshold <= len(guardians); server rejects otherwise.
   uint32 threshold = 2;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 // A single nominated guardian.
@@ -896,8 +939,7 @@ message DeclarePaperCodeRequest {
   // breaking existing codes. Floor per OWASP: 64 MiB memory, 3 iterations,
   // parallelism 4.
   Argon2idParams params = 3;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 // argon2id parameters. Stored per paper-code row so the verifier is
@@ -920,8 +962,7 @@ message BeginRecoveryRequest {
   // the attempt (and the returned window) to the right `recovery_methods`
   // row. Server rejects a kind the user has not declared.
   RecoveryMethodKind kind = 2;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 // Salt + KDF params the recovering client uses to argon2id-hash the typed
@@ -957,8 +998,7 @@ message SubmitRecoveryProofRequest {
     SocialRecoveryProof social = 3;
     PaperCodeRecoveryProof paper_code = 4;
   }
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 // WebAuthn assertion signed by the declared `time_locked_webauthn`
@@ -1017,8 +1057,7 @@ message VetoRecoveryRequest {
   // The veto bearer token surfaced to the user's existing devices by
   // BeginRecovery. Authorizes the cancel; valid only within the window.
   string veto_token = 2;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message VetoRecoveryResponse {
@@ -1030,6 +1069,5 @@ message VetoRecoveryResponse {
 // the new device key from the accepted proof. weft#183 §8-3.
 message CompleteRecoveryRequest {
   string recovery_attempt_id = 1;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }

@@ -40,7 +40,7 @@ pub mod server;
 
 pub use endpoint::{
     EndpointState, default_state_dir, endpoint_path_for, load_endpoint, persist_endpoint,
-    pid_alive, remove_endpoint,
+    pid_alive, remove_endpoint, remove_endpoint_if_owned,
 };
 pub use mount_proto::{
     ERR_MOUNT_CONFLICT, ERR_MOUNT_UNSUPPORTED, ERR_VERSION_MISMATCH, MOUNT_PROTOCOL_VERSION,

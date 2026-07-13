@@ -81,7 +81,7 @@ pub fn run(
                 reason: truncate_reason(&reason),
                 producer: ProducerId::new(MODULE_ID, VERSION),
                 computed_at,
-                computed_against: Some(new.change_id),
+                computed_against: Some(new.state_id),
             });
         }
     }

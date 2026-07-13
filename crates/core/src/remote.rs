@@ -89,7 +89,7 @@ pub fn list_remotes(repo: &Repository) -> Result<RemoteListReport> {
 /// List remotes from a plain-Git worktree root (no Heddle metadata required).
 pub fn list_plain_git_remotes(root: &Path) -> RemoteListReport {
     let items = plain_git_remote_items(root);
-    let default = default_remote_from_items(&items);
+    let default = plain_git_default_remote_name(root, &items);
     RemoteListReport {
         output_kind: "remote_list",
         remotes: items
@@ -128,7 +128,7 @@ pub fn show_remote(repo: &Repository, name: &str) -> Result<Option<RemoteInfo>> 
 /// Show a single remote from a plain-Git worktree. Returns `None` when missing.
 pub fn show_plain_git_remote(root: &Path, name: &str) -> Option<RemoteInfo> {
     let items = plain_git_remote_items(root);
-    let default = default_remote_from_items(&items);
+    let default = plain_git_default_remote_name(root, &items);
     let url = items.get(name)?.clone();
     Some(RemoteInfo {
         output_kind: Some("remote_show"),
@@ -140,12 +140,14 @@ pub fn show_plain_git_remote(root: &Path, name: &str) -> Option<RemoteInfo> {
 }
 
 /// Resolve the remote name for push/pull when the user omitted it.
-///
-/// Falls back to `"origin"` when no configured default exists (legacy CLI
-/// contract for explicit transport resolution).
 pub fn resolve_default_remote_name(repo: &Repository, requested: Option<&str>) -> Result<String> {
     if let Some(requested) = requested {
         return Ok(requested.to_string());
+    }
+    if repo.capability() == RepositoryCapability::GitOverlay
+        && let Some(default) = git_overlay_default_remote_name(repo)
+    {
+        return Ok(default);
     }
     if let Some(default) = RemoteConfig::open(repo)
         .map_err(anyhow::Error::new)?
@@ -153,22 +155,35 @@ pub fn resolve_default_remote_name(repo: &Repository, requested: Option<&str>) -
     {
         return Ok(default.to_string());
     }
-    if repo.capability() == RepositoryCapability::GitOverlay
-        && let Some(default) = git_overlay_default_remote_name(repo)
-    {
-        return Ok(default);
+    Err(anyhow!(
+        "No default remote is configured; pass a remote or configure one first"
+    ))
+}
+
+/// Resolve the push destination with Git's branch-aware precedence in Overlay mode.
+pub fn resolve_default_push_remote_name(
+    repo: &Repository,
+    requested: Option<&str>,
+) -> Result<String> {
+    if let Some(requested) = requested {
+        return Ok(requested.to_string());
     }
-    Ok("origin".to_string())
+    if repo.capability() != RepositoryCapability::GitOverlay {
+        return resolve_default_remote_name(repo, None);
+    }
+    git_overlay_default_push_remote_name(repo).ok_or_else(|| {
+        anyhow!("No default push remote is configured; pass a remote or configure one first")
+    })
 }
 
 /// The configured default remote name, if any (no `"origin"` fallback).
 pub fn resolved_default_remote_name(repo: &Repository) -> Result<Option<String>> {
+    if repo.capability() == RepositoryCapability::GitOverlay {
+        return Ok(git_overlay_default_remote_name(repo));
+    }
     let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::new)?;
     if let Some(default) = cfg.default_name() {
         return Ok(Some(default.to_string()));
-    }
-    if repo.capability() == RepositoryCapability::GitOverlay {
-        return Ok(git_overlay_default_remote_name(repo));
     }
     Ok(None)
 }
@@ -225,14 +240,14 @@ pub fn uses_git_overlay_mirror_rpc(capability: RepositoryCapability) -> bool {
 /// Whether push/pull should take the local git-overlay path (git refs /
 /// git projection) rather than native heddle remote transport.
 ///
-/// Eligible when the repo is git-overlay, hosted mode is off, and the
-/// resolved target is not a hosted heddle network endpoint.
+/// Eligible when the repo is git-overlay and the resolved target is not a
+/// hosted Heddle network endpoint. Repository-wide hosted linkage does not
+/// override the transport selected by an explicit ordinary Git remote.
 pub fn uses_local_git_overlay_transport(
     capability: RepositoryCapability,
-    hosted_enabled: bool,
     uses_hosted_network: bool,
 ) -> bool {
-    capability == RepositoryCapability::GitOverlay && !hosted_enabled && !uses_hosted_network
+    capability == RepositoryCapability::GitOverlay && !uses_hosted_network
 }
 
 /// Default thread name for a push when the user omitted it.
@@ -343,7 +358,6 @@ impl std::error::Error for RemotePreflightBlocker {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushPlanRequest {
     pub capability: RepositoryCapability,
-    pub hosted_enabled: bool,
     /// True when the resolved remote is a hosted heddle network endpoint.
     pub uses_hosted_network: bool,
     /// Explicit remote name/spec from the user; `None` means default.
@@ -406,7 +420,6 @@ pub struct PushPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullPlanRequest {
     pub capability: RepositoryCapability,
-    pub hosted_enabled: bool,
     pub uses_hosted_network: bool,
     pub remote: Option<String>,
     pub has_default_remote: bool,
@@ -504,11 +517,8 @@ pub fn plan_push(request: &PushPlanRequest) -> Result<PushPlan, RemotePreflightB
         return Err(blocker);
     }
 
-    let uses_local = uses_local_git_overlay_transport(
-        request.capability,
-        request.hosted_enabled,
-        request.uses_hosted_network,
-    );
+    let uses_local =
+        uses_local_git_overlay_transport(request.capability, request.uses_hosted_network);
     let track_name = default_push_thread_name(request.thread.as_deref(), &request.head);
     let hosted = plan_hosted_push(request.capability, request.all_threads);
     let uses_mirror = uses_git_overlay_mirror_rpc(request.capability);
@@ -587,11 +597,8 @@ pub fn plan_pull(request: &PullPlanRequest) -> Result<PullPlan, RemotePreflightB
         return Err(blocker);
     }
 
-    let uses_local = uses_local_git_overlay_transport(
-        request.capability,
-        request.hosted_enabled,
-        request.uses_hosted_network,
-    );
+    let uses_local =
+        uses_local_git_overlay_transport(request.capability, request.uses_hosted_network);
 
     if let Some(blocker) = transport_mismatch_blocker(uses_local, request.transport_mismatch) {
         return Err(blocker);
@@ -2052,13 +2059,14 @@ pub fn pull_should_materialize(will_materialize: bool, lazy: bool) -> bool {
 /// gaps. Used by list/show assembly and by mutation commands that need the
 /// same visibility set.
 pub fn merged_remote_items(repo: &Repository) -> Result<BTreeMap<String, (String, String)>> {
+    if repo.capability() == RepositoryCapability::GitOverlay {
+        return Ok(git_overlay_config_remotes(repo)
+            .into_iter()
+            .map(|(name, url)| (name, (url, "git-overlay".to_string())))
+            .collect());
+    }
     let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::new)?;
-    let git_overlay_remotes = if repo.capability() == RepositoryCapability::GitOverlay {
-        git_overlay_config_remotes(repo)
-    } else {
-        BTreeMap::new()
-    };
-    let mut items: BTreeMap<String, (String, String)> = cfg
+    let items: BTreeMap<String, (String, String)> = cfg
         .list()
         .into_iter()
         .map(|(name, remote)| {
@@ -2066,13 +2074,6 @@ pub fn merged_remote_items(repo: &Repository) -> Result<BTreeMap<String, (String
             (name, (remote.url, source.to_string()))
         })
         .collect();
-    if repo.capability() == RepositoryCapability::GitOverlay {
-        for (name, url) in git_overlay_remotes {
-            items
-                .entry(name)
-                .or_insert_with(|| (url, "git-overlay".to_string()));
-        }
-    }
     Ok(items)
 }
 
@@ -2094,9 +2095,28 @@ fn default_remote_from_items(items: &BTreeMap<String, String>) -> Option<String>
     }
 }
 
+fn plain_git_default_remote_name(root: &Path, items: &BTreeMap<String, String>) -> Option<String> {
+    let git = SleyRepository::discover(root).ok()?;
+    let config = git.config_snapshot().ok()?;
+    let branch = git.head().ok()?.symbolic_target.and_then(|name| {
+        name.as_str()
+            .strip_prefix("refs/heads/")
+            .map(str::to_string)
+    });
+    branch
+        .as_deref()
+        .and_then(|branch| config.get("branch", Some(branch), "remote"))
+        .or_else(|| config.get("remote", None, "pushDefault"))
+        .map(str::to_string)
+        .filter(|name| items.contains_key(name))
+        .or_else(|| default_remote_from_items(items))
+}
+
 fn git_overlay_default_remote_name(repo: &Repository) -> Option<String> {
     let git_remotes = git_overlay_config_remotes(repo);
-    if let Some(upstream_remote) = git_upstream_remote_name(repo) {
+    if let Some(upstream_remote) = git_upstream_remote_name(repo)
+        && git_remotes.contains_key(&upstream_remote)
+    {
         return Some(upstream_remote);
     }
     if git_remotes.contains_key("origin") {
@@ -2106,6 +2126,25 @@ fn git_overlay_default_remote_name(repo: &Repository) -> Option<String> {
         return git_remotes.keys().next().cloned();
     }
     None
+}
+
+fn git_overlay_default_push_remote_name(repo: &Repository) -> Option<String> {
+    let remotes = git_overlay_config_remotes(repo);
+    let git = SleyRepository::discover(repo.root()).ok()?;
+    let config = git.config_snapshot().ok()?;
+    let branch = repo.git_overlay_current_branch().ok().flatten();
+    branch
+        .as_deref()
+        .and_then(|branch| config.get("branch", Some(branch), "pushRemote"))
+        .or_else(|| config.get("remote", None, "pushDefault"))
+        .or_else(|| {
+            branch
+                .as_deref()
+                .and_then(|branch| config.get("branch", Some(branch), "remote"))
+        })
+        .map(str::to_string)
+        .filter(|name| remotes.contains_key(name))
+        .or_else(|| default_remote_from_items(&remotes))
 }
 
 fn git_upstream_remote_name(repo: &Repository) -> Option<String> {
@@ -2122,9 +2161,7 @@ fn git_overlay_config_remotes(repo: &Repository) -> BTreeMap<String, String> {
     let Some(ctx) = GitConfigContext::discover(repo.root()) else {
         return BTreeMap::new();
     };
-    let mut paths = ctx.layered_paths();
-    paths.push(repo.heddle_dir().join("git").join("config"));
-    ctx.remotes(paths)
+    ctx.remotes(ctx.layered_paths())
 }
 
 fn configured_remote_source(repo: &Repository, url: &str) -> &'static str {
@@ -2689,27 +2726,61 @@ mod tests {
     }
 
     #[test]
-    fn uses_local_git_overlay_transport_requires_overlay_and_no_hosted() {
+    fn uses_local_git_overlay_transport_follows_resolved_remote() {
         assert!(uses_local_git_overlay_transport(
             RepositoryCapability::GitOverlay,
             false,
-            false,
         ));
         assert!(!uses_local_git_overlay_transport(
             RepositoryCapability::GitOverlay,
-            true,
-            false,
-        ));
-        assert!(!uses_local_git_overlay_transport(
-            RepositoryCapability::GitOverlay,
-            false,
             true,
         ));
         assert!(!uses_local_git_overlay_transport(
             RepositoryCapability::NativeHeddle,
             false,
-            false,
         ));
+    }
+
+    #[test]
+    fn overlay_push_remote_uses_git_precedence() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        fs::write(tmp.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            tmp.path().join(".git/config"),
+            "[remote \"origin\"]\n\turl = https://example.com/origin\n\
+             [remote \"upstream\"]\n\turl = https://example.com/upstream\n\
+             [remote \"publish\"]\n\turl = https://example.com/publish\n\
+             [remote]\n\tpushDefault = publish\n\
+             [branch \"main\"]\n\tremote = origin\n\tpushRemote = upstream\n",
+        )
+        .unwrap();
+        let repo = Repository::init_git_overlay_sidecar(tmp.path()).unwrap();
+        assert_eq!(
+            resolve_default_push_remote_name(&repo, None).unwrap(),
+            "upstream"
+        );
+
+        let config = fs::read_to_string(tmp.path().join(".git/config")).unwrap();
+        fs::write(
+            tmp.path().join(".git/config"),
+            config.replace("\tpushRemote = upstream\n", ""),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_default_push_remote_name(&repo, None).unwrap(),
+            "publish"
+        );
+    }
+
+    #[test]
+    fn overlay_remote_resolution_does_not_invent_origin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let repo = Repository::init_git_overlay_sidecar(tmp.path()).unwrap();
+
+        assert!(resolve_default_remote_name(&repo, None).is_err());
+        assert!(resolve_default_push_remote_name(&repo, None).is_err());
     }
 
     #[test]
@@ -2718,7 +2789,7 @@ mod tests {
             thread: objects::object::ThreadName::new("feature"),
         };
         let detached = Head::Detached {
-            state: objects::object::ChangeId::generate(),
+            state: objects::object::StateId::from_bytes([75; 32]),
         };
 
         assert_eq!(
@@ -2801,14 +2872,13 @@ mod tests {
 
     fn detached_head() -> Head {
         Head::Detached {
-            state: objects::object::ChangeId::generate(),
+            state: objects::object::StateId::from_bytes([76; 32]),
         }
     }
 
     fn base_push_request() -> PushPlanRequest {
         PushPlanRequest {
             capability: RepositoryCapability::NativeHeddle,
-            hosted_enabled: false,
             uses_hosted_network: false,
             remote: Some("origin".to_string()),
             has_default_remote: true,
@@ -2824,7 +2894,6 @@ mod tests {
     fn base_pull_request() -> PullPlanRequest {
         PullPlanRequest {
             capability: RepositoryCapability::NativeHeddle,
-            hosted_enabled: false,
             uses_hosted_network: false,
             remote: Some("origin".to_string()),
             has_default_remote: true,
@@ -2986,7 +3055,6 @@ mod tests {
             req.all_threads = all_threads;
             // Force native remote path (hosted network disables local overlay).
             req.uses_hosted_network = capability == RepositoryCapability::GitOverlay;
-            req.hosted_enabled = capability == RepositoryCapability::GitOverlay;
             let plan = plan_push(&req).expect("plan");
             assert_eq!(plan.hosted, hosted, "capability={capability:?}");
             assert_eq!(plan.native_all_threads_fanout, fanout);

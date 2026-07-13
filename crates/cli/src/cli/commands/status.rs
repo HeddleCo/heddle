@@ -135,7 +135,7 @@ fn fast_short_repo_config(start: &Path) -> Result<Option<RepoConfig>> {
     };
     let config_path = workdir.join(".heddle").join("config.toml");
     if config_path.is_file() {
-        Ok(Some(RepoConfig::load(&config_path)?))
+        Ok(Some(RepoConfig::load_for_repository(&config_path)?))
     } else {
         Ok(None)
     }
@@ -618,7 +618,9 @@ fn render_short_status(output: &StatusOutput) {
 }
 
 fn short_status_health(output: &StatusOutput) -> String {
-    if output.recommended_action == "heddle push" && output.thread_health == "clean" {
+    if matches!(output.recommended_action.as_str(), "heddle push")
+        && output.thread_health == "clean"
+    {
         "ready to push".to_string()
     } else {
         human_thread_health(&output.thread_health)
@@ -865,11 +867,11 @@ fn render_status_thread(output: &StatusOutput, verbose: bool) {
         if verbose {
             println!(
                 "State: {} ({})",
-                style::change_id(&state.change_id),
+                style::state_id(&state.state_id),
                 style::dim(&state.content_hash)
             );
         } else {
-            println!("Saved change: {}", style::change_id(&state.change_id));
+            println!("Saved change: {}", style::state_id(&state.state_id));
         }
         if let Some(intent) = &state.intent {
             // Quote stays plain; the inner intent string is the
@@ -1241,7 +1243,7 @@ fn status_next_follow_up(output: &StatusOutput) -> Option<&'static str> {
     if action.contains("commit") && status_has_publish_target(output) {
         Some("run `heddle push` when the Git commit is ready to publish")
     } else if action.contains("ready") {
-        Some("run `heddle land --thread <thread> --no-push` after readiness passes")
+        Some("run `heddle land --thread <thread>` after readiness passes")
     } else if action.contains("land") {
         Some("add `--push` only when a remote is configured and the thread should be published")
     } else if action.contains("resolve") || action.contains("continue") || action.contains("abort")
@@ -1375,7 +1377,7 @@ fn render_git_index_status(index: &CoreGitIndexPlan) {
     if index.commit_mode == "staged_index" && !index.preserved_after_commit.is_empty() {
         println!(
             "  include the rest with: {}",
-            style::bold("heddle commit --all -m \"...\"")
+            style::bold("heddle capture -m \"...\" && heddle commit -m \"...\"")
         );
     }
 }
@@ -1390,13 +1392,13 @@ fn git_index_extra_path_label(index: &CoreGitIndexPlan, kind: &'static str) -> S
 
 fn git_index_commit_scope_text(index: &CoreGitIndexPlan) -> &'static str {
     match index.commit_mode {
-        "staged_index" => "plain `heddle commit` checkpoints staged paths only",
-        "worktree_all" => "plain `heddle commit` captures and checkpoints all current paths",
-        "worktree_all_explicit" => {
-            "`heddle commit --all` captures and checkpoints staged, unstaged, and untracked paths"
+        "staged_index" => "`heddle commit` records the captured Git state",
+        "worktree_all" => {
+            "capture records Heddle provenance; `heddle commit` records source history"
         }
+        "worktree_all_explicit" => "capture first, then stage and commit the intended Git paths",
         "none" => "no Git paths are ready to commit",
-        _ => "`heddle commit` captures and checkpoints the current Git worktree",
+        _ => "capture Heddle provenance, then commit source history with Git",
     }
 }
 
@@ -1641,27 +1643,18 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn status_serializes_agent_context_fields_when_set() {
+    #[test]
+    fn status_serializes_agent_context_fields_when_set() {
         let repo_dir = TempDir::new().unwrap();
         let repo = Repository::init_default(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
 
         let cli = status_cli(repo_dir.path());
-        super::super::actor_cmd::cmd_actor_spawn(
-            &cli,
-            None,
-            true,
-            Some("codex".to_string()),
-            Some("gpt-5".to_string()),
-        )
-        .await
-        .expect("spawn attached actor");
-
         let mut output = build_status_output(&cli, false).expect("build status output");
         output.path = Some(repo_dir.path().display().to_string());
         output.execution_path = Some(repo_dir.path().display().to_string());
+        output.session_id = Some("agent-session-1".to_string());
         output.heddle_session_id = Some("heddle-session-1".to_string());
         output.actor = Some(ActorInfo {
             provider: Some("codex".to_string()),
@@ -1672,6 +1665,7 @@ mod tests {
         output.usage_summary = Some(AgentUsageSummary::default());
         output.last_progress_at = Some("2026-06-12T00:00:00Z".to_string());
         output.report_flush_state = Some("flushed".to_string());
+        output.attach_reason = Some("matched native actor identity".to_string());
         output.target_thread = Some("main".to_string());
         output.parent_thread = Some("main".to_string());
         output.task = Some("status surface".to_string());
@@ -1683,6 +1677,8 @@ mod tests {
                 "status must serialize set agent-context key `{key}`: {json}"
             );
         }
+        assert_eq!(json["session_id"], "agent-session-1");
+        assert_eq!(json["heddle_session_id"], "heddle-session-1");
         assert_eq!(json["actor"]["provider"], "codex");
         assert_eq!(json["actor"]["model"], "gpt-5");
     }
@@ -1730,13 +1726,13 @@ mod tests {
         // Advance main from the main repo dir (not from dest).
         fs::write(repo_dir.path().join("hello.txt"), b"hello world\n").unwrap();
         let snap = repo.snapshot(Some("advance".into()), None).unwrap();
-        assert_ne!(snap.change_id, mat.state_id);
+        assert_ne!(snap.state_id, mat.state_id);
 
         let infos = assess_materialized_threads(&repo);
         assert_eq!(infos.len(), 1);
         assert!(
             infos[0].stale,
-            "manifest still names mat.state_id but main head is at snap.change_id → stale"
+            "manifest still names mat.state_id but main head is at snap.state_id → stale"
         );
     }
 

@@ -17,8 +17,8 @@ use heddle_core::{
 };
 use objects::{
     fs_ops::remove_path_recursively,
-    object::{ChangeId, ThreadName},
-    store::{AgentRegistry, ObjectStore},
+    object::{StateId, ThreadName},
+    store::{ActorPresenceStore, ObjectStore, WriterLeaseStore},
 };
 use oplog::{OpLogRecorder, ThreadUpdateSnapshots};
 use refs::Head;
@@ -58,12 +58,12 @@ struct ThreadOutput {
 }
 
 pub(crate) struct ThreadRefState {
-    pub state: ChangeId,
+    pub state: StateId,
     pub ref_absent: bool,
 }
 
 pub(crate) struct ThreadUpdateBefore {
-    pub state: ChangeId,
+    pub state: StateId,
     pub ref_absent: bool,
     pub manager_snapshot: Option<Vec<u8>>,
     pub manager_records: Vec<Thread>,
@@ -96,7 +96,7 @@ pub(crate) fn current_thread_ref_state_with_presence(
     })
 }
 
-pub(crate) fn current_thread_ref_state(repo: &Repository, thread: &Thread) -> Result<ChangeId> {
+pub(crate) fn current_thread_ref_state(repo: &Repository, thread: &Thread) -> Result<StateId> {
     Ok(current_thread_ref_state_with_presence(repo, thread)?.state)
 }
 
@@ -119,7 +119,7 @@ pub(crate) fn save_thread_update_with_oplog(
     manager: &ThreadManager,
     thread: &Thread,
     before: ThreadUpdateBefore,
-    new_state: ChangeId,
+    new_state: StateId,
 ) -> Result<()> {
     let new_manager_snapshot = Some(manager.encode_thread_record_snapshot(thread)?);
     let mut new_manager_records = before.manager_records.clone();
@@ -617,8 +617,8 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
             // conflict on intermediate states even when the *final*
             // tree (target ⊔ thread) merges cleanly — the canonical
             // case is two sibling threads forked from the same base
-            // that touch disjoint files. `heddle merge` handles this
-            // via a 3-way tree merge; refresh used to fail with a
+            // that touch disjoint files. The shared 3-way tree merge
+            // engine handles this; refresh used to fail with a
             // misleading "rebase conflicts" error. Converge the two
             // paths: try the 3-way merge as a fallback. If it's clean
             // we apply it directly; if it actually conflicts we emit
@@ -723,9 +723,9 @@ fn restore_refresh_rebase_abort(repo: &Repository, rebase_state_path: &Path) -> 
 fn persist_refresh_conflict_state(
     thread_repo: &Repository,
     tree: objects::object::Tree,
-    ours: objects::object::ChangeId,
-    theirs: objects::object::ChangeId,
-    base: Option<objects::object::ChangeId>,
+    ours: objects::object::StateId,
+    theirs: objects::object::StateId,
+    base: Option<objects::object::StateId>,
     paths: Vec<String>,
 ) -> Result<()> {
     super::merge::apply_merged_tree_external(thread_repo, &tree)?;
@@ -738,8 +738,8 @@ fn persist_refresh_conflict_state(
 
 fn ensure_refresh_conflict_markers_materialized(
     repo: &Repository,
-    ours: &objects::object::ChangeId,
-    theirs: &objects::object::ChangeId,
+    ours: &objects::object::StateId,
+    theirs: &objects::object::StateId,
     paths: &[String],
 ) -> Result<()> {
     let ours_tree = tree_for_state(repo, ours)?;
@@ -766,7 +766,7 @@ fn ensure_refresh_conflict_markers_materialized(
 
 fn tree_for_state(
     repo: &Repository,
-    state_id: &objects::object::ChangeId,
+    state_id: &objects::object::StateId,
 ) -> Result<objects::object::Tree> {
     let state = repo
         .store()
@@ -867,7 +867,7 @@ fn thread_refresh_requires_checkout_advice(
     thread_id: &str,
     current: Option<&str>,
 ) -> RecoveryAdvice {
-    let switch_command = format!("heddle switch {thread_id}");
+    let switch_command = format!("heddle thread switch {thread_id}");
     let retry_command = format!("heddle thread refresh {thread_id}");
     let current_summary = current
         .map(|name| format!("current checkout is attached to '{name}'"))
@@ -890,7 +890,7 @@ fn thread_refresh_checkout_unavailable_advice(
     error: impl std::fmt::Display,
 ) -> RecoveryAdvice {
     let inspect_command = format!("heddle thread show {thread_id}");
-    let switch_command = format!("heddle switch {thread_id}");
+    let switch_command = format!("heddle thread switch {thread_id}");
     RecoveryAdvice::safety_refusal(
         "thread_refresh_checkout_unavailable",
         format!("Thread '{thread_id}' checkout could not be opened"),
@@ -1012,14 +1012,14 @@ fn thread_cleanup_duration_advice(spec: &str, detail: impl Into<String>) -> Reco
 /// rebase replay fails but the final trees may still merge cleanly.
 enum ThreeWayMergeRefresh {
     Clean {
-        new_state: objects::object::ChangeId,
+        new_state: objects::object::StateId,
     },
     Conflicted {
         tree: objects::object::Tree,
         paths: Vec<String>,
-        ours: objects::object::ChangeId,
-        theirs: objects::object::ChangeId,
-        base: Option<objects::object::ChangeId>,
+        ours: objects::object::StateId,
+        theirs: objects::object::StateId,
+        base: Option<objects::object::StateId>,
     },
 }
 
@@ -1082,7 +1082,7 @@ fn preflight_three_way_refresh_conflict(
 
 /// Try to refresh a thread by performing a 3-way merge between the
 /// thread tip and the target tip (instead of replaying commits). This
-/// is the same algorithm `heddle merge` uses, so refresh and merge
+/// is the same algorithm the land path uses, so refresh and land
 /// agree on whether two thread tips can be combined cleanly.
 ///
 /// On success, the thread's worktree is updated with the merged tree
@@ -1190,9 +1190,9 @@ fn try_three_way_merge_refresh(
             )?;
             parent_repo
                 .refs()
-                .set_thread(&ThreadName::new(&thread.thread), &new_state.change_id)?;
+                .set_thread(&ThreadName::new(&thread.thread), &new_state.state_id)?;
             Ok(ThreeWayMergeRefresh::Clean {
-                new_state: new_state.change_id,
+                new_state: new_state.state_id,
             })
         }
         ThreeWayMergeOutcome::Conflicted { tree, paths, base } => {
@@ -1453,14 +1453,15 @@ pub(crate) fn drop_thread_silent(
         thread.updated_at = Utc::now();
         manager.save(&thread)?;
     }
-    if plan.strip_agent_registry {
-        let registry = AgentRegistry::new(repo.heddle_dir());
+    if plan.strip_actor_presence {
+        let registry = ActorPresenceStore::new(repo.heddle_dir());
         for entry in registry.list()? {
             if entry.thread == thread.thread || entry.thread_id.as_deref() == Some(thread_id) {
                 registry.delete(&entry.session_id)?;
             }
         }
     }
+    WriterLeaseStore::new(repo.heddle_dir()).abandon_thread(&thread.thread, Utc::now())?;
     let tn = ThreadName::new(&thread.thread);
     if plan.delete_thread_ref && repo.refs().get_thread(&tn)?.is_some() {
         repo.refs().delete_thread(&tn)?;
@@ -1991,14 +1992,15 @@ fn apply_thread_drop(repo: &Repository, manager: &ThreadManager, thread: &Thread
     if plan.delete_thread_ref && repo.refs().get_thread(&tn)?.is_some() {
         repo.refs().delete_thread(&tn)?;
     }
-    if plan.strip_agent_registry {
-        let registry = AgentRegistry::new(repo.heddle_dir());
+    if plan.strip_actor_presence {
+        let registry = ActorPresenceStore::new(repo.heddle_dir());
         for entry in registry.list()? {
             if entry.thread == thread.thread || entry.thread_id.as_deref() == Some(&thread.id) {
                 registry.delete(&entry.session_id)?;
             }
         }
     }
+    WriterLeaseStore::new(repo.heddle_dir()).abandon_thread(&thread.thread, Utc::now())?;
     Ok(())
 }
 
@@ -2096,9 +2098,9 @@ mod cleanup_tests {
             parent_thread: Some("main".to_string()),
             mode: ThreadMode::Materialized,
             state: ThreadState::Active,
-            base_state: state.change_id.short(),
+            base_state: state.state_id.short(),
             base_root: state.tree.short(),
-            current_state: Some(state.change_id.short()),
+            current_state: Some(state.state_id.short()),
             merged_state: None,
             task: None,
             execution_path: dir.path().to_path_buf(),
@@ -2120,7 +2122,7 @@ mod cleanup_tests {
 
         let resolved = current_thread_ref_state(&repo, &thread).unwrap();
         assert_eq!(
-            resolved, state.change_id,
+            resolved, state.state_id,
             "fallback must resolve thread-record short current_state values"
         );
     }

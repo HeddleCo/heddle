@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Merge relationship classification shared by preview and apply flows.
 
-use objects::object::ChangeId;
+use objects::object::StateId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MergeRelationKind {
@@ -15,16 +15,16 @@ pub(crate) enum MergeRelationKind {
 #[derive(Clone, Debug)]
 pub(crate) struct MergeRelation {
     kind: MergeRelationKind,
-    merge_base_id: Option<ChangeId>,
+    merge_base_id: Option<StateId>,
     conflict_count: usize,
 }
 
 impl MergeRelation {
     pub(crate) fn new(
         kind: MergeRelationKind,
-        _current_change_id: ChangeId,
-        _target_change_id: ChangeId,
-        merge_base_id: Option<ChangeId>,
+        _current_state_id: StateId,
+        _target_state_id: StateId,
+        merge_base_id: Option<StateId>,
         conflict_count: usize,
     ) -> Self {
         Self {
@@ -38,7 +38,7 @@ impl MergeRelation {
         self.kind
     }
 
-    pub(crate) fn merge_base_id(&self) -> Option<ChangeId> {
+    pub(crate) fn merge_base_id(&self) -> Option<StateId> {
         self.merge_base_id
     }
 

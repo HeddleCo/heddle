@@ -3,7 +3,6 @@
 
 use std::{
     path::{Path, PathBuf},
-    process,
     time::Instant,
 };
 
@@ -27,8 +26,11 @@ pub use heddle_core::{
     find_thread_summary, thread_is_available_git_ref, thread_is_imported_git_ref,
 };
 use objects::{
-    object::{ChangeId, State, ThreadName},
-    store::{AgentEntry, AgentRegistry, AgentStatus, ObjectStore, current_boot_id},
+    object::{State, StateId, ThreadName},
+    store::{
+        ActorPresence, ActorPresenceStatus, ActorPresenceStore, ObjectStore, WriterLeaseStatus,
+        WriterLeaseStore,
+    },
 };
 use oplog::OpLogRecorder;
 use refs::{Head, RefExpectation, RefUpdate};
@@ -143,7 +145,7 @@ pub(crate) struct ThreadOpOutput {
 
 #[derive(Serialize)]
 pub(crate) struct ThreadCaptureOutput {
-    pub change_id: String,
+    pub state_id: String,
     pub created_at: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
@@ -236,7 +238,7 @@ pub(crate) fn cmd_thread_captures(
             .unwrap_or_else(|| "None".to_string());
         println!(
             "  {} {} {}",
-            style::accent(&capture.change_id),
+            style::accent(&capture.state_id),
             capture.message,
             style::dim(&format!("confidence {confidence}"))
         );
@@ -262,13 +264,13 @@ fn collect_thread_captures(
         .map(|thread| thread.base_state);
     let mut out = Vec::new();
     let mut cursor = Some(current);
-    while let Some(change_id) = cursor {
-        if base.as_deref() == Some(change_id.short().as_str())
-            || base.as_deref().and_then(|base| ChangeId::parse(base).ok()) == Some(change_id)
+    while let Some(state_id) = cursor {
+        if base.as_deref() == Some(state_id.short().as_str())
+            || base.as_deref().and_then(|base| StateId::parse(base).ok()) == Some(state_id)
         {
             break;
         }
-        let Some(state) = repo.store().get_state(&change_id)? else {
+        let Some(state) = repo.store().get_state(&state_id)? else {
             break;
         };
         if state
@@ -315,9 +317,9 @@ fn thread_capture_output(
     let message = state
         .intent
         .clone()
-        .unwrap_or_else(|| format!("Capture {}", state.change_id.short()));
+        .unwrap_or_else(|| format!("Capture {}", state.state_id.short()));
     ThreadCaptureOutput {
-        change_id: state.change_id.short(),
+        state_id: state.state_id.short(),
         created_at: state.created_at.to_rfc3339(),
         intent: state.intent.clone(),
         confidence: state.confidence,
@@ -353,7 +355,7 @@ pub(crate) fn suppress_thread_actions_while_trust_blocked(
         if trust.status == "needs_import"
             && summary
                 .recommended_action
-                .starts_with("heddle adopt --ref ")
+                .starts_with("heddle import git --ref ")
         {
             summary.recommended_action_template =
                 recommended_action_template(&summary.recommended_action);
@@ -851,7 +853,7 @@ fn render_thread_entry(entry: &ThreadSummary, verbose: bool) {
 pub(crate) fn start_transaction_id(
     scope: &str,
     name: &str,
-    base_state: &ChangeId,
+    base_state: &StateId,
     start_epoch: DateTime<Utc>,
 ) -> String {
     format!(
@@ -902,7 +904,10 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     plan_thread_start(&thread_start_options_from_args(&args))
         .map_err(|ThreadPlanError::InvalidName(err)| anyhow!(thread_name_invalid_advice(&err)))?;
 
-    let existing = find_active_thread_entry(repo, &args.name)?;
+    let existing = WriterLeaseStore::new(repo.heddle_dir())
+        .list()?
+        .into_iter()
+        .find(|lease| lease.status == WriterLeaseStatus::Active && lease.thread == args.name);
     if active_reservation_blocks_start(existing.is_some()) {
         let entry = existing.expect("active reservation present");
         if let Some(ref requested_path) = args.path {
@@ -1183,6 +1188,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             shared_target_dir: shared_target_dir_path,
             hydrate: hydrate_requested,
             mount_ownership,
+            interactive_setup: args.interactive_setup,
             record: thread_state,
         },
     )
@@ -1210,13 +1216,13 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
 /// what it anchors on, so reconstruct the finalize inputs from it rather than
 /// re-running the fresh-start preflight (which would reject the now-non-empty
 /// checkout) or `execute` (whose `apply` would fail on the existing `.heddle`).
-/// `base_state` is the full `ChangeId` already resolved by `start_thread` (the
+/// `base_state` is the full `StateId` already resolved by `start_thread` (the
 /// record only persists the short form). No hydrate is re-run, so no hydrate
 /// note is emitted (the original start already linked the deps).
 fn finalize_committed_start(
     repo: &Repository,
     args: &ThreadStartArgs,
-    base_state: ChangeId,
+    base_state: StateId,
     actor_identity: &StartActorIdentity,
 ) -> Result<ThreadOpOutput> {
     let committed = ThreadManager::new(repo.heddle_dir())
@@ -1249,7 +1255,7 @@ fn finalize_committed_start(
 
 /// The post-commit bookkeeping shared by a fresh `thread start` and a committed
 /// retry ([`finalize_committed_start`]): emit the hydrate note, create the
-/// `AgentRegistry` reservation entry (the "active reservation" a crash before
+/// `ActorPresenceStore` reservation entry (the "active reservation" a crash before
 /// this step leaves missing), and build the command output. Idempotent w.r.t. the
 /// reservation: it is only reached when no live owner exists (a live owner is
 /// caught earlier by `find_active_thread_entry`), so the retry completes the
@@ -1260,7 +1266,7 @@ fn finalize_thread_start(
     args: &ThreadStartArgs,
     thread_mode: &ThreadMode,
     abs_path: &Path,
-    base_state: ChangeId,
+    base_state: StateId,
     base_short: &str,
     base_root: &str,
     actor_identity: &StartActorIdentity,
@@ -1288,11 +1294,11 @@ fn finalize_thread_start(
         }
     }
 
-    let registry = AgentRegistry::new(repo.heddle_dir());
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let path_for_entry = abs_path.to_path_buf();
     let thread_name = args.name.clone();
-    let entry = registry.create_generated_entry_for_thread(&thread_name, |session_id| {
-        Ok(AgentEntry {
+    let entry = registry.create_generated_entry(|session_id| {
+        Ok(ActorPresence {
             session_id: session_id.to_string(),
             client_instance_id: None,
             native_actor_key: actor_identity.native_actor_key.clone(),
@@ -1301,17 +1307,8 @@ fn finalize_thread_start(
             heddle_session_id: None,
             thread_id: Some(thread_name.clone()),
             thread: thread_name.clone(),
-            pid: Some(process::id()),
-            boot_id: current_boot_id(),
-            liveness_path: Some(
-                repo.heddle_dir()
-                    .join("agents")
-                    .join(format!("{session_id}.live")),
-            ),
-            heartbeat_at: Some(Utc::now()),
             anchor_state: Some(base_state.to_string_full()),
             anchor_root: Some(base_root.to_string()),
-            reservation_token: Some(objects::store::generate_agent_id()),
             path: match thread_mode {
                 ThreadMode::Solid | ThreadMode::Materialized | ThreadMode::Virtualized => {
                     Some(path_for_entry.clone())
@@ -1335,7 +1332,7 @@ fn finalize_thread_start(
             winning_attach_rule: Some("thread-start".to_string()),
             probe_source: actor_identity.probe_source.clone(),
             probe_confidence: actor_identity.probe_confidence,
-            status: AgentStatus::Active,
+            status: ActorPresenceStatus::Active,
             completed_at: None,
             context_queries: vec![],
         })
@@ -1459,7 +1456,7 @@ fn active_reservation_advice(thread: &str, existing_path: Option<String>) -> Rec
         "active_thread_reservation",
         format!("Thread '{thread}' already has an active reservation{location}"),
         format!(
-            "Inspect it with `{primary_command}`, or release that session before starting another writer."
+            "Inspect it with `{primary_command}`, or release that lease before starting another writer."
         ),
         format!("thread '{thread}' already has an active writer reservation{location}"),
         "starting another writer could create competing worktree materializations for the same thread",
@@ -1471,8 +1468,8 @@ fn active_reservation_advice(thread: &str, existing_path: Option<String>) -> Rec
 
 fn thread_anchor_mismatch_advice(
     thread: &str,
-    existing: &ChangeId,
-    requested: &ChangeId,
+    existing: &StateId,
+    requested: &StateId,
 ) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "thread_anchor_mismatch",
@@ -1991,10 +1988,10 @@ pub(crate) fn cmd_thread_switch(
         if repo.capability() == repo::RepositoryCapability::GitOverlay
             && repo.root().join(".git").exists()
         {
-            let mut bridge = crate::git_projection_engine::GitProjection::new(repo);
+            let mut bridge = heddle_git_projection::GitProjection::new(repo);
             match bridge.write_through_thread_checkout(&name)? {
-                crate::git_projection_engine::WriteThroughOutcome::Wrote(_) => {}
-                crate::git_projection_engine::WriteThroughOutcome::Skipped(reason) => {
+                heddle_git_projection::WriteThroughOutcome::Wrote(_) => {}
+                heddle_git_projection::WriteThroughOutcome::Skipped(reason) => {
                     return Err(anyhow!(thread_switch_git_checkout_skipped_advice(
                         &name,
                         reason.to_string()
@@ -2371,11 +2368,7 @@ pub(crate) fn show_thread_summary(
             println!();
             println!("{}", style::section("Recent saved states"));
             for capture in captures {
-                println!(
-                    "  {} {}",
-                    style::accent(&capture.change_id),
-                    capture.message
-                );
+                println!("  {} {}", style::accent(&capture.state_id), capture.message);
             }
         }
         if summary.promotion_suggested && !summary.heavy_impact_paths.is_empty() {
@@ -2790,7 +2783,7 @@ fn absolute_path(path: &std::path::Path) -> Result<PathBuf> {
     }
 }
 
-/// Return the most recently started *active* `AgentEntry` for `thread`, if
+/// Return the most recently started *active* `ActorPresence` for `thread`, if
 /// any. Used by `heddle status` to surface the actor for a thread, and
 /// (since the Phase-D demo work) by `heddle capture` to inherit the
 /// thread's actor as the captured state's `attribution.agent` — without
@@ -2798,12 +2791,12 @@ fn absolute_path(path: &std::path::Path) -> Result<PathBuf> {
 pub(crate) fn find_active_thread_entry(
     repo: &Repository,
     thread: &str,
-) -> Result<Option<AgentEntry>> {
-    let registry = AgentRegistry::new(repo.heddle_dir());
+) -> Result<Option<ActorPresence>> {
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     Ok(registry
-        .list()?
+        .active_entries()?
         .into_iter()
-        .filter(|entry| entry.thread == thread && entry.status == AgentStatus::Active)
+        .filter(|entry| entry.thread == thread)
         .max_by_key(|entry| entry.started_at))
 }
 
@@ -2828,7 +2821,7 @@ mod tests {
         assert!(advice.unsafe_condition.contains("dirty Git index"));
         assert_eq!(
             advice.primary_command,
-            "heddle fsck --repair git --prefer heddle --ref feature/git --preview"
+            "heddle fsck repair git --prefer heddle --ref feature/git --preview"
         );
         assert!(advice.preserved.contains("Git checkout was left unchanged"));
     }

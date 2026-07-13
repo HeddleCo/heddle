@@ -366,12 +366,17 @@ fn classify(ref_name: &str) -> RefKind {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use objects::object::ChangeId;
+    use objects::object::StateId;
     use oplog::oplog::{OpLog, OpLogRecorder};
     use tempfile::TempDir;
 
     use super::*;
     use crate::git_walk::GitSignature;
+
+    fn test_state_id() -> StateId {
+        static NEXT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+        StateId::from_bytes([NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); 32])
+    }
 
     fn fresh_oplog() -> (TempDir, OpLog) {
         let tmp = TempDir::new().unwrap();
@@ -416,8 +421,8 @@ mod tests {
         let mut map = ShaMap::new();
         let sha_a = "a".repeat(40);
         let sha_b = "b".repeat(40);
-        let cid_a = ChangeId::generate();
-        let cid_b = ChangeId::generate();
+        let cid_a = test_state_id();
+        let cid_b = test_state_id();
         map.insert_commit(&sha_a, cid_a).unwrap();
         map.insert_commit(&sha_b, cid_b).unwrap();
 
@@ -459,7 +464,7 @@ mod tests {
         let (_tmp, log) = fresh_oplog();
         let mut map = ShaMap::new();
         let sha = "c".repeat(40);
-        let cid = ChangeId::generate();
+        let cid = test_state_id();
         map.insert_commit(&sha, cid).unwrap();
 
         let entries = vec![mk_entry(
@@ -483,8 +488,8 @@ mod tests {
         let mut map = ShaMap::new();
         let sha_a = "a".repeat(40);
         let sha_b = "b".repeat(40);
-        let cid_a = ChangeId::generate();
-        let cid_b = ChangeId::generate();
+        let cid_a = test_state_id();
+        let cid_b = test_state_id();
         map.insert_commit(&sha_a, cid_a).unwrap();
         map.insert_commit(&sha_b, cid_b).unwrap();
 
@@ -518,7 +523,7 @@ mod tests {
         let (_tmp, log) = fresh_oplog();
         let mut map = ShaMap::new();
         let sha = "d".repeat(40);
-        map.insert_commit(&sha, ChangeId::generate()).unwrap();
+        map.insert_commit(&sha, test_state_id()).unwrap();
 
         let entries = vec![mk_entry(
             "refs/heads/main",
@@ -559,8 +564,8 @@ mod tests {
         let mut map = ShaMap::new();
         let sha_a = "a".repeat(40);
         let sha_b = "b".repeat(40);
-        let cid_a = ChangeId::generate();
-        let cid_b = ChangeId::generate();
+        let cid_a = test_state_id();
+        let cid_b = test_state_id();
         map.insert_commit(&sha_a, cid_a).unwrap();
         map.insert_commit(&sha_b, cid_b).unwrap();
 
@@ -587,7 +592,7 @@ mod tests {
         let (_tmp, log) = fresh_oplog();
         let mut map = ShaMap::new();
         let sha = "e".repeat(40);
-        map.insert_commit(&sha, ChangeId::generate()).unwrap();
+        map.insert_commit(&sha, test_state_id()).unwrap();
 
         let entries = vec![mk_entry(
             "refs/heads/main",
@@ -642,9 +647,9 @@ mod tests {
         let sha_a = "a".repeat(40);
         let sha_b = "b".repeat(40);
         let sha_c = "c".repeat(40);
-        let cid_a = ChangeId::generate();
-        let cid_b = ChangeId::generate();
-        let cid_c = ChangeId::generate();
+        let cid_a = test_state_id();
+        let cid_b = test_state_id();
+        let cid_c = test_state_id();
         map.insert_commit(&sha_a, cid_a).unwrap();
         map.insert_commit(&sha_b, cid_b).unwrap();
         map.insert_commit(&sha_c, cid_c).unwrap();
@@ -735,8 +740,8 @@ mod tests {
         let mut map = ShaMap::new();
         let sha_a = "a".repeat(40);
         let sha_b = "b".repeat(40);
-        map.insert_commit(&sha_a, ChangeId::generate()).unwrap();
-        map.insert_commit(&sha_b, ChangeId::generate()).unwrap();
+        map.insert_commit(&sha_a, test_state_id()).unwrap();
+        map.insert_commit(&sha_b, test_state_id()).unwrap();
 
         let entries = vec![
             mk_entry("refs/heads/main", None, Some(&sha_a), "branch: Created"),
@@ -771,7 +776,7 @@ mod tests {
             let mut entries = Vec::with_capacity(n);
             for i in 0..n {
                 let sha = format!("{:040x}", i + 1);
-                map.insert_commit(&sha, ChangeId::generate()).unwrap();
+                map.insert_commit(&sha, test_state_id()).unwrap();
                 entries.push(mk_entry(
                     &format!("refs/heads/b{i}"),
                     None,

@@ -41,7 +41,7 @@ fn init_warns_when_user_config_principal_is_placeholder() {
 }
 
 #[test]
-fn first_commit_warns_once_when_user_config_principal_is_placeholder() {
+fn placeholder_warning_is_not_repeated_after_init() {
     let temp = TempDir::new().unwrap();
     let config = write_user_config(&temp, "T", "t@e.c");
     let env = [("HEDDLE_CONFIG", config.to_str().unwrap())];
@@ -50,27 +50,26 @@ fn first_commit_warns_once_when_user_config_principal_is_placeholder() {
     assert!(init.status.success(), "init should succeed");
 
     fs::write(temp.path().join("one.txt"), "one\n").expect("write first file");
-    let first = heddle_output_with_env(&["commit", "-m", "first"], Some(temp.path()), &env)
-        .expect("run first commit");
-    assert!(first.status.success(), "first commit should warn, not fail");
+    let first = heddle_output_with_env(&["capture", "-m", "first"], Some(temp.path()), &env)
+        .expect("run first capture");
+    assert!(first.status.success(), "first capture should succeed");
     let first_stderr = stderr(&first);
     assert!(
-        first_stderr.contains("WARNING: principal attribution looks like a placeholder")
-            && first_stderr.contains("T <t@e.c>"),
-        "first commit should warn about placeholder attribution: {first_stderr}"
+        !first_stderr.contains("principal attribution looks like a placeholder"),
+        "init already surfaced the warning; capture should not repeat it: {first_stderr}"
     );
 
     fs::write(temp.path().join("two.txt"), "two\n").expect("write second file");
-    let second = heddle_output_with_env(&["commit", "-m", "second"], Some(temp.path()), &env)
-        .expect("run second commit");
+    let second = heddle_output_with_env(&["capture", "-m", "second"], Some(temp.path()), &env)
+        .expect("run second capture");
     assert!(
         second.status.success(),
-        "second commit should still succeed"
+        "second capture should still succeed"
     );
     let second_stderr = stderr(&second);
     assert!(
         !second_stderr.contains("principal attribution looks like a placeholder"),
-        "later commits should not spam the placeholder warning: {second_stderr}"
+        "later captures should not spam the placeholder warning: {second_stderr}"
     );
 }
 
@@ -130,7 +129,7 @@ fn capture_fails_closed_on_corrupt_user_config() {
 }
 
 #[test]
-fn real_user_config_principal_does_not_warn_on_init_or_first_commit() {
+fn real_user_config_principal_does_not_warn_on_init_or_first_capture() {
     let temp = TempDir::new().unwrap();
     let config = write_user_config(&temp, "Ada Lovelace", "ada@users.test");
     let env = [("HEDDLE_CONFIG", config.to_str().unwrap())];
@@ -144,12 +143,12 @@ fn real_user_config_principal_does_not_warn_on_init_or_first_commit() {
     );
 
     fs::write(temp.path().join("file.txt"), "content\n").expect("write file");
-    let commit = heddle_output_with_env(&["commit", "-m", "first"], Some(temp.path()), &env)
-        .expect("run first commit");
-    assert!(commit.status.success(), "commit should succeed");
-    let commit_stderr = stderr(&commit);
+    let capture = heddle_output_with_env(&["capture", "-m", "first"], Some(temp.path()), &env)
+        .expect("run first capture");
+    assert!(capture.status.success(), "capture should succeed");
+    let capture_stderr = stderr(&capture);
     assert!(
-        !commit_stderr.contains("principal attribution looks like a placeholder"),
-        "real commit identity should not warn: {commit_stderr}"
+        !capture_stderr.contains("principal attribution looks like a placeholder"),
+        "real capture identity should not warn: {capture_stderr}"
     );
 }

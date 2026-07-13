@@ -4,7 +4,7 @@
 use std::{fs, io::Write};
 
 use anyhow::{Result, anyhow};
-use objects::{object::ChangeId, store::ObjectStore};
+use objects::{object::StateId, store::ObjectStore};
 use oplog::OpRecord;
 use repo::Repository;
 
@@ -12,12 +12,12 @@ use super::super::advice::RecoveryAdvice;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RebaseState {
-    pub(crate) onto: ChangeId,
-    pub(crate) commits_to_replay: Vec<ChangeId>,
+    pub(crate) onto: StateId,
+    pub(crate) commits_to_replay: Vec<StateId>,
     pub(crate) current_index: usize,
-    pub(crate) original_head: ChangeId,
-    pub(crate) pending_manual_resolution: Option<ChangeId>,
-    pub(crate) pre_conflict_head: Option<ChangeId>,
+    pub(crate) original_head: StateId,
+    pub(crate) pending_manual_resolution: Option<StateId>,
+    pub(crate) pre_conflict_head: Option<StateId>,
     /// FastForward (or, on detached HEAD, Goto) records buffered from
     /// the per-commit replay loop. Flushed as a single oplog batch
     /// when the rebase completes so `heddle undo` rewinds the whole
@@ -37,9 +37,9 @@ pub(crate) struct RebaseState {
 
 pub(crate) fn collect_commits_to_rebase(
     repo: &Repository,
-    current_head: &ChangeId,
-    onto: &ChangeId,
-) -> Result<Vec<ChangeId>> {
+    current_head: &StateId,
+    onto: &StateId,
+) -> Result<Vec<StateId>> {
     let mut commits = Vec::new();
     let mut visited = std::collections::HashSet::new();
     let mut current = *current_head;
@@ -72,8 +72,8 @@ pub(crate) fn collect_commits_to_rebase(
 
 pub(crate) fn is_ancestor_of(
     repo: &Repository,
-    potential_ancestor: &ChangeId,
-    descendant: &ChangeId,
+    potential_ancestor: &StateId,
+    descendant: &StateId,
 ) -> Result<bool> {
     Ok(wire::is_ancestor(
         repo.store(),
@@ -169,21 +169,21 @@ fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result
 
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("onto=") {
-            onto = Some(ChangeId::parse(value)?);
+            onto = Some(StateId::parse(value)?);
         } else if let Some(value) = line.strip_prefix("original_head=") {
-            original_head = Some(ChangeId::parse(value)?);
+            original_head = Some(StateId::parse(value)?);
         } else if let Some(value) = line.strip_prefix("transaction_id=") {
             transaction_id = Some(value.to_string());
         } else if let Some(value) = line.strip_prefix("current_index=") {
             current_index = value.parse().unwrap_or(0);
         } else if let Some(value) = line.strip_prefix("pending_manual_resolution=") {
-            pending_manual_resolution = Some(ChangeId::parse(value)?);
+            pending_manual_resolution = Some(StateId::parse(value)?);
         } else if let Some(value) = line.strip_prefix("pre_conflict_head=") {
-            pre_conflict_head = Some(ChangeId::parse(value)?);
+            pre_conflict_head = Some(StateId::parse(value)?);
         } else if let Some(value) = line.strip_prefix("commits=") {
             for commit_str in value.split(',') {
                 if !commit_str.is_empty() {
-                    commits_to_replay.push(ChangeId::parse(commit_str)?);
+                    commits_to_replay.push(StateId::parse(commit_str)?);
                 }
             }
         } else if let Some(value) = line.strip_prefix("pending_advance=") {
@@ -343,7 +343,7 @@ fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result
 
 #[cfg(test)]
 mod tests {
-    use objects::object::ChangeId;
+    use objects::object::StateId;
     use oplog::OpRecord;
     use tempfile::TempDir;
 
@@ -356,15 +356,15 @@ mod tests {
         // through the strict loader.
         let current_index = pending.len();
         let commits_to_replay = (0..(current_index + 1))
-            .map(|_| ChangeId::generate())
+            .map(|_| StateId::from_bytes([16; 32]))
             .collect();
         RebaseState {
-            onto: ChangeId::generate(),
+            onto: StateId::from_bytes([17; 32]),
             commits_to_replay,
             current_index,
-            original_head: ChangeId::generate(),
-            pending_manual_resolution: Some(ChangeId::generate()),
-            pre_conflict_head: Some(ChangeId::generate()),
+            original_head: StateId::from_bytes([18; 32]),
+            pending_manual_resolution: Some(StateId::from_bytes([19; 32])),
+            pre_conflict_head: Some(StateId::from_bytes([20; 32])),
             pending_advances: pending,
             transaction_id: "rebase-test-sample".to_string(),
         }
@@ -374,14 +374,14 @@ mod tests {
         OpRecord::FastForward {
             source_thread: "<rebase>".to_string(),
             target_thread: "main".to_string(),
-            pre_target_id: ChangeId::generate(),
-            post_target_id: ChangeId::generate(),
+            pre_target_id: StateId::from_bytes([21; 32]),
+            post_target_id: StateId::from_bytes([22; 32]),
         }
     }
 
     /// Round-trip cover: the `pending_advances` vec must survive a
     /// save+load through the line-based REBASE_STATE file. This is the
-    /// load-bearing guarantee for `heddle rebase --continue` after a
+    /// load-bearing guarantee for `heddle continue` after a
     /// conflict pause — the buffered FFs from before the pause need
     /// to come back byte-identical so the eventual `flush_rebase_batch`
     /// emits the same oplog batch as a no-pause rebase would have.
@@ -437,8 +437,8 @@ mod tests {
         let path = tmp.path().join("REBASE_STATE");
         let body = format!(
             "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=0\ncommits=\npending_advance=not-hex!!\n",
-            onto = ChangeId::generate().to_string_full(),
-            oh = ChangeId::generate().to_string_full(),
+            onto = StateId::from_bytes([23; 32]).to_string_full(),
+            oh = StateId::from_bytes([24; 32]).to_string_full(),
         );
         std::fs::write(&path, body).unwrap();
 
@@ -458,8 +458,8 @@ mod tests {
         let path = tmp.path().join("REBASE_STATE");
         let body = format!(
             "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=0\ncommits=\npending_advance=deadbeef\n",
-            onto = ChangeId::generate().to_string_full(),
-            oh = ChangeId::generate().to_string_full(),
+            onto = StateId::from_bytes([25; 32]).to_string_full(),
+            oh = StateId::from_bytes([26; 32]).to_string_full(),
         );
         std::fs::write(&path, body).unwrap();
 
@@ -480,8 +480,8 @@ mod tests {
         let path = tmp.path().join("REBASE_STATE");
         let body = format!(
             "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=not-a-number\ncommits=\n",
-            onto = ChangeId::generate().to_string_full(),
-            oh = ChangeId::generate().to_string_full(),
+            onto = StateId::from_bytes([27; 32]).to_string_full(),
+            oh = StateId::from_bytes([28; 32]).to_string_full(),
         );
         std::fs::write(&path, body).unwrap();
 
@@ -500,7 +500,7 @@ mod tests {
             &path,
             format!(
                 "original_head={oh}\ncurrent_index=0\ncommits=\n",
-                oh = ChangeId::generate().to_string_full()
+                oh = StateId::from_bytes([29; 32]).to_string_full()
             ),
         )
         .unwrap();
@@ -516,7 +516,7 @@ mod tests {
             &path,
             format!(
                 "onto={onto}\ncurrent_index=0\ncommits=\n",
-                onto = ChangeId::generate().to_string_full()
+                onto = StateId::from_bytes([30; 32]).to_string_full()
             ),
         )
         .unwrap();
@@ -537,8 +537,8 @@ mod tests {
         let path = tmp.path().join("REBASE_STATE");
         let body = format!(
             "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=0\ncommits=\npending_advance=not-hex!!\n",
-            onto = ChangeId::generate().to_string_full(),
-            oh = ChangeId::generate().to_string_full(),
+            onto = StateId::from_bytes([31; 32]).to_string_full(),
+            oh = StateId::from_bytes([32; 32]).to_string_full(),
         );
         std::fs::write(&path, body).unwrap();
 
@@ -561,8 +561,8 @@ mod tests {
         let path = tmp.path().join("REBASE_STATE");
         let body = format!(
             "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=0\ncommits=\npending_advance=deadbeef\n",
-            onto = ChangeId::generate().to_string_full(),
-            oh = ChangeId::generate().to_string_full(),
+            onto = StateId::from_bytes([33; 32]).to_string_full(),
+            oh = StateId::from_bytes([34; 32]).to_string_full(),
         );
         std::fs::write(&path, body).unwrap();
 
@@ -583,7 +583,7 @@ mod tests {
             &path,
             format!(
                 "onto={onto}\ntransaction_id=rebase-test\ncurrent_index=0\ncommits=\n",
-                onto = ChangeId::generate().to_string_full()
+                onto = StateId::from_bytes([35; 32]).to_string_full()
             ),
         )
         .unwrap();
@@ -606,8 +606,8 @@ mod tests {
         let path = tmp.path().join("REBASE_STATE");
         let body = format!(
             "onto={onto}\noriginal_head={oh}\n",
-            onto = ChangeId::generate().to_string_full(),
-            oh = ChangeId::generate().to_string_full(),
+            onto = StateId::from_bytes([36; 32]).to_string_full(),
+            oh = StateId::from_bytes([37; 32]).to_string_full(),
         );
         std::fs::write(&path, body).unwrap();
 
@@ -629,8 +629,8 @@ mod tests {
         let path = tmp.path().join("REBASE_STATE");
         let body = format!(
             "onto={onto}\noriginal_head={oh}\npending_advance=not-hex!!\n",
-            onto = ChangeId::generate().to_string_full(),
-            oh = ChangeId::generate().to_string_full(),
+            onto = StateId::from_bytes([38; 32]).to_string_full(),
+            oh = StateId::from_bytes([39; 32]).to_string_full(),
         );
         std::fs::write(&path, body).unwrap();
 
@@ -652,8 +652,8 @@ mod tests {
             &path,
             format!(
                 "onto={onto}\noriginal_head={oh}\ncurrent_index=0\ncommits=\n",
-                onto = ChangeId::generate().to_string_full(),
-                oh = ChangeId::generate().to_string_full(),
+                onto = StateId::from_bytes([40; 32]).to_string_full(),
+                oh = StateId::from_bytes([41; 32]).to_string_full(),
             ),
         )
         .unwrap();
@@ -678,13 +678,13 @@ mod tests {
         // but is never legitimately emitted into a rebase batch.
         let bad = OpRecord::MarkerCreate {
             name: "junk".to_string(),
-            state: ChangeId::generate(),
+            state: StateId::from_bytes([42; 32]),
         };
         let bytes = rmp_serde::to_vec(&bad).unwrap();
         let body = format!(
             "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=1\ncommits=\npending_advance={pa}\n",
-            onto = ChangeId::generate().to_string_full(),
-            oh = ChangeId::generate().to_string_full(),
+            onto = StateId::from_bytes([43; 32]).to_string_full(),
+            oh = StateId::from_bytes([44; 32]).to_string_full(),
             pa = hex::encode(&bytes),
         );
         std::fs::write(&path, body).unwrap();
@@ -705,13 +705,13 @@ mod tests {
         let path = tmp.path().join("REBASE_STATE");
         let bad = OpRecord::ThreadDelete {
             name: "junk".to_string(),
-            state: ChangeId::generate(),
+            state: StateId::from_bytes([45; 32]),
         };
         let bytes = rmp_serde::to_vec(&bad).unwrap();
         let body = format!(
             "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=1\ncommits=\npending_advance={pa}\n",
-            onto = ChangeId::generate().to_string_full(),
-            oh = ChangeId::generate().to_string_full(),
+            onto = StateId::from_bytes([46; 32]).to_string_full(),
+            oh = StateId::from_bytes([47; 32]).to_string_full(),
             pa = hex::encode(&bytes),
         );
         std::fs::write(&path, body).unwrap();
@@ -738,8 +738,8 @@ mod tests {
         let path = tmp.path().join("REBASE_STATE");
         let body = format!(
             "onto={onto}\noriginal_head={oh}\ntransaction_id=\ncurrent_index=0\ncommits=\n",
-            onto = ChangeId::generate().to_string_full(),
-            oh = ChangeId::generate().to_string_full(),
+            onto = StateId::from_bytes([48; 32]).to_string_full(),
+            oh = StateId::from_bytes([49; 32]).to_string_full(),
         );
         std::fs::write(&path, body).unwrap();
 
@@ -762,8 +762,8 @@ mod tests {
         let path = tmp.path().join("REBASE_STATE");
         let body = format!(
             "onto={onto}\noriginal_head={oh}\ntransaction_id=   \t\ncurrent_index=0\ncommits=\n",
-            onto = ChangeId::generate().to_string_full(),
-            oh = ChangeId::generate().to_string_full(),
+            onto = StateId::from_bytes([50; 32]).to_string_full(),
+            oh = StateId::from_bytes([51; 32]).to_string_full(),
         );
         std::fs::write(&path, body).unwrap();
 
@@ -786,13 +786,13 @@ mod tests {
         let path = tmp.path().join("REBASE_STATE");
         let bad = OpRecord::MarkerCreate {
             name: "junk".to_string(),
-            state: ChangeId::generate(),
+            state: StateId::from_bytes([52; 32]),
         };
         let bytes = rmp_serde::to_vec(&bad).unwrap();
         let body = format!(
             "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=0\ncommits=\npending_advance={pa}\n",
-            onto = ChangeId::generate().to_string_full(),
-            oh = ChangeId::generate().to_string_full(),
+            onto = StateId::from_bytes([53; 32]).to_string_full(),
+            oh = StateId::from_bytes([54; 32]).to_string_full(),
             pa = hex::encode(&bytes),
         );
         std::fs::write(&path, body).unwrap();
@@ -816,8 +816,8 @@ mod tests {
         let path = tmp.path().join("REBASE_STATE");
         let body = format!(
             "onto={onto}\noriginal_head={oh}\ntransaction_id=\ncurrent_index=0\ncommits=\n",
-            onto = ChangeId::generate().to_string_full(),
-            oh = ChangeId::generate().to_string_full(),
+            onto = StateId::from_bytes([55; 32]).to_string_full(),
+            oh = StateId::from_bytes([56; 32]).to_string_full(),
         );
         std::fs::write(&path, body).unwrap();
 
@@ -842,8 +842,8 @@ mod tests {
         let bytes = rmp_serde::to_vec(&advance).unwrap();
         let body = format!(
             "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=3\ncommits=\npending_advance={pa}\n",
-            onto = ChangeId::generate().to_string_full(),
-            oh = ChangeId::generate().to_string_full(),
+            onto = StateId::from_bytes([57; 32]).to_string_full(),
+            oh = StateId::from_bytes([58; 32]).to_string_full(),
             pa = hex::encode(&bytes),
         );
         std::fs::write(&path, body).unwrap();
@@ -880,8 +880,8 @@ mod tests {
         let bytes = rmp_serde::to_vec(&advance).unwrap();
         let body = format!(
             "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=3\ncommits=\npending_advance={pa}\n",
-            onto = ChangeId::generate().to_string_full(),
-            oh = ChangeId::generate().to_string_full(),
+            onto = StateId::from_bytes([59; 32]).to_string_full(),
+            oh = StateId::from_bytes([60; 32]).to_string_full(),
             pa = hex::encode(&bytes),
         );
         std::fs::write(&path, body).unwrap();

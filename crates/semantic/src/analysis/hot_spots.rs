@@ -41,7 +41,7 @@ use std::{
 };
 
 use objects::{
-    object::{ChangeId, SemanticChange, State},
+    object::{SemanticChange, State, StateId},
     store::ObjectStore,
 };
 
@@ -143,8 +143,8 @@ pub struct HotSpot {
     pub key: HotSpotKeyValue,
     pub event_count: usize,
     pub state_count: usize,
-    pub first_seen: ChangeId,
-    pub last_seen: ChangeId,
+    pub first_seen: StateId,
+    pub last_seen: StateId,
     /// Breakdown of events by kind. Sums to `event_count`.
     pub by_kind: BTreeMap<HotEventKind, usize>,
     /// Per-actor histogram. `None` unless `params.include_actors`
@@ -217,7 +217,7 @@ pub struct HotSpotsReport {
 /// parent, the report is empty.
 pub fn analyze_hot_spots(
     store: &impl ObjectStore,
-    walk_from: ChangeId,
+    walk_from: StateId,
     params: &HotSpotParams,
 ) -> Result<HotSpotsReport, anyhow::Error> {
     let started = Instant::now();
@@ -355,14 +355,14 @@ pub fn analyze_hot_spots(
 struct SlotAccumulator {
     event_count: usize,
     state_count: usize,
-    first_seen: ChangeId,
-    last_seen: ChangeId,
+    first_seen: StateId,
+    last_seen: StateId,
     by_kind: BTreeMap<HotEventKind, usize>,
     by_actor: Option<BTreeMap<String, usize>>,
 }
 
 impl SlotAccumulator {
-    fn new(seen: ChangeId) -> Self {
+    fn new(seen: StateId) -> Self {
         Self {
             event_count: 0,
             state_count: 0,
@@ -433,7 +433,7 @@ fn path_passes_filter(path: &Path, includes: &[String], excludes: &[String]) -> 
 /// that doesn't need file-granularity output.
 pub fn analyze_actor_histogram(
     store: &impl ObjectStore,
-    walk_from: ChangeId,
+    walk_from: StateId,
     limit_states: Option<usize>,
 ) -> Result<BTreeMap<String, usize>, anyhow::Error> {
     let limit = limit_states.unwrap_or(usize::MAX);
@@ -475,7 +475,7 @@ fn _state_anchor(_: &State) {}
 #[cfg(test)]
 mod tests {
     use objects::{
-        object::{Attribution, ChangeId, Principal, State, Tree, TreeEntry},
+        object::{Attribution, Principal, State, StateId, Tree, TreeEntry},
         store::InMemoryStore,
     };
 
@@ -487,8 +487,8 @@ mod tests {
 
     /// Build a tiny chain `A → B → C` (C is HEAD) with a single file
     /// `src/lib.rs` whose content differs at every step. Returns the
-    /// HEAD change id plus the in-memory store.
-    fn build_three_state_chain() -> (ChangeId, InMemoryStore) {
+    /// HEAD state id plus the in-memory store.
+    fn build_three_state_chain() -> (StateId, InMemoryStore) {
         let store = InMemoryStore::new();
 
         let blob_a = store
@@ -504,7 +504,7 @@ mod tests {
         let attrib_a = Attribution::human(principal("alice"));
         let state_a = State::new(tree_a, Vec::new(), attrib_a);
         store.put_state(&state_a).unwrap();
-        let id_a = state_a.change_id;
+        let id_a = state_a.state_id;
 
         let blob_b = store
             .put_blob(&objects::object::Blob::from_slice(
@@ -518,7 +518,7 @@ mod tests {
             .unwrap();
         let state_b = State::new(tree_b, vec![id_a], Attribution::human(principal("bob")));
         store.put_state(&state_b).unwrap();
-        let id_b = state_b.change_id;
+        let id_b = state_b.state_id;
 
         let blob_c = store
             .put_blob(&objects::object::Blob::from_slice(
@@ -532,7 +532,7 @@ mod tests {
             .unwrap();
         let state_c = State::new(tree_c, vec![id_b], Attribution::human(principal("carol")));
         store.put_state(&state_c).unwrap();
-        let id_c = state_c.change_id;
+        let id_c = state_c.state_id;
 
         (id_c, store)
     }
@@ -658,7 +658,7 @@ mod tests {
         let state = State::new(tree, Vec::new(), Attribution::human(principal("alice")));
         store.put_state(&state).unwrap();
 
-        let report = analyze_hot_spots(&store, state.change_id, &HotSpotParams::default()).unwrap();
+        let report = analyze_hot_spots(&store, state.state_id, &HotSpotParams::default()).unwrap();
         assert_eq!(report.states_walked, 0);
         assert_eq!(report.total_events, 0);
         assert!(report.spots.is_empty());

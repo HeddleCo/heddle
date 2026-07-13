@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! HEAD reference definition.
 
-use objects::object::{ChangeId, ThreadName};
+use objects::object::{StateId, ThreadName};
 
 /// Parse error for HEAD text.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -12,7 +12,7 @@ pub struct HeadParseError(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Head {
     Attached { thread: ThreadName },
-    Detached { state: ChangeId },
+    Detached { state: StateId },
 }
 
 impl Head {
@@ -22,7 +22,7 @@ impl Head {
             Ok(Head::Attached {
                 thread: ThreadName::new(thread),
             })
-        } else if let Ok(id) = ChangeId::parse(contents) {
+        } else if let Ok(id) = StateId::parse(contents) {
             Ok(Head::Detached { state: id })
         } else {
             Err(HeadParseError(contents.to_string()))

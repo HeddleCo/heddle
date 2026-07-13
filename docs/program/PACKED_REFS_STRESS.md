@@ -106,7 +106,7 @@ Inspect ref counts / packed file size:
 ```bash
 # Performance inspection includes packed_refs_present / packed_refs_bytes
 # (repository_maintenance / inspect_performance path).
-heddle doctor   # or product-specific inspect if available on your build
+heddle doctor
 ```
 
 **There is no supported product command that fabricates 10k threads for stress.**

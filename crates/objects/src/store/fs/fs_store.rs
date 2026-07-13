@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     fs_atomic::sync_directory,
-    object::{Blob, ChangeId, ContentHash, State, Tree},
+    object::{Blob, ContentHash, State, StateId, Tree},
     store::{
         Result,
         pack::{PackManager, PackObjectId},
@@ -224,7 +224,7 @@ where
 ///       ab/
 ///         cdef1234...
 ///     states/
-///       <change_id>.state
+///       <state_id>.state
 ///   actions/
 ///     <action_id>.action
 ///   packs/
@@ -237,7 +237,7 @@ pub struct FsStore {
     pack_manager: RwLock<PackManager>,
     pub(super) recent_blobs: RwLock<RecentObjectCache<ContentHash, Blob>>,
     pub(super) recent_trees: RwLock<RecentObjectCache<ContentHash, Tree>>,
-    pub(super) recent_states: RwLock<RecentObjectCache<ChangeId, State>>,
+    pub(super) recent_states: RwLock<RecentObjectCache<StateId, State>>,
     loose_object_write_mode: LooseObjectWriteMode,
     snapshot_write_batch_depth: Mutex<usize>,
     pending_directory_syncs: Mutex<BTreeSet<PathBuf>>,

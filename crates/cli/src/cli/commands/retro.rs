@@ -25,12 +25,14 @@ use heddle_core::retro_plan::{
     DEFAULT_FALLBACK_WINDOW_HOURS, MAX_OPLOG_BATCHES, agent_task_window_overlaps,
     agent_window_overlaps, choose_default_since_ts, context_annotation_in_window,
     display_free_text, duration_secs as plan_duration_secs, excerpt, is_turn_boundary_intent,
-    is_verify_fail_marker, is_verify_pass_signal, retro_header_line, short_change_id,
+    is_verify_fail_marker, is_verify_pass_signal, retro_header_line, short_state_id,
     timeline_step_in_window,
 };
 use objects::{
-    object::{ChangeId, State},
-    store::{AgentRegistry, AgentStatus, AgentTaskRecord, AgentTaskStore, ObjectStore},
+    object::{State, StateId},
+    store::{
+        ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStore, ObjectStore,
+    },
 };
 use oplog::OpRecord;
 use repo::{Repository, TimelineStore, TimelineView};
@@ -60,7 +62,7 @@ struct RetroOutput {
     /// unresolvable (a brand-new repo before any captures).
     duration_secs: Option<i64>,
     states_captured: Vec<StateEntry>,
-    agents_active: Vec<AgentEntry>,
+    agents_active: Vec<ActorPresence>,
     agent_tasks: Vec<AgentTaskEntry>,
     timeline_steps: Vec<TimelineStepEntry>,
     markers_created: Vec<MarkerEntry>,
@@ -74,7 +76,7 @@ struct RetroOutput {
 
 #[derive(Serialize, Clone)]
 struct StateEntry {
-    change_id: String,
+    state_id: String,
     intent: Option<String>,
     confidence: Option<f32>,
     agent: Option<String>,
@@ -83,7 +85,7 @@ struct StateEntry {
 }
 
 #[derive(Serialize)]
-struct AgentEntry {
+struct ActorPresence {
     session_id: String,
     provider: Option<String>,
     model: Option<String>,
@@ -196,7 +198,7 @@ pub async fn cmd_retro(cli: &Cli, options: RetroCommandOptions) -> Result<()> {
     let mut merges = Vec::new();
     let mut undos = Vec::new();
     let mut verify_signals = Vec::new();
-    let mut seen_state_ids: HashSet<ChangeId> = HashSet::new();
+    let mut seen_state_ids: HashSet<StateId> = HashSet::new();
 
     for batch in &batches {
         // Batches arrive newest-first. We can stop once we hit one
@@ -317,7 +319,7 @@ pub async fn cmd_retro(cli: &Cli, options: RetroCommandOptions) -> Result<()> {
 
     let output = RetroOutput {
         since: since_id.map(|id| id.to_string_full()),
-        until: head_state.as_ref().map(|s| s.change_id.to_string_full()),
+        until: head_state.as_ref().map(|s| s.state_id.to_string_full()),
         duration_secs,
         states_captured,
         agents_active,
@@ -343,7 +345,7 @@ fn resolve_since_bound(
     repo: &Repository,
     since: Option<&str>,
     head_state: &Option<State>,
-) -> Result<(Option<ChangeId>, Option<DateTime<Utc>>)> {
+) -> Result<(Option<StateId>, Option<DateTime<Utc>>)> {
     if let Some(spec) = since {
         let id = resolve_state_id(repo, spec)?;
         let ts = repo.store().get_state(&id)?.map(|state| state.created_at);
@@ -414,8 +416,11 @@ fn find_recent_turn_ts(repo: &Repository) -> Result<Option<DateTime<Utc>>> {
     Ok(None)
 }
 
-fn collect_agents(repo: &Repository, since_ts: Option<DateTime<Utc>>) -> Result<Vec<AgentEntry>> {
-    let registry = AgentRegistry::new(repo.heddle_dir());
+fn collect_agents(
+    repo: &Repository,
+    since_ts: Option<DateTime<Utc>>,
+) -> Result<Vec<ActorPresence>> {
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let entries = registry.list().unwrap_or_default();
     let mut out = Vec::new();
     for entry in entries {
@@ -423,11 +428,10 @@ fn collect_agents(repo: &Repository, since_ts: Option<DateTime<Utc>>) -> Result<
         // within (since, now]. An agent that started before `since`
         // but is still Active counts; one that completed before
         // `since` does not.
-        let active_now = matches!(entry.status, objects::store::AgentStatus::Active);
+        let active_now = matches!(entry.status, objects::store::ActorPresenceStatus::Active);
         let last_activity = entry
             .completed_at
             .or(entry.last_progress_at)
-            .or(entry.heartbeat_at)
             .unwrap_or(entry.started_at);
         if !agent_window_overlaps(
             since_ts.map(|ts| ts.timestamp()),
@@ -437,7 +441,7 @@ fn collect_agents(repo: &Repository, since_ts: Option<DateTime<Utc>>) -> Result<
             continue;
         }
 
-        out.push(AgentEntry {
+        out.push(ActorPresence {
             session_id: entry.session_id.clone(),
             provider: entry.provider.clone(),
             model: entry.model.clone(),
@@ -460,11 +464,11 @@ fn collect_agent_tasks(
     since_ts: Option<DateTime<Utc>>,
     verbose: bool,
 ) -> Result<Vec<AgentTaskEntry>> {
-    let active_task_ids = AgentRegistry::new(repo.heddle_dir())
+    let active_task_ids = ActorPresenceStore::new(repo.heddle_dir())
         .list()
         .context("failed to list agent registry for retro task correlation")?
         .into_iter()
-        .filter(|entry| entry.status == AgentStatus::Active)
+        .filter(|entry| entry.status == ActorPresenceStatus::Active)
         .filter_map(|entry| entry.task_assignment_id)
         .collect::<HashSet<_>>();
     let tasks = AgentTaskStore::new(repo.heddle_dir())
@@ -551,12 +555,12 @@ fn collect_context_annotations(
     let Some(state) = head_state else {
         return Ok(Vec::new());
     };
-    let Some(context_root) = state.context.as_ref() else {
+    let Some(context_root) = repo.inherit_parent_context(state)? else {
         return Ok(Vec::new());
     };
 
     let entries = repo
-        .list_context_entries(context_root, None::<&Path>)
+        .list_context_entries(&context_root, None::<&Path>)
         .unwrap_or_default();
 
     let lo_secs = since_ts.map(|ts| ts.timestamp());
@@ -599,7 +603,7 @@ fn state_entry(state: &State, verbose: bool) -> StateEntry {
         .as_ref()
         .map(|i| if verbose { i.clone() } else { excerpt(i) });
     StateEntry {
-        change_id: state.change_id.to_string_full(),
+        state_id: state.state_id.to_string_full(),
         intent,
         confidence: state.confidence,
         agent: state
@@ -676,7 +680,7 @@ fn print_human(output: &RetroOutput, _verbose: bool) {
             .unwrap_or_else(|| "—".to_string());
         println!(
             "  {} {} conf={} [{}]",
-            short_change_id(&entry.change_id),
+            short_state_id(&entry.state_id),
             intent,
             confidence,
             entry.timestamp,
@@ -957,7 +961,7 @@ mod tests {
         let head_state = repo.current_state().unwrap();
         let output = RetroOutput {
             since: None,
-            until: head_state.map(|s| s.change_id.to_string_full()),
+            until: head_state.map(|s| s.state_id.to_string_full()),
             duration_secs: None,
             states_captured: Vec::new(),
             agents_active: Vec::new(),

@@ -12,7 +12,7 @@ pub enum RemoteCommands {
     Add {
         /// Remote name.
         name: String,
-        /// Remote URL, hosted endpoint, or local bare Git path.
+        /// Hosted Heddle endpoint or local native Heddle repository path.
         url: String,
     },
 
@@ -22,7 +22,7 @@ pub enum RemoteCommands {
         name: String,
     },
 
-    /// Set the default remote for pull, push, fetch, and Git projection operations.
+    /// Set the default Heddle remote for pull and push.
     SetDefault {
         /// Existing remote name.
         name: String,

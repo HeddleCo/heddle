@@ -15,10 +15,6 @@ pub(crate) fn print_next_step_dim(action: &str) {
     print_dim_action("Next step", action, 0);
 }
 
-pub(crate) fn print_nested_next(action: &str) {
-    print_bold_action("Next", action, 2);
-}
-
 pub(crate) fn print_command(action: &str) {
     print_bold_action("command", action, 2);
 }
@@ -33,10 +29,6 @@ pub(crate) fn print_nested_next_step(action: &str) {
 
 pub(crate) fn print_nested_optional(action: &str) {
     print_dim_action("optional", action, 4);
-}
-
-pub(crate) fn format_next(action: &str, indent: usize) -> Option<String> {
-    format_bold_action("Next", action, indent)
 }
 
 pub(crate) fn format_next_step_dim(action: &str, indent: usize) -> Option<String> {

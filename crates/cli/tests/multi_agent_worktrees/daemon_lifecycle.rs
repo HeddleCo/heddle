@@ -149,14 +149,14 @@ fn mount_path_from_start(raw: &str) -> String {
         .to_string()
 }
 
-/// Capture a snapshot in `cwd` and return its short change_id.
+/// Capture a snapshot in `cwd` and return its short state_id.
 fn capture_short(cwd: &Path, msg: &str) -> String {
     let out =
         heddle(&["--output", "json", "capture", "-m", msg], Some(cwd)).expect("snapshot succeeded");
     let v: Value = serde_json::from_str(&out).expect("snapshot --output json is valid JSON");
-    v.get("change_id")
+    v.get("state_id")
         .and_then(Value::as_str)
-        .expect("snapshot output exposes change_id")
+        .expect("snapshot output exposes state_id")
         .to_string()
 }
 

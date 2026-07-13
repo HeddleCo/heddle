@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use objects::{
     error::HeddleError,
-    object::{ChangeId, ContentHash, MarkerName, Principal, State, ThreadName, TreeEntryTarget},
+    object::{ContentHash, MarkerName, Principal, State, StateId, ThreadName, TreeEntryTarget},
     store::ObjectStore,
 };
 use repo::{AudienceTier, Repository as HeddleRepository, visible};
@@ -108,7 +108,7 @@ pub fn export_state(
     mapping: &mut SyncMapping,
     heddle_repo: &HeddleRepository,
     repo: &SleyRepository,
-    state_id: &ChangeId,
+    state_id: &StateId,
     options: ExportStateOptions<'_>,
 ) -> GitProjectionResult<Option<ObjectId>> {
     let state = heddle_repo
@@ -117,8 +117,8 @@ pub fn export_state(
         .ok_or(GitProjectionError::StateNotFound(*state_id))?;
 
     // Audience-aware minting. The visibility decision lives here, at the state
-    // walk where the `ChangeId` is in scope — never in the blob-keyed
-    // `export_tree` (no `ChangeId`/audience).
+    // walk where the `StateId` is in scope — never in the blob-keyed
+    // `export_tree` (no `StateId`/audience).
     let tier = heddle_repo
         .effective_visibility_tier(state_id)
         .map_err(|e| {
@@ -345,11 +345,11 @@ fn export_scoped(
     // Reachable set, used to tell a withheld parent (absent from the mapping
     // but present in this export) apart from a genuinely-missing shallow
     // boundary (absent from both).
-    let reachable: HashSet<ChangeId> = sorted_states.iter().copied().collect();
+    let reachable: HashSet<StateId> = sorted_states.iter().copied().collect();
     let repo = bridge.open_git_repo()?;
     bridge.mapping.retain_git_objects(&repo);
     bridge.seed_git_checkpoint_mappings_from_checkout(&repo)?;
-    bridge.seed_ingest_identity_mappings_from_mirror(&repo)?;
+    bridge.seed_ingest_identity_mappings_from_repo(&repo)?;
 
     // The desired/actual ref sets span the WHOLE mirror, not just this export's
     // scoped thread: a prior all-thread export can leave `refs/heads`/`refs/tags`
@@ -386,7 +386,7 @@ fn export_scoped(
     // out-of-scope commit whose tier — or an ancestor's — is now unserved, so
     // `project_desired_refs` lags those branches/tags correctly even on a scoped
     // export (heddle#316).
-    let mut frontier_roots: Vec<ChangeId> = Vec::new();
+    let mut frontier_roots: Vec<StateId> = Vec::new();
     for track_name in &threads {
         if let Some(tip) = bridge
             .heddle_repo
@@ -406,7 +406,7 @@ fn export_scoped(
     // Re-validate the served set against CURRENT visibility before anything treats
     // a mapping as "already served". A state minted while public in a prior export
     // can be marked under-tier later; `build_existing_mapping` rebuilds its stale
-    // ChangeId→OID mapping from the notes/sidecar every run, so without this purge
+    // StateId→OID mapping from the notes/sidecar every run, so without this purge
     // the frontier walk, the note re-write, and the tag sync would all keep serving
     // the now-embargoed commit. Purging is downward-closed: a still-visible state
     // whose ancestor is embargoed is withheld too (its Git commit chains to the
@@ -420,10 +420,10 @@ fn export_scoped(
     // mirror, so the notes-ref retraction below must consider all of them —
     // including the states the purge is about to drop AND any orphaned mapping a
     // deleted thread left behind, which no current-ref frontier reaches (heddle#316).
-    let pre_purge_targets: Vec<(ChangeId, ObjectId)> =
+    let pre_purge_targets: Vec<(StateId, ObjectId)> =
         bridge.mapping.iter().map(|(c, o)| (*c, *o)).collect();
 
-    let purge_reachable: HashSet<ChangeId> = sorted_states
+    let purge_reachable: HashSet<StateId> = sorted_states
         .iter()
         .copied()
         .chain(frontier_reachable.iter().copied())
@@ -454,7 +454,7 @@ fn export_scoped(
 
     for state_id in sorted_states {
         // Already mapped to a git object — the common case for git-imported
-        // states (the import populated the ChangeId→OID mapping) and for
+        // states (the import populated the StateId→OID mapping) and for
         // native commits a prior export already minted. Not re-counted as
         // "newly minted" (the total is decided below by ref-reachability).
         if bridge.mapping.has_heddle(&state_id) {
@@ -586,7 +586,7 @@ fn export_scoped(
         newly_minted.insert(git_oid);
 
         // Attach a heddle note to the freshly-created commit so the
-        // change_id survives a fresh `git clone` of the destination
+        // state_id survives a fresh `git clone` of the destination
         // (when only the git side travels, without our sidecar).
         if let Some(state) = bridge.heddle_repo.store().get_state(&state_id)? {
             let note = git_notes::HeddleNote::from_state(&state);
@@ -605,24 +605,24 @@ fn export_scoped(
     // retraction below. This is the SAME served rule the branch frontier uses,
     // applied to notes (heddle#316). For an all-states export it reduces to the
     // post-purge served set, so behavior there is unchanged.
-    let note_target_roots: Vec<ChangeId> = pre_purge_targets
+    let note_target_roots: Vec<StateId> = pre_purge_targets
         .iter()
         .map(|(c, _)| *c)
         .chain(bridge.mapping.iter().map(|(c, _)| *c))
         .collect();
     let note_reachable_vec = reachable_states(bridge.heddle_repo, &note_target_roots)?;
-    let note_reachable: HashSet<ChangeId> = note_reachable_vec.iter().copied().collect();
+    let note_reachable: HashSet<StateId> = note_reachable_vec.iter().copied().collect();
     let note_sorted = bridge.sort_states_topologically(&note_reachable_vec)?;
     let note_served =
-        served_change_ids(bridge.heddle_repo, &note_sorted, &note_reachable, &audience)?;
+        served_state_ids(bridge.heddle_repo, &note_sorted, &note_reachable, &audience)?;
 
     // For states whose git_oid was already in the mapping (the SHA-stable
     // path above), make sure the note is present too. This covers two
     // cases: (a) the state was imported from a non-heddle git source and
     // never had a note, and (b) the note was deleted from the mirror.
-    let note_targets: Vec<(ChangeId, ObjectId)> =
+    let note_targets: Vec<(StateId, ObjectId)> =
         bridge.mapping.iter().map(|(c, o)| (*c, *o)).collect();
-    for (change_id, git_oid) in note_targets {
+    for (state_id, git_oid) in note_targets {
         // Gate the backfill on the downward-closure served set, not the commit's
         // DIRECT tier. The mapping can carry orphaned entries (a deleted thread's
         // commits) the ref-rooted purge never examined; gating on direct
@@ -631,9 +631,9 @@ fn export_scoped(
         // withholds. `note_served` is the same served notion the branch frontier
         // uses, so no note-write site can emit metadata for an unserved commit
         // (heddle#316).
-        if note_served.contains(&change_id)
+        if note_served.contains(&state_id)
             && git_notes::read_note(&repo, git_oid)?.is_none()
-            && let Some(state) = bridge.heddle_repo.store().get_state(&change_id)?
+            && let Some(state) = bridge.heddle_repo.store().get_state(&state_id)?
         {
             let note = git_notes::HeddleNote::from_state(&state);
             git_notes::write_note(&repo, git_oid, &note)?;
@@ -681,15 +681,15 @@ fn export_scoped(
     // Drives BOTH the served-OID set just below AND (further down) the tag
     // classifier's served-but-unminted axis.
     let frontier_served = {
-        let reachable_set: HashSet<ChangeId> = frontier_reachable.iter().copied().collect();
+        let reachable_set: HashSet<StateId> = frontier_reachable.iter().copied().collect();
         let sorted = bridge.sort_states_topologically(&frontier_reachable)?;
-        served_change_ids(bridge.heddle_repo, &sorted, &reachable_set, &audience)?
+        served_state_ids(bridge.heddle_repo, &sorted, &reachable_set, &audience)?
     };
 
     // The whole-mirror SERVED-OID set: the git OID of every served frontier state.
     // An EXISTING mirror tip (head or tag) is "served" iff it is one of these — an
     // actually-served commit RIGHT NOW — independent of whether THIS run's purge
-    // happened to drop it. `frontier_served` is downward-closed at the ChangeId
+    // happened to drop it. `frontier_served` is downward-closed at the StateId
     // level (served ⟹ every reachable ancestor served) and every minted commit's
     // parents are themselves mapped, so the mapped OIDs of `frontier_served` already
     // form the downward-closed git-ancestry set — no separate git walk is needed
@@ -992,7 +992,7 @@ pub fn is_remote_tracking_thread_name(thread: &str, remote_names: &HashSet<Strin
 /// the caller can retract any ref still pointing at them.
 ///
 /// A state can be minted while public and only later marked under-tier; its
-/// stale ChangeId→OID mapping is rebuilt from the notes/sidecar on every
+/// stale StateId→OID mapping is rebuilt from the notes/sidecar on every
 /// export, so the served set must be re-derived against CURRENT visibility
 /// here rather than trusted from the mapping. The purge is downward-closed: a
 /// still-visible state is unserved if any reachable ancestor is unserved,
@@ -1002,11 +1002,11 @@ pub fn is_remote_tracking_thread_name(thread: &str, remote_names: &HashSet<Strin
 fn purge_unserved_mappings(
     heddle_repo: &HeddleRepository,
     mapping: &mut SyncMapping,
-    sorted_states: &[ChangeId],
-    reachable: &HashSet<ChangeId>,
+    sorted_states: &[StateId],
+    reachable: &HashSet<StateId>,
     audience: &AudienceTier,
 ) -> GitProjectionResult<HashSet<ObjectId>> {
-    let served = served_change_ids(heddle_repo, sorted_states, reachable, audience)?;
+    let served = served_state_ids(heddle_repo, sorted_states, reachable, audience)?;
     let mut purged: HashSet<ObjectId> = HashSet::new();
     for state_id in sorted_states {
         if !served.contains(state_id)
@@ -1027,13 +1027,13 @@ fn purge_unserved_mappings(
 /// The single notion of "served" shared by the branch-frontier purge and the
 /// notes-ref retraction — so a note can never be published for a commit whose
 /// branch the same rule would withhold (heddle#316).
-fn served_change_ids(
+fn served_state_ids(
     heddle_repo: &HeddleRepository,
-    sorted_states: &[ChangeId],
-    reachable: &HashSet<ChangeId>,
+    sorted_states: &[StateId],
+    reachable: &HashSet<StateId>,
     audience: &AudienceTier,
-) -> GitProjectionResult<HashSet<ChangeId>> {
-    let mut served: HashSet<ChangeId> = HashSet::new();
+) -> GitProjectionResult<HashSet<StateId>> {
+    let mut served: HashSet<StateId> = HashSet::new();
     for state_id in sorted_states {
         let tier = heddle_repo
             .effective_visibility_tier(state_id)
@@ -1145,11 +1145,11 @@ fn project_desired_refs(
 fn frontier_git_oid(
     heddle_repo: &HeddleRepository,
     mapping: &SyncMapping,
-    tip: ChangeId,
+    tip: StateId,
 ) -> GitProjectionResult<Option<ObjectId>> {
     let mut visited = HashSet::new();
     let mut stack = vec![tip];
-    let mut frontier: Vec<ChangeId> = Vec::new();
+    let mut frontier: Vec<StateId> = Vec::new();
     while let Some(id) = stack.pop() {
         if !visited.insert(id) {
             continue;
@@ -1169,7 +1169,7 @@ fn frontier_git_oid(
     // embargo splits the DAG can leave an antichain of ≥2 maximal served
     // states; advertising each sibling line under its own ref is the
     // multi-root work deferred to issues #4/#5. Until then the branch lags
-    // deterministically (lowest ChangeId) — never published from a raw
+    // deterministically (lowest StateId) — never published from a raw
     // embargoed tip — and the other lines are absent from this branch.
     let chosen = frontier.into_iter().min_by_key(|c| c.to_string_full());
     Ok(chosen.and_then(|c| mapping.get_git(&c)))
@@ -1177,8 +1177,8 @@ fn frontier_git_oid(
 
 fn reachable_states(
     heddle_repo: &HeddleRepository,
-    roots: &[ChangeId],
-) -> GitProjectionResult<Vec<ChangeId>> {
+    roots: &[StateId],
+) -> GitProjectionResult<Vec<StateId>> {
     let mut stack = roots.to_vec();
     let mut seen = HashSet::new();
     let mut states = Vec::new();

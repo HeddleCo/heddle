@@ -10,7 +10,7 @@ use std::{
 use objects::{
     error::{HeddleError, Result},
     object::{
-        ChangeId, ContentHash, CursorMovedV1, NativeToolCallRefV1, TimelineBranchId,
+        ContentHash, CursorMovedV1, NativeToolCallRefV1, StateId, TimelineBranchId,
         TimelineBranchReason, TimelineCursorMoveReason, TimelineLabel, TimelineOperationBodyV1,
         TimelineOperationEnvelope, TimelineOperationId, TimelineOperationKind, TimelineStepId,
         TimelineToolCallStatus,
@@ -86,7 +86,7 @@ pub struct TimelineThreadStatus {
     pub thread: String,
     pub current_branch_id: Option<TimelineBranchId>,
     pub current_step_id: Option<TimelineStepId>,
-    pub current_state: Option<ChangeId>,
+    pub current_state: Option<StateId>,
     pub last_operation_id: Option<TimelineOperationId>,
 }
 
@@ -109,7 +109,7 @@ pub struct TimelineBranchSummary {
     pub branch_id: TimelineBranchId,
     pub parent_branch_id: Option<TimelineBranchId>,
     pub forked_from_step_id: Option<TimelineStepId>,
-    pub forked_from_state: Option<ChangeId>,
+    pub forked_from_state: Option<StateId>,
     pub reason: Option<TimelineBranchReason>,
     pub created_at_ms: Option<i64>,
     pub operation_ids: Vec<TimelineOperationId>,
@@ -141,9 +141,9 @@ pub struct TimelineStepSummary {
     pub parent_step_id: Option<TimelineStepId>,
     pub native: Option<NativeToolCallRefV1>,
     pub tool_name: Option<String>,
-    pub before_state: Option<ChangeId>,
-    pub after_state: Option<ChangeId>,
-    pub capture_state: Option<ChangeId>,
+    pub before_state: Option<StateId>,
+    pub after_state: Option<StateId>,
+    pub capture_state: Option<StateId>,
     pub capture_oplog_batch_id: Option<u64>,
     pub changed: Option<bool>,
     pub status: Option<TimelineToolCallStatus>,
@@ -185,7 +185,7 @@ impl TimelineStepSummary {
         }
     }
 
-    fn cursor_state(&self) -> Option<ChangeId> {
+    fn cursor_state(&self) -> Option<StateId> {
         self.after_state
             .or(self.capture_state)
             .or(self.before_state)
@@ -198,7 +198,7 @@ pub struct TimelineSeekTarget {
     pub thread: String,
     pub branch_id: TimelineBranchId,
     pub step_id: Option<TimelineStepId>,
-    pub state: ChangeId,
+    pub state: StateId,
 }
 
 /// Command used to append a canonical cursor movement operation.
@@ -208,8 +208,8 @@ pub struct TimelineCursorMoveRecord {
     pub branch_id: TimelineBranchId,
     pub from_step_id: Option<TimelineStepId>,
     pub to_step_id: Option<TimelineStepId>,
-    pub from_state: ChangeId,
-    pub to_state: ChangeId,
+    pub from_state: StateId,
+    pub to_state: StateId,
     pub reason: TimelineCursorMoveReason,
     pub moved_at_ms: i64,
     pub labels: Vec<TimelineLabel>,
@@ -592,7 +592,7 @@ impl TimelineView {
         thread: String,
         branch_id: Option<TimelineBranchId>,
         step_id: Option<TimelineStepId>,
-        state: Option<ChangeId>,
+        state: Option<StateId>,
         operation_id: TimelineOperationId,
     ) {
         let status = self
@@ -915,8 +915,8 @@ mod tests {
 
     use super::*;
 
-    fn state(byte: u8) -> ChangeId {
-        ChangeId::from_bytes([byte; 16])
+    fn state(byte: u8) -> StateId {
+        StateId::from_bytes([byte; 32])
     }
 
     fn branch(id: &str) -> TimelineBranchId {

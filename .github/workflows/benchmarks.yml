@@ -1,9 +1,6 @@
 name: Benchmarks
 
 on:
-  schedule:
-    # Weekly full Criterion suite: Sunday 00:00 UTC.
-    - cron: '0 0 * * 0'
   workflow_dispatch:
 
 concurrency:
@@ -64,11 +61,21 @@ jobs:
       - name: Clear stale Criterion residue
         run: rm -rf target/criterion
 
-      - name: Run discovered Criterion benches
+      - name: Run FUSE baseline benchmark
         run: |
           : > benchmark-output.txt
+          cargo bench --locked --features fuse -p heddle-mount --bench fuse_e2e \
+            -- --output-format bencher 2>&1 | tee -a benchmark-output.txt
+          rm -rf target/fuse-criterion
+          cp -R target/criterion target/fuse-criterion
+
+      - name: Run remaining discovered Criterion benches
+        run: |
           while IFS=$'\t' read -r package bench features; do
             [ -n "$package" ] || continue
+            if [ "$package/$bench" = "heddle-mount/fuse_e2e" ]; then
+              continue
+            fi
             echo "::group::$package/$bench"
             cmd=(cargo bench --locked -p "$package" --bench "$bench")
             if [ -n "$features" ]; then
@@ -82,11 +89,8 @@ jobs:
             echo "::endgroup::"
           done < benchmark-plan.tsv
 
-      # Use github-action-benchmark for the broad scheduled suite instead
-      # of extending the committed FUSE baseline pattern. The workspace now
-      # has many Criterion targets, and more can appear independently; the
-      # action stores every run on gh-pages, charts history, and emits alert
-      # comments without forcing PR checks to wait on benchmark execution.
+      # Store history before the hard FUSE comparison so regressions remain
+      # visible even when the manual run ultimately fails.
       - name: Store benchmark history
         uses: benchmark-action/github-action-benchmark@v1
         with:
@@ -100,13 +104,21 @@ jobs:
           alert-threshold: '120%'
           benchmark-data-dir-path: dev/bench
 
+      - name: Compare FUSE baseline
+        run: |
+          python3 scripts/fuse-bench-compare.py \
+            --criterion-dir target/fuse-criterion \
+            --baseline crates/mount/benches/fuse_e2e_baseline.json \
+            --threshold 0.20 \
+            | tee fuse_e2e_compare.txt
+
       - name: Publish benchmark summary
         if: always()
         run: |
           {
             echo '## Benchmarks'
             echo
-            echo 'Trend tracking: benchmark-action/github-action-benchmark writes scheduled/manual results to gh-pages and surfaces >20% regressions as alerts without failing normal PR CI.'
+            echo 'Trend tracking: benchmark-action/github-action-benchmark writes manual results to gh-pages and surfaces >20% regressions as alerts.'
             echo
             echo 'Discovered targets:'
             sed 's/^/- /; s/\t/ /g' benchmark-plan.tsv
@@ -120,6 +132,7 @@ jobs:
           path: |
             benchmark-plan.tsv
             benchmark-output.txt
+            fuse_e2e_compare.txt
             target/criterion/
 
       - name: sccache stats

@@ -109,9 +109,11 @@ impl HeddleExitCode {
             // - `--output json`/`json-compact` against a command without
             //   that output contract (the invocation parses fine; the
             //   command rejects the requested projection)
-            "nothing_to_commit"
-            | "reconcile_direction_required"
-            | "git_repair_direction_required"
+            "nothing_to_capture"
+            | "commit_requires_git_overlay"
+            | "commit_capture_required"
+            | "git_repair_requires_adoption"
+            | "git_repair_requires_import"
             | "dirty_worktree"
             | "state_corrupted"
             | "state_not_found"
@@ -168,7 +170,10 @@ impl HeddleExitCode {
                     // A missing repository is a missing precondition
                     // (initialize/point at one), not an IO failure.
                     objects::error::HeddleError::RepositoryNotFound(_) => return Self::Config,
-                    objects::error::HeddleError::RepositoryFormatTooNew { .. } => {
+                    objects::error::HeddleError::RepositoryFormatTooNew { .. }
+                    | objects::error::HeddleError::RepositoryFormatMigrationRequired { .. }
+                    | objects::error::HeddleError::StorageFormatTooNew { .. }
+                    | objects::error::HeddleError::StorageFormatMigrationRequired { .. } => {
                         return Self::DataErr;
                     }
                     objects::error::HeddleError::StateNotFound(_)
@@ -177,6 +182,7 @@ impl HeddleExitCode {
                         return Self::DataErr;
                     }
                     objects::error::HeddleError::Config(_) => return Self::Config,
+                    objects::error::HeddleError::Lock(_) => return Self::TempFail,
                     // Stored state that fails msgpack decoding is corrupted
                     // data, not a transient IO problem — same class as the
                     // serde_json/toml parse failures below.
@@ -250,6 +256,17 @@ mod tests {
     }
 
     #[test]
+    fn typed_repository_lock_failure_maps_to_tempfail() {
+        let err = objects::error::HeddleError::Lock(objects::lock::LockError::Acquire(
+            std::io::Error::new(IoErrorKind::WouldBlock, "contended"),
+        ));
+        assert_eq!(
+            HeddleExitCode::from_error(&anyhow::Error::new(err)),
+            HeddleExitCode::TempFail
+        );
+    }
+
+    #[test]
     fn io_timed_out_is_retry_safe() {
         let err: anyhow::Error = std::io::Error::new(IoErrorKind::TimedOut, "slow").into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::TempFail);
@@ -303,12 +320,12 @@ mod tests {
     }
 
     #[test]
-    fn nothing_to_commit_advice_is_data_err() {
-        // `heddle commit` with nothing staged is semantic rejection of
+    fn nothing_to_capture_advice_is_data_err() {
+        // `heddle capture` with nothing selected is semantic rejection of
         // well-formed input (DataErr), not an IO failure.
         let advice = crate::cli::commands::RecoveryAdvice::safety_refusal(
-            "nothing_to_commit",
-            "nothing to commit",
+            "nothing_to_capture",
+            "nothing to capture",
             "hint",
             "unsafe",
             "would change",
@@ -321,12 +338,12 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_direction_required_advice_is_data_err() {
-        // `heddle fsck --repair git` without a `--prefer` side requires
-        // manual resolution — the reconcile contract's documented DataErr.
+    fn fsck_authority_refusal_is_data_err() {
+        // An authority-conflicting `heddle fsck repair git --prefer ...`
+        // request is a semantic refusal, not an IO failure.
         let advice = crate::cli::commands::RecoveryAdvice::safety_refusal(
-            "reconcile_direction_required",
-            "Refusing to reconcile 'main': choose a local side before applying",
+            "git_repair_requires_adoption",
+            "Git owns source history in this repository",
             "hint",
             "unsafe",
             "would change",
@@ -371,9 +388,10 @@ mod tests {
 
     #[test]
     fn state_not_found_typed_variant_is_data_err() {
-        let err: anyhow::Error =
-            objects::error::HeddleError::StateNotFound(objects::object::ChangeId::generate())
-                .into();
+        let err: anyhow::Error = objects::error::HeddleError::StateNotFound(
+            objects::object::StateId::from_bytes([3; 32]),
+        )
+        .into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
     }
 
@@ -384,6 +402,28 @@ mod tests {
             key: "output.format".to_string(),
             value: "auto".to_string(),
             valid_values: vec!["'text'".to_string(), "'json'".to_string()],
+        }
+        .into();
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn repository_format_migration_required_is_data_err() {
+        let err: anyhow::Error = objects::error::HeddleError::RepositoryFormatMigrationRequired {
+            path: std::path::PathBuf::from("/tmp/config.toml"),
+            found: 2,
+            required: 3,
+        }
+        .into();
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn storage_format_migration_required_is_data_err() {
+        let err: anyhow::Error = objects::error::HeddleError::StorageFormatMigrationRequired {
+            storage: "packed oplog container".to_string(),
+            found: 2,
+            required: 4,
         }
         .into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
@@ -428,9 +468,7 @@ mod tests {
             ("remote_not_configured", HeddleExitCode::Config),
             ("remote_not_found", HeddleExitCode::Config),
             ("repository_not_found", HeddleExitCode::Config),
-            ("nothing_to_commit", HeddleExitCode::DataErr),
-            ("reconcile_direction_required", HeddleExitCode::DataErr),
-            ("git_repair_direction_required", HeddleExitCode::DataErr),
+            ("nothing_to_capture", HeddleExitCode::DataErr),
             ("dirty_worktree", HeddleExitCode::DataErr),
             ("state_corrupted", HeddleExitCode::DataErr),
             ("state_not_found", HeddleExitCode::DataErr),

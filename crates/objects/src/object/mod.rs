@@ -8,6 +8,7 @@ mod action_id;
 mod action_operation;
 mod action_struct;
 mod blob;
+pub mod collaboration;
 mod diff;
 mod discussion;
 mod hash;
@@ -17,7 +18,9 @@ mod redaction;
 mod risk_signal;
 mod semantic_change;
 mod session;
+mod spool_id;
 mod staleness_core;
+mod state_attachment;
 mod state_attribution;
 mod state_context;
 mod state_core;
@@ -37,12 +40,13 @@ pub use action_id::ActionId;
 pub use action_operation::Operation;
 pub use action_struct::Action;
 pub use blob::Blob;
+pub use collaboration::*;
 pub use diff::{DiffKind, FileChange, FileChangeSet};
 pub use discussion::{
     Discussion, DiscussionError, DiscussionId, DiscussionResolution, DiscussionTurn,
-    DiscussionsBlob,
+    DiscussionsBlob, generate_discussion_id,
 };
-pub use hash::{ChangeId, ChangeIdParseError, ContentHash};
+pub use hash::{ChangeId, ChangeIdParseError, ContentHash, StateId, StateIdParseError};
 pub use identifiers::{MarkerName, Scope, ThreadName};
 pub use operation_id::{OperationId, OperationIdParseError};
 pub use redaction::{
@@ -54,17 +58,20 @@ pub use risk_signal::{
 };
 pub use semantic_change::{ChangeImportance, ModificationKind, SemanticChange};
 pub use session::{Session, SessionSegment, generate_session_id};
+pub use spool_id::{SpoolId, SpoolIdParseError};
 pub use staleness_core::{
     StalenessStatus, annotation_status_for_source,
     annotation_status_for_source_with_symbol_resolver, extract_line_range, resolve_current_symbol,
 };
+pub use state_attachment::{StateAttachment, StateAttachmentBody, StateAttachmentId};
 pub use state_attribution::{Agent, Attribution, Principal};
 pub use state_context::{
     Annotation, AnnotationKind, AnnotationRevision, AnnotationScope, AnnotationStatus, ContextBlob,
     ContextError, ContextTarget,
 };
 pub use state_core::{
-    SignatureStatus, State, StateSignature, Status, Verification, parse_commit_extension_headers,
+    ChangeLineage, ChangeLineageKind, SignatureStatus, State, StateSignature, Status, Verification,
+    parse_commit_extension_headers,
 };
 pub use state_provenance::{FileProvenance, LineSpan, Origin, OriginSet, ProvenanceError};
 pub use state_review::{

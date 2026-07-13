@@ -25,7 +25,7 @@ use super::{
         capture_thread_update_before, current_thread_ref_state, load_thread, refresh_thread,
         refresh_thread_freshness, save_thread_update_with_oplog, thread_not_found_advice,
     },
-    thread_landing::{land_command_for_thread, land_command_with_push_target},
+    thread_landing::{land_command_for_thread, land_local_command},
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 use crate::{
@@ -91,7 +91,7 @@ pub fn cmd_capture_split(
                     no_agent: false,
                 },
             )?
-            .change_id)
+            .state_id)
         },
     )
     .map_err(map_thread_shaping_anyhow_error)?;
@@ -131,7 +131,7 @@ pub fn cmd_thread_move(
                     no_agent: false,
                 },
             )?
-            .change_id)
+            .state_id)
         },
     )
     .map_err(map_thread_shaping_anyhow_error)?;
@@ -326,12 +326,12 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
             .ok_or_else(|| anyhow!("Thread '{}' has no current state", thread.id))?;
         if rebase_state
             .pre_conflict_head
-            .is_some_and(|head| head != current_state.change_id)
+            .is_some_and(|head| head != current_state.state_id)
         {
-            recommended_action = "heddle rebase --continue".to_string();
+            recommended_action = "heddle continue".to_string();
         } else {
             blockers.push(
-                "refresh has a rebase in progress; capture a manual resolution in the thread checkout, then run `heddle rebase --continue`".to_string(),
+                "refresh has a replay in progress; capture the manual resolution in the thread checkout, then run `heddle continue`".to_string(),
             );
         }
     }
@@ -459,10 +459,10 @@ fn thread_resolve_rebase_followup_operator(
     let mut blockers = Vec::new();
     if rebase_state
         .pre_conflict_head
-        .is_none_or(|head| head == current_state.change_id)
+        .is_none_or(|head| head == current_state.state_id)
     {
         blockers.push(
-            "refresh has a rebase in progress; capture a manual resolution in the thread checkout, then run `heddle rebase --continue`".to_string(),
+            "refresh has a replay in progress; capture the manual resolution in the thread checkout, then run `heddle continue`".to_string(),
         );
     }
 
@@ -524,7 +524,7 @@ fn thread_resolve_refresh_operator(
     thread_id: &str,
     trust: &RepositoryVerificationState,
 ) -> OperatorCommandOutput {
-    let land_command = land_command_with_push_target(thread_id, trust.default_remote.is_some());
+    let land_command = land_local_command(thread_id);
     if trust.verified {
         return OperatorCommandOutput {
             status: "synced".to_string(),
@@ -661,12 +661,12 @@ mod tests {
                 "active Git branch has not been imported"
             }
             .to_string(),
-            recommended_action: (!verified).then(|| "heddle adopt --ref main".to_string()),
+            recommended_action: (!verified).then(|| "heddle import git --ref main".to_string()),
             recommended_action_template: None,
             recovery_commands: if verified {
                 Vec::new()
             } else {
-                vec!["heddle adopt --ref main".to_string()]
+                vec!["heddle import git --ref main".to_string()]
             },
             recovery_action_templates: Vec::new(),
             details: std::collections::BTreeMap::new(),
@@ -710,7 +710,7 @@ mod tests {
         assert_eq!(clean.status, "synced");
         assert_eq!(
             clean.recommended_action.as_deref(),
-            Some("heddle land --thread feature/clean --no-push")
+            Some("heddle land --thread feature/clean")
         );
 
         let blocked = thread_resolve_refresh_operator("feature/blocked", &trust_state(false));
@@ -724,7 +724,7 @@ mod tests {
         );
         assert_eq!(
             blocked.recommended_action.as_deref(),
-            Some("heddle adopt --ref main")
+            Some("heddle import git --ref main")
         );
         assert!(
             blocked

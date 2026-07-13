@@ -3,31 +3,16 @@
 
 use std::sync::Arc;
 
-use crypto::{Signer, StateSigningExt, load_signer, verify_state_signature_bytes};
+use crypto::{Signer, load_signer, state_signature_from_signer, verify_state_signature_bytes};
 use objects::{
-    object::{ChangeId, ContentHash, SignatureStatus, State, StateSignature},
+    object::{
+        SignatureStatus, State, StateAttachment, StateAttachmentBody, StateId, StateSignature,
+    },
     store::ObjectStore,
 };
 use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result};
-
-/// Outcome of [`Repository::resign_if_owned`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResignOutcome {
-    /// The state carried no signature; nothing to preserve.
-    Unsigned,
-    /// The state was signed by this repo's active signing identity and has
-    /// been re-signed over its CURRENT `compute_hash()`, so the signature
-    /// stays valid after an authorized rewrite.
-    Resigned,
-    /// The signature was produced by a key this identity cannot reproduce —
-    /// a foreign/third-party key, or no signer is currently resolvable. The
-    /// state is left UNMODIFIED; the caller must not persist a rewritten
-    /// version of it, since that would ship a signature that no longer
-    /// verifies against the new hash.
-    Unreproducible,
-}
 
 impl Repository {
     /// Path to this repo's per-repo local signing identity (heddle#482).
@@ -55,152 +40,69 @@ impl Repository {
         crate::identity::resolve_signer(&local, &device).map(Arc::from)
     }
 
-    /// Best-effort auto-sign on the capture/commit/merge path (heddle#482).
-    ///
-    /// A missing or unreadable key warns and leaves the state unsigned rather
-    /// than failing the capture — the unsigned status stays observable via
-    /// `state.signature` being `None`. This MUST be the last mutation before
-    /// `put_state`: it signs `compute_hash()` over the then-current fields, so
-    /// any later field change would invalidate the signature.
-    pub(crate) fn sign_state_best_effort(&self, state: &mut State) {
+    /// Produce a detached signature when a signing identity is available.
+    fn sign_state_best_effort(&self, state: &State) -> Option<StateSignature> {
         let Some(signer) = self.signing_signer() else {
             debug!("no signing identity available; state captured unsigned");
-            return;
+            return None;
         };
-        if let Err(error) = state.sign(&*signer) {
-            tracing::warn!(%error, "auto-signing failed; state captured unsigned");
-        }
-    }
-
-    /// The authored-state write chokepoint (heddle#482): auto-sign
-    /// (best-effort) then persist a freshly authored `State`. EVERY writer that
-    /// records a *new authored state* routes through here — capture/snapshot,
-    /// merge, mount capture, thread materialize, fork, collapse, context
-    /// annotation, and both rebase replay paths, across this crate AND the
-    /// `mount`/`cli` crates — so no authored state can reach the store
-    /// unsigned. Signing is the LAST mutation before the write, so the
-    /// signature covers the final field set; any later change would invalidate
-    /// it.
-    ///
-    /// Non-authored writes deliberately do NOT use this path — they keep their
-    /// existing signature (or stay legitimately unsigned) rather than minting a
-    /// fresh one: replaying/transferring an already-signed state
-    /// (`put_state_serialized`, sync/packfile ops), the synthetic init root
-    /// (`seed_default_thread`), git-import of foreign history, and server-side
-    /// review/signal mutations. Re-signing those would either clobber an
-    /// existing signature or falsely attribute foreign content to this device.
-    pub fn put_authored_state(&self, state: &mut State) -> Result<()> {
-        self.sign_state_best_effort(state);
-        self.store.put_state(state)?;
-        Ok(())
-    }
-
-    /// Resolve a signer THIS repo controls whose public key matches the one
-    /// embedded in `signature`, or `None` if the signature is foreign.
-    ///
-    /// Tries two keys (heddle#570): first the *active* signer (the device key
-    /// after an `auth login`, else the per-repo local key), then — if that
-    /// misses — the per-repo local key explicitly. The second try matters
-    /// because the device key supersedes the local key for *new* states, so a
-    /// state signed with the local key BEFORE a device key was linked would
-    /// otherwise be misclassified as foreign even though this repo still owns
-    /// its key and can legitimately re-sign it.
-    fn owning_signer_for(&self, signature: &StateSignature) -> Option<Arc<dyn Signer>> {
-        if let Some(signer) = self.signing_signer()
-            && hex::encode(signer.public_key()) == signature.public_key
-        {
-            return Some(signer);
-        }
-        let local = crate::identity::load_local_signer(&self.local_identity_path())?;
-        if hex::encode(local.public_key()) == signature.public_key {
-            return Some(Arc::from(local));
-        }
-        None
-    }
-
-    /// Re-sign `state` over its CURRENT `compute_hash()` IFF its existing
-    /// signature was both produced by a key this repo controls AND already
-    /// valid over one of `prior_hashes` (the hash candidates the signature
-    /// could have been made over, BEFORE the caller's rewrite). So an
-    /// authorized rewrite (e.g. the #570 fidelity backfill, which re-derives
-    /// hash-bearing fields) keeps a valid signature instead of shipping one
-    /// that no longer verifies.
-    ///
-    /// Multiple candidates are accepted because migrations and authorized
-    /// rewrites can know more than one possible prior identity for a state.
-    /// The current operation only decides whether the existing signature was
-    /// valid over one of those old identities before it writes a new signature
-    /// over the current hash.
-    ///
-    /// Ownership is decided by [`Self::owning_signer_for`], which tries both the
-    /// active signer and the per-repo local key — a repo that signed states
-    /// with its local key before linking a device key is still recognised as
-    /// the owner (heddle#570).
-    ///
-    /// Returns [`ResignOutcome::Unreproducible`] WITHOUT modifying `state` when:
-    /// - the signature belongs to a foreign key (or no owned signer resolves) —
-    ///   re-signing foreign content would falsely attribute it to this device; or
-    /// - the existing signature does NOT verify against ANY of `prior_hashes` —
-    ///   re-signing over it would launder a never-valid signature into a fresh,
-    ///   valid-looking one (heddle#570).
-    ///
-    /// In both cases the caller MUST NOT persist a rewritten version of the state.
-    pub fn resign_if_owned(
-        &self,
-        state: &mut State,
-        prior_hashes: &[ContentHash],
-    ) -> ResignOutcome {
-        let Some(existing) = state.signature.clone() else {
-            return ResignOutcome::Unsigned;
-        };
-        let Some(signer) = self.owning_signer_for(&existing) else {
-            return ResignOutcome::Unreproducible;
-        };
-        // Verify the EXISTING signature against the OLD hash(es) before
-        // re-signing. Without this an owned-but-invalid signature (corrupted, or
-        // made over different content) would be silently replaced with a valid
-        // signature over the new content — laundering a bad signature.
-        let verifies = prior_hashes
-            .iter()
-            .any(|hash| verify_state_signature_bytes(&existing, hash).is_ok());
-        if !verifies {
-            return ResignOutcome::Unreproducible;
-        }
-        match state.sign(&*signer) {
-            Ok(()) => ResignOutcome::Resigned,
+        match state_signature_from_signer(&state.compute_hash(), &*signer) {
+            Ok(signature) => Some(signature),
             Err(error) => {
-                tracing::warn!(%error, "re-signing an owned state failed; leaving it unmodified");
-                ResignOutcome::Unreproducible
+                tracing::warn!(%error, "auto-signing failed; state captured unsigned");
+                None
             }
         }
     }
 
+    /// Persist an authored state and its detached signature attachment.
+    pub fn put_authored_state(&self, state: &State) -> Result<()> {
+        let signature = self.sign_state_best_effort(state);
+        self.store.put_state(state)?;
+        if let Some(signature) = signature {
+            self.put_state_attachment(&StateAttachment {
+                state_id: state.id(),
+                body: StateAttachmentBody::Signature(signature),
+                attribution: state.attribution.clone(),
+                created_at: chrono::Utc::now(),
+                supersedes: None,
+            })?;
+        }
+        Ok(())
+    }
+
     /// Sign a state with the given signer.
     ///
-    /// This loads the state, signs it, and stores the updated state.
+    /// This loads the immutable state and appends a signature attachment.
     ///
     /// # Arguments
     ///
-    /// * `state_id` - The change ID of the state to sign
+    /// * `state_id` - The state ID of the state to sign
     /// * `signer` - The signer to use
     ///
     /// # Errors
     ///
     /// Returns an error if the state is not found or signing fails.
     #[instrument(skip(self, signer), fields(state_id = %state_id.short()))]
-    pub fn sign_state(&self, state_id: &ChangeId, signer: &dyn Signer) -> Result<()> {
+    pub fn sign_state(&self, state_id: &StateId, signer: &dyn Signer) -> Result<()> {
         debug!("Signing state");
 
-        let mut state = self
+        let state = self
             .store
             .get_state(state_id)?
             .ok_or(HeddleError::StateNotFound(*state_id))?;
-
-        state
-            .sign(signer)
+        let signature = state_signature_from_signer(&state.compute_hash(), signer)
             .map_err(|error| HeddleError::Conflict(format!("failed to sign state: {error}")))?;
-
-        self.store.put_state(&state)?;
+        let supersedes = self
+            .latest_state_attachment(state_id, crate::StateAttachmentKind::Signature)?
+            .map(|attachment| attachment.id());
+        self.put_state_attachment(&StateAttachment {
+            state_id: *state_id,
+            body: StateAttachmentBody::Signature(signature),
+            attribution: state.attribution,
+            created_at: chrono::Utc::now(),
+            supersedes,
+        })?;
 
         debug!(algorithm = signer.algorithm(), "State signed successfully");
 
@@ -211,13 +113,13 @@ impl Repository {
     ///
     /// # Arguments
     ///
-    /// * `state_id` - The change ID of the state to sign
+    /// * `state_id` - The state ID of the state to sign
     /// * `key_path` - Path to the private key file
     /// * `algorithm` - Optional algorithm hint (auto-detected if not specified)
     #[instrument(skip(self), fields(state_id = %state_id.short()))]
     pub fn sign_state_with_key(
         &self,
-        state_id: &ChangeId,
+        state_id: &StateId,
         key_path: &std::path::Path,
         algorithm: Option<&str>,
     ) -> Result<()> {
@@ -236,9 +138,9 @@ impl Repository {
     ///
     /// # Arguments
     ///
-    /// * `state_id` - The change ID of the state to verify
+    /// * `state_id` - The state ID of the state to verify
     #[instrument(skip(self), fields(state_id = %state_id.short()))]
-    pub fn verify_state_signature(&self, state_id: &ChangeId) -> Result<SignatureStatus> {
+    pub fn verify_state_signature(&self, state_id: &StateId) -> Result<SignatureStatus> {
         debug!("Verifying state signature");
 
         let state = self
@@ -246,7 +148,14 @@ impl Repository {
             .get_state(state_id)?
             .ok_or(HeddleError::StateNotFound(*state_id))?;
 
-        match &state.signature {
+        let signature = self
+            .latest_state_attachment(state_id, crate::StateAttachmentKind::Signature)?
+            .and_then(|attachment| match attachment.body {
+                StateAttachmentBody::Signature(signature) => Some(signature),
+                _ => None,
+            });
+
+        match &signature {
             Some(sig) => {
                 let hash = state.compute_hash();
                 match verify_state_signature_bytes(sig, &hash) {
@@ -270,13 +179,16 @@ impl Repository {
     /// Get the signature of a state.
     ///
     /// Returns `None` if the state is not found or has no signature.
-    pub fn get_state_signature(&self, state_id: &ChangeId) -> Result<Option<StateSignature>> {
-        let state = self.store.get_state(state_id)?;
-
-        match state {
-            Some(s) => Ok(s.signature),
-            None => Ok(None),
+    pub fn get_state_signature(&self, state_id: &StateId) -> Result<Option<StateSignature>> {
+        if !self.store.has_state(state_id)? {
+            return Ok(None);
         }
+        Ok(self
+            .latest_state_attachment(state_id, crate::StateAttachmentKind::Signature)?
+            .and_then(|attachment| match attachment.body {
+                StateAttachmentBody::Signature(signature) => Some(signature),
+                _ => None,
+            }))
     }
 }
 
@@ -294,7 +206,7 @@ mod tests {
         (temp, repo)
     }
 
-    fn create_test_state(repo: &Repository) -> ChangeId {
+    fn create_test_state(repo: &Repository) -> StateId {
         use objects::object::Tree;
 
         let tree = Tree::new();
@@ -303,13 +215,14 @@ mod tests {
         let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
         let state = objects::object::State::new(tree_hash, vec![], attribution);
         repo.store().put_state(&state).expect("put state");
-        state.change_id
+        state.id()
     }
 
     #[test]
     fn test_sign_state() {
         let (_temp, repo) = setup_repo();
         let state_id = create_test_state(&repo);
+        let before = repo.store().get_state(&state_id).unwrap().unwrap();
 
         // Initially unsigned
         let status = repo.verify_state_signature(&state_id).expect("verify");
@@ -322,6 +235,7 @@ mod tests {
         // Now it should be valid
         let status = repo.verify_state_signature(&state_id).expect("verify");
         assert_eq!(status, SignatureStatus::Valid);
+        assert_eq!(repo.store().get_state(&state_id).unwrap().unwrap(), before);
     }
 
     #[test]
@@ -333,21 +247,30 @@ mod tests {
         let signer1 = Ed25519Signer::generate().expect("generate key");
         repo.sign_state(&state_id, &signer1).expect("sign state");
 
-        // Tamper with the stored signature (simulate corruption)
-        let mut state = repo
+        let state = repo
             .store()
             .get_state(&state_id)
             .expect("get state")
             .expect("state exists");
-
-        if let Some(ref mut sig) = state.signature {
-            // Flip a bit in the signature
-            let mut sig_bytes = hex::decode(&sig.signature).expect("decode");
-            sig_bytes[0] ^= 0xff;
-            sig.signature = hex::encode(&sig_bytes);
-        }
-
-        repo.store().put_state(&state).expect("put state");
+        let prior = repo
+            .latest_state_attachment(&state_id, crate::StateAttachmentKind::Signature)
+            .unwrap()
+            .unwrap();
+        let prior_id = prior.id();
+        let StateAttachmentBody::Signature(mut signature) = prior.body else {
+            panic!("expected signature attachment");
+        };
+        let mut sig_bytes = hex::decode(&signature.signature).expect("decode");
+        sig_bytes[0] ^= 0xff;
+        signature.signature = hex::encode(&sig_bytes);
+        repo.put_state_attachment(&StateAttachment {
+            state_id,
+            body: StateAttachmentBody::Signature(signature),
+            attribution: state.attribution,
+            created_at: chrono::Utc::now() + chrono::Duration::seconds(1),
+            supersedes: Some(prior_id),
+        })
+        .expect("put corrupted signature attachment");
 
         // Should now be invalid
         let status = repo.verify_state_signature(&state_id).expect("verify");
@@ -404,13 +327,11 @@ mod tests {
         }
     }
 
-    fn sig_pubkey(state: &State) -> String {
-        state
-            .signature
-            .as_ref()
+    fn sig_pubkey(repo: &Repository, state_id: &StateId) -> String {
+        repo.get_state_signature(state_id)
+            .expect("read signature")
             .expect("state is signed")
             .public_key
-            .clone()
     }
 
     #[test]
@@ -425,10 +346,9 @@ mod tests {
                 .expect("capture");
 
             // Every captured state is signed and verifies, with no auth login.
-            assert!(state.signature.is_some(), "capture must auto-sign");
+            assert!(repo.get_state_signature(&state.id()).unwrap().is_some());
             assert_eq!(
-                repo.verify_state_signature(&state.change_id)
-                    .expect("verify"),
+                repo.verify_state_signature(&state.id()).expect("verify"),
                 SignatureStatus::Valid,
             );
 
@@ -437,7 +357,7 @@ mod tests {
                 &temp.path().join(".heddle").join("identity.toml"),
             )
             .expect("read local identity");
-            assert_eq!(sig_pubkey(&state), local.public_key);
+            assert_eq!(sig_pubkey(&repo, &state.id()), local.public_key);
         });
     }
 
@@ -452,9 +372,9 @@ mod tests {
             let local_state = repo
                 .snapshot(Some("local".to_string()), None)
                 .expect("capture");
-            let local_pubkey = sig_pubkey(&local_state);
+            let local_pubkey = sig_pubkey(&repo, &local_state.id());
             assert_eq!(
-                repo.verify_state_signature(&local_state.change_id)
+                repo.verify_state_signature(&local_state.id())
                     .expect("verify"),
                 SignatureStatus::Valid,
             );
@@ -477,13 +397,13 @@ mod tests {
                 .snapshot(Some("device".to_string()), None)
                 .expect("capture");
             assert_eq!(
-                sig_pubkey(&device_state),
+                sig_pubkey(&repo2, &device_state.id()),
                 device_pubkey,
                 "post-login captures sign with the device key",
             );
             assert_eq!(
                 repo2
-                    .verify_state_signature(&device_state.change_id)
+                    .verify_state_signature(&device_state.id())
                     .expect("verify"),
                 SignatureStatus::Valid,
             );
@@ -492,7 +412,7 @@ mod tests {
             // not invalidate it (its public key is embedded in the state).
             assert_eq!(
                 repo2
-                    .verify_state_signature(&local_state.change_id)
+                    .verify_state_signature(&local_state.id())
                     .expect("verify"),
                 SignatureStatus::Valid,
             );
@@ -528,7 +448,7 @@ mod tests {
                 .snapshot(Some("in".to_string()), None)
                 .expect("capture");
             assert_eq!(
-                sig_pubkey(&signed_in),
+                sig_pubkey(&repo, &signed_in.id()),
                 device_pubkey,
                 "post-login capture uses the device key",
             );
@@ -548,12 +468,12 @@ mod tests {
                 .snapshot(Some("out".to_string()), None)
                 .expect("capture");
             assert_ne!(
-                sig_pubkey(&signed_out),
+                sig_pubkey(&repo, &signed_out.id()),
                 device_pubkey,
                 "post-logout capture must not sign with the logged-out device key",
             );
             assert_eq!(
-                repo.verify_state_signature(&signed_out.change_id)
+                repo.verify_state_signature(&signed_out.id())
                     .expect("verify"),
                 SignatureStatus::Valid,
             );
@@ -580,7 +500,7 @@ mod tests {
                 .snapshot(Some("b".to_string()), None)
                 .expect("capture b");
 
-            repo.goto(&state_a.change_id).expect("goto a");
+            repo.goto(&state_a.id()).expect("goto a");
             std::fs::write(temp.path().join("side.txt"), "c").expect("write");
             let state_c = repo
                 .snapshot(Some("c".to_string()), None)
@@ -590,7 +510,7 @@ mod tests {
             let attribution = Attribution::human(Principal::new("Merger", "merge@example.com"));
             let merge = repo
                 .snapshot_merge_with_attribution(
-                    &state_b.change_id,
+                    &state_b.id(),
                     Some("merge".to_string()),
                     None,
                     attribution,
@@ -600,10 +520,9 @@ mod tests {
                 .expect("merge");
 
             // The merge state carries its own signature.
-            assert!(merge.signature.is_some(), "merge state must be signed");
+            assert!(repo.get_state_signature(&merge.id()).unwrap().is_some());
             assert_eq!(
-                repo.verify_state_signature(&merge.change_id)
-                    .expect("verify"),
+                repo.verify_state_signature(&merge.id()).expect("verify"),
                 SignatureStatus::Valid,
             );
 
@@ -611,7 +530,7 @@ mod tests {
             // do not rewrite ancestors, so attribution survives.
             for parent in [&state_a, &state_b, &state_c] {
                 assert_eq!(
-                    repo.verify_state_signature(&parent.change_id)
+                    repo.verify_state_signature(&parent.id())
                         .expect("verify parent"),
                     SignatureStatus::Valid,
                     "parent signature must survive the merge",
@@ -635,182 +554,10 @@ mod tests {
             // Capture must still succeed — signing is best-effort.
             let state = repo.snapshot(Some("x".to_string()), None).expect("capture");
 
-            assert!(
-                state.signature.is_none(),
-                "degraded capture is unsigned, not silently signed",
-            );
+            assert!(repo.get_state_signature(&state.id()).unwrap().is_none());
             assert_eq!(
-                repo.verify_state_signature(&state.change_id)
-                    .expect("verify"),
+                repo.verify_state_signature(&state.id()).expect("verify"),
                 SignatureStatus::Unsigned,
-            );
-        });
-    }
-
-    // ----- heddle#570: the unified re-sign decision (verify-old → try-local
-    // -key → resign/skip) used by the fidelity backfill -----
-
-    /// Build an unsigned root state for the re-sign tests.
-    fn unsigned_state() -> State {
-        use objects::object::Tree;
-        let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
-        State::new(Tree::new().hash(), vec![], attribution)
-    }
-
-    /// An owned signature that was valid over the old hash is re-signed over the
-    /// new hash after an authorized rewrite.
-    #[test]
-    fn resign_if_owned_resigns_active_owned_signature() {
-        let home = TempDir::new().expect("home temp");
-        with_signing_home(home.path(), || {
-            let (_temp, repo) = setup_repo();
-            let signer = repo.signing_signer().expect("local signer resolves");
-
-            let mut state = unsigned_state();
-            state.sign(&*signer).expect("sign with the repo's own key");
-            let old_hash = state.compute_hash();
-
-            // An authorized rewrite changes the content hash.
-            state.created_at += chrono::Duration::seconds(1);
-            assert_ne!(state.compute_hash(), old_hash, "rewrite changed the hash");
-
-            assert_eq!(
-                repo.resign_if_owned(&mut state, &[old_hash]),
-                ResignOutcome::Resigned,
-            );
-            state
-                .verify_signature()
-                .expect("re-signed state verifies over the new hash");
-        });
-    }
-
-    /// An owned signature that does NOT verify over the old hash (corrupted, or
-    /// made over different content) must NOT be re-signed: re-signing would
-    /// launder a never-valid signature into a fresh, valid-looking one. The
-    /// state is left untouched and reported `Unreproducible` (heddle#570).
-    #[test]
-    fn resign_if_owned_refuses_to_launder_an_invalid_owned_signature() {
-        let home = TempDir::new().expect("home temp");
-        with_signing_home(home.path(), || {
-            let (_temp, repo) = setup_repo();
-            let signer = repo.signing_signer().expect("local signer resolves");
-
-            let mut state = unsigned_state();
-            state.sign(&*signer).expect("sign with the repo's own key");
-
-            // Corrupt the signature so it no longer verifies — but keep the
-            // public key intact so the OWNERSHIP check still matches.
-            let corrupted = {
-                let sig = state.signature.as_ref().expect("signed");
-                let mut bytes = hex::decode(&sig.signature).expect("decode sig");
-                bytes[0] ^= 0xff;
-                hex::encode(&bytes)
-            };
-            if let Some(sig) = state.signature.as_mut() {
-                sig.signature = corrupted.clone();
-            }
-            let old_hash = state.compute_hash();
-
-            // The owner check matches (public key intact) but the old signature
-            // does not verify over `old_hash`, so re-signing is refused.
-            assert_eq!(
-                repo.resign_if_owned(&mut state, &[old_hash]),
-                ResignOutcome::Unreproducible,
-            );
-            assert_eq!(
-                state.signature.as_ref().expect("still signed").signature,
-                corrupted,
-                "the state is left untouched, not re-signed",
-            );
-        });
-    }
-
-    /// A state signed with the per-repo LOCAL key before an `auth login` linked
-    /// a device key is still owner-reproducible: the device key now supersedes
-    /// the local key for new states, but `owning_signer_for` falls back to the
-    /// local key, so the backfill re-signs it rather than declaring ownership
-    /// lost (heddle#570).
-    #[test]
-    fn resign_if_owned_recognizes_local_key_after_device_link() {
-        let home = TempDir::new().expect("home temp");
-        with_signing_home(home.path(), || {
-            let (_temp, repo) = setup_repo();
-
-            // Sign with the local key (no device key linked yet).
-            let local = repo.signing_signer().expect("local signer resolves");
-            let local_pubkey = hex::encode(local.public_key());
-            let mut state = unsigned_state();
-            state.sign(&*local).expect("sign with local key");
-            let old_hash = state.compute_hash();
-
-            // `auth login`: link a DISTINCT device key, which now supersedes the
-            // local key for new states.
-            let device = Ed25519Signer::generate().expect("device key");
-            let device_pubkey = hex::encode(device.public_key());
-            assert_ne!(device_pubkey, local_pubkey, "device key is distinct");
-            crate::identity::link_device_key(
-                device.public_key(),
-                &device.to_pem().expect("device pem"),
-                "grpc.example",
-            )
-            .expect("link device key");
-            assert_eq!(
-                hex::encode(repo.signing_signer().expect("signer").public_key()),
-                device_pubkey,
-                "active signer is now the device key",
-            );
-
-            // An authorized rewrite, then re-sign: ownership is recognised via
-            // the local key fallback and the state is re-signed (with the local
-            // key it was originally signed by), keeping a valid signature.
-            state.created_at += chrono::Duration::seconds(1);
-            assert_eq!(
-                repo.resign_if_owned(&mut state, &[old_hash]),
-                ResignOutcome::Resigned,
-            );
-            state
-                .verify_signature()
-                .expect("re-signed state verifies over the new hash");
-            assert_eq!(
-                state.signature.as_ref().expect("signed").public_key,
-                local_pubkey,
-                "re-signed with the owning local key, not the device key",
-            );
-        });
-    }
-
-    /// A foreign signature (a key this repo does not control) is not re-signed
-    /// even after trying the local-key fallback: ownership genuinely cannot be
-    /// reproduced, so the state is left untouched (heddle#570).
-    #[test]
-    fn resign_if_owned_refuses_foreign_signature() {
-        let home = TempDir::new().expect("home temp");
-        with_signing_home(home.path(), || {
-            let (_temp, repo) = setup_repo();
-
-            let foreign = Ed25519Signer::generate().expect("foreign key");
-            let mut state = unsigned_state();
-            state.sign(&foreign).expect("foreign-sign");
-            let old_hash = state.compute_hash();
-
-            assert_eq!(
-                repo.resign_if_owned(&mut state, &[old_hash]),
-                ResignOutcome::Unreproducible,
-            );
-        });
-    }
-
-    /// An unsigned state needs no signature preserved.
-    #[test]
-    fn resign_if_owned_reports_unsigned() {
-        let home = TempDir::new().expect("home temp");
-        with_signing_home(home.path(), || {
-            let (_temp, repo) = setup_repo();
-            let mut state = unsigned_state();
-            let old_hash = state.compute_hash();
-            assert_eq!(
-                repo.resign_if_owned(&mut state, &[old_hash]),
-                ResignOutcome::Unsigned,
             );
         });
     }
@@ -835,10 +582,7 @@ mod tests {
             let first = repo
                 .snapshot(Some("a".to_string()), None)
                 .expect("capture a");
-            assert!(
-                first.signature.is_some(),
-                "first capture signs with the freshly-minted 0600 key",
-            );
+            assert!(repo.get_state_signature(&first.id()).unwrap().is_some());
             assert_eq!(
                 std::fs::metadata(&identity)
                     .expect("identity metadata")
@@ -858,13 +602,9 @@ mod tests {
             let exposed = repo
                 .snapshot(Some("b".to_string()), None)
                 .expect("capture b");
-            assert!(
-                exposed.signature.is_none(),
-                "an exposed key must make the next sign fail closed, not reuse a cached signer",
-            );
+            assert!(repo.get_state_signature(&exposed.id()).unwrap().is_none());
             assert_eq!(
-                repo.verify_state_signature(&exposed.change_id)
-                    .expect("verify"),
+                repo.verify_state_signature(&exposed.id()).expect("verify"),
                 SignatureStatus::Unsigned,
             );
 
@@ -875,12 +615,9 @@ mod tests {
             let resecured = repo
                 .snapshot(Some("c".to_string()), None)
                 .expect("capture c");
-            assert!(
-                resecured.signature.is_some(),
-                "re-securing the key lets the same handle sign again",
-            );
+            assert!(repo.get_state_signature(&resecured.id()).unwrap().is_some());
             assert_eq!(
-                repo.verify_state_signature(&resecured.change_id)
+                repo.verify_state_signature(&resecured.id())
                     .expect("verify"),
                 SignatureStatus::Valid,
             );

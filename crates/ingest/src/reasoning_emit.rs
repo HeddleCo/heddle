@@ -1,32 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Write [`ReasoningPoint`]s onto imported states as context annotations.
+//! Attach [`ReasoningPoint`]s to imported states as context annotations.
 //!
 //! The extractor produces notecards; the matcher pins each session to a
-//! git commit; this module lands the notecards on the Heddle [`State`] that
-//! was already written for that commit.
-//!
-//! # Why in-place mutation
-//!
-//! Live annotation flows (see `cli`'s `context annotate`) create a
-//! *new* state whose parent is the one being annotated — the annotation
-//! is itself a commit in Heddle's graph. That's the right model for a user
-//! at the keyboard.
-//!
-//! Ingest is retrospective. We're filling in reasoning that conceptually
-//! existed *at the time the git commit was made*. Threading a ghost
-//! state between every imported commit and its children would:
-//!
-//! 1. Warp the commit graph — every thread tip would land on a synthetic
-//!    annotation state rather than the user's actual commit.
-//! 2. Explode the state count (one extra per annotation-bearing commit).
-//! 3. Make a second import pass non-idempotent — re-run would double.
-//!
-//! So ingest mutates state content in place. The state's
-//! [`ChangeId`](objects::object::ChangeId) is stable; only its
-//! `context` field and derived `content_hash` change. Consumers that
-//! compare states by `change_id` (parent chains, refs, oplog) are
-//! unaffected. Consumers that compare by content hash (merkle
-//! verification) see the context-bearing version.
+//! git commit; this module records the notecards as metadata attached to the
+//! immutable Heddle [`State`](objects::object::State) already written for it.
 //!
 //! # Dedup
 //!
@@ -48,10 +25,13 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use objects::{
-    object::{Annotation, AnnotationScope, AnnotationStatus, ContextBlob, ContextTarget},
+    object::{
+        Annotation, AnnotationScope, AnnotationStatus, ContextBlob, ContextTarget, StateAttachment,
+        StateAttachmentBody,
+    },
     store::ObjectStore,
 };
-use repo::Repository;
+use repo::{Repository, StateAttachmentKind};
 use tracing::debug;
 
 use crate::{
@@ -73,7 +53,7 @@ pub struct ReasoningEmitStats {
     /// Point's `git_sha` wasn't in the sha map (commit wasn't imported,
     /// or the map is stale). Point dropped.
     pub skipped_unmapped: usize,
-    /// Point mapped to a ChangeId but no state exists at that id. The
+    /// Point mapped to a StateId but no state exists at that id. The
     /// sha map and the store have drifted — bug-level condition.
     pub skipped_missing_state: usize,
     /// Point's text was empty or over the 140-char budget. Dropped.
@@ -101,11 +81,11 @@ impl<'a> ReasoningEmitter<'a> {
     /// Points are grouped by their `target.file`; each distinct file
     /// becomes one `ContextTarget::File` entry in the state's context
     /// tree. Points with an empty `target.file` become a single
-    /// state-level entry (`ContextTarget::State { change_id }`).
+    /// state-level entry (`ContextTarget::State { state_id }`).
     ///
     /// Returns the new `context_root` hash on success. Returns `Ok(None)`
     /// only if every point in the batch was skipped (malformed, unmapped,
-    /// or a dupe) — the state wasn't mutated.
+    /// or a dupe) — no attachment was written.
     pub fn emit_for_commit(
         &mut self,
         git_sha: &str,
@@ -131,17 +111,17 @@ impl<'a> ReasoningEmitter<'a> {
             return Ok(None);
         }
 
-        // Resolve the git commit to its Heddle change_id. If the ShaMap
+        // Resolve the git commit to its Heddle state_id. If the ShaMap
         // doesn't know this SHA, the commit wasn't imported; count the
         // whole batch as unmapped and bail.
-        let Some(change_id) = self.sha_map.get_commit(git_sha) else {
+        let Some(state_id) = self.sha_map.get_commit(git_sha) else {
             self.stats.skipped_unmapped += clean.len();
             return Ok(None);
         };
 
         let store = self.repo.store();
-        let Some(mut state) = store.get_state(&change_id)? else {
-            // ShaMap promises this change_id exists; if the store
+        let Some(state) = store.get_state(&state_id)? else {
+            // ShaMap promises this state_id exists; if the store
             // disagrees, something (prune? bad map?) has gone wrong.
             self.stats.skipped_missing_state += clean.len();
             return Ok(None);
@@ -159,14 +139,22 @@ impl<'a> ReasoningEmitter<'a> {
                 .push(p);
         }
 
-        let mut context_root = state.context;
+        let prior_attachment = self
+            .repo
+            .latest_state_attachment(&state_id, StateAttachmentKind::Context)?;
+        let mut context_root = prior_attachment
+            .as_ref()
+            .map(|attachment| match &attachment.body {
+                StateAttachmentBody::Context(root) => *root,
+                _ => unreachable!("context lookup returned a different attachment kind"),
+            });
         let mut any_written = false;
 
         for (file, bucket) in by_file {
             let target = if file.is_empty() {
                 // State-scope: only file-scope annotations are allowed on
                 // this target kind (validate_scope enforces it).
-                ContextTarget::state(change_id)
+                ContextTarget::state(state_id)
             } else {
                 match ContextTarget::file(file.clone()) {
                     Ok(t) => t,
@@ -225,7 +213,7 @@ impl<'a> ReasoningEmitter<'a> {
                     this_attribution,
                     Utc::now().timestamp(),
                     None, // source_hash: we don't resolve bytes at ingest time
-                    Some(change_id),
+                    Some(state_id),
                 );
                 blob.annotations.push(annotation);
                 self.stats.annotations_written += 1;
@@ -244,10 +232,16 @@ impl<'a> ReasoningEmitter<'a> {
         }
 
         if any_written {
-            state.context = context_root;
-            store.put_state(&state)?;
+            let context_root = context_root.expect("a context write produces a root");
+            self.repo.put_state_attachment(&StateAttachment {
+                state_id,
+                body: StateAttachmentBody::Context(context_root),
+                attribution: state.attribution.clone(),
+                created_at: Utc::now(),
+                supersedes: prior_attachment.map(|attachment| attachment.id()),
+            })?;
             self.stats.states_updated += 1;
-            Ok(state.context)
+            Ok(Some(context_root))
         } else {
             Ok(None)
         }
@@ -348,14 +342,14 @@ mod tests {
     use crate::reasoning::{ReasoningEvidence, ReasoningTarget};
 
     /// Build a minimal repo, mint one state, record it in the shamap,
-    /// and return (repo, map, git_sha, change_id). Gives every test a
+    /// and return (repo, map, git_sha, state_id). Gives every test a
     /// clean slate without repeating boilerplate.
     fn seed_repo_with_one_state() -> (
         TempDir,
         Repository,
         ShaMap,
         String,
-        objects::object::ChangeId,
+        objects::object::StateId,
     ) {
         use objects::object::{Attribution, Blob, Principal, State, Tree};
 
@@ -369,7 +363,7 @@ mod tests {
             vec![],
             Attribution::human(Principal::new("Test", "test@example.com")),
         );
-        let change_id = state.change_id;
+        let state_id = state.state_id;
         repo.store().put_state(&state).unwrap();
 
         // Flush a blob so the store's blob path is exercised under
@@ -378,9 +372,9 @@ mod tests {
 
         let mut map = ShaMap::new();
         let git_sha = "a".repeat(40);
-        map.insert_commit(&git_sha, change_id).unwrap();
+        map.insert_commit(&git_sha, state_id).unwrap();
 
-        (dir, repo, map, git_sha, change_id)
+        (dir, repo, map, git_sha, state_id)
     }
 
     fn point(
@@ -409,9 +403,23 @@ mod tests {
         }
     }
 
+    fn latest_context_root(
+        repo: &Repository,
+        state_id: objects::object::StateId,
+    ) -> objects::object::ContentHash {
+        let attachment = repo
+            .latest_state_attachment(&state_id, StateAttachmentKind::Context)
+            .unwrap()
+            .expect("context attachment");
+        let StateAttachmentBody::Context(root) = attachment.body else {
+            panic!("expected context attachment")
+        };
+        root
+    }
+
     #[test]
     fn writes_file_scope_annotation_onto_state() {
-        let (_dir, repo, map, sha, change_id) = seed_repo_with_one_state();
+        let (_dir, repo, map, sha, state_id) = seed_repo_with_one_state();
         let mut emit = ReasoningEmitter::new(&repo, &map);
 
         let pts = vec![point(
@@ -432,8 +440,7 @@ mod tests {
 
         // Read back through the repo to confirm the blob landed on the
         // right target.
-        let state = repo.store().get_state(&change_id).unwrap().unwrap();
-        let context_root = state.context.unwrap();
+        let context_root = latest_context_root(&repo, state_id);
         let target = ContextTarget::file("src/auth.rs").unwrap();
         let blob = repo
             .get_context_blob(&context_root, &target)
@@ -449,7 +456,7 @@ mod tests {
 
     #[test]
     fn symbol_scope_preserved_with_resolved_lines() {
-        let (_dir, repo, map, sha, change_id) = seed_repo_with_one_state();
+        let (_dir, repo, map, sha, state_id) = seed_repo_with_one_state();
         let mut emit = ReasoningEmitter::new(&repo, &map);
 
         let pts = vec![point(
@@ -462,10 +469,9 @@ mod tests {
         )];
         emit.emit_for_commit(&sha, &pts).unwrap();
 
-        let state = repo.store().get_state(&change_id).unwrap().unwrap();
         let blob = repo
             .get_context_blob(
-                &state.context.unwrap(),
+                &latest_context_root(&repo, state_id),
                 &ContextTarget::file("src/auth.rs").unwrap(),
             )
             .unwrap()
@@ -484,7 +490,7 @@ mod tests {
 
     #[test]
     fn multiple_files_become_distinct_targets() {
-        let (_dir, repo, map, sha, change_id) = seed_repo_with_one_state();
+        let (_dir, repo, map, sha, state_id) = seed_repo_with_one_state();
         let mut emit = ReasoningEmitter::new(&repo, &map);
 
         let pts = vec![
@@ -507,8 +513,7 @@ mod tests {
         ];
         emit.emit_for_commit(&sha, &pts).unwrap();
 
-        let state = repo.store().get_state(&change_id).unwrap().unwrap();
-        let root = state.context.unwrap();
+        let root = latest_context_root(&repo, state_id);
         assert!(
             repo.get_context_blob(&root, &ContextTarget::file("src/a.rs").unwrap())
                 .unwrap()
@@ -526,7 +531,7 @@ mod tests {
 
     #[test]
     fn empty_file_path_becomes_state_scope_target() {
-        let (_dir, repo, map, sha, change_id) = seed_repo_with_one_state();
+        let (_dir, repo, map, sha, state_id) = seed_repo_with_one_state();
         let mut emit = ReasoningEmitter::new(&repo, &map);
 
         let pts = vec![point(
@@ -539,10 +544,9 @@ mod tests {
         )];
         emit.emit_for_commit(&sha, &pts).unwrap();
 
-        let state = repo.store().get_state(&change_id).unwrap().unwrap();
-        let target = ContextTarget::state(change_id);
+        let target = ContextTarget::state(state_id);
         assert!(
-            repo.get_context_blob(&state.context.unwrap(), &target)
+            repo.get_context_blob(&latest_context_root(&repo, state_id), &target)
                 .unwrap()
                 .is_some()
         );
@@ -550,7 +554,7 @@ mod tests {
 
     #[test]
     fn state_scope_rejects_symbol_scope_points() {
-        let (_dir, repo, map, sha, _change_id) = seed_repo_with_one_state();
+        let (_dir, repo, map, sha, _state_id) = seed_repo_with_one_state();
         let mut emit = ReasoningEmitter::new(&repo, &map);
 
         // file="" bucket → state target; symbol would violate the
@@ -572,7 +576,7 @@ mod tests {
 
     #[test]
     fn unmapped_git_sha_is_counted_not_errored() {
-        let (_dir, repo, map, _sha, _change_id) = seed_repo_with_one_state();
+        let (_dir, repo, map, _sha, _state_id) = seed_repo_with_one_state();
         let mut emit = ReasoningEmitter::new(&repo, &map);
         let pts = vec![point(
             AnnotationKind::Invariant,
@@ -590,7 +594,7 @@ mod tests {
 
     #[test]
     fn dedups_identical_point_on_rerun() {
-        let (_dir, repo, map, sha, _change_id) = seed_repo_with_one_state();
+        let (_dir, repo, map, sha, _state_id) = seed_repo_with_one_state();
         let mut emit = ReasoningEmitter::new(&repo, &map);
 
         let pts = vec![point(
@@ -614,7 +618,7 @@ mod tests {
 
     #[test]
     fn malformed_points_counted_and_skipped() {
-        let (_dir, repo, map, sha, _change_id) = seed_repo_with_one_state();
+        let (_dir, repo, map, sha, _state_id) = seed_repo_with_one_state();
         let mut emit = ReasoningEmitter::new(&repo, &map);
 
         // Oversize text → not well_formed → dropped before write.
@@ -629,7 +633,7 @@ mod tests {
 
     #[test]
     fn empty_batch_is_a_noop() {
-        let (_dir, repo, map, sha, _change_id) = seed_repo_with_one_state();
+        let (_dir, repo, map, sha, _state_id) = seed_repo_with_one_state();
         let mut emit = ReasoningEmitter::new(&repo, &map);
         let root = emit.emit_for_commit(&sha, &[]).unwrap();
         assert!(root.is_none());
@@ -638,8 +642,9 @@ mod tests {
 
     #[test]
     fn second_batch_appends_without_overwriting() {
-        let (_dir, repo, map, sha, change_id) = seed_repo_with_one_state();
+        let (_dir, repo, map, sha, state_id) = seed_repo_with_one_state();
         let mut emit = ReasoningEmitter::new(&repo, &map);
+        let state_before = repo.store().get_state(&state_id).unwrap().unwrap();
 
         emit.emit_for_commit(
             &sha,
@@ -666,19 +671,35 @@ mod tests {
         )
         .unwrap();
 
-        let state = repo.store().get_state(&change_id).unwrap().unwrap();
         let blob = repo
             .get_context_blob(
-                &state.context.unwrap(),
+                &latest_context_root(&repo, state_id),
                 &ContextTarget::file("src/a.rs").unwrap(),
             )
             .unwrap()
             .unwrap();
         assert_eq!(blob.annotations.len(), 2);
         assert_eq!(emit.stats().annotations_written, 2);
-        // States updated counts distinct state mutations — two batches
-        // to the same state counts as two.
         assert_eq!(emit.stats().states_updated, 2);
+
+        let attachments = repo.list_state_attachments(&state_id).unwrap();
+        assert_eq!(attachments.len(), 2);
+        let latest = repo
+            .latest_state_attachment(&state_id, StateAttachmentKind::Context)
+            .unwrap()
+            .unwrap();
+        let prior_id = latest
+            .supersedes
+            .expect("second attachment supersedes first");
+        assert!(
+            repo.get_state_attachment(&state_id, &prior_id)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            repo.store().get_state(&state_id).unwrap().unwrap(),
+            state_before
+        );
     }
 
     #[test]
@@ -704,7 +725,7 @@ mod tests {
 
     #[test]
     fn worktree_prefixed_file_lands_on_repo_relative_target() {
-        let (_dir, repo, map, sha, change_id) = seed_repo_with_one_state();
+        let (_dir, repo, map, sha, state_id) = seed_repo_with_one_state();
         let mut emit = ReasoningEmitter::new(&repo, &map);
 
         let pts = vec![point(
@@ -717,10 +738,9 @@ mod tests {
         )];
         emit.emit_for_commit(&sha, &pts).unwrap();
 
-        let state = repo.store().get_state(&change_id).unwrap().unwrap();
         let target = ContextTarget::file("crates/cli/src/cli/commands/workspace.rs").unwrap();
         let blob = repo
-            .get_context_blob(&state.context.unwrap(), &target)
+            .get_context_blob(&latest_context_root(&repo, state_id), &target)
             .unwrap()
             .expect("annotation should land under the repo-native path");
         assert_eq!(blob.annotations.len(), 1);

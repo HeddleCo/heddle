@@ -1,45 +1,84 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Top-level CLI commands.
 
-use clap::{Subcommand, ValueEnum};
+use clap::{Args, Subcommand};
 
+#[cfg(feature = "client")]
+use super::AuthCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    AgentCommands, CheckpointArgs, CompletionSubject, ContextCommands, DiscussCommands,
-    HookCommands, IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands,
-    ReviewCommands, ShellCommands, StashCommands, ThreadCommands, TransactionCommands,
-    VisibilityCommands,
+    AgentCommands, CompletionSubject, ContextCommands, DiscussCommands, HookCommands,
+    IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
+    ShellCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
-        ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
-        CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs, LandArgs,
-        LogArgs, MergeArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs,
-        RunArgs, SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs,
-        SessionStartArgs, SnapshotArgs, SwitchArgs, SyncArgs, ThreadStartArgs, TimelineArgs,
-        TryArgs, UndoArgs, WatchArgs,
+        AdoptArgs, CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs,
+        LandArgs, LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs,
+        RunArgs, SnapshotArgs, SyncArgs, ThreadStartArgs, TimelineArgs, TryArgs, UndoArgs,
+        WatchArgs,
     },
 };
-#[cfg(feature = "client")]
-use super::{AuthCommands, ProveArgs, SpoolCommands, SupportCommands};
 #[cfg(feature = "git-overlay")]
 use super::{ExportCommands, ImportCommands};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum FsckRepairTarget {
-    /// Repair Git projection metadata only.
-    Git,
+#[derive(Clone, Debug, Args)]
+pub struct FsckArgs {
+    /// Full check (includes content verification).
+    #[arg(long)]
+    pub full: bool,
+
+    /// Run slower graph and signature integrity checks.
+    #[arg(long)]
+    pub thorough: bool,
+
+    /// Include Git projection, mapping, notes, and checkout checks.
+    #[arg(long)]
+    pub git: bool,
+
+    #[command(subcommand)]
+    pub command: Option<FsckCommands>,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum FsckCommands {
+    /// Repair an integrity surface, then verify it.
+    Repair {
+        #[command(subcommand)]
+        target: FsckRepairCommands,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum FsckRepairCommands {
+    /// Reconcile Git projection metadata or one projected ref.
+    Git(FsckRepairGitArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct FsckRepairGitArgs {
+    /// Git ref to reconcile. Required for native repositories.
+    #[arg(long = "ref", value_name = "BRANCH")]
+    pub ref_name: Option<String>,
+
+    /// Assert the intended authority direction.
+    #[arg(long, value_parser = ["git", "heddle"])]
+    pub prefer: Option<String>,
+
+    /// Show the authority-valid repair without changing refs.
+    #[arg(long)]
+    pub preview: bool,
 }
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize a new Heddle repository.
+    /// Initialize Heddle in a directory or existing Git checkout.
     Init(InitArgs),
 
-    /// Convert Git history into Heddle-native storage.
+    /// Adopt Git history into Heddle-native source authority.
     ///
-    /// Git-overlay repos normally keep Git commits in `.git` and Heddle
-    /// metadata in `.heddle`. Use `adopt` only when you explicitly want a
-    /// Git-backed checkout converted into native Heddle storage.
+    /// Git Overlay is the normal existing-Git mode: Git keeps source objects,
+    /// refs, index, and worktree state while Heddle stores metadata in
+    /// `.heddle`. `adopt` imports history and moves source authority to Heddle.
     Adopt(AdoptArgs),
 
     /// Curated, progressive-disclosure help.
@@ -109,10 +148,6 @@ Examples:
     /// into CI to stop docs from going stale.
     Doctor(DoctorArgs),
 
-    /// Show the low-friction Git-overlay workflow.
-    #[cfg(feature = "git-overlay")]
-    GitOverlay,
-
     /// Print the JSON Schema for a `--output json`-emitting verb.
     ///
     /// Contract-table introspection over CLI output shapes —
@@ -125,7 +160,7 @@ Examples:
     ///
     /// With no `<verb>`, prints the registered schema verbs. `<verb>`
     /// is the joined subcommand path — e.g. `status`, `log`,
-    /// `fsck --repair git`, `marker list`.
+    /// `fsck repair git`, `marker list`.
     #[command(visible_alias = "schema")]
     Schemas {
         /// The verb whose schema to emit. Run `heddle schemas --help`
@@ -178,13 +213,12 @@ Examples:
     /// Abort the active operation without remembering the specific subcommand.
     Abort,
 
-    /// Land a ready thread and optionally publish it.
+    /// Integrate a ready thread into its local target.
     ///
     /// `land` is the local integration verb: capture outstanding work if needed,
-    /// refresh against the target when safe, land the thread, write the
-    /// Git checkpoint, and optionally push. It fails closed when
-    /// conflicts or other blockers exist. Pair it with `ready` when you
-    /// want the verdict and next action before landing anything.
+    /// refresh against the target when safe, and land the thread. It fails
+    /// closed when conflicts or other blockers exist. Pair it with `ready`
+    /// when you want the verdict and next action before landing anything.
     Land(LandArgs),
 
     /// Prepare this thread for review or merge.
@@ -199,11 +233,8 @@ Examples:
     /// Capture a recoverable Heddle step for undo, provenance, and review.
     Capture(SnapshotArgs),
 
-    /// Save current work as one Heddle change, plus a Git checkpoint in Git-overlay repos.
+    /// Commit the current captured state to the authoritative Git checkout.
     Commit(CommitArgs),
-
-    /// Commit the current captured work to the Git-overlay branch/index.
-    Checkpoint(CheckpointArgs),
 
     /// Show state history.
     ///
@@ -227,7 +258,8 @@ Examples:
 
     /// Show state details.
     Show {
-        /// State by change ID or hash prefix. Defaults to HEAD when omitted.
+        /// State by physical state ID, logical change ID, or unambiguous prefix.
+        /// Defaults to HEAD.
         state: Option<String>,
     },
 
@@ -239,22 +271,8 @@ Examples:
     /// the reconstruct-from-`heddle log` boilerplate.
     Retro(RetroArgs),
 
-    /// Remove untracked files from worktree.
-    Clean {
-        /// Actually remove files (required for safety).
-        #[arg(short, long)]
-        force: bool,
-
-        /// Only show what would be removed.
-        #[arg(long)]
-        dry_run: bool,
-    },
-
     /// Show what changed in the worktree, a thread, or two states.
     Diff(DiffArgs),
-
-    /// Git-compatible alias for `heddle thread switch`.
-    Switch(SwitchArgs),
 
     /// Open or resolve discussions anchored to symbols.
     ///
@@ -277,18 +295,6 @@ Examples:
     /// actor, time window, signal kind, symbol, thread, verbs. Returns
     /// structured results consumable by agents.
     Query(QueryArgs),
-
-    /// Transactional multi-step edits. Begin, commit, abort,
-    /// status. Operations within don't produce intermediate states.
-    ///
-    /// Hidden in alpha: buffered-op replay at commit and rewind-on-abort
-    /// are still follow-on work; the verb stays available for testing
-    /// but is not advertised in `heddle help advanced`.
-    #[command(hide = true)]
-    Transaction {
-        #[command(subcommand)]
-        command: TransactionCommands,
-    },
 
     /// Review a state — render the payload, sign, see signal health.
     ///
@@ -366,42 +372,11 @@ Examples:
         subject: CompletionSubject,
     },
 
-    /// Advanced/manual merge primitive. Prefer `heddle land` for managed threads.
-    Merge(MergeArgs),
-
     /// Resolve merge conflicts.
     Resolve(ResolveArgs),
 
-    /// Verify repository integrity.
-    Fsck {
-        /// Full check (includes content verification).
-        #[arg(long)]
-        full: bool,
-
-        /// Run slower graph and signature integrity checks.
-        #[arg(long)]
-        thorough: bool,
-
-        /// Include Git projection, mapping, notes, and checkout checks.
-        #[arg(long)]
-        git: bool,
-
-        /// Repair a focused integrity surface before checking it.
-        #[arg(long, value_enum, value_name = "TARGET")]
-        repair: Option<FsckRepairTarget>,
-
-        /// Git ref to reconcile when repairing Git projection state.
-        #[arg(long = "ref", value_name = "BRANCH", requires = "repair")]
-        ref_name: Option<String>,
-
-        /// Which local side should be authoritative for Git ref repair.
-        #[arg(long, value_parser = ["git", "heddle"], requires = "repair")]
-        prefer: Option<String>,
-
-        /// Show the planned Git repair without changing refs.
-        #[arg(long, requires = "repair")]
-        preview: bool,
-    },
+    /// Verify repository integrity or explicitly repair one surface.
+    Fsck(FsckArgs),
 
     /// Inspect and repair the operation log.
     ///
@@ -427,33 +402,10 @@ Examples:
         command: ExportCommands,
     },
 
-    /// Download objects and refs from remote.
-    ///
-    /// In Git-overlay mode this fetches branches and refs/notes/heddle, not Git tags.
-    Fetch {
-        /// Remote name or URL.
-        remote: Option<String>,
-
-        /// Fetch from all remotes.
-        #[arg(long)]
-        all: bool,
-
-        /// Allow cleartext (non-TLS) connections to non-loopback hosts.
-        #[arg(long)]
-        insecure: bool,
-    },
-
-    /// Push to a remote repository.
-    ///
-    /// In Git-overlay mode, push writes plain Git refs the remote's users can
-    /// inspect with `git ls-remote`: each Heddle thread's state goes to
-    /// `refs/heads/<thread>`, Heddle metadata (state identity carried as Git
-    /// notes) goes to `refs/notes/heddle`, and with `--all-threads` Git tags go
-    /// to `refs/tags/<tag>`. JSON output lists the refs actually written this
-    /// invocation in `refs_written`.
+    /// Push the source-authoritative history to a remote.
     Push(PushArgs),
 
-    /// Pull from a remote repository.
+    /// Pull source-authoritative history from a remote.
     Pull(PullArgs),
 
     /// Manage remote repositories.
@@ -487,56 +439,6 @@ Examples:
         #[command(subcommand)]
         command: IntegrationCommands,
     },
-
-    /// Manage stashed changes.
-    Stash {
-        #[command(subcommand)]
-        command: StashCommands,
-    },
-
-    /// Customer-issued temporary admin grants for Heddle staff.
-    /// Time-bounded and audit-trailed; staff need an active grant to
-    /// act on customer resources beyond the operator surface.
-    #[cfg(feature = "client")]
-    Support {
-        #[command(subcommand)]
-        command: SupportCommands,
-    },
-
-    /// Manage hosted spool child edges + inspect facet history.
-    ///
-    /// A spool can mount other spools as children to form a monorepo.
-    /// `heddle spool attach/detach/children` manage those edges;
-    /// `governance`/`membership` walk a spool's facet history. Clone the
-    /// whole assembled monorepo with `heddle clone <spool> --recursive`.
-    #[cfg(feature = "client")]
-    #[command(after_help = "\
-Examples:
-  heddle spool attach acme/root acme/lib --as libs   # mount acme/lib under acme/root at ./libs
-  heddle spool children acme/root                    # list mounted children + anchored states
-  heddle spool detach acme/root libs                 # unmount the child at ./libs
-  heddle spool governance acme/root --limit 10       # governance history, newest first
-")]
-    Spool {
-        #[command(subcommand)]
-        command: SpoolCommands,
-    },
-
-    /// Prove control of an external-host repo (git-native identity proof).
-    ///
-    /// `heddle prove <host> <repo>` starts a proof: the server returns a
-    /// marker line to publish at a well-known path in your repo. Publish it
-    /// (commit + push — the CLI never pushes for you), then run
-    /// `heddle prove submit <challenge_id>` to verify. `heddle prove list`
-    /// shows your proofs.
-    #[cfg(feature = "client")]
-    #[command(after_help = "\
-Examples:
-  heddle prove github.com owner/repo        # start a proof; prints the marker line to publish
-  heddle prove submit <challenge_id>        # verify after you push the .well-known/heddle file
-  heddle prove list                         # list your proofs
-")]
-    Prove(ProveArgs),
 
     /// Semantic analysis queries (call-graph hot-spots, churn,
     /// signature-stability surfaces).
@@ -578,94 +480,13 @@ Examples:
         command: MaintenanceCommands,
     },
 
-    /// Apply specific commits.
-    CherryPick {
-        /// Commit to cherry-pick.
-        commit: String,
-
-        /// Commit message for the cherry-pick.
-        #[arg(short = 'm', long)]
-        message: Option<String>,
-
-        /// Apply changes to worktree without committing.
-        #[arg(long)]
-        no_commit: bool,
-
-        /// Discard uncommitted local changes instead of refusing.
-        #[arg(long)]
-        force: bool,
-    },
-
     /// Clone from remote.
     Clone(CloneArgs),
-
-    /// Rebase current thread onto another.
-    Rebase {
-        /// Thread to rebase onto.
-        thread: Option<String>,
-
-        /// Abort an in-progress rebase.
-        #[arg(long)]
-        abort: bool,
-
-        /// Continue an in-progress rebase after resolving conflicts.
-        #[arg(long = "continue", alias = "cont")]
-        cont: bool,
-
-        /// Discard uncommitted local changes instead of refusing.
-        #[arg(long)]
-        force: bool,
-    },
 
     /// Manage repository hooks.
     Hook {
         #[command(subcommand)]
         command: HookCommands,
-    },
-
-    /// Advanced debugging/provenance commands for Heddle actors attached to threads.
-    Actor {
-        #[command(subcommand)]
-        command: ActorCommands,
-    },
-
-    /// Advanced debugging/provenance commands for Heddle execution sessions.
-    Session {
-        #[command(subcommand)]
-        command: SessionCommands,
-    },
-
-    /// Advanced debugging/provenance commands for the hosted local-agent presence relay.
-    ///
-    /// `heddle presence publish` runs a foreground publisher that streams
-    /// agent_start / agent_heartbeat / agent_done events to the configured
-    /// hosted server over a bearer-authenticated WebSocket.
-    #[cfg(feature = "client")]
-    Presence {
-        #[command(subcommand)]
-        command: PresenceCommands,
-    },
-}
-
-/// Presence subcommands.
-#[cfg(feature = "client")]
-#[derive(Clone, Debug, clap::Subcommand)]
-pub enum PresenceCommands {
-    /// Publish presence events for the given agent session.
-    ///
-    /// Intended to be launched detached by an orchestrator (or called
-    /// manually for debugging). Reads agent metadata from
-    /// `.heddle/agents/<session>.toml` and hosted upstream from
-    /// `.heddle/config.toml` `[hosted]`. Exits 0 (with a log line) when no
-    /// upstream is configured.
-    Publish {
-        /// Agent session ID (matches `.heddle/agents/<session>.toml`).
-        #[arg(long)]
-        session: String,
-
-        /// Heartbeat interval in seconds (default 15).
-        #[arg(long, default_value = "15")]
-        interval_secs: u64,
     },
 }
 
@@ -675,8 +496,8 @@ pub enum MaintenanceCommands {
     /// Inspect repository performance sidecars and repo shape.
     Inspect,
 
-    /// Rebuild repository performance sidecars without changing repository meaning.
-    Run,
+    /// Refresh repository performance sidecars without changing repository meaning.
+    Refresh,
 
     /// Garbage collect unreachable objects.
     Gc {
@@ -691,24 +512,6 @@ pub enum MaintenanceCommands {
         /// Show what would be removed without removing.
         #[arg(long)]
         dry_run: bool,
-    },
-
-    /// Inspect and debug the worktree index.
-    Index {
-        /// Dump the index contents in human-readable format.
-        #[arg(long)]
-        dump: bool,
-    },
-
-    /// Inspect the local change monitor state.
-    Monitor {
-        /// Print changed paths as well as backend/status summary.
-        #[arg(long)]
-        paths: bool,
-
-        /// Internal helper mode: serve monitor queries for this repo.
-        #[arg(long, hide = true)]
-        serve: bool,
     },
 }
 
@@ -730,50 +533,4 @@ pub enum DaemonCommands {
     /// any leftover registry entries with `fusermount -u` as a
     /// safety net before returning.
     Stop,
-}
-
-/// Actor subcommands.
-#[derive(Clone, Debug, clap::Subcommand)]
-pub enum ActorCommands {
-    /// Register a new actor lane (creates a thread + registry entry).
-    /// Does not create a filesystem-isolated checkout — for that use
-    /// `heddle start <name> --path <dir>`.
-    Spawn(ActorSpawnArgs),
-
-    /// List actors known to this repository.
-    List(ActorListArgs),
-
-    /// Show the current or selected actor.
-    Show(ActorShowArgs),
-
-    /// Explain why Heddle attached the current or selected actor.
-    Explain(ActorExplainArgs),
-
-    /// Mark the current or selected actor complete.
-    Done(ActorDoneArgs),
-}
-
-// `AgentCommands` lives in `commands_agent.rs`. Codex's foundation
-// commit added a parallel definition here; deleted during the rebase
-// onto main (which had already introduced the file). The reservation
-// variants Codex contributed are now folded into the canonical enum in
-// `commands_agent.rs`.
-
-/// Session subcommands.
-#[derive(Clone, Debug, clap::Subcommand)]
-pub enum SessionCommands {
-    /// Start a new session.
-    Start(SessionStartArgs),
-
-    /// Create a new segment (provider/model change).
-    Segment(SessionSegmentArgs),
-
-    /// End the current session.
-    End(SessionEndArgs),
-
-    /// Show session details.
-    Show(SessionShowArgs),
-
-    /// List all sessions.
-    List(SessionListArgs),
 }

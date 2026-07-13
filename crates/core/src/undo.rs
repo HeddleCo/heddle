@@ -20,7 +20,7 @@ use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use objects::{
     HeddleError, RecoveryDetails,
-    object::{ChangeId, ContentHash},
+    object::{ContentHash, StateId},
 };
 use oplog::{OpBatch, RedactionUndoClass};
 use repo::Repository;
@@ -407,7 +407,7 @@ pub struct PurgeOpRef {
 pub struct RedactOpRef {
     pub op_id: u64,
     pub blob: ContentHash,
-    pub state: ChangeId,
+    pub state: StateId,
     pub path: String,
 }
 
@@ -536,7 +536,7 @@ pub fn check_thread_worktree_undo_safe(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequiredStateRef {
     pub op_id: u64,
-    pub state: ChangeId,
+    pub state: StateId,
 }
 
 /// Collect states required for undo reachability (pure scan of batches).
@@ -663,7 +663,7 @@ impl std::error::Error for UndoApplyPreflightError {}
 mod tests {
     use std::sync::Arc;
 
-    use objects::object::{ChangeId, ContentHash};
+    use objects::object::{ContentHash, StateId};
     use oplog::OpRecord;
     use tempfile::TempDir;
 
@@ -860,7 +860,7 @@ mod tests {
     fn redaction_undo_preflight_precedence() {
         let blob = ContentHash::from_bytes([1u8; 32]);
         let redaction_id = ContentHash::from_bytes([2u8; 32]);
-        let state = ChangeId::from_bytes([3u8; 16]);
+        let state = StateId::from_bytes([3u8; 32]);
         let facts = RedactionUndoBatchFacts {
             purges: vec![PurgeOpRef {
                 op_id: 1,
@@ -908,7 +908,7 @@ mod tests {
         assert!(check_states_reachable(UndoHistoryAction::Undo, &[]).is_ok());
         let missing = vec![RequiredStateRef {
             op_id: 3,
-            state: ChangeId::from_bytes([4u8; 16]),
+            state: StateId::from_bytes([4u8; 32]),
         }];
         assert_eq!(
             check_states_reachable(UndoHistoryAction::Undo, &missing)

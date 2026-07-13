@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Bidirectional sidecar mapping `git_sha ↔ heddle ChangeId` (and companions
+//! Bidirectional sidecar mapping `git_sha ↔ heddle StateId` (and companions
 //! for tree/blob hashes).
 //!
 //! # Why a sidecar?
@@ -27,7 +27,7 @@
 //! ```
 //!
 //! `kind` is `0 = commit`, `1 = tree`, `2 = blob` (matches the on-the-
-//! wire [`MapKind`] enum). `heddle_repr` is `ChangeId::to_string_full()`
+//! wire [`MapKind`] enum). `heddle_repr` is `StateId::to_string_full()`
 //! for commits and `ContentHash::to_hex()` for trees/blobs.
 //!
 //! # Why SQLite (and not the prior JSONL + HashMap design)?
@@ -56,7 +56,7 @@
 
 use std::path::Path;
 
-use objects::object::{ChangeId, ContentHash};
+use objects::object::{ContentHash, StateId};
 use rusqlite::{Connection, OptionalExtension, params};
 use tracing::{debug, warn};
 
@@ -276,7 +276,7 @@ impl ShaMap {
     /// Insert a commit mapping. Idempotent on identical re-insert,
     /// returns [`ShaMapError::Conflict`] if a different `heddle` is
     /// already mapped to `git_sha`.
-    pub fn insert_commit(&mut self, git_sha: &str, heddle: ChangeId) -> Result<(), ShaMapError> {
+    pub fn insert_commit(&mut self, git_sha: &str, heddle: StateId) -> Result<(), ShaMapError> {
         self.insert_raw(MapKind::Commit, git_sha, heddle.to_string_full())
     }
 
@@ -380,10 +380,10 @@ impl ShaMap {
         }
     }
 
-    /// Look up the Heddle `ChangeId` for a git commit SHA.
-    pub fn get_commit(&self, git_sha: &str) -> Option<ChangeId> {
+    /// Look up the Heddle `StateId` for a git commit SHA.
+    pub fn get_commit(&self, git_sha: &str) -> Option<StateId> {
         let heddle = self.get_for_kind(git_sha, MapKind::Commit)?;
-        ChangeId::parse(&heddle).ok()
+        StateId::parse(&heddle).ok()
     }
 
     /// Look up the Heddle `ContentHash` for a git tree SHA.
@@ -540,6 +540,11 @@ mod tests {
     use super::*;
     use crate::import_options::LossyImportEntry;
 
+    fn test_state_id() -> StateId {
+        static NEXT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+        StateId::from_bytes([NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); 32])
+    }
+
     fn deterministic_content_hash(tag: &str) -> ContentHash {
         ContentHash::compute(tag.as_bytes())
     }
@@ -566,7 +571,7 @@ mod tests {
     fn in_memory_insert_and_lookup_commit() {
         let mut m = ShaMap::new();
         let sha = "ca1af22000000000000000000000000000000000";
-        let cid = ChangeId::generate();
+        let cid = test_state_id();
         m.insert_commit(sha, cid).unwrap();
         assert_eq!(m.get_commit(sha), Some(cid));
         assert_eq!(m.len(), 1);
@@ -591,7 +596,7 @@ mod tests {
     fn idempotent_reinsert_is_noop() {
         let mut m = ShaMap::new();
         let sha = "ca1af22000000000000000000000000000000000";
-        let cid = ChangeId::generate();
+        let cid = test_state_id();
         m.insert_commit(sha, cid).unwrap();
         m.insert_commit(sha, cid).unwrap();
         assert_eq!(m.len(), 1);
@@ -601,8 +606,8 @@ mod tests {
     fn conflicting_insert_errors() {
         let mut m = ShaMap::new();
         let sha = "ca1af22000000000000000000000000000000000";
-        let cid1 = ChangeId::generate();
-        let cid2 = ChangeId::generate();
+        let cid1 = test_state_id();
+        let cid2 = test_state_id();
         m.insert_commit(sha, cid1).unwrap();
         let err = m.insert_commit(sha, cid2).unwrap_err();
         assert!(matches!(err, ShaMapError::Conflict { .. }));
@@ -617,7 +622,7 @@ mod tests {
         let sha2 = "deadbeef000000000000000000000000c0ffee42";
         let sha3 = "f000ba1100000000000000000000000000001234";
 
-        let cid = ChangeId::generate();
+        let cid = test_state_id();
         let tree_h = deterministic_content_hash("tree-1");
         let blob_h = deterministic_content_hash("blob-1");
 
@@ -702,7 +707,7 @@ mod tests {
         let path = tmp.path().join("sha_map.sqlite");
         let sha1 = "ca1af22000000000000000000000000000000000";
         let sha2 = "deadbeef000000000000000000000000c0ffee42";
-        let cid = ChangeId::generate();
+        let cid = test_state_id();
         let tree_h = deterministic_content_hash("tree-batch");
 
         {
@@ -723,7 +728,7 @@ mod tests {
     fn reverse_lookup_finds_git() {
         let mut m = ShaMap::new();
         let sha = "ca1af22000000000000000000000000000000000";
-        let cid = ChangeId::generate();
+        let cid = test_state_id();
         m.insert_commit(sha, cid).unwrap();
         assert_eq!(
             m.get_git_for_heddle(&cid.to_string_full()).as_deref(),
@@ -740,12 +745,12 @@ mod tests {
         // begin/abort to BEGIN/ROLLBACK correctly.
         let mut m = ShaMap::new();
         let pre_sha = "ca1af22000000000000000000000000000000000";
-        let pre_cid = ChangeId::generate();
+        let pre_cid = test_state_id();
         m.insert_commit(pre_sha, pre_cid).unwrap();
 
         m.begin_append_batch().unwrap();
         let in_batch_sha = "deadbeef000000000000000000000000c0ffee42";
-        let in_batch_cid = ChangeId::generate();
+        let in_batch_cid = test_state_id();
         let in_batch_tree_sha = "f000ba1100000000000000000000000000001234";
         let in_batch_tree = deterministic_content_hash("aborted-tree");
         m.insert_commit(in_batch_sha, in_batch_cid).unwrap();
@@ -786,7 +791,7 @@ mod tests {
         let path = tmp.path().join("sha_map.sqlite");
 
         let pre_sha = "ca1af22000000000000000000000000000000000";
-        let pre_cid = ChangeId::generate();
+        let pre_cid = test_state_id();
         {
             let mut m = ShaMap::open(&path).unwrap();
             m.insert_commit(pre_sha, pre_cid).unwrap();
@@ -797,7 +802,7 @@ mod tests {
             let mut m = ShaMap::open(&path).unwrap();
             m.begin_append_batch().unwrap();
             let doomed_sha = "deadbeef000000000000000000000000c0ffee42";
-            let doomed_cid = ChangeId::generate();
+            let doomed_cid = test_state_id();
             m.insert_commit(doomed_sha, doomed_cid).unwrap();
             m.abort_append_batch();
         }
@@ -816,7 +821,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("sha_map.sqlite");
         let sha = "ca1af22000000000000000000000000000000000";
-        let cid = ChangeId::generate();
+        let cid = test_state_id();
 
         let mut m = ShaMap::open(&path).unwrap();
         m.begin_append_batch().unwrap();
@@ -839,9 +844,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("sha_map.sqlite");
         let outer_sha = "ca1af22000000000000000000000000000000000";
-        let outer_cid = ChangeId::generate();
+        let outer_cid = test_state_id();
         let inner_sha = "deadbeef000000000000000000000000c0ffee42";
-        let inner_cid = ChangeId::generate();
+        let inner_cid = test_state_id();
 
         let mut m = ShaMap::open(&path).unwrap();
         m.begin_append_batch().unwrap();
@@ -875,7 +880,7 @@ mod tests {
         for i in 0..10_000u32 {
             // Synthesize a unique 40-char hex git sha for each i.
             let sha = format!("{:040x}", i);
-            let cid = ChangeId::generate();
+            let cid = test_state_id();
             m.insert_commit(&sha, cid).unwrap();
         }
         m.flush_append_batch().unwrap();

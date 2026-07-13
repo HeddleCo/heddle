@@ -26,17 +26,17 @@ pub fn format_unix_secs_display(secs: u64) -> String {
 }
 
 /// Decode change-id wire bytes to a full hex string; empty/invalid → empty.
-pub fn change_id_bytes_to_string(bytes: &[u8]) -> String {
+pub fn state_id_bytes_to_string(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }
-    objects::object::ChangeId::try_from_slice(bytes)
+    objects::object::StateId::try_from_slice(bytes)
         .map(|id| id.to_string_full())
         .unwrap_or_default()
 }
 
 /// First 12 characters of a change-id / state string for human display.
-pub fn short_change_id(id: &str) -> &str {
+pub fn short_state_id(id: &str) -> &str {
     &id[..id.len().min(12)]
 }
 
@@ -48,7 +48,7 @@ pub fn short_change_id(id: &str) -> &str {
 pub fn approval_recorded_message(source: &str, target: &str, source_state: &str) -> String {
     format!(
         "Approved {source} -> {target} at {state}",
-        state = short_change_id(source_state),
+        state = short_state_id(source_state),
     )
 }
 
@@ -114,7 +114,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn timestamp_and_change_id_helpers() {
+    fn timestamp_and_state_id_helpers() {
         assert_eq!(timestamp_secs_u64(None), 0);
         assert_eq!(timestamp_secs_u64(Some(-3)), 0);
         assert_eq!(timestamp_secs_u64(Some(42)), 42);
@@ -123,10 +123,10 @@ mod tests {
         let labeled = format_unix_secs_label(1_700_000_000);
         assert!(!labeled.is_empty());
 
-        assert_eq!(change_id_bytes_to_string(&[]), "");
-        assert_eq!(change_id_bytes_to_string(&[0xff, 0x00]), "");
-        assert_eq!(short_change_id("abcdefghijklmnop"), "abcdefghijkl");
-        assert_eq!(short_change_id("abc"), "abc");
+        assert_eq!(state_id_bytes_to_string(&[]), "");
+        assert_eq!(state_id_bytes_to_string(&[0xff, 0x00]), "");
+        assert_eq!(short_state_id("abcdefghijklmnop"), "abcdefghijkl");
+        assert_eq!(short_state_id("abc"), "abc");
     }
 
     #[test]

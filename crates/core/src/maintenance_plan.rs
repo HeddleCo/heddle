@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Pure maintenance inspect/run **fact** types + one human renderer each.
+//! Pure maintenance inspect/refresh **fact** types + one human renderer each.
 //!
 //! Not twenty public `format!` sentence factories. Callers pass structured
 //! fields; CLI prints `lines()`. Repo I/O stays outside this module.
@@ -67,10 +67,7 @@ impl MaintenanceInspectView {
             ),
             format!(
                 "Refs: {} threads, {} markers, {} remotes, {} remote threads",
-                self.refs_threads,
-                self.refs_markers,
-                self.refs_remotes,
-                self.refs_remote_threads
+                self.refs_threads, self.refs_markers, self.refs_remotes, self.refs_remote_threads
             ),
             format!(
                 "Ref summary index: {} (valid: {}, threads: {}, markers: {}, remotes: {}, remote threads: {})",
@@ -92,17 +89,15 @@ impl MaintenanceInspectView {
             format!("Partial fetch: {} missing blobs", self.missing_blob_count),
             format!(
                 "Pull planner cache: {} (manifests: {}, planner entries: {})",
-                self.pull_planner_status,
-                self.pull_planner_manifests,
-                self.pull_planner_entries
+                self.pull_planner_status, self.pull_planner_manifests, self.pull_planner_entries
             ),
         ]
     }
 }
 
-/// Structured facts for `heddle maintenance run` human output.
+/// Structured facts for `heddle maintenance refresh` human output.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MaintenanceRunView {
+pub struct MaintenanceRefreshView {
     pub rebuilt_commit_graph: bool,
     pub rebuilt_ref_summary_index: bool,
     pub rebuilt_worktree_index: bool,
@@ -126,11 +121,14 @@ pub struct MaintenanceRunView {
     pub pull_planner_entries_now: usize,
 }
 
-impl MaintenanceRunView {
-    /// Human lines for run (stable order).
+impl MaintenanceRefreshView {
+    /// Human lines for refresh (stable order).
     pub fn lines(&self) -> Vec<String> {
         let mut lines = vec![
-            format!("Rebuilt commit graph: {}", yes_no(self.rebuilt_commit_graph)),
+            format!(
+                "Rebuilt commit graph: {}",
+                yes_no(self.rebuilt_commit_graph)
+            ),
             format!(
                 "Rebuilt ref summary index: {}",
                 yes_no(self.rebuilt_ref_summary_index)
@@ -250,8 +248,8 @@ mod tests {
     }
 
     #[test]
-    fn run_view_lines_include_recover_detail() {
-        let v = MaintenanceRunView {
+    fn refresh_view_lines_include_recover_detail() {
+        let v = MaintenanceRefreshView {
             rebuilt_commit_graph: true,
             rebuilt_ref_summary_index: false,
             rebuilt_worktree_index: true,

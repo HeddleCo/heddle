@@ -3,10 +3,10 @@
 
 use objects::{
     error::{HeddleError, Result},
-    object::{ChangeId, ThreadName},
+    object::{StateId, ThreadName},
 };
 
-use super::{Head, RefManager, parse_change_id_text};
+use super::{Head, RefManager, parse_state_id_text};
 
 pub(super) struct HeadState {
     pub head: Head,
@@ -40,17 +40,17 @@ impl RefManager {
         })
     }
 
-    pub(super) fn read_change_id_at(
+    pub(super) fn read_state_id_at(
         &self,
         path: &std::path::Path,
         kind: &str,
         name: &str,
-    ) -> Result<Option<ChangeId>> {
+    ) -> Result<Option<StateId>> {
         let contents = match self.read_optional_string(path)? {
             Some(c) => c,
             None => return Ok(None),
         };
-        match parse_change_id_text(&contents) {
+        match parse_state_id_text(&contents) {
             Ok(id) => Ok(Some(id)),
             Err(_) => Err(HeddleError::InvalidObject(format!(
                 "invalid {} {}: {}",

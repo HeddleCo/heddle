@@ -38,8 +38,9 @@ export HEDDLE_NOTARY_PROFILE="HeddleNotary"
 ## 1. Build universal Rust artifacts
 
 The Xcode extension links `target/release/libmount.a`; the macOS installer also
-ships the `heddle` CLI. Build both as universal artifacts so the app, extension,
-and command line stay version-locked.
+ships the `heddle` CLI and its sibling filesystem-monitor worker. Build all
+three as universal artifacts so the app, extension, command line, and worker
+stay version-locked.
 
 ```bash
 cd /path/to/heddle
@@ -53,10 +54,12 @@ MACOSX_DEPLOYMENT_TARGET=26.0 CFLAGS="-mmacosx-version-min=26.0" \
   cargo build --release -p heddle-mount --features fskit \
   --target x86_64-apple-darwin
 MACOSX_DEPLOYMENT_TARGET=26.0 CFLAGS="-mmacosx-version-min=26.0" \
-  cargo build --release -p heddle-cli --bin heddle \
+  cargo build --release -p heddle-cli \
+  --bin heddle --bin heddle-fsmonitor-worker --features mount,client \
   --target aarch64-apple-darwin
 MACOSX_DEPLOYMENT_TARGET=26.0 CFLAGS="-mmacosx-version-min=26.0" \
-  cargo build --release -p heddle-cli --bin heddle \
+  cargo build --release -p heddle-cli \
+  --bin heddle --bin heddle-fsmonitor-worker --features mount,client \
   --target x86_64-apple-darwin
 
 mkdir -p target/release
@@ -68,10 +71,15 @@ lipo -create \
   target/aarch64-apple-darwin/release/heddle \
   target/x86_64-apple-darwin/release/heddle \
   -output target/release/heddle
-chmod 0755 target/release/heddle
+lipo -create \
+  target/aarch64-apple-darwin/release/heddle-fsmonitor-worker \
+  target/x86_64-apple-darwin/release/heddle-fsmonitor-worker \
+  -output target/release/heddle-fsmonitor-worker
+chmod 0755 target/release/heddle target/release/heddle-fsmonitor-worker
 
 lipo -info target/release/libmount.a
 lipo -info target/release/heddle
+lipo -info target/release/heddle-fsmonitor-worker
 ```
 
 Expected output includes `x86_64 arm64`.
@@ -120,7 +128,10 @@ codesign --verify --strict --verbose=2 "$EXT"
 codesign --verify --strict --verbose=2 "$APP"
 codesign --force --timestamp --options runtime \
   --sign "$HEDDLE_DEVELOPER_ID" "$PWD/../../../../target/release/heddle"
+codesign --force --timestamp --options runtime \
+  --sign "$HEDDLE_DEVELOPER_ID" "$PWD/../../../../target/release/heddle-fsmonitor-worker"
 codesign --verify --strict --verbose=2 "$PWD/../../../../target/release/heddle"
+codesign --verify --strict --verbose=2 "$PWD/../../../../target/release/heddle-fsmonitor-worker"
 codesign -d --entitlements :- "$APP"
 codesign -d --entitlements :- "$EXT"
 ```
@@ -168,6 +179,7 @@ The package is the actual Mac install unit. It places:
 
 - `Heddle.app` in `/Applications/Heddle.app`
 - `heddle` in `/usr/local/bin/heddle`
+- `heddle-fsmonitor-worker` in `/usr/local/bin/heddle-fsmonitor-worker`
 
 The package's `postinstall` refreshes LaunchServices so the FSKit extension is
 discoverable before the first `heddle start`.
@@ -228,7 +240,7 @@ Install the package, then confirm both the CLI and app are present:
 
 ```bash
 sudo rm -rf /Applications/Heddle.app
-sudo rm -f /usr/local/bin/heddle
+sudo rm -f /usr/local/bin/heddle /usr/local/bin/heddle-fsmonitor-worker
 sudo installer -pkg build/Heddle.pkg -target /
 
 command -v heddle

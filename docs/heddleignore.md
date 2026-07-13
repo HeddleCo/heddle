@@ -1,7 +1,7 @@
 # `.heddleignore`
 
 `.heddleignore` is heddle's per-repo file for telling `heddle capture`,
-`heddle status`, and `heddle merge` which paths to ignore. It lives at
+`heddle status`, `heddle ready`, and `heddle land` which paths to ignore. It lives at
 the worktree root, next to your code.
 
 ## Suggested template
@@ -49,7 +49,7 @@ be explicit in `.gitignore` or `.heddleignore`.
 
 ## Common-noise hints
 
-When `heddle merge` refuses because of untracked paths the workflow
+When `heddle land` refuses because of untracked paths the workflow
 didn't expect, paths that look like common noise are annotated
 inline with a `.heddleignore` suggestion:
 

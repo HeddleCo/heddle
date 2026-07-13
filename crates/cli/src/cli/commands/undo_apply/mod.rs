@@ -9,10 +9,11 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
+use heddle_git_projection::git_core::{open_repo as open_git_repo, set_reference};
 use objects::{
     error::{HeddleError, Result as HeddleResult},
     lock::{RepoLock, WriteLockGuard},
-    object::{ChangeId, ContentHash, MarkerName, ThreadName},
+    object::{ContentHash, MarkerName, StateId, ThreadName},
 };
 use oplog::{IsolationKey, OpBatch, OpEntry, OpLogBackend, OpRecord, isolation_keys_for_record};
 use refs::Head;
@@ -29,7 +30,6 @@ use sley::{
 };
 
 use super::{advice::RecoveryAdvice, thread_cmd::thread_not_found_advice};
-use crate::git_projection_engine::git_core::{open_repo as open_git_repo, set_reference};
 
 pub(super) fn preflight_undo_batches(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
     if !batches_have_git_checkpoint(batches) {
@@ -220,7 +220,7 @@ fn fault_counter_trips(
 
 /// Restore HEAD to a captured worktree `state` + ref attachment: re-materialize
 /// the worktree (if a state was captured), then restore the exact `Head` ref.
-fn restore_head(repo: &Repository, state: Option<ChangeId>, head_ref: &Head) -> HeddleResult<()> {
+fn restore_head(repo: &Repository, state: Option<StateId>, head_ref: &Head) -> HeddleResult<()> {
     if let Some(state) = state {
         repo.goto_without_record_discard_local(&state)?;
     }
@@ -294,7 +294,7 @@ impl<'a> EntrySteps<'_, 'a> {
     /// partway. The capture snapshots the FULL pre-step `Head` (worktree state
     /// AND ref attachment) and the restore re-materializes it, so a partial
     /// (or later-failed) goto is fully unwound.
-    fn goto(&mut self, target: ChangeId) -> HeddleResult<()> {
+    fn goto(&mut self, target: StateId) -> HeddleResult<()> {
         let repo = self.repo();
         self.step_nonatomic(
             move || Ok((repo.head()?, repo.head_ref()?)),
@@ -305,7 +305,7 @@ impl<'a> EntrySteps<'_, 'a> {
 
     /// Re-materialize the currently attached thread at `target`, preserving its
     /// attached HEAD. No-op when undo/redo is replaying a different thread's ref.
-    fn restore_active_thread_worktree(&mut self, name: &str, target: ChangeId) -> HeddleResult<()> {
+    fn restore_active_thread_worktree(&mut self, name: &str, target: StateId) -> HeddleResult<()> {
         let repo = self.repo();
         let head_ref = repo.head_ref()?;
         let Head::Attached { thread } = &head_ref else {
@@ -334,7 +334,7 @@ impl<'a> EntrySteps<'_, 'a> {
 
     /// Set thread ref `name` to `state`; inverse restores its prior value (or
     /// deletes it if it had none). A single ref write.
-    fn set_thread(&mut self, name: &str, state: ChangeId) -> HeddleResult<()> {
+    fn set_thread(&mut self, name: &str, state: StateId) -> HeddleResult<()> {
         let repo = self.repo();
         let forward_name = ThreadName::new(name);
         let prev = repo.refs().get_thread(&forward_name)?;
@@ -373,7 +373,7 @@ impl<'a> EntrySteps<'_, 'a> {
     /// if it didn't exist). A single ref write — on a name collision the forward
     /// fails, so no inverse is registered and a pre-existing marker survives the
     /// rollback.
-    fn create_marker(&mut self, name: &str, state: ChangeId) -> HeddleResult<()> {
+    fn create_marker(&mut self, name: &str, state: StateId) -> HeddleResult<()> {
         let repo = self.repo();
         let forward_name = MarkerName::new(name);
         let prev = repo.refs().get_marker(&forward_name)?;
@@ -529,7 +529,7 @@ impl<'a> EntrySteps<'_, 'a> {
     fn remove_redaction_sidecar(
         &mut self,
         blob: ContentHash,
-        state: ChangeId,
+        state: StateId,
         path: String,
         redaction_id: ContentHash,
     ) -> HeddleResult<()> {
@@ -573,7 +573,7 @@ impl<'a> EntrySteps<'_, 'a> {
     ///     detected) overwrote a concurrently-committed record.
     fn restore_visibility_sidecar(
         &mut self,
-        state: ChangeId,
+        state: StateId,
         expected_current: Option<Vec<u8>>,
         target: Option<Vec<u8>>,
     ) -> HeddleResult<()> {
@@ -855,7 +855,7 @@ fn apply_ff_undo(
     steps: &mut EntrySteps,
     source_thread: &str,
     target_thread: &str,
-    pre_target_id: &ChangeId,
+    pre_target_id: &StateId,
 ) -> HeddleResult<()> {
     steps.goto(*pre_target_id)?;
     steps.set_thread(target_thread, *pre_target_id)?;
@@ -1023,7 +1023,7 @@ fn apply_ff_redo(
     steps: &mut EntrySteps,
     source_thread: &str,
     target_thread: &str,
-    post_target_id: &ChangeId,
+    post_target_id: &StateId,
 ) -> HeddleResult<()> {
     steps.goto(*post_target_id)?;
     steps.set_thread(target_thread, *post_target_id)?;
@@ -1185,9 +1185,8 @@ fn apply_git_checkpoint_undo(
                 reset_git_index_to_commit(&git_checkout_repo(repo)?, previous_oid)
             })?;
             let previous = previous.to_string();
-            let new_git_oid = new_git_oid.to_string();
             steps.git_restore_snapshot(repo, branch, &snapshot, || {
-                update_mirror_branch_ref(repo, branch, Some(&previous), Some(&new_git_oid))
+                reconcile_mirror_branch_ref(repo, branch, Some(&previous))
             })?;
         }
         None => {
@@ -1200,9 +1199,8 @@ fn apply_git_checkpoint_undo(
                     )
                 })?;
             }
-            let new_git_oid = new_git_oid.to_string();
             steps.git_restore_snapshot(repo, branch, &snapshot, || {
-                update_mirror_branch_ref(repo, branch, None, Some(&new_git_oid))
+                reconcile_mirror_branch_ref(repo, branch, None)
             })?;
         }
     }
@@ -1258,24 +1256,17 @@ fn apply_git_checkpoint_redo(
     steps.git_restore_snapshot(repo, branch, &snapshot, || {
         reset_git_index_to_commit(&git_checkout_repo(repo)?, new_oid)
     })?;
-    let previous_git_oid = previous_git_oid.map(|previous| previous.to_string());
     let new_git_oid = new_git_oid.to_string();
     steps.git_restore_snapshot(repo, branch, &snapshot, || {
-        update_mirror_branch_ref(
-            repo,
-            branch,
-            Some(&new_git_oid),
-            previous_git_oid.as_deref(),
-        )
+        reconcile_mirror_branch_ref(repo, branch, Some(&new_git_oid))
     })?;
     Ok(())
 }
 
-fn update_mirror_branch_ref(
+fn reconcile_mirror_branch_ref(
     repo: &Repository,
     branch: &str,
     target_oid: Option<&str>,
-    expected_old_oid: Option<&str>,
 ) -> Result<()> {
     if branch == "HEAD" {
         return Ok(());
@@ -1291,16 +1282,8 @@ fn update_mirror_branch_ref(
     {
         return Ok(());
     }
-    match (target_oid, expected_old_oid) {
-        (Some(target), Some(expected)) => set_reference(
-            &git,
-            &ref_name,
-            parse_git_oid(target)?,
-            RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(parse_git_oid(expected)?)),
-            "heddle: update mirror checkpoint ref",
-        )
-        .map_err(|error| anyhow!(error)),
-        (Some(target), None) => set_reference(
+    match target_oid {
+        Some(target) => set_reference(
             &git,
             &ref_name,
             parse_git_oid(target)?,
@@ -1308,10 +1291,7 @@ fn update_mirror_branch_ref(
             "heddle: update mirror checkpoint ref",
         )
         .map_err(|error| anyhow!(error)),
-        (None, Some(expected)) => {
-            delete_reference_matching(&git, &ref_name, Some(parse_git_oid(expected)?))
-        }
-        (None, None) => delete_reference_matching(&git, &ref_name, None),
+        None => delete_reference_matching(&git, &ref_name, None),
     }
 }
 
@@ -1590,7 +1570,7 @@ fn delete_thread_safely(steps: &mut EntrySteps, name: &ThreadName) -> HeddleResu
 fn sync_thread_record_state(
     steps: &mut EntrySteps,
     thread_name: &str,
-    state: objects::object::ChangeId,
+    state: objects::object::StateId,
 ) -> HeddleResult<()> {
     let manager = ThreadManager::new(steps.repo().heddle_dir());
     if let Some(mut thread) = manager.find_by_thread(thread_name)? {
@@ -1604,7 +1584,7 @@ fn sync_thread_record_state(
 fn mark_source_thread_unintegrated(
     steps: &mut EntrySteps,
     source_thread: &str,
-    target_after_undo: &ChangeId,
+    target_after_undo: &StateId,
 ) -> HeddleResult<()> {
     let repo = steps.repo();
     let manager = ThreadManager::new(repo.heddle_dir());
@@ -1644,8 +1624,8 @@ fn mark_source_thread_unintegrated(
 fn mark_merged_threads_unintegrated_for_target(
     steps: &mut EntrySteps,
     target_thread: &str,
-    integrated_state: &ChangeId,
-    target_after_undo: &ChangeId,
+    integrated_state: &StateId,
+    target_after_undo: &StateId,
 ) -> HeddleResult<()> {
     let repo = steps.repo();
     let manager = ThreadManager::new(repo.heddle_dir());
@@ -1674,7 +1654,7 @@ fn mark_merged_threads_unintegrated_for_target(
 fn mark_source_thread_integrated(
     steps: &mut EntrySteps,
     source_thread: &str,
-    target_after_redo: &ChangeId,
+    target_after_redo: &StateId,
 ) -> HeddleResult<()> {
     let repo = steps.repo();
     let manager = ThreadManager::new(repo.heddle_dir());
@@ -1709,8 +1689,8 @@ fn mark_source_thread_integrated(
 fn mark_ready_threads_integrated_for_target(
     steps: &mut EntrySteps,
     target_thread: &str,
-    integrated_state: &ChangeId,
-    target_before_redo: &Option<ChangeId>,
+    integrated_state: &StateId,
+    target_before_redo: &Option<StateId>,
 ) -> HeddleResult<()> {
     let repo = steps.repo();
     let manager = ThreadManager::new(repo.heddle_dir());
@@ -1735,7 +1715,7 @@ fn mark_ready_threads_integrated_for_target(
     Ok(())
 }
 
-fn change_contains(repo: &Repository, ancestor: &ChangeId, descendant: &ChangeId) -> bool {
+fn change_contains(repo: &Repository, ancestor: &StateId, descendant: &StateId) -> bool {
     let mut graph = CommitGraphIndex::new(repo);
     graph.is_ancestor(ancestor, descendant).unwrap_or(false)
 }
@@ -1845,7 +1825,7 @@ fn apply_error(err: anyhow::Error) -> HeddleError {
 /// (heddle#317 r7). Aborting the transaction here — rather than overwriting the
 /// newer record — is what makes the lock-serialized restore safe: the rewind
 /// then leaves the concurrently-committed record intact.
-fn visibility_superseded_conflict(state: &ChangeId) -> HeddleError {
+fn visibility_superseded_conflict(state: &StateId) -> HeddleError {
     HeddleError::Conflict(format!(
         "cannot undo/redo visibility on state {}: a concurrent `visibility set`/`promote` \
          superseded the sidecar. The newer record is preserved; re-run undo/redo after \
@@ -1896,7 +1876,7 @@ pub(super) fn undo_redo_transaction_id(
 /// restore as the inverse so an outer failure puts the prior pointer back
 /// (or clears it, on the first-ever undo).
 struct StageUndoRecovery {
-    head: Option<ChangeId>,
+    head: Option<StateId>,
 }
 
 impl AtomicMutation for StageUndoRecovery {
@@ -2093,14 +2073,14 @@ fn isolation_keys_for_batches(batches: &[OpBatch], scope: &str) -> BTreeSet<Isol
 /// is the sole commit point.
 pub(super) struct UndoOp {
     batches: Vec<OpBatch>,
-    recovery_head: Option<ChangeId>,
+    recovery_head: Option<StateId>,
     transaction_id: String,
 }
 
 impl UndoOp {
     pub(super) fn new(
         batches: Vec<OpBatch>,
-        recovery_head: Option<ChangeId>,
+        recovery_head: Option<StateId>,
         transaction_id: String,
     ) -> Self {
         Self {

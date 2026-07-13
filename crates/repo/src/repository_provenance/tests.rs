@@ -3,8 +3,8 @@ use std::path::Path;
 
 use objects::{
     object::{
-        Attribution, Blob, ChangeId, ContentHash, FileProvenance, LineSpan, Origin, OriginSet,
-        Principal, State, Tree, TreeEntry,
+        Attribution, Blob, ContentHash, FileProvenance, LineSpan, Origin, OriginSet, Principal,
+        State, StateId, Tree, TreeEntry,
     },
     store::ObjectStore,
 };
@@ -28,7 +28,7 @@ fn put_state_with_file(
     store: &impl ObjectStore,
     file: &str,
     content: &[u8],
-    parents: Vec<ChangeId>,
+    parents: Vec<StateId>,
     principal_name: &str,
 ) -> State {
     let blob_hash = store.put_blob(&Blob::from_slice(content)).unwrap();
@@ -79,21 +79,21 @@ fn merge_provenance_credits_each_parent_for_its_lines() {
         store,
         "lib.rs",
         b"fn shared() {}\nfn from_bob() {}\n",
-        vec![base.change_id],
+        vec![base.id()],
         "bob",
     );
     let theirs = put_state_with_file(
         store,
         "lib.rs",
         b"fn shared() {}\nfn from_carol() {}\n",
-        vec![base.change_id],
+        vec![base.id()],
         "carol",
     );
     let merge = put_state_with_file(
         store,
         "lib.rs",
         b"fn shared() {}\nfn from_bob() {}\nfn from_carol() {}\n",
-        vec![ours.change_id, theirs.change_id],
+        vec![ours.id(), theirs.id()],
         "dave",
     );
 
@@ -167,13 +167,13 @@ fn merge_with_genuinely_new_line_attributes_to_merger() {
     let store = repo.store();
 
     let base = put_state_with_file(store, "lib.rs", b"a\n", Vec::new(), "alice");
-    let ours = put_state_with_file(store, "lib.rs", b"a\nb\n", vec![base.change_id], "bob");
-    let theirs = put_state_with_file(store, "lib.rs", b"a\nc\n", vec![base.change_id], "carol");
+    let ours = put_state_with_file(store, "lib.rs", b"a\nb\n", vec![base.id()], "bob");
+    let theirs = put_state_with_file(store, "lib.rs", b"a\nc\n", vec![base.id()], "carol");
     let merge = put_state_with_file(
         store,
         "lib.rs",
         b"a\nb\nc\nNOVEL\n",
-        vec![ours.change_id, theirs.change_id],
+        vec![ours.id(), theirs.id()],
         "dave",
     );
 
@@ -218,8 +218,8 @@ fn linear_commit_provenance_unchanged_under_n_parent_path() {
     let store = repo.store();
 
     let s1 = put_state_with_file(store, "lib.rs", b"a\n", Vec::new(), "alice");
-    let s2 = put_state_with_file(store, "lib.rs", b"a\nb\n", vec![s1.change_id], "bob");
-    let s3 = put_state_with_file(store, "lib.rs", b"a\nb\nc\n", vec![s2.change_id], "carol");
+    let s2 = put_state_with_file(store, "lib.rs", b"a\nb\n", vec![s1.id()], "bob");
+    let s3 = put_state_with_file(store, "lib.rs", b"a\nb\nc\n", vec![s2.id()], "carol");
 
     let provenance = repo
         .get_file_provenance_for_state(&s3, Path::new("lib.rs"))
@@ -274,21 +274,21 @@ fn diamond_merge_provenance_walks_each_ancestor_once() {
         store,
         "lib.rs",
         b"fn shared() {}\nfn left() {}\n",
-        vec![base.change_id],
+        vec![base.id()],
         "bob",
     );
     let right = put_state_with_file(
         store,
         "lib.rs",
         b"fn shared() {}\nfn right() {}\n",
-        vec![base.change_id],
+        vec![base.id()],
         "carol",
     );
     let merge = put_state_with_file(
         store,
         "lib.rs",
         b"fn shared() {}\nfn left() {}\nfn right() {}\n",
-        vec![left.change_id, right.change_id],
+        vec![left.id(), right.id()],
         "dave",
     );
 
@@ -328,7 +328,7 @@ fn diamond_merge_provenance_walks_each_ancestor_once() {
 #[test]
 fn file_provenance_validates_coverage() {
     let origin = Origin {
-        state_id: ChangeId::generate(),
+        state_id: crate::test_state_id(),
         attribution: Attribution::human(Principal::new("Test", "test@example.com")),
         created_at: chrono::Utc::now(),
         authored_at: None,
@@ -354,7 +354,7 @@ fn provenance_merge_unions_origin_sets_not_set_indexes() {
         ]))
         .unwrap();
     let parent_origin = Origin {
-        state_id: ChangeId::generate(),
+        state_id: crate::test_state_id(),
         attribution: Attribution::human(Principal::new("Parent", "parent@example.com")),
         created_at: chrono::Utc::now(),
         authored_at: None,
@@ -403,7 +403,7 @@ fn provenance_merge_unions_origin_sets_not_set_indexes() {
         .unwrap();
     let child = State::new(
         child_tree_hash,
-        vec![parent.change_id],
+        vec![parent.id()],
         Attribution::human(Principal::new("Child", "child@example.com")),
     );
     store.put_state(&child).unwrap();

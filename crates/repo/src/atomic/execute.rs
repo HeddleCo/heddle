@@ -75,7 +75,7 @@ where
             Ok(CommitOutcome::Committed) => return Ok(output),
             Ok(CommitOutcome::AlreadyCommitted(prior_records)) => {
                 // Dedup hit: this run's `output` may diverge from what was
-                // actually committed (e.g. a regenerated `ChangeId`), so
+                // actually committed (e.g. a regenerated `StateId`), so
                 // reconstruct the originally-committed identity from the prior
                 // batch (cid 3329631075). Reconstruct BEFORE rewinding.
                 let reconstructed = mutation

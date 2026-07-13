@@ -17,6 +17,7 @@ libc.workspace = true
 # below) is gated behind that feature.
 proc-macro2.workspace = true
 protoc-bin-vendored.workspace = true
+prost-reflect.workspace = true
 serde_json.workspace = true
 syn.workspace = true
 tempfile.workspace = true

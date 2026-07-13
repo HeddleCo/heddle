@@ -107,7 +107,7 @@ purged bytes can survive in packfiles until an operator rewrites packs).
   blobs (accepting the documented pack-residue caveat; a `--repack` follow-through closes it for the
   paranoid).
 - **`env/*` projection-exclusion + mandatory ignore — BEFORE v1.** The git overlay's export walks
-  **all** threads (`export_all`, `crates/cli/src/git_projection_engine/git_core.rs`) — an unguarded
+  **all** threads (`export_all`, `crates/git-projection/src/git_core.rs`) — an unguarded
   `env/production` thread becomes a pushed git branch full of ciphertext. There is no thread-exclusion
   policy today; add one so `env/*` never projects. Inverse footgun: a decrypted `.env` materialized in
   the worktree gets captured by the next `heddle snap` into a *normal, unencrypted* state — so the

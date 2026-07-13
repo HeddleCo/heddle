@@ -17,7 +17,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use objects::object::{ChangeId, State, Status};
+use objects::object::{State, StateId, Status};
 use serde::{Deserialize, Serialize};
 use sley::{ObjectId, Repository};
 
@@ -30,8 +30,10 @@ pub const NOTES_REF: &str = "refs/notes/heddle";
 /// JSON payload stored inside each note blob.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeddleNote {
-    /// The heddle change_id this commit corresponds to.
+    pub state_id: String,
     pub change_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_state: Option<State>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<NoteAgent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,7 +108,9 @@ impl HeddleNote {
             model: a.model.clone(),
         });
         Self {
+            state_id: state.id().to_string_full(),
             change_id: state.change_id.to_string_full(),
+            source_state: Some(state.clone()),
             agent,
             confidence: state.confidence,
             status,
@@ -229,10 +233,16 @@ pub fn read_note(
 }
 
 /// Read every portable Git↔Heddle identity recorded under `refs/notes/heddle`.
-pub fn read_identity_mappings(repo: &Repository) -> GitProjectionResult<Vec<(ChangeId, ObjectId)>> {
+pub fn read_identity_mappings(repo: &Repository) -> GitProjectionResult<Vec<(StateId, ObjectId)>> {
     read_all_notes(repo)?
         .into_iter()
-        .map(|(oid, note)| Ok((ChangeId::parse(&note.change_id)?, oid)))
+        .map(|(oid, note)| {
+            Ok((
+                StateId::parse(&note.state_id)
+                    .map_err(|error| GitProjectionError::InvalidMapping(error.to_string()))?,
+                oid,
+            ))
+        })
         .collect()
 }
 

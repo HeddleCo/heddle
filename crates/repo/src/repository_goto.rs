@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use objects::{lock::RepositoryLockExt, object::ChangeId, store::ObjectStore};
+use objects::{lock::RepositoryLockExt, object::StateId, store::ObjectStore};
 use oplog::OpLogRecorder;
 use refs::Head;
 use tracing::debug;
@@ -20,12 +20,12 @@ use crate::{thread_model::ThreadFreshness, thread_storage::ThreadManager};
 #[derive(Debug, Clone, Copy)]
 enum WorktreeBaseline {
     Head,
-    Materialized(Option<ChangeId>),
+    Materialized(Option<StateId>),
 }
 
 impl Repository {
     /// Move worktree to a different state.
-    pub fn goto(&self, target: &ChangeId) -> Result<()> {
+    pub fn goto(&self, target: &StateId) -> Result<()> {
         self.goto_internal(
             target,
             true,
@@ -36,7 +36,7 @@ impl Repository {
     }
 
     /// Move worktree to a different state, discarding unsnapped local edits.
-    pub fn goto_discard_local(&self, target: &ChangeId) -> Result<()> {
+    pub fn goto_discard_local(&self, target: &StateId) -> Result<()> {
         self.goto_internal(
             target,
             true,
@@ -54,8 +54,8 @@ impl Repository {
     /// `target`, even though the files on disk still represent `materialized`.
     pub fn goto_from_materialized_state(
         &self,
-        target: &ChangeId,
-        materialized: Option<&ChangeId>,
+        target: &StateId,
+        materialized: Option<&StateId>,
     ) -> Result<()> {
         self.goto_internal(
             target,
@@ -78,7 +78,7 @@ impl Repository {
     /// `Head::Detached`, which silently strands the attached thread at its
     /// pre-op state — this helper preserves attached-HEAD semantics so the
     /// thread's ref and metadata advance with the worktree.
-    pub fn fast_forward_attached(&self, target: &ChangeId) -> Result<()> {
+    pub fn fast_forward_attached(&self, target: &StateId) -> Result<()> {
         self.fast_forward_attached_internal(
             target,
             true,
@@ -87,7 +87,7 @@ impl Repository {
         )
     }
 
-    pub fn fast_forward_attached_discard_local(&self, target: &ChangeId) -> Result<()> {
+    pub fn fast_forward_attached_discard_local(&self, target: &StateId) -> Result<()> {
         self.fast_forward_attached_internal(
             target,
             true,
@@ -98,8 +98,8 @@ impl Repository {
 
     pub fn fast_forward_attached_from_materialized_state(
         &self,
-        target: &ChangeId,
-        materialized: Option<&ChangeId>,
+        target: &StateId,
+        materialized: Option<&StateId>,
     ) -> Result<()> {
         self.fast_forward_attached_internal(
             target,
@@ -117,7 +117,7 @@ impl Repository {
     /// generic `Goto` inverse only rewinds HEAD, which stranded the
     /// merged-into thread ref (heddle#99 r1); a name-resolved redo was
     /// also non-deterministic if the source thread moved (heddle#99 r2).
-    pub fn fast_forward_attached_without_record(&self, target: &ChangeId) -> Result<()> {
+    pub fn fast_forward_attached_without_record(&self, target: &StateId) -> Result<()> {
         self.fast_forward_attached_internal(
             target,
             false,
@@ -128,7 +128,7 @@ impl Repository {
 
     pub fn fast_forward_attached_without_record_discard_local(
         &self,
-        target: &ChangeId,
+        target: &StateId,
     ) -> Result<()> {
         self.fast_forward_attached_internal(
             target,
@@ -140,8 +140,8 @@ impl Repository {
 
     pub fn fast_forward_attached_from_materialized_state_without_record(
         &self,
-        target: &ChangeId,
-        materialized: Option<&ChangeId>,
+        target: &StateId,
+        materialized: Option<&StateId>,
     ) -> Result<()> {
         self.fast_forward_attached_internal(
             target,
@@ -153,7 +153,7 @@ impl Repository {
 
     fn fast_forward_attached_internal(
         &self,
-        target: &ChangeId,
+        target: &StateId,
         record: bool,
         dirty_behavior: WorktreeApplyDirtyBehavior,
         baseline: WorktreeBaseline,
@@ -183,7 +183,7 @@ impl Repository {
         Ok(())
     }
 
-    pub fn goto_verified_clean(&self, target: &ChangeId) -> Result<()> {
+    pub fn goto_verified_clean(&self, target: &StateId) -> Result<()> {
         self.goto_internal(
             target,
             true,
@@ -193,7 +193,7 @@ impl Repository {
         )
     }
 
-    pub fn goto_verified_clean_without_record(&self, target: &ChangeId) -> Result<()> {
+    pub fn goto_verified_clean_without_record(&self, target: &StateId) -> Result<()> {
         self.goto_internal(
             target,
             false,
@@ -203,7 +203,7 @@ impl Repository {
         )
     }
 
-    pub fn goto_without_record(&self, target: &ChangeId) -> Result<()> {
+    pub fn goto_without_record(&self, target: &StateId) -> Result<()> {
         self.goto_internal(
             target,
             false,
@@ -213,7 +213,7 @@ impl Repository {
         )
     }
 
-    pub fn goto_without_record_discard_local(&self, target: &ChangeId) -> Result<()> {
+    pub fn goto_without_record_discard_local(&self, target: &StateId) -> Result<()> {
         self.goto_internal(
             target,
             false,
@@ -225,7 +225,7 @@ impl Repository {
 
     fn goto_internal(
         &self,
-        target: &ChangeId,
+        target: &StateId,
         record: bool,
         current_worktree_verified_clean: bool,
         dirty_behavior: WorktreeApplyDirtyBehavior,
@@ -258,7 +258,7 @@ impl Repository {
         let same_state_verified_clean = current_worktree_verified_clean
             && current_state
                 .as_ref()
-                .is_some_and(|current_state| current_state.change_id == *target);
+                .is_some_and(|current_state| current_state.id() == *target);
 
         let tree = if same_state_verified_clean {
             None
@@ -360,11 +360,9 @@ mod tests {
         root: &std::path::Path,
         path: &str,
         content: &str,
-    ) -> ChangeId {
+    ) -> StateId {
         fs::write(root.join(path), content).unwrap();
-        repo.snapshot(Some(path.to_string()), None)
-            .unwrap()
-            .change_id
+        repo.snapshot(Some(path.to_string()), None).unwrap().id()
     }
 
     #[test]
@@ -395,7 +393,7 @@ mod tests {
         let target = repo
             .snapshot(Some("target".to_string()), None)
             .unwrap()
-            .change_id;
+            .id();
 
         repo.goto(&pre_target).unwrap();
         repo.refs()
@@ -425,7 +423,7 @@ mod tests {
         let target = repo
             .snapshot(Some("target".to_string()), None)
             .unwrap()
-            .change_id;
+            .id();
 
         repo.goto(&base).unwrap();
         fs::write(&tracked, "local edit\n").unwrap();
@@ -445,7 +443,7 @@ mod tests {
         let target = repo
             .snapshot(Some("target".to_string()), None)
             .unwrap()
-            .change_id;
+            .id();
 
         repo.goto(&base).unwrap();
         let thread = ThreadName::new("main");

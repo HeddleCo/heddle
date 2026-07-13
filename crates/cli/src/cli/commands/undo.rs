@@ -24,7 +24,7 @@ use serde::Serialize;
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    command_catalog::{ActionFields, ActionTemplate},
+    command_catalog::{ActionFields, ActionTemplate, heddle_action},
     undo_apply::{
         RedoOp, UndoOp, acquire_undo_redo_lock, preflight_redo_batches, preflight_undo_batches,
         undo_redo_transaction_id,
@@ -50,10 +50,8 @@ use crate::cli::{Cli, should_output_json, style};
 /// doing so coupled recovery to a user-writable name and let the `MarkerDelete`
 /// undo inverse collide with it.
 /// `apply_undo_batch` replays only user-marker/thread inverses, so it can never
-/// see or clobber this internal pointer. `heddle switch .undo-recovery` resolves
-/// it via the reserved [`refs::UNDO_RECOVERY_HANDLE`], which `resolve_refspec`
-/// routes to the internal pointer BEFORE any user ref — and whose leading `.`
-/// makes it uncreatable as a user ref, so it is unshadowable in both directions.
+/// see or clobber this internal pointer. `heddle undo --recover` reads it
+/// directly, without routing the internal handle through any user-ref resolver.
 const UNDO_RECOVERY_MARKER: &str = UNDO_RECOVERY_HANDLE;
 
 #[derive(Serialize)]
@@ -194,6 +192,9 @@ pub fn cmd_undo(
     let post_undo_repo = Repository::open(repo.root())?;
     let post_undo_trust = build_repository_verification_state(&post_undo_repo);
     let recommended_action = ActionFields::from_action(&post_undo_trust.recommended_action);
+    let recovery_action = recovery_state
+        .map(|_| ActionFields::from_action(&heddle_action(["undo", "--recover"])))
+        .unwrap_or_else(ActionFields::none);
     let count = updated_batches.len();
     let output = UndoRedoOutput {
         output_kind: "undo",
@@ -201,8 +202,8 @@ pub fn cmd_undo(
         action: "undo".to_string(),
         message: heddle_core::machine_undo_redo_message(UndoHistoryAction::Undo, count, false),
         batches: updated_batches.iter().map(summarize_batch).collect(),
-        next_action: recommended_action.action.clone(),
-        next_action_template: recommended_action.template.clone(),
+        next_action: recovery_action.action,
+        next_action_template: recovery_action.template,
         recommended_action: recommended_action.action,
         recommended_action_template: recommended_action.template,
         recovery_state: recovery_state.map(|state| state.short()),
@@ -225,12 +226,82 @@ pub fn cmd_undo(
         print_head(&post_undo_repo)?;
         if let Some(state) = &output.recovery_state {
             println!(
-                "Preserved pre-undo state {} as `{}` (recover with `heddle switch {}`)",
-                style::change_id(state),
-                UNDO_RECOVERY_MARKER,
+                "Preserved pre-undo state {} as `{}`",
+                style::state_id(state),
                 UNDO_RECOVERY_MARKER,
             );
+            print_next("heddle undo --recover");
         }
+        if let Some(trust) = &output.trust {
+            print_post_undo_trust(trust);
+        }
+    }
+
+    Ok(())
+}
+
+pub fn cmd_undo_recover(cli: &Cli) -> Result<()> {
+    let repo = cli.open_repo()?;
+    let _undo_redo_lock = acquire_undo_redo_lock(&repo)?;
+    ensure_no_active_operation(&repo, "recover the pre-undo state")?;
+
+    let recovery_state = repo.refs().get_undo_recovery()?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::safety_refusal(
+            "undo_recovery_unavailable",
+            "No pre-undo recovery state is available",
+            "Inspect undoable history with `heddle undo --list`.",
+            "this checkout has not preserved a state through `heddle undo`",
+            "recovery has no recorded state to materialize",
+            "HEAD and worktree files were left unchanged",
+            "heddle undo --list",
+            vec!["heddle undo --list".to_string()],
+        ))
+    })?;
+    if !repo.store().has_state(&recovery_state)? {
+        return Err(anyhow!(RecoveryAdvice::safety_refusal(
+            "undo_recovery_state_missing",
+            format!(
+                "The preserved pre-undo state {} is missing",
+                recovery_state.short()
+            ),
+            "Restore the missing state from a trusted backup, then retry `heddle undo --recover`.",
+            "the checkout-local recovery ref points to an unavailable state",
+            "recovery cannot materialize a state whose object is missing",
+            "HEAD and worktree files were left unchanged",
+            "heddle fsck",
+            vec!["heddle fsck".to_string()],
+        )));
+    }
+
+    ensure_worktree_clean(&repo, "recover the pre-undo state")?;
+    repo.restore_state_tree_to_worktree(&recovery_state)?;
+
+    let recovered_repo = Repository::open(repo.root())?;
+    let trust = build_repository_verification_state(&recovered_repo);
+    let recommended_action = ActionFields::from_action(&trust.recommended_action);
+    let output = UndoRedoOutput {
+        output_kind: "undo_recover",
+        status: "completed",
+        action: "recover".to_string(),
+        message: "restored the state preserved by the most recent undo as worktree changes"
+            .to_string(),
+        batches: Vec::new(),
+        next_action: recommended_action.action.clone(),
+        next_action_template: recommended_action.template.clone(),
+        recommended_action: recommended_action.action,
+        recommended_action_template: recommended_action.template,
+        recovery_state: Some(recovery_state.short()),
+        recovery_marker: Some(UNDO_RECOVERY_MARKER.to_string()),
+        trust: Some(trust),
+    };
+
+    if should_output_json(cli, Some(recovered_repo.config())) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        println!(
+            "Recovered pre-undo state {} as worktree changes",
+            style::state_id(&recovery_state.short())
+        );
         if let Some(trust) = &output.trust {
             print_post_undo_trust(trust);
         }
@@ -779,10 +850,7 @@ mod tests {
         // Record a `ThreadCreate` for the name; its undo converges the name to
         // empty, removing BOTH same-name records.
         std::fs::write(temp.path().join("f.txt"), "x").unwrap();
-        let state = repo
-            .snapshot(Some("s".to_string()), None)
-            .unwrap()
-            .change_id;
+        let state = repo.snapshot(Some("s".to_string()), None).unwrap().state_id;
         let scope = repo.op_scope();
         repo.oplog()
             .record_batch_scoped(

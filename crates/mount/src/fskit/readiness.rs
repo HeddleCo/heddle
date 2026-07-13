@@ -7,9 +7,8 @@
 //! identifier; the `+` / `-` prefix indicates enabled / disabled.
 //!
 //! When the extension is disabled or missing, the caller is
-//! expected to print a one-line setup hint and open
-//! System Settings to the File System Extensions pane. This
-//! module exposes `open_settings()` to do that consistently.
+//! expected to surface setup guidance. Interactive policy belongs
+//! to the CLI boundary rather than this probe.
 
 use std::process::Command;
 
@@ -84,14 +83,6 @@ pub fn probe() -> Readiness {
         };
     }
     Readiness::NotInstalled
-}
-
-/// Open System Settings → General → Login Items & Extensions →
-/// File System Extensions. Best-effort; logs and returns on
-/// failure rather than propagating the error.
-pub fn open_settings() {
-    let url = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension?Extensions";
-    let _ = Command::new("open").arg(url).status();
 }
 
 /// One-line setup hint to print to stderr when the extension

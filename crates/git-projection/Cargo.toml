@@ -25,6 +25,7 @@ wire = { path = "../wire", package = "heddle-wire", version = "0.10", default-fe
 serde.workspace = true
 serde_json.workspace = true
 sley.workspace = true
+sley-transport.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

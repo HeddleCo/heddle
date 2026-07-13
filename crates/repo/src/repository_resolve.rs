@@ -2,7 +2,7 @@
 //! State resolution helpers for the Repository.
 
 use objects::{
-    object::{Agent, ChangeId},
+    object::{Agent, StateId},
     store::ObjectStore,
 };
 
@@ -10,7 +10,7 @@ use super::{HeddleError, Repository, Result};
 
 impl Repository {
     /// Resolve a state specifier (HEAD, thread, marker, full/short ID, HEAD~N).
-    pub fn resolve_state(&self, spec: &str) -> Result<Option<ChangeId>> {
+    pub fn resolve_state(&self, spec: &str) -> Result<Option<StateId>> {
         if let Some(steps) = parse_head_steps(spec) {
             return resolve_head_steps(self, steps);
         }
@@ -20,15 +20,15 @@ impl Repository {
         }
 
         if self.capability() == super::RepositoryCapability::GitOverlay {
-            if let Some(id) = self.git_overlay_mapped_change_for_branch(spec)? {
+            if let Some(id) = self.git_overlay_mapped_state_for_branch(spec)? {
                 return Ok(Some(id));
             }
-            if let Some(id) = self.git_overlay_mapped_change_for_tag(spec)? {
+            if let Some(id) = self.git_overlay_mapped_state_for_tag(spec)? {
                 return Ok(Some(id));
             }
         }
 
-        resolve_short_change_id(self, spec)
+        resolve_short_state_id(self, spec)
     }
 
     pub fn resolve_agent(&self) -> Option<Agent> {
@@ -74,7 +74,7 @@ fn parse_head_steps(spec: &str) -> Option<usize> {
     rest.parse::<usize>().ok()
 }
 
-fn resolve_head_steps(repo: &Repository, steps: usize) -> Result<Option<ChangeId>> {
+fn resolve_head_steps(repo: &Repository, steps: usize) -> Result<Option<StateId>> {
     let mut current = repo.head()?;
     if steps == 0 {
         return Ok(current);
@@ -94,8 +94,8 @@ fn resolve_head_steps(repo: &Repository, steps: usize) -> Result<Option<ChangeId
     Ok(current)
 }
 
-fn resolve_short_change_id(repo: &Repository, spec: &str) -> Result<Option<ChangeId>> {
-    let prefix = spec.strip_prefix("hd-").unwrap_or(spec).to_lowercase();
+fn resolve_short_state_id(repo: &Repository, spec: &str) -> Result<Option<StateId>> {
+    let prefix = spec.strip_prefix("hs-").unwrap_or(spec).to_lowercase();
     if prefix.len() < 4 {
         return Ok(None);
     }
@@ -103,7 +103,7 @@ fn resolve_short_change_id(repo: &Repository, spec: &str) -> Result<Option<Chang
     let mut matches = Vec::new();
     for id in repo.store.list_states()? {
         let full = id.to_string_full();
-        let full_norm = full.strip_prefix("hd-").unwrap_or(&full).to_lowercase();
+        let full_norm = full.strip_prefix("hs-").unwrap_or(&full).to_lowercase();
         if full_norm.starts_with(&prefix) {
             matches.push(id);
         }
@@ -137,7 +137,7 @@ mod tests {
     use std::fs;
 
     use objects::{
-        object::{ChangeId, MarkerName},
+        object::{MarkerName, StateId},
         store::ObjectStore,
     };
     use tempfile::TempDir;
@@ -146,14 +146,14 @@ mod tests {
 
     /// Init a repo and capture two snapshots so we have a real history
     /// to resolve against.
-    fn repo_with_two_states() -> (TempDir, Repository, ChangeId, ChangeId) {
+    fn repo_with_two_states() -> (TempDir, Repository, StateId, StateId) {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         fs::write(temp.path().join("a.txt"), "a").unwrap();
         let s1 = repo.snapshot(Some("first".into()), None).unwrap();
         fs::write(temp.path().join("b.txt"), "b").unwrap();
         let s2 = repo.snapshot(Some("second".into()), None).unwrap();
-        (temp, repo, s1.change_id, s2.change_id)
+        (temp, repo, s1.id(), s2.id())
     }
 
     #[test]
@@ -175,10 +175,10 @@ mod tests {
 
     #[test]
     fn resolve_state_accepts_short_prefix_without_hd_prefix() {
-        // The resolver also tolerates the bare encoding without `hd-`.
+        // The resolver also tolerates the bare encoding without `hs-`.
         let (_t, repo, s1, _) = repo_with_two_states();
         let short = s1.short();
-        let bare = short.strip_prefix("hd-").unwrap();
+        let bare = short.strip_prefix("hs-").unwrap();
         let resolved = repo.resolve_state(bare).unwrap();
         assert_eq!(resolved, Some(s1));
     }
@@ -188,7 +188,7 @@ mod tests {
         let (_t, repo, _, _) = repo_with_two_states();
         // Length>=4 so we exercise the index path, not the
         // too-short-prefix shortcut.
-        assert_eq!(repo.resolve_state("hd-zzzz").unwrap(), None);
+        assert_eq!(repo.resolve_state("hs-zzzz").unwrap(), None);
     }
 
     #[test]
@@ -221,44 +221,36 @@ mod tests {
         assert_eq!(repo.resolve_state("HEAD~1").unwrap(), Some(s1));
     }
 
-    /// Ambiguous-prefix detection: synthesize two states whose full
-    /// IDs share a common prefix by writing them straight to the store
-    /// at hand-picked IDs. Going through the snapshot path can't
-    /// reliably produce a collision because change IDs are random.
+    /// Ambiguous-prefix detection for content-addressed StateIds.
     #[test]
     fn resolve_state_errors_on_ambiguous_prefix() {
         use objects::object::{Attribution, State};
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
 
-        // Build two distinct ChangeIds that share an encoded prefix.
-        // Crockford base32 encodes 5 bits per char, so identical
-        // first 4 bytes (32 bits) guarantee the first 7 chars of the
-        // encoded form match.
-        let mut id_a_bytes = [0u8; 16];
-        let mut id_b_bytes = [0u8; 16];
-        id_a_bytes[..4].copy_from_slice(&[0xaa, 0xaa, 0xaa, 0xaa]);
-        id_b_bytes[..4].copy_from_slice(&[0xaa, 0xaa, 0xaa, 0xaa]);
-        id_a_bytes[15] = 0x01;
-        id_b_bytes[15] = 0x02;
-
-        let id_a = ChangeId::from_bytes(id_a_bytes);
-        let id_b = ChangeId::from_bytes(id_b_bytes);
-        assert_ne!(id_a, id_b);
-
-        // Persist States with hand-picked change_ids by going through
-        // the store's `put_state` (which writes by `state.change_id`).
         let head = repo.head().unwrap().unwrap();
         let head_state = repo.store().get_state(&head).unwrap().unwrap();
-        let principal = repo.get_principal().unwrap();
-        let state_a = State::new(
-            head_state.tree,
-            vec![head],
-            Attribution::human(principal.clone()),
-        )
-        .with_change_id(id_a);
-        let state_b = State::new(head_state.tree, vec![head], Attribution::human(principal))
-            .with_change_id(id_b);
+        let mut by_prefix = std::collections::HashMap::new();
+        let (prefix, state_a, state_b) = (0..10_000)
+            .find_map(|index| {
+                let state = State::new(
+                    head_state.tree,
+                    vec![head],
+                    Attribution::human(objects::object::Principal::new(
+                        format!("Collision Candidate {index}"),
+                        "collision@example.test",
+                    )),
+                );
+                let id = state.id();
+                let full = id.to_string_full();
+                let prefix = full.strip_prefix("hs-").unwrap()[..4].to_string();
+                by_prefix
+                    .insert(prefix.clone(), state.clone())
+                    .map(|previous| (format!("hs-{prefix}"), previous, state))
+            })
+            .expect("10,000 content-addressed states should contain a four-character collision");
+        let id_a = state_a.id();
+        let id_b = state_b.id();
         repo.store().put_state(&state_a).unwrap();
         repo.store().put_state(&state_b).unwrap();
 
@@ -271,20 +263,13 @@ mod tests {
         );
         assert!(listed.contains(&id_b), "state B must be indexed");
 
-        // 7-char encoded prefix ("hd-" + 4 base32 chars from
-        // identical first bytes) — strictly less than the 12-char
-        // "short" form so we know we're not hitting an exact match.
-        let full_a = id_a.to_string_full();
-        let prefix = &full_a[..7];
-        assert!(prefix.starts_with("hd-"));
-
-        let err = repo.resolve_state(prefix).unwrap_err();
+        let err = repo.resolve_state(&prefix).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("ambiguous state ID prefix"),
             "unexpected error: {msg}"
         );
-        assert!(msg.contains(prefix), "error should echo the prefix: {msg}");
+        assert!(msg.contains(&prefix), "error should echo the prefix: {msg}");
         assert!(matches!(err, HeddleError::Conflict(_)));
     }
 }

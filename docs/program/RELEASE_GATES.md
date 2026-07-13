@@ -36,7 +36,7 @@ Every gate is executable from the repo root with checked-in tooling.
 | Gate | Threshold | Command |
 |------|-----------|---------|
 | `heddle-core` docs build | `cargo doc -p heddle-core --no-deps` exit 0 | |
-| Doctor schemas clean | existing CI script | `bash scripts/check-doctor-schemas-clean.sh` when binary available |
+| Default CLI executable contracts | existing CI script | `bash scripts/check-default-cli-contracts.sh` |
 | JSON schema drift | doctor schemas gate | CI `rust-tests.yml` |
 
 ## G5 — Performance (equal work only)
@@ -45,7 +45,7 @@ Every gate is executable from the repo root with checked-in tooling.
 |------|-----------|--------|
 | Core-loop smoke | No case exceeds documented release budgets in `perf_core_loop.rs` on program hardware class | release + ignored smoke, ≥3 trials dev / ≥5 cert |
 | Common ops | No statistically meaningful regression vs stored baseline median (p95) for status/log/diff | paired alternating runs |
-| Criterion weekly | Artifacts stored; regressions investigated, not silently ignored | `scripts/discover-benches.py` + workflow |
+| Criterion manual | Artifacts stored; regressions investigated, not silently ignored | Run the `Benchmarks` workflow |
 
 **Rules (non-negotiable):**
 

@@ -2,28 +2,34 @@
 
 A safety net for the operations a daily user is most likely to want to roll back.
 
+Every completed undo preserves its pre-undo state in a checkout-local internal
+ref. Run `heddle undo --recover` to materialize that state later, even after a
+divergent capture has made redo unavailable. Recovery preserves the current
+`HEAD` and attached thread, restores the saved tree as dirty worktree changes,
+and recommends `heddle capture`. It refuses without changing files when the
+recovery state is absent or the worktree is dirty.
+
 This document describes the user-facing surface shipped under
 [HeddleCo/heddle#23](https://github.com/HeddleCo/heddle/issues/23). The
 design + 0.3 scope cut for cross-thread cases lives in
 [docs/design/cross-thread-undo.md](design/cross-thread-undo.md). Remote-
-affecting undo and persistent cross-invocation redo are tracked as
-follow-ups.
+affecting undo and cross-worktree safety are tracked as follow-ups.
 
 ## Undoable operations
 
 | Operation        | What undo does                                                          |
 |------------------|-------------------------------------------------------------------------|
 | `heddle capture` | Restores `HEAD` and the worktree to the immediate parent state.         |
-| `heddle merge` (non-FF) | Restores `HEAD` **and** both thread refs; drops the merge state.  |
-| `heddle merge` (FF)     | Restores `HEAD` **and** the merged-into thread ref to the pre-merge tip; the merged-in thread is untouched. |
-| `heddle switch`    | Restores `HEAD` to the pre-`goto` state.                                |
+| `heddle land` (non-FF) | Restores `HEAD` **and** both thread refs; drops the landed state.  |
+| `heddle land` (FF)     | Restores `HEAD` **and** the landed-into thread ref to its prior tip; the source thread is untouched. |
+| `heddle thread switch` | Restores `HEAD` to the previous thread state. |
 | `heddle thread create`   | Deletes the thread (if no further work landed on it).           |
 | `heddle thread drop`     | Recreates the thread at its pre-drop tip.                       |
 | `heddle thread rename`   | Renames back.                                                   |
 | `heddle thread marker create`   | Deletes the marker.                                             |
 | `heddle thread marker delete`     | Recreates the marker at its prior state.                        |
 | `heddle redact apply`    | Removes the redaction record so the next materialize restores the original bytes. Requires `--allow-redact-undo` (see "Safety contracts"). Refused when the blob has since been purged. |
-| `heddle rebase`          | Restores HEAD **and** the rebased thread ref to the pre-rebase tip in a single undo step. The whole rebase (every per-commit FF the replay emitted) is grouped into one oplog batch via the `OpRecord::TransactionCommit` envelope marker, so undo never lands the tip on an intermediate replay state. Refused when a blob reachable from the pre-rebase tree has since been purged (see "Safety contracts"). Local-only — see "Not undoable" for the remote-aware variant. |
+| `heddle sync`          | Restores HEAD **and** the refreshed thread ref to the pre-sync tip in a single undo step. The full replay is grouped into one oplog batch, so undo never lands on an intermediate replay state. Refused when a blob reachable from the prior tree has since been purged. |
 
 The list above is the **shipped** surface for v0.2. The inverses live in
 `crates/cli/src/cli/commands/undo_apply.rs`; the oplog records that drive them
@@ -34,7 +40,7 @@ live in `crates/oplog/src/oplog/oplog_types.rs::OpRecord`.
 These intentionally fall outside the MVP — they either touch state we don't
 own, are destructive by design, or need a substrate change we haven't shipped:
 
-- **`heddle push` / `heddle fetch`** — remote-affecting. Reverting them would
+- **`heddle push` / `heddle pull`** — remote-affecting. Reverting them would
   require coordinating with the other side. File a follow-up if you need this.
 - **`heddle redact purge`** — physically removes blob bytes; refused by `heddle undo`
   with a single clear message naming the affected op. Documented irreversible
@@ -54,8 +60,6 @@ own, are destructive by design, or need a substrate change we haven't shipped:
   `.heddle/refstore` (the `heddle start --path` setup) can step on each
   other's threads. 0.3 supports single-worktree usage only; cross-
   worktree safety is filed as a follow-up. See the design doc.
-- **Redo across CLI invocations** — `heddle undo --redo` works within the same shell
-  session but is not yet persisted across processes.
 
 ## Safety contracts
 
@@ -75,21 +79,23 @@ contracts below are enforced by integration tests in
 - **Dirty worktree refusal.** If you have uncommitted changes (modified
   tracked files, untracked files), `heddle undo` refuses and surfaces the
   dirty paths. Capture the changes with `heddle capture -m "..."` (or remove
-  them) and retry. The check is shared with `cherry-pick` and `rebase`.
+  them) and retry. `heddle undo --recover` enforces the same refusal before
+  materializing the preserved state. The check is shared with `revert` and
+  `sync`.
 - **Destructive-boundary refusal.** If the state the inverse would restore
   has been removed from the object store — typically by `heddle maintenance gc --prune`
   reaching past the live oplog window — `heddle undo` refuses with a single
   clear message naming the missing op id. Restore from a backup or list past
   the boundary with `heddle undo --list`.
-- **Rebase-undo refusal across `purge`.** Undoing a `heddle rebase` rewinds
-  the attached thread to its pre-rebase tip. If any blob reachable from
+- **Sync-undo refusal across `purge`.** Undoing a `heddle sync` rewinds
+  the attached thread to its pre-sync tip. If any blob reachable from
   that tree has since been redacted+purged, the rewind would land the
   worktree on a state whose next materialize fails with a missing-blob
   error. `heddle undo` refuses pre-mutation with a single message naming
-  the rebase batch and the purged blob — same fail-loud discipline as the
+  the sync batch and the purged blob — same fail-loud discipline as the
   Redact inverse's "Refused regardless of the flag when the underlying
   bytes have since been purged" rule. Restore from a backup or list past
-  the rebase with `heddle undo --list`.
+  the sync with `heddle undo --list`.
 - **Worktree-attached `ThreadCreate` refusal.** `heddle undo` refuses to
   roll back a `heddle start <name> --path <dir>` while the materialized
   worktree at `<dir>` is still on disk. The inverse only deletes the
@@ -113,8 +119,10 @@ contracts below are enforced by integration tests in
 | `--list`                   | Print the recent batches without undoing.                   |
 | `--depth <N>`              | How many batches `--list` shows (default 20).               |
 | `--preview` / `--dry-run`  | Print what would change without applying.                   |
+| `--redo`                   | Re-apply operations that a prior `undo` rewound.            |
+| `--recover`                | Restore the last undo's saved state as worktree changes without moving HEAD. |
 | `--allow-redact-undo`      | Explicit opt-in to undo a `heddle redact apply` (see "Safety contracts"). |
-| `--output {auto,json,text}`| Force output format. JSON is the structured contract.        |
+| `--output {text,json,json-compact}` | Select human output or a structured machine contract. |
 
 Run `heddle undo --help` for the curated list with examples and the explicit
 "NOT undoable" reminder.

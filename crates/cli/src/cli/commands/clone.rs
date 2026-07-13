@@ -3,10 +3,15 @@
 
 #[cfg(feature = "client")]
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::{ffi::CString, os::unix::ffi::OsStrExt};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 #[cfg(feature = "client")]
@@ -26,8 +31,12 @@ use heddle_core::{
     monorepo_execution_progress, monorepo_rel_display, plan_monorepo_clone,
     plan_monorepo_execution, validate_monorepo_clone_options, validate_monorepo_execution,
 };
+use heddle_git_projection::git_core::{
+    clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference, write_head_symref,
+};
 use ingest::ImportOptions;
 use objects::{
+    Progress,
     error::{HeddleError, Result as HeddleResult},
     object::{Blob, ContentHash, ThreadName},
     store::ObjectStore,
@@ -41,24 +50,24 @@ use sley::plumbing::sley_worktree;
 use sley::{
     ConfigEdit, ConfigEditPlan, ConfigEditScope, ConfigSectionEntry, GitObjectType,
     IndexWriteOptions, ObjectId, RefPrecondition, RemoteConfigSet, Repository as SleyRepository,
+    plumbing::sley_core::redact_url_for_display,
+    remote::{ProgressSink as SleyProgressSink, TransferProgress},
 };
 
 use super::{
     advice::RecoveryAdvice,
+    import_progress::ImportProgress,
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 #[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;
 use crate::{
-    cli::{Cli, should_output_json, style},
-    client::LocalSync,
-    git_projection_engine::{
-        GitProjection,
-        git_core::{
-            clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference, write_head_symref,
-        },
-        git_ingest::import_git_history,
+    cli::{
+        Cli,
+        progress_render::{TerminalSink, finish_line, format_transfer_bytes},
+        should_output_json, style,
     },
+    client::LocalSync,
     remote::{Remote, RemoteConfig, RemoteTarget},
 };
 
@@ -219,6 +228,10 @@ pub async fn cmd_clone(
     )
     .map_err(clone_plan_error_to_anyhow)?;
 
+    if insecure && plan.mode.is_git_overlay() {
+        return Err(anyhow!(git_overlay_clone_insecure_advice()));
+    }
+
     let options = CloneOptions {
         thread: plan.thread.clone(),
         depth: plan.depth,
@@ -334,7 +347,6 @@ fn clone_plan_error_to_anyhow(err: ClonePlanError) -> anyhow::Error {
                 "heddle clone <hosted-spool> <path> --recursive",
                 vec!["heddle clone <hosted-spool> <path> --recursive".to_string()],
             )),
-            // git-overlay (and any unexpected mode label): map to overlay advice
             _ => anyhow!(unsupported_git_overlay_clone_option_advice(
                 flag.as_str(),
                 value.as_deref()
@@ -347,7 +359,7 @@ fn clone_invalid_remote_url_advice(remote: &str) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "clone_invalid_remote_url",
         format!("Invalid remote URL: {remote}"),
-        "Use `file:///path/to/repo`, an existing local path, a hosted/network remote, or a Git clone URL.",
+        "Use an existing local repository, a hosted Heddle remote, or a Git clone URL.",
         format!("remote '{remote}' could not be parsed as a supported Heddle or Git remote"),
         "clone cannot determine which transport or repository to read from",
         "no destination directory, repository metadata, refs, or worktree files were written",
@@ -369,6 +381,53 @@ fn clone_destination_exists_advice(local: &str) -> RecoveryAdvice {
     )
 }
 
+struct GitCloneProgress {
+    progress: Progress,
+    received_bytes: u64,
+    received_objects: u64,
+}
+
+impl GitCloneProgress {
+    fn new(cli: &Cli) -> Self {
+        let progress = if should_output_json(cli, None) {
+            Progress::null()
+        } else {
+            Progress::with_sink(Box::new(TerminalSink::new()))
+        };
+        progress.set_phase("streaming Git objects");
+        Self {
+            progress,
+            received_bytes: 0,
+            received_objects: 0,
+        }
+    }
+}
+
+impl SleyProgressSink for GitCloneProgress {
+    fn transfer(&mut self, event: TransferProgress) {
+        self.received_bytes = event.received_bytes;
+        if let Some(total) = event.total_objects {
+            self.progress.set_total(total as usize);
+        }
+        let received = event.received_objects.saturating_sub(self.received_objects);
+        self.received_objects = event.received_objects;
+        self.progress.inc(received as usize);
+    }
+
+    fn message(&mut self, message: &str) {
+        let _ = message;
+    }
+}
+
+struct FinishedGitOverlayClone {
+    output_json: bool,
+    remote: String,
+    branch: String,
+    commits_imported: usize,
+    states_created: usize,
+    trust: RepositoryVerificationState,
+}
+
 fn clone_git_overlay_url(
     cli: &Cli,
     url: &str,
@@ -376,9 +435,38 @@ fn clone_git_overlay_url(
     options: &CloneOptions,
 ) -> Result<()> {
     reject_unsupported_for_git_overlay(options)?;
-    fs::create_dir_all(local_path)?;
-    clone_url_to_bare(url, &local_path.join(".git"), None, None).map_err(anyhow::Error::msg)?;
-    finish_git_overlay_clone(cli, local_path, options, url.to_string())
+    let staging = AtomicCloneDestination::new(local_path)?;
+    let mut progress = GitCloneProgress::new(cli);
+    let filter = options
+        .filter
+        .as_deref()
+        .or_else(|| options.lazy.then_some("blob:none"));
+    clone_url_to_bare(
+        url,
+        &staging.path().join(".git"),
+        options.depth,
+        filter,
+        &mut progress,
+    )
+    .map_err(anyhow::Error::msg)?;
+    finish_line(
+        &progress.progress,
+        &format!(
+            "[done] streamed {} Git objects ({} received)",
+            progress.received_objects,
+            format_transfer_bytes(progress.received_bytes)
+        ),
+    );
+    let finished = finish_git_overlay_clone(
+        cli,
+        staging.path(),
+        options,
+        url.to_string(),
+        redact_url_for_display(url),
+    )?;
+    staging.publish()?;
+    render_finished_git_overlay_clone(local_path, finished)?;
+    Ok(())
 }
 
 fn clone_git_overlay_path(
@@ -388,14 +476,24 @@ fn clone_git_overlay_path(
     options: &CloneOptions,
 ) -> Result<()> {
     reject_unsupported_for_git_overlay(options)?;
-    fs::create_dir_all(local_path)?;
-    SleyRepository::init(local_path).map_err(anyhow::Error::msg)?;
-    copy_local_repo_to_bare(remote_path, &local_path.join(".git")).map_err(anyhow::Error::msg)?;
+    let staging = AtomicCloneDestination::new(local_path)?;
+    SleyRepository::init(staging.path()).map_err(anyhow::Error::msg)?;
+    copy_local_repo_to_bare(remote_path, &staging.path().join(".git"))
+        .map_err(anyhow::Error::msg)?;
     let remote_label = fs::canonicalize(remote_path)
         .unwrap_or_else(|_| remote_path.to_path_buf())
         .display()
         .to_string();
-    finish_git_overlay_clone(cli, local_path, options, remote_label)
+    let finished = finish_git_overlay_clone(
+        cli,
+        staging.path(),
+        options,
+        remote_label.clone(),
+        remote_label,
+    )?;
+    staging.publish()?;
+    render_finished_git_overlay_clone(local_path, finished)?;
+    Ok(())
 }
 
 /// Reject `--depth` / `--lazy` / `--filter` for Git-overlay clones before
@@ -403,6 +501,9 @@ fn clone_git_overlay_path(
 /// `heddle_core::validate_clone_mode_options`; this wrapper maps errors to
 /// recovery advice for the git-overlay execution path and unit tests.
 fn reject_unsupported_for_git_overlay(options: &CloneOptions) -> Result<()> {
+    if options.insecure {
+        return Err(anyhow!(git_overlay_clone_insecure_advice()));
+    }
     heddle_core::validate_clone_mode_options(
         &CloneMode::GitOverlayUrl,
         options.depth,
@@ -410,6 +511,19 @@ fn reject_unsupported_for_git_overlay(options: &CloneOptions) -> Result<()> {
         options.filter.as_deref(),
     )
     .map_err(clone_plan_error_to_anyhow)
+}
+
+fn git_overlay_clone_insecure_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_clone_insecure_unsupported",
+        "--insecure is not supported for Git-overlay clones",
+        "Use a TLS-protected Git URL, or configure the remote's trust through the system certificate store.",
+        "Sley does not expose a clone-scoped TLS verification override",
+        "accepting the flag would imply a security setting that the Git transport did not apply",
+        "no destination directory, repository metadata, refs, or worktree files were written",
+        "heddle clone <git-url> <path>",
+        vec!["heddle clone <git-url> <path>".to_string()],
+    )
 }
 
 fn unsupported_git_overlay_clone_option_advice(flag: &str, value: Option<&str>) -> RecoveryAdvice {
@@ -439,56 +553,66 @@ fn finish_git_overlay_clone(
     local_path: &Path,
     options: &CloneOptions,
     remote_label: String,
-) -> Result<()> {
+    remote_display: String,
+) -> Result<FinishedGitOverlayClone> {
     configure_git_overlay_origin(local_path, &remote_label)?;
-    let repo = Repository::init(local_path)?;
-    let mut bridge = GitProjection::new(&repo);
+    let repo = Repository::init_git_overlay_sidecar(local_path)?;
     let refs = options
         .thread
         .as_ref()
         .map(|thread| vec![thread.clone()])
         .unwrap_or_default();
-    let stats = import_git_history(
-        &mut bridge,
-        Some(&local_path.join(".git")),
-        &refs,
+    let scope = if refs.is_empty() {
+        ingest::ImportScope::all()
+    } else {
+        ingest::ImportScope::refs(refs.clone())
+    };
+    let scope_label = if refs.is_empty() {
+        "all branches and tags".to_string()
+    } else {
+        refs.join(", ")
+    };
+    let mut progress = ImportProgress::start(cli, &repo, &scope_label, &remote_display);
+    heddle_git_projection::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(
+        local_path,
+    );
+    progress.begin_commit_import();
+    let mut on_commit = |event| progress.commit_tick(event);
+    let (stats, _map) = ingest::import_git_into_scoped_with_options_and_progress(
+        local_path,
+        local_path,
         ImportOptions::default(),
-        None,
+        scope,
+        Some(&mut on_commit),
     )
     .map_err(|err| {
         anyhow!(clone_git_overlay_import_failed_advice(
             options.thread.as_deref(),
-            &remote_label,
+            &remote_display,
             err.to_string()
         ))
     })?;
+    progress.begin_ref_write();
+    progress.finish();
 
     let track_name = select_clone_thread(
         &repo,
         options.thread.as_deref(),
         read_git_head_branch(&local_path.join(".git")).as_deref(),
-        &remote_label,
+        &remote_display,
     )?;
     let tn = ThreadName::new(&track_name);
     let state_id = repo.refs().get_thread(&tn)?.ok_or_else(|| {
         anyhow!(clone_git_overlay_branch_not_imported_advice(
             &track_name,
-            &remote_label
+            &remote_display
         ))
     })?;
     // Materialize the imported tip from a fresh clone baseline. Imported
     // refs may already make HEAD resolve to the target, but the files on
     // disk do not yet represent that target.
     repo.goto_from_materialized_state(&state_id, None)?;
-    // Re-attach HEAD to the cloned thread, AND mirror the choice into
-    // `.git/HEAD`. `Repository::open` on a git-overlay repo
-    // unconditionally syncs heddle's HEAD from `.git/HEAD` via
-    // `detect_git_head`, so if we left `.git/HEAD` pointing at Sley's
-    // init-time default ("main" / "master") the very next `heddle`
-    // command would silently reset HEAD to a thread that doesn't
-    // exist — and `current_state` would return `None`, causing
-    // `heddle log` to snapshot a "Bootstrap git-overlay before
-    // viewing log" state instead of walking the imported history.
+    // Keep Git and Heddle attached to the same imported branch.
     repo.refs().write_head(&Head::Attached {
         thread: ThreadName::new(&track_name),
     })?;
@@ -496,20 +620,36 @@ fn finish_git_overlay_clone(
     configure_git_overlay_origin_tracking(local_path, &track_name)?;
     verify_git_overlay_clone(&repo, local_path, &track_name, &state_id)?;
 
-    if should_output_json(cli, Some(repo.config())) {
-        let trust = build_repository_verification_state(&repo);
+    let trust = build_repository_verification_state(&repo);
+    Ok(FinishedGitOverlayClone {
+        output_json: should_output_json(cli, Some(repo.config())),
+        remote: remote_display,
+        branch: track_name,
+        commits_imported: stats.commits_imported,
+        states_created: stats.states_created,
+        trust,
+    })
+}
+
+fn render_finished_git_overlay_clone(
+    local_path: &Path,
+    finished: FinishedGitOverlayClone,
+) -> Result<()> {
+    if finished.output_json {
         let output = git_overlay_clone_output(GitOverlayCloneOutputInput {
-            remote: remote_label,
+            remote: finished.remote,
             local: local_path.display().to_string(),
-            branch: track_name,
-            commits_imported: stats.commits_imported,
-            states_created: stats.states_created,
-            trust,
+            branch: finished.branch,
+            commits_imported: finished.commits_imported,
+            states_created: finished.states_created,
+            trust: finished.trust,
         });
         crate::cli::render::write_json_stdout(&output)?;
     } else {
-        let repo_name = clone_repo_name_from_label(&remote_label);
-        for line in format_clone_completion_lines(repo_name, stats.commits_imported, &track_name) {
+        let repo_name = clone_repo_name_from_label(&finished.remote);
+        for line in
+            format_clone_completion_lines(repo_name, finished.commits_imported, &finished.branch)
+        {
             println!("{line}");
         }
     }
@@ -628,7 +768,7 @@ fn verify_git_overlay_clone(
     repo: &Repository,
     local_path: &Path,
     track_name: &str,
-    state_id: &objects::object::ChangeId,
+    state_id: &objects::object::StateId,
 ) -> Result<()> {
     ensure_git_excludes_heddle(local_path)?;
     refresh_git_index_to_head(local_path)?;
@@ -791,7 +931,7 @@ fn clone_verification_failed_advice(
         format!("Repair the clone mapping, then rerun `{primary_command}`."),
         unsafe_condition,
         would_change,
-        "the cloned files, Git refs, and Heddle metadata were left for inspection",
+        "the incomplete destination created by this clone attempt was removed",
         primary_command.clone(),
         vec![primary_command],
     )
@@ -814,7 +954,7 @@ fn clone_git_overlay_import_failed_advice(
         "Retry with an existing commit-pointing branch or repair the source repository, then clone again.",
         format!("Git-overlay import failed{requested}: {cause}"),
         "clone cannot create a verified Git/Heddle mapping until the requested refs import cleanly",
-        "the clone directory, copied Git objects, and Heddle metadata were left for inspection",
+        "the incomplete destination created by this clone attempt was removed",
         primary_command.clone(),
         vec![primary_command],
     )
@@ -833,7 +973,7 @@ fn clone_git_overlay_branch_not_imported_advice(
             "Git-overlay clone selected branch '{track_name}', but no Heddle thread was imported for it"
         ),
         "materializing this clone would attach Git and Heddle to an unverified or missing branch mapping",
-        "the clone directory, copied Git objects, and Heddle metadata were left for inspection",
+        "the incomplete destination created by this clone attempt was removed",
         primary_command.clone(),
         vec![primary_command],
     )
@@ -847,7 +987,7 @@ fn clone_git_overlay_no_branch_refs_advice(remote_label: &str) -> RecoveryAdvice
         "Clone from a repository with at least one commit-pointing branch, or pass `--thread <branch>` after creating one.",
         format!("Git-overlay import from '{remote_label}' produced no branch refs"),
         "clone cannot choose a verified active branch without an imported Git/Heddle mapping",
-        "the clone directory, copied Git objects, and Heddle metadata were left for inspection",
+        "the incomplete destination created by this clone attempt was removed",
         primary_command.clone(),
         vec![primary_command],
     )
@@ -938,7 +1078,7 @@ fn format_clone_completion_lines(
             "  {}",
             style::field("current thread", &style::bold(thread_name))
         ),
-        super::action_line::format_next("heddle status", 2)
+        super::action_line::format_next_step_dim("heddle status", 2)
             .expect("static clone next action is non-empty"),
     ]
 }
@@ -1057,11 +1197,14 @@ async fn clone_local(
     let local_repo = Repository::init(local_path)?;
 
     // Fetch the state and dependencies
-    let objects_copied = if let Some(d) = depth {
+    let mut objects_copied = if let Some(d) = depth {
         sync.fetch_state_with_depth(&local_repo, &state_id, d)?
     } else {
         sync.fetch_state(&local_repo, &state_id)?
     };
+    if depth.is_none() {
+        objects_copied += sync.fetch_markers(&local_repo)?;
+    }
 
     // Materialize from a fresh clone baseline before publishing the local
     // thread ref. Otherwise HEAD can resolve to the target first and make
@@ -1225,6 +1368,98 @@ fn hosted_endpoint_spec(remote: &str) -> String {
     let trimmed = remote.strip_prefix("heddle://").unwrap_or(remote);
     // The address ends at the first slash that introduces a repo path.
     trimmed.split('/').next().unwrap_or(trimmed).to_string()
+}
+
+static CLONE_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+struct AtomicCloneDestination {
+    destination: PathBuf,
+    staging: PathBuf,
+    published: bool,
+}
+
+impl AtomicCloneDestination {
+    fn new(destination: &Path) -> Result<Self> {
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("repository");
+        let staging = loop {
+            let sequence = CLONE_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let candidate = parent.join(format!(
+                ".{name}.heddle-clone-{}-{sequence}",
+                std::process::id()
+            ));
+            match fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        };
+        Ok(Self {
+            destination: destination.to_path_buf(),
+            staging,
+            published: false,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.staging
+    }
+
+    fn publish(mut self) -> Result<()> {
+        rename_clone_noreplace(&self.staging, &self.destination)?;
+        self.published = true;
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn rename_clone_noreplace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let destination = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    #[cfg(target_os = "linux")]
+    // SAFETY: both CString pointers remain valid for the duration of this call.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    #[cfg(target_os = "macos")]
+    // SAFETY: both CString pointers remain valid for the duration of this call.
+    let result =
+        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn rename_clone_noreplace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    if destination.exists() {
+        return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+    }
+    fs::rename(source, destination)
+}
+
+impl Drop for AtomicCloneDestination {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = fs::remove_dir_all(&self.staging);
+        }
+    }
 }
 
 #[cfg(feature = "client")]
@@ -1411,7 +1646,7 @@ async fn clone_network(
             if let Some(state) = final_state {
                 println!(
                     "  {}",
-                    style::field("state", &style::change_id(&state.to_string()))
+                    style::field("state", &style::state_id(&state.to_string()))
                 );
             }
         }
@@ -1570,16 +1805,16 @@ async fn clone_monorepo(
 
 /// Map a transport `MonorepoNode` tree into pure core facts (no I/O).
 ///
-/// Parses content-state bytes into [`ChangeId`]; malformed/absent states map
+/// Parses content-state bytes into [`StateId`]; malformed/absent states map
 /// to `None` (empty checkout), matching prior client planner policy.
 #[cfg(feature = "client")]
 fn monorepo_node_facts_from_resolved(node: &grpc::heddle::v1::MonorepoNode) -> MonorepoNodeFacts {
-    use objects::object::ChangeId;
+    use objects::object::StateId;
 
     let content_state = node
         .content_state
         .as_deref()
-        .and_then(|bytes| ChangeId::try_from_slice(bytes).ok());
+        .and_then(|bytes| StateId::try_from_slice(bytes).ok());
     let edges = node
         .edges
         .iter()
@@ -1908,9 +2143,9 @@ fn clone_symlink_unsupported_advice(path: &Path, dest_path: &Path) -> RecoveryAd
 /// ## Why a side-table?
 ///
 /// `PartialFetchMetadata` records blake3 hashes only, but
-/// `Repository::read_object` is keyed by Git OID. The bridge
+/// `Repository::read_object` is keyed by Git OID. Git Projection
 /// already computes blake3↔git mappings *for commits* (see
-/// `SyncMapping` in `git_projection_engine/git_core.rs`); blob mappings are
+/// `SyncMapping` in `heddle-git-projection::git_core`); blob mappings are
 /// constructed on-the-fly during import. We accept the same shape of
 /// mapping here, populated by the caller (clone-time or test-time)
 /// before [`Self::hydrate`] fires. Future work: persist a sidecar
@@ -2030,16 +2265,6 @@ pub fn register_git_overlay_factory() {
 mod tests {
     use super::*;
 
-    fn opts(depth: Option<u32>, lazy: bool, filter: Option<&str>) -> CloneOptions {
-        CloneOptions {
-            thread: None,
-            depth,
-            lazy,
-            filter: filter.map(str::to_string),
-            insecure: false,
-        }
-    }
-
     #[test]
     fn heddle_clone_output_uses_native_repository_capability() {
         let temp = tempfile::TempDir::new().expect("temp");
@@ -2057,31 +2282,6 @@ mod tests {
 
         assert_eq!(repo.capability_label(), "native-heddle");
         assert_eq!(output.repository_capability, Some("native-heddle"));
-    }
-
-    #[test]
-    fn heddle_clone_output_uses_git_overlay_repository_capability() {
-        let temp = tempfile::TempDir::new().expect("temp");
-        SleyRepository::init(temp.path()).expect("init git repo");
-        let repo = Repository::init(temp.path()).expect("init git-overlay repo");
-
-        let output = heddle_clone_output(
-            "heddle://weft.local:8421/org/repo".to_string(),
-            temp.path().display().to_string(),
-            "main".to_string(),
-            repo.capability_label(),
-            None,
-            None,
-            None,
-        );
-
-        assert_eq!(repo.capability_label(), "git-overlay");
-        assert_eq!(output.repository_capability, Some("git-overlay"));
-    }
-
-    #[test]
-    fn reject_unsupported_passes_when_no_flags_set() {
-        assert!(reject_unsupported_for_git_overlay(&opts(None, false, None)).is_ok());
     }
 
     #[cfg(feature = "client")]
@@ -2110,112 +2310,6 @@ mod tests {
                 .expect("thread selected");
 
         assert_eq!(selected, "feature");
-    }
-
-    // ---- clone text-mode summary helpers (heddle#161) ----
-
-    #[test]
-    fn clone_repo_name_strips_https_url_and_dot_git() {
-        assert_eq!(
-            clone_repo_name_from_label("https://github.com/BurntSushi/ripgrep.git"),
-            "ripgrep"
-        );
-        assert_eq!(
-            clone_repo_name_from_label("https://github.com/BurntSushi/ripgrep"),
-            "ripgrep"
-        );
-    }
-
-    #[test]
-    fn clone_repo_name_strips_ssh_url_and_dot_git() {
-        assert_eq!(
-            clone_repo_name_from_label("git@github.com:owner/repo.git"),
-            "repo"
-        );
-    }
-
-    #[test]
-    fn clone_repo_name_extracts_last_filesystem_segment() {
-        assert_eq!(clone_repo_name_from_label("/home/user/foo"), "foo");
-        assert_eq!(
-            clone_repo_name_from_label("file:///tmp/projects/bar/"),
-            "bar"
-        );
-    }
-
-    #[test]
-    fn clone_repo_name_falls_back_to_label_when_no_segment() {
-        // Empty or pathologic input: don't panic, return the input as-is
-        // so the rendered summary still carries *something* identifying.
-        assert_eq!(clone_repo_name_from_label(""), "");
-        assert_eq!(clone_repo_name_from_label("///"), "///");
-    }
-
-    #[test]
-    fn clone_repo_name_handles_windows_drive_paths() {
-        // Windows drive prefixes (`C:\…` and `C:/…`) are not SSH/SCP
-        // shorthand — earlier versions unconditionally split on `:` and
-        // dropped the drive letter, producing `\src\ripgrep` instead of
-        // `ripgrep`.
-        assert_eq!(clone_repo_name_from_label("C:\\src\\ripgrep"), "ripgrep");
-        assert_eq!(clone_repo_name_from_label("C:/src/ripgrep"), "ripgrep");
-        assert_eq!(
-            clone_repo_name_from_label("D:\\workspaces\\heddle.git"),
-            "heddle"
-        );
-    }
-
-    #[test]
-    fn clone_repo_name_handles_local_paths_with_colon() {
-        // Git treats `host:path` as SCP shorthand only when the prefix
-        // contains no path separator. `/tmp/foo:bar/repo` and
-        // `./foo:bar/repo.git` are valid local paths whose basename
-        // must not be shadowed by the colon.
-        assert_eq!(clone_repo_name_from_label("/tmp/foo:bar/repo.git"), "repo");
-        assert_eq!(clone_repo_name_from_label("./foo:bar/repo.git"), "repo");
-    }
-
-    #[test]
-    fn format_clone_completion_text_names_repo_and_count_and_thread_and_next_command() {
-        // Style helpers are no-ops when color is uninitialized (test
-        // default), so substring assertions work on the raw text. Keeps
-        // the assertions independent of ANSI escape sequences.
-        let lines = format_clone_completion_lines("ripgrep", 2249, "master");
-        let joined = lines.join("\n");
-        assert!(
-            joined.contains("ripgrep"),
-            "summary must name the repo: {joined}"
-        );
-        assert!(
-            joined.contains("2249"),
-            "summary must include the commit count: {joined}"
-        );
-        assert!(
-            joined.contains("commit"),
-            "summary must use the word 'commit': {joined}"
-        );
-        assert!(
-            joined.contains("master"),
-            "summary must name the current thread: {joined}"
-        );
-        assert!(
-            joined.to_lowercase().contains("heddle status"),
-            "summary must suggest `heddle status` as the next step: {joined}"
-        );
-    }
-
-    #[test]
-    fn format_clone_completion_singularizes_one_commit() {
-        // Avoid "1 commits" — the style::count helper already singularizes,
-        // but pin it here so a future formatter refactor doesn't regress.
-        let lines = format_clone_completion_lines("tiny", 1, "main");
-        let joined = lines.join("\n");
-        assert!(
-            joined.contains("1 commit ")
-                || joined.contains("1 commit\n")
-                || joined.ends_with("1 commit"),
-            "one commit must not pluralize: {joined}"
-        );
     }
 
     #[cfg(feature = "client")]
@@ -2271,121 +2365,110 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "client")]
     #[test]
-    fn clone_destination_cleanup_removes_armed_destination() {
+    fn atomic_clone_destination_removes_unpublished_staging() {
         let temp = tempfile::TempDir::new().expect("temp");
-        let path = temp.path().join("partial-clone");
+        let destination = temp.path().join("partial-clone");
+        let staging;
 
         {
-            let _cleanup = CloneDestinationCleanup::new(&path);
-            std::fs::create_dir_all(&path).expect("create partial destination");
+            let clone = AtomicCloneDestination::new(&destination).expect("create staging");
+            staging = clone.path().to_path_buf();
+            std::fs::write(clone.path().join("partial"), b"partial").expect("write staging");
         }
 
-        assert!(
-            !path.exists(),
-            "armed clone cleanup must remove the partial destination"
-        );
+        assert!(!destination.exists());
+        assert!(!staging.exists());
     }
 
-    #[cfg(feature = "client")]
     #[test]
-    fn clone_destination_cleanup_disarm_preserves_destination() {
+    fn atomic_clone_destination_publishes_only_complete_staging() {
         let temp = tempfile::TempDir::new().expect("temp");
-        let path = temp.path().join("successful-clone");
+        let destination = temp.path().join("successful-clone");
+        let clone = AtomicCloneDestination::new(&destination).expect("create staging");
+        std::fs::write(clone.path().join("complete"), b"complete").expect("write staging");
 
-        {
-            let mut cleanup = CloneDestinationCleanup::new(&path);
-            std::fs::create_dir_all(&path).expect("create successful destination");
-            cleanup.disarm();
-        }
+        assert!(!destination.exists());
+        clone.publish().expect("publish clone");
 
-        assert!(
-            path.exists(),
-            "disarmed clone cleanup must preserve the successful destination"
-        );
-    }
-
-    #[test]
-    fn reject_unsupported_rejects_filter() {
-        let err = reject_unsupported_for_git_overlay(&opts(None, false, Some("blob:none")))
-            .expect_err("filter must be rejected");
-        let advice = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
-            .expect("filter refusal should use typed recovery advice");
-        assert_eq!(advice.kind, "git_overlay_clone_option_unsupported");
-        assert_eq!(advice.primary_command, "heddle clone <remote> <path>");
-        assert!(advice.preserved.contains("no clone directory"));
-        let msg = err.to_string();
-        assert!(
-            msg.contains("--filter"),
-            "message must name --filter: {msg}"
-        );
-        assert!(
-            msg.contains("not yet supported"),
-            "message must say not yet supported: {msg}"
-        );
-    }
-
-    #[test]
-    fn reject_unsupported_rejects_lazy() {
-        let err = reject_unsupported_for_git_overlay(&opts(None, true, None))
-            .expect_err("lazy must be rejected");
-        let advice = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
-            .expect("lazy refusal should use typed recovery advice");
-        assert_eq!(advice.kind, "git_overlay_clone_option_unsupported");
-        assert!(advice.primary_hint().contains("full Git-overlay clone"));
-        let msg = err.to_string();
-        assert!(msg.contains("--lazy"), "message must name --lazy: {msg}");
-        assert!(
-            msg.contains("not yet supported"),
-            "message must say not yet supported: {msg}"
-        );
-    }
-
-    #[test]
-    fn reject_unsupported_rejects_depth() {
-        let err = reject_unsupported_for_git_overlay(&opts(Some(1), false, None))
-            .expect_err("depth must be rejected");
-        let advice = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
-            .expect("depth refusal should use typed recovery advice");
-        assert_eq!(advice.kind, "git_overlay_clone_option_unsupported");
-        assert!(advice.error.contains("shallow boundary"));
-        let msg = err.to_string();
-        assert!(msg.contains("--depth"), "message must name --depth: {msg}");
-        assert!(
-            msg.contains("not yet supported"),
-            "message must say not yet supported: {msg}"
-        );
-    }
-
-    #[test]
-    fn clone_verification_failures_use_typed_recovery_advice() {
-        let advice = clone_verification_failed_advice(
-            "clone verification failed: Heddle active thread is 'dev', expected 'main'",
-            "Heddle active thread 'dev' does not match imported Git branch 'main'",
-            "continuing would report the clone as verified while Heddle is attached to the wrong thread",
-            "heddle thread switch main --force",
-        );
-
-        assert_eq!(advice.kind, "clone_verification_failed");
-        assert!(
-            advice
-                .error
-                .contains("clone verification failed: Heddle active thread")
-        );
-        assert_eq!(advice.primary_command, "heddle thread switch main --force");
         assert_eq!(
-            advice.recovery_commands,
-            vec!["heddle thread switch main --force"]
+            std::fs::read(destination.join("complete")).expect("read published file"),
+            b"complete"
         );
-        assert!(advice.preserved.contains("left for inspection"));
-        assert!(advice.primary_hint().contains("Repair the clone mapping"));
+    }
+
+    #[test]
+    fn atomic_clone_destination_never_replaces_a_late_destination() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let destination = temp.path().join("contended-clone");
+        let clone = AtomicCloneDestination::new(&destination).expect("create staging");
+        std::fs::write(clone.path().join("clone"), b"clone").expect("write staging");
+        std::fs::create_dir(&destination).expect("create contending destination");
+        std::fs::write(destination.join("owner"), b"owner").expect("write owner marker");
+
+        clone
+            .publish()
+            .expect_err("publication must not replace a destination that appeared mid-clone");
+
+        assert_eq!(
+            std::fs::read(destination.join("owner")).expect("read owner marker"),
+            b"owner"
+        );
+        assert!(!destination.join("clone").exists());
+    }
+
+    #[test]
+    fn git_overlay_insecure_refusal_precedes_destination_staging() {
+        let options = CloneOptions {
+            thread: None,
+            depth: None,
+            lazy: false,
+            filter: None,
+            insecure: true,
+        };
+
+        let error = reject_unsupported_for_git_overlay(&options)
+            .expect_err("Git-overlay --insecure must fail closed");
+        assert!(error.to_string().contains("--insecure is not supported"));
+    }
+
+    #[test]
+    fn git_clone_progress_tracks_sley_transfer_events() {
+        let progress = Progress::null();
+        progress.set_phase("streaming Git objects");
+        let mut clone_progress = GitCloneProgress {
+            progress: progress.clone(),
+            received_bytes: 0,
+            received_objects: 0,
+        };
+
+        clone_progress.transfer(TransferProgress {
+            received_bytes: 1024,
+            received_objects: 3,
+            total_objects: Some(8),
+            indexed_deltas: 0,
+        });
+        clone_progress.transfer(TransferProgress {
+            received_bytes: 4096,
+            received_objects: 5,
+            total_objects: Some(8),
+            indexed_deltas: 1,
+        });
+
+        assert_eq!(clone_progress.received_objects, 5);
+        assert_eq!(clone_progress.received_bytes, 4096);
+        assert_eq!(progress.done(), 5);
+        assert_eq!(progress.total(), 8);
+        assert_eq!(progress.phase(), "streaming Git objects");
+        clone_progress.message("remote: counting objects");
+        assert_eq!(progress.phase(), "streaming Git objects");
+    }
+
+    #[test]
+    fn transfer_byte_formatter_uses_binary_units() {
+        assert_eq!(format_transfer_bytes(42), "42 B");
+        assert_eq!(format_transfer_bytes(1536), "1.5 KiB");
+        assert_eq!(format_transfer_bytes(3 * 1024 * 1024), "3.0 MiB");
     }
 
     /// Standalone helpers to exercise [`GitOverlayBlobHydrator`]'s

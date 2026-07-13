@@ -15,11 +15,11 @@
 //!    object's worth of data plus its `BufWriter` capacity.
 //!
 //! 2. **External sorting the index** via 512 hash-prefix bucket files
-//!    on disk (256 for `Hash` ids, 256 for `ChangeId` ids). Each
+//!    on disk (256 for `Hash` ids, 256 for `StateId` ids). Each
 //!    `add()` appends one fixed-shape `(id, offset)` record to the
 //!    bucket whose first byte matches the id's first inner byte. At
 //!    finalize, each bucket is small enough to sort in memory; the
-//!    concatenation of `Hash` buckets followed by `ChangeId` buckets
+//!    concatenation of `Hash` buckets followed by `StateId` buckets
 //!    in byte order produces the exact same global sort `PackBuilder`
 //!    would have via `entries.sort_by_key(|e| e.id)`.
 //!
@@ -86,7 +86,7 @@ use crate::{
 /// minor) so the concatenated bucket output matches what
 /// `PackIndex::sort()` would have produced.
 const BUCKETS_PER_VARIANT: usize = 256;
-/// 256 for Hash ids + 256 for ChangeId ids.
+/// 256 for Hash ids + 256 for StateId ids.
 const TOTAL_BUCKETS: usize = BUCKETS_PER_VARIANT * 2;
 /// Cap concurrently-open index-bucket files. macOS GUI-launched
 /// processes commonly inherit a 256-fd soft limit; imports also need
@@ -95,7 +95,7 @@ const MAX_OPEN_BUCKET_WRITERS: usize = 32;
 
 /// Variant indices into the `bucket_*` arrays. `Hash` ids fill the
 /// lower half (matches the variant order in `PackObjectId` which makes
-/// `Hash(_) < ChangeId(_)`).
+/// `Hash(_) < StateId(_)`).
 const HASH_VARIANT: usize = 0;
 const CHANGEID_VARIANT: usize = 1;
 
@@ -741,12 +741,12 @@ impl<W: Write + Read + Seek> Drop for StreamingPackBuilder<W> {
 }
 
 /// Map a `PackObjectId` to one of `TOTAL_BUCKETS` buckets. The variant
-/// (Hash vs ChangeId) picks the upper half; the first byte of the
+/// (Hash vs StateId) picks the upper half; the first byte of the
 /// inner id picks the slot within the half.
 fn bucket_index_for(id: &PackObjectId) -> usize {
     match id {
         PackObjectId::Hash(h) => HASH_VARIANT * BUCKETS_PER_VARIANT + h.as_bytes()[0] as usize,
-        PackObjectId::ChangeId(c) => {
+        PackObjectId::StateId(c) => {
             CHANGEID_VARIANT * BUCKETS_PER_VARIANT + c.as_bytes()[0] as usize
         }
     }
@@ -784,7 +784,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        object::ChangeId,
+        object::StateId,
         store::pack::{PackReader, PackStats},
     };
 
@@ -800,13 +800,13 @@ mod tests {
         ContentHash::from_bytes(bytes)
     }
 
-    fn deterministic_change_id(seed: u8) -> ChangeId {
-        let mut bytes = [0u8; 16];
+    fn deterministic_state_id(seed: u8) -> StateId {
+        let mut bytes = [0u8; 32];
         bytes[0] = seed;
         for (i, b) in bytes.iter_mut().enumerate().skip(1) {
             *b = seed.wrapping_add(i as u8 * 7);
         }
-        ChangeId::from_bytes(bytes)
+        StateId::from_bytes(bytes)
     }
 
     /// Test rig: returns the builder, the bucket dir (for cleanup
@@ -881,10 +881,10 @@ mod tests {
     fn single_state_with_change_id_round_trips() {
         let tmp = tempfile::TempDir::new().unwrap();
         let (mut b, _, idx_path) = fresh_builder(&tmp);
-        let cid = deterministic_change_id(0xa5);
+        let cid = deterministic_state_id(0xa5);
         let payload = b"serialized-state-bytes".to_vec();
         b.add_id(
-            PackObjectId::ChangeId(cid),
+            PackObjectId::StateId(cid),
             ObjectType::State,
             payload.clone(),
         )
@@ -893,7 +893,7 @@ mod tests {
 
         assert_eq!(stats.object_count, 1);
         let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
-        let id = PackObjectId::ChangeId(cid);
+        let id = PackObjectId::StateId(cid);
         let (ty, data) = reader.get_object(&id).unwrap().unwrap();
         assert_eq!(ty, ObjectType::State);
         assert_eq!(data, payload);
@@ -905,14 +905,14 @@ mod tests {
         let (mut b, _, idx_path) = fresh_builder(&tmp);
         let blob_hash = deterministic_hash(0x10);
         let tree_hash = deterministic_hash(0x20);
-        let state_cid = deterministic_change_id(0x80);
+        let state_cid = deterministic_state_id(0x80);
 
         b.add(blob_hash, ObjectType::Blob, b"blob-bytes".to_vec())
             .unwrap();
         b.add(tree_hash, ObjectType::Tree, b"serialized-tree".to_vec())
             .unwrap();
         b.add_id(
-            PackObjectId::ChangeId(state_cid),
+            PackObjectId::StateId(state_cid),
             ObjectType::State,
             b"serialized-state".to_vec(),
         )
@@ -939,7 +939,7 @@ mod tests {
         );
         assert_eq!(
             reader
-                .get_object(&PackObjectId::ChangeId(state_cid))
+                .get_object(&PackObjectId::StateId(state_cid))
                 .unwrap()
                 .unwrap()
                 .1,
@@ -995,10 +995,10 @@ mod tests {
         }
 
         for i in 0..BUCKETS_PER_VARIANT {
-            let cid = deterministic_change_id(i as u8);
-            ids.push(PackObjectId::ChangeId(cid));
+            let cid = deterministic_state_id(i as u8);
+            ids.push(PackObjectId::StateId(cid));
             b.add_id(
-                PackObjectId::ChangeId(cid),
+                PackObjectId::StateId(cid),
                 ObjectType::State,
                 format!("state-{i}").into_bytes(),
             )
@@ -1470,14 +1470,14 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let (mut b, _, idx_path) = fresh_builder(&tmp);
         let mut added: Vec<PackObjectId> = Vec::new();
-        // Mix of Hash and ChangeId in a non-sorted order on input.
+        // Mix of Hash and StateId in a non-sorted order on input.
         for seed in [0x05u8, 0xa0, 0x12, 0x9f, 0x33] {
             let id = PackObjectId::Hash(deterministic_hash(seed));
             b.add_id(id, ObjectType::Blob, vec![seed; 4]).unwrap();
             added.push(id);
         }
         for seed in [0x80u8, 0x10, 0xff] {
-            let id = PackObjectId::ChangeId(deterministic_change_id(seed));
+            let id = PackObjectId::StateId(deterministic_state_id(seed));
             b.add_id(id, ObjectType::State, vec![seed; 4]).unwrap();
             added.push(id);
         }

@@ -7,7 +7,7 @@
 //! module injects command-catalog coverage, builds refusal advice, and
 //! formats setup guidance for text/render paths.
 
-use std::{collections::BTreeSet, path::Path};
+use std::{collections::BTreeSet, path::Path, sync::OnceLock};
 
 // Re-exported for unit tests in operator/thread_shaping modules.
 #[cfg(test)]
@@ -15,7 +15,7 @@ pub(crate) use heddle_core::VerificationCheck;
 use heddle_core::status::next_action::{
     canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
     heddle_action as core_heddle_action, import_guidance_includes_active_branch,
-    remote_tracking_next_action, remote_tracking_status,
+    remote_tracking_next_action_for, remote_tracking_status,
 };
 pub(crate) use heddle_core::{
     ActionTemplate, MachineContractCoverage, MachineContractInput, PlainGitVerifyProbe,
@@ -169,7 +169,7 @@ pub(crate) fn build_repository_verification_state_with_worktree_status(
     )
 }
 
-/// Core-owned health proof (CLI may inspect recovery commands for diagnose text).
+/// Core-owned health proof (CLI may inspect recovery commands for doctor text).
 pub(crate) fn build_verification_health(repo: &Repository) -> RepositoryVerificationHealth {
     let worktree_status = worktree_status_for_verification(repo);
     heddle_core::status::build_repository_verification_health_with_worktree_status(
@@ -326,7 +326,7 @@ pub(crate) fn raw_git_operation_mutation_advice(
         ),
         "Git refs, Git sequencer files, Heddle refs, and worktree files were left unchanged",
         primary_command.clone(),
-        vec![primary_command, "heddle verify".to_string()],
+        vec![primary_command],
     )))
 }
 fn raw_git_operation_recovery_hint(
@@ -380,20 +380,20 @@ fn uncheckpointed_heddle_state_is_ahead_of_git(repo: &Repository) -> anyhow::Res
     let Some(tip) = current_branch_tip(repo)? else {
         return Ok(false);
     };
-    let Some(mapped) = tip.mapped_change else {
+    let Some(mapped) = tip.mapped_state else {
         return Ok(false);
     };
     let Some(current) = repo.current_state()? else {
         return Ok(false);
     };
-    if mapped == current.change_id {
+    if mapped == current.state_id {
         return Ok(false);
     }
-    if mapped_change_relation(repo, &mapped, &current.change_id) != "git_behind_heddle" {
+    if mapped_change_relation(repo, &mapped, &current.state_id) != "git_behind_heddle" {
         return Ok(false);
     }
     Ok(repo
-        .latest_git_checkpoint_for_change(&current.change_id)?
+        .latest_git_checkpoint_for_state(&current.state_id)?
         .is_none())
 }
 
@@ -406,8 +406,8 @@ fn current_branch_tip(repo: &Repository) -> anyhow::Result<Option<GitOverlayBran
 
 fn mapped_change_relation(
     repo: &Repository,
-    git_mapped: &objects::object::ChangeId,
-    heddle_current: &objects::object::ChangeId,
+    git_mapped: &objects::object::StateId,
+    heddle_current: &objects::object::StateId,
 ) -> &'static str {
     let mut graph = CommitGraphIndex::new(repo);
     let git_is_ancestor = graph
@@ -441,15 +441,6 @@ impl GitOverlayMutationPreflight {
     }
 
     pub(crate) fn checkpoint_like() -> Self {
-        Self {
-            check_detached_head: true,
-            check_unimported_git_history: true,
-            check_raw_git_operation: false,
-            check_verification: true,
-        }
-    }
-
-    pub(crate) fn commit_like() -> Self {
         Self {
             check_detached_head: true,
             check_unimported_git_history: true,
@@ -529,15 +520,6 @@ pub(crate) fn git_overlay_mutation_preflight_advice(
 ) -> anyhow::Result<Option<RecoveryAdvice>> {
     git_overlay_mutation_preflight_advice_inner(repo, action, preflight, None)
 }
-/// `checkpoint` hot-path variant of [`git_overlay_mutation_preflight_advice`]
-/// that reuses an already-computed git-overlay worktree status for the
-/// `checkpoint` hot-path variant of [`git_overlay_mutation_preflight_advice`]
-/// that reuses an already-computed git-overlay worktree status for the
-/// `check_verification` branch instead of re-walking the worktree. All other
-/// `checkpoint` hot-path variant of [`git_overlay_mutation_preflight_advice`]
-/// that reuses an already-computed git-overlay worktree status for the
-/// `check_verification` branch instead of re-walking the worktree. All other
-/// branches and the resulting advice are identical.
 /// `checkpoint` hot-path variant of [`git_overlay_mutation_preflight_advice`]
 /// that reuses an already-computed git-overlay worktree status for the
 /// `check_verification` branch instead of re-walking the worktree. All other
@@ -703,29 +685,48 @@ pub(crate) fn plain_git_mutation_advice(
 }
 pub(crate) fn detached_git_head_mutation_advice(repo: &Repository, action: &str) -> RecoveryAdvice {
     let primary_command = detached_head_primary_recovery(repo);
+    let needs_selection = primary_command == "heddle thread list";
+    let hint = if needs_selection {
+        format!(
+            "Inspect managed threads with `{primary_command}`, then attach this checkout with `heddle thread switch <thread>` before retrying `heddle {action}`. Heddle could not safely infer which thread owns the detached commit."
+        )
+    } else {
+        format!("Run `{primary_command}` before retrying `heddle {action}`.")
+    };
+    let recovery_commands = if needs_selection {
+        vec![
+            primary_command.clone(),
+            "heddle thread switch <thread>".to_string(),
+        ]
+    } else {
+        vec![primary_command.clone()]
+    };
     RecoveryAdvice::safety_refusal(
         "git_head_detached",
         format!("Refusing to {action}: Git HEAD is detached"),
-        format!("Run `{primary_command}` before retrying `heddle {action}`."),
+        hint,
         "Git HEAD points directly to a commit instead of an attached branch",
         format!(
             "{action} would need to write a Git checkpoint through a branch and could reattach or advance the wrong ref"
         ),
         "Git refs, Heddle refs, Git checkpoints, and worktree files were left unchanged",
-        primary_command.clone(),
-        vec![primary_command],
+        primary_command,
+        recovery_commands,
     )
 }
 fn detached_head_primary_recovery(repo: &Repository) -> String {
     match repo.refs().read_head() {
-        Ok(Head::Attached { thread }) if !thread.trim().is_empty() => {
+        Ok(Head::Attached { thread })
+            if !thread.trim().is_empty()
+                && repo.refs().get_thread(&thread).ok().flatten().is_some() =>
+        {
             // `switch` takes the thread as a positional; a leading-dash id needs
             // the `--` separator so clap binds it as a value, not a flag.
             // (heddle#464 close-the-class.)
             return if thread.starts_with('-') {
-                heddle_action(["switch", "--", thread.as_str()])
+                heddle_action(["thread", "switch", "--", thread.as_str()])
             } else {
-                heddle_action(["switch", thread.as_str()])
+                heddle_action(["thread", "switch", thread.as_str()])
             };
         }
         _ => {}
@@ -735,11 +736,19 @@ fn detached_head_primary_recovery(repo: &Repository) -> String {
         && let Some(tip) = branch_tips
             .iter()
             .filter(|tip| tip.history_imported)
-            .find(|tip| tip.git_commit == detached_commit)
+            .find(|tip| {
+                tip.git_commit == detached_commit
+                    && repo
+                        .refs()
+                        .get_thread(&ThreadName::new(&tip.branch))
+                        .ok()
+                        .flatten()
+                        .is_some()
+            })
     {
-        return heddle_action(["switch", tip.branch.as_str()]);
+        return heddle_action(["thread", "switch", tip.branch.as_str()]);
     }
-    "heddle switch <branch>".to_string()
+    "heddle thread list".to_string()
 }
 pub(crate) fn build_plain_git_verification_probe(
     start: &Path,
@@ -761,6 +770,13 @@ pub(crate) fn action_templates(commands: &[String]) -> Vec<ActionTemplate> {
         .collect()
 }
 pub(crate) fn machine_contract_coverage() -> MachineContractCoverage {
+    static COVERAGE: OnceLock<MachineContractCoverage> = OnceLock::new();
+    COVERAGE
+        .get_or_init(build_machine_contract_coverage)
+        .clone()
+}
+
+fn build_machine_contract_coverage() -> MachineContractCoverage {
     const EXAMPLE_LIMIT: usize = 8;
     let catalog = build_command_catalog();
     let commands = catalog.commands;
@@ -1020,7 +1036,7 @@ fn machine_contract_verified_scope(command: &super::command_catalog::CommandCata
     command.help_visibility == "everyday"
         || matches!(
             command.path.first().map(String::as_str),
-            Some("actor" | "agent" | "commands" | "schemas" | "session")
+            Some("agent" | "schemas")
         )
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1047,23 +1063,24 @@ pub(crate) fn remote_drift_decision(
         "remote_untracked" => RemoteDriftDecision {
             status,
             verified_as_clean: true,
-            primary_action: remote_tracking_next_action(remote),
+            primary_action: remote_tracking_next_action_for(remote, repo.source_authority()),
             recovery_commands: Vec::new(),
             requires_clean_worktree: false,
         },
         "remote_ahead" => RemoteDriftDecision {
             status,
             verified_as_clean: true,
-            primary_action: Some("heddle push".to_string()),
+            primary_action: remote_tracking_next_action_for(remote, repo.source_authority()),
             recovery_commands: Vec::new(),
             requires_clean_worktree: false,
         },
         "remote_contains_undone_checkpoint" => RemoteDriftDecision {
             status,
             verified_as_clean: false,
-            primary_action: remote_tracking_next_action(remote),
+            primary_action: remote_tracking_next_action_for(remote, repo.source_authority()),
             recovery_commands: vec![
-                core_heddle_action(["push", "--force"]),
+                remote_tracking_next_action_for(remote, repo.source_authority())
+                    .expect("undone checkpoint has a source recovery action"),
                 core_heddle_action(["undo", "--redo"]),
             ],
             requires_clean_worktree: true,
@@ -1071,8 +1088,10 @@ pub(crate) fn remote_drift_decision(
         "remote_behind" => RemoteDriftDecision {
             status,
             verified_as_clean: false,
-            primary_action: Some("heddle pull".to_string()),
-            recovery_commands: vec!["heddle pull".to_string()],
+            primary_action: remote_tracking_next_action_for(remote, repo.source_authority()),
+            recovery_commands: remote_tracking_next_action_for(remote, repo.source_authority())
+                .into_iter()
+                .collect(),
             requires_clean_worktree: true,
         },
         "remote_diverged" => {
@@ -1081,8 +1100,11 @@ pub(crate) fn remote_drift_decision(
                 return RemoteDriftDecision {
                     status,
                     verified_as_clean: false,
-                    primary_action: Some("heddle fetch".to_string()),
-                    recovery_commands: vec!["heddle fetch".to_string()],
+                    primary_action: Some("heddle remote list".to_string()),
+                    recovery_commands: vec![
+                        "heddle remote list".to_string(),
+                        "heddle pull <remote> --thread <thread>".to_string(),
+                    ],
                     requires_clean_worktree: false,
                 };
             }
@@ -1123,13 +1145,13 @@ fn upstream_thread_matches_current_git_tip(repo: &Repository, upstream: &str) ->
     else {
         return false;
     };
-    repo.git_overlay_mapped_change_for_branch(upstream)
+    repo.git_overlay_mapped_state_for_branch(upstream)
         .or(Ok(None))
         .and_then(|mapped| {
             if mapped.is_some() {
                 Ok(mapped)
             } else {
-                repo.git_overlay_mapped_change_for_remote_tracking_ref(upstream)
+                repo.git_overlay_mapped_state_for_remote_tracking_ref(upstream)
             }
         })
         .ok()

@@ -40,7 +40,7 @@ impl Repository {
                 signal.recent_changes += 1;
                 signal
                     .distinct_states
-                    .insert(candidate.change_id.to_string_full());
+                    .insert(candidate.id().to_string_full());
                 if let Some(agent) = &candidate.attribution.agent {
                     signal
                         .distinct_agents
@@ -55,8 +55,8 @@ impl Repository {
         }
 
         let stale_map = staleness::check_context_staleness(self, state)?;
-        let active_context = match &state.context {
-            Some(root) => self.list_context_entries(root, None)?,
+        let active_context = match self.inherit_parent_context(state)? {
+            Some(root) => self.list_context_entries(&root, None)?,
             None => Vec::new(),
         };
 
@@ -84,7 +84,7 @@ impl Repository {
         state: &State,
         limit: usize,
     ) -> Result<Vec<State>, anyhow::Error> {
-        let query = HistoryQuery::new(Some(state.change_id)).with_limit(limit);
+        let query = HistoryQuery::new(Some(state.id())).with_limit(limit);
         Ok(self.query_history(&query)?)
     }
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Public types for ref operations.
 
-use objects::object::{ChangeId, MarkerName, ThreadName};
+use objects::object::{MarkerName, StateId, ThreadName};
 
 use super::Head;
 
@@ -16,13 +16,13 @@ pub enum RefExpectation<T> {
 pub enum RefUpdate {
     Thread {
         name: ThreadName,
-        expected: RefExpectation<ChangeId>,
-        new: Option<ChangeId>,
+        expected: RefExpectation<StateId>,
+        new: Option<StateId>,
     },
     Marker {
         name: MarkerName,
-        expected: RefExpectation<ChangeId>,
-        new: Option<ChangeId>,
+        expected: RefExpectation<StateId>,
+        new: Option<StateId>,
     },
     Head {
         expected: RefExpectation<Head>,

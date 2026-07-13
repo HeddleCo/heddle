@@ -7,7 +7,7 @@ use std::{collections::HashMap, hint::black_box, sync::RwLock};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use objects::{
-    object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree, TreeEntry, diff_trees},
+    object::{Action, ActionId, Blob, ContentHash, State, StateId, Tree, TreeEntry, diff_trees},
     store::{ObjectStore, Result},
     sync::RwLockExt,
 };
@@ -66,7 +66,7 @@ impl ObjectStore for BenchStore {
         Ok(self.trees.read_or_poisoned().contains_key(hash))
     }
 
-    fn get_state(&self, _id: &ChangeId) -> Result<Option<State>> {
+    fn get_state(&self, _id: &StateId) -> Result<Option<State>> {
         Ok(None)
     }
 
@@ -74,11 +74,11 @@ impl ObjectStore for BenchStore {
         Ok(())
     }
 
-    fn has_state(&self, _id: &ChangeId) -> Result<bool> {
+    fn has_state(&self, _id: &StateId) -> Result<bool> {
         Ok(false)
     }
 
-    fn list_states(&self) -> Result<Vec<ChangeId>> {
+    fn list_states(&self) -> Result<Vec<StateId>> {
         Ok(Vec::new())
     }
 

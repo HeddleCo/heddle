@@ -88,7 +88,7 @@ pub fn run(
                     reason: REASON_TEXT.to_string(),
                     producer: ProducerId::new(MODULE_ID, VERSION),
                     computed_at,
-                    computed_against: Some(new.change_id),
+                    computed_against: Some(new.state_id),
                 });
             }
         }

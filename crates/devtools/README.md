@@ -10,8 +10,11 @@ Workspace-internal tooling. Not published to crates.io.
   the checked-in output; used as a CI gate. Without it, writes to
   `clients/grpc/src/gen/` and syncs `clients/grpc/package.json` to the
   `heddle-grpc` crate version.
-- `heddle-devtools audit-idempotency` — fail if any state-changing
-  RPC's request message is missing `string client_operation_id = 15`.
+- `heddle-devtools audit-grpc-contract` — compile the canonical descriptor and
+  verify every RPC's explicit effect and deduplication options. Retry-safe RPCs
+  must reach exactly one singular string `client_operation_id` field marked as
+  the idempotency key; durable writes without deduplication are reported as
+  known limitations.
 - `heddle-devtools audit-coverage <lcov> --gate <crate>=<pct> ...` —
   parse `lcov.info` and fail if any gated crate falls below its
   per-crate line-coverage threshold.
@@ -27,20 +30,23 @@ There is **exactly one** copy of `service.proto` in this workspace:
 crates/grpc/proto/heddle/v1/service.proto
 ```
 
-Every consumer reads from that path:
+The entrypoint directly imports every schema file. Consumers derive their
+inventory from either that complete import closure or the canonical directory:
 
-- `crates/grpc/build.rs` — tonic-prost codegen for the Rust server
-  and client.
-- `crates/devtools/src/main.rs::run_grpc_ts` — TypeScript protobuf
-  and Connect client package (consumed by tapestry).
-- `crates/devtools/src/main.rs::run_audit_idempotency` — proto-side
-  idempotency lint.
-- `crates/cli/tests/idempotency_lint.rs` — server-side dedup lint.
+- `crates/grpc/build.rs` — discovers the full canonical tree for tonic-prost
+  server and client codegen.
+- `crates/devtools/src/main.rs::run_grpc_ts` — discovers that same tree for the
+  TypeScript protobuf/Connect package and derives its root exports.
+- `crates/devtools/src/audit_grpc_contract.rs` — descriptor-driven RPC effect,
+  deduplication, and idempotency-key audit from the complete entrypoint.
+
+Hosted handler coverage belongs in Weft, where the implementations and service
+registration live. Heddle intentionally does not source-scan that sibling repo.
 
 This file lives inside `crates/grpc/` so the crate's published tarball
 contains everything `cargo build` needs from a fresh download. Do not
 re-introduce mirror copies under `proto/` or elsewhere; the historical
 mirrors drifted (missing `RedactionTransfer` before heddle#63 r1)
 because nothing audited the duplication. The regression test
-`heddle-devtools::tests_proto_single_source::only_canonical_proto_exists`
-pins the contract.
+`heddle-devtools::tests_proto_single_source` pins the single tree, complete
+entrypoint, and TypeScript export inventory.

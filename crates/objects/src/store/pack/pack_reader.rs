@@ -102,7 +102,7 @@ impl<'a> PackReader<'a> {
             .into_iter()
             .filter_map(|id| match id {
                 PackObjectId::Hash(hash) => Some(hash),
-                PackObjectId::ChangeId(_) => None,
+                PackObjectId::StateId(_) => None,
             })
             .collect()
     }
@@ -349,7 +349,7 @@ impl<'a> PackReader<'a> {
     fn require_delta_base_hash(base_id: Option<PackObjectId>) -> Result<ContentHash> {
         match base_id {
             Some(PackObjectId::Hash(hash)) => Ok(hash),
-            Some(PackObjectId::ChangeId(_)) => Err(StoreError::InvalidObject(
+            Some(PackObjectId::StateId(_)) => Err(StoreError::InvalidObject(
                 "pack delta base must be hash-backed content".into(),
             )),
             None => Err(StoreError::InvalidObject(

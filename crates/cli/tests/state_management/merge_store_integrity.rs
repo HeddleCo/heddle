@@ -5,12 +5,11 @@
 //! from an empty one and the merger happily produced a "clean" merge
 //! that erased every file under the subtree.
 //!
-//! These tests drive the real `heddle merge` binary against a real
-//! on-disk store. The first one introduces targeted corruption (deletes
-//! a single subtree object) and asserts the merge fails loud rather
-//! than committing data loss. The second one exercises a legitimate
-//! "tree doesn't exist at this path" case (a directory rename) and
-//! asserts the new error path doesn't false-positive.
+//! These tests drive the public thread refresh/land workflow against a
+//! real on-disk store. The first introduces targeted corruption and
+//! asserts refresh fails loud rather than committing data loss. The
+//! second exercises a legitimate directory rename and ensures the same
+//! integration path does not false-positive.
 use std::{fs, path::Path};
 
 use objects::{object::ThreadName, store::ObjectStore};
@@ -97,12 +96,12 @@ fn test_merge_missing_base_subtree_fails_loud_not_silent_erase() {
             .unwrap();
         let feature_state = repo.store().get_state(&feature_tip).unwrap().unwrap();
         // Both tips have a single parent — the base capture.
-        let base_change_id = main_state.parents[0];
+        let base_state_id = main_state.parents[0];
         assert_eq!(
-            base_change_id, feature_state.parents[0],
+            base_state_id, feature_state.parents[0],
             "test setup: main and feature must share a single merge base",
         );
-        let base_state = repo.store().get_state(&base_change_id).unwrap().unwrap();
+        let base_state = repo.store().get_state(&base_state_id).unwrap().unwrap();
         let base_tree = repo.store().get_tree(&base_state.tree).unwrap().unwrap();
         let sub_entry = base_tree
             .entries()
@@ -128,39 +127,40 @@ fn test_merge_missing_base_subtree_fails_loud_not_silent_erase() {
         "test setup: expected to find loose tree at hash {sub_hash_hex} to delete",
     );
 
-    // The merge MUST fail. Pre-fix it succeeded and `sub/a.txt`
-    // vanished from the merged tree without conflict markers.
-    let result = heddle(&["--output", "json", "merge", "feature"], Some(temp.path()));
+    // Refresh is the current public operation that integrates the parent
+    // into a thread. It MUST fail rather than silently erasing the subtree.
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+    let result = heddle(
+        &["--output", "json", "thread", "refresh", "feature"],
+        Some(temp.path()),
+    );
     let err = result.expect_err(
-        "merge against a corrupt subtree must fail loud; \
+        "thread refresh against a corrupt subtree must fail loud; \
          a clean Ok here means the silent-corruption bug regressed",
     );
     assert!(
         err.contains("missing from the object store"),
-        "merge error must surface the missing-subtree diagnostic so the \
+        "refresh error must surface the missing-subtree diagnostic so the \
          operator can tell store corruption from a normal merge conflict; \
          got: {err}"
     );
     assert!(
         err.contains(&sub_hash_hex),
-        "merge error must include the missing subtree's hash so the \
+        "refresh error must include the missing subtree's hash so the \
          operator can correlate with `heddle fsck` output; got: {err}"
     );
     assert!(
         err.contains("heddle fsck"),
-        "merge error must point at the recovery command so the operator \
+        "refresh error must point at the recovery command so the operator \
          has a next step instead of just a stack trace; got: {err}"
     );
 
-    // Belt-and-suspenders: the merge must not have produced a partial
-    // result on disk that overwrites `sub/a.txt` with the silent-
-    // -default content. The worktree file should still hold main's
-    // pre-merge content.
+    // The failed refresh must leave the feature checkout untouched.
     let on_disk = fs::read_to_string(temp.path().join("sub/a.txt")).unwrap();
     assert_eq!(
-        on_disk, "main content\n",
-        "failed merge must not partially apply: sub/a.txt should still hold \
-         main's pre-merge content, got: {on_disk:?}"
+        on_disk, "feature content\n",
+        "failed refresh must not partially apply: sub/a.txt should still hold \
+         feature's pre-refresh content, got: {on_disk:?}"
     );
 }
 
@@ -213,19 +213,18 @@ fn test_merge_with_directory_rename_succeeds_no_false_positive() {
     fs::write(temp.path().join("keep.txt"), "keep edited\n").unwrap();
     heddle(&["capture", "-m", "main edits keep"], Some(temp.path())).unwrap();
 
-    // Direct merge now refuses stale threads before doing semantic
-    // planning. Refresh first so this test keeps exercising the store
-    // integrity path, not the freshness gate.
+    // Refresh exercises the semantic integration path; land then adopts the
+    // verified current thread into main.
     heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
     heddle(&["thread", "refresh", "feature"], Some(temp.path())).unwrap();
     heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
 
-    // The merge MUST succeed; the directory rename is a legitimate
+    // The land MUST succeed; the directory rename is a legitimate
     // "this subtree path doesn't exist on the other side" scenario,
     // and the require_subtree fix must not over-trigger here.
-    let result = heddle(&["merge", "feature"], Some(temp.path()));
+    let result = heddle(&["land", "--thread", "feature"], Some(temp.path()));
     result.expect(
-        "merge across a clean directory rename must succeed; \
+        "land across a clean directory rename must succeed; \
          a require_subtree failure here is a false-positive regression",
     );
 

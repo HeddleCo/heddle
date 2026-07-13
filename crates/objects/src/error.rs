@@ -3,7 +3,7 @@
 
 use std::{error::Error, fmt, path::Path};
 
-use crate::object::{ChangeId, ContentHash, TreeError};
+use crate::object::{ContentHash, StateId, TreeError};
 
 /// Structured recovery details that can cross the embeddable facade boundary.
 #[derive(Debug, Clone, PartialEq)]
@@ -146,7 +146,7 @@ pub enum HeddleError {
     #[error("No merge in progress")]
     NoMergeInProgress,
     #[error("state not found: {0}")]
-    StateNotFound(ChangeId),
+    StateNotFound(StateId),
     #[error("invalid object: {0}")]
     InvalidObject(String),
     #[error("repository not found at {0}")]
@@ -161,8 +161,34 @@ pub enum HeddleError {
         found: u32,
         supported: u32,
     },
+    #[error(
+        "repository at {path} predates format v{required} (found v{found}); recreate it or re-adopt its Git history with this Heddle version"
+    )]
+    RepositoryFormatMigrationRequired {
+        path: std::path::PathBuf,
+        found: u32,
+        required: u32,
+    },
+    #[error(
+        "{storage} uses format {found}, but this binary supports {supported}; upgrade Heddle before opening it"
+    )]
+    StorageFormatTooNew {
+        storage: String,
+        found: u32,
+        supported: u32,
+    },
+    #[error(
+        "{storage} predates required format {required} (found {found}); recreate the repository or re-adopt its Git history with this Heddle version"
+    )]
+    StorageFormatMigrationRequired {
+        storage: String,
+        found: u32,
+        required: u32,
+    },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("repository lock unavailable: {0}")]
+    Lock(#[from] crate::lock::LockError),
     #[error("serialization error: {0}")]
     Serialization(String),
     #[error("configuration error: {0}")]

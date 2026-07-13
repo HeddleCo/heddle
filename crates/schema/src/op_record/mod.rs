@@ -5,7 +5,7 @@ mod codec;
 mod types;
 
 pub use codec::{
-    LATEST_RECORD_SCHEMA_VERSION, OpRecordSchemaVersion, candidate_versions_newest_first,
-    decode_versioned_record, encode_latest_record, schema_version_from_u32, tests_support,
+    CURRENT_OP_RECORD_SCHEMA_VERSION, decode_current_record, encode_current_record,
+    validate_op_record_schema_version,
 };
 pub use types::*;

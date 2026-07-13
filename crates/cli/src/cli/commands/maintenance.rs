@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::Result;
-use heddle_core::maintenance_plan::{MaintenanceInspectView, MaintenanceRunView};
+use heddle_core::maintenance_plan::{MaintenanceInspectView, MaintenanceRefreshView};
+use serde::Serialize;
 
 use crate::cli::{
-    Cli, MaintenanceCommands,
-    commands::{cmd_gc, cmd_index, cmd_monitor},
-    should_output_json, worktree_status_options,
+    Cli, MaintenanceCommands, commands::cmd_gc, should_output_json, worktree_status_options,
 };
+
+#[derive(Serialize)]
+struct MaintenanceOutput<'a, T> {
+    output_kind: &'static str,
+    #[serde(flatten)]
+    report: &'a T,
+}
 
 pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
     let repo = cli.open_repo()?;
@@ -16,7 +22,13 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
         MaintenanceCommands::Inspect => {
             let report = repo.inspect_performance_with_options(&options)?;
             if should_output_json(cli, Some(repo.config())) {
-                println!("{}", serde_json::to_string(&report)?);
+                println!(
+                    "{}",
+                    serde_json::to_string(&MaintenanceOutput {
+                        output_kind: "maintenance_inspect",
+                        report: &report,
+                    })?
+                );
             } else {
                 let view = MaintenanceInspectView {
                     commit_graph_present: report.commit_graph.present,
@@ -54,12 +66,18 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
                 }
             }
         }
-        MaintenanceCommands::Run => {
+        MaintenanceCommands::Refresh => {
             let run = repo.run_maintenance_with_options(&options)?;
             if should_output_json(cli, Some(repo.config())) {
-                println!("{}", serde_json::to_string(&run)?);
+                println!(
+                    "{}",
+                    serde_json::to_string(&MaintenanceOutput {
+                        output_kind: "maintenance_refresh",
+                        report: &run,
+                    })?
+                );
             } else {
-                let view = MaintenanceRunView {
+                let view = MaintenanceRefreshView {
                     rebuilt_commit_graph: run.rebuilt_commit_graph,
                     rebuilt_ref_summary_index: run.rebuilt_ref_summary_index,
                     rebuilt_worktree_index: run.rebuilt_worktree_index,
@@ -93,12 +111,6 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
             dry_run,
         } => {
             return cmd_gc(cli, prune, aggressive, dry_run);
-        }
-        MaintenanceCommands::Index { dump } => {
-            return cmd_index(cli, dump);
-        }
-        MaintenanceCommands::Monitor { paths, serve } => {
-            return cmd_monitor(cli, paths, serve);
         }
     }
 

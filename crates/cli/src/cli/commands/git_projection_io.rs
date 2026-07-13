@@ -10,11 +10,16 @@ use anyhow::{Result, anyhow};
 use heddle_core::git_projection_io_plan::{
     ExportedRefSummaryFact, export_commits_summary, exported_refs_summary,
 };
+use heddle_git_projection::{
+    GitProjection, git_core::clone_url_to_bare, git_export::export_all,
+    git_ingest::import_git_history, git_util::ExportedRef,
+};
 use ingest::{ImportOptions, LossyImportEntry};
-use objects::object::{ChangeId, ThreadName};
+use objects::object::{StateId, ThreadName};
 use refs::Head;
 use repo::Repository;
 use serde::Serialize;
+use sley::remote::SilentProgress;
 
 use super::{
     action_line::print_next,
@@ -26,13 +31,7 @@ use super::{
         serialize_empty_action_as_null,
     },
 };
-use crate::{
-    cli::{Cli, cli_args::GitSource, should_output_json, style},
-    git_projection_engine::{
-        GitProjection, git_core::clone_url_to_bare, git_export::export_all,
-        git_ingest::import_git_history, git_util::ExportedRef,
-    },
-};
+use crate::cli::{Cli, cli_args::GitSource, should_output_json, style};
 
 /// A `GitSource` resolved to an on-disk path. For URL sources we own a
 /// scratch directory whose `Drop` cleans up the cloned bare repo after
@@ -94,7 +93,8 @@ fn resolve_source(repo: &Repository, source: GitSource) -> Result<ResolvedSource
             // repo it was for, not buried under the OS temp root.
             let tmp_root = repo.heddle_dir().join("tmp");
             let scratch = ScratchDir::new_in(&tmp_root, "import-")?;
-            clone_url_to_bare(&url, &scratch.path, None, None)?;
+            let mut progress = SilentProgress;
+            clone_url_to_bare(&url, &scratch.path, None, None, &mut progress)?;
             Ok(ResolvedSource {
                 path: scratch.path.clone(),
                 _temp: Some(scratch),
@@ -633,7 +633,7 @@ pub fn cmd_context_reason_git(
 
 fn materialize_imported_attached_thread(
     bridge: &mut GitProjection<'_>,
-    attached_before: Option<&(ThreadName, ChangeId)>,
+    attached_before: Option<&(ThreadName, StateId)>,
 ) -> Result<()> {
     let Some((thread, old_state)) = attached_before else {
         return Ok(());

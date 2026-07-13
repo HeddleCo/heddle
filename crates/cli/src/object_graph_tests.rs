@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::fs;
 
-use objects::object::ChangeId;
+use objects::object::StateId;
 use repo::Repository;
 use tempfile::TempDir;
 use wire::{ObjectId, StateClosureOptions, enumerate_state_closure_with_options};
 
-fn create_repo_with_two_states() -> (TempDir, Repository, ChangeId, ChangeId) {
+fn create_repo_with_two_states() -> (TempDir, Repository, StateId, StateId) {
     let temp_dir = TempDir::new().expect("temp dir");
     let repo = Repository::init_default(temp_dir.path()).expect("init repo");
 
@@ -20,7 +20,7 @@ fn create_repo_with_two_states() -> (TempDir, Repository, ChangeId, ChangeId) {
         .snapshot(Some("two".to_string()), None)
         .expect("snapshot two");
 
-    (temp_dir, repo, state1.change_id, state2.change_id)
+    (temp_dir, repo, state1.state_id, state2.state_id)
 }
 
 #[test]
@@ -37,7 +37,7 @@ fn test_enumerate_with_depth() {
     let states: Vec<_> = objects
         .iter()
         .filter_map(|obj| match obj.id {
-            ObjectId::ChangeId(id) => Some(id),
+            ObjectId::StateId(id) => Some(id),
             _ => None,
         })
         .collect();
@@ -60,7 +60,7 @@ fn test_enumerate_with_excludes() {
     let states: Vec<_> = objects
         .iter()
         .filter_map(|obj| match obj.id {
-            ObjectId::ChangeId(id) => Some(id),
+            ObjectId::StateId(id) => Some(id),
             _ => None,
         })
         .collect();

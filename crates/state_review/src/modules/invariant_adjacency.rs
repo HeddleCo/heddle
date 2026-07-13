@@ -26,7 +26,7 @@ pub fn run(
     if !cfg.invariant_adjacency.enabled {
         return Vec::new();
     }
-    // Annotations live in `state.context`'s blob. The caller materialises
+    // Annotations live in the state's context attachment. The caller materialises
     // them into the SemanticContext when available; we don't want this
     // module to do I/O. For the first ship, return empty when the
     // SemanticContext doesn't carry decoded annotations — the wrapper
@@ -56,7 +56,7 @@ pub fn run(
             reason: truncate_reason(&reason),
             producer: ProducerId::new(MODULE_ID, VERSION),
             computed_at,
-            computed_against: Some(new.change_id),
+            computed_against: Some(new.state_id),
         });
     }
     out
@@ -163,7 +163,7 @@ mod tests {
                     reason: truncate_reason(&reason),
                     producer: ProducerId::new(MODULE_ID, VERSION),
                     computed_at,
-                    computed_against: Some(new.change_id),
+                    computed_against: Some(new.state_id),
                 }
             })
             .collect()

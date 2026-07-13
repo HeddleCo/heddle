@@ -20,7 +20,7 @@
 //! Thread block:  thread_count records, each:
 //!                  name_len  u16
 //!                  name      [u8; name_len]   (UTF-8, no `refs/threads/` prefix)
-//!                  id        [u8; 16]         (ChangeId raw bytes)
+//!                  id        [u8; 32]         (StateId raw bytes)
 //!                Records appear in ascending name order.
 //!
 //! Marker index:  [u32; marker_count] — same shape, into the marker block.
@@ -35,7 +35,7 @@
 //! deliverable is a ship-or-defer decision (see `docs/design/reftable-spike.md`),
 //! not a production backend.
 
-use objects::object::ChangeId;
+use objects::object::StateId;
 
 /// Magic bytes at the start (and end) of a serialized reftable.
 pub const MAGIC: &[u8; 8] = b"REFT01\0\0";
@@ -46,7 +46,7 @@ pub const HEADER_LEN: usize = 16;
 /// On-disk footer size in bytes: 8 magic.
 pub const FOOTER_LEN: usize = 8;
 
-const ID_LEN: usize = 16;
+const ID_LEN: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReftableError {
@@ -60,13 +60,13 @@ pub enum ReftableError {
 
 /// Sorted, binary-format model of repository refs (threads + markers).
 ///
-/// In-memory the records are held as sorted `Vec`s of `(name, ChangeId)` so
+/// In-memory the records are held as sorted `Vec`s of `(name, StateId)` so
 /// mutation stays simple. On disk they serialize to the layout documented at
 /// the module level.
 #[derive(Debug)]
 pub struct ReftableModel {
-    threads: Vec<(String, ChangeId)>,
-    markers: Vec<(String, ChangeId)>,
+    threads: Vec<(String, StateId)>,
+    markers: Vec<(String, StateId)>,
 }
 
 impl ReftableModel {
@@ -89,27 +89,27 @@ impl ReftableModel {
         self.markers.len()
     }
 
-    pub fn set_thread(&mut self, name: &str, id: ChangeId) {
+    pub fn set_thread(&mut self, name: &str, id: StateId) {
         upsert_sorted(&mut self.threads, name, id);
     }
 
-    pub fn set_marker(&mut self, name: &str, id: ChangeId) {
+    pub fn set_marker(&mut self, name: &str, id: StateId) {
         upsert_sorted(&mut self.markers, name, id);
     }
 
-    pub fn remove_thread(&mut self, name: &str) -> Option<ChangeId> {
+    pub fn remove_thread(&mut self, name: &str) -> Option<StateId> {
         remove_sorted(&mut self.threads, name)
     }
 
-    pub fn remove_marker(&mut self, name: &str) -> Option<ChangeId> {
+    pub fn remove_marker(&mut self, name: &str) -> Option<StateId> {
         remove_sorted(&mut self.markers, name)
     }
 
-    pub fn get_thread(&self, name: &str) -> Option<ChangeId> {
+    pub fn get_thread(&self, name: &str) -> Option<StateId> {
         find_sorted(&self.threads, name)
     }
 
-    pub fn get_marker(&self, name: &str) -> Option<ChangeId> {
+    pub fn get_marker(&self, name: &str) -> Option<StateId> {
         find_sorted(&self.markers, name)
     }
 
@@ -187,7 +187,7 @@ impl ReftableModel {
     pub fn lookup_thread_in_bytes(
         bytes: &[u8],
         name: &str,
-    ) -> Result<Option<ChangeId>, ReftableError> {
+    ) -> Result<Option<StateId>, ReftableError> {
         let (thread_count, _marker_count) = parse_header(bytes)?;
         binary_search_block(bytes, HEADER_LEN, thread_count, name)
     }
@@ -196,7 +196,7 @@ impl ReftableModel {
     pub fn lookup_marker_in_bytes(
         bytes: &[u8],
         name: &str,
-    ) -> Result<Option<ChangeId>, ReftableError> {
+    ) -> Result<Option<StateId>, ReftableError> {
         let (thread_count, marker_count) = parse_header(bytes)?;
         let thread_index_start = HEADER_LEN;
         let thread_block_start = thread_index_start + thread_count * 4;
@@ -220,21 +220,21 @@ impl Default for ReftableModel {
 
 // -- record helpers ---------------------------------------------------------
 
-fn upsert_sorted(records: &mut Vec<(String, ChangeId)>, name: &str, id: ChangeId) {
+fn upsert_sorted(records: &mut Vec<(String, StateId)>, name: &str, id: StateId) {
     match records.binary_search_by(|(n, _)| n.as_str().cmp(name)) {
         Ok(idx) => records[idx].1 = id,
         Err(idx) => records.insert(idx, (name.to_string(), id)),
     }
 }
 
-fn remove_sorted(records: &mut Vec<(String, ChangeId)>, name: &str) -> Option<ChangeId> {
+fn remove_sorted(records: &mut Vec<(String, StateId)>, name: &str) -> Option<StateId> {
     match records.binary_search_by(|(n, _)| n.as_str().cmp(name)) {
         Ok(idx) => Some(records.remove(idx).1),
         Err(_) => None,
     }
 }
 
-fn find_sorted(records: &[(String, ChangeId)], name: &str) -> Option<ChangeId> {
+fn find_sorted(records: &[(String, StateId)], name: &str) -> Option<StateId> {
     records
         .binary_search_by(|(n, _)| n.as_str().cmp(name))
         .ok()
@@ -245,11 +245,11 @@ fn record_byte_len(name: &str) -> usize {
     2 + name.len() + ID_LEN
 }
 
-fn block_byte_len(records: &[(String, ChangeId)]) -> usize {
+fn block_byte_len(records: &[(String, StateId)]) -> usize {
     records.iter().map(|(n, _)| record_byte_len(n)).sum()
 }
 
-fn encode_block(records: &[(String, ChangeId)], block_start: usize) -> (Vec<u32>, Vec<u8>) {
+fn encode_block(records: &[(String, StateId)], block_start: usize) -> (Vec<u32>, Vec<u8>) {
     let mut offsets = Vec::with_capacity(records.len());
     let mut bytes = Vec::with_capacity(block_byte_len(records));
     for (name, id) in records {
@@ -274,7 +274,7 @@ fn parse_header(bytes: &[u8]) -> Result<(usize, usize), ReftableError> {
     Ok((thread_count, marker_count))
 }
 
-fn read_record(bytes: &[u8], offset: usize) -> Result<(String, ChangeId, usize), ReftableError> {
+fn read_record(bytes: &[u8], offset: usize) -> Result<(String, StateId, usize), ReftableError> {
     if bytes.len() < offset + 2 {
         return Err(ReftableError::Truncated(offset));
     }
@@ -290,14 +290,14 @@ fn read_record(bytes: &[u8], offset: usize) -> Result<(String, ChangeId, usize),
         .to_string();
     let mut id_bytes = [0u8; ID_LEN];
     id_bytes.copy_from_slice(&bytes[name_end..id_end]);
-    Ok((name, ChangeId::from_bytes(id_bytes), id_end))
+    Ok((name, StateId::from_bytes(id_bytes), id_end))
 }
 
 fn decode_block(
     bytes: &[u8],
     block_start: usize,
     count: usize,
-) -> Result<(Vec<(String, ChangeId)>, usize), ReftableError> {
+) -> Result<(Vec<(String, StateId)>, usize), ReftableError> {
     let mut out = Vec::with_capacity(count);
     let mut cursor = block_start;
     for _ in 0..count {
@@ -335,7 +335,7 @@ fn binary_search_block(
     index_start: usize,
     count: usize,
     name: &str,
-) -> Result<Option<ChangeId>, ReftableError> {
+) -> Result<Option<StateId>, ReftableError> {
     if count == 0 {
         return Ok(None);
     }

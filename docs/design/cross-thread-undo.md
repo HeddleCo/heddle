@@ -162,7 +162,7 @@ inverse. Filing them keeps 0.3 surgical.
   exists today (audit: `crates/daemon/src/` reads refs on every RPC). When
   one lands, undo must broadcast invalidation. Until then this is a
   documented assumption, not a TODO.
-- **Remote-affecting undo.** `heddle push`/`pull`/`fetch` cannot be rolled
+- **Remote-affecting undo.** `heddle push`/`pull` cannot be rolled
   back unilaterally. Documented in `docs/undo.md` already; no in-scope work.
 - **Worktree teardown command.** Today there's no `heddle thread drop
   --with-worktree` that atomically removes a thread and its materialized
@@ -323,11 +323,11 @@ Today's call sites that emit `FastForward` (via the shared
 
 | Site | Command | `source_thread` value | Notes |
 |---|---|---|---|
-| `commands/merge/mod.rs` | `heddle merge` (FF path) | merge `track_name` | heddle#99 |
-| `commands/rebase/mod.rs` (is_ancestor) | `heddle rebase` (pure FF) | rebase target thread | heddle#110; wrapped in a single-FF rebase batch via `flush_rebase_batch` (heddle#198) so listing is uniform |
-| `commands/rebase/mod.rs` (empty-replay) | `heddle rebase` (no commits to replay) | rebase target thread | heddle#110; same `flush_rebase_batch` envelope as the is_ancestor arm |
-| `commands/rebase/rebase_ops.rs:apply_commit` | `heddle rebase` (replay step) | `"<rebase>"` synthetic | heddle#110; one op per replayed commit, **buffered in `RebaseState.pending_advances` and flushed as one batch on completion** (heddle#198) so `heddle undo` rewinds the whole rebase atomically |
-| `commands/rebase/rebase_ops.rs:apply_tree_to_worktree` | `heddle rebase` (parentless replay) | `"<rebase>"` synthetic | heddle#110; rare parentless-commit replay; same buffering as `apply_commit` |
+| `commands/merge/mod.rs` | `heddle land` (FF path) | source thread | heddle#99 |
+| `commands/rebase/mod.rs` (is_ancestor) | `heddle sync` (pure FF) | sync target thread | heddle#110; wrapped in one replay batch via `flush_rebase_batch` (heddle#198) |
+| `commands/rebase/mod.rs` (empty-replay) | `heddle sync` (no commits to replay) | sync target thread | heddle#110; same batch envelope as the is_ancestor arm |
+| `commands/rebase/rebase_ops.rs:apply_commit` | `heddle sync` (replay step) | `"<rebase>"` synthetic | heddle#110; replayed commits are buffered and flushed as one batch so `heddle undo` rewinds the whole sync atomically |
+| `commands/rebase/rebase_ops.rs:apply_tree_to_worktree` | `heddle sync` (parentless replay) | `"<rebase>"` synthetic | heddle#110; rare parentless-commit replay; same buffering as `apply_commit` |
 | `commands/workflow.rs:adopt_manual_resolution` | `heddle land` (manual-resolution adopt) | landed thread name | heddle#110 |
 | `commands/remote/remote_ops.rs:pull_local` | `heddle pull` (local sync, repeat pull) | remote thread name | heddle#110; first-time pull falls back to `Goto` because there's no pre-target tip to restore |
 | `commands/resolve.rs:abort_merge_state` | `heddle resolve --abort` | `"<abort>"` synthetic | heddle#110; today this is a pre-target = post-target no-op record (HEAD doesn't move during a 3-way conflict merge), kept on the same code path so a future merge variant that does move HEAD before abort gets correct undo semantics for free |

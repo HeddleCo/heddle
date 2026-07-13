@@ -7,42 +7,34 @@ use anyhow::Result;
 use clap::{Arg, ArgAction, CommandFactory, Parser, error::ErrorKind};
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 use cli::cli::commands::cmd_context_reason_git;
-#[cfg(feature = "client")]
-use cli::cli::commands::cmd_prove;
 #[cfg(feature = "semantic")]
 use cli::cli::commands::cmd_semantic;
-#[cfg(feature = "client")]
-use cli::cli::commands::cmd_spool;
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
     ExportCommands, ImportCommands,
     cli_args::SyncCommands,
-    commands::{cmd_export_git, cmd_git_overlay_guide, cmd_import_git, cmd_sync_git},
+    commands::{cmd_export_git, cmd_import_git, cmd_sync_git},
 };
 use cli::{
     cli::{
-        ActorCommands, AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands,
-        DaemonCommands, DiagnoseArgs, DiffArgs, ExpandArgs, IntegrationCommands, LogArgs,
-        MergeArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs,
-        SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, UndoArgs,
+        AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands, DaemonCommands,
+        DiffArgs, ExpandArgs, IntegrationCommands, LogArgs, ResolveArgs, RetroArgs, RevertArgs,
+        RunArgs, UndoArgs,
         cli_args::{LandArgs, SyncArgs},
         commands::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
-            cmd_abort, cmd_actor_done, cmd_actor_explain, cmd_actor_list, cmd_actor_show,
-            cmd_actor_spawn, cmd_adopt, cmd_agent, cmd_capture_split, cmd_checkpoint,
-            cmd_cherry_pick, cmd_clean, cmd_clone, cmd_collapse, cmd_commit_git_projection,
-            cmd_complete, cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
-            cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
-            cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
-            cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff, cmd_discuss,
-            cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fetch, cmd_fsck, cmd_hook,
-            cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_merge, cmd_oplog,
-            cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote,
-            cmd_resolve, cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_session_end,
-            cmd_session_list, cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell,
-            cmd_show, cmd_snapshot, cmd_start, cmd_stash, cmd_status, cmd_switch_git_projection,
-            cmd_sync_smart, cmd_thread, cmd_timeline, cmd_transaction, cmd_try, cmd_undo,
-            cmd_verify, cmd_watch, command_runtime_contract_for_command, print_error_with_hint,
+            cmd_abort, cmd_adopt, cmd_agent, cmd_capture_split, cmd_clone, cmd_collapse,
+            cmd_commit, cmd_complete, cmd_context_audit, cmd_context_check, cmd_context_edit,
+            cmd_context_get, cmd_context_history, cmd_context_list, cmd_context_rm,
+            cmd_context_set, cmd_context_suggest, cmd_context_supersede, cmd_continue,
+            cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop, cmd_diff, cmd_discuss,
+            cmd_doctor, cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fsck,
+            cmd_fsck_repair_git, cmd_hook, cmd_init, cmd_integration, cmd_land, cmd_log,
+            cmd_maintenance, cmd_oplog, cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_redo,
+            cmd_remote, cmd_resolve, cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas,
+            cmd_shell, cmd_show, cmd_snapshot, cmd_start, cmd_status, cmd_sync_smart, cmd_thread,
+            cmd_timeline, cmd_try, cmd_undo, cmd_undo_recover, cmd_verify, cmd_watch,
+            command_runtime_contract_for_command, print_error_with_hint,
             print_parse_error_json_envelope,
         },
         render::write_json_stdout,
@@ -80,6 +72,14 @@ fn main() -> Result<()> {
 }
 
 async fn async_main() -> Result<()> {
+    let embedding_args = std::env::args().skip(1).collect::<Vec<_>>();
+    if let Some(result) =
+        heddle_git_projection::credential::dispatch_embedded_credential_helper(&embedding_args)
+    {
+        result.map_err(anyhow::Error::new)?;
+        return Ok(());
+    }
+
     // Install the ring crypto provider as the rustls default. Without this,
     // any rustls TLS handshake (gRPC, GitHub REST, `import git
     // https://…`) panics in 0.23.x. We pin ring instead of aws-lc-rs to
@@ -97,12 +97,7 @@ async fn async_main() -> Result<()> {
     #[cfg(feature = "client")]
     heddle_client::grpc_hosted::register_hosted_factory();
 
-    // Pick the WeftExtensions implementation at startup. OSS builds
-    // get NoopWeftExtensions (returns friendly errors for `auth`,
-    // `support`, `presence` commands). client builds get the
-    // EnabledWeftExtensions adapter that delegates to the existing
-    // in-cli command impls; Step 5 of the OSS extraction plan moves
-    // those impls into a separate closed crate.
+    // Pick the hosted authentication implementation at startup.
     #[cfg(feature = "client")]
     let hosted: Box<dyn weft_client_shim::WeftExtensions> =
         Box::new(cli::extensions::EnabledWeftExtensions);
@@ -320,12 +315,7 @@ async fn async_main() -> Result<()> {
         Commands::Verify => cmd_verify(&cli, cli.verbose > 0),
 
         Commands::Doctor(args) => match &args.command {
-            None => cmd_diagnose(
-                &cli,
-                DiagnoseArgs {
-                    profile: args.profile,
-                },
-            ),
+            None => cmd_doctor(&cli, args.profile),
             Some(cli::cli::DoctorCommands::Docs(docs_args)) => {
                 cmd_doctor_docs(&cli, docs_args.clone())
             }
@@ -335,9 +325,6 @@ async fn async_main() -> Result<()> {
         },
 
         Commands::Schemas { verb } => cmd_schemas(&cli, verb),
-
-        #[cfg(feature = "git-overlay")]
-        Commands::GitOverlay => cmd_git_overlay_guide(&cli),
 
         Commands::Start(args) => cmd_start(&cli, args.clone()),
 
@@ -381,9 +368,6 @@ async fn async_main() -> Result<()> {
             thread,
             message,
             no_squash,
-            push,
-            no_push,
-            remote,
         }) => {
             cmd_land(
                 &cli,
@@ -391,9 +375,6 @@ async fn async_main() -> Result<()> {
                     thread: thread.clone(),
                     message: message.clone(),
                     no_squash: *no_squash,
-                    push: *push,
-                    no_push: *no_push,
-                    remote: remote.clone(),
                 },
             )
             .await
@@ -429,7 +410,7 @@ async fn async_main() -> Result<()> {
             }
         }
 
-        Commands::Commit(args) => cmd_commit_git_projection(&cli, args.clone()).await,
+        Commands::Commit(args) => cmd_commit(&cli, args.clone()),
 
         Commands::Log(LogArgs {
             state,
@@ -485,8 +466,6 @@ async fn async_main() -> Result<()> {
             .await
         }
 
-        Commands::Clean { force, dry_run } => cmd_clean(&cli, *force, *dry_run),
-
         Commands::Diff(DiffArgs {
             from,
             to,
@@ -508,8 +487,6 @@ async fn async_main() -> Result<()> {
             *patch,
         ),
 
-        Commands::Switch(args) => cmd_switch_git_projection(&cli, args.clone()).await,
-
         Commands::Revert(RevertArgs {
             state,
             message,
@@ -522,20 +499,17 @@ async fn async_main() -> Result<()> {
             depth,
             preview,
             redo,
+            recover,
             allow_redact_undo,
         }) => {
-            if *redo {
+            if *recover {
+                cmd_undo_recover(&cli)
+            } else if *redo {
                 cmd_redo(&cli, *steps, *preview)
             } else {
                 cmd_undo(&cli, *steps, *list, *depth, *preview, *allow_redact_undo)
             }
         }
-
-        Commands::Fetch {
-            remote,
-            all,
-            insecure,
-        } => cmd_fetch(&cli, remote.clone(), *all, *insecure).await,
 
         #[cfg(feature = "git-overlay")]
         Commands::Import { command } => match command {
@@ -549,24 +523,17 @@ async fn async_main() -> Result<()> {
             ExportCommands::Git { destination } => cmd_export_git(&cli, destination.clone()),
         },
 
-        Commands::Fsck {
-            full,
-            thorough,
-            git,
-            repair,
-            ref_name,
-            prefer,
-            preview,
-        } => cmd_fsck(
-            &cli,
-            *full,
-            *thorough,
-            *git,
-            *repair,
-            ref_name.clone(),
-            prefer.clone(),
-            *preview,
-        ),
+        Commands::Fsck(args) => match &args.command {
+            None => cmd_fsck(&cli, args.full, args.thorough, args.git),
+            Some(cli::cli::FsckCommands::Repair { target }) => match target {
+                cli::cli::FsckRepairCommands::Git(args) => cmd_fsck_repair_git(
+                    &cli,
+                    args.ref_name.clone(),
+                    args.prefer.clone(),
+                    args.preview,
+                ),
+            },
+        },
 
         Commands::Oplog { command } => cmd_oplog(&cli, command.clone()),
 
@@ -583,25 +550,6 @@ async fn async_main() -> Result<()> {
         Commands::Shell { command } => cmd_shell(&cli, command.clone()),
 
         Commands::Complete { subject } => cmd_complete(&cli, *subject),
-
-        Commands::Merge(MergeArgs {
-            thread,
-            message,
-            no_commit,
-            preview,
-            with_diff,
-            no_semantic,
-            git_commit,
-        }) => cmd_merge(
-            &cli,
-            thread.clone(),
-            message.clone(),
-            *no_commit,
-            *preview,
-            *with_diff,
-            *no_semantic,
-            *git_commit,
-        ),
 
         Commands::Resolve(ResolveArgs {
             path,
@@ -630,7 +578,6 @@ async fn async_main() -> Result<()> {
                 args.state.clone(),
                 args.force,
                 args.all_threads,
-                args.mirror.clone(),
                 args.insecure,
             )
             .await
@@ -761,20 +708,6 @@ async fn async_main() -> Result<()> {
 
         Commands::Integration { command } => cmd_integration(&cli, command.clone()),
 
-        Commands::Stash { command } => cmd_stash(&cli, command.clone()),
-
-        #[cfg(feature = "client")]
-        Commands::Support { command } => {
-            let cmd = command.clone();
-            hosted.support(&cli, &cmd).await
-        }
-
-        #[cfg(feature = "client")]
-        Commands::Spool { command } => cmd_spool(&cli, command.clone()).await,
-
-        #[cfg(feature = "client")]
-        Commands::Prove(args) => cmd_prove(&cli, args.clone()).await,
-
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => cmd_semantic(&cli, command.clone()),
 
@@ -790,10 +723,6 @@ async fn async_main() -> Result<()> {
 
         Commands::Query(args) => cmd_query(&cli, args).await,
 
-        Commands::Checkpoint(args) => cmd_checkpoint(&cli, args).await,
-
-        Commands::Transaction { command } => cmd_transaction(&cli, command).await,
-
         Commands::Review { command } => cmd_review(&cli, command).await,
 
         Commands::Redact { command } => cli::cli::commands::cmd_redact(&cli, command.clone()),
@@ -803,13 +732,6 @@ async fn async_main() -> Result<()> {
         }
 
         Commands::Maintenance { command } => cmd_maintenance(&cli, command.clone()),
-
-        Commands::CherryPick {
-            commit,
-            message,
-            no_commit,
-            force,
-        } => cmd_cherry_pick(&cli, commit.clone(), message.clone(), *no_commit, *force),
 
         Commands::Clone(CloneArgs {
             remote,
@@ -835,68 +757,7 @@ async fn async_main() -> Result<()> {
             .await
         }
 
-        Commands::Rebase {
-            thread,
-            abort,
-            cont,
-            force,
-        } => cmd_rebase(&cli, thread.as_deref(), *abort, *cont, *force),
-
         Commands::Hook { command } => cmd_hook(&cli, command.clone()),
-
-        Commands::Actor { command } => match command {
-            ActorCommands::Spawn(args) => {
-                cmd_actor_spawn(
-                    &cli,
-                    args.thread.clone(),
-                    args.no_thread,
-                    args.provider.clone(),
-                    args.model.clone(),
-                )
-                .await
-            }
-            ActorCommands::List(args) => cmd_actor_list(&cli, args.active).await,
-            ActorCommands::Show(args) => cmd_actor_show(&cli, args.session.clone()).await,
-            ActorCommands::Explain(args) => cmd_actor_explain(&cli, args.session.clone()).await,
-            ActorCommands::Done(args) => cmd_actor_done(&cli, args.session.clone()).await,
-        },
-
-        // cmd_agent is the unified dispatcher: daemon variants
-        // (Serve/Status/Stop) plus the reservation API (Reserve/
-        // Heartbeat/Capture/Ready/Release/List).
-        Commands::Session { command } => match command {
-            SessionCommands::Start(SessionStartArgs {
-                provider,
-                model,
-                policy,
-            }) => cmd_session_start(&cli, provider.clone(), model.clone(), policy.clone()).await,
-            SessionCommands::Segment(SessionSegmentArgs {
-                provider,
-                model,
-                policy,
-            }) => cmd_session_segment(&cli, provider.clone(), model.clone(), policy.clone()).await,
-            SessionCommands::End(SessionEndArgs { session_id }) => {
-                cmd_session_end(&cli, session_id.clone()).await
-            }
-            SessionCommands::Show(SessionShowArgs { session_id }) => {
-                cmd_session_show(&cli, session_id.clone()).await
-            }
-            SessionCommands::List(SessionListArgs { active }) => {
-                cmd_session_list(&cli, *active).await
-            }
-        },
-
-        #[cfg(feature = "client")]
-        Commands::Presence { command } => match command {
-            cli::cli::PresenceCommands::Publish {
-                session,
-                interval_secs,
-            } => {
-                hosted
-                    .presence_publish(&cli, session.clone(), *interval_secs)
-                    .await
-            }
-        },
     };
 
     debug!(

@@ -516,12 +516,37 @@ impl std::error::Error for EnrichedFsError {
     }
 }
 
-fn write_file_atomic_impl(
+pub struct StagedAtomicWrite {
+    path: PathBuf,
+    parent: PathBuf,
+    tmp: PathBuf,
+    pending: bool,
+}
+
+impl StagedAtomicWrite {
+    pub fn publish(mut self) -> io::Result<()> {
+        fs::rename(&self.tmp, &self.path)
+            .map_err(|error| enrich_rename_error(&self.tmp, &self.path, error))?;
+        self.pending = false;
+        sync_directory(&self.parent)
+            .map_err(|error| enrich_fs_error(&self.parent, "syncing", error))
+    }
+}
+
+impl Drop for StagedAtomicWrite {
+    fn drop(&mut self) {
+        if self.pending {
+            let _ = fs::remove_file(&self.tmp);
+        }
+    }
+}
+
+fn stage_file_atomic_impl(
     path: &Path,
     bytes: &[u8],
     kind: AtomicWriteKind,
     before_write: impl FnOnce(&File, &Path) -> io::Result<()>,
-) -> io::Result<()> {
+) -> io::Result<StagedAtomicWrite> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     create_dir_all_durable(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
 
@@ -543,8 +568,21 @@ fn write_file_atomic_impl(
         return Err(enrich_write_error(path, err));
     }
 
-    fs::rename(&tmp, path).map_err(|e| enrich_rename_error(&tmp, path, e))?;
-    sync_directory(parent).map_err(|e| enrich_fs_error(parent, "syncing", e))
+    Ok(StagedAtomicWrite {
+        path: path.to_path_buf(),
+        parent: parent.to_path_buf(),
+        tmp,
+        pending: true,
+    })
+}
+
+fn write_file_atomic_impl(
+    path: &Path,
+    bytes: &[u8],
+    kind: AtomicWriteKind,
+    before_write: impl FnOnce(&File, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    stage_file_atomic_impl(path, bytes, kind, before_write)?.publish()
 }
 
 pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -594,6 +632,10 @@ pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
 /// fsync, and rename sequence.
 pub fn write_file_atomic_secret(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_file_atomic_impl(path, bytes, AtomicWriteKind::Secret, |_, _| Ok(()))
+}
+
+pub fn stage_file_atomic_secret(path: &Path, bytes: &[u8]) -> io::Result<StagedAtomicWrite> {
+    stage_file_atomic_impl(path, bytes, AtomicWriteKind::Secret, |_, _| Ok(()))
 }
 
 /// Publish an existing on-disk file at `src` to `dst` with the same
@@ -1043,6 +1085,28 @@ mod tests {
         assert!(!target.exists(), "secret write must not publish target");
         let tmp = tmp_path.expect("pre-write hook observed temp path");
         assert!(!tmp.exists(), "failed secret write should remove temp file");
+    }
+
+    #[test]
+    fn staged_secret_is_unpublished_until_publish() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("secret.txt");
+        let staged = stage_file_atomic_secret(&target, b"secret").unwrap();
+
+        assert!(!target.exists());
+        staged.publish().unwrap();
+        assert_eq!(fs::read(target).unwrap(), b"secret");
+    }
+
+    #[test]
+    fn dropping_staged_secret_removes_temporary_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("secret.txt");
+        let staged = stage_file_atomic_secret(&target, b"secret").unwrap();
+        drop(staged);
+
+        assert!(!target.exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     /// Regression for heddle#105: `sync_directory` must succeed on any

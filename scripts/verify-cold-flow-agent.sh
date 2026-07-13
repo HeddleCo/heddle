@@ -145,7 +145,7 @@ profiles = {
     "complex-git": {
         "repo_shape": "complex-git",
         "proof": [
-            "source Git tag v1.0.0 exists before import; scoped tag adopt reports tags_synced=1 and thread marker show resolves v1.0.0",
+            "source Git tag v1.0.0 exists before import; full adopt reports tags_synced=1 and thread marker show resolves v1.0.0",
             "merge commit",
             "prior Git rename commit src/main.txt -> src/renamed.txt",
             "binary assets/blob.bin",
@@ -266,6 +266,49 @@ assert_clean_git_status() {
   fi
 }
 
+assert_dirty_git_status() {
+  local repo="$1"
+  if [[ -z "$(git -C "$repo" status --short)" ]]; then
+    echo "expected pending Git worktree changes in $repo" >&2
+    exit 1
+  fi
+}
+
+assert_source_authority() {
+  local repo="$1"
+  local expected="$2"
+  local config="$repo/.heddle/config.toml"
+  if ! grep -F -- "source_authority = \"$expected\"" "$config" >/dev/null; then
+    echo "expected $config to persist source_authority = \"$expected\"" >&2
+    sed -n '1,80p' "$config" >&2
+    exit 1
+  fi
+}
+
+assert_git_commit_mapped() {
+  local repo="$1"
+  local git_oid="$2"
+  python3 - "$repo/.heddle/ingest/sha_map.sqlite" "$git_oid" <<'PYJSON'
+import sqlite3
+import sys
+
+database, git_oid = sys.argv[1:]
+with sqlite3.connect(database) as connection:
+    row = connection.execute(
+        "SELECT heddle_repr FROM sha_map WHERE kind = 0 AND git_sha = ?",
+        (git_oid,),
+    ).fetchone()
+if row is None or not row[0].startswith("hs-"):
+    raise SystemExit(f"expected imported Git commit {git_oid} to have a Heddle state mapping")
+PYJSON
+}
+
+assert_git_ancestor() {
+  local repo="$1"
+  local ancestor="$2"
+  git -C "$repo" merge-base --is-ancestor "$ancestor" HEAD
+}
+
 assert_no_literal_round_leak() {
   local path="$1"
   if grep -IRF -- '$round' "$path" >/dev/null; then
@@ -352,15 +395,11 @@ PYJSON
 assert_transcript_claims() {
   local transcript="$1"
   for needle in \
-    '"bridge"' \
-    '"checkpoint"' \
     '"commit"' \
     '"undo"' \
-    '"fetch"' \
     '"pull"' \
     '"push"' \
     '"clone"' \
-    '"reconcile"' \
     '"start"' \
     '"ready"' \
     '"merge"' \
@@ -637,29 +676,6 @@ if remote.get("recovery_commands"):
 PYJSON
 }
 
-assert_merge_preview_points_to_land_json() {
-  local json_file="$1"
-  local thread="$2"
-  python3 - "$json_file" "$thread" <<'PYJSON'
-import json
-import sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    data = json.load(handle)
-thread = sys.argv[2]
-expected = f"heddle land --thread {thread} --no-push"
-if data.get("preview_only") is not True or data.get("merge_relation") != "fast_forward":
-    raise SystemExit(f"expected a clean fast-forward preview: {data!r}")
-if data.get("recommended_action") != expected or data.get("next_action") != expected:
-    raise SystemExit(f"merge preview should point to land, got {data!r}")
-verify = data.get("verification")
-if verify is not None:
-    if verify.get("verified") is not True or verify.get("status") != "clean":
-        raise SystemExit(f"merge preview should keep repository verify clean while workflow remains actionable: {data!r}")
-    if verify.get("workflow_status") != "ready" or verify.get("recommended_action") != expected:
-        raise SystemExit(f"nested verify should align with the preview's land action: {data!r}")
-PYJSON
-}
-
 assert_ready_workflow_json() {
   local json_file="$1"
   local thread="$2"
@@ -669,18 +685,18 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
 thread = sys.argv[2]
-expected = f"heddle land --thread {thread} --no-push"
-context_expected_suffix = ["land", "--thread", thread, "--no-push"]
+expected = f"heddle land --thread {thread}"
+context_expected_suffix = ["land", "--thread", thread]
 argv = (data.get("recommended_action_template") or {}).get("argv_template") or []
 context_ready = (
-    len(argv) >= 6
+    len(argv) >= 5
     and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
     and argv[1] == "--repo"
-    and argv[-4:] == context_expected_suffix
+    and argv[-3:] == context_expected_suffix
 )
 plain_ready = (
     data.get("recommended_action") == expected
-    and len(argv) == 5
+    and len(argv) == 4
     and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
     and argv[1:] == context_expected_suffix
 )
@@ -693,14 +709,14 @@ if verify.get("verified") is not True or verify.get("status") != "clean":
     raise SystemExit(f"ready work should keep repository verify clean, got {data!r}")
 verify_argv = (verify.get("recommended_action_template") or {}).get("argv_template") or []
 verify_context_ready = (
-    len(verify_argv) >= 6
+    len(verify_argv) >= 5
     and (verify_argv[0] == "heddle" or verify_argv[0].endswith("/heddle"))
     and verify_argv[1] == "--repo"
-    and verify_argv[-4:] == context_expected_suffix
+    and verify_argv[-3:] == context_expected_suffix
 )
 verify_plain_ready = (
     verify.get("recommended_action") == expected
-    and len(verify_argv) == 5
+    and len(verify_argv) == 4
     and (verify_argv[0] == "heddle" or verify_argv[0].endswith("/heddle"))
     and verify_argv[1:] == context_expected_suffix
 )
@@ -747,6 +763,10 @@ for arg in args[1:]:
   else
     run_json "$transcript" "$repo" "$label" "${action_args[@]}"
   fi
+  if [[ "${action_args[0]}" == "capture" ]] \
+    && grep -F -- 'source_authority = "git-overlay"' "$repo/.heddle/config.toml" >/dev/null; then
+    run_json "$transcript" "$repo" "$label.commit" commit -m "$message"
+  fi
   assert_current_worktree_clean_json "$repo"
 }
 
@@ -759,6 +779,8 @@ run_shape() {
   local final_json="$ARTIFACT_ROOT/$shape.final-verify.json"
   local clone_json="$ARTIFACT_ROOT/$shape.clone-verify.json"
   create_fixture "$repo" "$shape"
+  local overlay_base
+  overlay_base="$(git -C "$repo" rev-parse HEAD)"
   : > "$transcript"
   python3 - "$transcript" "$(heddle_runtime_path_label)" <<'PYJSON'
 import json
@@ -770,7 +792,8 @@ record = {
     "output": {
         "heddle_runtime_path": runtime_path,
         "requires_git_executable": False,
-        "fixture_setup": "Git is used only before the cold story to build interoperable fixture repositories.",
+        "runtime_engine": "embedded Sley",
+        "harness_git_usage": "fixture setup and external assertions only",
     },
     "exit_code": 0,
     "stdout": "",
@@ -788,6 +811,20 @@ PYJSON
   (cd "$clone_path" && heddle_runtime verify --output json) > "$clone_json"
   assert_final_verify "$clone_json"
 
+  # Prove adoption as a separate native-authority transition.
+  if [[ "$shape" == "complex-git" ]]; then
+    run_json "$transcript" "$clone_path" "$shape.00.adopt-native" adopt
+    run_json "$transcript" "$clone_path" "$shape.00.adopt-native-marker" thread marker show v1.0.0
+  else
+    run_json "$transcript" "$clone_path" "$shape.00.adopt-native" adopt --ref main
+  fi
+  assert_source_authority "$clone_path" native
+  printf 'native authority proof for %s\n' "$shape" > "$clone_path/native-authority-proof.txt"
+  run_json "$transcript" "$clone_path" "$shape.00.native-capture" capture -m "native authority proof $shape" --confidence 0.9
+  run_json "$transcript" "$clone_path" "$shape.00.native-undo" undo
+  run_json "$transcript" "$clone_path" "$shape.00.native-verify" verify
+  assert_clean_git_status "$clone_path"
+
   run_json "$transcript" "$repo" "$shape.01.status" status
   run_json_expect_verify_failed "$transcript" "$repo" "$shape.02.verify-plain" verify
   if [[ "$shape" == "complex-git" ]]; then
@@ -797,17 +834,13 @@ PYJSON
   fi
   test ! -e "$repo/.heddle"
 
-  if [[ "$shape" == "complex-git" ]]; then
-    run_json "$transcript" "$repo" "$shape.03.adopt" adopt
-  else
-    run_json "$transcript" "$repo" "$shape.03.adopt" adopt --ref main
-  fi
+  run_json "$transcript" "$repo" "$shape.03.init-overlay" init
+  assert_source_authority "$repo" git-overlay
+  run_json "$transcript" "$repo" "$shape.03.import-overlay-main" import git --ref main
+  assert_source_authority "$repo" git-overlay
+  assert_git_commit_mapped "$repo" "$overlay_base"
   assert_clean_git_status "$repo"
-  if [[ "$shape" == "complex-git" ]]; then
-    run_json "$transcript" "$repo" "$shape.03.adopt-tag" adopt --ref v1.0.0
-    run_json "$transcript" "$repo" "$shape.03.thread-marker-show-tag" thread marker show v1.0.0
-  fi
-  run_json_expect_failure "$transcript" "$repo" "$shape.03.missing-thread-error" merge missing-thread --preview
+  run_json_expect_failure "$transcript" "$repo" "$shape.03.missing-thread-error" ready --thread missing-thread
   run_json "$transcript" "$repo" "$shape.04.verify-clean-after-adopt" verify
   run_json "$transcript" "$repo" "$shape.06.status-clean" status
   run_json "$transcript" "$repo" "$shape.07.doctor" doctor
@@ -822,10 +855,9 @@ PYJSON
     run_json "$transcript" "$repo" "$shape.13.diff-capture-name-only" diff --name-only
   fi
   run_json "$transcript" "$repo" "$shape.14.capture" capture -m "agent capture $shape" --confidence 0.86
-  run_json "$transcript" "$repo" "$shape.15.checkpoint" checkpoint -m "agent checkpoint $shape"
-  run_json "$transcript" "$repo" "$shape.16.push-checkpoint" push "$origin"
-  run_json "$transcript" "$repo" "$shape.17.fetch" fetch "$origin"
-  run_json "$transcript" "$repo" "$shape.18.pull" pull "$origin"
+  run_json "$transcript" "$repo" "$shape.15.commit-captured" commit -m "agent commit $shape"
+  run_json "$transcript" "$repo" "$shape.16.push-commit" push "$origin"
+  run_json "$transcript" "$repo" "$shape.18.pull" pull origin
   assert_clean_git_status "$repo"
 
   make_agent_commit_edit "$repo" "$shape" first
@@ -848,11 +880,13 @@ PYJSON
     "$shape.20.commit-from-template" \
     "agent verify cold flow $shape" \
     "$template_op_id"
-  assert_local_ahead_verified_json "$ARTIFACT_ROOT/$shape.20.commit-from-template.json"
+  assert_git_ancestor "$repo" "$overlay_base"
+  assert_local_ahead_verified_json "$ARTIFACT_ROOT/$shape.20.commit-from-template.commit.json"
   run_json "$transcript" "$repo" "$shape.21.undo" undo
-  assert_clean_git_status "$repo"
+  assert_dirty_git_status "$repo"
   make_agent_commit_edit "$repo" "$shape" after_undo
-  run_json "$transcript" "$repo" "$shape.22.commit-after-undo" commit -m "agent verify cold flow after undo $shape" --confidence 0.9
+  run_json "$transcript" "$repo" "$shape.22.capture-after-undo" capture -m "agent verify cold flow after undo $shape" --confidence 0.9
+  run_json "$transcript" "$repo" "$shape.22.commit-after-undo" commit -m "agent verify cold flow after undo $shape"
   assert_local_ahead_verified_json "$ARTIFACT_ROOT/$shape.22.commit-after-undo.json"
   run_json "$transcript" "$repo" "$shape.23.push-commit" push "$origin"
   run_json "$transcript" "$repo" "$shape.24.ready" ready
@@ -872,12 +906,10 @@ PYJSON
   run_json "$transcript" "$feature_path" "$shape.29.capture-isolated" capture -m "isolated agent capture $shape" --confidence 0.84
   run_json "$transcript" "$feature_path" "$shape.30.ready-isolated" ready
   assert_ready_workflow_json "$ARTIFACT_ROOT/$shape.30.ready-isolated.json" "$feature_thread"
-  run_json "$transcript" "$repo" "$shape.31.merge-preview" merge "$feature_thread" --preview --with-diff
-  assert_merge_preview_points_to_land_json "$ARTIFACT_ROOT/$shape.31.merge-preview.json" "$feature_thread"
-  run_json "$transcript" "$repo" "$shape.32.thread-show-feature" thread show "$feature_thread"
-  run_json "$transcript" "$repo" "$shape.33.land-feature" land --thread "$feature_thread" --no-push
-  assert_local_ahead_verified_json "$ARTIFACT_ROOT/$shape.33.land-feature.json"
-  run_json "$transcript" "$repo" "$shape.34.push-feature" push "$origin"
+  run_json "$transcript" "$repo" "$shape.31.thread-show-feature" thread show "$feature_thread"
+  run_json "$transcript" "$repo" "$shape.32.land-feature" land --thread "$feature_thread"
+  assert_local_ahead_verified_json "$ARTIFACT_ROOT/$shape.32.land-feature.json"
+  run_json "$transcript" "$repo" "$shape.33.push-feature" push "$origin"
 
   run_json "$transcript" "$repo" "$shape.final-verify" verify
   assert_final_verify "$final_json"

@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Text codec helpers for loose ref payloads.
 
-use objects::object::ChangeId;
+use objects::object::StateId;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("invalid change id text: {0}")]
-pub struct ChangeIdTextError(pub String);
+#[error("invalid state id text: {0}")]
+pub struct StateIdTextError(pub String);
 
-pub fn parse_change_id_text(contents: &str) -> Result<ChangeId, ChangeIdTextError> {
+pub fn parse_state_id_text(contents: &str) -> Result<StateId, StateIdTextError> {
     let trimmed = contents.trim();
-    ChangeId::parse(trimmed).map_err(|_| ChangeIdTextError(trimmed.to_string()))
+    StateId::parse(trimmed).map_err(|_| StateIdTextError(trimmed.to_string()))
 }
 
-pub fn format_change_id_text(id: &ChangeId) -> String {
+pub fn format_state_id_text(id: &StateId) -> String {
     format!("{}\n", id.to_string_full())
 }

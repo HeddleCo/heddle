@@ -35,7 +35,7 @@ only user interaction macOS requires, and we can't bypass it — Apple
 enforces it as a security check for any file-system extension.
 
 The Mac installer is one package, not two manual installs. The release `.pkg`
-places `heddle` in `/usr/local/bin/heddle`, places `Heddle.app` in
+places `heddle` and its fsmonitor worker in `/usr/local/bin`, places `Heddle.app` in
 `/Applications/Heddle.app`, and refreshes LaunchServices so the embedded FSKit
 module is discoverable before the first `heddle start`.
 
@@ -132,14 +132,24 @@ macOS 26.0.
 
 ### 3. Package or install
 
-The release path is package-first:
+The signed release path is the repository-level artifact builder; it builds,
+stages, signs, verifies, and notarizes the app, CLI, and fsmonitor worker as one
+version-locked unit:
+
+```bash
+HEDDLE_TAG=vX.Y.Z HEDDLE_VERSION=X.Y.Z \
+  ./scripts/build-macos-cask-artifact.sh
+```
+
+For a local unsigned package, first follow `BUILD.md` section 1 so both universal
+CLI binaries exist beside each other, then run:
 
 ```bash
 ./pkg/make-pkg.sh "$APP" "$REPO_ROOT/target/release/heddle" build/Heddle.pkg
 ./dmg/make-dmg.sh build/Heddle.pkg build/Heddle.dmg
 ```
 
-`Heddle.pkg` installs both the CLI and `/Applications/Heddle.app`; its
+`Heddle.pkg` installs the CLI, its fsmonitor worker, and `/Applications/Heddle.app`; its
 `postinstall` runs `lsregister -f /Applications/Heddle.app`. The DMG is only a
 branded wrapper around that package for website downloads.
 
@@ -335,7 +345,7 @@ first stable release that publishes `Heddle-v<version>-macos-universal.dmg`.
 | `mtime` on returned items | Wired through the C ABI; shows mount bootstrap time in `ls -l` |
 | `-o t=<thread>` option parsing | Parsed from `FSTaskOptions.taskOptions` in `loadResource`; defaults to `"main"` |
 | Entitlement request | Not yet filed |
-| macOS package | `pkg/make-pkg.sh` builds CLI + app payload |
+| macOS package | `pkg/make-pkg.sh` builds CLI + fsmonitor worker + app payload |
 | Branded DMG | `dmg/make-dmg.sh` wraps the package by default |
 | Homebrew cask | Not yet published |
 | Code signing + notarization | Not yet set up |

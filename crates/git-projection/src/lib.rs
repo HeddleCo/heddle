@@ -4,6 +4,7 @@
 //! This module provides bidirectional conversion between Heddle state and Git
 //! projection state.
 
+pub mod credential;
 pub mod git_core;
 pub mod git_export;
 pub mod git_ingest;

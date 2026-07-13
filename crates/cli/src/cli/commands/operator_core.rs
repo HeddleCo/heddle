@@ -563,8 +563,8 @@ fn continue_from_operation(
                             .to_string(),
                     blockers: Vec::new(),
                     warnings: Vec::new(),
-                    next_action: Some("heddle commit -m \"Manual resolution\"".to_string()),
-                    recommended_action: Some("heddle commit -m \"Manual resolution\"".to_string()),
+                    next_action: Some("heddle capture -m \"Manual resolution\"".to_string()),
+                    recommended_action: Some("heddle capture -m \"Manual resolution\"".to_string()),
                 },
                 OperatorContinueStatus::Continued => OperatorCommandOutput {
                     status: "continued".to_string(),
@@ -878,7 +878,7 @@ mod tests {
 
     #[test]
     fn verification_claim_gate_blocks_local_success_claims() {
-        let trust = verification_state(false, "needs_checkpoint", "heddle commit -m \"...\"");
+        let trust = verification_state(false, "needs_checkpoint", "heddle capture -m \"...\"");
         let mut output = OperatorCommandOutput {
             status: "synced".to_string(),
             action: OperatorAction::Sync,
@@ -898,7 +898,7 @@ mod tests {
         assert_eq!(output.status, "blocked");
         assert_eq!(
             output.recommended_action.as_deref(),
-            Some("heddle commit -m \"...\"")
+            Some("heddle capture -m \"...\"")
         );
         assert!(
             output

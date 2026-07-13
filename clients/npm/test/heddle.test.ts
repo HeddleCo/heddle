@@ -129,7 +129,7 @@ test("flags exit 75 (TempFail) as retryable", async () => {
   });
   const heddle = new Heddle({ executor: fake });
   await assert.rejects(
-    () => heddle.fetch(),
+    () => heddle.pull(),
     (err: unknown) => {
       assert.ok(err instanceof HeddleError);
       assert.equal(err.retryable, true);

@@ -28,12 +28,24 @@ _Avoid_: external Git adapter, optional Git backend, Git subprocess wrapper
 A Heddle sidecar operating on an existing Git checkout. Active Git-overlay reads and writes use the checkout's real `.git` repository for Git commits, refs, packs, index, and worktree state; Heddle stores native metadata such as captures, threads, provenance, discussions, and Git Projection Mapping under `.heddle`.
 _Avoid_: copied Git mirror, imported-only Git repo, hidden Git checkout
 
+**Repository Source Authority**:
+The durable repository choice of Git Overlay or native Heddle as the owner of source objects, refs, and worktree behavior. It is stored in repository config; the presence of `.git` only makes Git Projection available and does not select authority.
+_Avoid_: inferred Git mode, `.git`-presence authority, projection availability
+
+**Native Heddle Repository**:
+A repository whose source history is stored in Heddle's native object model under `.heddle`. Git interoperability is an explicit projection, import, or export path rather than the active source store.
+_Avoid_: adopted Git Overlay, hidden Git repository, Git-backed Heddle repository
+
+**Repository Adoption**:
+The explicit transition from Git Overlay source storage into a Native Heddle Repository. Adoption is not normal Git Overlay initialization and is chosen when the repository needs Heddle-native source storage.
+_Avoid_: Git Overlay initialization, sidecar setup, ordinary Git import
+
 **Bridge Mirror**:
-The bare Git repository at `.heddle/git` used by explicit Git bridge import, export, sync, reconstruction, and maintenance paths. It is not the active Git-overlay repository and should not be described as the place where normal `status`, `commit`, `checkpoint`, or branch movement writes Git state.
+The bare Git repository at `.heddle/git` used by explicit Git bridge import, export, sync, reconstruction, and maintenance paths. It is not the active Git-overlay repository: normal Git-overlay reads use the checkout, while `commit` and branch movement write through to the checkout's real `.git` repository.
 _Avoid_: active Git store, Git-overlay `.git`, canonical Git object store
 
-**Git Checkpoint**:
-The Git commit that binds a Heddle state into the Git history of a Git-overlay checkout. A checkpoint writes through to the checkout's real `.git` repository and is the Git-facing handle shown to raw Git tooling; the Heddle-facing handle remains the `hd-...` state id.
+**Git Checkpoint (internal operation, not a CLI verb)**:
+The Git commit that binds a Heddle state into the Git history of a Git-overlay checkout. The `commit` flow writes it through to the checkout's real `.git` repository, and it is the Git-facing handle shown to raw Git tooling; the Heddle-facing handle remains the `hd-...` state id.
 _Avoid_: Heddle capture, bridge mirror commit, native state id
 
 **Raw Git Object Residual**:

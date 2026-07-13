@@ -79,7 +79,7 @@ fn write_nested_tracked_heddle_fixture(root: &std::path::Path, head: &str) {
     .unwrap();
     std::fs::write(
         root.join("examples/calculator/.heddle/refs/threads/main"),
-        "hd-exampletrack\n",
+        "hs-exampletrack\n",
     )
     .unwrap();
 }

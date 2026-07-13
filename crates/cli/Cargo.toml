@@ -215,6 +215,10 @@ uuid.workspace = true
 name = "heddle"
 path = "src/main.rs"
 
+[[bin]]
+name = "heddle-fsmonitor-worker"
+path = "src/bin/heddle-fsmonitor-worker.rs"
+
 # Linux-only crash-isolation worker. Co-located in the CLI package
 # so `cargo install --path crates/cli` (and `cargo install heddle`
 # from crates.io) installs both `heddle` and `heddle-fuse-worker`

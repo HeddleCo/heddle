@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::Result;
 use heddle_core::status::next_action::{NextActionInput, effective_next_action, non_empty_action};
+use heddle_git_projection::GitProjection;
 use repo::{GitImportGuidance, GitRemoteTrackingStatus, RepositoryOperationStatus};
 
 use super::{
@@ -20,7 +21,6 @@ use super::{
 use crate::{
     cli::{Cli, cli_args::SyncArgs, output_is_compact, should_output_json, style},
     config::UserConfig,
-    git_projection_engine::GitProjection,
 };
 
 pub async fn cmd_continue(cli: &Cli) -> Result<()> {

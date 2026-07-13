@@ -34,13 +34,12 @@ fn assert_head_signed(path: &std::path::Path, what: &str) {
         .expect("current state")
         .expect("repo has a HEAD state");
     assert!(
-        head.signature.is_some(),
+        repo.get_state_signature(&head.state_id).unwrap().is_some(),
         "{what}: authored HEAD state {} must be auto-signed, not stored unsigned",
-        head.change_id.short(),
+        head.state_id.short(),
     );
     assert_eq!(
-        repo.verify_state_signature(&head.change_id)
-            .expect("verify"),
+        repo.verify_state_signature(&head.state_id).expect("verify"),
         crypto::SignatureStatus::Valid,
         "{what}: the auto-signature on the HEAD state must verify",
     );
@@ -53,8 +52,8 @@ fn assert_head_signed(path: &std::path::Path, what: &str) {
 /// reaching `store().put_state` directly for an authored state — makes the
 /// matching arm below fail, so the regression can't merge.
 ///
-/// `capture`, `fork`, `collapse`, `context set`, `rebase`, and `merge` are
-/// exercised here. Mount capture routes through the same chokepoint and is
+/// `capture`, `collapse`, `context set`, and `land` are exercised here.
+/// Mount capture routes through the same chokepoint and is
 /// covered by `crates/mount` tests + the repo-level signing unit tests (it
 /// needs a FUSE mount this subprocess harness can't stand up).
 #[test]
@@ -87,7 +86,7 @@ fn authored_commands_auto_sign_their_states() {
             &[
                 "collapse",
                 &first.to_string_full(),
-                &head.change_id.to_string_full(),
+                &head.state_id.to_string_full(),
                 "--into",
                 "combined",
             ],
@@ -114,29 +113,7 @@ fn authored_commands_auto_sign_their_states() {
         assert_head_signed(temp.path(), "context set");
     }
 
-    // rebase (replay re-authors commits onto a new base)
-    {
-        let temp = TempDir::new().unwrap();
-        let home = TempDir::new().unwrap();
-        heddle_signed(&["init"], temp.path(), home.path()).unwrap();
-        fs::write(temp.path().join("base.txt"), "base").unwrap();
-        heddle_signed(&["capture", "-m", "Base"], temp.path(), home.path()).unwrap();
-
-        heddle_signed(&["thread", "create", "feature"], temp.path(), home.path()).unwrap();
-        heddle_signed(&["thread", "switch", "feature"], temp.path(), home.path()).unwrap();
-        fs::write(temp.path().join("a1.txt"), "a1").unwrap();
-        heddle_signed(&["capture", "-m", "A1"], temp.path(), home.path()).unwrap();
-
-        heddle_signed(&["thread", "switch", "main"], temp.path(), home.path()).unwrap();
-        fs::write(temp.path().join("b1.txt"), "b1").unwrap();
-        heddle_signed(&["capture", "-m", "B1"], temp.path(), home.path()).unwrap();
-
-        heddle_signed(&["thread", "switch", "feature"], temp.path(), home.path()).unwrap();
-        heddle_signed(&["rebase", "main"], temp.path(), home.path()).unwrap();
-        assert_head_signed(temp.path(), "rebase replay");
-    }
-
-    // merge (a two-parent merge state is itself authored)
+    // land (the integrated state is itself authored)
     {
         let temp = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
@@ -148,18 +125,49 @@ fn authored_commands_auto_sign_their_states() {
         heddle_signed(&["thread", "switch", "feature"], temp.path(), home.path()).unwrap();
         fs::write(temp.path().join("feat.txt"), "feature").unwrap();
         heddle_signed(&["capture", "-m", "Feature"], temp.path(), home.path()).unwrap();
+        let feature_tip = repo::Repository::open(temp.path())
+            .unwrap()
+            .current_state()
+            .unwrap()
+            .unwrap()
+            .state_id;
 
         heddle_signed(&["thread", "switch", "main"], temp.path(), home.path()).unwrap();
         fs::write(temp.path().join("main.txt"), "main").unwrap();
         heddle_signed(&["capture", "-m", "Main"], temp.path(), home.path()).unwrap();
+        let main_tip = repo::Repository::open(temp.path())
+            .unwrap()
+            .current_state()
+            .unwrap()
+            .unwrap()
+            .state_id;
 
-        // Stale threads must refresh before merge (harness invariant); refresh
-        // feature against main, then merge it back into main.
         heddle_signed(&["thread", "switch", "feature"], temp.path(), home.path()).unwrap();
-        heddle_signed(&["thread", "refresh", "feature"], temp.path(), home.path()).unwrap();
-        heddle_signed(&["thread", "switch", "main"], temp.path(), home.path()).unwrap();
-        heddle_signed(&["merge", "feature"], temp.path(), home.path()).unwrap();
-        assert_head_signed(temp.path(), "merge");
+        let output = heddle_signed(
+            &["--output", "json", "land", "--thread", "feature"],
+            temp.path(),
+            home.path(),
+        )
+        .unwrap();
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["synced"], true, "land must sync a stale thread");
+        assert_eq!(output["integrated"], true, "land must integrate the thread");
+
+        let repo = repo::Repository::open(temp.path()).unwrap();
+        let landed = repo.current_state().unwrap().unwrap();
+        assert_ne!(
+            landed.state_id, feature_tip,
+            "land must not merely fast-forward to the pre-land feature tip"
+        );
+        assert_ne!(
+            landed.state_id, main_tip,
+            "land must advance the target thread"
+        );
+        assert!(
+            landed.parents.contains(&main_tip),
+            "the state integrated by land must descend from the pre-land target tip"
+        );
+        assert_head_signed(temp.path(), "land");
     }
 }
 
@@ -192,34 +200,32 @@ fn test_sign_verify_p256() {
 }
 
 #[test]
-fn test_snapshot_sign_cli() {
+fn test_capture_signs_cli() {
     let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
+    let home = TempDir::new().unwrap();
+    heddle_signed(&["init"], temp.path(), home.path()).unwrap();
+    std::fs::write(temp.path().join("signed.txt"), "signed content").unwrap();
+    heddle_signed(
+        &["capture", "-m", "Signed commit"],
+        temp.path(),
+        home.path(),
+    )
+    .expect("capture must succeed");
 
-    let signer = Ed25519Signer::generate().expect("generate key");
-    let key_pem = signer.to_pem().expect("export PEM");
-    let key_path = temp.path().join("signing_key.pem");
-    objects::fs_atomic::write_file_atomic_secret(&key_path, key_pem.as_bytes()).unwrap();
-
-    let result = heddle(
-        &[
-            "capture",
-            "-m",
-            "Signed commit",
-            "--sign",
-            &key_path.to_string_lossy(),
-        ],
-        Some(temp.path()),
+    let repo = repo::Repository::open(temp.path()).expect("open signed repository");
+    let state_id = repo.head().unwrap().expect("signed capture created HEAD");
+    assert!(
+        repo.get_state_signature(&state_id)
+            .expect("read state signature")
+            .is_some(),
+        "capture must attach a signature to the authored state"
     );
-
-    if result.is_ok() {
-        let show_result = heddle(&["show", "HEAD", "--output", "json"], Some(temp.path())).unwrap();
-        let show: serde_json::Value = serde_json::from_str(&show_result).expect("show JSON");
-        assert!(
-            show.get("signature").is_some() || show.get("signature_status").is_some(),
-            "signed state should have signature info"
-        );
-    }
+    assert_eq!(
+        repo.verify_state_signature(&state_id)
+            .expect("verify state signature"),
+        crypto::SignatureStatus::Valid,
+        "capture must create a cryptographically valid signature"
+    );
 }
 
 #[test]
@@ -235,7 +241,7 @@ fn test_state_signing_via_repository() {
     let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
     let state = objects::object::State::new(tree_hash, vec![], attribution);
     repo.store().put_state(&state).expect("put state");
-    let state_id = state.change_id;
+    let state_id = state.state_id;
 
     let status = repo.verify_state_signature(&state_id).expect("verify");
     assert_eq!(
@@ -268,24 +274,30 @@ fn test_signature_tampering_detected() {
     let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
     let state = objects::object::State::new(tree_hash, vec![], attribution);
     repo.store().put_state(&state).expect("put state");
-    let state_id = state.change_id;
+    let state_id = state.state_id;
 
     let signer = Ed25519Signer::generate().expect("generate key");
     repo.sign_state(&state_id, &signer).expect("sign state");
 
-    let mut state = repo
-        .store()
-        .get_state(&state_id)
-        .expect("get state")
-        .expect("state exists");
-
-    if let Some(ref mut sig) = state.signature {
-        let mut sig_bytes = hex::decode(&sig.signature).expect("decode");
-        sig_bytes[0] ^= 0xff;
-        sig.signature = hex::encode(&sig_bytes);
-    }
-
-    repo.store().put_state(&state).expect("put state");
+    let prior = repo
+        .latest_state_attachment(&state_id, repo::StateAttachmentKind::Signature)
+        .unwrap()
+        .unwrap();
+    let prior_id = prior.id();
+    let objects::object::StateAttachmentBody::Signature(mut signature) = prior.body else {
+        panic!("signature attachment")
+    };
+    let mut sig_bytes = hex::decode(&signature.signature).expect("decode");
+    sig_bytes[0] ^= 0xff;
+    signature.signature = hex::encode(&sig_bytes);
+    repo.put_state_attachment(&objects::object::StateAttachment {
+        state_id,
+        body: objects::object::StateAttachmentBody::Signature(signature),
+        attribution: state.attribution,
+        created_at: chrono::Utc::now(),
+        supersedes: Some(prior_id),
+    })
+    .unwrap();
 
     let status = repo.verify_state_signature(&state_id).expect("verify");
     assert_eq!(

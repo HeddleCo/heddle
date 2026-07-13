@@ -28,7 +28,7 @@ struct MarkerListOutput {
 struct MarkerEntry {
     name: String,
     /// Short change-id of the state the marker points at.
-    change_id: String,
+    state_id: String,
 }
 
 #[derive(Serialize)]
@@ -37,7 +37,7 @@ struct MarkerOpOutput {
     name: String,
     /// Short change-id of the state the marker pointed at after the op.
     /// `None` for ops that delete the marker.
-    change_id: Option<String>,
+    state_id: Option<String>,
     message: String,
 }
 
@@ -88,7 +88,7 @@ fn cmd_marker_list(cli: &Cli, repo: &Repository, filter: Option<String>) -> Resu
             let state = repo.refs().get_marker(name).ok()??;
             Some(MarkerEntry {
                 name: name.to_string(),
-                change_id: state.short(),
+                state_id: state.short(),
             })
         })
         .collect();
@@ -102,7 +102,7 @@ fn cmd_marker_list(cli: &Cli, repo: &Repository, filter: Option<String>) -> Resu
         println!("{}", serde_json::to_string(&output)?);
     } else {
         for entry in &output.markers {
-            println!("{} -> {}", entry.name, entry.change_id);
+            println!("{} -> {}", entry.name, entry.state_id);
         }
         if output.markers.is_empty() {
             println!("No markers");
@@ -129,7 +129,7 @@ fn cmd_marker_create(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     let output = MarkerOpOutput {
         output_kind: "thread_marker_create",
         name: name.clone(),
-        change_id: Some(current.short()),
+        state_id: Some(current.short()),
         message: marker_create_message(&name, &current.short()),
     };
 
@@ -154,7 +154,7 @@ fn cmd_marker_delete(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     let output = MarkerOpOutput {
         output_kind: "thread_marker_delete",
         name: name.clone(),
-        change_id: None,
+        state_id: None,
         message: marker_delete_message(&name),
     };
 
@@ -185,7 +185,7 @@ fn cmd_marker_delete_prefix(cli: &Cli, repo: &Repository, prefix: String) -> Res
             repo.oplog().record_marker_delete(name, &state)?;
             deleted.push(MarkerEntry {
                 name: name.to_string(),
-                change_id: state.short(),
+                state_id: state.short(),
             });
         }
     }
@@ -205,7 +205,7 @@ fn cmd_marker_delete_prefix(cli: &Cli, repo: &Repository, prefix: String) -> Res
     } else {
         println!("{}", output.message);
         for entry in &output.deleted {
-            println!("  {} -> {}", entry.name, entry.change_id);
+            println!("  {} -> {}", entry.name, entry.state_id);
         }
     }
 
@@ -276,7 +276,7 @@ fn cmd_marker_show(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     let output = MarkerOpOutput {
         output_kind: "thread_marker_show",
         name: name.clone(),
-        change_id: Some(state_id.short()),
+        state_id: Some(state_id.short()),
         message: format!("Marker '{}' -> {}", name, state_id.short()),
     };
 

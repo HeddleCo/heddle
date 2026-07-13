@@ -18,17 +18,23 @@ use tempfile::TempDir;
 
 use super::heddle;
 
-/// Overwrite `.heddle/config.toml` with a minimal-but-valid config that pins
-/// `[review.discussion] default_visibility` to `tier_toml`. Every other field
-/// falls back to its serde default, so this is enough to drive capture-time
-/// resolution deterministically. `tier_toml` is the raw TOML value for the
-/// tier (e.g. `"\"Public\""` or `"{ Restricted = { scope_label = \"embargo\" } }"`).
+/// Pin `[review.discussion] default_visibility` while preserving the current
+/// repository-format and source-authority fields written by `heddle init`.
 fn set_repo_default_visibility(repo: &Path, tier_toml: &str) {
     let config_path = repo.join(".heddle/config.toml");
-    let contents = format!(
-        "[repository]\nversion = 1\n\n[review.discussion]\ndefault_visibility = {tier_toml}\n"
-    );
-    fs::write(&config_path, contents).expect("write repo config");
+    let contents = fs::read_to_string(&config_path).expect("read repo config");
+    let updated = contents
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("default_visibility =") {
+                format!("default_visibility = {tier_toml}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&config_path, format!("{updated}\n")).expect("write repo config");
 }
 
 /// `heddle init` then capture one state; return the temp dir and the captured
@@ -44,9 +50,9 @@ fn capture_state(temp: &Path, message: &str) -> String {
     heddle(&["capture", "-m", message], Some(temp)).expect("capture");
     let raw = heddle(&["--output", "json", "log", "--limit", "1"], Some(temp)).unwrap();
     let value: Value = serde_json::from_str(&raw).unwrap();
-    value["states"][0]["change_id"]
+    value["states"][0]["state_id"]
         .as_str()
-        .expect("log --output json should expose change_id")
+        .expect("log --output json should expose state_id")
         .to_string()
 }
 
@@ -54,9 +60,9 @@ fn capture_state(temp: &Path, message: &str) -> String {
 fn latest_state(temp: &Path) -> String {
     let raw = heddle(&["--output", "json", "log", "--limit", "1"], Some(temp)).unwrap();
     let value: Value = serde_json::from_str(&raw).unwrap();
-    value["states"][0]["change_id"]
+    value["states"][0]["state_id"]
         .as_str()
-        .expect("log --output json should expose change_id")
+        .expect("log --output json should expose state_id")
         .to_string()
 }
 
@@ -119,41 +125,9 @@ fn capture_still_applies_default_visibility() {
 }
 
 #[test]
-fn cherry_pick_state_gets_default_visibility() {
-    // PR #529 P1: the default-visibility binding was only on the `capture`
-    // call site, so cherry-pick created a state left public even under a
-    // non-public default. Now it funnels through the snapshot chokepoint.
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-
-    fs::write(temp.path().join("note.txt"), b"base").unwrap();
-    heddle(&["capture", "-m", "first"], Some(temp.path())).expect("capture first");
-    let first = latest_state(temp.path());
-
-    fs::write(temp.path().join("note.txt"), b"modified").unwrap();
-    heddle(&["capture", "-m", "second"], Some(temp.path())).expect("capture second");
-
-    // Pin a restrictive default, then cherry-pick the earlier state. The new
-    // snapshot it commits must inherit the restricted tier — not stay public.
-    set_repo_default_visibility(
-        temp.path(),
-        "{ Restricted = { scope_label = \"embargo\" } }",
-    );
-    heddle(&["cherry-pick", &first], Some(temp.path())).expect("cherry-pick");
-
-    let new_state = latest_state(temp.path());
-    let show = show_json(temp.path(), &new_state);
-    assert_eq!(
-        show["tier"], "restricted",
-        "cherry-picked state must inherit the restricted default via the chokepoint: {show}"
-    );
-    assert_eq!(show["effective_public"], false);
-}
-
-#[test]
 fn revert_state_gets_default_visibility() {
-    // Sibling of the cherry-pick leak: a revert creates a new state too, and
-    // must inherit the configured non-public default through the chokepoint.
+    // Revert creates a new state and must inherit the configured non-public
+    // default through the snapshot chokepoint.
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 

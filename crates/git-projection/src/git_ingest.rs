@@ -3,7 +3,7 @@
 
 use std::{collections::HashSet, path::Path};
 
-use objects::{object::ChangeId, store::ObjectStore};
+use objects::{object::StateId, store::ObjectStore};
 use sley::{GitObjectType, ObjectId, Repository as SleyRepository};
 
 use super::{
@@ -44,7 +44,7 @@ pub fn import_git_history(
         bridge.build_existing_mapping(None)?;
     }
     let mirror_repo = bridge.open_git_repo()?;
-    bridge.seed_ingest_identity_mappings_from_mirror(&mirror_repo)?;
+    bridge.seed_ingest_identity_mappings_from_repo(&mirror_repo)?;
     backfill_ingest_identity_notes_in_mirror(bridge, &mirror_repo, refs)?;
     Ok(import_stats_from_ingest(stats))
 }
@@ -110,8 +110,8 @@ fn backfill_ingest_identity_notes_in_mirror(
         Some(reachable_commits_from_updates(mirror_repo, updates)?)
     };
 
-    for (git_sha, change_id) in bridge.heddle_repo.git_overlay_ingest_commit_mapping()? {
-        let change_id = ChangeId::parse(&change_id)?;
+    for (git_sha, state_id) in bridge.heddle_repo.git_overlay_ingest_commit_mapping()? {
+        let state_id = StateId::parse(&state_id)?;
         let git_oid = git_sha
             .parse::<ObjectId>()
             .map_err(|err| GitProjectionError::InvalidMapping(err.to_string()))?;
@@ -129,14 +129,14 @@ fn backfill_ingest_identity_notes_in_mirror(
         }
         let tier = bridge
             .heddle_repo
-            .effective_visibility_tier(&change_id)
+            .effective_visibility_tier(&state_id)
             .map_err(|error| {
-                GitProjectionError::Git(format!("resolve visibility for {change_id}: {error:#}"))
+                GitProjectionError::Git(format!("resolve visibility for {state_id}: {error:#}"))
             })?;
         if !repo::visible(&tier, &repo::AudienceTier::Public) {
             continue;
         }
-        let Some(state) = bridge.heddle_repo.store().get_state(&change_id)? else {
+        let Some(state) = bridge.heddle_repo.store().get_state(&state_id)? else {
             continue;
         };
         git_notes::write_note(

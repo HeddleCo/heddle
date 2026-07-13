@@ -6,7 +6,7 @@
 //! finish / abort / carry_forward.
 
 use objects::{
-    object::{ChangeId, ThreadName},
+    object::{StateId, ThreadName},
     store::ObjectStore,
 };
 use repo::{MergeState, MergeStateManager, Repository};
@@ -24,7 +24,7 @@ fn test_detect_divergent_history() {
 
     // Fork: create feature branch
     repo.refs()
-        .set_thread(&ThreadName::new("feature"), &base_state.change_id)
+        .set_thread(&ThreadName::new("feature"), &base_state.state_id)
         .unwrap();
 
     // Make divergent changes on feature
@@ -34,14 +34,14 @@ fn test_detect_divergent_history() {
         .unwrap();
 
     // Reset to base and make different changes on main
-    repo.goto(&base_state.change_id).unwrap();
+    repo.goto(&base_state.state_id).unwrap();
     std::fs::write(temp.path().join("main.txt"), "main work").unwrap();
     let main_state = repo.snapshot(Some("Main work".to_string()), None).unwrap();
 
     // Verify we have divergent histories
-    assert_ne!(feature_state.change_id, main_state.change_id);
-    assert_eq!(feature_state.parents, vec![base_state.change_id]);
-    assert_eq!(main_state.parents, vec![base_state.change_id]);
+    assert_ne!(feature_state.state_id, main_state.state_id);
+    assert_eq!(feature_state.parents, vec![base_state.state_id]);
+    assert_eq!(main_state.parents, vec![base_state.state_id]);
 }
 
 /// Test that common ancestors can be found.
@@ -61,13 +61,13 @@ fn test_find_common_ancestor() {
     let state_c = repo.snapshot(Some("C".to_string()), None).unwrap();
 
     // Fork from B
-    repo.goto(&state_b.change_id).unwrap();
+    repo.goto(&state_b.state_id).unwrap();
     std::fs::write(temp.path().join("file.txt"), "D").unwrap();
     let state_d = repo.snapshot(Some("D".to_string()), None).unwrap();
 
     // B should be common ancestor of C and D
-    assert_eq!(state_c.parents, vec![state_b.change_id]);
-    assert_eq!(state_d.parents, vec![state_b.change_id]);
+    assert_eq!(state_c.parents, vec![state_b.state_id]);
+    assert_eq!(state_d.parents, vec![state_b.state_id]);
 }
 
 /// Test three-way merge base calculation.
@@ -85,13 +85,13 @@ fn test_three_way_merge_base() {
     let branch1 = repo.snapshot(Some("Branch 1".to_string()), None).unwrap();
 
     // Reset to base, create branch 2
-    repo.goto(&base.change_id).unwrap();
+    repo.goto(&base.state_id).unwrap();
     std::fs::write(temp.path().join("file2.txt"), "branch2").unwrap();
     let branch2 = repo.snapshot(Some("Branch 2".to_string()), None).unwrap();
 
     // Verify merge base
-    assert_eq!(branch1.parents[0], base.change_id);
-    assert_eq!(branch2.parents[0], base.change_id);
+    assert_eq!(branch1.parents[0], base.state_id);
+    assert_eq!(branch2.parents[0], base.state_id);
 }
 
 /// Test detecting conflicting file modifications.
@@ -109,7 +109,7 @@ fn test_detect_conflicting_modifications() {
     repo.snapshot(Some("Branch 1".to_string()), None).unwrap();
 
     // Reset and branch 2: also modify conflict.txt
-    repo.goto(&base.change_id).unwrap();
+    repo.goto(&base.state_id).unwrap();
     std::fs::write(temp.path().join("conflict.txt"), "branch2").unwrap();
     repo.snapshot(Some("Branch 2".to_string()), None).unwrap();
 
@@ -132,24 +132,14 @@ fn test_non_conflicting_changes() {
     let branch1 = repo.snapshot(Some("Branch 1".to_string()), None).unwrap();
 
     // Reset and branch 2: add file2.txt (different file)
-    repo.goto(&base.change_id).unwrap();
+    repo.goto(&base.state_id).unwrap();
     std::fs::write(temp.path().join("file2.txt"), "branch2").unwrap();
     let branch2 = repo.snapshot(Some("Branch 2".to_string()), None).unwrap();
 
     // These changes don't conflict - different files
     // A merge would succeed
-    assert!(
-        repo.store()
-            .get_state(&branch1.change_id)
-            .unwrap()
-            .is_some()
-    );
-    assert!(
-        repo.store()
-            .get_state(&branch2.change_id)
-            .unwrap()
-            .is_some()
-    );
+    assert!(repo.store().get_state(&branch1.state_id).unwrap().is_some());
+    assert!(repo.store().get_state(&branch2.state_id).unwrap().is_some());
 }
 
 /// Test fast-forward merge detection.
@@ -170,8 +160,8 @@ fn test_fast_forward_detection() {
 
     // If we're at A and want to merge C, it's a fast-forward
     // because C is a descendant of A
-    assert_eq!(state_b.parents, vec![state_a.change_id]);
-    assert_eq!(state_c.parents, vec![state_b.change_id]);
+    assert_eq!(state_b.parents, vec![state_a.state_id]);
+    assert_eq!(state_c.parents, vec![state_b.state_id]);
 }
 
 /// Test detecting when files are modified vs deleted.
@@ -189,7 +179,7 @@ fn test_modify_vs_delete_conflict() {
     repo.snapshot(Some("Modified".to_string()), None).unwrap();
 
     // Reset and branch 2: delete file
-    repo.goto(&base.change_id).unwrap();
+    repo.goto(&base.state_id).unwrap();
     std::fs::remove_file(temp.path().join("file.txt")).unwrap();
     repo.snapshot(Some("Deleted".to_string()), None).unwrap();
 
@@ -212,7 +202,7 @@ fn test_rename_detection_in_merge() {
     let _branch1 = repo.snapshot(Some("Renamed".to_string()), None).unwrap();
 
     // Reset and branch 2: modify original file
-    repo.goto(&base.change_id).unwrap();
+    repo.goto(&base.state_id).unwrap();
     std::fs::write(temp.path().join("oldname.txt"), "modified content").unwrap();
     let _branch2 = repo
         .snapshot(Some("Modified original".to_string()), None)
@@ -233,17 +223,17 @@ fn test_octopus_merge_structure() {
     let base = repo.snapshot(Some("Base".to_string()), None).unwrap();
 
     // Create three branches from base
-    let mut parent_ids = vec![base.change_id];
+    let mut parent_ids = vec![base.state_id];
 
     for i in 1..=3 {
-        repo.goto(&base.change_id).unwrap();
+        repo.goto(&base.state_id).unwrap();
         std::fs::write(
             temp.path().join(format!("branch{}.txt", i)),
             format!("branch {}", i),
         )
         .unwrap();
         let state = repo.snapshot(Some(format!("Branch {}", i)), None).unwrap();
-        parent_ids.push(state.change_id);
+        parent_ids.push(state.state_id);
     }
 
     // Verify we have multiple parents to merge
@@ -265,7 +255,7 @@ fn test_binary_file_merge() {
     repo.snapshot(Some("Binary 1".to_string()), None).unwrap();
 
     // Reset and branch 2: yet another binary
-    repo.goto(&base.change_id).unwrap();
+    repo.goto(&base.state_id).unwrap();
     std::fs::write(temp.path().join("image.bin"), vec![10u8, 11, 12, 13, 14]).unwrap();
     repo.snapshot(Some("Binary 2".to_string()), None).unwrap();
 
@@ -289,7 +279,7 @@ fn test_directory_file_conflict() {
     repo.snapshot(Some("Directory".to_string()), None).unwrap();
 
     // Reset and branch 2: modify file
-    repo.goto(&base.change_id).unwrap();
+    repo.goto(&base.state_id).unwrap();
     std::fs::write(temp.path().join("item.txt"), "modified file").unwrap();
     repo.snapshot(Some("Modified file".to_string()), None)
         .unwrap();
@@ -305,11 +295,11 @@ fn merge_manager(temp: &TempDir) -> (Repository, MergeStateManager) {
     (repo, manager)
 }
 
-fn sample_ids() -> (ChangeId, ChangeId, ChangeId) {
+fn sample_ids() -> (StateId, StateId, StateId) {
     (
-        ChangeId::generate(),
-        ChangeId::generate(),
-        ChangeId::generate(),
+        StateId::from_bytes([12; 32]),
+        StateId::from_bytes([13; 32]),
+        StateId::from_bytes([14; 32]),
     )
 }
 
@@ -410,7 +400,7 @@ fn merge_state_carry_forward_repoints_ours_without_ending_merge() {
     let temp = TempDir::new().unwrap();
     let (_repo, manager) = merge_manager(&temp);
     let (ours, theirs, base) = sample_ids();
-    let new_ours = ChangeId::generate();
+    let new_ours = StateId::from_bytes([15; 32]);
 
     manager
         .start(

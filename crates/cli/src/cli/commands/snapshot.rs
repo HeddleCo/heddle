@@ -8,8 +8,9 @@ use heddle_core::{
     GitScope, SavePlan, SaveVerb, execute_save, large_capture_requires_force,
     principal_lacks_accountable_identity,
 };
+use heddle_git_projection::GitProjection;
 use objects::{
-    object::{Agent, Attribution, ChangeId, Principal, Tree},
+    object::{Agent, Attribution, Principal, StateId, Tree},
     worktree::WorktreeStatus,
 };
 use repo::{Repository, SessionManager, SnapshotProfile, format_confidence};
@@ -41,7 +42,6 @@ use crate::{
     attribution::clean_attribution_value,
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
-    git_projection_engine::GitProjection,
     perf::{ProfileField, emit_profile, profile_enabled},
 };
 
@@ -50,7 +50,7 @@ pub(crate) struct SnapshotOutput {
     pub output_kind: &'static str,
     pub status: &'static str,
     pub action: &'static str,
-    pub change_id: String,
+    pub state_id: String,
     pub content_hash: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
@@ -264,7 +264,7 @@ pub async fn cmd_snapshot(
         match repo.current_state() {
             Ok(Some(state)) => {
                 let bridge = GitProjection::new(&repo);
-                if let Err(err) = bridge.update_intent_to_add(&state.change_id) {
+                if let Err(err) = bridge.update_intent_to_add(&state.state_id) {
                     debug!("intent-to-add index update skipped: {err}");
                 }
             }
@@ -286,7 +286,7 @@ pub async fn cmd_snapshot(
         // continue to receive a clean ANSI-free string.
         println!(
             "Captured state {} ({})",
-            style::change_id(&output.change_id),
+            style::state_id(&output.state_id),
             style::dim(&output.content_hash),
         );
         println!(
@@ -407,7 +407,7 @@ fn missing_capture_intent_advice() -> RecoveryAdvice {
 
 fn nothing_to_capture_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
-        "nothing_to_commit",
+        "nothing_to_capture",
         "nothing to capture: worktree has no changes eligible for Heddle capture",
         "Inspect the worktree with `heddle status`; make changes before running `heddle capture -m \"...\"`.",
         "the worktree has no modified, deleted, or untracked paths relative to the current Heddle state",
@@ -449,20 +449,6 @@ fn missing_capture_identity_advice() -> RecoveryAdvice {
             "heddle capture -m \"...\"".to_string(),
         ],
     )
-}
-
-/// Large-capture safety preflight for `commit`'s dirty path, reusing an
-/// already-computed Git-overlay worktree status instead of re-walking the
-/// worktree. The Git Projection commit path has already computed the same
-/// pre-mutation status for its own preflights and the clean classification, so
-/// threading it here
-/// removes a redundant full walk. The large-capture gating decision is
-/// byte-identical because it reads the same `WorktreeStatus`.
-pub(crate) fn preflight_large_capture_for_git_projection_commit_with_worktree_status(
-    force: bool,
-    worktree_status: &repo::Result<Option<WorktreeStatus>>,
-) -> Result<()> {
-    preflight_large_capture_with_status(force, worktree_status)
 }
 
 /// Large-capture safety preflight built from an already-computed git-overlay
@@ -573,9 +559,9 @@ pub(crate) fn ensure_current_state(
     repo: &Repository,
     user_config: &UserConfig,
     intent: Option<String>,
-) -> Result<ChangeId> {
+) -> Result<StateId> {
     if let Some(state) = repo.current_state()? {
-        return Ok(state.change_id);
+        return Ok(state.state_id);
     }
 
     create_snapshot(
@@ -763,7 +749,7 @@ fn snapshot_output_from_save_report(
         output_kind: "capture",
         status: "captured",
         action: "capture",
-        change_id: report.change_id.short(),
+        state_id: report.state_id.short(),
         content_hash: report.content_hash.short(),
         intent: report.intent,
         confidence: report.confidence,
@@ -858,7 +844,7 @@ fn build_attribution_with_env(
     // Pull the thread's declared actor — set when the user ran
     // `heddle start --agent-provider X --agent-model Y` to dedicate this
     // thread to a specific agent. The `start` command writes an
-    // `AgentEntry` into the `AgentRegistry`; `heddle status` already
+    // `ActorPresence` into the `ActorPresenceStore`; `heddle status` already
     // surfaces it via `build_thread_view`. We look it up here so
     // `heddle capture` propagates it onto the resulting state's
     // `attribution.agent` — otherwise every captured state on an agent
@@ -875,7 +861,7 @@ fn build_attribution_with_env(
         .flatten()
         .and_then(|t| find_active_thread_entry(repo, &t.id).ok().flatten());
     // Harness probing writes the literal "unknown" placeholder into
-    // `AgentEntry.model` and `SessionSegment.model` when it can't
+    // `ActorPresence.model` and `SessionSegment.model` when it can't
     // identify the model from argv/env (see `harness::open_session`
     // and `claude_hook::handle_user_prompt_segment_rotate`). If we
     // let that placeholder participate in the precedence chain, an
@@ -1013,7 +999,7 @@ fn build_attribution_with_env(
 ///
 /// Differs from the snapshot path in two ways — both intentional: it does not
 /// honor explicit `--agent-*` flag overrides (other commands don't expose
-/// those), and it does not consult the active `heddle session` chain. Use the
+/// those), and it does not consult the active `heddle agent provenance` chain. Use the
 /// snapshot path's full `resolve_*` for capture flows.
 pub(crate) fn resolve_attribution(
     repo: &Repository,
@@ -1156,13 +1142,13 @@ mod tests {
         repo: &Repository,
         provider: &str,
         model: &str,
-    ) -> objects::store::AgentEntry {
+    ) -> objects::store::ActorPresence {
         let thread = current_thread(repo)
             .unwrap()
             .expect("initialized repository has a current thread");
-        let registry = objects::store::AgentRegistry::new(repo.heddle_dir());
-        let entry = objects::store::AgentEntry {
-            session_id: objects::store::generate_agent_id(),
+        let registry = objects::store::ActorPresenceStore::new(repo.heddle_dir());
+        let entry = objects::store::ActorPresence {
+            session_id: objects::store::generate_actor_session_id(),
             client_instance_id: None,
             native_actor_key: Some("claude-code:session:session-457".to_string()),
             native_parent_actor_key: None,
@@ -1170,13 +1156,8 @@ mod tests {
             heddle_session_id: None,
             thread_id: Some(thread.id.clone()),
             thread: thread.id,
-            pid: Some(std::process::id()),
-            boot_id: None,
-            liveness_path: None,
-            heartbeat_at: Some(chrono::Utc::now()),
             anchor_state: None,
             anchor_root: None,
-            reservation_token: Some(objects::store::generate_agent_id()),
             path: Some(repo.root().to_path_buf()),
             base_state: String::new(),
             started_at: chrono::Utc::now(),
@@ -1193,7 +1174,7 @@ mod tests {
             winning_attach_rule: Some("test".to_string()),
             probe_source: Some("hook_payload".to_string()),
             probe_confidence: Some(0.99),
-            status: objects::store::AgentStatus::Active,
+            status: objects::store::ActorPresenceStatus::Active,
             completed_at: None,
             context_queries: Vec::new(),
         };

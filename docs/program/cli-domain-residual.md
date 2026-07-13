@@ -31,9 +31,9 @@ Heuristic only: files under `crates/cli/src` defining `fn cmd_*`, sorted by LOC.
 | 829 | yes | `crates/cli/src/cli/commands/thread_shaping.rs` | `cmd_capture_split`, `cmd_thread_absorb`, `cmd_thread_move`, `cmd_thread_resolve` |
 | 818 | yes | `crates/cli/src/cli/commands/undo.rs` | `cmd_redo`, `cmd_undo` |
 | 784 | yes | `crates/cli/src/cli/commands/git_projection_io.rs` | `cmd_context_reason_git`, `cmd_export_git`, `cmd_import_git`, `cmd_sync_git` |
-| 742 | yes | `crates/cli/src/cli/commands/actor_cmd.rs` | `cmd_actor_done`, `cmd_actor_explain`, `cmd_actor_list`, `cmd_actor_show`, `cmd_actor_spawn` |
+| 742 | yes | `crates/cli/src/cli/commands/agent_presence.rs` | presence list, show, explain, and complete |
 | 719 | yes | `crates/cli/src/cli/commands/try_cmd.rs` | `cmd_try`, `cmd_try_refuses_name_collision_via_ref_only_thread` |
-| 693 | yes | `crates/cli/src/cli/commands/diagnose.rs` | `cmd_diagnose` |
+| 693 | yes | `crates/cli/src/cli/commands/doctor.rs` | `cmd_doctor` |
 | 538 | yes | `crates/cli/src/cli/commands/blame.rs` | `cmd_blame_with_output_kind`, `cmd_query_attribution` |
 | 504 | yes | `crates/cli/src/cli/commands/context/context_query.rs` | `cmd_context_audit`, `cmd_context_check`, `cmd_context_get`, `cmd_context_history`, `cmd_context_list`, `cmd_context_suggest` |
 | 476 | yes | `crates/cli/src/cli/commands/verify.rs` | `cmd_verify` |
@@ -54,14 +54,13 @@ Heuristic only: files under `crates/cli/src` defining `fn cmd_*`, sorted by LOC.
 | 270 | yes | `crates/cli/src/cli/commands/init.rs` | `cmd_init` |
 | 261 | yes | `crates/cli/src/cli/commands/revert.rs` | `cmd_revert` |
 | 257 | yes | `crates/cli/src/cli/commands/spool.rs` | `cmd_spool`, `cmd_spool_attach`, `cmd_spool_children`, `cmd_spool_detach`, `cmd_spool_governance`, `cmd_spool_membership` |
-| 255 | yes | `crates/cli/src/cli/commands/session.rs` | `cmd_session_end`, `cmd_session_list`, `cmd_session_segment`, `cmd_session_show`, `cmd_session_start` |
+| 255 | yes | `crates/cli/src/cli/commands/agent_provenance.rs` | provenance begin, segment, end, show, and list |
 | 251 | yes | `crates/cli/src/cli/commands/semantic_cmd.rs` | `cmd_semantic`, `cmd_semantic_hot` |
 | 245 | yes | `crates/cli/src/cli/commands/completion.rs` | `cmd_complete`, `cmd_completion` |
 | 238 | yes | `crates/cli/src/cli/commands/expand.rs` | `cmd_expand` |
 | 228 | yes | `crates/cli/src/cli/commands/collapse.rs` | `cmd_collapse` |
 | 216 | yes | `crates/cli/src/cli/commands/operator_loop.rs` | `cmd_abort`, `cmd_continue`, `cmd_sync_smart` |
 | 212 | yes | `crates/cli/src/cli/commands/diff/diff_compute.rs` | `cmd_diff` |
-| 211 | yes | `crates/cli/src/cli/commands/cherry_pick.rs` | `cmd_cherry_pick` |
 | 203 | yes | `crates/cli/src/cli/commands/purge.rs` | `cmd_purge`, `cmd_purge_apply`, `cmd_purge_list` |
 | 202 | yes | `crates/cli/src/cli/commands/hook.rs` | `cmd_hook` |
 | 188 | yes | `crates/cli/src/cli/commands/gc.rs` | `cmd_gc` |
@@ -82,4 +81,3 @@ Heuristic only: files under `crates/cli/src` defining `fn cmd_*`, sorted by LOC.
 
 Prefer high-LOC modules with `uses_heddle_core=no` that implement durable VCS
 semantics (thread lifecycle, remotes, undo, clone) over pure render/catalog modules.
-

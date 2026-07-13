@@ -10,14 +10,45 @@ fn test_full_workflow_basic() {
     fs::write(temp.path().join("main.rs"), "fn main() {}").unwrap();
     heddle(&["capture", "-m", "Initial commit"], Some(temp.path())).unwrap();
 
-    heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
-    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+    let started: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature",
+                "--workspace",
+                "auto",
+            ],
+            Some(temp.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let feature_path = std::path::PathBuf::from(
+        started["execution_path"]
+            .as_str()
+            .expect("start should report the feature checkout"),
+    );
 
-    fs::write(temp.path().join("feature.rs"), "pub fn feature() {}").unwrap();
-    heddle(&["capture", "-m", "Add feature"], Some(temp.path())).unwrap();
+    fs::write(feature_path.join("feature.rs"), "pub fn feature() {}").unwrap();
+    heddle(&["capture", "-m", "Add feature"], Some(&feature_path)).unwrap();
+    heddle(
+        &["--output", "json", "ready", "--thread", "feature"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
-    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-    heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+    let landed: Value = serde_json::from_str(
+        &heddle(
+            &["--output", "json", "land", "--thread", "feature"],
+            Some(temp.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(landed["status"], "landed");
+    assert_eq!(landed["integrated"], true);
 
     assert_exists(temp.path().join("main.rs"), "main.rs should exist");
     assert_exists(temp.path().join("feature.rs"), "feature.rs should exist");
@@ -47,25 +78,4 @@ fn test_undo_redo_workflow() {
     heddle(&["undo", "--redo"], Some(temp.path())).unwrap();
     let content = fs::read_to_string(temp.path().join("file.txt")).unwrap();
     assert_eq!(content, "v3", "redo should restore v3");
-}
-
-#[test]
-fn test_stash_workflow() {
-    let temp = TempDir::new().unwrap();
-    setup_repo_with_file(&temp, "file.txt", "original");
-
-    fs::write(temp.path().join("file.txt"), "modified").unwrap();
-    fs::write(temp.path().join("new.txt"), "new file").unwrap();
-
-    heddle(&["stash", "push", "-m", "WIP"], Some(temp.path())).unwrap();
-
-    let content = fs::read_to_string(temp.path().join("file.txt")).unwrap();
-    assert_eq!(content, "original", "stash should restore original");
-    assert_not_exists(temp.path().join("new.txt"), "stashed file should be gone");
-
-    heddle(&["stash", "pop"], Some(temp.path())).unwrap();
-
-    let content = fs::read_to_string(temp.path().join("file.txt")).unwrap();
-    assert_eq!(content, "modified", "pop should restore modifications");
-    assert_exists(temp.path().join("new.txt"), "pop should restore new file");
 }

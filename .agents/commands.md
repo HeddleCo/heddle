@@ -36,8 +36,8 @@ cargo doc --open              # Generate and open docs
 cargo run -p heddle-cli -- init
 cargo run -p heddle-cli -- status
 cargo run -p heddle-cli -- capture -m "message"
-cargo run -p heddle-cli -- actor list
-cargo run -p heddle-cli -- actor explain
+cargo run -p heddle-cli -- agent presence list
+cargo run -p heddle-cli -- agent presence explain
 cargo run -p heddle-cli -- integration install claude-code
 
 # Hosted server/admin binary
@@ -51,16 +51,16 @@ cargo run -p hosted -- serve --bind 0.0.0.0 --port 8421
 cargo run -- start feature/auth --path /tmp/agent-a
 
 # Spawn an explicit Heddle actor (creates thread + registry entry)
-cargo run -- actor spawn --thread feature/x
+cargo run -- agent reserve --thread feature/x
 
 # List active actors
-cargo run -- actor list
+cargo run -- agent presence list
 
 # Inspect why Heddle attached an actor (omit the session id to use the current thread's actor)
-cargo run -- actor explain agent-x7k9qm4h
+cargo run -- agent presence explain agent-x7k9qm4h
 
 # Mark actor complete
-cargo run -- actor done --session agent-x7k9qm4h
+cargo run -- agent presence complete --session agent-x7k9qm4h
 ```
 
 Notes:
@@ -68,7 +68,7 @@ Notes:
 - Threads are the human-facing work context.
 - Actors are the active workers on those threads.
 - Heddle sessions and segments are the execution records underneath that actor model.
-- Supported harnesses may create actors ambiently; explicit `actor spawn` is not required for the ambient path.
+- Supported harnesses may create presence ambiently; only `agent reserve` grants writer authority.
 
 ## Harness Integration
 
@@ -99,30 +99,28 @@ cargo run -- integration relay claude-code SessionStart
 ## History Operations
 
 ```bash
-# Rebase current thread onto another (replays commits as new states)
-cargo run -- rebase <thread>
-cargo run -- rebase --continue     # After resolving conflicts
-cargo run -- rebase --abort        # Cancel in-progress rebase
+# Refresh a thread onto its target, then verify and integrate it
+cargo run -- thread refresh <thread>
+cargo run -- ready --thread <thread>
+cargo run -- land --thread <thread>
+
+# Resolve or cancel an in-progress integration
+cargo run -- resolve <path>
+cargo run -- continue
+cargo run -- abort
 
 # Collapse (squash) multiple states into one
 cargo run -- collapse <from>..<to>
-
-# Cherry-pick a specific state onto HEAD
-cargo run -- cherry-pick <state-id>
-
-# Fork current state (same tree, new change_id)
-cargo run -- fork
 
 # Revert a state (creates inverse change)
 cargo run -- revert <state-id>
 
 # Undo/redo last operation(s)
 cargo run -- undo
-cargo run -- redo
+cargo run -- undo --redo
 ```
 
-Note: rebase and collapse create **new** state objects — originals remain in the store.
-Force push (`heddle push --force`) is required after rebase since the thread is non-fast-forward.
+Note: refresh and collapse create **new** state objects — originals remain in the store.
 
 ## Debug Build
 

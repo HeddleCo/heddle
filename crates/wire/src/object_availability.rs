@@ -18,12 +18,10 @@ pub fn has_object(store: &impl ObjectStore, info: &ObjectInfo) -> Result<bool> {
     match (&info.id, info.obj_type) {
         (ObjectId::Hash(hash), ObjectType::Blob) => Ok(store.has_blob(hash)?),
         (ObjectId::Hash(hash), ObjectType::Tree) => Ok(store.has_tree(hash)?),
-        // State identity deliberately excludes mutable tail fields such as
-        // discussions and review signatures. A receiver may have the same
-        // ChangeId with older tail pointers, so refresh State records by id
-        // and let the store's loose-state shadowing keep the newest metadata
-        // body authoritative.
-        (ObjectId::ChangeId(_), ObjectType::State) => Ok(false),
+        (ObjectId::StateId(state_id), ObjectType::State) => Ok(store.has_state(state_id)?),
+        (ObjectId::StateAttachment { state, id }, ObjectType::StateAttachment) => {
+            Ok(store.get_state_attachment(state, id)?.is_some())
+        }
         // Redactions are keyed by the redacted blob's hash. Two senders
         // can declare different redactions on the same blob (different
         // reason / signature / timestamp), so we conservatively report
@@ -34,7 +32,7 @@ pub fn has_object(store: &impl ObjectStore, info: &ObjectInfo) -> Result<bool> {
         // StateVisibility is a per-state sidecar with append/merge
         // semantics. Like Redaction, conservatively refetch and let the
         // repository boundary validate + dedupe.
-        (ObjectId::ChangeId(_), ObjectType::StateVisibility) => Ok(false),
+        (ObjectId::StateId(_), ObjectType::StateVisibility) => Ok(false),
         _ => Ok(false),
     }
 }
@@ -79,7 +77,7 @@ impl ObjectAvailabilityPlan {
 #[cfg(test)]
 mod tests {
     use objects::{
-        object::{Blob, ChangeId, ContentHash, Tree},
+        object::{Blob, ContentHash, StateId, Tree},
         store::{ObjectStore, Result as StoreResult},
     };
 
@@ -88,6 +86,7 @@ mod tests {
     #[derive(Default)]
     struct DummyStore {
         blob: Option<ContentHash>,
+        state: Option<StateId>,
     }
 
     impl ObjectStore for DummyStore {
@@ -115,7 +114,7 @@ mod tests {
             Ok(false)
         }
 
-        fn get_state(&self, _id: &ChangeId) -> StoreResult<Option<objects::object::State>> {
+        fn get_state(&self, _id: &StateId) -> StoreResult<Option<objects::object::State>> {
             Ok(None)
         }
 
@@ -123,11 +122,11 @@ mod tests {
             unreachable!("not used in test")
         }
 
-        fn has_state(&self, _id: &ChangeId) -> StoreResult<bool> {
-            Ok(false)
+        fn has_state(&self, id: &StateId) -> StoreResult<bool> {
+            Ok(self.state == Some(*id))
         }
 
-        fn list_states(&self) -> StoreResult<Vec<ChangeId>> {
+        fn list_states(&self) -> StoreResult<Vec<StateId>> {
             Ok(vec![])
         }
 
@@ -164,6 +163,7 @@ mod tests {
         let blob_hash = blob.hash();
         let store = DummyStore {
             blob: Some(blob_hash),
+            state: None,
         };
         let missing_hash = ContentHash::from_bytes([7; 32]);
         let objects = vec![
@@ -191,11 +191,11 @@ mod tests {
     }
 
     #[test]
-    fn state_objects_are_refreshed_even_when_present_locally() {
+    fn missing_state_objects_are_requested() {
         let store = DummyStore::default();
-        let state = ChangeId::from_bytes([9; 16]);
+        let state = StateId::from_bytes([9; 32]);
         let objects = vec![ObjectInfo {
-            id: ObjectId::ChangeId(state),
+            id: ObjectId::StateId(state),
             obj_type: ObjectType::State,
             size: 0,
             delta_base: None,
@@ -204,8 +204,28 @@ mod tests {
         let plan = plan_object_availability(&store, &objects).unwrap();
 
         assert!(plan.have_objects.is_empty());
-        assert_eq!(plan.want_objects, vec![ObjectId::ChangeId(state)]);
-        assert_eq!(plan.missing_objects, vec![ObjectId::ChangeId(state)]);
+        assert_eq!(plan.want_objects, vec![ObjectId::StateId(state)]);
+        assert_eq!(plan.missing_objects, vec![ObjectId::StateId(state)]);
+    }
+
+    #[test]
+    fn immutable_state_objects_are_not_requested_when_present() {
+        let state = StateId::from_bytes([9; 32]);
+        let store = DummyStore {
+            state: Some(state),
+            ..DummyStore::default()
+        };
+        let objects = vec![ObjectInfo {
+            id: ObjectId::StateId(state),
+            obj_type: ObjectType::State,
+            size: 0,
+            delta_base: None,
+        }];
+
+        let plan = plan_object_availability(&store, &objects).unwrap();
+
+        assert_eq!(plan.have_objects, vec![ObjectId::StateId(state)]);
+        assert!(plan.want_objects.is_empty());
     }
 
     #[test]

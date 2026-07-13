@@ -6,7 +6,7 @@ use tempfile::TempDir;
 
 use super::{ObjectType, PackBuilder, PackObjectId, PackReader, pack_index::PackIndex};
 use crate::{
-    object::{ChangeId, ContentHash},
+    object::{ContentHash, StateId},
     store::{StoreError, pack::pack_container_spec},
 };
 
@@ -44,21 +44,21 @@ fn assert_invalid_object_message_contains(error: StoreError, expected: &str) {
 }
 
 #[test]
-fn test_pack_container_header_codec_matches_legacy_bytes() {
-    let mut legacy = Vec::new();
-    legacy.extend_from_slice(b"LMPK");
-    legacy.extend_from_slice(&2_u32.to_be_bytes());
-    legacy.extend_from_slice(&0_u64.to_be_bytes());
-    let checksum = blake3::hash(&legacy);
-    legacy.extend_from_slice(checksum.as_bytes());
+fn test_pack_container_header_codec_matches_v3_bytes() {
+    let mut canonical = Vec::new();
+    canonical.extend_from_slice(b"LMPK");
+    canonical.extend_from_slice(&3_u32.to_be_bytes());
+    canonical.extend_from_slice(&0_u64.to_be_bytes());
+    let checksum = blake3::hash(&canonical);
+    canonical.extend_from_slice(checksum.as_bytes());
 
     let mut encoded = Vec::new();
     super::write_container_header(&mut encoded, pack_container_spec(), 0);
     super::append_container_checksum(&mut encoded);
 
-    assert_eq!(encoded, legacy);
+    assert_eq!(encoded, canonical);
     assert_eq!(
-        super::verify_container(&legacy, pack_container_spec()).unwrap(),
+        super::verify_container(&canonical, pack_container_spec()).unwrap(),
         (0, 16, 16)
     );
 }
@@ -81,7 +81,7 @@ fn test_pack_index_roundtrip() {
     let mut index = PackIndex::new();
     index.add(PackObjectId::Hash(create_test_hash(1)), 100);
     index.add(PackObjectId::Hash(create_test_hash(2)), 200);
-    index.add(PackObjectId::ChangeId(ChangeId::from_bytes([3; 16])), 300);
+    index.add(PackObjectId::StateId(StateId::from_bytes([3; 32])), 300);
     index.sort();
 
     let bytes = index.to_bytes();
@@ -96,7 +96,7 @@ fn test_pack_index_roundtrip() {
         Some(200)
     );
     assert_eq!(
-        restored.find(&PackObjectId::ChangeId(ChangeId::from_bytes([3; 16]))),
+        restored.find(&PackObjectId::StateId(StateId::from_bytes([3; 32]))),
         Some(300)
     );
     assert_eq!(
@@ -719,7 +719,7 @@ fn test_delta_window_pack_bytes_are_stable() {
     assert!(stats.delta_count > 0);
     assert_eq!(
         blake3::hash(&pack_data).to_string(),
-        "4dc15365d17fbdf22ee4c1a8a44ee3414dda6dbdcb93c583536a4629c575e8ca"
+        "98c8d82f9aad4dab4e7ff441e0b4faaf74b19682846bfd8b7b3bf31d4007939f"
     );
     assert_eq!(
         blake3::hash(&index_data).to_string(),

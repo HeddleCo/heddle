@@ -20,12 +20,12 @@ use heddle_core::{
 use objects::{
     fs_atomic::write_file_atomic,
     object::{
-        ChangeId, ContentHash, DiffKind, NativeToolCallRefV1, Session, ThreadName,
-        TimelineBranchId, TimelineLabel, TimelineOperationBodyV1, TimelineOperationEnvelope,
-        TimelineStepId, TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1,
-        ToolCallStartedV1, Tree,
+        ContentHash, DiffKind, NativeToolCallRefV1, Session, StateId, ThreadName, TimelineBranchId,
+        TimelineLabel, TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineStepId,
+        TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
+        Tree,
     },
-    store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ObjectStore},
+    store::{ActorPresence, ActorPresenceStore, ActorPresenceStatus, AgentUsageSummary, ObjectStore},
 };
 use oplog::OpLogRecorder;
 use refs::Head;
@@ -239,19 +239,19 @@ struct RegistryEntryRequest<'a> {
     probe: &'a HarnessProbeResult,
     attach: &'a ResolvedAttachment,
     client_instance_id: Option<&'a str>,
-    requested_entry: Option<&'a AgentEntry>,
+    requested_entry: Option<&'a ActorPresence>,
 }
 
 struct CanonicalActorSessionRequest<'a> {
     tentative_session: Session,
     tentative_owns_session: bool,
-    entry: &'a AgentEntry,
+    entry: &'a ActorPresence,
     probe: &'a HarnessProbeResult,
     attach: &'a mut ResolvedAttachment,
 }
 
 struct AttachmentResolutionInput<'a> {
-    requested_entry: Option<&'a AgentEntry>,
+    requested_entry: Option<&'a ActorPresence>,
     explicit_heddle_session_id: Option<&'a str>,
     client_instance_id: Option<&'a str>,
     probe: &'a HarnessProbeResult,
@@ -415,7 +415,7 @@ fn relay_claude(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value
         }
         "SubagentStart" => {
             // open_session above has already created (or reattached) the
-            // child `AgentEntry` with `native_parent_actor_key` pointing at
+            // child `ActorPresence` with `native_parent_actor_key` pointing at
             // the parent session via the claude-code probe. The explicit
             // branch exists so the relay's behaviour is traceable in tests
             // and logs, and to preserve room for future subagent-specific
@@ -660,7 +660,7 @@ fn record_timeline_tool_started<E: HarnessTimelineExtractor>(
     let Some(native) = extractor.native_tool_call(payload) else {
         return Ok(());
     };
-    let Some(before_state) = current_change_id(&runtime.repo)? else {
+    let Some(before_state) = current_state_id(&runtime.repo)? else {
         return Ok(());
     };
     let thread = extractor.timeline_thread(runtime, opened)?;
@@ -697,7 +697,7 @@ fn record_timeline_tool_finished<E: HarnessTimelineExtractor>(
     let Some(native) = extractor.native_tool_call(payload) else {
         return Ok(());
     };
-    let Some(fallback_state) = current_change_id(&runtime.repo)? else {
+    let Some(fallback_state) = current_state_id(&runtime.repo)? else {
         return Ok(());
     };
     let thread = extractor.timeline_thread(runtime, opened)?;
@@ -739,7 +739,7 @@ fn record_timeline_tool_finished<E: HarnessTimelineExtractor>(
             }
         }
     };
-    let after_state = current_change_id(&runtime.repo)?.unwrap_or(fallback_state);
+    let after_state = current_state_id(&runtime.repo)?.unwrap_or(fallback_state);
     let mut touched_paths = extractor.touched_paths(payload);
     merge_string_vec(
         &mut touched_paths,
@@ -816,10 +816,10 @@ fn timeline_position_for_new_tool_step(
     (branch_id, parent_step_id)
 }
 
-fn current_change_id(repo: &Repository) -> Result<Option<ChangeId>> {
+fn current_state_id(repo: &Repository) -> Result<Option<StateId>> {
     Ok(repo
         .current_state()?
-        .map(|state| state.change_id)
+        .map(|state| state.state_id)
         .or(repo.head()?))
 }
 
@@ -984,7 +984,7 @@ impl HarnessBridgeRuntime {
                 probe: probe.clone(),
             },
         )?;
-        let registry = AgentRegistry::new(self.repo.heddle_dir());
+        let registry = ActorPresenceStore::new(self.repo.heddle_dir());
         let requested_entry = resolve_requested_registry_entry(
             &registry,
             params.agent_session_id.as_deref(),
@@ -1083,7 +1083,7 @@ impl HarnessBridgeRuntime {
         let base_state = self
             .repo
             .current_state()?
-            .map(|state| state.change_id.to_string_full())
+            .map(|state| state.state_id.to_string_full())
             .or_else(|| {
                 self.repo
                     .head()
@@ -1139,10 +1139,10 @@ impl HarnessBridgeRuntime {
             report.transcript_refs = probe.transcript_refs.clone();
         }
         self.reports.save(&report)?;
-        self.sync_registry_from_report(&report, AgentStatus::Active)?;
+        self.sync_registry_from_report(&report, ActorPresenceStatus::Active)?;
         if matches!(requested_transport, HarnessTransport::Direct) {
             enqueue_report(&self.reports, &mut report)?;
-            self.sync_registry_from_report(&report, AgentStatus::Active)?;
+            self.sync_registry_from_report(&report, ActorPresenceStatus::Active)?;
         }
 
         Ok(OpenSessionResult {
@@ -1435,7 +1435,7 @@ impl HarnessBridgeRuntime {
         &self,
         target_thread: Option<&str>,
         parent_thread: Option<&str>,
-    ) -> Result<Option<objects::object::ChangeId>> {
+    ) -> Result<Option<objects::object::StateId>> {
         resolve_harness_thread_base_state(&self.repo, target_thread, parent_thread)
     }
 
@@ -1523,7 +1523,7 @@ impl HarnessBridgeRuntime {
         } else {
             self.reports.save(&report)?;
         }
-        self.sync_registry_from_report(&report, AgentStatus::Complete)?;
+        self.sync_registry_from_report(&report, ActorPresenceStatus::Complete)?;
         Ok(CloseSessionResult {
             heddle_session_id: report.heddle_session_id,
             changed_paths: report.changed_paths,
@@ -1547,9 +1547,9 @@ impl HarnessBridgeRuntime {
             }
             enqueue_report(&self.reports, &mut report)?;
             let status = if report.closed_at.is_some() {
-                AgentStatus::Complete
+                ActorPresenceStatus::Complete
             } else {
-                AgentStatus::Active
+                ActorPresenceStatus::Active
             };
             self.sync_registry_from_report(&report, status)?;
             flushed += 1;
@@ -1570,7 +1570,7 @@ impl HarnessBridgeRuntime {
                 self.reports.save(&report)?;
             }
         }
-        self.sync_registry_from_report(&report, AgentStatus::Active)?;
+        self.sync_registry_from_report(&report, ActorPresenceStatus::Active)?;
         Ok(SessionMutationResult {
             heddle_session_id: report.heddle_session_id,
             heddle_segment_id: report.heddle_segment_id,
@@ -1618,7 +1618,7 @@ impl HarnessBridgeRuntime {
         Ok(())
     }
 
-    fn ensure_registry_entry(&self, request: RegistryEntryRequest<'_>) -> Result<AgentEntry> {
+    fn ensure_registry_entry(&self, request: RegistryEntryRequest<'_>) -> Result<ActorPresence> {
         let RegistryEntryRequest {
             heddle_session_id,
             thread_name,
@@ -1629,7 +1629,7 @@ impl HarnessBridgeRuntime {
             client_instance_id,
             requested_entry,
         } = request;
-        let registry = AgentRegistry::new(self.repo.heddle_dir());
+        let registry = ActorPresenceStore::new(self.repo.heddle_dir());
         let fallback_entry = if client_instance_id.is_some()
             || probe.native_actor_key.is_some()
             || probe.native_instance_key.is_some()
@@ -1680,7 +1680,8 @@ impl HarnessBridgeRuntime {
                     existing.winning_attach_rule = Some(attach.winning_rule.clone());
                     existing.probe_source = probe.probe_source.clone();
                     existing.probe_confidence = probe.confidence;
-                    existing.status = AgentStatus::Active;
+                    existing.status = ActorPresenceStatus::Active;
+                    existing.completed_at = None;
                 })?
                 .ok_or_else(|| anyhow!("registry entry disappeared during update"));
         }
@@ -1726,10 +1727,11 @@ impl HarnessBridgeRuntime {
                     existing.winning_attach_rule = Some(attach.winning_rule.clone());
                     existing.probe_source = probe.probe_source.clone();
                     existing.probe_confidence = probe.confidence;
-                    existing.status = AgentStatus::Active;
+                    existing.status = ActorPresenceStatus::Active;
+                    existing.completed_at = None;
                 },
                 |session_id| {
-                    Ok(AgentEntry {
+                    Ok(ActorPresence {
                         session_id: session_id.to_string(),
                         client_instance_id: client_instance_id.map(ToString::to_string),
                         native_actor_key: probe.native_actor_key.clone(),
@@ -1738,13 +1740,8 @@ impl HarnessBridgeRuntime {
                         heddle_session_id: Some(heddle_session_id.to_string()),
                         thread_id: thread_id.map(ToString::to_string),
                         thread: thread_name.unwrap_or("detached").to_string(),
-                        pid: Some(std::process::id()),
-                        boot_id: None,
-                        liveness_path: None,
-                        heartbeat_at: Some(Utc::now()),
                         anchor_state: self.repo.head()?.map(|id| id.to_string_full()),
                         anchor_root: None,
-                        reservation_token: Some(objects::store::generate_agent_id()),
                         path: Some(self.repo.root().to_path_buf()),
                         base_state: self.repo.head()?.map(|id| id.short()).unwrap_or_default(),
                         started_at: Utc::now(),
@@ -1761,7 +1758,7 @@ impl HarnessBridgeRuntime {
                         winning_attach_rule: Some(attach.winning_rule.clone()),
                         probe_source: probe.probe_source.clone(),
                         probe_confidence: probe.confidence,
-                        status: AgentStatus::Active,
+                        status: ActorPresenceStatus::Active,
                         completed_at: None,
                         context_queries: vec![],
                     })
@@ -1771,7 +1768,7 @@ impl HarnessBridgeRuntime {
         }
 
         Ok(registry.create_generated_entry(|session_id| {
-            Ok(AgentEntry {
+            Ok(ActorPresence {
                 session_id: session_id.to_string(),
                 client_instance_id: client_instance_id.map(ToString::to_string),
                 native_actor_key: probe.native_actor_key.clone(),
@@ -1780,13 +1777,8 @@ impl HarnessBridgeRuntime {
                 heddle_session_id: Some(heddle_session_id.to_string()),
                 thread_id: thread_id.map(ToString::to_string),
                 thread: thread_name.unwrap_or("detached").to_string(),
-                pid: Some(std::process::id()),
-                boot_id: None,
-                liveness_path: None,
-                heartbeat_at: Some(Utc::now()),
                 anchor_state: self.repo.head()?.map(|id| id.to_string_full()),
                 anchor_root: None,
-                reservation_token: Some(objects::store::generate_agent_id()),
                 path: Some(self.repo.root().to_path_buf()),
                 base_state: self.repo.head()?.map(|id| id.short()).unwrap_or_default(),
                 started_at: Utc::now(),
@@ -1803,7 +1795,7 @@ impl HarnessBridgeRuntime {
                 winning_attach_rule: Some(attach.winning_rule.clone()),
                 probe_source: probe.probe_source.clone(),
                 probe_confidence: probe.confidence,
-                status: AgentStatus::Active,
+                status: ActorPresenceStatus::Active,
                 completed_at: None,
                 context_queries: vec![],
             })
@@ -1866,9 +1858,9 @@ impl HarnessBridgeRuntime {
     fn sync_registry_from_report(
         &self,
         report: &SessionReportEnvelope,
-        status: AgentStatus,
+        status: ActorPresenceStatus,
     ) -> Result<()> {
-        let registry = AgentRegistry::new(self.repo.heddle_dir());
+        let registry = ActorPresenceStore::new(self.repo.heddle_dir());
         let entry = if let Some(agent_session_id) = &report.agent_session_id {
             registry.update_entry(agent_session_id, |entry| {
                 if report.client_instance_id.is_some() {
@@ -1900,8 +1892,8 @@ impl HarnessBridgeRuntime {
                 entry.probe_confidence = report.probe_confidence;
                 entry.status = status.clone();
                 entry.completed_at = match status {
-                    AgentStatus::Active => None,
-                    AgentStatus::Abandoned | AgentStatus::Complete | AgentStatus::Merged => {
+                    ActorPresenceStatus::Active => None,
+                    ActorPresenceStatus::Abandoned | ActorPresenceStatus::Complete | ActorPresenceStatus::Merged => {
                         Some(Utc::now())
                     }
                 };
@@ -2062,14 +2054,14 @@ enum AttachTarget {
 
 struct ResolvedAttachment {
     target: AttachTarget,
-    matched_entry: Option<AgentEntry>,
+    matched_entry: Option<ActorPresence>,
     attach_reason: String,
     precedence: Vec<String>,
     winning_rule: String,
 }
 
 fn resolve_actor_attachment(
-    registry: &AgentRegistry,
+    registry: &ActorPresenceStore,
     repo: &Repository,
     sessions: &mut SessionManager,
     input: AttachmentResolutionInput<'_>,
@@ -2084,7 +2076,7 @@ fn resolve_actor_attachment(
 
     // CLI owns FS/registry/session I/O; pure core owns attach/create precedence.
     let mut sessions_by_id: BTreeMap<String, Session> = BTreeMap::new();
-    let mut matched_by_session: BTreeMap<String, AgentEntry> = BTreeMap::new();
+    let mut matched_by_session: BTreeMap<String, ActorPresence> = BTreeMap::new();
     let mut facts = SessionAttachFacts {
         root_actor: probe.attach_hints.root_actor,
         ..SessionAttachFacts::default()
@@ -2280,7 +2272,7 @@ fn resolve_actor_attachment(
 }
 
 fn claude_actor_compatible(
-    entry: &AgentEntry,
+    entry: &ActorPresence,
     probe: &HarnessProbeResult,
     repo_root: &Path,
 ) -> bool {
@@ -2369,7 +2361,7 @@ fn resolve_harness_thread_base_state(
     repo: &Repository,
     target_thread: Option<&str>,
     parent_thread: Option<&str>,
-) -> Result<Option<objects::object::ChangeId>> {
+) -> Result<Option<objects::object::StateId>> {
     if let Some(head_state) = repo.head()? {
         return Ok(Some(head_state));
     }
@@ -2386,7 +2378,7 @@ fn resolve_harness_thread_base_state(
 fn resolve_named_thread_base_state(
     repo: &Repository,
     thread_name: &str,
-) -> Result<Option<objects::object::ChangeId>> {
+) -> Result<Option<objects::object::StateId>> {
     if let Some(thread) = ThreadManager::new(repo.heddle_dir()).load(thread_name)?
         && let Some(state_spec) = thread
             .current_state
@@ -2394,7 +2386,7 @@ fn resolve_named_thread_base_state(
             .or(Some(thread.base_state.as_str()))
         && let Some(state_id) = repo
             .resolve_state(state_spec)?
-            .or_else(|| objects::object::ChangeId::parse(state_spec).ok())
+            .or_else(|| objects::object::StateId::parse(state_spec).ok())
     {
         return Ok(Some(state_id));
     }
@@ -2408,7 +2400,7 @@ fn resolve_parent_thread_for_subagent(
     current_attached: Option<&str>,
 ) -> Result<Option<String>> {
     if let Some(parent_key) = probe.native_parent_actor_key.as_deref() {
-        let registry = AgentRegistry::new(repo.heddle_dir());
+        let registry = ActorPresenceStore::new(repo.heddle_dir());
         if let Some(entry) = registry.find_active_by_native_actor_key(parent_key)? {
             return Ok(Some(entry.thread));
         }
@@ -2490,15 +2482,15 @@ fn sanitize_name(name: &str) -> String {
 }
 
 fn resolve_requested_registry_entry(
-    registry: &AgentRegistry,
+    registry: &ActorPresenceStore,
     agent_session_id: Option<&str>,
     client_instance_id: Option<&str>,
-) -> Result<Option<AgentEntry>> {
+) -> Result<Option<ActorPresence>> {
     if let Some(agent_session_id) = agent_session_id {
         let entry = registry
             .load(agent_session_id)?
             .ok_or_else(|| anyhow!("agent session not found: {agent_session_id}"))?;
-        if entry.status != AgentStatus::Active {
+        if entry.status != ActorPresenceStatus::Active {
             return Err(anyhow!("agent session is not active: {agent_session_id}"));
         }
         return Ok(Some(entry));
@@ -2512,7 +2504,7 @@ fn resolve_requested_registry_entry(
 }
 
 fn ensure_requested_entry_matches_session(
-    requested_entry: Option<&AgentEntry>,
+    requested_entry: Option<&ActorPresence>,
     heddle_session_id: &str,
 ) -> Result<()> {
     if let Some(entry) = requested_entry
@@ -2528,9 +2520,9 @@ fn ensure_requested_entry_matches_session(
 }
 
 fn session_claimed_by_other(
-    registry: &AgentRegistry,
+    registry: &ActorPresenceStore,
     heddle_session_id: &str,
-    requested_entry: Option<&AgentEntry>,
+    requested_entry: Option<&ActorPresence>,
     client_instance_id: Option<&str>,
     native_actor_key: Option<&str>,
 ) -> Result<bool> {
@@ -2558,11 +2550,11 @@ fn session_claimed_by_other(
 }
 
 fn find_matching_registry_entry(
-    registry: &AgentRegistry,
+    registry: &ActorPresenceStore,
     repo: &Repository,
     heddle_session_id: &str,
     thread_name: Option<&str>,
-) -> Result<Option<AgentEntry>> {
+) -> Result<Option<ActorPresence>> {
     if let Some(entry) = registry.find_active_by_heddle_session_id(heddle_session_id)? {
         return Ok(Some(entry));
     }
@@ -2573,7 +2565,7 @@ fn find_matching_registry_entry(
     Ok(registry
         .list()?
         .into_iter()
-        .filter(|entry| entry.status == AgentStatus::Active)
+        .filter(|entry| entry.status == ActorPresenceStatus::Active)
         .find(|entry| {
             entry
                 .path
@@ -2754,7 +2746,7 @@ fn compute_final_diff(
     if let (Some(base_spec), Some(head_id)) = (base_state, head_state) {
         let base_id = repo
             .resolve_state(base_spec)?
-            .or_else(|| objects::object::ChangeId::parse(base_spec).ok());
+            .or_else(|| objects::object::StateId::parse(base_spec).ok());
         if let Some(base_id) = base_id
             && base_id != head_id
         {
@@ -2836,8 +2828,8 @@ fn collect_worktree_changes(repo: &Repository) -> Result<BTreeMap<String, DiffKi
 
 fn changed_paths_between_states(
     repo: &Repository,
-    before_state: ChangeId,
-    after_state: ChangeId,
+    before_state: StateId,
+    after_state: StateId,
 ) -> Result<Vec<String>> {
     if before_state == after_state {
         return Ok(Vec::new());
@@ -3710,10 +3702,10 @@ mod tests {
             )
             .unwrap();
 
-        let registry = AgentRegistry::new(runtime.repo.heddle_dir());
+        let registry = ActorPresenceStore::new(runtime.repo.heddle_dir());
         let existing_entry = registry
             .create_generated_entry(|session_id| {
-                Ok(AgentEntry {
+                Ok(ActorPresence {
                     session_id: session_id.to_string(),
                     client_instance_id: None,
                     native_actor_key: Some(
@@ -3726,13 +3718,8 @@ mod tests {
                     heddle_session_id: Some(existing_session.id.clone()),
                     thread_id: None,
                     thread: "detached".to_string(),
-                    pid: Some(std::process::id()),
-                    boot_id: None,
-                    liveness_path: None,
-                    heartbeat_at: Some(Utc::now()),
                     anchor_state: None,
                     anchor_root: None,
-                    reservation_token: Some(objects::store::generate_agent_id()),
                     path: Some(runtime.repo.root().to_path_buf()),
                     base_state: String::new(),
                     started_at: Utc::now(),
@@ -3749,7 +3736,7 @@ mod tests {
                     winning_attach_rule: None,
                     probe_source: Some("hook_payload".to_string()),
                     probe_confidence: Some(1.0),
-                    status: AgentStatus::Active,
+                    status: ActorPresenceStatus::Active,
                     completed_at: None,
                     context_queries: vec![],
                 })
@@ -3891,7 +3878,7 @@ mod tests {
         std::fs::write(temp.path().join("ambient.txt"), b"not in the state delta\n").unwrap();
 
         assert_eq!(
-            changed_paths_between_states(&repo, before.change_id, after.change_id).unwrap(),
+            changed_paths_between_states(&repo, before.state_id, after.state_id).unwrap(),
             vec!["tracked.txt"]
         );
     }
@@ -3969,7 +3956,7 @@ mod tests {
         let verify = Repository::open(temp.path()).unwrap();
         let head_id = verify.head().unwrap().expect("HEAD preserved");
         assert_eq!(
-            head_id, seed.change_id,
+            head_id, seed.state_id,
             "no change expected when worktree is clean",
         );
     }
@@ -4008,7 +3995,7 @@ mod tests {
         assert_eq!(step.native.as_ref().unwrap().harness, "opencode");
         assert_eq!(step.native.as_ref().unwrap().tool_call_id, "call-1");
         assert_eq!(step.tool_name.as_deref(), Some("bash"));
-        assert_eq!(step.before_state, Some(seed.change_id));
+        assert_eq!(step.before_state, Some(seed.state_id));
         assert!(step.status.is_none());
         assert!(step.payload_summary.as_deref().unwrap().contains("call-1"));
         assert!(step.payload_hash.is_some());
@@ -4039,7 +4026,7 @@ mod tests {
         relay_opencode(&mut runtime, "tool.execute.after", &payload).unwrap();
 
         let head = runtime.repo.head().unwrap().expect("capture advanced HEAD");
-        assert_ne!(head, seed.change_id);
+        assert_ne!(head, seed.state_id);
         let store = TimelineStore::open(runtime.repo.heddle_dir()).unwrap();
         let view = TimelineView::rebuild(&store).unwrap();
         let steps = view.steps_for_thread("main");
@@ -4047,7 +4034,7 @@ mod tests {
         let step = steps[0];
         assert_eq!(step.operation_ids.len(), 2);
         assert_eq!(step.status, Some(TimelineToolCallStatus::Succeeded));
-        assert_eq!(step.before_state, Some(seed.change_id));
+        assert_eq!(step.before_state, Some(seed.state_id));
         assert_eq!(step.after_state, Some(head));
         assert_eq!(step.capture_state, Some(head));
         assert_eq!(step.changed, Some(true));
@@ -4085,7 +4072,7 @@ mod tests {
 
         assert_eq!(
             runtime.repo.head().unwrap(),
-            Some(seed.change_id),
+            Some(seed.state_id),
             "capture failure must not advance HEAD"
         );
         let store = TimelineStore::open(runtime.repo.heddle_dir()).unwrap();
@@ -4094,8 +4081,8 @@ mod tests {
         assert_eq!(steps.len(), 1, "before/after should merge by native id");
         let step = steps[0];
         assert_eq!(step.operation_ids.len(), 2);
-        assert_eq!(step.before_state, Some(seed.change_id));
-        assert_eq!(step.after_state, Some(seed.change_id));
+        assert_eq!(step.before_state, Some(seed.state_id));
+        assert_eq!(step.after_state, Some(seed.state_id));
         assert_eq!(step.capture_state, None);
         assert_eq!(step.changed, Some(false));
         assert!(step.labels.contains(&TimelineLabel::CaptureFailed));
@@ -4167,17 +4154,17 @@ mod tests {
         drop(runtime);
 
         let verify = Repository::open(temp.path()).unwrap();
-        let registry = AgentRegistry::new(verify.heddle_dir());
+        let registry = ActorPresenceStore::new(verify.heddle_dir());
         let child = registry
             .find_active_by_native_actor_key("claude-code:agent:child-subagent-xyz")
             .unwrap()
-            .expect("subagent AgentEntry should exist after SubagentStart");
+            .expect("subagent ActorPresence should exist after SubagentStart");
         assert_eq!(
             child.native_parent_actor_key.as_deref(),
             Some("claude-code:session:parent-claude-sess"),
             "subagent must carry parent session linkage",
         );
-        assert_eq!(child.status, AgentStatus::Active);
+        assert_eq!(child.status, ActorPresenceStatus::Active);
     }
 
     #[test]
@@ -4218,7 +4205,7 @@ mod tests {
         drop(runtime);
 
         let verify = Repository::open(temp.path()).unwrap();
-        let registry = AgentRegistry::new(verify.heddle_dir());
+        let registry = ActorPresenceStore::new(verify.heddle_dir());
         let child = registry
             .list()
             .unwrap()
@@ -4227,7 +4214,7 @@ mod tests {
             .expect("child entry should still exist");
         assert_eq!(
             child.status,
-            AgentStatus::Complete,
+            ActorPresenceStatus::Complete,
             "SubagentStop should mark the child entry Complete",
         );
     }

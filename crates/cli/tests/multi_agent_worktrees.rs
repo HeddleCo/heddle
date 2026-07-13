@@ -5,7 +5,7 @@
 //!
 //! 1. **Object store pointer** — `.heddle` as a file that points to a shared store.
 //! 2. **`heddle worktree add`** — create a filesystem-isolated agent checkout.
-//! 3. **Actor registry** — `heddle actor spawn / list / done`.
+//! 3. **Agent lifecycle** — writer leases plus separately inspectable presence.
 
 use std::{
     fs,
@@ -16,8 +16,8 @@ use std::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-#[path = "multi_agent_worktrees/agent_registry.rs"]
-mod agent_registry;
+#[path = "multi_agent_worktrees/actor_presence.rs"]
+mod actor_presence;
 #[cfg(target_os = "linux")]
 #[path = "multi_agent_worktrees/daemon_lifecycle.rs"]
 mod daemon_lifecycle;
@@ -88,6 +88,8 @@ fn heddle_output_with_env(
 ) -> Result<Output, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
     cmd.args(args);
+    cmd.env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
+        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }

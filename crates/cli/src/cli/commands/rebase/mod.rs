@@ -19,7 +19,6 @@ use super::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
         repository_verification_primary_command,
     },
-    worktree_safety::ensure_worktree_clean,
 };
 use crate::{
     cli::{Cli, JsonOutputMode, json_output_mode_for_kind},
@@ -79,38 +78,6 @@ pub(crate) enum OperatorContinueStatus {
     Blocked,
 }
 
-pub fn cmd_rebase(
-    cli: &Cli,
-    thread: Option<&str>,
-    abort: bool,
-    cont: bool,
-    force: bool,
-) -> Result<()> {
-    // Same metadata-resolution pattern as `cmd_merge`: open at CWD to
-    // discover the active thread, then re-open at that thread's
-    // metadata-recorded worktree so commits are replayed into the
-    // thread's actual checkout. See `Repository::active_worktree_path`
-    // for fallback semantics.
-    let cwd_repo = cli.open_repo()?;
-    let target_path = cwd_repo.active_worktree_path()?;
-    let repo = if target_path == *cwd_repo.root() {
-        cwd_repo
-    } else {
-        Repository::open(&target_path)?
-    };
-
-    // Rebase replays commits onto another thread by mutating the worktree.
-    // The guard runs only on the entry path (not `--abort` / `--continue`,
-    // which need access to the in-progress state on disk). `--force` is
-    // threaded down to the repo apply layer as the explicit opt-in to discard
-    // local worktree changes during the fast-forward materialization.
-    if !force && !abort && !cont {
-        ensure_worktree_clean(&repo, "rebase")?;
-    }
-
-    run_rebase(&repo, thread, abort, cont, force, Some(cli))
-}
-
 pub(crate) fn cmd_rebase_silent(
     repo: &Repository,
     thread: Option<&str>,
@@ -134,8 +101,8 @@ pub(crate) fn continue_rebase_for_operator(repo: &Repository) -> Result<Operator
         let current_state = repo
             .current_state()?
             .ok_or_else(|| anyhow!("No current state"))?;
-        if current_state.change_id != pre_conflict_head
-            && Some(current_state.change_id) != before.pending_manual_resolution
+        if current_state.state_id != pre_conflict_head
+            && Some(current_state.state_id) != before.pending_manual_resolution
         {
             let current_tree = repo
                 .store()
@@ -231,28 +198,24 @@ fn run_rebase(
         .get_state(&current_change)?
         .ok_or_else(|| anyhow!("Current state not found"))?;
 
-    let target_change_id = repo
+    let target_state_id = repo
         .refs()
         .get_thread(&ThreadName::new(target_thread))?
         .ok_or_else(|| rebase_target_not_found_advice(target_thread))?;
 
-    if current_state.change_id == target_change_id {
+    if current_state.state_id == target_state_id {
         emit_up_to_date_if_trusted(repo, cli)?;
         return Ok(());
     }
 
-    let is_ancestor = is_ancestor_of(repo, &current_state.change_id, &target_change_id)?;
+    let is_ancestor = is_ancestor_of(repo, &current_state.state_id, &target_state_id)?;
 
     if is_ancestor {
         // Wrap the single-FF arm in the same TransactionCommit-bracketed
         // batch shape replay_commits uses, so `heddle undo` treats this
         // path identically to a multi-commit rebase (heddle#198).
-        let advance = ff_advance_deferred(
-            repo,
-            target_thread,
-            &target_change_id,
-            discard_local_changes,
-        )?;
+        let advance =
+            ff_advance_deferred(repo, target_thread, &target_state_id, discard_local_changes)?;
         flush_rebase_batch(repo, &[advance], &mint_rebase_transaction_id())?;
 
         if !emit_rebase_progress(
@@ -260,7 +223,7 @@ fn run_rebase(
             cli,
             json!({
                 "status": "fast_forwarded",
-                "to": target_change_id.to_string(),
+                "to": target_state_id.to_string(),
             }),
         )? && cli.is_some()
         {
@@ -269,10 +232,10 @@ fn run_rebase(
             // thread mentally. JSON output is unchanged.
             match repo.head_ref()? {
                 Head::Attached { thread } => {
-                    println!("Fast-forwarded {} to {}", thread, target_change_id.short())
+                    println!("Fast-forwarded {} to {}", thread, target_state_id.short())
                 }
                 Head::Detached { .. } => {
-                    println!("Fast-forwarded to {}", target_change_id.short())
+                    println!("Fast-forwarded to {}", target_state_id.short())
                 }
             }
         }
@@ -280,19 +243,19 @@ fn run_rebase(
     }
 
     let commits_to_replay =
-        collect_commits_to_rebase(repo, &current_state.change_id, &target_change_id)?;
+        collect_commits_to_rebase(repo, &current_state.state_id, &target_state_id)?;
 
     if commits_to_replay.is_empty() {
-        record_ff_advance(repo, target_thread, &target_change_id)?;
+        record_ff_advance(repo, target_thread, &target_state_id)?;
         emit_up_to_date_if_trusted(repo, cli)?;
         return Ok(());
     }
 
     let rebase_state = RebaseState {
-        onto: target_change_id,
+        onto: target_state_id,
         commits_to_replay: commits_to_replay.clone(),
         current_index: 0,
-        original_head: current_state.change_id,
+        original_head: current_state.state_id,
         pending_manual_resolution: None,
         pre_conflict_head: None,
         pending_advances: Vec::new(),
@@ -313,7 +276,7 @@ fn run_rebase(
         println!(
             "Rebasing {} commits onto {}",
             commits_to_replay.len(),
-            target_change_id.short()
+            target_state_id.short()
         );
     }
 
@@ -391,14 +354,14 @@ fn rebase_target_required_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "rebase_target_required",
         "Refusing to rebase: target thread required",
-        "Inspect available threads with `heddle thread list`, then run `heddle rebase <thread>`.",
+        "Inspect available threads with `heddle thread list`, then run `heddle sync --thread <thread>`.",
         "rebase was requested without a target thread",
         "rebase would need to move the current thread and worktree onto a specific target",
         "repository state was left unchanged",
         "heddle thread list",
         vec![
             "heddle thread list".to_string(),
-            "heddle rebase <thread>".to_string(),
+            "heddle sync --thread <thread>".to_string(),
         ],
     )
 }
