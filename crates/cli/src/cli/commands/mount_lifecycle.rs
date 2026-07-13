@@ -37,6 +37,7 @@ pub(crate) struct SpawnedMount {
     pub fskit_readiness: Option<FskitReadinessReport>,
 }
 
+#[cfg(any(all(target_os = "macos", feature = "mount"), test))]
 fn fskit_interactive_setup_allowed(
     explicitly_enabled: bool,
     stdin_is_terminal: bool,
