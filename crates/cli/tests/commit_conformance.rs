@@ -59,7 +59,7 @@ fn ingest_into_git_projection(
         .map_err(|error| error.to_string())?;
     let mirror_repo =
         test_support::open_git_repo(git_projection).map_err(|error| error.to_string())?;
-    test_support::seed_ingest_identity_mappings_from_mirror(git_projection, &mirror_repo)
+    test_support::seed_ingest_identity_mappings_from_repo(git_projection, &mirror_repo)
         .map_err(|error| error.to_string())
 }
 

@@ -6,6 +6,17 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::{
+    GitOverlayPushTracking, GitRemoteConfigured, LocalTransferSummary, PushFailure, PushOutcome,
+    PushPath, PushPlan, PushPlanRequest, RemotePreflightBlocker, build_push_outcome,
+    first_multi_thread_push_failure, format_multi_ref_push_progress, format_push_outcome_text,
+    format_pushing_to, git_overlay_push_execution_facts,
+    heddle_single_push_execution_facts_from_local, is_native_transport_mismatch,
+    looks_like_git_remote_url, looks_like_remote_location, multi_ref_push_begin,
+    multi_ref_thread_failed, multi_ref_thread_succeeded_local, multi_thread_push_execution_facts,
+    named_thread_tip_mismatch_failure, plan_push, refuse_named_thread_tip_overwrite,
+    remote_urls_match, resolve_default_push_remote_name, transport_error_message,
+};
 #[cfg(feature = "client")]
 use heddle_core::{
     HostedPushResult, HostedPushResultFields, format_connected_to, format_remote_state_detail,
@@ -13,19 +24,17 @@ use heddle_core::{
     message_indicates_already_exists, multi_ref_progress_from_hosted_thread,
     parse_hosted_push_result, redact_internal_hosted_paths, remote_push_failure,
 };
-use heddle_core::{
-    LocalTransferSummary, PushFailure, PushOutcome, PushPath, PushPlan, PushPlanRequest,
-    RemotePreflightBlocker, build_push_outcome, first_multi_thread_push_failure,
-    format_multi_ref_push_progress, format_push_outcome_text, format_pushing_to,
-    heddle_single_push_execution_facts_from_local, is_native_transport_mismatch,
-    looks_like_git_remote_url, looks_like_remote_location, multi_ref_push_begin,
-    multi_ref_thread_failed, multi_ref_thread_succeeded_local, multi_thread_push_execution_facts,
-    named_thread_tip_mismatch_failure, plan_push, refuse_named_thread_tip_overwrite,
-    transport_error_message,
-};
 use objects::object::ThreadName;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
+use sley::{
+    ConfigEdit, ConfigEditPlan, FullName, RefPrecondition, RemoteConfigSet,
+    Repository as SleyRepository,
+    remote::{
+        CredentialHelperProvider, PackGenerationProgress, ProgressSink as SleyProgressSink,
+        PushOptions, PushThinMode,
+    },
+};
 #[cfg(feature = "client")]
 use wire::ProtocolError;
 
@@ -34,10 +43,8 @@ use super::{
     auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
     command_catalog::{ActionFields, ActionTemplate},
     snapshot::ensure_current_state,
-    source_authority::SourceAuthorityDispatch,
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
-#[cfg(feature = "client")]
 #[cfg(feature = "client")]
 use crate::client::HostedGrpcClient;
 #[cfg(feature = "client")]
@@ -45,9 +52,14 @@ use crate::client::{HostedAuthMode, HostedSession};
 #[cfg(feature = "client")]
 use crate::remote::Remote;
 use crate::{
-    cli::{Cli, should_output_json, style},
+    cli::{
+        Cli,
+        progress_render::{finish_line, progress_for},
+        should_output_json, style,
+    },
     client::LocalSync,
     config::UserConfig,
+    git_projection_engine::git_core::set_reference,
     remote::{RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
 
@@ -66,8 +78,6 @@ struct PushOutput {
     next_action_template: Option<ActionTemplate>,
     recommended_action: Option<String>,
     recommended_action_template: Option<ActionTemplate>,
-    #[allow(dead_code)]
-    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
@@ -87,6 +97,140 @@ fn push_output_from_outcome(
     }
 }
 
+#[derive(Debug, Clone)]
+struct GitOverlayTrackingRefresh {
+    remote_name: String,
+    configured_remote: Option<GitOverlayConfiguredRemote>,
+    upstream_branch: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GitOverlayConfiguredRemote {
+    name: String,
+    url: String,
+}
+
+struct GitPushProgress {
+    progress: objects::Progress,
+}
+
+impl SleyProgressSink for GitPushProgress {
+    fn pack_generation(&mut self, event: &PackGenerationProgress) {
+        self.progress.set_phase("streaming Git objects");
+        self.progress.set_total(event.total_objects);
+        self.progress
+            .inc(event.total_objects.saturating_sub(self.progress.done()));
+    }
+
+    fn message(&mut self, message: &str) {
+        if !message.trim().is_empty() {
+            self.progress.set_phase(message);
+        }
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn push_git_overlay_refs(
+    cli: &Cli,
+    repo: &Repository,
+    remote: Option<&str>,
+    all_threads: bool,
+    force: bool,
+) -> Result<(
+    String,
+    Option<String>,
+    Option<GitOverlayTrackingRefresh>,
+    Vec<String>,
+    RepositoryVerificationState,
+)> {
+    let remote_name = resolve_default_push_remote_name(repo, remote)?;
+    let git = SleyRepository::discover(repo.root()).map_err(anyhow::Error::new)?;
+    let current_thread = if all_threads {
+        None
+    } else {
+        Some(
+            repo.git_overlay_current_branch()?
+                .filter(|branch| !branch.is_empty())
+                .ok_or_else(|| {
+                    anyhow!("cannot push a detached Git checkout without --all-threads")
+                })?,
+        )
+    };
+    let refspecs = match current_thread.as_deref() {
+        Some(branch) => vec![format!("refs/heads/{branch}:refs/heads/{branch}")],
+        None => vec!["refs/heads/*:refs/heads/*".to_string()],
+    };
+    let git_config = git.config_snapshot().map_err(anyhow::Error::new)?;
+    let mut credentials = CredentialHelperProvider::new(Some(&git_config));
+    let progress = progress_for(cli, repo);
+    let mut sley_progress = GitPushProgress {
+        progress: progress.clone(),
+    };
+    // Sley streams from `.git`; interruption drops the transport before local tracking refresh.
+    let pushed = git
+        .push(
+            &remote_name,
+            &refspecs,
+            PushOptions {
+                quiet: true,
+                force,
+                thin: PushThinMode::Auto,
+                atomic: false,
+                push_options: Vec::new(),
+            },
+            &mut credentials,
+            &mut sley_progress,
+        )
+        .map_err(|error| {
+            map_push_failure(PushFailure::RemoteFailed {
+                track_name: remote_name.clone(),
+                error: error.to_string(),
+            })
+        })?;
+    finish_line(&progress, "[done] pushed Git refs");
+    let mut refs_written = pushed
+        .commands
+        .into_iter()
+        .map(|command| command.name)
+        .collect::<Vec<_>>();
+    refs_written.sort_unstable();
+    refs_written.dedup();
+    let tracking = refresh_git_tracking_after_overlay_push(repo, &remote_name)?;
+    let trust = build_repository_verification_state(repo);
+    Ok((remote_name, current_thread, tracking, refs_written, trust))
+}
+
+fn git_overlay_push_output(
+    plan: &PushPlan,
+    remote_name: String,
+    current_thread: Option<String>,
+    tracking_refresh: Option<GitOverlayTrackingRefresh>,
+    refs_written: Vec<String>,
+    trust: RepositoryVerificationState,
+) -> PushOutput {
+    let tracking = tracking_refresh.map(|refresh| GitOverlayPushTracking {
+        remote_name: refresh.remote_name,
+        configured_remote: refresh.configured_remote.map(|remote| GitRemoteConfigured {
+            name: remote.name,
+            url: remote.url,
+        }),
+        upstream_branch: refresh.upstream_branch,
+    });
+    let mut outcome = build_push_outcome(
+        plan,
+        git_overlay_push_execution_facts(remote_name, current_thread, refs_written, tracking),
+    );
+    outcome.ref_scope = Some(if plan.all_threads {
+        "all_branches"
+    } else {
+        "current_branch"
+    });
+    outcome.git_notes_ref = None;
+    outcome.git_notes_visibility_warning = None;
+    outcome.tags_included = Some(false);
+    push_output_from_outcome(outcome, trust)
+}
+
 /// Execute push command.
 ///
 /// Pure orchestration (`plan_push`) runs first; network / git I/O bodies stay
@@ -103,15 +247,25 @@ pub async fn cmd_push(
     insecure: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
-    SourceAuthorityDispatch::for_repo(&repo)
-        .require_push(remote.as_deref(), thread.as_deref(), force, all_threads)
-        .map_err(anyhow::Error::new)?;
+    if repo.capability() == RepositoryCapability::GitOverlay {
+        if state.is_some() {
+            return Err(git_overlay_push_state_advice());
+        }
+        if insecure {
+            return Err(git_overlay_push_insecure_advice());
+        }
+    }
     if let Some(remote_name) = remote.as_deref() {
         ensure_remote_arg_resolves(&repo, remote_name)?;
     }
 
-    let has_default_remote = resolved_default_remote_name(&repo)?.is_some();
-    let push_uses_hosted_network = push_target_is_hosted_network(&repo, remote.as_deref());
+    let has_default_remote = if repo.capability() == RepositoryCapability::GitOverlay {
+        resolve_default_push_remote_name(&repo, None).is_ok()
+    } else {
+        resolved_default_remote_name(&repo)?.is_some()
+    };
+    let push_uses_hosted_network = repo.capability() != RepositoryCapability::GitOverlay
+        && push_target_is_hosted_network(&repo, remote.as_deref());
     // Match preflight_native_remote_transport: overlay capability never
     // treats a git URL as a native-transport mismatch.
     let remote_is_git_local_or_url = matches!(
@@ -123,7 +277,8 @@ pub async fn cmd_push(
     let head = repo.head_ref()?;
     let plan = plan_push(&PushPlanRequest {
         capability: repo.capability(),
-        hosted_enabled: repo.hosted_enabled(),
+        hosted_enabled: repo.capability() != RepositoryCapability::GitOverlay
+            && repo.hosted_enabled(),
         uses_hosted_network: push_uses_hosted_network,
         remote: remote.clone(),
         has_default_remote,
@@ -169,8 +324,36 @@ pub async fn cmd_push(
         PushPath::NativeRemote { .. } => {
             // Transport mismatch already refused by plan_push.
         }
-        PushPath::LocalGitOverlayRefs { .. } => {
-            unreachable!("Git-owned repositories are refused before push planning")
+        PushPath::LocalGitOverlayRefs {
+            all_threads: path_all_threads,
+        } => {
+            let (remote_name, current_thread, tracking, refs_written, trust) =
+                push_git_overlay_refs(
+                    cli,
+                    &repo,
+                    remote.as_deref(),
+                    *path_all_threads,
+                    plan.force,
+                )?;
+            let output = git_overlay_push_output(
+                &plan,
+                remote_name,
+                current_thread,
+                tracking,
+                refs_written,
+                trust,
+            );
+            if should_output_json(cli, Some(repo.config())) {
+                crate::cli::render::write_json_stdout(&output)?;
+            } else {
+                let text = format_push_outcome_text(&output.outcome, None);
+                println!("{} {}", style::ok_marker(), text.headline);
+                for line in &text.detail_lines {
+                    println!("{line}");
+                }
+            }
+            run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
+            return Ok(());
         }
     }
 
@@ -263,6 +446,34 @@ pub async fn cmd_push(
     run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
 
     Ok(())
+}
+
+fn git_overlay_push_state_advice() -> anyhow::Error {
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_push_state_unsupported",
+        "Git Overlay push cannot use --state",
+        "Push the current Git branch, or adopt the repository before pushing a Heddle state.",
+        "Git Overlay publishes Git refs rather than Heddle state identifiers",
+        "accepting --state would imply a state-selection behavior the Git transport cannot honor",
+        "no hook ran and repository, remote, index, and worktree state were left unchanged",
+        "heddle push",
+        vec!["heddle push".to_string(), "heddle adopt".to_string()],
+    )
+    .into()
+}
+
+fn git_overlay_push_insecure_advice() -> anyhow::Error {
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_push_insecure_unsupported",
+        "Git Overlay push cannot use --insecure",
+        "Configure trusted transport credentials and retry without --insecure.",
+        "Sley's Git transport does not expose a per-operation insecure TLS policy",
+        "silently ignoring the flag would misrepresent the transport security policy",
+        "no hook ran, no connection was opened, and repository, remote, index, and worktree state were left unchanged",
+        "heddle push",
+        vec!["heddle push".to_string()],
+    )
+    .into()
 }
 
 pub(super) fn map_remote_preflight_blocker(
@@ -427,7 +638,147 @@ fn ensure_remote_arg_resolves(repo: &Repository, remote_arg: &str) -> Result<()>
     {
         return Ok(());
     }
+    if repo.capability() == RepositoryCapability::GitOverlay
+        && git_remote_names(repo.root())?
+            .iter()
+            .any(|name| name == remote_arg)
+    {
+        return Ok(());
+    }
     Err(anyhow!(RecoveryAdvice::remote_not_found(remote_arg)))
+}
+
+fn refresh_git_tracking_after_overlay_push(
+    repo: &Repository,
+    requested: &str,
+) -> Result<Option<GitOverlayTrackingRefresh>> {
+    let Some(branch) = repo
+        .git_overlay_current_branch()?
+        .filter(|branch| !branch.is_empty())
+    else {
+        return Ok(None);
+    };
+    let git = SleyRepository::discover(repo.root()).map_err(anyhow::Error::new)?;
+    let Some(head) = git.head().ok().and_then(|head| head.oid) else {
+        return Ok(None);
+    };
+    let Some(tracking_remote) = resolve_git_tracking_remote(repo, requested)? else {
+        return Ok(None);
+    };
+    let remote_ref = format!("refs/remotes/{}/{branch}", tracking_remote.name);
+    set_reference(
+        &git,
+        &remote_ref,
+        head,
+        RefPrecondition::Any,
+        &format!("heddle: push to {requested}"),
+    )
+    .map_err(|error| {
+        anyhow!(RecoveryAdvice::safety_refusal(
+            "git_overlay_tracking_refresh_failed",
+            format!("Push succeeded, but {remote_ref} could not be refreshed: {error}"),
+            "Run `heddle verify`, then refresh tracking before the next push.",
+            format!("Sley could not publish the local tracking ref: {error}"),
+            "continuing could report stale upstream distance",
+            "the remote push completed; source history and worktree files were not rewritten",
+            "heddle verify",
+            vec!["heddle verify".to_string()],
+        ))
+    })?;
+    write_git_overlay_branch_upstream(repo.root(), &branch, &tracking_remote.name)?;
+    Ok(Some(GitOverlayTrackingRefresh {
+        remote_name: tracking_remote.name,
+        configured_remote: tracking_remote.configured_remote,
+        upstream_branch: Some(branch),
+    }))
+}
+
+struct GitTrackingRemoteResolution {
+    name: String,
+    configured_remote: Option<GitOverlayConfiguredRemote>,
+}
+
+fn resolve_git_tracking_remote(
+    repo: &Repository,
+    requested: &str,
+) -> Result<Option<GitTrackingRemoteResolution>> {
+    let git = SleyRepository::discover(repo.root()).map_err(anyhow::Error::new)?;
+    for name in git_remote_names(repo.root())? {
+        let config = git.config_snapshot().map_err(anyhow::Error::new)?;
+        let url = config
+            .get("remote", Some(&name), "pushurl")
+            .or_else(|| config.get("remote", Some(&name), "url"));
+        if url.is_some_and(|url| remote_urls_match(url, requested)) {
+            return Ok(Some(GitTrackingRemoteResolution {
+                name,
+                configured_remote: None,
+            }));
+        }
+    }
+    if !looks_like_remote_location(requested)
+        && FullName::try_from(format!("refs/remotes/{requested}/HEAD").as_str()).is_ok()
+    {
+        return Ok(Some(GitTrackingRemoteResolution {
+            name: requested.to_string(),
+            configured_remote: None,
+        }));
+    }
+    if git_remote_names(repo.root())?.is_empty() && !requested.trim().is_empty() {
+        write_git_overlay_remote(repo.root(), "origin", requested)?;
+        return Ok(Some(GitTrackingRemoteResolution {
+            name: "origin".to_string(),
+            configured_remote: Some(GitOverlayConfiguredRemote {
+                name: "origin".to_string(),
+                url: requested.to_string(),
+            }),
+        }));
+    }
+    Ok(None)
+}
+
+fn git_remote_names(root: &Path) -> Result<Vec<String>> {
+    let git = match SleyRepository::discover(root) {
+        Ok(git) => git,
+        Err(_) => return Ok(Vec::new()),
+    };
+    Ok(git
+        .remote_names()?
+        .into_iter()
+        .filter(|name| !name.is_empty())
+        .collect())
+}
+
+fn write_git_overlay_branch_upstream(root: &Path, branch: &str, remote: &str) -> Result<()> {
+    let git = SleyRepository::discover(root).map_err(anyhow::Error::new)?;
+    let branch_remote = format!("branch.{branch}.remote");
+    let branch_merge = format!("branch.{branch}.merge");
+    let plan = ConfigEditPlan::new(git.common_dir().join("config"))
+        .with_operation(ConfigEdit::set(&branch_remote, remote)?)
+        .with_operation(ConfigEdit::set(
+            &branch_merge,
+            format!("refs/heads/{branch}"),
+        )?)
+        .with_fsync(true);
+    git.apply_config_edit_plan(plan)
+        .map_err(anyhow::Error::new)?;
+    Ok(())
+}
+
+fn write_git_overlay_remote(root: &Path, name: &str, url: &str) -> Result<()> {
+    let git = SleyRepository::discover(root).map_err(anyhow::Error::new)?;
+    let remote = RemoteConfigSet::new(name)
+        .with_url(url)
+        .with_fetch_refspec(format!("+refs/heads/*:refs/remotes/{name}/*"));
+    let plan = ConfigEditPlan::new(git.common_dir().join("config"))
+        .with_operation(ConfigEdit::replace_section(
+            "remote",
+            Some(remote.name),
+            remote.entries,
+        ))
+        .with_fsync(true);
+    git.apply_config_edit_plan(plan)
+        .map_err(anyhow::Error::new)?;
+    Ok(())
 }
 
 pub(super) fn push_target_is_hosted_network(repo: &Repository, remote_arg: Option<&str>) -> bool {

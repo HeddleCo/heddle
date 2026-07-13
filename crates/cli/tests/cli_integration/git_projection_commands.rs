@@ -113,6 +113,69 @@ fn seed_unrepresentable_tree_name_repo(path: &std::path::Path) {
 const EMPTY_BLOB_OID: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
 
 #[test]
+fn git_overlay_commit_recovers_checkpoint_intent_without_bridge_mirror() {
+    use oplog::{OpLogBackend, OpRecord};
+
+    for fault in [
+        "git_checkpoint_after_publish_before_phase",
+        "git_checkpoint_after_metadata_before_oplog",
+        "git_checkpoint_after_oplog_before_finalize",
+    ] {
+        let repo = TempDir::new().unwrap();
+        init_colocated_git_repo(repo.path());
+        std::fs::write(repo.path().join("tracked.txt"), "base\n").unwrap();
+        git_commit_all_in(repo.path(), "base");
+        heddle(&["init"], Some(repo.path())).expect("initialize Git Overlay");
+
+        std::fs::write(repo.path().join("tracked.txt"), format!("{fault}\n")).unwrap();
+        heddle(&["capture", "-m", fault], Some(repo.path())).expect("capture state");
+        let crashed = heddle_output_with_env(
+            &["commit"],
+            Some(repo.path()),
+            &[("HEDDLE_FAULT_INJECT", fault)],
+        )
+        .expect("run faulted commit");
+        assert!(
+            !crashed.status.success(),
+            "fault point {fault} must stop commit"
+        );
+        assert!(
+            repo.path()
+                .join(".heddle/state/git-checkpoint-intent.json")
+                .is_file(),
+            "fault point {fault} must leave a durable recovery intent"
+        );
+
+        heddle(&["commit"], Some(repo.path())).expect("retry checkpoint recovery");
+        assert!(
+            !repo
+                .path()
+                .join(".heddle/state/git-checkpoint-intent.json")
+                .exists(),
+            "retry after {fault} must finalize the intent"
+        );
+        assert!(
+            !repo.path().join(".heddle/git").exists(),
+            "commit must write through Sley to the checkout .git"
+        );
+        assert_eq!(git_status_porcelain(repo.path()), "");
+        let reopened = Repository::open(repo.path()).expect("open recovered repository");
+        assert_eq!(reopened.list_git_checkpoints().unwrap().len(), 1);
+        let checkpoint_ops = reopened
+            .oplog()
+            .recent(100)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| matches!(entry.operation, OpRecord::GitCheckpoint { .. }))
+            .count();
+        assert_eq!(
+            checkpoint_ops, 1,
+            "recovery after {fault} must finalize the checkpoint oplog exactly once"
+        );
+    }
+}
+
+#[test]
 fn import_git_refuses_unrepresentable_tree_name_by_default_and_lossy_summarizes() {
     let source = TempDir::new().unwrap();
     seed_unrepresentable_tree_name_repo(source.path());

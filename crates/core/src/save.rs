@@ -12,6 +12,7 @@ use anyhow::{Context, Result, anyhow};
 use heddle_git_projection::{GitProjection, WriteThroughOutcome};
 use objects::{
     HeddleError, RecoveryDetails,
+    lock::RepositoryLockExt,
     object::{Agent, Attribution, ContentHash, Principal, State, StateId, Tree},
 };
 use oplog::{OpLogBackend, OpRecord};
@@ -451,11 +452,16 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
             }
         }
 
-        if let Some(existing) = repo.latest_git_checkpoint_for_state(&state.state_id)? {
+        if let Some(existing) = repo.latest_git_checkpoint_for_state(&state.state_id)?
+            && repo.pending_git_checkpoint_intent()?.is_none()
+        {
             git_commit = Some(existing.git_commit.clone());
             git_checkpoint = Some(existing);
         } else {
-            let previous = git_rev_parse_head(repo.root());
+            let previous = repo
+                .pending_git_checkpoint_intent()?
+                .and_then(|intent| intent.previous_git_oid)
+                .or_else(|| git_rev_parse_head(repo.root()));
             git_previous_commit = previous.clone();
             let summary = checkpoint_summary(&plan, &state);
             let record = write_git_checkpoint(repo, &state, summary)?;
@@ -611,10 +617,7 @@ fn write_git_checkpoint(
     state: &State,
     summary: String,
 ) -> Result<GitCheckpointRecord> {
-    let branch = repo
-        .git_overlay_current_branch()?
-        .unwrap_or_else(|| "HEAD".to_string());
-    let previous_git_oid = git_rev_parse_head(repo.root());
+    let _lock = repo.locker().write()?;
     let mut bridge = GitProjection::new(repo);
     let git_commit = match bridge
         .write_through_current_checkout_with_message(state.state_id, summary.clone())?
@@ -633,16 +636,42 @@ fn write_git_checkpoint(
             )));
         }
     };
+    let intent = repo.pending_git_checkpoint_intent()?.ok_or_else(|| {
+        anyhow!("Git checkpoint published without its durable finalization intent")
+    })?;
+    if intent.phase != repo::GitCheckpointIntentPhase::Published
+        || intent.state_id != state.state_id.to_string_full()
+        || intent.new_git_oid != git_commit
+    {
+        return Err(anyhow!(
+            "published Git checkpoint does not match its durable finalization intent"
+        ));
+    }
     let record = repo.record_git_checkpoint(&state.state_id, git_commit.clone(), summary)?;
-    repo.oplog().record_batch_scoped(
-        vec![OpRecord::GitCheckpoint {
-            branch,
-            state: state.state_id,
-            previous_git_oid,
-            new_git_oid: git_commit,
-        }],
+    objects::fault_inject::maybe_panic_at("git_checkpoint_after_metadata_before_oplog");
+    let transaction_id = format!(
+        "git-checkpoint:v1:{}:{}",
+        state.state_id.to_string_full(),
+        git_commit
+    );
+    repo.oplog().record_batch_exactly_once(
+        vec![
+            OpRecord::GitCheckpoint {
+                branch: intent.branch,
+                state: state.state_id,
+                previous_git_oid: intent.previous_git_oid,
+                new_git_oid: git_commit.clone(),
+            },
+            OpRecord::TransactionCommit {
+                transaction_id: transaction_id.clone(),
+                op_count: 1,
+            },
+        ],
         Some(&repo.op_scope()),
+        &transaction_id,
     )?;
+    objects::fault_inject::maybe_panic_at("git_checkpoint_after_oplog_before_finalize");
+    repo.finish_git_checkpoint_intent(&state.state_id, &git_commit)?;
     Ok(record)
 }
 

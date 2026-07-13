@@ -89,7 +89,7 @@ pub(crate) fn dirty_worktree(
             // this to "Refusing to … with a dirty worktree", dropping the
             // recovery-first phrasing the typed advice contract asserts.
             format!("Save or stash worktree changes before {action}"),
-            "Save Heddle provenance with `heddle capture -m \"...\"`, then commit Git-owned source history with `git commit -m \"...\"` before retrying.",
+            "Save Heddle provenance with `heddle capture -m \"...\"`, then commit Git-owned source history with `heddle commit -m \"...\"` before retrying.",
             unsafe_condition,
             format!(
                 "{action} would write another tree into the worktree; saving first prevents those path changes from being overwritten"

@@ -30,7 +30,9 @@ use heddle_core::retro_plan::{
 };
 use objects::{
     object::{State, StateId},
-    store::{ActorPresenceStore, ActorPresenceStatus, AgentTaskRecord, AgentTaskStore, ObjectStore},
+    store::{
+        ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStore, ObjectStore,
+    },
 };
 use oplog::OpRecord;
 use repo::{Repository, TimelineStore, TimelineView};
@@ -414,7 +416,10 @@ fn find_recent_turn_ts(repo: &Repository) -> Result<Option<DateTime<Utc>>> {
     Ok(None)
 }
 
-fn collect_agents(repo: &Repository, since_ts: Option<DateTime<Utc>>) -> Result<Vec<ActorPresence>> {
+fn collect_agents(
+    repo: &Repository,
+    since_ts: Option<DateTime<Utc>>,
+) -> Result<Vec<ActorPresence>> {
     let registry = ActorPresenceStore::new(repo.heddle_dir());
     let entries = registry.list().unwrap_or_default();
     let mut out = Vec::new();

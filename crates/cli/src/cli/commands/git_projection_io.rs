@@ -15,6 +15,7 @@ use objects::object::{StateId, ThreadName};
 use refs::Head;
 use repo::Repository;
 use serde::Serialize;
+use sley::remote::SilentProgress;
 
 use super::{
     action_line::print_next,
@@ -94,7 +95,8 @@ fn resolve_source(repo: &Repository, source: GitSource) -> Result<ResolvedSource
             // repo it was for, not buried under the OS temp root.
             let tmp_root = repo.heddle_dir().join("tmp");
             let scratch = ScratchDir::new_in(&tmp_root, "import-")?;
-            clone_url_to_bare(&url, &scratch.path, None, None)?;
+            let mut progress = SilentProgress;
+            clone_url_to_bare(&url, &scratch.path, None, None, &mut progress)?;
             Ok(ResolvedSource {
                 path: scratch.path.clone(),
                 _temp: Some(scratch),

@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 pub(crate) const DIRTY_WORKTREE_COMMIT_COMMAND: &str = "heddle capture -m \"...\"";
 pub(crate) const DIRTY_WORKTREE_CAPTURE_COMMAND: &str = "heddle capture -m \"...\"";
 pub(crate) const DIRTY_WORKTREE_STASH_COMMAND: &str = "heddle capture -m \"...\"";
-pub(crate) const GIT_OVERLAY_CHECKPOINT_COMMAND: &str = "git commit -m \"...\"";
+pub(crate) const GIT_OVERLAY_CHECKPOINT_COMMAND: &str = "heddle commit -m \"...\"";
 
 #[derive(Debug, Clone)]
 pub struct RecoveryAdvice {
@@ -575,7 +575,7 @@ impl RecoveryAdvice {
         Self::safety_refusal(
             "repository_no_head",
             format!("Repository has no HEAD state for {action}"),
-            "Create a Heddle anchor with `heddle capture -m \"...\"`; commit Git-owned source history with `git commit -m \"...\"`, then retry.",
+            "Create a Heddle anchor with `heddle capture -m \"...\"`; commit Git-owned source history with `heddle commit -m \"...\"`, then retry.",
             "the repository has no current HEAD state",
             format!("`{action}` needs a concrete Heddle state id and cannot safely infer one"),
             "no repository objects, refs, metadata, or worktree files were changed",
@@ -718,14 +718,14 @@ impl RecoveryAdvice {
             format!(
                 "Land partially completed for `{thread}`, but Git checkpoint failed: {checkpoint_error}"
             ),
-            "Run `heddle undo` to roll back the local land, or resolve the Git issue and run `git commit -m \"...\"`.",
+            "Run `heddle undo` to roll back the local land, or resolve the Git issue and run `heddle commit -m \"...\"`.",
             "Git checkpoint failed after Heddle had already completed local land steps",
             "retrying blindly could obscure the already-landed local merge state",
             format!("completed steps: {completed}. No Git checkpoint was written."),
             "heddle undo",
             vec![
                 "heddle undo".to_string(),
-                "git commit -m \"...\"".to_string(),
+                "heddle commit -m \"...\"".to_string(),
             ],
         )
     }
@@ -764,13 +764,13 @@ impl RecoveryAdvice {
         Self::safety_refusal(
             "git_overlay_note_ref_conflict",
             "Remote Heddle notes do not fast-forward",
-            "Fetch the remote Heddle notes, then retry the push. If the conflict remains, create a fresh Heddle clone from the remote so Git-to-Heddle identity metadata stays authoritative.",
+            "Pull the remote Heddle metadata, then retry the push. If the conflict remains, create a fresh Heddle clone from the remote so Git-to-Heddle identity metadata stays authoritative.",
             "updating refs/notes/heddle would replace remote Git-to-Heddle identity metadata instead of fast-forwarding it",
             "pushing would remap commits that another Heddle checkout already identified",
             "remote refs/notes/heddle was left unchanged",
-            "git fetch",
+            "heddle pull",
             vec![
-                "git fetch".to_string(),
+                "heddle pull".to_string(),
                 "heddle push".to_string(),
                 "heddle clone <remote> <fresh-path>".to_string(),
             ],
@@ -831,11 +831,11 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn git_overlay_remote_push_rejected(branch: &str) -> Self {
-        let primary_command = "git fetch".to_string();
+        let primary_command = "heddle pull".to_string();
         Self::safety_refusal(
             "git_overlay_remote_diverged",
             "Remote branch does not fast-forward the local Git checkpoint",
-            "Run `git fetch` first so Heddle can inspect the remote tip locally, then run `heddle verify` for the exact integration command.",
+            "Run `heddle pull` so Heddle can stream and inspect the remote tip, then run `heddle verify` for the exact integration command.",
             format!(
                 "pushing branch '{branch}' would rewrite the remote branch instead of fast-forwarding it"
             ),
@@ -1245,5 +1245,17 @@ mod tests {
             "shallow recovery should stay no-git friendly: {}",
             advice.hint
         );
+    }
+
+    #[test]
+    fn rejected_git_push_recovers_through_heddle_pull() {
+        let advice = RecoveryAdvice::git_overlay_remote_push_rejected("main");
+
+        assert_eq!(advice.primary_command, "heddle pull");
+        assert_eq!(
+            advice.recovery_commands,
+            vec!["heddle pull", "heddle verify"]
+        );
+        assert!(!advice.hint.contains("git fetch"));
     }
 }

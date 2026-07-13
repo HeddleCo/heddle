@@ -30,7 +30,9 @@ In a plain Git repo, observe-only commands do not create `.heddle/`. `heddle sta
 - whether Heddle has been initialized
 - the exact next command to initialize Git Overlay
 
-Run the exact command printed by `heddle status`. In an existing Git checkout, that is `heddle init`: it creates the `.heddle` sidecar while Git remains authoritative for commits, trees, refs, index, and worktree state. Heddle stores captures, threads, provenance, discussions, and Git projection metadata in `.heddle`. `heddle adopt` imports selected Git refs and makes Heddle the source authority. The retained `.git` remains available only through explicit Git Projection commands. Adoption is not required for normal Git Overlay use.
+Run the exact command printed by `heddle status`. In an existing Git checkout, that is `heddle init`: it creates the `.heddle` sidecar while the real `.git` remains authoritative for commits, trees, refs, packs, index, and worktree state. Heddle stores captures, threads, provenance, discussions, and source mappings in `.heddle`. Its embedded Sley engine powers the thin Git surface — `clone`, `commit`, `pull`, `push`, and `remote` — directly against `.git`. Heddle never requires the `git` executable and does not maintain a normal `.heddle/git` mirror.
+
+`heddle adopt` atomically imports selected Git refs, makes Heddle the source authority, and enables the full Native Heddle feature set. The retained `.git` is then an explicit Git Projection adapter. Adoption is not required for normal Git Overlay use.
 
 Heddle's CLI follows five operating principles — verification, disposability, composability, restraint, honesty — documented in [docs/PRINCIPLES.md](docs/PRINCIPLES.md).
 
@@ -47,7 +49,7 @@ Heddle's CLI follows five operating principles — verification, disposability, 
 - Semantic integration by default: `ready`, `land`, and `sync` use AST-item-level merge within a file when built with the default `semantic` feature (first-class Rust/Python/JS/TS; Go/C/C++/Java opt-in); the engine does not auto-rewrite cross-file imports or call-sites
 - Automatic state signing: device-local ed25519 identity minted on first use signs every authored state — provenance with no manual key setup
 - Git overlay: direct `.git` integration, explicit native adoption, import, export, sync
-- Byte-identical Git round-trip, CI-enforced: adopt→export reproduces identical commit/tree/blob/tag SHAs with a `git fsck`-clean result, gated per-PR by 10 deterministic fixtures
+- Byte-identical Git round-trip, CI-enforced: adopt→export reproduces identical commit/tree/blob/tag SHAs and a valid Git object graph, gated per-PR by 10 deterministic fixtures
 - Multi-agent worktrees and agent registry
 
 ### Foundation in place
@@ -75,11 +77,16 @@ The default feature set is `git-overlay`, `native`, `local`, `semantic`, `zstd`.
 
 ### From source
 
+Obtain a source checkout from the release archive or with any Git-compatible
+client, then install it locally:
+
 ```bash
-git clone https://github.com/HeddleCo/heddle
 cd heddle
 cargo install --path crates/cli
 ```
+
+The client used to obtain the source is optional; Heddle itself does not invoke
+or require it.
 
 Prerequisites: Rust 1.85+, `cargo`, `rustfmt`, `clippy`.
 
@@ -91,7 +98,8 @@ New to Heddle? In an existing Git checkout, start with `heddle status` and initi
 heddle status
 heddle init
 heddle capture -m "start project"
-git commit -am "start project"
+heddle commit
+heddle push
 ```
 
 For a new or unborn repo, initialize once, set attribution if needed, then use `heddle capture` as the Heddle save boundary:
@@ -101,7 +109,7 @@ heddle init --principal-name "Ada Lovelace" --principal-email ada@example.com
 heddle capture -m "start project"
 ```
 
-In a Git checkout, `heddle init` creates the Heddle sidecar and leaves source storage in the checkout's real `.git`. `heddle capture` records Heddle provenance in `.heddle`; source commits and remote transport remain direct `git commit`, `git pull`, and `git push` operations. Use `heddle adopt` when you explicitly want to import Git history and move source authority to Heddle-native storage. The existing `.git` is retained as an explicit projection adapter.
+In a Git checkout, `heddle init` creates the Heddle sidecar and leaves source storage in the checkout's real `.git`. `heddle capture` records Heddle metadata and provenance in `.heddle`; `heddle commit`, `pull`, `push`, and `remote` delegate through Sley to `.git`. Use `heddle adopt` when you want an atomic transition to Heddle-native source authority and its full feature set.
 
 ### The verb-by-verb tour
 
@@ -113,7 +121,7 @@ heddle verify
 
 # Save Heddle provenance, then commit Git-owned source history
 heddle capture -m "add user authentication"
-git commit -am "add user authentication"
+heddle commit
 
 # Start isolated work and prove it is ready
 heddle start feature/auth --path ../feature-auth
@@ -123,7 +131,7 @@ heddle ready
 
 # Land locally, then publish with the source authority
 heddle land --thread feature/auth
-git push
+heddle push
 
 # Inspect history and provenance
 heddle log
@@ -153,9 +161,9 @@ History commands render up to three distinct identifiers. They are not interchan
 
 - **`hd-…` change id** (e.g. `hd-wgqnj47xyh40`) — the **physical ChangeId**, minted fresh for each state. It is the handle for *this specific state*: pass it to commands that take a change as an argument — `heddle show <id>`, `heddle query --attribution` reports it per line, and `heddle log <id>` selects by it (resolution matches the physical id of a recorded state). Prefixes are accepted, so a short `hd-…` is enough as long as it is unambiguous. It is **not** a lineage handle that survives rewrites: amending or rebasing produces a *new* state with a *new* `hd-…`, so an `hd-…` captured before a rebase still resolves to the pre-rebase state, not the rewritten one. Heddle does track a separate stable *logical* ChangeId that is carried forward across a rewrite, but it is internal — it is not rendered in output and is not accepted as a command argument, so the displayed `hd-…` is the only id you can pass, and it identifies one state rather than a lineage.
 - **`(……)` content hash** (e.g. `(61408ef9)`, shown beside the change id by `heddle log --verbose` and `heddle show`) — the short form of the **ContentHash**, a BLAKE3 digest of the state's contents. It is *not* a Git commit sha. Because it is content-addressed, it changes whenever the state's content changes, so it pins an exact snapshot but is not a stable handle to "the change". Use it for integrity/equality checks, not as a command argument.
-- **Git checkpoint sha** (shown on the `Git checkpoint:` line under `heddle log --verbose` / `heddle show`) — the actual Git commit that binds the state into Git history. This is the handle for plain-Git tooling (`git show`, `git log`); heddle commands take the `hd-…` change id instead.
+- **Git checkpoint sha** (shown on the `Git checkpoint:` line under `heddle log --verbose` / `heddle show`) — the actual Git commit that binds the state into Git history. This is the handle for any Git-compatible client; Heddle commands take the `hd-…` change id instead.
 
-Rule of thumb: hand `hd-…` change ids to heddle, and the checkpoint sha to Git.
+Rule of thumb: hand `hd-…` change ids to Heddle, and the checkpoint sha to a Git-compatible client.
 
 ## Agent-friendly output
 

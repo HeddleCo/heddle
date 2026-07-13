@@ -1423,7 +1423,7 @@ pub fn merge_thread_into_current_with_machine_contract(
                 ));
                 post_snapshot_git_blockers.push(format!(
                     "recovery: heddle merge state {} is intact; resolve the Git checkout issue \
-                     (identity, locks, or filesystem errors) and run `git commit -m \"{}\"` — do NOT re-run the integration",
+                     (identity, locks, or filesystem errors) and run `heddle commit -m \"{}\"` — do NOT re-run the integration",
                     new_state.state_id.short(),
                     merge_message
                 ));

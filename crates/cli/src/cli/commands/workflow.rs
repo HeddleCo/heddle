@@ -28,7 +28,7 @@ use serde::Serialize;
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    checkpoint::create_git_checkpoint,
+    checkpoint::{GitCheckpointRequest, create_git_checkpoint},
     collapse::{CollapsePublishedRef, collapse_resolved_states},
     git_overlay_txn,
     merge::{build_thread_preview_report, merge_thread_into_current},
@@ -498,7 +498,11 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             );
             let record = create_git_checkpoint(
                 &repo,
-                Some(&checkpoint_message),
+                GitCheckpointRequest {
+                    action: "land",
+                    message: Some(&checkpoint_message),
+                    retry_command: "heddle land --thread <name>",
+                },
                 worktree_status_options(Some(repo.config())),
             )
             .map_err(|error| {
@@ -724,7 +728,11 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         );
         let record = create_git_checkpoint(
             &repo,
-            Some(&checkpoint_message),
+            GitCheckpointRequest {
+                action: "land",
+                message: Some(&checkpoint_message),
+                retry_command: "heddle land --thread <name>",
+            },
             worktree_status_options(Some(repo.config())),
         )
         .map_err(|error| {
@@ -1456,10 +1464,6 @@ mod tests {
         }
     }
 
-    // heddle#464 bug 2: the confidence/verification policy-blocker recovery used
-    // to be a bare capture action with confidence, which saves the CURRENT
-    // checkout. Run from the parent of an isolated thread, that never updates the
-    // blocked thread's state. Scope it to the thread's checkout via `--repo`.
     #[test]
     fn confidence_blocker_recovery_scopes_to_thread_checkout() {
         let blockers = vec!["confidence 0.40 is below the auto-land threshold of 0.75".to_string()];
@@ -1470,7 +1474,7 @@ mod tests {
         .expect("a confidence blocker must yield a recovery action");
         assert_eq!(
             action,
-            "heddle --repo /work/threads/agent-thread commit -m \"...\" --confidence <confidence>"
+            "heddle --repo /work/threads/agent-thread capture -m \"...\" --confidence <confidence>"
         );
         validate_recommended_action(&action)
             .unwrap_or_else(|e| panic!("scoped recovery must validate: {e}"));
@@ -1486,7 +1490,7 @@ mod tests {
         .expect("a verification blocker must yield a recovery action");
         assert_eq!(
             action,
-            "heddle --repo /work/threads/agent-thread commit -m \"...\" --confidence <confidence>"
+            "heddle --repo /work/threads/agent-thread capture -m \"...\" --confidence <confidence>"
         );
         validate_recommended_action(&action)
             .unwrap_or_else(|e| panic!("scoped recovery must validate: {e}"));

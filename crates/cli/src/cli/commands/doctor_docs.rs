@@ -414,7 +414,6 @@ fn scan_forbidden_prose(file: &str, text: &str, out: &mut Vec<DocsIssue>) {
             continue;
         }
         let verb = [
-            "commit",
             "checkpoint",
             "cherry-pick",
             "git-overlay",
@@ -470,8 +469,7 @@ fn forbidden_invocation_issue(file: &str, inv: &DocsInvocation) -> Option<DocsIs
     let verb = inv.tokens.first()?.as_str();
     let retired = matches!(
         verb,
-        "commit"
-            | "checkpoint"
+        "checkpoint"
             | "cherry-pick"
             | "git-overlay"
             | "support"
@@ -483,7 +481,7 @@ fn forbidden_invocation_issue(file: &str, inv: &DocsInvocation) -> Option<DocsIs
     );
     if retired {
         let suggestion = match verb {
-            "commit" | "checkpoint" => "use `heddle capture`",
+            "checkpoint" => "use `heddle capture`, then `heddle commit` in Git Overlay",
             "actor" | "session" => "inspect the `heddle agent` command family",
             _ => "remove the retired Heddle command recommendation",
         };
@@ -507,7 +505,7 @@ fn forbidden_invocation_issue(file: &str, inv: &DocsInvocation) -> Option<DocsIs
             invocation: inv.raw.clone(),
             kind: IssueKind::AuthorityConflict,
             detail: format!(
-                "`heddle {verb}` shadows a Git source operation; Git Overlay must invoke `git {verb}` directly"
+                "`heddle {verb}` is outside Heddle's narrow Git surface; use a compatible client if that operation is required"
             ),
             suggestion: Some(format!("use `git {verb}` in Git Overlay documentation")),
         });
@@ -994,7 +992,6 @@ mod tests {
     #[test]
     fn rejects_retired_commands_even_if_a_stale_parser_variant_survives() {
         for invocation in [
-            "`heddle commit -m save`",
             "`heddle checkpoint -m save`",
             "`heddle actor list`",
             "`heddle session start`",
@@ -1028,8 +1025,8 @@ mod tests {
     }
 
     #[test]
-    fn historical_adr_may_name_a_retired_command_but_readme_guidance_may_not() {
-        let prose = "Migration history: run heddle commit in the old interface.";
+    fn historical_adr_may_name_retired_checkpoint_but_readme_guidance_may_not() {
+        let prose = "Migration history: run heddle checkpoint in the old interface.";
         let mut adr_issues = Vec::new();
         scan_markdown("docs/adr/0000-history.md", prose, &cli(), &mut adr_issues);
         assert!(

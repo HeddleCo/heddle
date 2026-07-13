@@ -349,7 +349,7 @@ fn export_scoped(
     let repo = bridge.open_git_repo()?;
     bridge.mapping.retain_git_objects(&repo);
     bridge.seed_git_checkpoint_mappings_from_checkout(&repo)?;
-    bridge.seed_ingest_identity_mappings_from_mirror(&repo)?;
+    bridge.seed_ingest_identity_mappings_from_repo(&repo)?;
 
     // The desired/actual ref sets span the WHOLE mirror, not just this export's
     // scoped thread: a prior all-thread export can leave `refs/heads`/`refs/tags`

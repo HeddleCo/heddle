@@ -233,11 +233,11 @@ pub fn stage_ingest_source_in_mirror(
     bridge.stage_ingest_source_in_mirror(source, refs)
 }
 
-pub fn seed_ingest_identity_mappings_from_mirror(
+pub fn seed_ingest_identity_mappings_from_repo(
     bridge: &mut GitProjection<'_>,
     repo: &SleyRepository,
 ) -> GitProjectionResult<()> {
-    bridge.seed_ingest_identity_mappings_from_mirror(repo)
+    bridge.seed_ingest_identity_mappings_from_repo(repo)
 }
 
 pub fn open_git_repo(bridge: &GitProjection<'_>) -> GitProjectionResult<SleyRepository> {

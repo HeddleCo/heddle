@@ -12,9 +12,10 @@ use super::{
     IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
     ShellCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
-        AdoptArgs, CloneArgs, CollapseArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs, LandArgs,
-        LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
-        SnapshotArgs, SyncArgs, ThreadStartArgs, TimelineArgs, TryArgs, UndoArgs, WatchArgs,
+        AdoptArgs, CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs,
+        LandArgs, LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs,
+        RunArgs, SnapshotArgs, SyncArgs, ThreadStartArgs, TimelineArgs, TryArgs, UndoArgs,
+        WatchArgs,
     },
 };
 #[cfg(feature = "git-overlay")]
@@ -232,6 +233,9 @@ Examples:
     /// Capture a recoverable Heddle step for undo, provenance, and review.
     Capture(SnapshotArgs),
 
+    /// Commit the current captured state to the authoritative Git checkout.
+    Commit(CommitArgs),
+
     /// Show state history.
     ///
     /// By default, when a thread name is given (e.g. `heddle log master`),
@@ -398,14 +402,10 @@ Examples:
         command: ExportCommands,
     },
 
-    /// Push native Heddle source history to a remote.
-    ///
-    /// Git Overlay refuses this verb with exact direct-`git push` recovery.
+    /// Push the source-authoritative history to a remote.
     Push(PushArgs),
 
-    /// Pull native Heddle source history from a remote.
-    ///
-    /// Git Overlay refuses this verb with exact direct-`git pull` recovery.
+    /// Pull source-authoritative history from a remote.
     Pull(PullArgs),
 
     /// Manage remote repositories.

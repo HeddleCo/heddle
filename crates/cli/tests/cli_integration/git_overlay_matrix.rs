@@ -6263,6 +6263,10 @@ fn git_overlay_matrix_squashed_land_default_subject_is_land_thread() {
         git_stdout(temp.path(), &["log", "-1", "--pretty=%s"]),
         "Land feature/default-subject"
     );
+    assert!(
+        !temp.path().join(".heddle/git").exists(),
+        "land must checkpoint directly into the authoritative checkout .git"
+    );
 }
 
 #[test]

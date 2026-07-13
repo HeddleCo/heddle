@@ -218,6 +218,20 @@ pub struct SnapshotArgs {
     pub paths: Vec<String>,
 }
 
+/// Arguments for the Git-overlay `commit` command.
+#[derive(Clone, Debug, clap::Args)]
+#[command(after_help = "\
+Examples:
+  heddle capture -m 'add login route'
+  heddle commit
+  heddle commit -m 'add login route'
+")]
+pub struct CommitArgs {
+    /// Git commit message. Defaults to the current capture intent.
+    #[arg(short = 'm', long = "message")]
+    pub message: Option<String>,
+}
+
 /// Arguments for the `log` command.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
@@ -506,7 +520,7 @@ pub struct RetroArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Patch compatibility:
-  --patch output targets a clean `git apply` round-trip; patch(1) support is best-effort — use `git apply` for git extended headers (type changes, mode bits, empty add/delete hunks).
+  --patch output uses Git-compatible unified diff, including extended headers for type and mode changes.
 ")]
 pub struct DiffArgs {
     /// Base state (default: HEAD).
@@ -535,7 +549,7 @@ pub struct DiffArgs {
     #[arg(long)]
     pub context: bool,
 
-    /// Output patch in standard unified-diff format. Targets a clean `git apply` round-trip; `patch(1)` is best-effort.
+    /// Output a Git-compatible unified diff.
     #[arg(short = 'p', long = "patch")]
     pub patch: bool,
 }
@@ -649,7 +663,7 @@ Examples:
   heddle start scratch --path ../scratch            # place the checkout explicitly
   heddle start fix-flake --task 'fix CI flake'      # attach a task description
 
-Isolated checkouts are Heddle-managed working directories. They do not contain a .git directory; use Heddle commands inside them, and run raw Git commands from the parent Git-overlay repo when needed.
+Isolated checkouts are Heddle-managed working directories. They do not contain a .git directory; use Heddle commands inside them, and run Git-authority operations through Heddle from the parent Git-overlay repository.
 
 `heddle start <name> --path <dir>` is the one-step form of the advanced split flow: `heddle thread create <name>` creates the ref now, and `heddle thread promote <name> --path <dir>` materializes it later. Use the split form only when you intentionally need ref-first, checkout-later staging.
 
@@ -1175,7 +1189,7 @@ pub struct PullArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Behavior:
-  Clones native local or hosted Heddle repositories and checks out `main` (pass --thread to pick another). Git sources return exact `git clone` recovery argv. Never prompts. Full details: `heddle help clone`.
+  Clones native Heddle or Git repositories and checks out the selected default branch. Git transport runs through Sley and does not require a Git executable. Never prompts. Full details: `heddle help clone`.
 
 Advanced/planned flags: see `heddle help clone`.
 

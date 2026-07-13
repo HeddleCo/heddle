@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 use objects::object::{MarkerName, ThreadName};
+use sley::{ConfigEdit, ConfigEditPlan};
 
 use super::{git_overlay_fixtures::GitOverlayFixture, *};
 
 #[test]
-fn git_owned_source_commands_refuse_with_exact_git_argv() {
+fn git_owned_source_commands_except_push_refuse_with_exact_git_argv() {
     let source = TempDir::new().unwrap();
     git_ok(&["init", "-b", "main"], source.path());
     git_ok(
@@ -44,7 +45,6 @@ fn git_owned_source_commands_refuse_with_exact_git_argv() {
     heddle(&["init"], Some(source.path())).unwrap();
     for (args, expected) in [
         (&["remote", "list"][..], "git remote -v"),
-        (&["push"][..], "git push"),
         (&["pull"][..], "git pull"),
     ] {
         let output =
@@ -66,6 +66,63 @@ fn heddle_without_git_for_remote_tests(args: &[&str], cwd: &std::path::Path) -> 
         "heddle {args:?} should succeed without git on PATH\nstdout: {stdout}\nstderr: {stderr}"
     );
     stdout
+}
+
+#[test]
+fn git_overlay_push_uses_sley_without_git_on_path() {
+    let (work, _remote, remote_repo) = setup_git_overlay_push_fixture();
+
+    let output =
+        heddle_without_git_for_remote_tests(&["--output", "json", "push", "origin"], work.path());
+    let parsed: Value = serde_json::from_str(&output).expect("push JSON should parse");
+    assert_eq!(parsed["transport"], "git");
+    assert_eq!(parsed["ref_scope"], "current_branch");
+    assert_eq!(
+        parsed["refs_written"],
+        serde_json::json!(["refs/heads/main"])
+    );
+    assert!(parsed.get("git_notes_ref").is_none());
+    assert!(find_reference(&remote_repo, "refs/heads/main").is_ok());
+    assert!(find_reference(&remote_repo, "refs/heads/side").is_err());
+
+    let git = SleyRepository::discover(work.path()).expect("open authoritative Git checkout");
+    let config = git.config_snapshot().expect("read real Git config");
+    assert_eq!(config.get("branch", Some("main"), "remote"), Some("origin"));
+    assert_eq!(
+        config.get("branch", Some("main"), "merge"),
+        Some("refs/heads/main")
+    );
+}
+
+#[test]
+fn git_overlay_push_preserves_unrelated_branch_config() {
+    let (work, _remote, _remote_repo) = setup_git_overlay_push_fixture();
+    let git = SleyRepository::discover(work.path()).expect("open authoritative Git checkout");
+    let plan = ConfigEditPlan::new(git.common_dir().join("config"))
+        .with_operation(ConfigEdit::set("branch.main.rebase", "merges").unwrap())
+        .with_operation(ConfigEdit::set("branch.main.pushRemote", "publish").unwrap())
+        .with_operation(ConfigEdit::set("branch.main.description", "kept").unwrap())
+        .with_fsync(true);
+    git.apply_config_edit_plan(plan)
+        .expect("seed unrelated branch config");
+
+    heddle(&["push", "origin"], Some(work.path())).expect("push succeeds");
+
+    let config = git.config_snapshot().expect("read real Git config");
+    assert_eq!(config.get("branch", Some("main"), "remote"), Some("origin"));
+    assert_eq!(
+        config.get("branch", Some("main"), "merge"),
+        Some("refs/heads/main")
+    );
+    assert_eq!(config.get("branch", Some("main"), "rebase"), Some("merges"));
+    assert_eq!(
+        config.get("branch", Some("main"), "pushRemote"),
+        Some("publish")
+    );
+    assert_eq!(
+        config.get("branch", Some("main"), "description"),
+        Some("kept")
+    );
 }
 
 fn verify_json(cwd: &std::path::Path) -> Value {
@@ -972,8 +1029,8 @@ fn git_overlay_push_reports_refs_written_matching_ls_remote() {
     let parsed: Value = serde_json::from_str(&output).expect("push JSON should parse");
     assert_eq!(
         parsed["refs_written"],
-        serde_json::json!(["refs/heads/main", "refs/notes/heddle"]),
-        "current-thread push should report exactly the branch + notes refs it wrote: {parsed}"
+        serde_json::json!(["refs/heads/main"]),
+        "current-thread push should report exactly the real Git branch it wrote: {parsed}"
     );
 
     // Round-trip: the destination's refs are exactly the refs the push
@@ -1012,22 +1069,12 @@ fn git_overlay_push_all_threads_reports_tag_and_sibling_refs_written() {
     let parsed: Value = serde_json::from_str(&output).expect("push JSON should parse");
     assert_eq!(
         parsed["refs_written"],
-        serde_json::json!([
-            "refs/heads/main",
-            "refs/heads/side",
-            "refs/notes/heddle",
-            "refs/tags/v1.0"
-        ]),
-        "all-threads push should report every branch, tag, and notes ref it wrote: {parsed}"
+        serde_json::json!(["refs/heads/main", "refs/heads/side"]),
+        "all-threads push should report every real Git branch it wrote: {parsed}"
     );
     assert_eq!(
         remote_ref_names(&remote_repo),
-        vec![
-            "refs/heads/main".to_string(),
-            "refs/heads/side".to_string(),
-            "refs/notes/heddle".to_string(),
-            "refs/tags/v1.0".to_string(),
-        ],
+        vec!["refs/heads/main".to_string(), "refs/heads/side".to_string(),],
         "refs at the remote should be exactly the refs the push output reported"
     );
 }
@@ -1039,9 +1086,10 @@ fn git_overlay_push_defaults_to_current_thread_branch() {
     let output = heddle(&["--output", "json", "push", "origin"], Some(work.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).expect("push JSON should parse");
     assert_eq!(parsed["push_scope"], "current_thread");
-    assert_eq!(parsed["ref_scope"], "branch_and_heddle_notes");
+    assert_eq!(parsed["ref_scope"], "current_branch");
     assert_eq!(parsed["tags_included"], false);
     assert_eq!(parsed["thread"], "main");
+    assert!(parsed.get("git_notes_ref").is_none());
 
     assert!(
         find_reference(&remote_repo, "refs/heads/main").is_ok(),
@@ -1055,14 +1103,7 @@ fn git_overlay_push_defaults_to_current_thread_branch() {
         find_reference(&remote_repo, "refs/tags/v1.0").is_err(),
         "default push must not push tags"
     );
-    assert!(
-        find_reference(
-            &remote_repo,
-            cli::git_projection_engine::git_notes::NOTES_REF
-        )
-        .is_ok(),
-        "default push must carry Heddle notes so clones preserve state identity"
-    );
+    assert!(find_reference(&remote_repo, "refs/notes/heddle").is_err());
 }
 
 #[test]
@@ -1076,13 +1117,13 @@ fn git_overlay_push_all_threads_preserves_all_refs_behavior() {
     .unwrap();
     let parsed: Value = serde_json::from_str(&output).expect("push JSON should parse");
     assert_eq!(parsed["push_scope"], "all_threads");
-    assert_eq!(parsed["ref_scope"], "all_threads_tags_and_heddle_notes");
-    assert_eq!(parsed["tags_included"], true);
+    assert_eq!(parsed["ref_scope"], "all_branches");
+    assert_eq!(parsed["tags_included"], false);
     assert!(parsed["thread"].is_null());
 
     assert!(find_reference(&remote_repo, "refs/heads/main").is_ok());
     assert!(find_reference(&remote_repo, "refs/heads/side").is_ok());
-    assert!(find_reference(&remote_repo, "refs/tags/v1.0").is_ok());
+    assert!(find_reference(&remote_repo, "refs/tags/v1.0").is_err());
 }
 
 #[test]

@@ -85,7 +85,7 @@ fn import_all_with_options(
         .map_err(|error| error.to_string())?;
     let mirror_repo =
         test_support::open_git_repo(git_projection).map_err(|error| error.to_string())?;
-    test_support::seed_ingest_identity_mappings_from_mirror(git_projection, &mirror_repo)
+    test_support::seed_ingest_identity_mappings_from_repo(git_projection, &mirror_repo)
         .map_err(|error| error.to_string())?;
     Ok(import_stats_from_ingest(stats))
 }
@@ -2824,7 +2824,8 @@ fn clone_url_to_bare_populates_destination_from_file_url() {
     // Clone into a fresh dest dir.
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
-    clone_url_to_bare(url.as_str(), &dest, None, None).expect("clone file url");
+    let mut progress = sley::remote::SilentProgress;
+    clone_url_to_bare(url.as_str(), &dest, None, None, &mut progress).expect("clone file url");
 
     // Verify the dest has main + the v1.0 tag with the original commit OID.
     let dest_repo = open_git(&dest).expect("open dest");
@@ -2891,7 +2892,8 @@ fn clone_url_to_bare_rejects_shallow_file_url_without_shelling_to_git() {
 
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
-    let err = clone_url_to_bare(url.as_str(), &dest, Some(1), None)
+    let mut progress = sley::remote::SilentProgress;
+    let err = clone_url_to_bare(url.as_str(), &dest, Some(1), None, &mut progress)
         .expect_err("shallow file:// clone should fail closed in no-git runtime");
     let msg = err.to_string();
     assert!(
@@ -2922,8 +2924,15 @@ fn clone_url_to_bare_rejects_blob_none_filter_without_shelling_to_git() {
 
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
-    let err = clone_url_to_bare(url.as_str(), &dest, Some(1), Some("blob:none"))
-        .expect_err("filtered clone must be rejected in no-git runtime");
+    let mut progress = sley::remote::SilentProgress;
+    let err = clone_url_to_bare(
+        url.as_str(),
+        &dest,
+        Some(1),
+        Some("blob:none"),
+        &mut progress,
+    )
+    .expect_err("filtered clone must be rejected in no-git runtime");
     let msg = err.to_string();
     assert!(
         msg.contains("partial Git clone filter `blob:none` is not supported")
@@ -2950,7 +2959,8 @@ fn clone_url_to_bare_filter_rejection_preserves_pre_created_empty_dest() {
     std::fs::create_dir(&dest).expect("pre-create empty dest");
     assert!(dest.exists() && dest.read_dir().expect("read empty").next().is_none());
 
-    let err = clone_url_to_bare(url.as_str(), &dest, None, Some("blob:none"))
+    let mut progress = sley::remote::SilentProgress;
+    let err = clone_url_to_bare(url.as_str(), &dest, None, Some("blob:none"), &mut progress)
         .expect_err("filtered clone must be rejected in no-git runtime");
     assert!(
         err.to_string().contains("retry without --filter/--lazy"),
@@ -2980,8 +2990,15 @@ fn clone_url_to_bare_filter_rejection_precedes_remote_probe() {
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
 
-    let err =
-        clone_url_to_bare(url.as_str(), &dest, Some(1), Some("blob:none")).expect_err("must fail");
+    let mut progress = sley::remote::SilentProgress;
+    let err = clone_url_to_bare(
+        url.as_str(),
+        &dest,
+        Some(1),
+        Some("blob:none"),
+        &mut progress,
+    )
+    .expect_err("must fail");
     let msg = err.to_string();
     assert!(
         msg.contains("partial Git clone filter `blob:none` is not supported"),
@@ -4108,7 +4125,7 @@ fn export_retracts_branch_when_public_commit_is_later_embargoed() {
 /// invariant on `export_scoped`.
 ///
 /// `export_scoped` runs, in this exact order:
-///   1. `seed_ingest_identity_mappings_from_mirror` — re-hydrates the in-memory
+///   1. `seed_ingest_identity_mappings_from_repo` — re-hydrates the in-memory
 ///      mapping from the PERSISTENT ingest SHA map (`.heddle/ingest/sha_map.sqlite`),
 ///      so a commit imported earlier is re-mapped StateId→OID even on a brand-new
 ///      git_projection whose live mapping is empty;
@@ -4201,7 +4218,7 @@ fn export_purge_drops_seeded_embargoed_sha_before_serving_mapping() {
         let mut seed_probe = GitProjection::new(&repo);
         test_support::set_git_repo_path(&mut seed_probe, source_workdir.clone());
         let mirror = test_support::open_git_repo(&seed_probe).expect("open mirror for seed probe");
-        test_support::seed_ingest_identity_mappings_from_mirror(&mut seed_probe, &mirror)
+        test_support::seed_ingest_identity_mappings_from_repo(&mut seed_probe, &mirror)
             .expect("seed from ingest map");
         assert_eq!(
             test_support::mapping(&seed_probe).get_git(&change_b),
@@ -4257,7 +4274,7 @@ fn export_purge_drops_seeded_embargoed_sha_before_serving_mapping() {
 fn export_path_saves_mapping_strictly_after_the_embargo_purge() {
     let src_path = std::path::PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/git_projection_engine/git_export.rs"
+        "/../git-projection/src/git_export.rs"
     ));
     let src = std::fs::read_to_string(&src_path)
         .unwrap_or_else(|e| panic!("read git_export.rs at {}: {e}", src_path.display()));

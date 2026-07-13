@@ -4,9 +4,7 @@
 use anyhow::{Result, anyhow};
 use clap::CommandFactory;
 use clap_complete::{Shell, generate};
-use heddle_core::completion_plan::{
-    CompletionShell, CompletionShellError, parse_completion_shell,
-};
+use heddle_core::completion_plan::{CompletionShell, CompletionShellError, parse_completion_shell};
 
 use super::advice::RecoveryAdvice;
 use crate::cli::{Cli, CompletionSubject};

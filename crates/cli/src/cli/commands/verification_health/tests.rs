@@ -10,12 +10,14 @@ use heddle_core::status::next_action::{
     remote_tracking_next_action,
 };
 use objects::object::ThreadName;
+use refs::Head;
 use repo::{GitRemoteTrackingStatus, Repository};
 use tempfile::TempDir;
 
 use super::{
-    RepositoryVerificationState, action_template, machine_contract_coverage, remote_drift_decision,
-    repository_setup_guidance, repository_verification_blocked_advice,
+    RepositoryVerificationState, action_template, detached_git_head_mutation_advice,
+    machine_contract_coverage, remote_drift_decision, repository_setup_guidance,
+    repository_verification_blocked_advice,
 };
 use crate::cli::commands::build_command_catalog;
 
@@ -256,6 +258,29 @@ fn remote_drift_decision_treats_local_only_branch_as_clean_publishable_state() {
     assert_eq!(decision.primary_action.as_deref(), Some("heddle push"));
     assert!(decision.recovery_commands.is_empty());
     assert!(!decision.requires_clean_worktree);
+}
+
+#[test]
+fn detached_head_without_known_thread_returns_typed_heddle_handoff() {
+    let (_temp, repo) = test_repo();
+    let main = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .expect("main state");
+    repo.refs()
+        .write_head(&Head::Detached { state: main })
+        .unwrap();
+
+    let advice = detached_git_head_mutation_advice(&repo, "commit");
+
+    assert_eq!(advice.kind, "git_head_detached");
+    assert_eq!(advice.primary_command, "heddle thread list");
+    assert_eq!(
+        advice.recovery_commands,
+        vec!["heddle thread list", "heddle thread switch <thread>"]
+    );
+    assert!(!advice.hint.contains("git switch"));
 }
 
 fn remote(

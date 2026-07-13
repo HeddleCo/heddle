@@ -61,7 +61,7 @@ crates/
   repo/      # repository operations and helpers
   refs/      # threads, markers, HEAD, packed refs
   oplog/     # undo/redo oplog logic
-  cli/src/git_projection_engine/   # Git interoperability (module within the cli crate)
+  git-projection/ # Git interoperability engine, re-exported by the CLI
   semantic/  # semantic diff and parser-heavy analysis
   ...
 docs/             # architecture, hosted model, roadmap, future-state plans

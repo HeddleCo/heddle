@@ -83,7 +83,6 @@ mod worktree_status_options;
 pub mod worktree_walk;
 
 // Re-export commonly used types from underlying crates.
-pub use ephemeral_thread::{CollapsedThread, collapse_expired_ephemeral_threads};
 pub use collaboration_migration::{
     LegacyDiscussionMigrationBlocker, LegacyDiscussionMigrationItem, LegacyDiscussionMigrationPlan,
     LegacyDiscussionMigrationReport, apply_legacy_discussion_migration,
@@ -93,6 +92,7 @@ pub use collaboration_store::{
     CollaborationIntegrityReport, CollaborationStore, CollaborationWriteDisposition,
     CollaborationWriteOutcome,
 };
+pub use ephemeral_thread::{CollapsedThread, collapse_expired_ephemeral_threads};
 pub use fsmonitor::{ChangeMonitorReport, run_local_monitor_helper};
 pub use git_ref_name::{
     GitRefContentNamespace, GitRefKind, GitRefName, GitRefNamespace, ParsedGitRef,
@@ -121,18 +121,18 @@ pub use repository::query_history_async;
 pub use repository::{
     BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters,
     CheckoutMaterialization, CommitGraphIndex, CommitGraphInspection, ContextSuggestion,
-    ContextSuggestionTier, DiffKind, GitCheckpointRecord, GitImportGuidance,
-    GitRemoteTrackingStatus, HIGH_SUGGESTION_THRESHOLD, HistoryQuery, HostedConfig,
-    MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD, MissingBlob, OperationKind,
-    OperationScope, OutputFormat, PackFilesInspection, PartialFetchInspection,
-    PullPlannerCacheInspection, RedactConfig, RefCountsInspection, RefSummaryIndexInspection,
-    RepoConfig, Repository, RepositoryCapability, RepositoryMaintenanceRunReport,
-    RepositoryOperationStatus, RepositoryPerformanceInspectionReport, RepositorySourceAuthority,
-    SUGGESTION_WINDOW, SnapshotExecution, SnapshotProfile, SpoolFacet,
-    ThreadCaptureOutcome, TreeBuildProfile, TrustedKey, UntrackedSet, UntrackedSubtree,
-    WarmCanonicalStoreStats, WorktreeCompareProfile, WorktreeIndexInspection,
-    WorktreeStatusDetailed, compute_rewrite_pct, find_merge_base, is_major_rewrite,
-    is_synthetic_root,
+    ContextSuggestionTier, DiffKind, GitCheckpointIntent, GitCheckpointIntentPhase,
+    GitCheckpointRecord, GitImportGuidance, GitRemoteTrackingStatus, HIGH_SUGGESTION_THRESHOLD,
+    HistoryQuery, HostedConfig, MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD,
+    MissingBlob, OperationKind, OperationScope, OutputFormat, PackFilesInspection,
+    PartialFetchInspection, PullPlannerCacheInspection, RedactConfig, RefCountsInspection,
+    RefSummaryIndexInspection, RepoConfig, Repository, RepositoryCapability,
+    RepositoryMaintenanceRunReport, RepositoryOperationStatus,
+    RepositoryPerformanceInspectionReport, RepositorySourceAuthority, SUGGESTION_WINDOW,
+    SnapshotExecution, SnapshotProfile, SpoolFacet, ThreadCaptureOutcome, TreeBuildProfile,
+    TrustedKey, UntrackedSet, UntrackedSubtree, WarmCanonicalStoreStats, WorktreeCompareProfile,
+    WorktreeIndexInspection, WorktreeStatusDetailed, compute_rewrite_pct, find_merge_base,
+    is_major_rewrite, is_synthetic_root,
 };
 #[cfg(feature = "git-overlay")]
 pub use repository::{GitOverlayBranchTip, GitOverlayOutOfBandCommits};

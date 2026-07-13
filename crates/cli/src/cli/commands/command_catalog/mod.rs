@@ -382,7 +382,7 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     // argv because the literal ellipsis would create bad history.
     "heddle capture -m \"...\"",
     "heddle capture -m \"...\" --confidence <confidence>",
-    "git commit -m \"...\"",
+    "heddle commit -m \"...\"",
     "heddle init --principal-name <name> --principal-email <email>",
     "heddle ready -m \"...\"",
     "heddle context get --path <path>",
@@ -406,7 +406,7 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     // Shallow Git import recovery requires choosing a complete checkout.
     "heddle import git --path <full-git-repo>",
     "heddle import git --path <full-git-repo> --ref <ref>",
-    "git switch <branch>",
+    "heddle thread switch <branch>",
     "heddle ready --thread <thread>",
     "heddle land --thread <thread>",
 ];
@@ -432,8 +432,8 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "git commit -m \"...\"",
-        &["git", "commit", "-m", "<message>"],
+        "heddle commit -m \"...\"",
+        &["heddle", "commit", "-m", "<message>"],
         &["message"],
         true,
     ),
@@ -646,8 +646,8 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         false,
     ),
     (
-        "git switch <branch>",
-        &["git", "switch", "<branch>"],
+        "heddle thread switch <branch>",
+        &["heddle", "thread", "switch", "<branch>"],
         &["branch"],
         false,
     ),
@@ -1537,48 +1537,54 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["clone"],
         front_door(
-            json_discriminators(
-                documented_schemas(
-                    CommandContract {
-                        may_initialize: true,
-                        may_write_worktree: true,
-                        may_move_ref: true,
-                        writes_worktree: true,
-                        network_io: true,
-                        ..REF_MUTATION
-                    },
-                    &["clone"],
-                ),
-                &[
-                    json_discriminator(Some("clone"), "output_kind", "clone"),
-                    // `clone --output json` on a hosted/network remote
-                    // emits a preliminary connection envelope before the
-                    // final clone payload. Both records carry
-                    // `output_kind` so agents that route on the
-                    // discriminator (per heddle#272) can classify each
-                    // line without falling back to text parsing. The
-                    // envelope has no separate schema verb — it's a
-                    // small inline object, not a Serialize struct in
-                    // `schemas`. Source-of-truth value:
-                    // `cli::cli::commands::CLONE_CONNECTION_OUTPUT_KIND`.
-                    json_discriminator_no_schema(
-                        "preliminary connection envelope emitted by hosted clones \
+            surface(
+                json_discriminators(
+                    documented_schemas(
+                        CommandContract {
+                            may_initialize: true,
+                            may_import_git: true,
+                            may_write_worktree: true,
+                            may_move_ref: true,
+                            writes_git_refs: true,
+                            writes_worktree: true,
+                            writes_config: true,
+                            network_io: true,
+                            ..REF_MUTATION
+                        },
+                        &["clone"],
+                    ),
+                    &[
+                        json_discriminator(Some("clone"), "output_kind", "clone"),
+                        // `clone --output json` on a hosted/network remote
+                        // emits a preliminary connection envelope before the
+                        // final clone payload. Both records carry
+                        // `output_kind` so agents that route on the
+                        // discriminator (per heddle#272) can classify each
+                        // line without falling back to text parsing. The
+                        // envelope has no separate schema verb — it's a
+                        // small inline object, not a Serialize struct in
+                        // `schemas`. Source-of-truth value:
+                        // `cli::cli::commands::CLONE_CONNECTION_OUTPUT_KIND`.
+                        json_discriminator_no_schema(
+                            "preliminary connection envelope emitted by hosted clones \
                          before the final clone payload (no separate schema)",
-                        "output_kind",
-                        "clone_connection",
-                    ),
-                    // `clone --recursive --output json` (Spool epic P9) emits a
-                    // monorepo summary instead of the single-spool `clone`
-                    // payload: the placed per-spool ops + the skipped (EdgeSkip)
-                    // child edges. Inline object, no separate schema verb.
-                    // Source: `clone::monorepo_clone_output_json`.
-                    json_discriminator_no_schema(
-                        "monorepo clone summary emitted by `clone --recursive` \
+                            "output_kind",
+                            "clone_connection",
+                        ),
+                        // `clone --recursive --output json` (Spool epic P9) emits a
+                        // monorepo summary instead of the single-spool `clone`
+                        // payload: the placed per-spool ops + the skipped (EdgeSkip)
+                        // child edges. Inline object, no separate schema verb.
+                        // Source: `clone::monorepo_clone_output_json`.
+                        json_discriminator_no_schema(
+                            "monorepo clone summary emitted by `clone --recursive` \
                          (placed spools + skipped child edges; no separate schema)",
-                        "output_kind",
-                        "clone_monorepo",
-                    ),
-                ],
+                            "output_kind",
+                            "clone_monorepo",
+                        ),
+                    ],
+                ),
+                "source_authority",
             ),
             220,
         ),
@@ -1586,6 +1592,40 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["collapse"],
         category(opaque_schemas(REF_MUTATION, &["collapse"]), "states"),
+    ),
+    entry(
+        &["commit"],
+        exits(
+            front_door(
+                advertised_action(
+                    surface(
+                        json_discriminators(
+                            documented_schemas(
+                                CommandContract {
+                                    writes_git_refs: true,
+                                    writes_metadata: true,
+                                    ..REF_MUTATION
+                                },
+                                &["commit"],
+                            ),
+                            &[json_discriminator(Some("commit"), "output_kind", "commit")],
+                        ),
+                        "source_authority",
+                    ),
+                    "heddle commit",
+                    &["heddle", "commit"],
+                    &[],
+                    true,
+                    true,
+                ),
+                28,
+            ),
+            &[
+                (0, "Git checkpoint written or already current"),
+                (65, "repository mode or worktree preflight refused"),
+                (74, "io while writing Git state"),
+            ],
+        ),
     ),
     entry(
         &["expand"],
@@ -2055,12 +2095,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
         exits(
             front_door(
                 json_discriminators(
-                    documented_schemas(
-                        CommandContract {
-                            network_io: true,
-                            ..WORKTREE_MUTATION
-                        },
-                        &["pull"],
+                    surface(
+                        documented_schemas(
+                            CommandContract {
+                                may_import_git: true,
+                                writes_git_refs: true,
+                                network_io: true,
+                                ..WORKTREE_MUTATION
+                            },
+                            &["pull"],
+                        ),
+                        "source_authority",
                     ),
                     &[json_discriminator(Some("pull"), "output_kind", "pull")],
                 ),
@@ -2080,12 +2125,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
             front_door(
                 advertised_action(
                     json_discriminators(
-                        documented_schemas(
-                            CommandContract {
-                                network_io: true,
-                                ..REF_MUTATION
-                            },
-                            &["push"],
+                        surface(
+                            documented_schemas(
+                                CommandContract {
+                                    writes_git_refs: true,
+                                    writes_config: true,
+                                    network_io: true,
+                                    ..REF_MUTATION
+                                },
+                                &["push"],
+                            ),
+                            "source_authority",
                         ),
                         &[json_discriminator(Some("push"), "output_kind", "push")],
                     ),
@@ -2228,60 +2278,78 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
-    entry(&["remote"], category(surface(GROUP, "native"), "repo")),
+    entry(
+        &["remote"],
+        category(surface(GROUP, "source_authority"), "repo"),
+    ),
     entry(
         &["remote", "list"],
-        json_discriminators(
-            documented_schemas(READ_JSON, &["remote list"]),
-            &[json_discriminator(
-                Some("remote list"),
-                "output_kind",
-                "remote_list",
-            )],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["remote list"]),
+                &[json_discriminator(
+                    Some("remote list"),
+                    "output_kind",
+                    "remote_list",
+                )],
+            ),
+            "source_authority",
         ),
     ),
     entry(
         &["remote", "add"],
-        json_discriminators(
-            documented_schemas(CONFIG_MUTATION, &["remote add"]),
-            &[json_discriminator(
-                Some("remote add"),
-                "output_kind",
-                "remote_add",
-            )],
+        surface(
+            json_discriminators(
+                documented_schemas(CONFIG_MUTATION, &["remote add"]),
+                &[json_discriminator(
+                    Some("remote add"),
+                    "output_kind",
+                    "remote_add",
+                )],
+            ),
+            "source_authority",
         ),
     ),
     entry(
         &["remote", "remove"],
-        json_discriminators(
-            documented_schemas(CONFIG_MUTATION, &["remote remove"]),
-            &[json_discriminator(
-                Some("remote remove"),
-                "output_kind",
-                "remote_remove",
-            )],
+        surface(
+            json_discriminators(
+                documented_schemas(CONFIG_MUTATION, &["remote remove"]),
+                &[json_discriminator(
+                    Some("remote remove"),
+                    "output_kind",
+                    "remote_remove",
+                )],
+            ),
+            "source_authority",
         ),
     ),
     entry(
         &["remote", "set-default"],
-        json_discriminators(
-            documented_schemas(CONFIG_MUTATION, &["remote set-default"]),
-            &[json_discriminator(
-                Some("remote set-default"),
-                "output_kind",
-                "remote_set_default",
-            )],
+        surface(
+            json_discriminators(
+                documented_schemas(CONFIG_MUTATION, &["remote set-default"]),
+                &[json_discriminator(
+                    Some("remote set-default"),
+                    "output_kind",
+                    "remote_set_default",
+                )],
+            ),
+            "source_authority",
         ),
     ),
     entry(
         &["remote", "show"],
-        json_discriminators(
-            documented_schemas(READ_JSON, &["remote show"]),
-            &[json_discriminator(
-                Some("remote show"),
-                "output_kind",
-                "remote_show",
-            )],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["remote show"]),
+                &[json_discriminator(
+                    Some("remote show"),
+                    "output_kind",
+                    "remote_show",
+                )],
+            ),
+            "source_authority",
         ),
     ),
     entry(
@@ -4222,9 +4290,8 @@ pub(crate) fn validate_recommended_action(action: &str) -> std::result::Result<(
             .try_get_matches_from(argv)
             .map(|_| ())
             .map_err(|err| err.to_string()),
-        Some("git") => Ok(()),
         Some(other) => Err(format!(
-            "recommended action must start with `heddle` or `git`, found `{other}`"
+            "recommended action must start with `heddle`, found `{other}`"
         )),
         None => Ok(()),
     }
@@ -4334,6 +4401,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Land(_) => vec!["land"],
         Commands::Ready(_) => vec!["ready"],
         Commands::Capture(_) => vec!["capture"],
+        Commands::Commit(_) => vec!["commit"],
         Commands::Log(_) => vec!["log"],
         Commands::Show { .. } => vec!["show"],
         Commands::Retro(_) => vec!["retro"],

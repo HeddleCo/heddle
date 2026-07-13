@@ -119,6 +119,7 @@ mod status_tracked_refresh;
 mod status_untracked_scan;
 
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
+const GIT_CHECKPOINT_INTENT_FILE: &str = "git-checkpoint-intent.json";
 const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +140,24 @@ pub struct GitCheckpointRecord {
     pub git_commit: String,
     pub summary: String,
     pub committed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitCheckpointIntentPhase {
+    Prepared,
+    Published,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitCheckpointIntent {
+    pub version: u32,
+    pub state_id: String,
+    pub branch: String,
+    pub previous_git_oid: Option<String>,
+    pub new_git_oid: String,
+    pub summary: String,
+    pub phase: GitCheckpointIntentPhase,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1972,9 +1991,15 @@ impl Repository {
         summary: impl Into<String>,
     ) -> Result<GitCheckpointRecord> {
         let mut records = self.list_git_checkpoints()?;
+        let git_commit = git_commit.into();
+        if let Some(existing) = records.iter().rev().find(|record| {
+            record.state_id == state_id.to_string_full() && record.git_commit == git_commit
+        }) {
+            return Ok(existing.clone());
+        }
         let record = GitCheckpointRecord {
             state_id: state_id.to_string_full(),
-            git_commit: git_commit.into(),
+            git_commit,
             summary: summary.into(),
             committed_at: Utc::now().to_rfc3339(),
         };
@@ -1985,6 +2010,95 @@ impl Repository {
         records.push(record.clone());
         write_file_atomic(&path, serde_json::to_string_pretty(&records)?.as_bytes())?;
         Ok(record)
+    }
+
+    fn git_checkpoint_intent_path(&self) -> PathBuf {
+        self.root
+            .join(".heddle/state")
+            .join(GIT_CHECKPOINT_INTENT_FILE)
+    }
+
+    pub fn pending_git_checkpoint_intent(&self) -> Result<Option<GitCheckpointIntent>> {
+        let path = self.git_checkpoint_intent_path();
+        let contents = match fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Some(serde_json::from_str(&contents)?))
+    }
+
+    pub fn begin_git_checkpoint_intent(
+        &self,
+        intent: &GitCheckpointIntent,
+    ) -> Result<GitCheckpointIntent> {
+        if intent.version != 1 || intent.phase != GitCheckpointIntentPhase::Prepared {
+            return Err(HeddleError::InvalidObject(
+                "new Git checkpoint intent must be prepared v1".to_string(),
+            ));
+        }
+        if let Some(existing) = self.pending_git_checkpoint_intent()? {
+            let same_operation = existing.version == intent.version
+                && existing.state_id == intent.state_id
+                && existing.branch == intent.branch
+                && existing.previous_git_oid == intent.previous_git_oid
+                && existing.new_git_oid == intent.new_git_oid
+                && existing.summary == intent.summary;
+            if same_operation {
+                return Ok(existing);
+            }
+            return Err(HeddleError::Config(format!(
+                "Git checkpoint {} -> {} is still pending on branch '{}'; retry that checkpoint before starting another",
+                existing.previous_git_oid.as_deref().unwrap_or("<unborn>"),
+                existing.new_git_oid,
+                existing.branch
+            )));
+        }
+        let path = self.git_checkpoint_intent_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_file_atomic(&path, serde_json::to_string_pretty(intent)?.as_bytes())?;
+        Ok(intent.clone())
+    }
+
+    pub fn mark_git_checkpoint_published(
+        &self,
+        state_id: &StateId,
+        git_oid: &str,
+    ) -> Result<GitCheckpointIntent> {
+        let mut intent = self.pending_git_checkpoint_intent()?.ok_or_else(|| {
+            HeddleError::Config("Git checkpoint intent disappeared before publish".to_string())
+        })?;
+        if intent.state_id != state_id.to_string_full() || intent.new_git_oid != git_oid {
+            return Err(HeddleError::Config(
+                "Git checkpoint publish does not match the durable intent".to_string(),
+            ));
+        }
+        intent.phase = GitCheckpointIntentPhase::Published;
+        write_file_atomic(
+            &self.git_checkpoint_intent_path(),
+            serde_json::to_string_pretty(&intent)?.as_bytes(),
+        )?;
+        Ok(intent)
+    }
+
+    pub fn finish_git_checkpoint_intent(&self, state_id: &StateId, git_oid: &str) -> Result<()> {
+        let Some(intent) = self.pending_git_checkpoint_intent()? else {
+            return Ok(());
+        };
+        if intent.state_id != state_id.to_string_full() || intent.new_git_oid != git_oid {
+            return Err(HeddleError::Config(
+                "cannot finalize a Git checkpoint that does not match the durable intent"
+                    .to_string(),
+            ));
+        }
+        let path = self.git_checkpoint_intent_path();
+        fs::remove_file(&path)?;
+        if let Some(parent) = path.parent() {
+            objects::fs_atomic::sync_directory(parent)?;
+        }
+        Ok(())
     }
 
     pub fn init_worktree(

@@ -15,8 +15,8 @@ pub mod tips;
 pub use cli_args::AuthCommands;
 pub use cli_args::{
     AdoptArgs, AgentCommands, AgentPresenceCommands, AgentProvenanceCommands, Cli, CloneArgs,
-    CollapseArgs, Commands, CompletionSubject, ContextCommands, DaemonCommands, DiffArgs,
-    DoctorArgs, DoctorCommands, DoctorDocsArgs, DoctorSchemasArgs, ExpandArgs, FsckArgs,
+    CollapseArgs, Commands, CommitArgs, CompletionSubject, ContextCommands, DaemonCommands,
+    DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs, DoctorSchemasArgs, ExpandArgs, FsckArgs,
     FsckCommands, FsckRepairCommands, FsckRepairGitArgs, HookCommands, HookInstallSource, InitArgs,
     IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs, IntegrationTargetArgs,
     LogArgs, MaintenanceCommands, OplogCommands, OutputMode, PullArgs, PurgeApplyArgs,

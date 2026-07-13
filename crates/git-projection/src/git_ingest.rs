@@ -44,7 +44,7 @@ pub fn import_git_history(
         bridge.build_existing_mapping(None)?;
     }
     let mirror_repo = bridge.open_git_repo()?;
-    bridge.seed_ingest_identity_mappings_from_mirror(&mirror_repo)?;
+    bridge.seed_ingest_identity_mappings_from_repo(&mirror_repo)?;
     backfill_ingest_identity_notes_in_mirror(bridge, &mirror_repo, refs)?;
     Ok(import_stats_from_ingest(stats))
 }

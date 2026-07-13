@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use objects::{
-    object::{ActionId, ContentHash, StateAttachmentBody, StateId},
+    object::{ActionId, ContentHash, StateAttachment, StateId},
     store::ObjectStore,
 };
 use repo::Repository;
@@ -110,14 +110,94 @@ impl LocalSync {
     ) -> Result<usize> {
         let mut copied = 0;
         for object in &transfer_plan.partitions.packable_objects {
+            if object.obj_type == ObjectType::StateAttachment {
+                continue;
+            }
             if self.copy_planned_object(target, object)? {
                 copied += 1;
             }
         }
+        copied += self.copy_planned_attachments(
+            target,
+            transfer_plan
+                .partitions
+                .packable_objects
+                .iter()
+                .filter(|object| object.obj_type == ObjectType::StateAttachment),
+        )?;
         for object in &transfer_plan.partitions.sidecar_objects {
             self.copy_planned_sidecar(target, object)?;
         }
         Ok(copied)
+    }
+
+    fn copy_planned_attachments<'a>(
+        &self,
+        target: &Repository,
+        objects: impl Iterator<Item = &'a PlannedObject>,
+    ) -> Result<usize> {
+        let mut pending = Vec::new();
+        for object in objects {
+            let ObjectId::StateAttachment { state, id } = &object.id else {
+                return Err(anyhow!(
+                    "transfer plan object {:?} has incompatible type {:?}",
+                    object.id,
+                    object.obj_type
+                ));
+            };
+            let attachment = self
+                .source
+                .store()
+                .get_state_attachment(state, id)?
+                .ok_or_else(|| anyhow!("State attachment {} not found in source", id))?;
+            pending.push(attachment);
+        }
+
+        let mut copied = 0;
+        while !pending.is_empty() {
+            let mut ready = None;
+            for (index, attachment) in pending.iter().enumerate() {
+                if self.attachment_is_ready(target, attachment)? {
+                    ready = Some(index);
+                    break;
+                }
+            }
+            let Some(index) = ready else {
+                let state_id = pending[0].state_id;
+                return Err(anyhow!(
+                    "state attachment history for {} has an unresolved predecessor",
+                    state_id
+                ));
+            };
+            let attachment = pending.remove(index);
+            if target
+                .get_state_attachment(&attachment.state_id, &attachment.id())?
+                .is_none()
+            {
+                target.put_state_attachment(&attachment)?;
+                copied += 1;
+            }
+        }
+        Ok(copied)
+    }
+
+    fn attachment_is_ready(
+        &self,
+        target: &Repository,
+        attachment: &StateAttachment,
+    ) -> Result<bool> {
+        if target
+            .get_state_attachment(&attachment.state_id, &attachment.id())?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        match attachment.supersedes {
+            Some(prior) => Ok(target
+                .get_state_attachment(&attachment.state_id, &prior)?
+                .is_some()),
+            None => Ok(true),
+        }
     }
 
     fn copy_planned_object(&self, target: &Repository, object: &PlannedObject) -> Result<bool> {
@@ -171,60 +251,7 @@ impl LocalSync {
         if !state_already_present {
             target.store().put_state(&state)?;
         }
-        self.copy_state_attachments(target, state_id)?;
         Ok(!state_already_present)
-    }
-
-    fn copy_state_attachments(&self, target: &Repository, state_id: &StateId) -> Result<()> {
-        let mut pending = self.source.list_state_attachments(state_id)?;
-        while !pending.is_empty() {
-            let mut ready = None;
-            for (index, attachment) in pending.iter().enumerate() {
-                if let Some(prior) = attachment.supersedes
-                    && target.get_state_attachment(state_id, &prior)?.is_none()
-                {
-                    continue;
-                }
-                ready = Some(index);
-                break;
-            }
-            let Some(index) = ready else {
-                return Err(anyhow!(
-                    "state attachment history for {} has an unresolved predecessor",
-                    state_id
-                ));
-            };
-            let attachment = pending.remove(index);
-            match &attachment.body {
-                StateAttachmentBody::Context(root) => self.copy_tree_closure(target, root)?,
-                StateAttachmentBody::RiskSignals(hash)
-                | StateAttachmentBody::ReviewSignatures(hash)
-                | StateAttachmentBody::Discussions(hash)
-                | StateAttachmentBody::StructuredConflicts(hash) => {
-                    self.copy_blob(target, hash)?;
-                }
-                StateAttachmentBody::Signature(_) => {}
-            }
-            target.put_state_attachment(&attachment)?;
-        }
-        Ok(())
-    }
-
-    fn copy_tree_closure(&self, target: &Repository, root: &ContentHash) -> Result<()> {
-        let tree = self
-            .source
-            .store()
-            .get_tree(root)?
-            .ok_or_else(|| anyhow!("Tree {} not found in source", root))?;
-        for entry in tree.entries() {
-            if let Some(tree_hash) = entry.tree_hash() {
-                self.copy_tree_closure(target, &tree_hash)?;
-            } else if let Some(blob_hash) = entry.blob_hash() {
-                self.copy_blob(target, &blob_hash)?;
-            }
-        }
-        target.store().put_tree(&tree)?;
-        Ok(())
     }
 
     fn copy_planned_sidecar(&self, target: &Repository, object: &PlannedObject) -> Result<()> {

@@ -1297,7 +1297,7 @@ fn recommended_action_templates() -> Vec<ActionTemplate> {
             true,
         ),
         (
-            "git commit -m \"...\"",
+            "heddle commit -m \"...\"",
             &["git", "commit", "-m", "<message>"][..],
             &["message"][..],
             true,

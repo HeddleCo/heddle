@@ -45,7 +45,7 @@ impl Tip {
     pub fn message(&self) -> &'static str {
         match self {
             Self::CheckpointAfterCapture => {
-                "tip: in Git Overlay, run `git commit` directly when source history is ready"
+                "tip: in Git Overlay, run `heddle commit` when the captured state is ready"
             }
             Self::QueryFromLog => "tip: `heddle query` searches saved change history",
             Self::AgentServeForLatency => {

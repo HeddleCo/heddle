@@ -153,6 +153,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(&["capture"], &["capture"]),
     sample(&["clone"], &["clone", "remote", "local"]),
+    sample(&["commit"], &["commit"]),
     sample(
         &["collapse"],
         &["collapse", "s1", "s2", "--into", "squashed"],
@@ -471,9 +472,9 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
         "",
         "heddle init",
         "heddle capture -m \"...\"",
-        "git commit -m \"...\"",
+        "heddle commit -m \"...\"",
         "heddle capture -m \"Preserve raw Git operation work\"",
-        "git switch <branch>",
+        "heddle thread switch <branch>",
         "heddle start feature/auth --path <dir>",
         "heddle clone <remote> <fresh-path>",
         "heddle clone <local-path> <path>",
@@ -501,6 +502,29 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
 }
 
 #[test]
+fn recommended_actions_reject_external_git_commands() {
+    let error = validate_recommended_action("git fetch origin").expect_err("external Git action");
+    assert!(error.contains("must start with `heddle`"), "{error}");
+}
+
+#[test]
+fn commit_catalog_action_matches_optional_message_runtime() {
+    let catalog = build_command_catalog();
+    let commit = catalog
+        .command_by_display("commit")
+        .expect("commit should be cataloged");
+    let action = commit
+        .command_action
+        .as_ref()
+        .expect("commit should advertise an executable action");
+    assert_eq!(
+        action.argv.as_ref(),
+        Some(&vec!["heddle".to_string(), "commit".to_string()])
+    );
+    assert!(action.executable);
+}
+
+#[test]
 fn recommended_action_templates_describe_display_only_placeholders() {
     let catalog = build_command_catalog();
     for placeholder in RECOMMENDED_ACTION_PLACEHOLDERS {
@@ -521,18 +545,21 @@ fn recommended_action_templates_describe_display_only_placeholders() {
     let commit = catalog
         .recommended_action_templates
         .iter()
-        .find(|template| template.action == "git commit -m \"...\"")
+        .find(|template| template.action == "heddle commit -m \"...\"")
         .expect("commit placeholder should have a structured template");
     assert_eq!(
         commit.argv_template,
-        vec!["git", "commit", "-m", "<message>"]
+        vec!["heddle", "commit", "-m", "<message>"]
     );
     assert_eq!(commit.required_inputs, vec!["message"]);
     assert!(commit.agent_may_fill);
 
-    let switch = recommended_action_template("git switch <branch>")
+    let switch = recommended_action_template("heddle thread switch <branch>")
         .expect("switch placeholder should resolve");
-    assert_eq!(switch.argv_template, vec!["git", "switch", "<branch>"]);
+    assert_eq!(
+        switch.argv_template,
+        vec!["heddle", "thread", "switch", "<branch>"]
+    );
     assert_eq!(switch.required_inputs, vec!["branch"]);
     assert!(!switch.agent_may_fill);
 
@@ -644,7 +671,7 @@ fn action_fields_template_argv_normalized_message_placeholders() {
 
 #[test]
 fn display_only_recommended_actions_must_be_templated() {
-    let err = validate_recommended_action("git switch <missing-template>")
+    let err = validate_recommended_action("heddle thread switch <missing-template>")
         .expect_err("unregistered display placeholder should fail validation");
     assert!(
         err.contains("structured template"),
@@ -652,7 +679,7 @@ fn display_only_recommended_actions_must_be_templated() {
     );
 
     assert!(
-        recommended_action_template("git switch <missing-template>").is_none(),
+        recommended_action_template("heddle thread switch <missing-template>").is_none(),
         "unregistered display placeholder must not resolve to a fillable template"
     );
 }
@@ -666,7 +693,9 @@ fn recommended_action_validator_rejects_unknown_commands() {
         "error should name the bad command: {err}"
     );
 
-    validate_recommended_action("git status").expect("Git-owned actions are valid guidance");
+    let err = validate_recommended_action("git status")
+        .expect_err("external Git commands are not Heddle recovery actions");
+    assert!(err.contains("must start with `heddle`"), "{err}");
 }
 
 #[test]
@@ -748,14 +777,13 @@ fn checked_action_builder_quotes_and_validates_from_argv() {
         ["ready", "--thread", "feature with spaces"]
     );
 
-    let git = checked_action_from_argv(["git", "status"]);
-    assert_eq!(git, "git status");
-
-    let panic = std::panic::catch_unwind(|| checked_action_from_argv(["curl", "example.com"]));
-    assert!(
-        panic.is_err(),
-        "unowned executables should not enter runtime advice sidecars"
-    );
+    for argv in [["git", "status"], ["curl", "example.com"]] {
+        let panic = std::panic::catch_unwind(|| checked_action_from_argv(argv));
+        assert!(
+            panic.is_err(),
+            "unowned executables should not enter runtime advice sidecars"
+        );
+    }
 }
 
 #[test]
@@ -1002,7 +1030,12 @@ fn command_contract_metadata_is_internally_consistent() {
         assert!(
             matches!(
                 contract.surface,
-                "native" | "git_projection" | "automation" | "admin" | "internal"
+                "native"
+                    | "source_authority"
+                    | "git_projection"
+                    | "automation"
+                    | "admin"
+                    | "internal"
             ),
             "`{display}` has unknown product surface `{}`",
             contract.surface
@@ -1563,6 +1596,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // clone_monorepo discriminator: `clone --recursive --output json`
             // (Spool epic P9) emits a monorepo summary record.
             "clone",
+            "commit",
             "expand",
             "continue",
             "context set",
@@ -2025,7 +2059,15 @@ fn command_contract_table_drives_help_tiers() {
             "verify", "everyday", "native", "everyday", None, None, false,
         ),
         ("land", "everyday", "native", "everyday", None, None, false),
-        ("push", "everyday", "native", "everyday", None, None, false),
+        (
+            "push",
+            "everyday",
+            "source_authority",
+            "everyday",
+            None,
+            None,
+            false,
+        ),
         (
             "capture", "everyday", "native", "everyday", None, None, false,
         ),

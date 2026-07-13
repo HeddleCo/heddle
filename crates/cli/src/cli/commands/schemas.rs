@@ -72,10 +72,9 @@ schema_registry! {
     (&["init"], InitSchema),
     (&["adopt"], AdoptSchema),
     (&["capture"], CaptureSchema),
+    (&["commit"], CommitSchema),
     (&["undo", "undo --redo"], UndoSchema),
     (&["undo --list"], UndoListSchema),
-    (&["clean"], CleanSchema),
-    (&["switch"], SwitchCheckoutSchema),
     (&["ready"], ReadySchema),
     (&["land"], LandSchema),
     (&["sync"], SyncSchema),
@@ -101,7 +100,6 @@ schema_registry! {
     (&["remote list"], RemoteListSchema),
     (&["remote show"], RemoteInfoSchema),
     (&["remote add", "remote remove", "remote set-default"], RemoteMutationSchema),
-    (&["fetch"], FetchSchema),
     (&["pull"], PullSchema),
     (&["push"], PushSchema),
     (&["expand"], ExpandSchema),
@@ -150,10 +148,6 @@ schema_registry! {
     (&["agent provenance begin", "agent provenance end", "agent provenance show"], AgentProvenanceEnvelopeSchema),
     (&["agent provenance segment"], AgentProvenanceSegmentEnvelopeSchema),
     (&["agent provenance list"], AgentProvenanceListSchema),
-    (&["support grant"], SupportGrantSchema),
-    (&["support list"], SupportAccessListSchema),
-    (&["support revoke"], SupportRevokeSchema),
-    (&["git-overlay"], GitOverlayGuideSchema),
     (&["watch"], WatchLineSchema),
     (&["integration list", "integration doctor"], IntegrationStatusListSchema),
     (&["try"], TrySchema),
@@ -688,50 +682,6 @@ pub struct AuthCreateServiceTokenSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct SupportAccessSchema {
-    pub id: String,
-    pub operator_email: String,
-    pub namespace_path: String,
-    pub repo_path: String,
-    pub role: String,
-    pub granted_by: String,
-    pub granted_at: u64,
-    pub expires_at: u64,
-    pub revoked_at: u64,
-    pub revoked_by: String,
-    pub reason: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SupportGrantSchema {
-    pub output_kind: String,
-    pub id: String,
-    pub operator_email: String,
-    pub namespace_path: String,
-    pub repo_path: String,
-    pub role: String,
-    pub granted_by: String,
-    pub granted_at: u64,
-    pub expires_at: u64,
-    pub revoked_at: u64,
-    pub revoked_by: String,
-    pub reason: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SupportAccessListSchema {
-    pub output_kind: String,
-    pub grants: Vec<SupportAccessSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SupportRevokeSchema {
-    pub output_kind: String,
-    pub id: String,
-    pub revoked: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct IntegrationStatusListSchema(pub Vec<IntegrationStatusSchema>);
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1192,6 +1142,17 @@ pub struct CommitAgentSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+pub struct CommitSchema {
+    pub output_kind: String,
+    pub status: String,
+    pub state_id: String,
+    pub git_commit: String,
+    pub summary: String,
+    pub recommended_action: Option<String>,
+    pub verification: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct OperatorCommandSchema {
     pub output_kind: Option<String>,
     pub status: String,
@@ -1232,31 +1193,6 @@ pub struct UndoSchema {
 pub struct UndoListSchema {
     pub output_kind: Option<String>,
     pub batches: Vec<Value>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CleanSchema {
-    pub output_kind: String,
-    pub removed: Vec<String>,
-    pub dry_run: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SwitchCheckoutSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub action: Option<String>,
-    pub name: Option<String>,
-    pub message: String,
-    pub thread: Option<ThreadSummarySchema>,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
-    pub target: Option<String>,
-    pub intent: Option<String>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1621,19 +1557,45 @@ pub struct ThreadTaskSummarySchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct CloneSchema {
-    pub output_kind: Option<String>,
-    pub action: Option<String>,
-    pub status: Option<String>,
-    pub success: Option<bool>,
-    pub cloned: Option<bool>,
-    pub transport: Option<String>,
-    pub remote: Option<String>,
-    pub local: Option<String>,
-    pub branch: Option<String>,
-    pub repository_capability: Option<String>,
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum CloneSchema {
+    Git(CloneGitSchema),
+    Heddle(CloneHeddleSchema),
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CloneGitSchema {
+    pub output_kind: String,
+    pub action: String,
+    pub status: String,
+    pub success: bool,
+    pub cloned: bool,
+    pub transport: GitTransportSchema,
+    pub remote: String,
+    pub local: String,
+    pub branch: String,
+    pub repository_capability: String,
+    pub commits_imported: usize,
+    pub states_created: usize,
+    pub verification: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CloneHeddleSchema {
+    pub output_kind: String,
+    pub action: String,
+    pub status: String,
+    pub success: bool,
+    pub cloned: bool,
+    pub transport: HeddleTransportSchema,
+    pub remote: String,
+    pub local: String,
+    pub branch: String,
+    pub repository_capability: String,
     pub objects: Option<usize>,
     pub state: Option<String>,
+    pub verification: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1681,6 +1643,7 @@ pub struct RemoteMutationSchema {
     pub url: Option<String>,
     pub default: Option<String>,
     pub message: String,
+    pub verification: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1995,59 +1958,135 @@ pub struct SessionSegmentSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct FetchSchema {
-    pub output_kind: Option<String>,
-    pub remote: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ref_scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tags_included: Option<bool>,
-    pub refs_fetched: usize,
-    pub objects_fetched: usize,
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum PullSchema {
+    Git(PullGitSchema),
+    Heddle(PullHeddleSchema),
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct PullSchema {
-    pub output_kind: Option<String>,
-    pub action: Option<String>,
-    pub status: Option<String>,
-    pub pulled: Option<bool>,
-    pub changed: Option<bool>,
-    pub success: Option<bool>,
-    pub transport: Option<String>,
-    pub remote: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread: Option<String>,
+pub struct PullGitSchema {
+    pub output_kind: String,
+    pub action: String,
+    pub status: String,
+    pub pulled: bool,
+    pub changed: bool,
+    pub success: bool,
+    pub transport: GitTransportSchema,
+    pub remote: String,
+    pub branch: String,
+    pub old_git_head: Option<String>,
+    pub new_git_head: String,
+    pub old_state: Option<String>,
+    pub new_state: String,
+    pub states_created: usize,
+    pub commits_seen: usize,
+    pub commits_seen_scope: String,
+    pub materialized_checkout: bool,
+    pub changed_path_count: usize,
+    pub changed_paths: Vec<String>,
+    pub verification: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PullHeddleSchema {
+    pub output_kind: String,
+    pub action: String,
+    pub status: String,
+    pub pulled: bool,
+    pub changed: bool,
+    pub success: bool,
+    pub transport: HeddleTransportSchema,
+    pub remote: String,
+    pub thread: String,
     pub state: Option<String>,
     pub objects: Option<usize>,
+    pub verification: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct PushSchema {
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum PushSchema {
+    Git(PushGitSchema),
+    Heddle(PushHeddleSchema),
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PushGitSchema {
     pub output_kind: String,
     pub action: String,
     pub status: String,
     pub pushed: bool,
     pub changed: bool,
     pub success: bool,
-    pub transport: String,
-    pub remote: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub push_scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub force: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: GitTransportSchema,
+    pub remote: String,
+    pub push_scope: String,
+    pub ref_scope: String,
+    pub refs_written: Vec<String>,
+    pub git_tracking_remote: Option<String>,
+    pub git_remote_configured: Option<GitRemoteConfiguredSchema>,
+    pub git_upstream_configured: Option<GitUpstreamConfiguredSchema>,
+    pub tags_included: bool,
+    pub force: bool,
+    pub force_discard_warning: Option<String>,
     pub thread: Option<String>,
-    pub state: Option<String>,
-    pub objects: Option<usize>,
-    // Required AND nullable (the `#[schemars(required)]` shorthand strips
-    // the null variant from `Option<T>`, mis-declaring the wire contract —
-    // HeddleCo/heddle#645 conformance): push always emits these fields,
-    // serializing null for the no-action case.
     pub next_action: NullableStringSchema,
     pub next_action_template: NullableActionTemplateSchema,
     pub recommended_action: NullableStringSchema,
     pub recommended_action_template: NullableActionTemplateSchema,
+    pub verification: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PushHeddleSchema {
+    pub output_kind: String,
+    pub action: String,
+    pub status: String,
+    pub pushed: bool,
+    pub changed: bool,
+    pub success: bool,
+    pub transport: HeddleTransportSchema,
+    pub remote: Option<String>,
+    pub push_scope: Option<String>,
+    pub refs_written: Option<Vec<String>>,
+    pub force: Option<bool>,
+    pub thread: Option<String>,
+    pub state: Option<String>,
+    pub objects: Option<usize>,
+    pub next_action: NullableStringSchema,
+    pub next_action_template: NullableActionTemplateSchema,
+    pub recommended_action: NullableStringSchema,
+    pub recommended_action_template: NullableActionTemplateSchema,
+    pub verification: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[allow(dead_code)]
+pub enum GitTransportSchema {
+    Git,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[allow(dead_code)]
+pub enum HeddleTransportSchema {
+    Heddle,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GitRemoteConfiguredSchema {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GitUpstreamConfiguredSchema {
+    pub branch: String,
+    pub remote: String,
 }
 
 /// Operation banner — kept opaque because the underlying
@@ -2706,13 +2745,6 @@ pub struct CommandContractSchemaCoverageSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct GitOverlayGuideSchema {
-    pub topic: String,
-    pub summary: String,
-    pub steps: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct WatchLineSchema {
     pub ts: String,
     pub thread: Option<String>,
@@ -3128,7 +3160,7 @@ mod tests {
     /// discriminator from the catalog after deriving the struct schema,
     /// so `heddle schemas <verb>` already surfaces `output_kind`. That
     /// injection masks the fact that the Rust mirror struct (e.g.
-    /// `CleanSchema`, `DiffSchema`) never declares the field. The mirror
+    /// `DiffSchema`) never declares the field. The mirror
     /// is the source of truth a reader greps; it must be honest about the
     /// discriminator the runtime always emits. This check reads the
     /// *pre-injection* struct schema so a missing field fails CI rather
@@ -3514,45 +3546,87 @@ mod tests {
     #[test]
     fn push_schema_requires_stable_runtime_fields() {
         let schema = schema_for_verb("push").expect("push schema");
-        let required = required_fields(&schema);
-        for stable_field in [
-            "output_kind",
-            "action",
-            "status",
-            "pushed",
-            "changed",
-            "success",
-            "transport",
-            "next_action",
-            "next_action_template",
-            "recommended_action",
-            "recommended_action_template",
+        let variants = schema
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .expect("push schema has transport variants")
+            .iter()
+            .map(|variant| {
+                let reference = variant.get("$ref").and_then(Value::as_str).or_else(|| {
+                    variant
+                        .get("allOf")
+                        .and_then(Value::as_array)
+                        .and_then(|parts| {
+                            parts
+                                .iter()
+                                .find_map(|part| part.get("$ref").and_then(Value::as_str))
+                        })
+                });
+                reference
+                    .map(|reference| resolve_schema_ref(&schema, reference))
+                    .unwrap_or(variant)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(variants.len(), 2, "Git and Heddle push variants");
+
+        for variant in &variants {
+            let required = required_fields(variant);
+            for stable_field in [
+                "output_kind",
+                "action",
+                "status",
+                "pushed",
+                "changed",
+                "success",
+                "transport",
+                "next_action",
+                "next_action_template",
+                "recommended_action",
+                "recommended_action_template",
+                "verification",
+            ] {
+                assert!(
+                    required.contains(&stable_field),
+                    "every push variant must require `{stable_field}`: {variant}"
+                );
+            }
+        }
+
+        let git_required = variants
+            .iter()
+            .map(|variant| required_fields(variant))
+            .find(|required| required.contains(&"ref_scope"))
+            .expect("Git push variant");
+        for git_field in [
+            "remote",
+            "push_scope",
+            "refs_written",
+            "tags_included",
+            "force",
         ] {
             assert!(
-                required.contains(&stable_field),
-                "push schema must require stable emitted field `{stable_field}`: {schema}"
+                git_required.contains(&git_field),
+                "Git push requires `{git_field}`"
             );
         }
 
-        for skipped_when_none in [
+        let heddle_required = variants
+            .iter()
+            .map(|variant| required_fields(variant))
+            .find(|required| !required.contains(&"ref_scope"))
+            .expect("Heddle push variant");
+        for conditional in [
             "remote",
             "push_scope",
-            "ref_scope",
-            "git_notes_ref",
-            "git_notes_visibility_warning",
-            "git_tracking_remote",
-            "git_remote_configured",
-            "git_upstream_configured",
-            "tags_included",
+            "refs_written",
             "force",
-            "force_discard_warning",
             "thread",
             "state",
             "objects",
         ] {
             assert!(
-                !required.contains(&skipped_when_none),
-                "push schema must not require conditionally omitted field `{skipped_when_none}`: {schema}"
+                !heddle_required.contains(&conditional),
+                "Heddle push conditionally omits `{conditional}`"
             );
         }
     }

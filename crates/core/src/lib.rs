@@ -244,10 +244,10 @@ pub use remote::{
     pull_should_materialize, pull_status, pull_tip_changed, pull_will_materialize,
     push_scope_label, push_status, redact_internal_hosted_paths, refuse_named_thread_tip_overwrite,
     remote_advice_kind, remote_missing_blocker, remote_pull_failure, remote_push_failure,
-    remote_urls_match, resolve_default_remote_name, resolved_default_remote_name,
-    show_plain_git_remote, show_remote, summarize_pull_outcome, summarize_push_outcome,
-    transport_error_message, transport_mismatch_blocker, uses_git_overlay_mirror_rpc,
-    uses_local_git_overlay_transport,
+    remote_urls_match, resolve_default_push_remote_name, resolve_default_remote_name,
+    resolved_default_remote_name, show_plain_git_remote, show_remote, summarize_pull_outcome,
+    summarize_push_outcome, transport_error_message, transport_mismatch_blocker,
+    uses_git_overlay_mirror_rpc, uses_local_git_overlay_transport,
 };
 pub use resolve_plan::{
     ResolveSideSelection, contains_line_start_conflict_markers, path_is_active_conflict,

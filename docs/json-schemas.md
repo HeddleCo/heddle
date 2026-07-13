@@ -385,8 +385,9 @@ standard recovery fields plus nested verification proof:
 
 These verbs are the everyday loop agents use after discovery through
 `heddle help --output json`: capture state, undo/redo the last logical
-operation, and ask whether a thread is ready. Git Overlay source commits
-remain direct `git commit` operations.
+operation, and ask whether a thread is ready. In Git Overlay repositories,
+`heddle commit` writes the captured state to the authoritative `.git` store
+through Sley; it does not require a Git executable.
 
 `heddle capture --output json` emits:
 
@@ -395,7 +396,7 @@ remain direct `git commit` operations.
   "output_kind": "capture",
   "status": "captured",
   "action": "capture",
-  "change_id": "hd-capture123",
+  "state_id": "hd-capture123",
   "content_hash": "deadbeef",
   "intent": "tighten parser validation",
   "confidence": 0.86,
@@ -408,6 +409,22 @@ remain direct `git commit` operations.
   "promotion_suggested": false,
   "heavy_impact_paths": [],
   "message": "captured state hd-capture123"
+}
+```
+
+`heddle commit --output json` emits after writing the current captured state
+to Git Overlay source history. `-m/--message` is optional and defaults to the
+capture intent.
+
+```json
+{
+  "output_kind": "commit",
+  "status": "committed",
+  "state_id": "hd-head456",
+  "git_commit": "e97f61a",
+  "summary": "committed",
+  "recommended_action": null,
+  "verification": {"verified":true,"status":"clean","repository_mode":"git-overlay","heddle_initialized":true,"git_branch":"main","heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"clean","mapping_state":"clean","remote_drift":"clean","active_operation":null,"default_remote":"origin","clone_verification":"verified","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Git overlay and Heddle agree","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}
 }
 ```
 
@@ -492,7 +509,7 @@ saves a Heddle state without recommending a Git checkpoint.
     "blockers": []
   },
   "report": {},
-  "verification": {}
+  "verification": {"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":"origin","clone_verification":"verified","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}
 }
 ```
 
@@ -522,6 +539,7 @@ saves a Heddle state without recommending a Git checkpoint.
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
 | `change_id` | string | required when present | Stable Heddle state ID for the captured state. |
+| `state_id`, `git_commit` | string | required for `commit` | Captured Heddle state and the Git commit written to the authoritative `.git` store. |
 | `content_hash` | string | required for `capture` | Short content hash for the captured state. |
 | `intent` | string \| null | required for `capture` | User-provided intent/message, when supplied. |
 | `confidence` | number \| null | required for `capture` | Agent or human confidence score, when supplied. |
@@ -710,8 +728,8 @@ Move captured paths between isolated threads.
   "from_thread": "feature/parser",
   "to_thread": "feature/tests",
   "moved_paths": ["src/parser.rs"],
-  "source_change_id": "hd-src123",
-  "target_change_id": "hd-tgt456",
+  "source_state_id": "hd-src123",
+  "target_state_id": "hd-tgt456",
   "message": "Moved selected paths between threads"
 }
 ```
@@ -986,7 +1004,7 @@ verification.
   "markers": [
     {
       "name": "verified-parser",
-      "change_id": "hd-def456"
+      "state_id": "hd-def456"
     }
   ]
 }
@@ -998,7 +1016,7 @@ verification.
 {
   "output_kind": "thread_marker_create",
   "name": "verified-parser",
-  "change_id": "hd-def456",
+  "state_id": "hd-def456",
   "message": "Created marker 'verified-parser' at hd-def456"
 }
 ```
@@ -1009,7 +1027,7 @@ verification.
 {
   "output_kind": "thread_marker_delete",
   "name": "verified-parser",
-  "change_id": null,
+  "state_id": null,
   "message": "Deleted marker 'verified-parser'"
 }
 ```
@@ -1020,7 +1038,7 @@ verification.
 {
   "output_kind": "thread_marker_show",
   "name": "verified-parser",
-  "change_id": "hd-def456",
+  "state_id": "hd-def456",
   "message": "Marker 'verified-parser' -> hd-def456"
 }
 ```
@@ -1044,7 +1062,8 @@ verification.
   "branch": "main",
   "repository_capability": "native-heddle",
   "objects": 42,
-  "state": "hs-head456"
+  "state": "hs-head456",
+  "verification": {"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":"origin","clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}
 }
 ```
 
@@ -1086,7 +1105,8 @@ verification.
   "name": "origin",
   "url": "heddle://example.com/team/repo",
   "default": null,
-  "message": "Added remote"
+  "message": "Added remote",
+  "verification": {"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":"origin","clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}
 }
 ```
 
@@ -1289,14 +1309,30 @@ and release emit the same reservation shape without `token`:
     "thread": "main",
     "anchor_state": "hd-sqr398dvx9ay",
     "anchor_root": "32fc0aff",
+    "task_assignment_id": null,
     "status": "active",
     "path": null,
     "heartbeat_at": "2026-07-12T23:15:00Z",
     "lease_expires_at": "2026-07-12T23:20:00Z",
     "liveness": "alive"
   },
-  "token": "hwl_secret-token-material"
+  "token": "hwl_secret-token-material",
+  "verification": {"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":"origin","clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}
 }
+```
+
+---
+
+## `heddle agent heartbeat --output json`
+
+```json
+{"reservation":{"lease_id":"lease-kvd9yn2z5kk3ehm0x8be","actor_session_id":"agent-k3f2w58q7f8rmm3qj0v8","thread":"main","anchor_state":"hd-sqr398dvx9ay","anchor_root":"32fc0aff","task_assignment_id":null,"status":"active","path":null,"heartbeat_at":"2026-07-12T23:16:00Z","lease_expires_at":"2026-07-12T23:21:00Z","liveness":"alive"},"token":null,"verification":{"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":null,"clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}}
+```
+
+## `heddle agent release --output json`
+
+```json
+{"reservation":{"lease_id":"lease-kvd9yn2z5kk3ehm0x8be","actor_session_id":"agent-k3f2w58q7f8rmm3qj0v8","thread":"main","anchor_state":"hd-sqr398dvx9ay","anchor_root":"32fc0aff","task_assignment_id":null,"status":"released","path":null,"heartbeat_at":"2026-07-12T23:16:00Z","lease_expires_at":"2026-07-12T23:16:00Z","liveness":"released"},"token":null,"verification":{"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":null,"clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}}
 ```
 
 ---
@@ -1311,7 +1347,7 @@ shape is the same capture envelope.
   "output_kind": "capture",
   "status": "captured",
   "action": "capture",
-  "change_id": "hd-sqr398dvx9ay",
+  "state_id": "hd-sqr398dvx9ay",
   "content_hash": "sha256:...",
   "intent": "agent capture",
   "confidence": 0.8,
@@ -1855,7 +1891,8 @@ the same ready envelope.
   "remote": "origin",
   "thread": "main",
   "state": "hs-head456",
-  "objects": 12
+  "objects": 12,
+  "verification": {"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":"origin","clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}
 }
 ```
 
@@ -1879,7 +1916,8 @@ the same ready envelope.
   "next_action": null,
   "next_action_template": null,
   "recommended_action": null,
-  "recommended_action_template": null
+  "recommended_action_template": null,
+  "verification": {}
 }
 ```
 
@@ -1889,15 +1927,16 @@ the same ready envelope.
 |-------|------|-------------|-----------|
 | `output_kind`, `action`, `status`, `success`, `cloned`, `transport`, `remote`, `local`, `branch`, `repository_capability` | mixed | required for successful `clone` | Stable clone envelope, transport, source, destination, checked-out branch, and initialized repository capability. |
 | `objects`, `state` | int/string \| null | Heddle clone | Transferred object count and resulting Heddle state. |
+| `commits_imported`, `states_created` | int | Git Overlay clone | Git commits streamed through Sley and Heddle states created during overlay initialization. |
 | `remotes` | array<object> | required for `remote list` | Configured remotes. Empty if none. |
 | `name`, `url`, `source`, `is_default` | string/string/string/bool | required for `remote show` and remote entries | Remote identity and default marker. |
 | `pulled`, `pushed`, `success` | bool \| null | required when present | Transport result booleans. Pull reports `pulled`; push reports `pushed`. |
-| `action`, `status`, `transport` | string \| null | required for pull/push | Stable action name, outcome status, and Heddle transport kind. |
+| `action`, `status`, `transport` | string | required for pull/push | Stable action name, outcome status, and authority transport (`git` or `heddle`). |
 | `state`, `objects` | string/int \| null | pull/push | Resulting Heddle state and transferred object count. |
 | `push_scope`, `thread` | string \| null | push | Whether the push published the current thread or all threads, and the named thread when applicable. |
 | `force` | bool \| null | push | Whether Heddle-native ref protection was explicitly overridden. |
 | `next_action`, `recommended_action`, `next_action_template`, `recommended_action_template` | mixed | required for push | Post-push action metadata promoted from verification; all are `null` when the push closes the remote loop. |
-| `verification` | object | required for pull/push | Post-transfer verification proof. |
+| `verification` | object | required for clone, remote mutations, pull, push, and commit | Post-operation repository verification proof. Observe-only `remote list` and `remote show` do not emit this field. |
 
 ---
 
@@ -2241,8 +2280,8 @@ State detail view, pretty-printed.
   "output_kind": "show",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
-  "change_id": "hd-def456",
-  "change_id_full": "hd-def4561234567890abcdef",
+  "state_id": "hd-def456",
+  "state_id_full": "hd-def4561234567890abcdef",
   "content_hash": "deadbeef…",
   "tree": "…",
   "parents": ["hd-abc123"],
@@ -2383,7 +2422,7 @@ set should filter the returned `commands` array by `display`, `tier`,
 | `commands[].display` | string | required | Joined command path. |
 | `commands[].aliases` | array<string> | required | Alternate command spellings advertised by the command contract table. |
 | `commands[].tier` | string | required | Derived discovery tier for broad filtering (`everyday`, `advanced`, or `hidden`). |
-| `commands[].surface` | string | required | Product surface from the command contract table (`native`, `git_projection`, `automation`, `admin`, or `internal`). |
+| `commands[].surface` | string | required | Product surface from the command contract table (`native`, `source_authority`, `git_projection`, `automation`, `admin`, or `internal`). `source_authority` commands dispatch through the repository's Git Overlay or Native Heddle adapter. |
 | `commands[].help_visibility` | string | required | Human discovery placement from the command contract table (`everyday`, `advanced`, `git_projection`, or `hidden`). |
 | `commands[].help_rank` | int | required | Stable ordering key for human command discovery. Lower ranks appear earlier. |
 | `commands[].canonical_command` | string \| null | required | Canonical Heddle command for Git-shaped aliases; `null` for native commands. |
@@ -2531,13 +2570,13 @@ instead of treating it as a global catalog option.
   ],
   "recommended_action_placeholders": [
     "heddle capture -m \"...\"",
-    "heddle capture -m \"...\"",
+    "heddle commit -m \"...\"",
     "heddle ready -m \"...\"",
     "heddle remote add <name> <url>",
     "heddle clone <remote> <path>",
     "heddle clone <remote> <new-path>",
     "heddle clone <remote> <fresh-path>",
-    "git switch <branch>",
+    "heddle thread switch <branch>",
     "heddle ready --thread <thread>",
     "heddle land --thread <thread>"
   ],
@@ -2560,7 +2599,7 @@ Hosted-review payload for a single state.
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
-| `change_id` | string | required | Renamed from `state_id`. |
+| `state_id` | string | required | Physical state identifier. |
 | `headline` | string | required | |
 | `agent_narrative` | string \| null | required | |
 | `files_changed` | int | required | |
@@ -2573,7 +2612,7 @@ Hosted-review payload for a single state.
 ```json
 {
   "output_kind": "review_show",
-  "change_id": "hd-def456",
+  "state_id": "hd-def456",
   "headline": "Tighten parser recovery",
   "agent_narrative": null,
   "files_changed": 3,
@@ -2588,19 +2627,19 @@ Hosted-review payload for a single state.
 `heddle review sign --output json` emits:
 
 ```json
-{"output_kind": "review_sign", "signature_id": "...", "change_id": "..."}
+{"output_kind": "review_sign", "signature_id": "...", "state_id": "..."}
 ```
 
 `heddle review next --output json` emits a stable envelope keyed by
 `output_kind: "review_next"`. When the scan window holds a pending
 review, the pending state's view is flattened alongside `output_kind`
-(`change_id`, `headline`, `existing_signatures`) and the same view is
+(`state_id`, `headline`, `existing_signatures`) and the same view is
 echoed under `next`. When the scan window holds no pending review, the
 payload carries only `output_kind` and `next: null` — never a
 top-level `null`.
 
 ```json
-{"output_kind": "review_next", "change_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": 0, "next": {"change_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": 0}}
+{"output_kind": "review_next", "state_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": 0, "next": {"state_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": 0}}
 ```
 
 `heddle review health --output json` emits:
@@ -2869,37 +2908,43 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact apply",
       "redact list",
       "redact show",
-      "redact trust add"
+      "redact trust add",
+      "redact trust list",
+      "redact trust remove",
+      "redact purge apply"
     ],
-    "accepted_opaque_schema_verbs_total": 43,
+    "accepted_opaque_schema_verbs_total": 39,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
       "redact apply",
       "redact list",
       "redact show",
-      "redact trust add"
+      "redact trust add",
+      "redact trust list",
+      "redact trust remove",
+      "redact purge apply"
     ],
-    "advanced_scope_json_commands_total": 108,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 43,
-    "advanced_scope_mutating_commands_total": 63,
-    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 23,
-    "catalog_commands_total": 185,
-    "catalog_mutating_commands_total": 91,
-    "json_commands_total": 151,
-    "json_commands_with_accepted_opaque_schema": 43,
-    "json_commands_with_schema": 108,
+    "advanced_scope_json_commands_total": 105,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
+    "advanced_scope_mutating_commands_total": 61,
+    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 22,
+    "catalog_commands_total": 183,
+    "catalog_mutating_commands_total": 89,
+    "json_commands_total": 148,
+    "json_commands_with_accepted_opaque_schema": 39,
+    "json_commands_with_schema": 109,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 89,
+    "json_mutating_commands_total": 87,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 89,
-    "mutating_commands_with_accepted_opaque_schema": 23,
+    "mutating_commands_total": 87,
+    "mutating_commands_with_accepted_opaque_schema": 22,
     "mutating_commands_with_schema": 65,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 43,
+    "opaque_schema_verbs_total": 39,
     "status": "available",
-    "summary": "185 command(s), 151 JSON command(s), 91 mutating command(s), 89 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 43 accepted opaque schema(s) outside clean verification",
+    "summary": "183 command(s), 148 JSON command(s), 89 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -2937,7 +2982,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "185 command(s), 151 JSON command(s), 91 mutating command(s), 89 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 43 accepted opaque schema(s) outside clean verification",
+  "summary": "183 command(s), 148 JSON command(s), 89 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -2955,7 +3000,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
   "ts": "2026-05-23T00:00:00Z",
   "thread": "main",
   "kind": "snapshot",
-  "change_id": "hd-sqr398dvx9ay",
+  "state_id": "hd-sqr398dvx9ay",
   "intent": "capture parser fix",
   "confidence": 0.91,
   "actor": {"provider": "openai", "model": "gpt-5"},
@@ -3059,13 +3104,13 @@ named Heddle ref into the retained Git projection. Supplying the opposite
 
 ## `heddle revert --output json`
 
-Apply the inverse of a state. With `--no-commit`, `change_id` is
+Apply the inverse of a state. With `--no-commit`, `state_id` is
 `null`; otherwise it is the new revert state.
 
 ```json
 {
   "output_kind": "revert",
-  "change_id": null,
+  "state_id": null,
   "reverted_state": "hd-sqr398dvx9ay",
   "files_affected": ["M src/parser.rs"],
   "message": "Changes applied to worktree (not committed)"
@@ -3144,9 +3189,18 @@ durable collaboration-log address; `disposition` is `created`,
 {"output_kind":"discuss_open","operation_id":"co-01abc","disposition":"created","discussion":{"id":"disc-018f47ea-4a54-7c89-b012-3456789abcde","title":"Please check this edge case.","anchor":{"kind":"symbol","state_id":"hs-01abc","path":"src/lib.rs","symbol":"verify"},"visibility":"team:platform","status":"open","resolution":null,"conflict_operation_ids":[],"head_operation_ids":["co-01abc"],"display_head_operation_id":"co-01abc","turns":[{"operation_id":"co-01abc","author_name":"A. Engineer","author_email":"a@example.com","agent":null,"occurred_at_ms":1767225600000,"body":"Please check this edge case.","content_hash":"0123456789abcdef"}]}}
 ```
 
+## `heddle discuss show --output json`
+
 `heddle discuss show --output json` uses the same discussion object beneath
-`{"output_kind":"discuss_show","discussion":...}`. `heddle discuss list
---output json` emits:
+the `discuss_show` discriminator:
+
+```json
+{"output_kind":"discuss_show","discussion":{"id":"disc-018f47ea-4a54-7c89-b012-3456789abcde","title":"Please check this edge case.","anchor":{"kind":"symbol","state_id":"hs-01abc","change_id":null,"path":"src/lib.rs","symbol":"verify"},"visibility":"team:platform","status":"open","resolution":null,"conflict_operation_ids":[],"head_operation_ids":["co-01abc"],"display_head_operation_id":"co-01abc","turns":[]}}
+```
+
+## `heddle discuss list --output json`
+
+`heddle discuss list --output json` emits:
 
 ```json
 {"output_kind":"discuss_list","discussions":[]}

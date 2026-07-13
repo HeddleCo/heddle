@@ -32,8 +32,7 @@ use repo::{
 use super::{
     advice::RecoveryAdvice,
     command_catalog::{
-        ActionFields, build_command_catalog, checked_action_from_argv, heddle_action,
-        recommended_action_template,
+        ActionFields, build_command_catalog, heddle_action, recommended_action_template,
     },
     schemas::opaque_schema_verbs,
 };
@@ -695,29 +694,48 @@ pub(crate) fn plain_git_mutation_advice(
 }
 pub(crate) fn detached_git_head_mutation_advice(repo: &Repository, action: &str) -> RecoveryAdvice {
     let primary_command = detached_head_primary_recovery(repo);
+    let needs_selection = primary_command == "heddle thread list";
+    let hint = if needs_selection {
+        format!(
+            "Inspect managed threads with `{primary_command}`, then attach this checkout with `heddle thread switch <thread>` before retrying `heddle {action}`. Heddle could not safely infer which thread owns the detached commit."
+        )
+    } else {
+        format!("Run `{primary_command}` before retrying `heddle {action}`.")
+    };
+    let recovery_commands = if needs_selection {
+        vec![
+            primary_command.clone(),
+            "heddle thread switch <thread>".to_string(),
+        ]
+    } else {
+        vec![primary_command.clone()]
+    };
     RecoveryAdvice::safety_refusal(
         "git_head_detached",
         format!("Refusing to {action}: Git HEAD is detached"),
-        format!("Run `{primary_command}` before retrying `heddle {action}`."),
+        hint,
         "Git HEAD points directly to a commit instead of an attached branch",
         format!(
             "{action} would need to write a Git checkpoint through a branch and could reattach or advance the wrong ref"
         ),
         "Git refs, Heddle refs, Git checkpoints, and worktree files were left unchanged",
-        primary_command.clone(),
-        vec![primary_command],
+        primary_command,
+        recovery_commands,
     )
 }
 fn detached_head_primary_recovery(repo: &Repository) -> String {
     match repo.refs().read_head() {
-        Ok(Head::Attached { thread }) if !thread.trim().is_empty() => {
+        Ok(Head::Attached { thread })
+            if !thread.trim().is_empty()
+                && repo.refs().get_thread(&thread).ok().flatten().is_some() =>
+        {
             // `switch` takes the thread as a positional; a leading-dash id needs
             // the `--` separator so clap binds it as a value, not a flag.
             // (heddle#464 close-the-class.)
             return if thread.starts_with('-') {
-                heddle_action(["switch", "--", thread.as_str()])
+                heddle_action(["thread", "switch", "--", thread.as_str()])
             } else {
-                heddle_action(["switch", thread.as_str()])
+                heddle_action(["thread", "switch", thread.as_str()])
             };
         }
         _ => {}
@@ -727,11 +745,19 @@ fn detached_head_primary_recovery(repo: &Repository) -> String {
         && let Some(tip) = branch_tips
             .iter()
             .filter(|tip| tip.history_imported)
-            .find(|tip| tip.git_commit == detached_commit)
+            .find(|tip| {
+                tip.git_commit == detached_commit
+                    && repo
+                        .refs()
+                        .get_thread(&ThreadName::new(&tip.branch))
+                        .ok()
+                        .flatten()
+                        .is_some()
+            })
     {
-        return checked_action_from_argv(["git", "switch", tip.branch.as_str()]);
+        return heddle_action(["thread", "switch", tip.branch.as_str()]);
     }
-    "git switch <branch>".to_string()
+    "heddle thread list".to_string()
 }
 pub(crate) fn build_plain_git_verification_probe(
     start: &Path,
@@ -1083,8 +1109,11 @@ pub(crate) fn remote_drift_decision(
                 return RemoteDriftDecision {
                     status,
                     verified_as_clean: false,
-                    primary_action: Some("git fetch".to_string()),
-                    recovery_commands: vec!["git fetch".to_string()],
+                    primary_action: Some("heddle remote list".to_string()),
+                    recovery_commands: vec![
+                        "heddle remote list".to_string(),
+                        "heddle pull <remote> --thread <thread>".to_string(),
+                    ],
                     requires_clean_worktree: false,
                 };
             }

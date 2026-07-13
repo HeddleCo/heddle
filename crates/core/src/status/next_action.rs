@@ -176,7 +176,7 @@ pub fn remote_tracking_next_action_for(
         "remote_untracked" => Some(remote_untracked_action_for(remote, authority)),
         "remote_contains_undone_checkpoint" => Some(match authority {
             RepositorySourceAuthority::Native => heddle_action(["push", "--force"]),
-            RepositorySourceAuthority::GitOverlay => "git push --force-with-lease".to_string(),
+            RepositorySourceAuthority::GitOverlay => "heddle push --force-with-lease".to_string(),
         }),
         "remote_behind" => Some(actions.display(SourceAction::Pull)),
         "remote_ahead" => Some(actions.display(SourceAction::Push)),

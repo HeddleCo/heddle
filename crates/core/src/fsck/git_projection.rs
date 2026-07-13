@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Fork note: this module mirrors the Git projection note/mapping logic from
-//! `crates/cli/src/git_projection_engine/git_notes.rs` and
-//! `crates/cli/src/git_projection_engine/git_mapping.rs`. Until Git projection support is fully extracted
+//! `crates/git-projection/src/git_notes.rs` and
+//! `crates/git-projection/src/git_mapping.rs`. Until Git projection support is fully extracted
 //! into `heddle-core`, we keep the behavior aligned (notably required note
 //! fields and skip-on-deserialization-failure semantics).
 use std::{

@@ -24,16 +24,17 @@ use cli::{
         commands::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
             cmd_abort, cmd_adopt, cmd_agent, cmd_capture_split, cmd_clone, cmd_collapse,
-            cmd_complete, cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
-            cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
-            cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
-            cmd_daemon_status, cmd_daemon_stop, cmd_diff, cmd_discuss, cmd_doctor, cmd_doctor_docs,
-            cmd_doctor_schemas, cmd_expand, cmd_fsck, cmd_fsck_repair_git, cmd_hook, cmd_init,
-            cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_oplog, cmd_pull, cmd_push,
-            cmd_query, cmd_ready, cmd_redo, cmd_remote, cmd_resolve, cmd_retro, cmd_revert,
-            cmd_review, cmd_run, cmd_schemas, cmd_shell, cmd_show, cmd_snapshot, cmd_start,
-            cmd_status, cmd_sync_smart, cmd_thread, cmd_timeline, cmd_try, cmd_undo, cmd_verify,
-            cmd_watch, command_runtime_contract_for_command, print_error_with_hint,
+            cmd_commit, cmd_complete, cmd_context_audit, cmd_context_check, cmd_context_edit,
+            cmd_context_get, cmd_context_history, cmd_context_list, cmd_context_rm,
+            cmd_context_set, cmd_context_suggest, cmd_context_supersede, cmd_continue,
+            cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop, cmd_diff, cmd_discuss,
+            cmd_doctor, cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fsck,
+            cmd_fsck_repair_git, cmd_hook, cmd_init, cmd_integration, cmd_land, cmd_log,
+            cmd_maintenance, cmd_oplog, cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_redo,
+            cmd_remote, cmd_resolve, cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas,
+            cmd_shell, cmd_show, cmd_snapshot, cmd_start, cmd_status, cmd_sync_smart, cmd_thread,
+            cmd_timeline, cmd_try, cmd_undo, cmd_verify, cmd_watch,
+            command_runtime_contract_for_command, print_error_with_hint,
             print_parse_error_json_envelope,
         },
         render::write_json_stdout,
@@ -400,6 +401,8 @@ async fn async_main() -> Result<()> {
                 .await
             }
         }
+
+        Commands::Commit(args) => cmd_commit(&cli, args.clone()),
 
         Commands::Log(LogArgs {
             state,

@@ -621,10 +621,8 @@ fn render_short_status(output: &StatusOutput) {
 }
 
 fn short_status_health(output: &StatusOutput) -> String {
-    if matches!(
-        output.recommended_action.as_str(),
-        "heddle push" | "git push"
-    ) && output.thread_health == "clean"
+    if matches!(output.recommended_action.as_str(), "heddle push")
+        && output.thread_health == "clean"
     {
         "ready to push".to_string()
     } else {
@@ -1246,7 +1244,7 @@ fn status_next_reason(output: &StatusOutput) -> &'static str {
 fn status_next_follow_up(output: &StatusOutput) -> Option<&'static str> {
     let action = output.recommended_action.as_str();
     if action.contains("commit") && status_has_publish_target(output) {
-        Some("run `git push` when the Git commit is ready to publish")
+        Some("run `heddle push` when the Git commit is ready to publish")
     } else if action.contains("ready") {
         Some("run `heddle land --thread <thread>` after readiness passes")
     } else if action.contains("land") {
@@ -1382,7 +1380,7 @@ fn render_git_index_status(index: &CoreGitIndexPlan) {
     if index.commit_mode == "staged_index" && !index.preserved_after_commit.is_empty() {
         println!(
             "  include the rest with: {}",
-            style::bold("heddle capture -m \"...\" && git commit -am \"...\"")
+            style::bold("heddle capture -m \"...\" && heddle commit -m \"...\"")
         );
     }
 }
@@ -1397,8 +1395,10 @@ fn git_index_extra_path_label(index: &CoreGitIndexPlan, kind: &'static str) -> S
 
 fn git_index_commit_scope_text(index: &CoreGitIndexPlan) -> &'static str {
     match index.commit_mode {
-        "staged_index" => "`git commit` records staged paths",
-        "worktree_all" => "capture records Heddle provenance; `git commit` records source history",
+        "staged_index" => "`heddle commit` records the captured Git state",
+        "worktree_all" => {
+            "capture records Heddle provenance; `heddle commit` records source history"
+        }
         "worktree_all_explicit" => "capture first, then stage and commit the intended Git paths",
         "none" => "no Git paths are ready to commit",
         _ => "capture Heddle provenance, then commit source history with Git",
@@ -1646,8 +1646,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn status_serializes_agent_context_fields_when_set() {
+    #[test]
+    fn status_serializes_agent_context_fields_when_set() {
         let repo_dir = TempDir::new().unwrap();
         let repo = Repository::init_default(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
@@ -1657,6 +1657,7 @@ mod tests {
         let mut output = build_status_output(&cli, false).expect("build status output");
         output.path = Some(repo_dir.path().display().to_string());
         output.execution_path = Some(repo_dir.path().display().to_string());
+        output.session_id = Some("agent-session-1".to_string());
         output.heddle_session_id = Some("heddle-session-1".to_string());
         output.actor = Some(ActorInfo {
             provider: Some("codex".to_string()),
@@ -1667,6 +1668,7 @@ mod tests {
         output.usage_summary = Some(AgentUsageSummary::default());
         output.last_progress_at = Some("2026-06-12T00:00:00Z".to_string());
         output.report_flush_state = Some("flushed".to_string());
+        output.attach_reason = Some("matched native actor identity".to_string());
         output.target_thread = Some("main".to_string());
         output.parent_thread = Some("main".to_string());
         output.task = Some("status surface".to_string());
@@ -1678,6 +1680,8 @@ mod tests {
                 "status must serialize set agent-context key `{key}`: {json}"
             );
         }
+        assert_eq!(json["session_id"], "agent-session-1");
+        assert_eq!(json["heddle_session_id"], "heddle-session-1");
         assert_eq!(json["actor"]["provider"], "codex");
         assert_eq!(json["actor"]["model"], "gpt-5");
     }

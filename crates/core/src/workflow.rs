@@ -428,7 +428,7 @@ pub fn integrated_land_next_action(
     if !integrated {
         return None;
     }
-    if matches!(trust_recommended_action, "heddle push" | "git push") {
+    if trust_recommended_action == "heddle push" {
         Some(trust_recommended_action.to_string())
     } else {
         Some("heddle thread cleanup --merged --dry-run".to_string())
@@ -708,7 +708,7 @@ mod tests {
         .expect("confidence blocker must yield recovery");
         assert_eq!(
             action,
-            "heddle --repo /work/threads/agent-thread commit -m \"...\" --confidence <confidence>"
+            "heddle --repo /work/threads/agent-thread capture -m \"...\" --confidence <confidence>"
         );
 
         let unscoped =
@@ -767,8 +767,8 @@ mod tests {
             Some("heddle push".to_string())
         );
         assert_eq!(
-            integrated_land_next_action(true, "git push"),
-            Some("git push".to_string())
+            integrated_land_next_action(true, "heddle push"),
+            Some("heddle push".to_string())
         );
         assert_eq!(integrated_land_next_action(false, "heddle push"), None);
     }

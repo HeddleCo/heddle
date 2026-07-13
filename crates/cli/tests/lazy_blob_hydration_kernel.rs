@@ -310,7 +310,8 @@ fn hydration_fires_against_torvalds_linux() {
 
     eprintln!("cloning torvalds/linux.git at depth=1 + filter=blob:none ...");
     let started = Instant::now();
-    if let Err(err) = clone_url_to_bare(url, &bare, Some(1), Some("blob:none")) {
+    let mut progress = sley::remote::SilentProgress;
+    if let Err(err) = clone_url_to_bare(url, &bare, Some(1), Some("blob:none"), &mut progress) {
         eprintln!("SKIP: kernel clone failed (network?): {err}");
         return;
     }

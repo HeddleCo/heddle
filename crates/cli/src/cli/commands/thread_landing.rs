@@ -10,7 +10,12 @@ pub(crate) fn merge_preview_command(thread_id: &str) -> String {
 }
 
 pub(crate) fn switch_thread_command(thread_id: &str) -> String {
-    heddle_action(["thread", "switch", thread_id])
+    let mut argv = vec!["thread".to_string(), "switch".to_string()];
+    if thread_id.starts_with('-') {
+        argv.push("--".to_string());
+    }
+    argv.push(thread_id.to_string());
+    heddle_action(argv)
 }
 
 pub(crate) fn land_command_for_thread(_repo: &repo::Repository, thread_id: &str) -> String {
@@ -43,12 +48,6 @@ mod tests {
         );
     }
 
-    // heddle#464 close-the-class (r9): a historical `-foo` thread id (un-creatable
-    // now, but reachable via `new_unchecked` deserialization) must yield a
-    // clap-valid command from EVERY land/merge breadcrumb builder. `heddle_action`
-    // validates through clap and panics on an invalid action, so a builder still
-    // emitting the bare `--thread -foo` (or positional `-foo`) form would panic
-    // here — this test is the conformance gate against the next sibling.
     #[test]
     fn land_breadcrumbs_handle_leading_dash_thread_ids() {
         use super::super::command_catalog::validate_recommended_action;
@@ -63,13 +62,9 @@ mod tests {
                 panic!("breadcrumb `{cmd}` must validate for a leading-dash id: {e}")
             });
         }
-        // `cli::render::shell_quote` (used by checked_action_from_argv) treats
-        // `=` as unsafe, so `--thread=-foo` renders single-quoted — still
-        // runnable (the shell strips the quotes, clap binds the value) and, as
-        // the loop above asserts, accepted by the validator.
         assert_eq!(land_local_command(id), "heddle land '--thread=-foo'");
         assert_eq!(merge_preview_command(id), "heddle ready '--thread=-foo'");
-        assert_eq!(switch_thread_command(id), "heddle thread switch -foo");
+        assert_eq!(switch_thread_command(id), "heddle thread switch -- -foo");
     }
 
     #[test]

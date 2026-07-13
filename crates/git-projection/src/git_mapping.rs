@@ -193,7 +193,7 @@ impl<'a> GitProjection<'a> {
         Ok(())
     }
 
-    pub fn seed_ingest_identity_mappings_from_mirror(
+    pub fn seed_ingest_identity_mappings_from_repo(
         &mut self,
         repo: &SleyRepository,
     ) -> GitProjectionResult<()> {

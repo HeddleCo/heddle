@@ -2,7 +2,7 @@
 //! Progressive-disclosure help: curated default, advanced surface,
 //! topic-scoped help.
 //!
-//! The Heddle CLI's default `heddle help` lists only the native loop
+//! The Heddle CLI's default `heddle help` lists only the authority-aware loop
 //! from the command contract table. Advanced affordances, automation,
 //! admin commands, and Git projection commands are reachable
 //! via `heddle help advanced` or `heddle help <topic>`. Per-verb help
@@ -62,7 +62,7 @@ fn primary_loop_verbs(catalog: &crate::cli::commands::CommandCatalogOutput) -> V
 
 /// Verbs surfaced by `heddle help advanced`, in command-contract order.
 /// This includes power surfaces, automation/admin commands, and
-/// Git-shaped aliases, each labeled by the contract table.
+/// Git interop surfaces, each labeled by the contract table.
 pub fn advanced_verbs() -> Vec<&'static str> {
     crate::cli::commands::root_commands_for_advanced_help()
 }
@@ -113,7 +113,7 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
             let _ = writeln!(out);
             let _ = writeln!(
                 out,
-                "Existing Git: heddle status -> heddle init -> heddle capture -m \"...\" -> git commit -> git push"
+                "Existing Git: heddle status -> heddle init -> heddle capture -m \"...\" -> heddle commit -> heddle push"
             );
             let _ = writeln!(
                 out,
@@ -122,15 +122,15 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
             let _ = writeln!(out);
             let _ = writeln!(
                 out,
-                "Nearby: `heddle undo` and `heddle verify`. Native Heddle repositories also use `heddle push` and `heddle pull`."
+                "Nearby: `heddle pull`, `heddle undo`, and `heddle verify`."
             );
             let _ = writeln!(
                 out,
-                "Start here: `heddle init` or `heddle capture`; use `heddle clone` only for a native Heddle remote."
+                "Start here: `heddle init`, `heddle clone`, or `heddle capture`."
             );
             let _ = writeln!(
                 out,
-                "Git Overlay source transport stays in Git: `git clone`, `git pull`, and `git push`."
+                "In Git Overlay, Heddle uses its embedded Sley engine to operate directly on the checkout's `.git`."
             );
             let _ = writeln!(
                 out,
@@ -167,8 +167,7 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
             // group is registration data (`help_category` / surface),
             // not a hand-maintained help string (heddle#652). The group
             // header replaces the old per-line `[advanced]`-style
-            // surface label; only the `use <canonical>` redirect for
-            // Git-shaped aliases stays on the line.
+            // surface label; only canonical redirects stay on the line.
             for (title, verbs) in crate::cli::commands::advanced_help_groups() {
                 let mut lines = Vec::new();
                 for name in verbs {
@@ -512,9 +511,9 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
 
 const ADVANCED_HELP: &str = "Advanced commands for power users, agents, automation, Git interop, and recovery.\n\
 \n\
-The default `heddle help` curates the native loop: init/adopt/clone,\n\
+The default `heddle help` curates the authority-aware loop: init/adopt/clone,\n\
 status/diff/commit/start, ready/land/push/pull, resolve/continue/abort,\n\
-doctor/verify. Power nouns such as thread/workspace/remote/Git projection/agent and\n\
+doctor/verify. Power nouns such as thread/remote/Git projection/agent and\n\
 Git projection commands live behind this topic. Use `heddle help\n\
 <verb>` for curated topics or `heddle <verb> --help` for the full clap-derived\n\
 docs.\n\
@@ -551,7 +550,7 @@ agent-flags` for capture attribution overrides.
 // `heddle clone --help` keeps the signature + flags + a one-screen
 // summary; this topic carries the full default-thread fallback chain and
 // --depth exposition that used to bloat the after-help (heddle#652).
-const CLONE_TOPIC: &str = r#"Cloning — Heddle repositories.
+const CLONE_TOPIC: &str = r#"Cloning — Git Overlay and native Heddle repositories.
 
     heddle clone <remote> <dir> [--thread <name>] [--depth <n>]
 
@@ -559,11 +558,10 @@ Run `heddle clone --help` for the flag list.
 
 # Repository authority
 
-- `heddle clone` accepts native local repositories and hosted Heddle remotes.
-- Git sources return a typed refusal with exact `git clone` argv. Run Git
-  directly, then use `heddle init` for Git Overlay or `heddle adopt` to move
-  source authority to Heddle.
-- Heddle clones target `main` directly; if the remote has no `main` thread,
+- A Git source is streamed by Sley directly into the destination `.git`, then
+  initialized as Git Overlay. No Git executable or `.heddle/git` mirror is used.
+- A native source is cloned into Heddle-owned storage.
+- Native clones target `main` directly; if the remote has no `main` thread,
   pass `--thread <name>` to select one.
 - Clone never prompts.
 
@@ -575,10 +573,11 @@ so `heddle log` stops at the depth boundary; history older than that is
 not present locally — re-clone at a greater --depth (or --depth 0) to
 obtain it.
 
-Depth controls history extent only — how many states the clone fetches —
+Depth controls native Heddle history extent only — how many states the clone fetches —
 and says nothing about object contents. Whether a state's blobs are
 present locally or fetched lazily is a separate concern that `--depth`
-never governs. Advanced/planned flags `--lazy` and `--filter blob:none`
+never governs. Git Overlay clones ingest full history and reject partial-history
+options. Advanced/planned flags `--lazy` and `--filter blob:none`
 skip blob content and hydrate it on demand for hosted/network Heddle
 remotes; local clone paths reject them today.
 
@@ -641,10 +640,10 @@ Core nouns:
   provenance. States are what `log`, `show`, `diff`, `undo`, and agents can
   reason about.
 - Thread: a named line of work with its own checkout and captured history.
-  Use it for risky edits, agent work, or parallel experiments without stash
-  juggling.
-- Capture: a cheap recoverable save point on the current thread.
+  Use it for risky edits, agent work, or parallel experiments without
+  serializing everything through one checkout.
 - Capture: the Heddle save boundary for provenance, undo, and review.
+- Commit: publish captured source history to `.git` in Git Overlay.
 - Verify: the proof surface. It says whether Heddle, Git mapping, worktree,
   remotes, active operations, clone state, and machine contracts agree.
 
@@ -653,6 +652,7 @@ Everyday loop:
     heddle status
     heddle diff
     heddle capture -m "..."
+    heddle commit
     heddle start <name> --path ../<name>
     heddle ready
     heddle land --thread <name>
@@ -663,6 +663,8 @@ Existing Git checkout:
 
     heddle status
     heddle init                  # initialize Heddle metadata; Git commits stay in .git
+    heddle capture -m "..."
+    heddle commit                # Sley writes directly to .git
     heddle verify
 
 If a command refuses, read the first `Next:` line. Heddle fails closed when it
@@ -671,32 +673,36 @@ cannot prove the move is safe.
 
 const GIT_CONCEPTS_TOPIC: &str = r#"Git and Heddle own different layers.
 
-In a Git Overlay repository, Git owns commits, refs, the index, and ordinary
-worktree operations. Run `git switch`, `git stash`, `git clean`, `git fetch`,
-`git merge`, and `git rebase` directly. Heddle owns coordination and durable
-sidecar data in `.heddle`: captures, provenance, threads, readiness, review,
-and safe landing.
+In a Git Overlay repository, the checkout's real `.git` owns commits, refs,
+packs, the index, and worktree state. Heddle's thin Git surface — `clone`,
+`commit`, `pull`, `push`, and `remote` — uses the embedded Sley engine directly
+against that store. Heddle owns coordination and durable metadata in `.heddle`:
+captures, provenance, threads, readiness, review, and safe landing. Normal
+overlay operation never creates a `.heddle/git` mirror.
 
 Use `heddle init` to add that sidecar to an existing Git checkout. Use
-`heddle adopt` only when you want to import source history and make Heddle the
-repository authority. In a native repository, use `heddle sync`, `ready`,
-`land`, `push`, and `pull` for the managed workflow.
+`heddle adopt` when you want one atomic transition that imports source history,
+makes Heddle the repository authority, and enables the full native feature set.
 
 Common mappings:
 
 | Intent | Git Overlay | Native Heddle |
 |--------|-------------|---------------|
-| Save source history | `git commit` | `heddle capture` |
+| Save source history | `heddle capture`, then `heddle commit` | `heddle capture` |
 | Isolate coordinated work | `heddle start` | `heddle start` |
 | Record a granular Heddle savepoint | `heddle capture` | `heddle capture` |
 | Check integration readiness | `heddle ready` | `heddle ready` |
 | Integrate a managed thread | `heddle land` | `heddle land` |
-| Inspect source history | `git log` | `heddle log` |
+| Synchronize source | `heddle pull` / `heddle push` | `heddle pull` / `heddle push` |
+| Configure remotes | `heddle remote` | `heddle remote` |
+| Inspect source history | another Git-compatible client or `heddle log --reflog` | `heddle log` |
 
-Heddle does not shadow Git commands. Explicit `import git`, `export git`, and
-`sync git` exist because they translate data between the two authorities.
-After `heddle adopt`, the retained `.git` is an explicit Git Projection adapter;
-it no longer selects repository source authority.
+Heddle intentionally does not reproduce the full Git command surface. An
+optional Git-compatible client can perform unsupported Git operations against
+the same `.git`; it is not a Heddle dependency. Explicit `import git`, `export
+git`, and `sync git` translate data between authorities. After `heddle adopt`,
+the retained `.git` is an explicit Git Projection adapter; it no longer selects
+repository source authority.
 "#;
 
 const THREADS_TOPIC: &str = "Threads — Heddle's unit of in-progress work.\n\
@@ -714,10 +720,10 @@ between threads with `heddle thread switch <name>`, and integrate with\n\
   state history, agent/task metadata, a freshness verdict against its\n\
   target, and a workflow state (Ready/Blocked/Merged/...). A git branch\n\
   is just a ref.\n\
-- Multiple threads coexist on disk simultaneously without `git stash` /\n\
-  `git worktree` gymnastics. Each thread's working tree is its own.\n\
-- `heddle capture` records Heddle-native work; `git commit` writes Git\n\
-  history directly in Git Overlay.\n\
+- Multiple threads coexist on disk simultaneously. Each thread's working\n\
+  tree is its own.\n\
+- `heddle capture` records Heddle metadata; `heddle commit` asks Sley to\n\
+  write source history directly to `.git` in Git Overlay.\n\
 \n\
 # Workspace modes (`--workspace`)\n\
 \n\
@@ -777,15 +783,16 @@ Resolution paths:\n\
   outstanding work on the thread you're leaving. Pair with the shell\n\
   hook (`heddle shell init`) to auto-cd into the target thread's\n\
   directory.\n\
-- In Git Overlay, `git switch` and `git checkout` remain Git operations.\n\
-  They do not change Heddle's active thread or coordination metadata.\n\
+- In Git Overlay, branch switching remains outside Heddle's deliberately\n\
+  narrow Git surface. An optional Git-compatible client can update `.git`\n\
+  without changing Heddle's active thread or coordination metadata.\n\
 \n\
 # Capture and Git commits\n\
 \n\
 - `heddle capture` records a recoverable Heddle step on the current\n\
   thread — for undo, provenance, and review. Captures are\n\
   fine-grained and accumulate freely as work progresses.\n\
-- In Git Overlay, run `git commit` directly when source history is ready.\n\
+- In Git Overlay, run `heddle commit` when captured source history is ready.\n\
 - Agents and tools can take many small captures without producing noisy Git history.\n\
 \n\
 See also: `heddle help advanced` for the full operational surface,\n\
@@ -809,46 +816,47 @@ rmp-serde, 7-day default retention) and Postgres-backed in hosted deployments.\n
 Without an id, dedup is bypassed and the call executes normally. For the\n\
 authoritative per-command contract, use `heddle help --output json`.\n";
 
-const REMOTES_TOPIC: &str = "Remotes — native local and hosted Heddle destinations.\n\
-\n\
-Native Heddle loop:\n\
-\n\
-    heddle remote add origin <url-or-path>\n\
-    heddle remote set-default origin\n\
-    heddle push\n\
-    heddle pull\n\
-    heddle verify\n\
-\n\
-Remote values may be hosted endpoints or native Heddle paths. `push` and `pull`\n\
-use the default remote unless a positional remote is supplied. These commands\n\
-are native-only: in Git Overlay, use `git remote`, `git fetch`, `git pull`, and\n\
-`git push` directly. Heddle returns typed recovery with exact direct-Git argv.\n\
-Setting a Git default requires both `git config remote.pushDefault <name>` and\n\
-`git config branch.<branch>.remote <name>`; Heddle does not hide that split.\n\
-`heddle verify` reports repository verification state before and after native\n\
-Heddle remote operations.\n\
-\n\
-When a remote action is unsafe, Heddle reports the blocker and one primary\n\
-next command, including exact direct-Git argv when Git owns source history.\n";
+const REMOTES_TOPIC: &str = r#"Remotes — dispatched by repository source authority.
 
-const GIT_DEPENDENCIES_TOPIC: &str = "Git executable dependencies — what works without `git` on PATH.\n\
-\n\
-Heddle's own commands use native/library paths for Git-format projection and\n\
-do not shell out implicitly. In Git Overlay, ordinary Git operations belong to\n\
-Git itself, so `git switch`, `git stash`, `git clean`, `git fetch`, `git merge`,\n\
-and `git rebase` naturally require the Git executable.\n\
-\n\
-If Heddle detects an externally-started raw Git sequencer operation, it leaves\n\
-Git metadata, refs, index, and worktree files unchanged and reports a Heddle\n\
-preservation command. Finish or abort that operation with the Git-compatible\n\
-tool that started it, then run `heddle verify`.\n\
-\n\
-Unsupported projection capabilities fail closed instead of silently invoking\n\
-Git. Heddle never pretends a Git operation was a native Heddle operation.\n\
-\n\
-Run `heddle help --output json` to inspect the public command surface, and\n\
-`heddle doctor` / `heddle fsck --full` when a repository reports integrity or\n\
-Git Projection state problems.\n";
+Common loop:
+
+    heddle remote add origin <url-or-path>
+    heddle remote set-default origin
+    heddle pull
+    heddle push
+    heddle verify
+
+Remote values may be Git URLs, hosted endpoints, or local paths. `push` and
+`pull` use the default remote unless a positional remote is supplied. In Git
+Overlay, Sley reads and edits the repository's Git configuration and streams
+objects directly between the remote and `.git`. In Native Heddle, the same
+verbs use Heddle transport and storage. The Git executable is not involved.
+
+When a remote action is unsafe, Heddle reports the blocker and one primary next
+command for the active source authority. `heddle verify` reports repository
+verification state before and after remote operations.
+"#;
+
+const GIT_DEPENDENCIES_TOPIC: &str = r#"Git executable dependencies — Heddle does not have one.
+
+Heddle never requires the `git` executable. Sley is its embedded Git engine. In
+Git Overlay, `heddle clone`, `commit`, `pull`, `push`, and `remote`
+operate on the checkout's real `.git` directly; `.heddle` contains Heddle
+metadata, not a second Git object store.
+
+If Heddle detects an externally-started Git sequencer operation, it leaves Git
+metadata, refs, index, and worktree files unchanged and reports a Heddle
+preservation command. Finish or abort that operation with the optional
+Git-compatible client that started it, then run `heddle verify`.
+
+Operations outside Heddle's narrow Git surface can be performed by another
+Git-compatible client, but that client is optional and is never invoked by
+Heddle. Unsupported capabilities fail closed.
+
+Run `heddle help --output json` to inspect the public command surface, and
+`heddle doctor` / `heddle fsck --full` when a repository reports integrity
+or Git Projection state problems.
+"#;
 
 const REVIEW_TOPIC: &str = "Review surface — `heddle review show | sign | next | health`.\n\
 \n\
@@ -882,50 +890,55 @@ file, and symbol where the discussion began:\n\
 Visibility: `--visibility public|internal|team:NAME|restricted:LABEL|private:LABEL`.\n\
 Empty visibility uses the configured discussion visibility policy.\n";
 
-const GIT_OVERLAY_TOPIC: &str = "Git-overlay workflow\n\
-\n\
-Use this when you want Heddle's captured states, isolated threads, merge\n\
-previews, undo, provenance, and machine-safe JSON with Git compatibility kept\n\
-as a projection surface.\n\
-\n\
-Start in an existing Git checkout:\n\
-\n\
-    heddle status\n\
-    heddle init                               # initialize Heddle metadata; Git commits stay in .git\n\
-    heddle verify\n\
-\n\
-Save and sync ordinary work:\n\
-\n\
-    heddle diff\n\
-    heddle capture -m \"...\"                   # save Heddle provenance\n\
-    git commit -am \"...\"                       # Git owns source history\n\
-    git push\n\
-\n\
-Isolate risky work:\n\
-\n\
-    heddle start <name> --path ../<name>\n\
-    cd ../<name>\n\
-    heddle capture -m \"...\"\n\
-    heddle ready\n\
-    cd -\n\
-    heddle land --thread <name>\n\
-    git push\n\
-\n\
-Recover or prove state:\n\
-\n\
-    heddle undo\n\
-    heddle verify\n\
-\n\
-State-specific recovery:\n\
-\n\
-    Worktree has unsaved edits: heddle capture -m \"...\", then git commit\n\
-    Adopt Git refs into Heddle-native source storage: heddle adopt --ref <branch>\n";
+const GIT_OVERLAY_TOPIC: &str = r#"Git Overlay workflow
+
+Use this when `.git` should remain the source authority while Heddle adds
+captures, isolated threads, merge previews, undo, provenance, and machine-safe
+JSON in `.heddle`. Sley is the embedded Git engine; no Git executable or
+normal `.heddle/git` mirror is involved.
+
+Start in an existing Git checkout:
+
+    heddle status
+    heddle init                               # add Heddle metadata
+    heddle verify
+
+Save and synchronize ordinary work:
+
+    heddle diff
+    heddle capture -m "..."                   # save Heddle metadata and provenance
+    heddle commit                             # Sley writes source history to .git
+    heddle pull
+    heddle push
+
+Isolate risky work:
+
+    heddle start <name> --path ../<name>
+    cd ../<name>
+    heddle capture -m "..."
+    heddle ready
+    cd -
+    heddle land --thread <name>
+    heddle push
+
+Recover or prove state:
+
+    heddle undo
+    heddle verify
+
+State-specific recovery:
+
+    Worktree has unsaved edits: heddle capture -m "...", then heddle commit
+    Move atomically to the full Native Heddle feature set: heddle adopt --ref <branch>
+"#;
 
 const GIT_PROJECTION_TOPIC: &str = "Git Projection — use Heddle with existing Git repos without a hidden mirror.\n\
 \n\
-Use Git Projection when you are standing in a normal Git checkout and want Heddle's\n\
-captured states, isolated threads, merge previews, undo, and machine-safe JSON\n\
-while keeping Git remotes and commits available as interoperability surfaces.\n\
+Use Git Projection when you are standing in a normal Git checkout and want\n\
+Heddle's captured states, isolated threads, merge previews, undo, and\n\
+machine-safe JSON while the real `.git` remains authoritative. Heddle uses\n\
+Sley to access that store directly; it does not require a Git executable or\n\
+maintain a normal `.heddle/git` mirror.\n\
 \n\
 First run:\n\
 \n\
@@ -938,7 +951,7 @@ Manual setup, when you want one ref at a time:\n\
     heddle init\n\
     heddle import git --ref <branch>\n\
 \n\
-Explicit conversion to native Heddle storage:\n\
+Atomic transition to native Heddle storage and its full feature set:\n\
 \n\
     heddle adopt --ref <branch>\n\
 \n\
@@ -946,12 +959,13 @@ Daily loop:\n\
 \n\
     heddle status\n\
     heddle capture -m \"...\"                   # save Heddle provenance\n\
-    git commit -am \"...\"\n\
-    git push\n\
+    heddle commit                             # write source history to .git\n\
+    heddle pull\n\
+    heddle push\n\
     heddle start <name> --path ../<name>\n\
     heddle ready --thread <name>              # or cd into ../<name> and run heddle ready\n\
     heddle land --thread <name>\n\
-    git push\n\
+    heddle push\n\
 \n\
 Recovery and inspection:\n\
 \n\
@@ -1061,21 +1075,12 @@ mod tests {
         }
     }
 
-    /// Regression: heddle#150. `query`, `capture`, `continue`, and
-    /// `abort` are referenced in inline tips and error messages but
-    /// were absent from the `heddle help advanced` listing, leaving
-    /// users unable to discover the verb they were told to run.
+    /// Regression: heddle#150. Commands referenced in inline tips and
+    /// error messages must remain discoverable on the advanced surface.
     #[test]
     fn advanced_verbs_lists_tip_referenced_commands() {
         let advanced: std::collections::HashSet<&str> = advanced_verbs().into_iter().collect();
-        for verb in [
-            "query",
-            "capture",
-            "continue",
-            "abort",
-            "shell",
-            "git-overlay",
-        ] {
+        for verb in ["query", "continue", "abort", "shell"] {
             assert!(
                 advanced.contains(verb),
                 "`{verb}` is referenced in user-facing tips but is not \
@@ -1092,8 +1097,8 @@ mod tests {
     fn everyday_verbs_surface_the_core_loop() {
         let everyday: std::collections::HashSet<&str> = everyday_verbs().into_iter().collect();
         for verb in [
-            "init", "clone", "status", "start", "capture", "ready", "diff", "land", "resolve",
-            "undo", "log", "show", "pull", "push", "doctor", "verify",
+            "init", "clone", "status", "start", "capture", "commit", "ready", "diff", "land",
+            "resolve", "undo", "log", "show", "pull", "push", "doctor", "verify",
         ] {
             assert!(
                 everyday.contains(verb),

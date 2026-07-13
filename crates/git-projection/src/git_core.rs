@@ -14,25 +14,32 @@ use objects::{
     store::ObjectStore,
 };
 use refs::Head;
+use repo::{
+    AudienceTier, GitCheckpointIntent, GitCheckpointIntentPhase, GitRefName,
+    Repository as HeddleRepository,
+};
 pub use repo::{
     GitRefContentNamespace as RefNamespace, GitRefKind, ParsedGitRef,
     REMOTE_NAME_FOR_LOCAL_GIT_REPO, is_reserved_git_remote_name,
 };
-use repo::{GitRefName, Repository as HeddleRepository};
 use sley::{
     BString as GitBString, DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions, Index,
     IndexEntry, IndexWriteOptions, ObjectFormat, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository, Signature,
     plumbing::sley_core::ByteString as GitByteString,
     remote::{
-        FetchOptions, LsRemoteFilter, NoCredentials, PushActionPlan, PushCommand, PushOptions,
-        SilentProgress,
+        CredentialHelperProvider, FetchOptions, LsRemoteFilter, NoCredentials, ProgressSink,
+        PushActionPlan, PushCommand, PushOptions, SilentProgress,
     },
 };
 
 use super::{
-    git_export::{commit_is_byte_faithful, export_all, export_current_thread},
+    git_export::{
+        ExportStateOptions, commit_is_byte_faithful, export_all, export_current_thread,
+        export_state,
+    },
     git_ingest::import_git_history,
+    git_notes,
     git_reconstruct::{commit_object_id, reconstruct_commit_bytes, write_commit_object},
     git_residual::{ResidualStore, resolve_lossy_object},
     git_util::ImportStats,
@@ -139,7 +146,8 @@ fn reject_reserved_git_remote_name(remote: &str) -> GitProjectionResult<()> {
         return Err(GitProjectionError::Git(format!(
             "a Git remote named '{remote}' collides with heddle's reserved namespace \
              (local refs are recorded under the '{REMOTE_NAME_FOR_LOCAL_GIT_REPO}' sentinel); \
-             rename the remote (e.g. `git remote rename {remote} origin`) and retry"
+             configure it under another name with `heddle remote add origin <url>`, \
+             remove the reserved entry with `heddle remote remove {remote}`, and retry"
         )));
     }
     Ok(())
@@ -607,6 +615,117 @@ impl MappingFileSnapshot {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             },
+        }
+        Ok(())
+    }
+}
+
+struct CheckoutWrite {
+    checkout_repo: SleyRepository,
+    object_repo: SleyRepository,
+    git_dir: PathBuf,
+    branch_ref: String,
+    head_path: PathBuf,
+    index_path: PathBuf,
+    previous_head: Option<Vec<u8>>,
+    previous_index: Option<Vec<u8>>,
+    previous_branch: Option<ObjectId>,
+}
+
+impl CheckoutWrite {
+    fn prepare(root: &Path, thread: &str) -> GitProjectionResult<Self> {
+        let checkout_repo = SleyRepository::discover(root).map_err(git_err)?;
+        let git_dir = checkout_repo.git_dir().to_path_buf();
+        if git_dir.join("index.lock").exists() {
+            return Err(GitProjectionError::Git(
+                "Git index is locked; checkpoint write-through cannot proceed".to_string(),
+            ));
+        }
+        let object_repo = common_repo_for_worktree(&checkout_repo)?;
+        let branch_ref = format!("refs/heads/{thread}");
+        let head_path = git_dir.join("HEAD");
+        let index_path = git_dir.join("index");
+        let previous_head = fs::read(&head_path).ok();
+        let previous_index = fs::read(&index_path).ok();
+        let previous_branch = object_repo
+            .find_reference(&branch_ref)
+            .ok()
+            .flatten()
+            .and_then(|reference| reference.peeled_oid(&object_repo).ok().flatten());
+        Ok(Self {
+            checkout_repo,
+            object_repo,
+            git_dir,
+            branch_ref,
+            head_path,
+            index_path,
+            previous_head,
+            previous_index,
+            previous_branch,
+        })
+    }
+
+    fn excluded_objects(&self) -> GitProjectionResult<HashSet<ObjectId>> {
+        match self.previous_branch {
+            Some(parent) => sley::plumbing::sley_odb::collect_reachable_object_ids(
+                self.object_repo.objects().as_ref(),
+                self.object_repo.object_format(),
+                [parent],
+            )
+            .map_err(git_err),
+            None => Ok(HashSet::new()),
+        }
+    }
+
+    fn publish(&self, git_oid: ObjectId) -> GitProjectionResult<()> {
+        let result = (|| -> GitProjectionResult<()> {
+            write_head_symref(&self.git_dir, &self.branch_ref)?;
+            let commit = self.object_repo.read_commit(&git_oid).map_err(git_err)?;
+            let mut index = self
+                .object_repo
+                .index_from_tree(&commit.tree)
+                .map_err(git_err)?;
+            index.upgrade_version_for_flags();
+            self.checkout_repo
+                .write_index(
+                    &index,
+                    IndexWriteOptions {
+                        fsync: true,
+                        validate_checksum: true,
+                    },
+                )
+                .map_err(git_err)?;
+            update_checkout_head_ref(
+                &self.checkout_repo,
+                git_oid,
+                self.previous_branch,
+                "heddle: write-through current thread",
+            )?;
+            fsync_path(&self.head_path)?;
+            fsync_path(&self.index_path)?;
+            fsync_path(&self.git_dir)?;
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            restore_file(self.head_path.clone(), self.previous_head.as_deref())?;
+            restore_file(self.index_path.clone(), self.previous_index.as_deref())?;
+            match self.previous_branch {
+                Some(previous) => set_reference(
+                    &self.object_repo,
+                    &self.branch_ref,
+                    previous,
+                    RefPrecondition::Any,
+                    "heddle: rollback failed write-through",
+                )?,
+                None => {
+                    delete_reference_if_present(&self.object_repo, &self.branch_ref)?;
+                }
+            }
+            let _ = fsync_path(&self.head_path);
+            let _ = fsync_path(&self.index_path);
+            let _ = fsync_path(&self.git_dir);
+            return Err(error);
         }
         Ok(())
     }
@@ -1263,7 +1382,23 @@ impl<'a> GitProjection<'a> {
             return Ok(());
         }
         let object_repo = common_repo_for_worktree(&checkout_repo)?;
+        for record in self.heddle_repo.list_git_checkpoints()? {
+            let git_oid = record
+                .git_commit
+                .parse::<ObjectId>()
+                .map_err(|error| GitProjectionError::InvalidMapping(error.to_string()))?;
+            if mirror_repo.read_object(&git_oid).is_err() {
+                copy_reachable_objects(&object_repo, mirror_repo, [git_oid])?;
+            }
+        }
 
+        self.seed_git_checkpoint_mappings_from_repo(mirror_repo)
+    }
+
+    fn seed_git_checkpoint_mappings_from_repo(
+        &mut self,
+        git_repo: &SleyRepository,
+    ) -> GitProjectionResult<()> {
         for record in self.heddle_repo.list_git_checkpoints()? {
             let state_id = StateId::parse(&record.state_id)?;
             let git_oid = record
@@ -1271,10 +1406,7 @@ impl<'a> GitProjection<'a> {
                 .parse::<ObjectId>()
                 .map_err(|err| GitProjectionError::InvalidMapping(err.to_string()))?;
 
-            if mirror_repo.read_object(&git_oid).is_err() {
-                copy_reachable_objects(&object_repo, mirror_repo, [git_oid])?;
-            }
-            mirror_repo
+            git_repo
                 .read_object(&git_oid)
                 .map_err(|_| GitProjectionError::CommitNotFound(record.git_commit.clone()))?;
 
@@ -1294,11 +1426,11 @@ impl<'a> GitProjection<'a> {
                     GitProjectionError::Git(format!("resolve visibility for {state_id}: {e:#}"))
                 })?;
             if repo::visible(&tier, &repo::AudienceTier::Public)
-                && super::git_notes::read_note(mirror_repo, git_oid)?.is_none()
+                && super::git_notes::read_note(git_repo, git_oid)?.is_none()
                 && let Some(state) = self.heddle_repo.store().get_state(&state_id)?
             {
                 let note = super::git_notes::HeddleNote::from_state(&state);
-                super::git_notes::write_note(mirror_repo, git_oid, &note)?;
+                super::git_notes::write_note(git_repo, git_oid, &note)?;
             }
         }
 
@@ -1357,24 +1489,12 @@ impl<'a> GitProjection<'a> {
                 WriteThroughSkipReason::DetachedHead,
             ));
         };
-
-        let mirror_guard = self.init_mirror_with_guard()?;
-        // First export against a freshly-initialized mirror runs while
-        // the guard is still armed; if export fails we want the
-        // half-built `.heddle/git/` cleared so the next caller doesn't
-        // see a corrupt bare repo.
-        //
-        // Checkpoint/commit write-through is intentionally scoped to the
-        // attached thread. Moving every Git branch during an everyday save
-        // surprised Git users and made stale isolated threads fail while
-        // checkpointing unrelated work. Full export remains explicit via
-        // export git or push --all-threads.
-        export_current_thread(self, &thread)?;
-        // Mirror is committed to disk (objects + refs) in a known-good
-        // shape; remaining failures only affect the user's checkout
-        // and have their own per-file rollback below.
-        mirror_guard.commit();
-        self.write_thread_checkout_from_existing_mirror(&thread)
+        let Some(state_id) = self.heddle_repo.refs().get_thread(&thread)? else {
+            return Ok(WriteThroughOutcome::Skipped(
+                WriteThroughSkipReason::NoAttachedThread,
+            ));
+        };
+        self.write_thread_state_checkout_direct(&thread, &state_id, None)
     }
 
     pub fn write_through_current_checkout_with_message(
@@ -1382,8 +1502,28 @@ impl<'a> GitProjection<'a> {
         state_id: StateId,
         message: String,
     ) -> GitProjectionResult<WriteThroughOutcome> {
+        if !self.heddle_repo.root().join(".git").exists() {
+            return Ok(WriteThroughOutcome::Skipped(
+                WriteThroughSkipReason::MissingDotGit,
+            ));
+        }
+        if checkout_git_head_is_detached(self.heddle_repo.root())? {
+            return Ok(WriteThroughOutcome::Skipped(
+                WriteThroughSkipReason::DetachedHead,
+            ));
+        }
         self.set_commit_message_override(state_id, message);
-        self.write_through_current_checkout()
+        let Head::Attached { thread } = self.heddle_repo.head_ref()? else {
+            return Ok(WriteThroughOutcome::Skipped(
+                WriteThroughSkipReason::DetachedHead,
+            ));
+        };
+        let summary = self
+            .commit_message_overrides
+            .get(&state_id)
+            .cloned()
+            .unwrap_or_default();
+        self.write_thread_state_checkout_direct(&thread, &state_id, Some(&summary))
     }
 
     /// Mark files that Heddle has captured but that Git still sees as
@@ -1552,10 +1692,136 @@ impl<'a> GitProjection<'a> {
             ));
         }
 
-        let mirror_guard = self.init_mirror_with_guard()?;
-        export_current_thread(self, thread)?;
-        mirror_guard.commit();
-        self.write_thread_checkout_from_existing_mirror(thread)
+        let Some(state_id) = self
+            .heddle_repo
+            .refs()
+            .get_thread(&ThreadName::new(thread))?
+        else {
+            return Ok(WriteThroughOutcome::Skipped(
+                WriteThroughSkipReason::NoAttachedThread,
+            ));
+        };
+        self.write_thread_state_checkout_direct(thread, &state_id, None)
+    }
+
+    fn write_thread_state_checkout_direct(
+        &mut self,
+        thread: &str,
+        state_id: &StateId,
+        checkpoint_summary: Option<&str>,
+    ) -> GitProjectionResult<WriteThroughOutcome> {
+        let git = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
+        if git.git_dir().join("index.lock").exists() {
+            return Ok(WriteThroughOutcome::Skipped(
+                WriteThroughSkipReason::IndexAlreadyDirty,
+            ));
+        }
+        let checkout = CheckoutWrite::prepare(self.heddle_repo.root(), thread)?;
+        self.build_existing_mapping(Some(self.heddle_repo.root()))?;
+        self.seed_git_checkpoint_mappings_from_repo(&checkout.object_repo)?;
+        self.seed_ingest_identity_mappings_from_repo(&checkout.object_repo)?;
+
+        let identity = git_config_identity_with_global_fallback(self.heddle_repo.root())?;
+        let audience = AudienceTier::Public;
+        for reachable in self.sort_states_topologically(&[*state_id])? {
+            let message_override = self
+                .commit_message_overrides
+                .get(&reachable)
+                .map(String::as_str);
+            let parent_override = self
+                .commit_parent_overrides
+                .get(&reachable)
+                .map(Vec::as_slice);
+            if let Some(mapped) = self.mapping.get_git(&reachable) {
+                let native_object_missing = checkout.object_repo.read_object(&mapped).is_err()
+                    && self
+                        .heddle_repo
+                        .store()
+                        .get_state(&reachable)?
+                        .is_some_and(|state| state.raw_message.is_none());
+                if !native_object_missing {
+                    continue;
+                }
+            }
+            let Some(git_oid) = export_state(
+                &mut self.mapping,
+                self.heddle_repo,
+                &checkout.object_repo,
+                &reachable,
+                ExportStateOptions {
+                    identity: identity.as_ref(),
+                    message_override,
+                    parent_override,
+                    audience: &audience,
+                },
+            )?
+            else {
+                continue;
+            };
+            if let Some(mapped) = self.mapping.get_git(&reachable)
+                && mapped != git_oid
+            {
+                return Err(GitProjectionError::MappingConflict {
+                    message: format!(
+                        "state {reachable} reminted as {git_oid}, but the durable mapping expects {mapped}"
+                    ),
+                });
+            }
+            self.mapping.insert(reachable, git_oid);
+            if let Some(state) = self.heddle_repo.store().get_state(&reachable)? {
+                git_notes::write_note(
+                    &checkout.object_repo,
+                    git_oid,
+                    &git_notes::HeddleNote::from_state(&state),
+                )?;
+            }
+        }
+
+        let Some(git_oid) = self.mapping.get_git(state_id) else {
+            return Ok(WriteThroughOutcome::Skipped(
+                WriteThroughSkipReason::NoMappedCommit,
+            ));
+        };
+        materialize_active_checkout_closure(
+            self.heddle_repo,
+            &self.mapping,
+            &checkout.object_repo,
+            state_id,
+            git_oid,
+            &checkout.excluded_objects()?,
+        )?;
+        self.save_mapping_to_disk()?;
+
+        if let Some(summary) = checkpoint_summary {
+            let pending = self.heddle_repo.pending_git_checkpoint_intent()?;
+            let previous_git_oid = pending
+                .as_ref()
+                .filter(|intent| {
+                    intent.state_id == state_id.to_string_full()
+                        && intent.branch == thread
+                        && intent.new_git_oid == git_oid.to_string()
+                })
+                .and_then(|intent| intent.previous_git_oid.clone())
+                .or_else(|| checkout.previous_branch.map(|oid| oid.to_string()));
+            let intent = GitCheckpointIntent {
+                version: 1,
+                state_id: state_id.to_string_full(),
+                branch: thread.to_string(),
+                previous_git_oid,
+                new_git_oid: git_oid.to_string(),
+                summary: summary.to_string(),
+                phase: GitCheckpointIntentPhase::Prepared,
+            };
+            self.heddle_repo.begin_git_checkpoint_intent(&intent)?;
+        }
+
+        checkout.publish(git_oid)?;
+        if checkpoint_summary.is_some() {
+            objects::fault_inject::maybe_panic_at("git_checkpoint_after_publish_before_phase");
+            self.heddle_repo
+                .mark_git_checkpoint_published(state_id, &git_oid.to_string())?;
+        }
+        Ok(WriteThroughOutcome::Wrote(git_oid))
     }
 
     pub fn write_current_checkout_from_existing_mirror(
@@ -1585,37 +1851,12 @@ impl<'a> GitProjection<'a> {
         self.write_thread_state_checkout_from_existing_mirror(&thread, &state_id)
     }
 
-    fn write_thread_checkout_from_existing_mirror(
-        &mut self,
-        thread: &str,
-    ) -> GitProjectionResult<WriteThroughOutcome> {
-        let Some(state_id) = self
-            .heddle_repo
-            .refs()
-            .get_thread(&ThreadName::new(thread))?
-        else {
-            return Ok(WriteThroughOutcome::Skipped(
-                WriteThroughSkipReason::NoAttachedThread,
-            ));
-        };
-        self.write_thread_state_checkout_from_existing_mirror(thread, &state_id)
-    }
-
     fn write_thread_state_checkout_from_existing_mirror(
         &mut self,
         thread: &str,
         state_id: &StateId,
     ) -> GitProjectionResult<WriteThroughOutcome> {
         let mirror_repo = self.open_git_repo()?;
-        // Reconstructing a faithful commit from state (#568 P1) resolves each
-        // parent's git OID through the Git Projection Mapping. A checkpoint/push runs
-        // export first, which leaves the in-memory mapping populated for the
-        // served set — trust it, and do NOT re-read from disk (notes vs sidecar
-        // can legitimately disagree mid-operation, e.g. a `--git-commit` merge
-        // checkpoint that has not yet flushed; clobbering the freshly-built
-        // mapping with a disk read trips the conflict guard). Only a STANDALONE
-        // checkout (projection checkout, no preceding export) starts with an
-        // empty mapping; hydrate it from disk in that case alone.
         if self.mapping.is_empty() {
             self.build_existing_mapping(None)?;
         }
@@ -1634,142 +1875,28 @@ impl<'a> GitProjection<'a> {
             ));
         };
 
-        let checkout_repo = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
-        if checkout_repo.git_dir() == mirror_repo.git_dir() {
-            return Ok(WriteThroughOutcome::Skipped(
-                WriteThroughSkipReason::MirrorIsWorktree,
-            ));
-        }
-        let git_dir = checkout_repo.git_dir().to_path_buf();
-        // sley's index writer owns `index.lock`; keep this preflight so a stale
-        // or concurrent lock surfaces as a structured `IndexAlreadyDirty` skip.
-        if git_dir.join("index.lock").exists() {
+        let git = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
+        if git.git_dir().join("index.lock").exists() {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::IndexAlreadyDirty,
             ));
         }
-
-        let object_repo = common_repo_for_worktree(&checkout_repo)?;
-        let branch_ref = format!("refs/heads/{thread}");
-        let head_path = git_dir.join("HEAD");
-        let index_path = git_dir.join("index");
-        let previous_head = fs::read(&head_path).ok();
-        let previous_index = fs::read(&index_path).ok();
-        let previous_branch = object_repo
-            .find_reference(&branch_ref)
-            .ok()
-            .flatten()
-            .and_then(|reference| reference.peeled_oid(&object_repo).ok().flatten());
-
-        let heddle_repo = self.heddle_repo;
-        let mapping = &self.mapping;
-        let write_result = (|| -> GitProjectionResult<()> {
-            // Incremental object materialization (perf): bringing the new commit's
-            // full reachable closure into the checkout re-walks the ENTIRE tree
-            // every checkpoint — ~115s of the ~140s on the ~6k-object ghostty tree,
-            // scaling with total history rather than the change. But the checkout
-            // already holds the prior HEAD (`previous_branch`) and its whole
-            // closure. So exclude that closure: only objects genuinely new since
-            // the parent are reconstructed/copied. Excluding the parent COMMIT
-            // alone is not enough — the new commit's tree re-reaches the parent's
-            // unchanged trees/blobs, so they would not be pruned. Compute the
-            // parent's FULL closure from the DESTINATION (cheap: those objects are
-            // local and already packed) and exclude all of it. Byte-identical
-            // result — every pruned object was already present in the checkout.
-            // First checkpoint on a thread has no previous branch, so the exclude
-            // set is empty (full materialization).
-            let excluded: HashSet<ObjectId> = match previous_branch {
-                Some(parent) => sley::plumbing::sley_odb::collect_reachable_object_ids(
-                    object_repo.objects().as_ref(),
-                    object_repo.object_format(),
-                    [parent],
-                )
-                .map_err(|error| GitProjectionError::Git(error.to_string()))?,
-                None => HashSet::new(),
-            };
-            // #568 P1: materialize the checkout from heddle state, NOT by copying
-            // the eager `.heddle/git` mirror's verbatim objects. Each byte-faithful
-            // commit's object closure is reconstructed directly into the checkout
-            // `object_repo`; the mirror is consulted only for the lossy residual
-            // (commits whose original bytes can't be re-derived). This is the
-            // strategic flip — heddle-native store feeds the worktree, git is a
-            // derived projection — with a per-commit fallback so nothing is lost.
-            materialize_checkout_closure_from_state(
-                heddle_repo,
-                mapping,
-                &mirror_repo,
-                &object_repo,
-                state_id,
-                git_oid,
-                &excluded,
-            )?;
-            // Atomic temp+rename so a torn write can't leave HEAD in a
-            // self-inconsistent state mid-write-through (the rollback
-            // path below restores previous_head on any later failure).
-            write_head_symref(&git_dir, &branch_ref)?;
-
-            let commit = object_repo.read_commit(&git_oid).map_err(git_err)?;
-            let mut index = object_repo.index_from_tree(&commit.tree).map_err(git_err)?;
-            index.upgrade_version_for_flags();
-            checkout_repo
-                .write_index(
-                    &index,
-                    IndexWriteOptions {
-                        fsync: true,
-                        validate_checksum: true,
-                    },
-                )
-                .map_err(git_err)?;
-
-            update_checkout_head_ref(
-                &checkout_repo,
-                git_oid,
-                previous_branch,
-                "heddle: write-through current thread",
-            )?;
-
-            // fsync after every durable write so a power loss between
-            // `fs::write(HEAD)` and `write_index` doesn't leave the
-            // checkout in a self-inconsistent state. Sync the parent
-            // dir too — file-level fsync on its own doesn't durably
-            // commit the dirent on most filesystems.
-            fsync_path(&head_path)?;
-            fsync_path(&index_path)?;
-            fsync_path(&git_dir)?;
-            Ok(())
-        })();
-
-        if let Err(err) = write_result {
-            restore_file(head_path.clone(), previous_head.as_deref())?;
-            restore_file(index_path.clone(), previous_index.as_deref())?;
-            if let Some(previous_branch) = previous_branch {
-                set_reference(
-                    &object_repo,
-                    &branch_ref,
-                    previous_branch,
-                    RefPrecondition::Any,
-                    "heddle: rollback failed write-through",
-                )?;
-            } else {
-                // The branch did not exist before write-through. If
-                // `set_reference` (or anything after it — notes mirror,
-                // fsync) created the new branch and *then* the write
-                // failed, the rollback used to leave that branch
-                // behind, so callers saw an error but Git still showed
-                // the new ref. Delete it so the failure is actually
-                // reverted. Best-effort: a missing ref here means the
-                // failure happened before set_reference ran, which is
-                // already the correct rolled-back state.
-                let _ = delete_reference_if_present(&object_repo, &branch_ref);
-            }
-            // fsync the rollback so the recovered files are durable
-            // even if the caller crashes immediately after.
-            let _ = fsync_path(&head_path);
-            let _ = fsync_path(&index_path);
-            let _ = fsync_path(&git_dir);
-            return Err(err);
+        let checkout = CheckoutWrite::prepare(self.heddle_repo.root(), thread)?;
+        if checkout.checkout_repo.git_dir() == mirror_repo.git_dir() {
+            return Ok(WriteThroughOutcome::Skipped(
+                WriteThroughSkipReason::MirrorIsWorktree,
+            ));
         }
-
+        materialize_checkout_closure_from_state(
+            self.heddle_repo,
+            &self.mapping,
+            &mirror_repo,
+            &checkout.object_repo,
+            state_id,
+            git_oid,
+            &checkout.excluded_objects()?,
+        )?;
+        checkout.publish(git_oid)?;
         Ok(WriteThroughOutcome::Wrote(git_oid))
     }
 
@@ -2171,6 +2298,70 @@ fn configured_remote_values_match(left: &str, right: &str) -> bool {
         return left == right;
     }
     false
+}
+
+fn materialize_active_checkout_closure(
+    heddle_repo: &HeddleRepository,
+    mapping: &SyncMapping,
+    object_repo: &SleyRepository,
+    tip_state_id: &StateId,
+    tip_oid: ObjectId,
+    excluded: &HashSet<ObjectId>,
+) -> GitProjectionResult<()> {
+    let residuals = ResidualStore::open(heddle_repo.heddle_dir());
+    let mut stack = vec![*tip_state_id];
+    let mut seen = HashSet::new();
+
+    while let Some(state_id) = stack.pop() {
+        if !seen.insert(state_id) {
+            continue;
+        }
+        let git_oid = if state_id == *tip_state_id {
+            tip_oid
+        } else {
+            mapping
+                .get_git(&state_id)
+                .ok_or(GitProjectionError::StateNotFound(state_id))?
+        };
+        if excluded.contains(&git_oid) || object_repo.read_object(&git_oid).is_ok() {
+            continue;
+        }
+
+        let state = heddle_repo
+            .store()
+            .get_state(&state_id)?
+            .ok_or(GitProjectionError::StateNotFound(state_id))?;
+        if commit_is_byte_faithful(&state) {
+            let content = reconstruct_commit_bytes(heddle_repo, object_repo, mapping, &state)?;
+            let reconstructed = commit_object_id(&content);
+            if reconstructed != git_oid {
+                return Err(GitProjectionError::MappingConflict {
+                    message: format!(
+                        "state {state_id} reconstructs as {reconstructed}, expected {git_oid}"
+                    ),
+                });
+            }
+            write_commit_object(object_repo, &content)?;
+            stack.extend(state.parents);
+            continue;
+        }
+
+        if !residuals.install_into(object_repo, &git_oid)? {
+            return Err(GitProjectionError::CommitNotFound(format!(
+                "{git_oid} for state {state_id}; the authoritative checkout .git and Raw Git Object Residual store do not contain it"
+            )));
+        }
+        match verify_closure_present(object_repo, &[git_oid], excluded) {
+            Ok(()) => {}
+            Err(ClosureCheck::Incomplete { missing }) => {
+                return Err(GitProjectionError::CommitNotFound(format!(
+                    "{missing} in the closure of {git_oid}; restore the original object to the authoritative checkout .git"
+                )));
+            }
+            Err(ClosureCheck::Walk(error)) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn looks_like_remote_location(value: &str) -> bool {
@@ -3678,6 +3869,7 @@ pub fn clone_url_to_bare(
     dest: &Path,
     depth: Option<u32>,
     filter: Option<&str>,
+    progress: &mut dyn ProgressSink,
 ) -> GitProjectionResult<()> {
     // Public Git-overlay workflows must run on machines with no Git executable
     // installed. Keep depth-only clones native and reject filtered clones until
@@ -3696,8 +3888,8 @@ pub fn clone_url_to_bare(
         }
         return copy_local_repo_to_bare(&source_path, dest);
     }
-    let default_branch =
-        clone_url_to_bare_via_sley(url, dest, depth)?.or_else(|| default_branch_from_file_url(url));
+    let default_branch = clone_url_to_bare_via_sley(url, dest, depth, progress)?
+        .or_else(|| default_branch_from_file_url(url));
     // `init_bare` writes `.git/HEAD = ref: refs/heads/<init.defaultBranch>`
     // (typically "main" or "master") regardless of what the remote
     // advertises, and the fetch above doesn't touch HEAD. If we leave
@@ -3735,11 +3927,13 @@ fn clone_url_to_bare_via_sley(
     url: &str,
     dest: &Path,
     depth: Option<u32>,
+    progress: &mut dyn ProgressSink,
 ) -> GitProjectionResult<Option<String>> {
     fs::create_dir_all(dest)?;
     let repo = SleyRepository::init_bare(dest).map_err(git_err)?;
-    let mut credentials = NoCredentials;
-    let mut progress = SilentProgress;
+    let config = repo.config_snapshot().map_err(git_err)?;
+    let mut credentials = CredentialHelperProvider::new(Some(&config));
+    let display_url = sley::plumbing::sley_core::redact_url_for_display(url);
     let outcome = repo
         .fetch(
             url,
@@ -3780,9 +3974,9 @@ fn clone_url_to_bare_via_sley(
                 deepen_not: Vec::new(),
             },
             &mut credentials,
-            &mut progress,
+            progress,
         )
-        .map_err(|err| GitProjectionError::Git(format!("clone failed for {url}: {err}")))?;
+        .map_err(|err| GitProjectionError::Git(format!("clone failed for {display_url}: {err}")))?;
     Ok(outcome
         .head_symref
         .and_then(|target| target.strip_prefix("refs/heads/").map(str::to_string)))
@@ -4651,7 +4845,8 @@ mod tests {
         std::fs::write(source.join("HEAD"), b"ref: refs/heads/trunk\n").unwrap();
 
         let url = format!("file://{}", source.display());
-        clone_url_to_bare(&url, &dest, None, None).expect("clone url to bare");
+        let mut progress = SilentProgress;
+        clone_url_to_bare(&url, &dest, None, None, &mut progress).expect("clone url to bare");
 
         let dest_head = std::fs::read_to_string(dest.join("HEAD")).expect("read dest HEAD");
         assert_eq!(

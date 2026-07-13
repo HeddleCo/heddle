@@ -130,7 +130,7 @@ fn repair_git_metadata(repo: &repo::Repository) -> Result<Vec<FsckRepair>> {
 
     let before_seed = bridge.mapping.iter().count();
     let git_repo = bridge.open_git_repo()?;
-    bridge.seed_ingest_identity_mappings_from_mirror(&git_repo)?;
+    bridge.seed_ingest_identity_mappings_from_repo(&git_repo)?;
     let seeded = bridge.mapping.iter().count().saturating_sub(before_seed);
     if seeded > 0 {
         bridge.save_mapping_to_disk()?;
