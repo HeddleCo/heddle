@@ -3,7 +3,7 @@
 
 use std::{
     collections::BTreeMap,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use objects::{
@@ -134,72 +134,6 @@ impl Repository {
             }
         }
         Ok(None)
-    }
-
-    pub(crate) fn canonicalize_context_root(
-        &self,
-        context_root: &ContentHash,
-    ) -> Result<(ContentHash, bool)> {
-        let mut root = *context_root;
-        let mut changed = false;
-
-        for entry in self.list_context_entries_for_migration(context_root)? {
-            let Some(legacy_path) = legacy_storage_path_for_target(&entry.target) else {
-                continue;
-            };
-            if legacy_path == entry.target.storage_path() {
-                continue;
-            }
-            let Some(legacy_hash) = self.lookup_context_leaf(&root, &legacy_path)? else {
-                continue;
-            };
-
-            if self
-                .lookup_context_leaf(&root, &entry.target.storage_path())?
-                .is_some()
-            {
-                if let Some(new_root) = self.remove_leaf_at_path(&root, &legacy_path)? {
-                    root = new_root;
-                }
-                changed = true;
-                continue;
-            }
-
-            let Some(blob) = self.store.get_blob(&legacy_hash)? else {
-                continue;
-            };
-            let context = ContextBlob::decode(blob.content())
-                .map_err(|e| HeddleError::InvalidObject(format!("invalid context blob: {e}")))?;
-            let updated = self.set_context_blob(Some(&root), &entry.target, &context)?;
-            root = self
-                .remove_leaf_at_path(&updated, &legacy_path)?
-                .unwrap_or(updated);
-            changed = true;
-        }
-
-        Ok((root, changed))
-    }
-
-    fn list_context_entries_for_migration(
-        &self,
-        context_root: &ContentHash,
-    ) -> Result<Vec<ContextEntry>> {
-        let tree = match self.store.get_tree(context_root)? {
-            Some(t) => t,
-            None => return Ok(Vec::new()),
-        };
-        let mut results = BTreeMap::new();
-        self.walk_context_tree(
-            &tree,
-            &PathBuf::new(),
-            None,
-            &mut results,
-            ContextWalkMode::IncludeLegacyDirectPaths,
-        )?;
-        Ok(results
-            .into_iter()
-            .map(|(_, (target, blob))| ContextEntry { target, blob })
-            .collect())
     }
 
     // --- private helpers ---
@@ -351,17 +285,14 @@ impl Repository {
         Ok(())
     }
 
-    /// Carry a single parent state's context tree forward onto a new
-    /// snapshot. Because context trees are content-addressed, this is a
-    /// pointer copy: the new state's `context` field gets the same
-    /// `ContentHash` as the parent. Annotations attached upstream remain
-    /// active at the new state, and the existing on-demand staleness check
-    /// (which compares the stored `source_hash` against the current bytes
-    /// at the anchor) naturally reports drift caused by the new tree.
-    ///
-    /// Returns `None` when the parent has no context tree.
-    pub fn inherit_parent_context(parent: &State) -> Option<ContentHash> {
-        parent.context
+    /// Resolve the context snapshot attached to a parent state.
+    pub fn inherit_parent_context(&self, parent: &State) -> Result<Option<ContentHash>> {
+        Ok(self
+            .latest_state_attachment(&parent.id(), crate::StateAttachmentKind::Context)?
+            .and_then(|attachment| match attachment.body {
+                objects::object::StateAttachmentBody::Context(hash) => Some(hash),
+                _ => None,
+            }))
     }
 
     /// Build a unioned context tree across multiple parent states for a
@@ -379,7 +310,12 @@ impl Repository {
     /// Returns `None` when none of the parents has any context.
     pub fn union_parent_contexts(&self, parents: &[&State]) -> Result<Option<ContentHash>> {
         // Fast paths: nothing or single-parent.
-        let mut roots: Vec<ContentHash> = parents.iter().filter_map(|p| p.context).collect();
+        let mut roots = Vec::new();
+        for parent in parents {
+            if let Some(root) = self.inherit_parent_context(parent)? {
+                roots.push(root);
+            }
+        }
         if roots.is_empty() {
             return Ok(None);
         }
@@ -484,35 +420,18 @@ fn pick_newer_annotation(a: Annotation, b: Annotation) -> Annotation {
 fn context_entry_key(target: &ContextTarget) -> String {
     match target {
         ContextTarget::File { path } => format!("file:{path}"),
-        ContextTarget::State { change_id } => format!("state:{}", change_id.to_string_full()),
+        ContextTarget::State { state_id } => format!("state:{}", state_id.to_string_full()),
     }
 }
 
 #[derive(Clone, Copy)]
 enum ContextWalkMode {
     CanonicalOnly,
-    IncludeLegacyDirectPaths,
 }
 
 fn context_target_from_entry_path(path: &Path, mode: ContextWalkMode) -> Option<ContextTarget> {
-    ContextTarget::from_storage_path(path).or_else(|| match mode {
-        ContextWalkMode::CanonicalOnly => None,
-        ContextWalkMode::IncludeLegacyDirectPaths => legacy_context_target_from_path(path),
-    })
-}
-
-fn legacy_context_target_from_path(path: &Path) -> Option<ContextTarget> {
-    match path.components().next()? {
-        Component::Normal(part) if part == "__files" || part == "__states" => None,
-        Component::Normal(_) => ContextTarget::file(path.to_string_lossy().to_string()).ok(),
-        _ => None,
-    }
-}
-
-fn legacy_storage_path_for_target(target: &ContextTarget) -> Option<PathBuf> {
-    match target {
-        ContextTarget::File { path } => Some(PathBuf::from(path)),
-        ContextTarget::State { .. } => None,
+    match mode {
+        ContextWalkMode::CanonicalOnly => ContextTarget::from_storage_path(path),
     }
 }
 
@@ -527,8 +446,11 @@ fn split_path(path: &Path) -> Option<(&str, &Path)> {
 
 #[cfg(test)]
 mod tests {
-    use crypto::{Ed25519Signer, StateSigningExt};
-    use objects::object::{Annotation, AnnotationKind, Attribution, Blob, ChangeId, Principal};
+    use crypto::Ed25519Signer;
+    use objects::object::{
+        Annotation, AnnotationKind, Attribution, Blob, Principal, StateAttachment,
+        StateAttachmentBody, StateId,
+    };
     use tempfile::TempDir;
 
     use super::{Repository, *};
@@ -574,7 +496,7 @@ mod tests {
     #[test]
     fn supports_state_targets() {
         let (_dir, repo) = setup();
-        let target = ContextTarget::state(ChangeId::generate());
+        let target = ContextTarget::state(crate::test_state_id());
         let blob = ContextBlob::new(vec![make_annotation(AnnotationScope::File, "review note")]);
 
         let root = repo.set_context_blob(None, &target, &blob).unwrap();
@@ -644,59 +566,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_direct_file_context_is_migration_only() {
-        let (_dir, repo) = setup();
-        let target = ContextTarget::file("src/main.rs").unwrap();
-        let blob = ContextBlob::new(vec![make_annotation(AnnotationScope::File, "legacy")]);
-        let root = legacy_context_root(&repo, "src/main.rs", &blob);
-
-        assert_eq!(repo.get_context_blob(&root, &target).unwrap(), None);
-
-        let entries = repo.list_context_entries(&root, None).unwrap();
-        assert!(entries.is_empty());
-
-        let (canonical_root, changed) = repo.canonicalize_context_root(&root).unwrap();
-        assert!(changed);
-        assert_eq!(
-            repo.get_context_blob(&canonical_root, &target).unwrap(),
-            Some(blob)
-        );
-        let tree = repo.store.get_tree(&canonical_root).unwrap().unwrap();
-        assert!(tree.get("src").is_none());
-        assert!(tree.get("__files").is_some());
-    }
-
-    #[test]
-    fn direct_context_canonicalization_requires_signature_decision() {
-        let (_dir, repo) = setup();
-        let target = ContextTarget::file("src/main.rs").unwrap();
-        let blob = ContextBlob::new(vec![make_annotation(AnnotationScope::File, "legacy")]);
-        let legacy_root = legacy_context_root(&repo, "src/main.rs", &blob);
-        let canonical_root = repo.set_context_blob(None, &target, &blob).unwrap();
-        assert_ne!(
-            legacy_root, canonical_root,
-            "legacy direct-path and canonical context roots must be distinct fixtures",
-        );
-
-        let signer = Ed25519Signer::generate().expect("generate signer");
-        let mut state = State::new_snapshot(
-            ContentHash::compute(b"tree"),
-            vec![],
-            Attribution::human(Principal::new("Test", "test@example.com")),
-        )
-        .with_context(legacy_root);
-        state.sign(&signer).expect("sign legacy-context state");
-        state
-            .verify_signature()
-            .expect("legacy context state verifies before rewrite");
-
-        let rewritten = state.clone().with_context(canonical_root);
-        rewritten
-            .verify_signature()
-            .expect_err("canonicalizing context root without re-signing invalidates the signature");
-    }
-
-    #[test]
     fn find_annotation_returns_target_and_index() {
         let (_dir, repo) = setup();
         let target = ContextTarget::file("src/main.rs").unwrap();
@@ -720,7 +589,7 @@ mod tests {
         let target = ContextTarget::file(path).unwrap();
         let blob = ContextBlob::new(anns);
         let root = repo.set_context_blob(None, &target, &blob).unwrap();
-        let mut state = State::new_snapshot(
+        let state = State::new_snapshot(
             ContentHash::compute(b""),
             vec![],
             objects::object::Attribution::human(objects::object::Principal::new(
@@ -728,7 +597,15 @@ mod tests {
                 "test@example.com",
             )),
         );
-        state = state.with_context(root);
+        repo.store().put_state(&state).unwrap();
+        repo.put_state_attachment(&StateAttachment {
+            state_id: state.id(),
+            body: StateAttachmentBody::Context(root),
+            attribution: state.attribution.clone(),
+            created_at: chrono::Utc::now(),
+            supersedes: None,
+        })
+        .unwrap();
         state
     }
 
@@ -755,12 +632,13 @@ mod tests {
             "src/lib.rs",
             vec![make_annotation(AnnotationScope::File, "first")],
         );
-        let inherited = Repository::inherit_parent_context(&parent);
-        assert_eq!(inherited, parent.context);
+        let inherited = repo.inherit_parent_context(&parent).unwrap();
+        assert!(inherited.is_some());
     }
 
     #[test]
     fn inherit_parent_context_yields_none_when_parent_has_none() {
+        let (_dir, repo) = setup();
         let parent = State::new_snapshot(
             ContentHash::compute(b""),
             vec![],
@@ -769,7 +647,7 @@ mod tests {
                 "test@example.com",
             )),
         );
-        assert_eq!(Repository::inherit_parent_context(&parent), None);
+        assert_eq!(repo.inherit_parent_context(&parent).unwrap(), None);
     }
 
     #[test]
@@ -806,7 +684,7 @@ mod tests {
         let merged = repo
             .union_parent_contexts(&[&parent_with, &parent_without])
             .unwrap();
-        assert_eq!(merged, parent_with.context);
+        assert_eq!(merged, repo.inherit_parent_context(&parent_with).unwrap());
     }
 
     #[test]

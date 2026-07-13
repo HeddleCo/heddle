@@ -9,7 +9,7 @@ use heddle_core::{
     principal_lacks_accountable_identity,
 };
 use objects::{
-    object::{Agent, Attribution, ChangeId, Principal, Tree},
+    object::{Agent, Attribution, Principal, StateId, Tree},
     worktree::WorktreeStatus,
 };
 use repo::{Repository, SessionManager, SnapshotProfile, format_confidence};
@@ -50,7 +50,7 @@ pub(crate) struct SnapshotOutput {
     pub output_kind: &'static str,
     pub status: &'static str,
     pub action: &'static str,
-    pub change_id: String,
+    pub state_id: String,
     pub content_hash: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
@@ -264,7 +264,7 @@ pub async fn cmd_snapshot(
         match repo.current_state() {
             Ok(Some(state)) => {
                 let bridge = GitProjection::new(&repo);
-                if let Err(err) = bridge.update_intent_to_add(&state.change_id) {
+                if let Err(err) = bridge.update_intent_to_add(&state.state_id) {
                     debug!("intent-to-add index update skipped: {err}");
                 }
             }
@@ -286,7 +286,7 @@ pub async fn cmd_snapshot(
         // continue to receive a clean ANSI-free string.
         println!(
             "Captured state {} ({})",
-            style::change_id(&output.change_id),
+            style::state_id(&output.state_id),
             style::dim(&output.content_hash),
         );
         println!(
@@ -573,9 +573,9 @@ pub(crate) fn ensure_current_state(
     repo: &Repository,
     user_config: &UserConfig,
     intent: Option<String>,
-) -> Result<ChangeId> {
+) -> Result<StateId> {
     if let Some(state) = repo.current_state()? {
-        return Ok(state.change_id);
+        return Ok(state.state_id);
     }
 
     create_snapshot(
@@ -763,7 +763,7 @@ fn snapshot_output_from_save_report(
         output_kind: "capture",
         status: "captured",
         action: "capture",
-        change_id: report.change_id.short(),
+        state_id: report.state_id.short(),
         content_hash: report.content_hash.short(),
         intent: report.intent,
         confidence: report.confidence,

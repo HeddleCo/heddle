@@ -925,14 +925,14 @@ fn sv(args: &[&str]) -> Vec<String> {
     args.iter().map(|s| s.to_string()).collect()
 }
 
-/// `change_id` of the current HEAD state in `dir` (first `log` record).
-fn head_change_id(dir: &std::path::Path) -> String {
+/// `state_id` of the current HEAD state in `dir` (first `log` record).
+fn head_state_id(dir: &std::path::Path) -> String {
     let stdout = heddle(&["--output", "json", "log"], Some(dir)).expect("heddle log");
     let first = stdout.lines().next().unwrap_or("");
     let parsed: Value = serde_json::from_str(first).expect("log stdout is JSON");
-    parsed["states"][0]["change_id"]
+    parsed["states"][0]["state_id"]
         .as_str()
-        .expect("log states[0].change_id")
+        .expect("log states[0].state_id")
         .to_string()
 }
 
@@ -983,7 +983,7 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             heddle(&["switch", "feature"], Some(t.path())).expect("switch feature");
             std::fs::write(t.path().join("g.txt"), "feat").unwrap();
             heddle(&["commit", "-m", "feature work"], Some(t.path())).expect("commit feature");
-            let src = head_change_id(t.path());
+            let src = head_state_id(t.path());
             heddle(&["switch", "main"], Some(t.path())).expect("switch main");
             (t, vec!["cherry-pick".to_string(), src])
         }
@@ -1091,7 +1091,7 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             let t = init_fixture();
             std::fs::write(t.path().join("a.txt"), "fn verify(){}").unwrap();
             heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
-            let cid = head_change_id(t.path());
+            let cid = head_state_id(t.path());
             (t, vec!["review".to_string(), "show".to_string(), cid])
         }
         "review_next" => {

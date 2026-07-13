@@ -4,7 +4,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use chrono::{DateTime, Utc};
-use objects::object::{ChangeId, ContentHash, OperationId, Principal, VisibilityTier};
+use objects::object::{ContentHash, OperationId, Principal, StateId, VisibilityTier};
 use serde::{Deserialize, Serialize};
 
 /// Logical key used by conditional transaction commits to detect intervening
@@ -21,9 +21,9 @@ pub enum IsolationKey {
     /// a visibility batch that also touched `S`. Without it a visibility record
     /// would contribute no isolation key, and an undo could restore an older
     /// `prior_sidecar` over a concurrently-committed newer visibility record,
-    /// silently discarding it. Keyed by the state's `ChangeId`, so visibility
+    /// silently discarding it. Keyed by the state's `StateId`, so visibility
     /// mutations on *different* states never spuriously conflict.
-    StateVisibility(ChangeId),
+    StateVisibility(StateId),
 }
 
 /// The oplog generation and logical keys a transaction observed before apply.
@@ -54,22 +54,22 @@ pub enum ConditionalCommitOutcome {
 pub enum OpRecord {
     /// Snapshot operation.
     Snapshot {
-        new_state: ChangeId,
-        prev_head: Option<ChangeId>,
+        new_state: StateId,
+        prev_head: Option<StateId>,
         /// Detached HEAD published by this snapshot, if any. Attached
         /// snapshots publish their `thread` ref instead; detached snapshots
         /// publish `HEAD = Detached(head)`.
-        head: Option<ChangeId>,
+        head: Option<StateId>,
         thread: Option<String>,
     },
     /// Goto operation.
     Goto {
-        target: ChangeId,
-        prev_head: Option<ChangeId>,
+        target: StateId,
+        prev_head: Option<StateId>,
         /// HEAD published by this goto. This intentionally duplicates `target`
         /// for the current detached-only command shape so crash replay folds the
         /// published ref state directly instead of inferring it from intent.
-        head: ChangeId,
+        head: StateId,
     },
     /// Thread creation.
     ///
@@ -82,18 +82,18 @@ pub enum OpRecord {
     /// op (rename batch's new-name arm, ingest, harness/agent stubs).
     ThreadCreate {
         name: String,
-        state: ChangeId,
+        state: StateId,
         /// rmp-serde-encoded `Thread` record body, or `None` when no
         /// record was written by the forward path.
         manager_snapshot: Option<Vec<u8>>,
     },
     /// Thread deletion.
-    ThreadDelete { name: String, state: ChangeId },
+    ThreadDelete { name: String, state: StateId },
     /// Thread update.
     ThreadUpdate {
         name: String,
-        old_state: ChangeId,
-        new_state: ChangeId,
+        old_state: StateId,
+        new_state: StateId,
         /// rmp-serde-encoded `Thread` record bodies around the update.
         ///
         /// This is intentionally one sparse tail field rather than two
@@ -114,36 +114,36 @@ pub enum OpRecord {
     /// These published-ref fields — not the `from`/`new_state` positional
     /// pair — are the authoritative replay/materialization target.
     Fork {
-        from: ChangeId,
-        new_state: ChangeId,
+        from: StateId,
+        new_state: StateId,
         #[serde(default)]
         thread: Option<String>,
         #[serde(default)]
-        head: Option<ChangeId>,
+        head: Option<StateId>,
     },
     /// Collapse operation. `thread` names the published ref: `Some(name)`
     /// when the collapse published a thread ref, `None` when it published
     /// a detached HEAD at `result` (heddle#330 write chokepoint — the
     /// published-ref discriminant replay needs to materialize the ref).
     Collapse {
-        sources: Vec<ChangeId>,
-        result: ChangeId,
+        sources: Vec<StateId>,
+        result: StateId,
         #[serde(default)]
         thread: Option<String>,
         #[serde(default)]
-        pre_thread_state: Option<ChangeId>,
+        pre_thread_state: Option<StateId>,
     },
     /// Marker creation.
-    MarkerCreate { name: String, state: ChangeId },
+    MarkerCreate { name: String, state: StateId },
     /// Marker deletion.
-    MarkerDelete { name: String, state: ChangeId },
+    MarkerDelete { name: String, state: StateId },
     // --- Agent-first tail variants below; new variants append here. ---
     /// Cheap addressable save intended for agent-style frequent saves.
     /// Distinct from `Snapshot` so `heddle log --no-checkpoints` (the human
     /// default) can filter them without losing the ability to `goto` them.
     Checkpoint {
-        parent: Option<ChangeId>,
-        state: ChangeId,
+        parent: Option<StateId>,
+        state: StateId,
         thread: Option<String>,
     },
     /// Recorded when a transaction is aborted. The buffered ops the
@@ -158,7 +158,7 @@ pub enum OpRecord {
     /// pointer is retired.
     EphemeralThreadCollapse {
         thread: String,
-        final_state: ChangeId,
+        final_state: StateId,
     },
     /// Recorded when a structured conflict is resolved through
     /// `ConflictService::Resolve` (or its CLI front-end). Carries the
@@ -203,7 +203,7 @@ pub enum OpRecord {
         /// Blob the redaction targets.
         blob: ContentHash,
         /// State that surfaces the redacted file.
-        state: ChangeId,
+        state: StateId,
         /// Path within the state's tree.
         path: String,
     },
@@ -239,17 +239,17 @@ pub enum OpRecord {
         /// `pre_target_id`; redo advances it to `post_target_id`.
         target_thread: String,
         /// `target_thread`'s tip before the FF. Undo target.
-        pre_target_id: ChangeId,
+        pre_target_id: StateId,
         /// `target_thread`'s tip after the FF (the source's tip at
         /// recording time). Redo target — recorded so replay is
         /// deterministic regardless of what `source_thread` does
         /// later.
-        post_target_id: ChangeId,
+        post_target_id: StateId,
     },
     /// Git-overlay checkpoint written to the real Git checkout.
     GitCheckpoint {
         branch: String,
-        state: ChangeId,
+        state: StateId,
         previous_git_oid: Option<String>,
         new_git_oid: String,
     },
@@ -262,7 +262,7 @@ pub enum OpRecord {
     RemoteThreadUpdate {
         remote: String,
         thread: String,
-        state: ChangeId,
+        state: StateId,
     },
     /// A remote-thread ref was deleted (heddle#330 r9). Folded like a
     /// `MarkerDelete`: drops the name from the reconciled remote-thread
@@ -270,13 +270,13 @@ pub enum OpRecord {
     RemoteThreadDelete {
         remote: String,
         thread: String,
-        state: ChangeId,
+        state: StateId,
     },
     /// The heddle-internal pre-undo recovery pointer was set (heddle#330
     /// r9). A single rolling ORIG_HEAD-style pointer with no delete path,
     /// so one update variant suffices. Local (per-checkout) ref —
     /// reconciles within its own `op_scope`.
-    UndoRecoveryUpdate { state: ChangeId },
+    UndoRecoveryUpdate { state: StateId },
     /// A visibility tier was declared on a state (heddle#317). Audit-trail
     /// companion to the per-state `StateVisibility` sidecar record: the
     /// sidecar is the authoritative effective tier; this oplog entry records
@@ -290,7 +290,7 @@ pub enum OpRecord {
     /// sidecar capture-restore. Without the before-image the undo path could
     /// only no-op, leaving the oplog and the sidecar divergent (PR #529 P1).
     StateVisibilitySet {
-        state: ChangeId,
+        state: StateId,
         /// Content id of the persisted `StateVisibility` record.
         record_id: ContentHash,
         /// The tier declared.
@@ -309,7 +309,7 @@ pub enum OpRecord {
     /// Reversible the same way as [`StateVisibilitySet`](Self::StateVisibilitySet):
     /// `prior_sidecar`/`new_sidecar` snapshot the whole sidecar around the put.
     StateVisibilityPromote {
-        state: ChangeId,
+        state: StateId,
         /// The prior record this promotion supersedes.
         superseded: ContentHash,
         /// Content id of the new, superseding record.
@@ -743,7 +743,7 @@ pub enum RedactionUndoClass<'a> {
     /// blob bytes have since been purged.
     Redact {
         blob: &'a ContentHash,
-        state: &'a ChangeId,
+        state: &'a StateId,
         path: &'a str,
     },
     /// Every other record is irrelevant to redaction-undo safety.
@@ -762,7 +762,7 @@ impl OpRecord {
     /// reachability check. Enumerated explicitly (no wildcard) so a new
     /// state-carrying variant must declare what its undo needs to load
     /// (heddle#354 r9).
-    pub fn states_required_for_undo(&self) -> Vec<ChangeId> {
+    pub fn states_required_for_undo(&self) -> Vec<StateId> {
         match self {
             OpRecord::Snapshot {
                 prev_head: Some(prev),
@@ -806,7 +806,7 @@ impl OpRecord {
     /// whose redo is a no-op, deletes a ref, or touches only sidecars/Git OIDs
     /// return an empty list. Enumerated explicitly so a new state-carrying
     /// variant must declare its redo target (heddle#354 r9).
-    pub fn states_required_for_redo(&self) -> Vec<ChangeId> {
+    pub fn states_required_for_redo(&self) -> Vec<StateId> {
         match self {
             OpRecord::Snapshot { new_state, .. } => vec![*new_state],
             OpRecord::Goto { target, .. } => vec![*target],
@@ -994,12 +994,12 @@ impl OpBatch {
 
 #[cfg(test)]
 mod verb_catalog_tests {
-    use objects::object::{ChangeId, ContentHash, VisibilityTier};
+    use objects::object::{ContentHash, StateId, VisibilityTier};
 
     use super::*;
 
-    fn cid() -> ChangeId {
-        ChangeId::from_bytes([7; 16])
+    fn cid() -> StateId {
+        StateId::from_bytes([7; 32])
     }
 
     fn hash() -> ContentHash {

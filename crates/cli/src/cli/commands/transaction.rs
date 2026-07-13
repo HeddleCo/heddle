@@ -27,7 +27,7 @@ struct BeginOutput {
 
 #[derive(Serialize)]
 struct CommitOutput {
-    change_id: String,
+    state_id: String,
     op_count: u32,
 }
 
@@ -100,7 +100,7 @@ async fn run_commit(
         .map_err(status_to_anyhow)?
         .into_inner();
     let out = CommitOutput {
-        change_id: objects::object::ChangeId::try_from_slice(&resp.state_id)
+        state_id: objects::object::StateId::try_from_slice(&resp.state_id)
             .map(|id| id.to_string_full())
             .unwrap_or_default(),
         op_count: resp.op_count,
@@ -111,7 +111,7 @@ async fn run_commit(
             serde_json::to_string(&out).context("serialize commit output")?
         );
     } else {
-        println!("committed {} ({} ops)", out.change_id, out.op_count);
+        println!("committed {} ({} ops)", out.state_id, out.op_count);
     }
     Ok(())
 }

@@ -10,7 +10,7 @@ use std::{
 
 use objects::{
     error::HeddleError,
-    object::{ChangeId, ChangeIdParseError, ContentHash, FileMode, Principal, ThreadName, Tree},
+    object::{ContentHash, FileMode, Principal, StateId, StateIdParseError, ThreadName, Tree},
     store::ObjectStore,
 };
 use refs::Head;
@@ -63,7 +63,7 @@ pub enum GitProjectionError {
     CommitNotFound(String),
 
     #[error("state not found: {0}")]
-    StateNotFound(ChangeId),
+    StateNotFound(StateId),
 
     #[error("git repository not initialized")]
     GitRepoNotInitialized,
@@ -91,8 +91,8 @@ pub enum GitProjectionError {
     GitHeddleThreadDiverged {
         thread: String,
         branch: String,
-        thread_change: ChangeId,
-        branch_change: ChangeId,
+        thread_change: StateId,
+        branch_change: StateId,
     },
 
     #[error(
@@ -115,7 +115,7 @@ pub enum GitProjectionError {
     },
 
     #[error("change id parse error: {0}")]
-    ChangeIdParse(#[from] ChangeIdParseError),
+    StateIdParse(#[from] StateIdParseError),
 }
 
 /// Type alias for Git Projection and Bridge Mirror results.
@@ -426,13 +426,13 @@ impl WriteThroughOutcome {
     }
 }
 
-/// Mapping between Heddle ChangeIds and Git commit object IDs.
+/// Mapping between Heddle StateIds and Git commit object IDs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncMapping {
-    /// Maps Heddle ChangeId -> Git object id
-    heddle_to_git: HashMap<ChangeId, ObjectId>,
-    /// Maps Git object id -> Heddle ChangeId
-    git_to_heddle: HashMap<ObjectId, ChangeId>,
+    /// Maps Heddle StateId -> Git object id
+    heddle_to_git: HashMap<StateId, ObjectId>,
+    /// Maps Git object id -> Heddle StateId
+    git_to_heddle: HashMap<ObjectId, StateId>,
 }
 
 impl SyncMapping {
@@ -442,75 +442,75 @@ impl SyncMapping {
     }
 
     /// Insert a mapping.
-    pub fn insert(&mut self, change_id: ChangeId, git_oid: ObjectId) {
-        if let Some(previous_git) = self.heddle_to_git.remove(&change_id) {
+    pub fn insert(&mut self, state_id: StateId, git_oid: ObjectId) {
+        if let Some(previous_git) = self.heddle_to_git.remove(&state_id) {
             self.git_to_heddle.remove(&previous_git);
         }
         if let Some(previous_change) = self.git_to_heddle.remove(&git_oid) {
             self.heddle_to_git.remove(&previous_change);
         }
-        self.heddle_to_git.insert(change_id, git_oid);
-        self.git_to_heddle.insert(git_oid, change_id);
+        self.heddle_to_git.insert(state_id, git_oid);
+        self.git_to_heddle.insert(git_oid, state_id);
     }
 
     /// Insert a mapping and detect conflicts.
     pub fn insert_checked(
         &mut self,
-        change_id: ChangeId,
+        state_id: StateId,
         git_oid: ObjectId,
     ) -> GitProjectionResult<()> {
-        if let Some(existing) = self.heddle_to_git.get(&change_id)
+        if let Some(existing) = self.heddle_to_git.get(&state_id)
             && *existing != git_oid
         {
             return Err(GitProjectionError::MappingConflict {
                 message: format!(
                     "change id {} mapped to {} (new {})",
-                    change_id, existing, git_oid
+                    state_id, existing, git_oid
                 ),
             });
         }
 
         if let Some(existing) = self.git_to_heddle.get(&git_oid)
-            && *existing != change_id
+            && *existing != state_id
         {
             return Err(GitProjectionError::MappingConflict {
                 message: format!(
                     "git oid {} mapped to {} (new {})",
-                    git_oid, existing, change_id
+                    git_oid, existing, state_id
                 ),
             });
         }
 
-        self.insert(change_id, git_oid);
+        self.insert(state_id, git_oid);
         Ok(())
     }
 
-    /// Get Git object id for a Heddle ChangeId.
-    pub fn get_git(&self, change_id: &ChangeId) -> Option<ObjectId> {
-        self.heddle_to_git.get(change_id).copied()
+    /// Get Git object id for a Heddle StateId.
+    pub fn get_git(&self, state_id: &StateId) -> Option<ObjectId> {
+        self.heddle_to_git.get(state_id).copied()
     }
 
-    /// Get Heddle ChangeId for a Git object id.
-    pub fn get_heddle(&self, git_oid: ObjectId) -> Option<ChangeId> {
+    /// Get Heddle StateId for a Git object id.
+    pub fn get_heddle(&self, git_oid: ObjectId) -> Option<StateId> {
         self.git_to_heddle.get(&git_oid).copied()
     }
 
-    /// Check if a mapping exists for a ChangeId.
-    pub fn has_heddle(&self, change_id: &ChangeId) -> bool {
-        self.heddle_to_git.contains_key(change_id)
+    /// Check if a mapping exists for a StateId.
+    pub fn has_heddle(&self, state_id: &StateId) -> bool {
+        self.heddle_to_git.contains_key(state_id)
     }
 
-    /// Drop the mapping for `change_id`, clearing both directions. Returns the
+    /// Drop the mapping for `state_id`, clearing both directions. Returns the
     /// Git OID that was mapped, if any.
     ///
     /// The export visibility purge calls this to remove a state whose
     /// effective tier is no longer served by the export audience. Without it,
-    /// a stale ChangeId→OID mapping (minted while the state was public, kept
+    /// a stale StateId→OID mapping (minted while the state was public, kept
     /// alive by the notes/cache rebuild on the next export) makes the
     /// frontier walk and the tag/note sync treat a now-embargoed commit as
     /// served — leaking it via `refs/heads/<thread>` or a tag.
-    pub fn remove(&mut self, change_id: &ChangeId) -> Option<ObjectId> {
-        let git_oid = self.heddle_to_git.remove(change_id)?;
+    pub fn remove(&mut self, state_id: &StateId) -> Option<ObjectId> {
+        let git_oid = self.heddle_to_git.remove(state_id)?;
         self.git_to_heddle.remove(&git_oid);
         Some(git_oid)
     }
@@ -521,11 +521,11 @@ impl SyncMapping {
     }
 
     /// Iterate over mappings.
-    pub fn iter(&self) -> impl Iterator<Item = (&ChangeId, &ObjectId)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&StateId, &ObjectId)> {
         self.heddle_to_git.iter()
     }
 
-    /// Whether the in-memory mapping holds no `ChangeId → git OID` entries. The
+    /// Whether the in-memory mapping holds no `StateId → git OID` entries. The
     /// checkout-materialization path (#568 P1) uses this to decide whether it must
     /// hydrate the mapping from disk (a standalone projection checkout) or trust
     /// the mapping export just built in memory (a checkpoint/push).
@@ -534,37 +534,37 @@ impl SyncMapping {
     }
 
     pub fn retain_git_objects(&mut self, repo: &SleyRepository) {
-        let retained: Vec<(ChangeId, ObjectId)> = self
+        let retained: Vec<(StateId, ObjectId)> = self
             .heddle_to_git
             .iter()
-            .filter_map(|(change_id, git_oid)| {
+            .filter_map(|(state_id, git_oid)| {
                 repo.read_object(git_oid)
                     .ok()
-                    .map(|_| (*change_id, *git_oid))
+                    .map(|_| (*state_id, *git_oid))
             })
             .collect();
 
         self.heddle_to_git.clear();
         self.git_to_heddle.clear();
-        for (change_id, git_oid) in retained {
-            self.insert(change_id, git_oid);
+        for (state_id, git_oid) in retained {
+            self.insert(state_id, git_oid);
         }
     }
 
     #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
     pub fn retain_git_object_set(&mut self, reachable: &HashSet<ObjectId>) -> usize {
         let before = self.heddle_to_git.len();
-        let retained: Vec<(ChangeId, ObjectId)> = self
+        let retained: Vec<(StateId, ObjectId)> = self
             .heddle_to_git
             .iter()
             .filter(|(_, git_oid)| reachable.contains(*git_oid))
-            .map(|(change_id, git_oid)| (*change_id, *git_oid))
+            .map(|(state_id, git_oid)| (*state_id, *git_oid))
             .collect();
 
         self.heddle_to_git.clear();
         self.git_to_heddle.clear();
-        for (change_id, git_oid) in retained {
-            self.insert(change_id, git_oid);
+        for (state_id, git_oid) in retained {
+            self.insert(state_id, git_oid);
         }
         before.saturating_sub(self.heddle_to_git.len())
     }
@@ -575,8 +575,8 @@ pub struct GitProjection<'a> {
     pub heddle_repo: &'a HeddleRepository,
     pub git_repo_path: Option<PathBuf>,
     pub mapping: SyncMapping,
-    pub commit_message_overrides: HashMap<ChangeId, String>,
-    pub commit_parent_overrides: HashMap<ChangeId, Vec<ObjectId>>,
+    pub commit_message_overrides: HashMap<StateId, String>,
+    pub commit_parent_overrides: HashMap<StateId, Vec<ObjectId>>,
 }
 
 struct MappingFileSnapshot {
@@ -680,16 +680,16 @@ impl<'a> GitProjection<'a> {
     /// Sort states topologically (parents before children).
     pub fn sort_states_topologically(
         &self,
-        states: &[ChangeId],
-    ) -> GitProjectionResult<Vec<ChangeId>> {
+        states: &[StateId],
+    ) -> GitProjectionResult<Vec<StateId>> {
         let mut sorted = Vec::new();
-        let mut visited: std::collections::HashSet<ChangeId> = std::collections::HashSet::new();
+        let mut visited: std::collections::HashSet<StateId> = std::collections::HashSet::new();
 
         fn visit<S: ObjectStore + ?Sized>(
-            state_id: &ChangeId,
+            state_id: &StateId,
             store: &S,
-            visited: &mut std::collections::HashSet<ChangeId>,
-            sorted: &mut Vec<ChangeId>,
+            visited: &mut std::collections::HashSet<StateId>,
+            sorted: &mut Vec<StateId>,
         ) -> GitProjectionResult<()> {
             if visited.contains(state_id) {
                 return Ok(());
@@ -724,11 +724,11 @@ impl<'a> GitProjection<'a> {
         export_all(self)
     }
 
-    pub fn set_commit_message_override(&mut self, state_id: ChangeId, message: String) {
+    pub fn set_commit_message_override(&mut self, state_id: StateId, message: String) {
         self.commit_message_overrides.insert(state_id, message);
     }
 
-    pub fn set_commit_parent_override(&mut self, state_id: ChangeId, parents: Vec<ObjectId>) {
+    pub fn set_commit_parent_override(&mut self, state_id: StateId, parents: Vec<ObjectId>) {
         self.commit_parent_overrides.insert(state_id, parents);
     }
 
@@ -1172,7 +1172,7 @@ impl<'a> GitProjection<'a> {
     fn preflight_attached_pull_fast_forward(
         &mut self,
         remote_name: &str,
-        attached_before: Option<&(String, ChangeId)>,
+        attached_before: Option<&(String, StateId)>,
     ) -> GitProjectionResult<PullPreflight> {
         let Some((thread, state_id)) = attached_before else {
             return Ok(PullPreflight::ImportRequired);
@@ -1265,7 +1265,7 @@ impl<'a> GitProjection<'a> {
         let object_repo = common_repo_for_worktree(&checkout_repo)?;
 
         for record in self.heddle_repo.list_git_checkpoints()? {
-            let change_id = ChangeId::parse(&record.change_id)?;
+            let state_id = StateId::parse(&record.state_id)?;
             let git_oid = record
                 .git_commit
                 .parse::<ObjectId>()
@@ -1278,7 +1278,7 @@ impl<'a> GitProjection<'a> {
                 .read_object(&git_oid)
                 .map_err(|_| GitProjectionError::CommitNotFound(record.git_commit.clone()))?;
 
-            self.mapping.insert(change_id, git_oid);
+            self.mapping.insert(state_id, git_oid);
             // Only publish a note for a state served to the public mirror.
             // `collect_ref_updates` copies `refs/notes/*`, so writing a note for
             // a now-embargoed checkpoint here would leak that commit's metadata
@@ -1289,13 +1289,13 @@ impl<'a> GitProjection<'a> {
             // (heddle#316). Git projection export always publishes the public Git projection.
             let tier = self
                 .heddle_repo
-                .effective_visibility_tier(&change_id)
+                .effective_visibility_tier(&state_id)
                 .map_err(|e| {
-                    GitProjectionError::Git(format!("resolve visibility for {change_id}: {e:#}"))
+                    GitProjectionError::Git(format!("resolve visibility for {state_id}: {e:#}"))
                 })?;
             if repo::visible(&tier, &repo::AudienceTier::Public)
                 && super::git_notes::read_note(mirror_repo, git_oid)?.is_none()
-                && let Some(state) = self.heddle_repo.store().get_state(&change_id)?
+                && let Some(state) = self.heddle_repo.store().get_state(&state_id)?
             {
                 let note = super::git_notes::HeddleNote::from_state(&state);
                 super::git_notes::write_note(mirror_repo, git_oid, &note)?;
@@ -1379,7 +1379,7 @@ impl<'a> GitProjection<'a> {
 
     pub fn write_through_current_checkout_with_message(
         &mut self,
-        state_id: ChangeId,
+        state_id: StateId,
         message: String,
     ) -> GitProjectionResult<WriteThroughOutcome> {
         self.set_commit_message_override(state_id, message);
@@ -1408,7 +1408,7 @@ impl<'a> GitProjection<'a> {
     /// [`Self::write_through_current_checkout`], replacing these
     /// placeholder entries with real ones — so the index is never
     /// churned by read-only invocations.
-    pub fn update_intent_to_add(&self, state_id: &ChangeId) -> GitProjectionResult<()> {
+    pub fn update_intent_to_add(&self, state_id: &StateId) -> GitProjectionResult<()> {
         let root = self.heddle_repo.root();
         if !root.join(".git").exists() {
             return Ok(());
@@ -1604,7 +1604,7 @@ impl<'a> GitProjection<'a> {
     fn write_thread_state_checkout_from_existing_mirror(
         &mut self,
         thread: &str,
-        state_id: &ChangeId,
+        state_id: &StateId,
     ) -> GitProjectionResult<WriteThroughOutcome> {
         let mirror_repo = self.open_git_repo()?;
         // Reconstructing a faithful commit from state (#568 P1) resolves each
@@ -2410,9 +2410,9 @@ impl Drop for MirrorInitGuard {
 /// case without silently overwriting real work.
 pub fn thread_is_unclaimed_bootstrap(
     heddle_repo: &HeddleRepository,
-    change_id: &ChangeId,
+    state_id: &StateId,
 ) -> GitProjectionResult<bool> {
-    let Some(state) = heddle_repo.store().get_state(change_id)? else {
+    let Some(state) = heddle_repo.store().get_state(state_id)? else {
         return Ok(false);
     };
     if !state.parents.is_empty() {
@@ -3208,7 +3208,7 @@ fn classify_ref_move(
     // advanced and fetched into the mirror — is never force-overwritten; it falls
     // through to `Diverged` (FF-rejected unless the user passes `--force`), so its
     // newer commit survives. `old`'s objects survive in the mirror because heddle
-    // published it (the embargo purge drops the ChangeId→OID mapping, never the
+    // published it (the embargo purge drops the StateId→OID mapping, never the
     // object); if `old` is NOT resolvable here we cannot prove a rewind anyway.
     if recorded_tip == Some(old)
         && repo.read_commit(&old).is_ok()
@@ -3826,7 +3826,7 @@ pub fn materialize_checkout_closure_from_state(
     mapping: &SyncMapping,
     mirror_repo: &SleyRepository,
     object_repo: &SleyRepository,
-    tip_state_id: &ChangeId,
+    tip_state_id: &StateId,
     tip_oid: ObjectId,
     excluded: &HashSet<ObjectId>,
 ) -> GitProjectionResult<()> {
@@ -3834,8 +3834,8 @@ pub fn materialize_checkout_closure_from_state(
     // install attempts. Residual-only roots are installed per-oid below; mirror
     // roots are batched into one excluding pack install for perf shape parity.
     let mut lossy_roots: Vec<ObjectId> = Vec::new();
-    let mut stack: Vec<ChangeId> = vec![*tip_state_id];
-    let mut seen: HashSet<ChangeId> = HashSet::new();
+    let mut stack: Vec<StateId> = vec![*tip_state_id];
+    let mut seen: HashSet<StateId> = HashSet::new();
     let residual_store = ResidualStore::open(heddle_repo.heddle_dir());
 
     while let Some(state_id) = stack.pop() {
@@ -4092,7 +4092,7 @@ fn verify_closure_present(
 fn resolve_mapped_git_oid(
     heddle_repo: &HeddleRepository,
     mapping: &SyncMapping,
-    state_id: &ChangeId,
+    state_id: &StateId,
     object_repo: &SleyRepository,
 ) -> GitProjectionResult<Option<ObjectId>> {
     if let Some(git_oid) = mapping.get_git(state_id) {

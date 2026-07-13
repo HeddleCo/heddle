@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
-use crate::object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree};
+use crate::object::{
+    Action, ActionId, Blob, ContentHash, State, StateAttachment, StateAttachmentId, StateId, Tree,
+};
 
 pub mod actor_presence;
 pub mod agent_task;
@@ -134,7 +136,7 @@ impl ObjectStore for AnyStore {
     fn has_tree(&self, hash: &ContentHash) -> Result<bool> {
         any_store_dispatch!(self, has_tree(hash))
     }
-    fn get_state(&self, id: &ChangeId) -> Result<Option<State>> {
+    fn get_state(&self, id: &StateId) -> Result<Option<State>> {
         match self {
             AnyStore::Fs(inner) => ObjectStore::get_state(inner, id),
         }
@@ -142,11 +144,24 @@ impl ObjectStore for AnyStore {
     fn put_state(&self, state: &State) -> Result<()> {
         any_store_dispatch!(self, put_state(state))
     }
-    fn has_state(&self, id: &ChangeId) -> Result<bool> {
+    fn has_state(&self, id: &StateId) -> Result<bool> {
         any_store_dispatch!(self, has_state(id))
     }
-    fn list_states(&self) -> Result<Vec<ChangeId>> {
+    fn list_states(&self) -> Result<Vec<StateId>> {
         any_store_dispatch!(self, list_states())
+    }
+    fn get_state_attachment(
+        &self,
+        state: &StateId,
+        id: &StateAttachmentId,
+    ) -> Result<Option<StateAttachment>> {
+        any_store_dispatch!(self, get_state_attachment(state, id))
+    }
+    fn put_state_attachment(&self, attachment: &StateAttachment) -> Result<StateAttachmentId> {
+        any_store_dispatch!(self, put_state_attachment(attachment))
+    }
+    fn list_state_attachments(&self, state: &StateId) -> Result<Vec<StateAttachment>> {
+        any_store_dispatch!(self, list_state_attachments(state))
     }
     fn get_action(&self, id: &ActionId) -> Result<Option<Action>> {
         any_store_dispatch!(self, get_action(id))
@@ -171,7 +186,7 @@ impl ObjectStore for AnyStore {
             AnyStore::Fs(inner) => ObjectStore::put_tree_serialized(inner, data, hash),
         }
     }
-    fn put_state_serialized(&self, data: &[u8], id: ChangeId) -> Result<()> {
+    fn put_state_serialized(&self, data: &[u8], id: StateId) -> Result<()> {
         any_store_dispatch!(self, put_state_serialized(data, id))
     }
     fn put_action_serialized(&self, data: &[u8], id: ActionId) -> Result<()> {
@@ -223,16 +238,16 @@ impl ObjectStore for AnyStore {
     fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
         any_store_dispatch!(self, list_blobs_with_redactions())
     }
-    fn has_state_visibility_for_state(&self, state: &ChangeId) -> Result<bool> {
+    fn has_state_visibility_for_state(&self, state: &StateId) -> Result<bool> {
         any_store_dispatch!(self, has_state_visibility_for_state(state))
     }
-    fn get_state_visibility_bytes_for_state(&self, state: &ChangeId) -> Result<Option<Vec<u8>>> {
+    fn get_state_visibility_bytes_for_state(&self, state: &StateId) -> Result<Option<Vec<u8>>> {
         any_store_dispatch!(self, get_state_visibility_bytes_for_state(state))
     }
-    fn put_state_visibility_bytes_for_state(&self, state: &ChangeId, bytes: &[u8]) -> Result<()> {
+    fn put_state_visibility_bytes_for_state(&self, state: &StateId, bytes: &[u8]) -> Result<()> {
         any_store_dispatch!(self, put_state_visibility_bytes_for_state(state, bytes))
     }
-    fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
+    fn list_states_with_visibility(&self) -> Result<Vec<StateId>> {
         any_store_dispatch!(self, list_states_with_visibility())
     }
 }
@@ -351,10 +366,25 @@ pub trait ObjectStore: Send + Sync {
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>>;
     fn put_tree(&self, tree: &Tree) -> Result<ContentHash>;
     fn has_tree(&self, hash: &ContentHash) -> Result<bool>;
-    fn get_state(&self, id: &ChangeId) -> Result<Option<State>>;
+    fn get_state(&self, id: &StateId) -> Result<Option<State>>;
     fn put_state(&self, state: &State) -> Result<()>;
-    fn has_state(&self, id: &ChangeId) -> Result<bool>;
-    fn list_states(&self) -> Result<Vec<ChangeId>>;
+    fn has_state(&self, id: &StateId) -> Result<bool>;
+    fn list_states(&self) -> Result<Vec<StateId>>;
+    fn get_state_attachment(
+        &self,
+        _state: &StateId,
+        _id: &StateAttachmentId,
+    ) -> Result<Option<StateAttachment>> {
+        Ok(None)
+    }
+    fn put_state_attachment(&self, _attachment: &StateAttachment) -> Result<StateAttachmentId> {
+        Err(HeddleError::InvalidObject(
+            "object store does not support state attachments".to_string(),
+        ))
+    }
+    fn list_state_attachments(&self, _state: &StateId) -> Result<Vec<StateAttachment>> {
+        Ok(Vec::new())
+    }
     fn get_action(&self, id: &ActionId) -> Result<Option<Action>>;
     fn put_action(&self, action: &mut Action) -> Result<ActionId>;
     fn list_actions(&self) -> Result<Vec<ActionId>>;
@@ -391,12 +421,12 @@ pub trait ObjectStore: Send + Sync {
         self.put_tree(&tree)
     }
 
-    fn put_state_serialized(&self, data: &[u8], id: ChangeId) -> Result<()> {
+    fn put_state_serialized(&self, data: &[u8], id: StateId) -> Result<()> {
         let state: State = rmp_serde::from_slice(data)?;
-        if state.change_id != id {
+        let found = state.id();
+        if found != id {
             return Err(HeddleError::InvalidObject(format!(
-                "state change_id mismatch: expected {}, found {}",
-                id, state.change_id
+                "state id mismatch: expected {id}, computed {found}"
             )));
         }
         self.put_state(&state)
@@ -444,7 +474,7 @@ pub trait ObjectStore: Send + Sync {
                 }
                 Ok(None)
             }
-            pack::PackObjectId::ChangeId(change_id) => {
+            pack::PackObjectId::StateId(change_id) => {
                 if let Some(state) = self.get_state(change_id)? {
                     Ok(Some((
                         pack::ObjectType::State,
@@ -492,7 +522,7 @@ pub trait ObjectStore: Send + Sync {
                 (pack::PackObjectId::Hash(hash), pack::ObjectType::Action) => {
                     self.put_action_serialized(&data, ActionId::from_hash(*hash))?;
                 }
-                (pack::PackObjectId::ChangeId(change_id), pack::ObjectType::State) => {
+                (pack::PackObjectId::StateId(change_id), pack::ObjectType::State) => {
                     self.put_state_serialized(&data, *change_id)?;
                 }
                 _ => {
@@ -616,7 +646,7 @@ pub trait ObjectStore: Send + Sync {
     ///
     /// Default impl returns `Ok(false)` for stores that do not model this
     /// sidecar.
-    fn has_state_visibility_for_state(&self, _state: &ChangeId) -> Result<bool> {
+    fn has_state_visibility_for_state(&self, _state: &StateId) -> Result<bool> {
         Ok(false)
     }
 
@@ -625,7 +655,7 @@ pub trait ObjectStore: Send + Sync {
     /// payload for state visibility.
     ///
     /// Default impl returns `Ok(None)`.
-    fn get_state_visibility_bytes_for_state(&self, _state: &ChangeId) -> Result<Option<Vec<u8>>> {
+    fn get_state_visibility_bytes_for_state(&self, _state: &StateId) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
 
@@ -633,7 +663,7 @@ pub trait ObjectStore: Send + Sync {
     ///
     /// Default impl returns an "unsupported" error so stores that do not
     /// model the sidecar refuse instead of dropping it.
-    fn put_state_visibility_bytes_for_state(&self, _state: &ChangeId, _bytes: &[u8]) -> Result<()> {
+    fn put_state_visibility_bytes_for_state(&self, _state: &StateId, _bytes: &[u8]) -> Result<()> {
         Err(HeddleError::InvalidObject(
             "this object store does not support persisting state visibility".to_string(),
         ))
@@ -642,7 +672,7 @@ pub trait ObjectStore: Send + Sync {
     /// List every state with at least one state-visibility record.
     ///
     /// Default impl returns `Ok(vec![])`.
-    fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
+    fn list_states_with_visibility(&self) -> Result<Vec<StateId>> {
         Ok(Vec::new())
     }
 }
@@ -730,25 +760,21 @@ mod any_store_tests {
         let attribution =
             Attribution::human(Principal::new("AnyStore Test", "anystore@example.com"));
         let state = State::new(tree_hash, vec![], attribution.clone());
-        let change_id = state.change_id;
+        let state_id = state.id();
         store.put_state(&state).unwrap();
-        assert!(
-            ObjectStore::get_state(&store, &change_id)
-                .unwrap()
-                .is_some()
-        );
-        assert!(store.has_state(&change_id).unwrap());
-        assert!(store.list_states().unwrap().contains(&change_id));
+        assert!(ObjectStore::get_state(&store, &state_id).unwrap().is_some());
+        assert!(store.has_state(&state_id).unwrap());
+        assert!(store.list_states().unwrap().contains(&state_id));
         let state2 = State::new(tree2.hash(), vec![], attribution.clone());
         let state2_bytes = rmp_serde::to_vec_named(&state2).unwrap();
         store
-            .put_state_serialized(&state2_bytes, state2.change_id)
+            .put_state_serialized(&state2_bytes, state2.id())
             .unwrap();
 
         // ── Actions ──
         let mut action = Action::new(
             None,
-            ChangeId::generate(),
+            StateId::from_bytes([3; 32]),
             Operation::Snapshot,
             "any-store action",
             attribution,
@@ -813,12 +839,12 @@ mod any_store_tests {
         // ── State visibility ──
         let state_visibility = b"any-store state visibility bytes";
         store
-            .put_state_visibility_bytes_for_state(&change_id, state_visibility)
+            .put_state_visibility_bytes_for_state(&state_id, state_visibility)
             .unwrap();
-        assert!(store.has_state_visibility_for_state(&change_id).unwrap());
+        assert!(store.has_state_visibility_for_state(&state_id).unwrap());
         assert_eq!(
             store
-                .get_state_visibility_bytes_for_state(&change_id)
+                .get_state_visibility_bytes_for_state(&state_id)
                 .unwrap()
                 .as_deref(),
             Some(state_visibility.as_slice())
@@ -827,7 +853,7 @@ mod any_store_tests {
             store
                 .list_states_with_visibility()
                 .unwrap()
-                .contains(&change_id)
+                .contains(&state_id)
         );
 
         // ── Caches ──

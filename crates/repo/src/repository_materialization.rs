@@ -13,7 +13,7 @@ use std::{
 
 use objects::{
     fs_atomic::{enrich_fs_error, is_directory_not_empty},
-    object::{Blob, ChangeId, ContentHash, Tree, TreeEntryTarget},
+    object::{Blob, ContentHash, StateId, Tree, TreeEntryTarget},
     store::ObjectStore,
     util::gitlink_placeholder_bytes,
 };
@@ -224,7 +224,7 @@ impl Repository {
     #[instrument(skip(self), fields(state_id = %state_id))]
     pub fn warm_canonical_store_for_state(
         &self,
-        state_id: &ChangeId,
+        state_id: &StateId,
     ) -> Result<WarmCanonicalStoreStats> {
         self.warm_canonical_store_for_states(std::slice::from_ref(state_id))
     }
@@ -237,7 +237,7 @@ impl Repository {
     #[instrument(skip(self, state_ids), fields(state_count = state_ids.len()))]
     pub fn warm_canonical_store_for_states(
         &self,
-        state_ids: &[ChangeId],
+        state_ids: &[StateId],
     ) -> Result<WarmCanonicalStoreStats> {
         let mut blob_hashes = BTreeSet::new();
         for state_id in state_ids {
@@ -312,7 +312,7 @@ impl Repository {
     /// Materialize a tree to the filesystem.
     ///
     /// Crate-private on purpose: this blob-keyed primitive carries no
-    /// `ChangeId`/audience, so it cannot apply the visibility gate. External
+    /// `StateId`/audience, so it cannot apply the visibility gate. External
     /// callers serving a *named committed state* to a checkout must go through
     /// [`Repository::checkout_state_gated`] (gated); callers applying a
     /// *locally-computed* tree (a merge/cherry-pick result) use
@@ -1634,9 +1634,7 @@ mod tests {
         }
 
         // Warm: every blob should now be loose-uncompressed.
-        let stats = repo
-            .warm_canonical_store_for_state(&state.change_id)
-            .unwrap();
+        let stats = repo.warm_canonical_store_for_state(&state.id()).unwrap();
         assert_eq!(stats.errors, 0, "warm pass produced errors: {:?}", stats);
         assert_eq!(stats.total(), hashes.len());
         assert!(
@@ -1695,12 +1693,8 @@ mod tests {
         repo.store().pack_objects(false).unwrap();
         repo.store().prune_loose_objects().unwrap();
 
-        let first = repo
-            .warm_canonical_store_for_state(&state.change_id)
-            .unwrap();
-        let second = repo
-            .warm_canonical_store_for_state(&state.change_id)
-            .unwrap();
+        let first = repo.warm_canonical_store_for_state(&state.id()).unwrap();
+        let second = repo.warm_canonical_store_for_state(&state.id()).unwrap();
 
         assert_eq!(first.total(), second.total(), "blob count must be stable");
         assert_eq!(
@@ -1760,9 +1754,7 @@ mod tests {
         repo.store().prune_loose_objects().unwrap();
 
         // Warm so the first materialize doesn't pay decompress cost.
-        let stats = repo
-            .warm_canonical_store_for_state(&state.change_id)
-            .unwrap();
+        let stats = repo.warm_canonical_store_for_state(&state.id()).unwrap();
         assert_eq!(stats.errors, 0);
 
         let n_worktrees = 6;

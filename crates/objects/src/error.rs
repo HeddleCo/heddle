@@ -3,7 +3,7 @@
 
 use std::{error::Error, fmt, path::Path};
 
-use crate::object::{ChangeId, ContentHash, TreeError};
+use crate::object::{ContentHash, StateId, TreeError};
 
 /// Structured recovery details that can cross the embeddable facade boundary.
 #[derive(Debug, Clone, PartialEq)]
@@ -146,7 +146,7 @@ pub enum HeddleError {
     #[error("No merge in progress")]
     NoMergeInProgress,
     #[error("state not found: {0}")]
-    StateNotFound(ChangeId),
+    StateNotFound(StateId),
     #[error("invalid object: {0}")]
     InvalidObject(String),
     #[error("repository not found at {0}")]

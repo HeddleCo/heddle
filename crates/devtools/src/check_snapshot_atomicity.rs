@@ -11,7 +11,7 @@
 //! record second:
 //!
 //! ```ignore
-//! self.refs.set_thread(&thread, &state.change_id)?;   // PUBLISH (phase 5)
+//! self.refs.set_thread(&thread, &state.state_id)?;   // PUBLISH (phase 5)
 //! self.oplog.record_snapshot(...)?;                    // RECORD  (phase 4)
 //! ```
 //!

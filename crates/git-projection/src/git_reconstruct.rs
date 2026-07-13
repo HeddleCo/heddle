@@ -62,7 +62,7 @@ pub fn commit_object_id(content: &[u8]) -> ObjectId {
 /// `state.tree` through [`export_tree`] (git trees are content-addressed, so the
 /// resulting OID is independent of which repo it is written into — the round-trip
 /// fidelity gate proves this path reproduces the original tree SHA). Parent OIDs
-/// come from the import `mapping` (`ChangeId` → original git OID), in
+/// come from the import `mapping` (`StateId` → original git OID), in
 /// `state.parents` order — order is part of a commit's identity (§1.2).
 pub fn reconstruct_commit_bytes(
     heddle_repo: &HeddleRepository,
@@ -284,10 +284,10 @@ impl GitProjection<'_> {
         sha: &str,
     ) -> GitProjectionResult<Option<Vec<u8>>> {
         let oid = ObjectId::from_hex(ObjectFormat::Sha1, sha).map_err(git_err)?;
-        let Some(change_id) = self.mapping.get_heddle(oid) else {
+        let Some(state_id) = self.mapping.get_heddle(oid) else {
             return Ok(None);
         };
-        let Some(state) = self.heddle_repo.store().get_state(&change_id)? else {
+        let Some(state) = self.heddle_repo.store().get_state(&state_id)? else {
             return Ok(None);
         };
         Ok(Some(reconstruct_commit_bytes(
@@ -311,10 +311,10 @@ impl GitProjection<'_> {
         sha: &str,
     ) -> GitProjectionResult<Option<ObjectId>> {
         let oid = ObjectId::from_hex(ObjectFormat::Sha1, sha).map_err(git_err)?;
-        let Some(change_id) = self.mapping.get_heddle(oid) else {
+        let Some(state_id) = self.mapping.get_heddle(oid) else {
             return Ok(None);
         };
-        let Some(state) = self.heddle_repo.store().get_state(&change_id)? else {
+        let Some(state) = self.heddle_repo.store().get_state(&state_id)? else {
             return Ok(None);
         };
         Ok(Some(self.reconstruct_and_write_commit(repo, &state)?))

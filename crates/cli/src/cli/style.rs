@@ -277,7 +277,7 @@ pub fn confidence(value: Option<f32>, formatted: &str) -> String {
 /// terminals already render text monospaced. The "dim+monospace"
 /// label in the spec was about *visual treatment*, which the
 /// terminal grants for free.
-pub fn change_id(id: &str) -> String {
+pub fn state_id(id: &str) -> String {
     dim(id)
 }
 
@@ -327,11 +327,11 @@ mod tests {
             accent("ok"),
             warn("careful"),
             error("boom"),
-            dim("hd-abc123"),
+            dim("hs-abc123"),
             bold("Capture audit pipeline"),
             confidence(Some(0.95), "0.95"),
             confidence(None, "—"),
-            change_id("hd-abc123"),
+            state_id("hs-abc123"),
             principal("Ada Lovelace", "ada@analytical.engine"),
             thread_state("active"),
         ] {
@@ -348,10 +348,10 @@ mod tests {
             accent("ok"),
             warn("careful"),
             error("boom"),
-            dim("hd-abc123"),
+            dim("hs-abc123"),
             bold("Capture audit pipeline"),
             confidence(Some(0.95), "0.95"),
-            change_id("hd-abc123"),
+            state_id("hs-abc123"),
             principal("Ada Lovelace", "ada@analytical.engine"),
             thread_state("active"),
         ] {
@@ -499,8 +499,8 @@ mod tests {
 
     #[test]
     #[serial(color_state)]
-    fn change_id_uncolored_is_identity() {
+    fn state_id_uncolored_is_identity() {
         force_for_test(false);
-        assert_eq!(change_id("hd-abc123"), "hd-abc123");
+        assert_eq!(state_id("hs-abc123"), "hs-abc123");
     }
 }

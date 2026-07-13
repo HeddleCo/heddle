@@ -387,14 +387,14 @@ fn uncheckpointed_heddle_state_is_ahead_of_git(repo: &Repository) -> anyhow::Res
     let Some(current) = repo.current_state()? else {
         return Ok(false);
     };
-    if mapped == current.change_id {
+    if mapped == current.state_id {
         return Ok(false);
     }
-    if mapped_change_relation(repo, &mapped, &current.change_id) != "git_behind_heddle" {
+    if mapped_change_relation(repo, &mapped, &current.state_id) != "git_behind_heddle" {
         return Ok(false);
     }
     Ok(repo
-        .latest_git_checkpoint_for_change(&current.change_id)?
+        .latest_git_checkpoint_for_change(&current.state_id)?
         .is_none())
 }
 
@@ -407,8 +407,8 @@ fn current_branch_tip(repo: &Repository) -> anyhow::Result<Option<GitOverlayBran
 
 fn mapped_change_relation(
     repo: &Repository,
-    git_mapped: &objects::object::ChangeId,
-    heddle_current: &objects::object::ChangeId,
+    git_mapped: &objects::object::StateId,
+    heddle_current: &objects::object::StateId,
 ) -> &'static str {
     let mut graph = CommitGraphIndex::new(repo);
     let git_is_ancestor = graph

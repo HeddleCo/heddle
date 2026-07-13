@@ -28,12 +28,12 @@ pub fn apply_merged_tree(repo: &Repository, tree: &Tree) -> Result<()> {
                     "current state {} references tree {} but the object store has no such tree; \
                      aborting merge application to avoid silently replacing tracked content with \
                      an empty baseline",
-                    state.change_id.short(),
+                    state.state_id.short(),
                     state.tree,
                 ),
                 format!(
                     "current state {} references missing tree {} in the object store",
-                    state.change_id.short(),
+                    state.state_id.short(),
                     state.tree,
                 ),
                 "merge application would compare against an empty baseline and could silently replace tracked content with the merged tree, losing tracked paths outside it",

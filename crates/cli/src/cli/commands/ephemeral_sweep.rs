@@ -18,7 +18,7 @@
 //! tail wagging the dog.
 
 use anyhow::Result;
-use objects::object::ChangeId;
+use objects::object::StateId;
 use oplog::OpRecord;
 use repo::Repository;
 use repo::ephemeral_thread::{CollapsedThread, collapse_expired_ephemeral_threads};
@@ -64,12 +64,12 @@ pub fn run_ephemeral_sweep(repo: &Repository) -> Result<Vec<CollapsedThread>> {
         }
         // Record the oplog entry. `final_state` may be `None` for
         // never-snapshotted threads; in that rare case we synthesise a
-        // zero-valued `ChangeId` so the proto field stays populated —
+        // zero-valued `StateId` so the proto field stays populated —
         // the oplog entry is still meaningful as a "this thread
         // collapsed without producing a state" marker.
         let final_state = entry
             .final_state
-            .unwrap_or_else(|| ChangeId::from_bytes([0; 16]));
+            .unwrap_or_else(|| StateId::from_bytes([0; 16]));
         ops.push(OpRecord::EphemeralThreadCollapse {
             thread: entry.thread_name.clone(),
             final_state,

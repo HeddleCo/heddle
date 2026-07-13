@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::ChangeId;
+use super::StateId;
 
 /// Type of operation performed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,12 +19,12 @@ pub enum Operation {
     /// Squash multiple states into one.
     Collapse {
         /// Source states that were collapsed.
-        sources: Vec<ChangeId>,
+        sources: Vec<StateId>,
     },
     /// AI-generated merge/reconciliation.
     Synthesize {
         /// Source states that were synthesized.
-        sources: Vec<ChangeId>,
+        sources: Vec<StateId>,
     },
     /// Update a thread reference.
     ThreadUpdate {

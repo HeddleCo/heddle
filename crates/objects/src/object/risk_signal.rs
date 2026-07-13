@@ -5,9 +5,8 @@
 //! and lives in `crates/state_review/`. This module owns only the shape: what
 //! a signal is, how it serializes on disk, and the validation rules.
 //!
-//! The full set of fired signals is stored on the state. Tick budgeting (which
-//! signals to surface in the review UI) happens at render time and is never
-//! baked into storage — see [`state_review::budget`].
+//! Fired signals are referenced by detached state attachments. Tick budgeting
+//! remains a render-time concern.
 //!
 //! Wire encoding: rmp-serde MessagePack. Format version is `1`. New optional
 //! fields are appended at the tail of [`RiskSignal`] with `#[serde(default)]`,
@@ -15,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::object::hash::ChangeId;
+use crate::object::hash::StateId;
 
 /// Maximum length of [`RiskSignal::reason`], in bytes.
 ///
@@ -24,9 +23,7 @@ use crate::object::hash::ChangeId;
 /// review payload from ballooning when many signals fire.
 pub const MAX_REASON_LEN: usize = 200;
 
-/// Top-level encoded blob. Stored under a [`ContentHash`] referenced from
-/// [`State::risk_signals`]. A blob with `format_version > FORMAT_VERSION` is
-/// rejected; older versions are read with the missing-field defaults.
+/// Top-level encoded blob referenced by a risk-signal state attachment.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RiskSignalBlob {
     pub format_version: u8,
@@ -54,7 +51,7 @@ pub struct RiskSignal {
     /// when a signal moves between renders (e.g., anchor travel after a
     /// rename).
     #[serde(default)]
-    pub computed_against: Option<ChangeId>,
+    pub computed_against: Option<StateId>,
 }
 
 impl RiskSignal {

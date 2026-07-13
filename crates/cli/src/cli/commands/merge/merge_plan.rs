@@ -3,7 +3,7 @@
 
 use ::merge::{ConflictLabels, TreeMergeResult, merge_trees};
 use anyhow::{Result, anyhow};
-use objects::{object::ChangeId, store::ObjectStore};
+use objects::{object::StateId, store::ObjectStore};
 use repo::{CommitGraphIndex, Repository};
 
 use super::{
@@ -22,15 +22,15 @@ impl MergePlan {
     pub(crate) fn for_merge_command(
         repo: &Repository,
         graph: &mut CommitGraphIndex<'_>,
-        current_change_id: &ChangeId,
-        target_change_id: &ChangeId,
+        current_state_id: &StateId,
+        target_state_id: &StateId,
         labels: ConflictLabels<'_>,
     ) -> Result<Self> {
         Self::build(
             repo,
             graph,
-            current_change_id,
-            target_change_id,
+            current_state_id,
+            target_state_id,
             MergeRelationKind::AlreadyUpToDate,
             labels,
         )
@@ -39,15 +39,15 @@ impl MergePlan {
     pub(crate) fn for_thread_preview(
         repo: &Repository,
         graph: &mut CommitGraphIndex<'_>,
-        target_change_id: &ChangeId,
-        thread_change_id: &ChangeId,
+        target_state_id: &StateId,
+        thread_state_id: &StateId,
         labels: ConflictLabels<'_>,
     ) -> Result<Self> {
         Self::build(
             repo,
             graph,
-            target_change_id,
-            thread_change_id,
+            target_state_id,
+            thread_state_id,
             MergeRelationKind::AlreadyIntegrated,
             labels,
         )
@@ -64,17 +64,17 @@ impl MergePlan {
     fn build(
         repo: &Repository,
         graph: &mut CommitGraphIndex<'_>,
-        current_change_id: &ChangeId,
-        target_change_id: &ChangeId,
+        current_state_id: &StateId,
+        target_state_id: &StateId,
         integrated_kind: MergeRelationKind,
         labels: ConflictLabels<'_>,
     ) -> Result<Self> {
-        if graph.is_ancestor(target_change_id, current_change_id)? {
+        if graph.is_ancestor(target_state_id, current_state_id)? {
             return Ok(Self {
                 relation: MergeRelation::new(
                     integrated_kind,
-                    *current_change_id,
-                    *target_change_id,
+                    *current_state_id,
+                    *target_state_id,
                     None,
                     0,
                 ),
@@ -82,12 +82,12 @@ impl MergePlan {
             });
         }
 
-        if graph.is_ancestor(current_change_id, target_change_id)? {
+        if graph.is_ancestor(current_state_id, target_state_id)? {
             return Ok(Self {
                 relation: MergeRelation::new(
                     MergeRelationKind::FastForward,
-                    *current_change_id,
-                    *target_change_id,
+                    *current_state_id,
+                    *target_state_id,
                     None,
                     0,
                 ),
@@ -96,16 +96,16 @@ impl MergePlan {
         }
 
         let merge_base_id = graph
-            .find_merge_base(current_change_id, target_change_id)?
+            .find_merge_base(current_state_id, target_state_id)?
             .ok_or_else(|| {
                 anyhow!(RecoveryAdvice::merge_no_common_ancestor(
-                    &current_change_id.short(),
-                    &target_change_id.short(),
+                    &current_state_id.short(),
+                    &target_state_id.short(),
                 ))
             })?;
         let base_tree = load_tree(repo, &merge_base_id)?;
-        let current_tree = load_tree(repo, current_change_id)?;
-        let target_tree = load_tree(repo, target_change_id)?;
+        let current_tree = load_tree(repo, current_state_id)?;
+        let target_tree = load_tree(repo, target_state_id)?;
         let blob_source = RepositoryMergeBlobSource { repo };
         let merge_result = merge_trees(
             repo.store(),
@@ -125,8 +125,8 @@ impl MergePlan {
         Ok(Self {
             relation: MergeRelation::new(
                 relation_kind,
-                *current_change_id,
-                *target_change_id,
+                *current_state_id,
+                *target_state_id,
                 Some(merge_base_id),
                 merge_result.conflicts.len(),
             ),
@@ -135,11 +135,11 @@ impl MergePlan {
     }
 }
 
-fn load_tree(repo: &Repository, change_id: &ChangeId) -> Result<objects::object::Tree> {
+fn load_tree(repo: &Repository, state_id: &StateId) -> Result<objects::object::Tree> {
     let state = repo
         .store()
-        .get_state(change_id)?
-        .ok_or_else(|| anyhow!("State '{}' not found", change_id.short()))?;
+        .get_state(state_id)?
+        .ok_or_else(|| anyhow!("State '{}' not found", state_id.short()))?;
     // `state.tree` is recorded by the state object — the tree MUST be
     // present in the store for that state to be meaningful. Coercing
     // `Ok(None)` to `Tree::default()` here meant a corrupt store
@@ -149,12 +149,12 @@ fn load_tree(repo: &Repository, change_id: &ChangeId) -> Result<objects::object:
         anyhow!(RecoveryAdvice::merge_integrity_refusal(
             format!(
                 "State {} references missing tree {}",
-                change_id.short(),
+                state_id.short(),
                 state.tree
             ),
             format!(
                 "state {} references tree {} but the object store has no such tree",
-                change_id.short(),
+                state_id.short(),
                 state.tree
             ),
             "merging against a missing tree would silently treat that side as empty and could erase tracked files",

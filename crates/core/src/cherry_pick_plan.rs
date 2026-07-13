@@ -86,7 +86,7 @@ pub struct CherryPickSuccessFacts<'a> {
     pub outcome: CherryPickOutcome,
     pub commit: &'a str,
     /// New change id short form when [`CherryPickOutcome::Committed`].
-    pub new_change_id_short: Option<&'a str>,
+    pub new_state_id_short: Option<&'a str>,
 }
 
 /// Human success message for a completed cherry-pick.
@@ -100,7 +100,7 @@ pub fn cherry_pick_human_message(facts: &CherryPickSuccessFacts<'_>) -> String {
             format!("Applied {} (not committed)", facts.commit)
         }
         CherryPickOutcome::Committed => {
-            let new_id = facts.new_change_id_short.unwrap_or("");
+            let new_id = facts.new_state_id_short.unwrap_or("");
             format!("Cherry-picked {} as {}", facts.commit, new_id)
         }
     }
@@ -142,18 +142,18 @@ mod tests {
     #[test]
     fn messages_and_status_tokens() {
         assert_eq!(
-            default_cherry_pick_commit_message("hd-source"),
-            "Cherry-pick hd-source"
+            default_cherry_pick_commit_message("hs-source"),
+            "Cherry-pick hs-source"
         );
 
         let applied = CherryPickSuccessFacts {
             outcome: CherryPickOutcome::AppliedNotCommitted,
-            commit: "hd-source",
-            new_change_id_short: None,
+            commit: "hs-source",
+            new_state_id_short: None,
         };
         assert_eq!(
             cherry_pick_human_message(&applied),
-            "Applied hd-source (not committed)"
+            "Applied hs-source (not committed)"
         );
         assert_eq!(
             cherry_pick_json_status(CherryPickOutcome::AppliedNotCommitted),
@@ -162,12 +162,12 @@ mod tests {
 
         let committed = CherryPickSuccessFacts {
             outcome: CherryPickOutcome::Committed,
-            commit: "hd-source",
-            new_change_id_short: Some("hd-result"),
+            commit: "hs-source",
+            new_state_id_short: Some("hs-result"),
         };
         assert_eq!(
             cherry_pick_human_message(&committed),
-            "Cherry-picked hd-source as hd-result"
+            "Cherry-picked hs-source as hs-result"
         );
         assert_eq!(
             cherry_pick_json_status(CherryPickOutcome::Committed),

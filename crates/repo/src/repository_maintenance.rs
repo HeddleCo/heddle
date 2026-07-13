@@ -8,7 +8,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use objects::{
     fs_atomic::write_file_atomic,
-    object::ChangeId,
+    object::StateId,
     store::{ObjectStore, pack_install_metrics_snapshot, recover_pack_install_intents},
 };
 use refs::{Head, RefSummaryIndexInspection};
@@ -554,17 +554,17 @@ struct ColdCloneThreadEntryMirror {
 
 #[derive(Clone)]
 struct PullPlannerKeyMirror {
-    remote_state_id: ChangeId,
+    remote_state_id: StateId,
     depth: Option<u32>,
-    exclude_states: Vec<ChangeId>,
+    exclude_states: Vec<StateId>,
     availability_mode: PullAvailabilityModeMirror,
 }
 
 impl PullPlannerKeyMirror {
     fn new(
-        remote_state_id: ChangeId,
+        remote_state_id: StateId,
         depth: Option<u32>,
-        exclude_states: Vec<ChangeId>,
+        exclude_states: Vec<StateId>,
         availability_mode: PullAvailabilityModeMirror,
     ) -> Self {
         Self {
@@ -671,7 +671,7 @@ fn prune_invalid_pull_plans(repo: &Repository, repo_path: Option<&str>) -> Resul
                 Ok(plan) => {
                     plan.schema_version != PULL_PLANNER_SCHEMA_VERSION
                         || repo_path.is_some_and(|expected| plan.repo_path != expected)
-                        || ChangeId::parse(&plan.remote_state_id).is_err()
+                        || StateId::parse(&plan.remote_state_id).is_err()
                         || !valid_states.contains(&plan.remote_state_id)
                 }
                 Err(_) => true,
@@ -710,7 +710,7 @@ fn pull_planner_manifest_needs_rebuild(
         else {
             return Ok(true);
         };
-        let state_id = ChangeId::parse(&thread.state_id).map_err(|err| {
+        let state_id = StateId::parse(&thread.state_id).map_err(|err| {
             HeddleError::Io(io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
         })?;
         let full_key =
@@ -744,7 +744,7 @@ fn rebuild_pull_planner_manifest(repo: &Repository, repo_path: &str) -> Result<(
 
     let mut thread_entries = Vec::with_capacity(threads.len());
     for thread in &threads {
-        let state_id = ChangeId::parse(&thread.state_id).map_err(|err| {
+        let state_id = StateId::parse(&thread.state_id).map_err(|err| {
             HeddleError::Io(io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
         })?;
         let full_key =
@@ -855,13 +855,13 @@ fn pull_planner_plans_dir(repo_root: &Path) -> PathBuf {
     pull_planner_root(repo_root).join("plans")
 }
 
-fn sorted_change_ids(ids: &[ChangeId]) -> Vec<String> {
-    let mut values = ids.iter().map(ChangeId::to_string_full).collect::<Vec<_>>();
+fn sorted_change_ids(ids: &[StateId]) -> Vec<String> {
+    let mut values = ids.iter().map(StateId::to_string_full).collect::<Vec<_>>();
     values.sort();
     values
 }
 
-fn pull_planner_exclude_fingerprint(ids: &[ChangeId]) -> String {
+fn pull_planner_exclude_fingerprint(ids: &[StateId]) -> String {
     let joined = sorted_change_ids(ids).join("\n");
     objects::object::ContentHash::compute(joined.as_bytes())
         .to_hex()
@@ -1080,16 +1080,16 @@ mod tests {
                 "head": {
                     "kind": "attached",
                     "value": "main",
-                    "head_state": first.change_id.to_string_full(),
+                    "head_state": first.id().to_string_full(),
                 },
                 "markers": [],
                 "threads": [{
                     "name": "main",
-                    "state_id": first.change_id.to_string_full(),
+                    "state_id": first.id().to_string_full(),
                 }],
                 "thread_entries": [{
                     "thread": "main",
-                    "state_id": first.change_id.to_string_full(),
+                    "state_id": first.id().to_string_full(),
                     "planner_key_full": "missing-full.json",
                     "planner_key_lazy": "missing-lazy.json",
                     "object_count": 0,

@@ -53,7 +53,7 @@ use objects::{
     error::{HeddleError, Result},
     fs_atomic::write_file_atomic,
     lock::{RepoLock, RepositoryLockExt},
-    object::{Attribution, ChangeId, ContentHash, Principal, State, ThreadName, Tree},
+    object::{Attribution, ContentHash, Principal, State, StateId, ThreadName, Tree},
     store::{AnyStore, FsStore, ObjectStore, ShallowInfo},
     sync::RwLockExt,
 };
@@ -83,7 +83,6 @@ pub use repository_maintenance::{
 };
 pub use repository_materialization::WarmCanonicalStoreStats;
 pub use repository_partial_fetch::MissingBlob;
-pub use repository_signing::ResignOutcome;
 pub use repository_snapshot::{SnapshotExecution, SnapshotProfile};
 pub use repository_thread_materialize::{CheckoutMaterialization, ThreadCaptureOutcome};
 pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile};
@@ -136,7 +135,7 @@ enum GitHeadState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitCheckpointRecord {
-    pub change_id: String,
+    pub state_id: String,
     pub git_commit: String,
     pub summary: String,
     pub committed_at: String,
@@ -157,7 +156,7 @@ pub struct GitOverlayBranchTip {
     pub git_commit: String,
     pub history_imported: bool,
     #[serde(skip)]
-    pub mapped_change: Option<ChangeId>,
+    pub mapped_state: Option<StateId>,
 }
 
 #[cfg(feature = "git-overlay")]
@@ -167,7 +166,7 @@ pub struct GitOverlayTagTip {
     pub git_commit: String,
     pub history_imported: bool,
     #[serde(skip)]
-    pub mapped_change: Option<ChangeId>,
+    pub mapped_state: Option<StateId>,
 }
 
 /// How many Git commits reachable from a branch tip have no Heddle mapping
@@ -259,7 +258,7 @@ fn is_false(value: &bool) -> bool {
 
 #[derive(Debug, Deserialize)]
 struct GitProjectionMappingEntry {
-    change_id: String,
+    state_id: String,
     git_oid: String,
 }
 
@@ -833,7 +832,7 @@ impl Repository {
                             }
                             Ok(Some(GitHeadState::Detached(git_oid))) => {
                                 if let Ok(Some(state)) =
-                                    repo.git_overlay_mapped_change_for_git_oid(git_oid)
+                                    repo.git_overlay_mapped_state_for_git_oid(git_oid)
                                 {
                                     let git_head = Head::Detached { state };
                                     let stale = match repo.refs.read_head() {
@@ -1216,7 +1215,7 @@ impl Repository {
                 continue;
             };
             let git_commit = target.to_string();
-            let mapped_change = self.git_overlay_mapped_change_for_commit(
+            let mapped_state = self.git_overlay_mapped_state_for_commit(
                 &git_commit,
                 &projection_mapping,
                 &ingest_mapping,
@@ -1229,30 +1228,30 @@ impl Repository {
                 // ref-store hits per branch on a 60+ branch repo.
                 let existing_thread = self.refs().get_thread(&thread_name)?;
                 let mapped = matches!(
-                    (existing_thread.as_ref(), mapped_change.as_ref()),
-                    (Some(existing), Some(mapped_change))
-                        if existing == mapped_change
+                    (existing_thread.as_ref(), mapped_state.as_ref()),
+                    (Some(existing), Some(mapped_state))
+                        if existing == mapped_state
                 );
                 let checkpointed = if mapped {
                     false
                 } else if let Some(existing) = existing_thread {
-                    self.latest_git_checkpoint_for_change(&existing)?
+                    self.latest_git_checkpoint_for_state(&existing)?
                         .is_some_and(|record| record.git_commit == git_commit)
-                        || mapped_change.as_ref().is_some_and(|mapped_change| {
-                            self.change_is_ancestor(mapped_change, &existing)
+                        || mapped_state.as_ref().is_some_and(|mapped_state| {
+                            self.state_is_ancestor(mapped_state, &existing)
                         })
                 } else {
                     false
                 };
                 mapped || checkpointed
             } else {
-                mapped_change.is_some()
+                mapped_state.is_some()
             };
             branch_tips.push(GitOverlayBranchTip {
                 branch: name,
                 git_commit,
                 history_imported,
-                mapped_change,
+                mapped_state,
             });
         }
         branch_tips.sort_by(|a, b| a.branch.cmp(&b.branch));
@@ -1295,7 +1294,7 @@ impl Repository {
                 continue;
             };
             let git_commit = target.to_string();
-            let mapped_change = self.git_overlay_mapped_change_for_commit(
+            let mapped_state = self.git_overlay_mapped_state_for_commit(
                 &git_commit,
                 &projection_mapping,
                 &ingest_mapping,
@@ -1304,8 +1303,8 @@ impl Repository {
             let marker_name = MarkerName::from(name.as_str());
             let history_imported = if imported_markers.contains(&marker_name) {
                 matches!(
-                    (self.refs().get_marker(&marker_name)?, mapped_change.as_ref()),
-                    (Some(existing), Some(mapped_change)) if existing == *mapped_change
+                    (self.refs().get_marker(&marker_name)?, mapped_state.as_ref()),
+                    (Some(existing), Some(mapped_state)) if existing == *mapped_state
                 )
             } else {
                 false
@@ -1314,7 +1313,7 @@ impl Repository {
                 tag: name,
                 git_commit,
                 history_imported,
-                mapped_change,
+                mapped_state,
             });
         }
 
@@ -1338,12 +1337,12 @@ impl Repository {
             .find(|tip| tip.tag == name))
     }
 
-    /// Map a Git branch name to a Heddle change id when known.
+    /// Map a Git branch name to a Heddle state id when known.
     ///
     /// Kept available without `git-overlay` feature so open/HEAD reconciliation
     /// can compile under native-only builds (it no-ops when capability is not
     /// Git Overlay). Tip enumeration (`git_overlay_branch_tips`) remains gated.
-    pub fn git_overlay_mapped_change_for_branch(&self, name: &str) -> Result<Option<ChangeId>> {
+    pub fn git_overlay_mapped_state_for_branch(&self, name: &str) -> Result<Option<StateId>> {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
         }
@@ -1369,7 +1368,7 @@ impl Repository {
             else {
                 return Ok(None);
             };
-            return self.git_overlay_mapped_change_for_commit(
+            return self.git_overlay_mapped_state_for_commit(
                 &target.to_string(),
                 &projection_mapping,
                 &ingest_mapping,
@@ -1380,10 +1379,10 @@ impl Repository {
     }
 
     #[cfg(feature = "git-overlay")]
-    pub fn git_overlay_mapped_change_for_remote_tracking_ref(
+    pub fn git_overlay_mapped_state_for_remote_tracking_ref(
         &self,
         name: &str,
-    ) -> Result<Option<ChangeId>> {
+    ) -> Result<Option<StateId>> {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
         }
@@ -1409,7 +1408,7 @@ impl Repository {
             else {
                 return Ok(None);
             };
-            return self.git_overlay_mapped_change_for_commit(
+            return self.git_overlay_mapped_state_for_commit(
                 &target.to_string(),
                 &projection_mapping,
                 &ingest_mapping,
@@ -1419,7 +1418,7 @@ impl Repository {
         Ok(None)
     }
 
-    pub fn git_overlay_mapped_change_for_tag(&self, name: &str) -> Result<Option<ChangeId>> {
+    pub fn git_overlay_mapped_state_for_tag(&self, name: &str) -> Result<Option<StateId>> {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
         }
@@ -1445,7 +1444,7 @@ impl Repository {
             else {
                 return Ok(None);
             };
-            return self.git_overlay_mapped_change_for_commit(
+            return self.git_overlay_mapped_state_for_commit(
                 &target.to_string(),
                 &projection_mapping,
                 &ingest_mapping,
@@ -1456,7 +1455,7 @@ impl Repository {
     }
 
     #[cfg(feature = "git-overlay")]
-    fn change_is_ancestor(&self, ancestor: &ChangeId, descendant: &ChangeId) -> bool {
+    fn state_is_ancestor(&self, ancestor: &StateId, descendant: &StateId) -> bool {
         let mut graph = CommitGraphIndex::new(self);
         graph.is_ancestor(ancestor, descendant).unwrap_or(false)
     }
@@ -1559,7 +1558,7 @@ impl Repository {
         Ok(file
             .entries
             .into_iter()
-            .map(|entry| (entry.git_oid, entry.change_id))
+            .map(|entry| (entry.git_oid, entry.state_id))
             .collect())
     }
 
@@ -1603,14 +1602,14 @@ impl Repository {
 
         let mut mapping = HashMap::new();
         for row in rows {
-            let (git_sha, change_id) = row.map_err(|error| {
+            let (git_sha, state_id) = row.map_err(|error| {
                 HeddleError::Config(format!(
                     "failed to read ingest SHA map row at '{}': {}",
                     path.display(),
                     error
                 ))
             })?;
-            mapping.insert(git_sha, change_id);
+            mapping.insert(git_sha, state_id);
         }
         Ok(mapping)
     }
@@ -1619,17 +1618,17 @@ impl Repository {
         Ok(self
             .list_git_checkpoints()?
             .into_iter()
-            .map(|record| (record.git_commit, record.change_id))
+            .map(|record| (record.git_commit, record.state_id))
             .collect())
     }
 
-    fn git_overlay_mapped_change_for_commit(
+    fn git_overlay_mapped_state_for_commit(
         &self,
         git_commit: &str,
         projection_mapping: &HashMap<String, String>,
         ingest_mapping: &HashMap<String, String>,
         checkpoint_mapping: &HashMap<String, String>,
-    ) -> Result<Option<ChangeId>> {
+    ) -> Result<Option<StateId>> {
         let Some(change) = projection_mapping
             .get(git_commit)
             .or_else(|| ingest_mapping.get(git_commit))
@@ -1637,66 +1636,66 @@ impl Repository {
         else {
             return Ok(None);
         };
-        let change_id = ChangeId::parse(change).map_err(|error| {
+        let state_id = StateId::parse(change).map_err(|error| {
             HeddleError::Config(format!(
-                "git commit {git_commit} maps to invalid Heddle change id '{change}': {error}"
+                "git commit {git_commit} maps to invalid Heddle state id '{change}': {error}"
             ))
         })?;
-        if self.store.get_state(&change_id)?.is_some() {
-            Ok(Some(change_id))
+        if self.store.get_state(&state_id)?.is_some() {
+            Ok(Some(state_id))
         } else {
             Ok(None)
         }
     }
 
-    fn git_overlay_mapped_git_commit_for_change_in(
+    fn git_overlay_mapped_git_commit_for_state_in(
         &self,
-        change_id: &ChangeId,
+        state_id: &StateId,
         mapping: &HashMap<String, String>,
     ) -> Result<Option<String>> {
-        for (git_commit, mapped_change) in mapping {
-            let mapped_change_id = ChangeId::parse(mapped_change).map_err(|error| {
+        for (git_commit, mapped_state) in mapping {
+            let mapped_state_id = StateId::parse(mapped_state).map_err(|error| {
                 HeddleError::Config(format!(
-                    "git commit {git_commit} maps to invalid Heddle change id '{mapped_change}': {error}"
+                    "git commit {git_commit} maps to invalid Heddle state id '{mapped_state}': {error}"
                 ))
             })?;
-            if mapped_change_id == *change_id {
+            if mapped_state_id == *state_id {
                 return Ok(Some(git_commit.clone()));
             }
         }
         Ok(None)
     }
 
-    pub fn git_overlay_mapped_git_commit_for_change(
+    pub fn git_overlay_mapped_git_commit_for_state(
         &self,
-        change_id: &ChangeId,
+        state_id: &StateId,
     ) -> Result<Option<String>> {
         let projection_mapping = self.git_projection_mapping()?;
         if let Some(git_commit) =
-            self.git_overlay_mapped_git_commit_for_change_in(change_id, &projection_mapping)?
+            self.git_overlay_mapped_git_commit_for_state_in(state_id, &projection_mapping)?
         {
             return Ok(Some(git_commit));
         }
 
         let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         if let Some(git_commit) =
-            self.git_overlay_mapped_git_commit_for_change_in(change_id, &ingest_mapping)?
+            self.git_overlay_mapped_git_commit_for_state_in(state_id, &ingest_mapping)?
         {
             return Ok(Some(git_commit));
         }
 
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
-        self.git_overlay_mapped_git_commit_for_change_in(change_id, &checkpoint_mapping)
+        self.git_overlay_mapped_git_commit_for_state_in(state_id, &checkpoint_mapping)
     }
 
-    pub fn git_overlay_mapped_change_for_git_commit(
+    pub fn git_overlay_mapped_state_for_git_commit(
         &self,
         git_commit: &str,
-    ) -> Result<Option<ChangeId>> {
+    ) -> Result<Option<StateId>> {
         let projection_mapping = self.git_projection_mapping()?;
         let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
-        self.git_overlay_mapped_change_for_commit(
+        self.git_overlay_mapped_state_for_commit(
             git_commit,
             &projection_mapping,
             &ingest_mapping,
@@ -1704,11 +1703,11 @@ impl Repository {
         )
     }
 
-    fn git_overlay_mapped_change_for_git_oid(
+    fn git_overlay_mapped_state_for_git_oid(
         &self,
         git_oid: SleyObjectId,
-    ) -> Result<Option<ChangeId>> {
-        self.git_overlay_mapped_change_for_git_commit(&git_oid.to_string())
+    ) -> Result<Option<StateId>> {
+        self.git_overlay_mapped_state_for_git_commit(&git_oid.to_string())
     }
 
     /// Count the Git commits reachable from `tip_git_commit` that are not
@@ -1748,7 +1747,7 @@ impl Repository {
             }
             let git_commit = oid.to_string();
             if self
-                .git_overlay_mapped_change_for_commit(
+                .git_overlay_mapped_state_for_commit(
                     &git_commit,
                     &projection_mapping,
                     &ingest_mapping,
@@ -1954,27 +1953,27 @@ impl Repository {
         Ok(serde_json::from_str(&contents)?)
     }
 
-    pub fn latest_git_checkpoint_for_change(
+    pub fn latest_git_checkpoint_for_state(
         &self,
-        change_id: &ChangeId,
+        state_id: &StateId,
     ) -> Result<Option<GitCheckpointRecord>> {
-        let full_id = change_id.to_string_full();
+        let full_id = state_id.to_string_full();
         Ok(self
             .list_git_checkpoints()?
             .into_iter()
             .rev()
-            .find(|record| record.change_id == full_id))
+            .find(|record| record.state_id == full_id))
     }
 
     pub fn record_git_checkpoint(
         &self,
-        change_id: &ChangeId,
+        state_id: &StateId,
         git_commit: impl Into<String>,
         summary: impl Into<String>,
     ) -> Result<GitCheckpointRecord> {
         let mut records = self.list_git_checkpoints()?;
         let record = GitCheckpointRecord {
-            change_id: change_id.to_string_full(),
+            state_id: state_id.to_string_full(),
             git_commit: git_commit.into(),
             summary: summary.into(),
             committed_at: Utc::now().to_rfc3339(),
@@ -2069,7 +2068,7 @@ impl Repository {
         &self,
         facet: &SpoolFacet,
         main_thread: &str,
-    ) -> Result<Option<ChangeId>> {
+    ) -> Result<Option<StateId>> {
         if facet.is_default() {
             return self.head();
         }
@@ -2088,7 +2087,7 @@ impl Repository {
         &self,
         facet: &SpoolFacet,
         main_thread: &str,
-        state: &ChangeId,
+        state: &StateId,
     ) -> Result<()> {
         if facet.is_default() {
             return Err(HeddleError::InvalidObject(
@@ -2152,8 +2151,8 @@ impl Repository {
     /// (see `atomic::reconciler`'s detached-`Snapshot` arm).
     pub fn commit_snapshot_atomic(
         &self,
-        new_state: &ChangeId,
-        prev_head: Option<ChangeId>,
+        new_state: &StateId,
+        prev_head: Option<StateId>,
         thread: Option<&ThreadName>,
     ) -> Result<()> {
         self.commit_snapshot_atomic_with_records(new_state, prev_head, thread, Vec::new())
@@ -2170,8 +2169,8 @@ impl Repository {
     /// auto-applied default tier together (heddle#317 / PR #529 P1).
     pub fn commit_snapshot_atomic_with_records(
         &self,
-        new_state: &ChangeId,
-        prev_head: Option<ChangeId>,
+        new_state: &StateId,
+        prev_head: Option<StateId>,
         thread: Option<&ThreadName>,
         extra: Vec<OpRecord>,
     ) -> Result<()> {
@@ -2217,8 +2216,8 @@ impl Repository {
     /// and the commit runs with no folded record.
     pub fn commit_snapshot_atomic_with_capture_visibility(
         &self,
-        new_state: &ChangeId,
-        prev_head: Option<ChangeId>,
+        new_state: &StateId,
+        prev_head: Option<StateId>,
         thread: Option<&ThreadName>,
         lock_held: bool,
     ) -> Result<()> {
@@ -2275,7 +2274,7 @@ impl Repository {
         self.repo_config()
     }
 
-    pub fn get_tree_for_state(&self, state_id: &ChangeId) -> Result<Option<Tree>> {
+    pub fn get_tree_for_state(&self, state_id: &StateId) -> Result<Option<Tree>> {
         let state = match self.store.get_state(state_id)? {
             Some(state) => state,
             None => return Ok(None),
@@ -2374,12 +2373,12 @@ impl Repository {
         Ok(exclusions)
     }
 
-    pub fn head(&self) -> Result<Option<ChangeId>> {
+    pub fn head(&self) -> Result<Option<StateId>> {
         Ok(match self.head_ref()? {
             Head::Attached { thread } => match self.refs.get_thread(&thread)? {
-                Some(change_id) => Some(change_id),
+                Some(state_id) => Some(state_id),
                 None if self.capability() == RepositoryCapability::GitOverlay => {
-                    self.git_overlay_mapped_change_for_branch(&thread)?
+                    self.git_overlay_mapped_state_for_branch(&thread)?
                 }
                 None => None,
             },
@@ -2396,7 +2395,7 @@ impl Repository {
             return Ok(raw);
         }
         if let Some(GitHeadState::Detached(git_oid)) = detect_git_head_state(&self.root)?
-            && let Some(state) = self.git_overlay_mapped_change_for_git_oid(git_oid)?
+            && let Some(state) = self.git_overlay_mapped_state_for_git_oid(git_oid)?
         {
             return Ok(Head::Detached { state });
         }
@@ -2408,9 +2407,7 @@ impl Repository {
         }
         let branch_thread = ThreadName::from(branch.as_str());
         if self.refs.get_thread(&branch_thread)?.is_some()
-            || self
-                .git_overlay_mapped_change_for_branch(&branch)?
-                .is_some()
+            || self.git_overlay_mapped_state_for_branch(&branch)?.is_some()
         {
             return Ok(Head::Attached {
                 thread: branch_thread,
@@ -2504,11 +2501,11 @@ impl Repository {
         }
     }
 
-    pub fn is_shallow(&self, id: &ChangeId) -> bool {
+    pub fn is_shallow(&self, id: &StateId) -> bool {
         self.shallow.read_or_poisoned().is_shallow(id)
     }
 
-    pub fn set_shallow(&self, state_id: &ChangeId, _parents: &[ChangeId]) -> Result<()> {
+    pub fn set_shallow(&self, state_id: &StateId, _parents: &[StateId]) -> Result<()> {
         self.shallow.write_or_poisoned().add_shallow(*state_id)?;
         Ok(())
     }
@@ -2542,7 +2539,7 @@ impl Repository {
         let tree_hash = self.store.put_tree(&empty_tree)?;
         let state = State::new_snapshot(tree_hash, vec![], Attribution::human(seed_principal()));
         self.store.put_state(&state)?;
-        self.refs.set_thread(&main_thread, &state.change_id)?;
+        self.refs.set_thread(&main_thread, &state.id())?;
         Ok(())
     }
 

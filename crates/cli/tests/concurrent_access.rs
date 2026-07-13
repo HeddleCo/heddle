@@ -32,7 +32,7 @@ fn test_concurrent_reads() {
     for _ in 0..10 {
         let repo = Arc::clone(&repo);
         let barrier = Arc::clone(&barrier);
-        let state_id = state.change_id;
+        let state_id = state.state_id;
 
         let handle = thread::spawn(move || {
             barrier.wait(); // Synchronize start
@@ -98,7 +98,7 @@ fn test_concurrent_snapshots() {
             .as_ref()
             .unwrap_or_else(|e| panic!("Thread {} snapshot failed: {:?}", i, e));
         assert!(
-            state_ids.insert(state.change_id),
+            state_ids.insert(state.state_id),
             "Thread {} produced duplicate state ID",
             i
         );
@@ -137,7 +137,7 @@ fn test_concurrent_track_operations() {
     for i in 0..5 {
         let repo = Arc::clone(&repo);
         let barrier = Arc::clone(&barrier);
-        let base_id = base.change_id;
+        let base_id = base.state_id;
 
         let handle = thread::spawn(move || {
             barrier.wait();
@@ -226,7 +226,7 @@ fn test_concurrent_goto() {
     for i in 0..5 {
         std::fs::write(temp.path().join("version.txt"), format!("v{}", i)).unwrap();
         let state = repo.snapshot(Some(format!("State {}", i)), None).unwrap();
-        states.push(state.change_id);
+        states.push(state.state_id);
     }
 
     let repo = Arc::new(repo);
@@ -354,7 +354,7 @@ fn test_concurrent_snapshots_same_parent() {
             .as_ref()
             .unwrap_or_else(|e| panic!("Thread {} snapshot failed: {:?}", index, e));
         assert!(
-            state_ids.insert(state.change_id),
+            state_ids.insert(state.state_id),
             "Thread {} produced duplicate state ID",
             index
         );
@@ -392,7 +392,7 @@ fn test_concurrent_marker_operations() {
     for i in 0..10 {
         let repo = Arc::clone(&repo);
         let barrier = Arc::clone(&barrier);
-        let state_id = state.change_id;
+        let state_id = state.state_id;
 
         let handle = thread::spawn(move || {
             barrier.wait();
@@ -515,7 +515,7 @@ fn test_concurrent_state_retrieval() {
     for i in 0..50 {
         std::fs::write(temp.path().join(format!("v{}.txt", i)), format!("v{}", i)).unwrap();
         let state = repo.snapshot(Some(format!("State {}", i)), None).unwrap();
-        state_ids.push(state.change_id);
+        state_ids.push(state.state_id);
     }
 
     let repo = Arc::new(repo);

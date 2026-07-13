@@ -372,8 +372,7 @@ mod tests {
     #[test]
     fn state_not_found_typed_variant_is_data_err() {
         let err: anyhow::Error =
-            objects::error::HeddleError::StateNotFound(objects::object::ChangeId::generate())
-                .into();
+            objects::error::HeddleError::StateNotFound(objects::object::StateId::generate()).into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
     }
 

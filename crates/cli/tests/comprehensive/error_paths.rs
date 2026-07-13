@@ -33,7 +33,7 @@ fn test_goto_nonexistent_state() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "content");
 
-    let result = heddle(&["switch", "hd-deadbeef1234"], Some(temp.path()));
+    let result = heddle(&["switch", "hs-deadbeef1234"], Some(temp.path()));
     assert!(result.is_err(), "goto nonexistent state should fail");
 }
 

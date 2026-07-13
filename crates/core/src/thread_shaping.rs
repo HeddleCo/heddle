@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use objects::{
     fs_ops::remove_path_recursively,
-    object::{ChangeId, ThreadName},
+    object::{StateId, ThreadName},
     store::ObjectStore,
 };
 use refs::Head;
@@ -22,8 +22,8 @@ pub struct ThreadMoveOutput {
     pub from_thread: String,
     pub to_thread: String,
     pub moved_paths: Vec<String>,
-    pub source_change_id: Option<String>,
-    pub target_change_id: String,
+    pub source_state_id: Option<String>,
+    pub target_state_id: String,
     pub message: String,
 }
 
@@ -119,8 +119,8 @@ pub fn capture_split(
         from_thread: current.id,
         to_thread: target.id,
         moved_paths,
-        source_change_id: None,
-        target_change_id: target_snapshot,
+        source_state_id: None,
+        target_state_id: target_snapshot,
         message: "Split selected paths into target thread".to_string(),
     })
 }
@@ -181,8 +181,8 @@ pub fn thread_move(
         from_thread: source.id,
         to_thread: target.id,
         moved_paths,
-        source_change_id: Some(source_snapshot),
-        target_change_id: target_snapshot,
+        source_state_id: Some(source_snapshot),
+        target_state_id: target_snapshot,
         message: "Moved selected paths between threads".to_string(),
     })
 }
@@ -275,11 +275,7 @@ fn no_paths_matched_details(
     }
 }
 
-fn resolve_required_state(
-    repo: &Repository,
-    spec: Option<&str>,
-    message: &str,
-) -> Result<ChangeId> {
+fn resolve_required_state(repo: &Repository, spec: Option<&str>, message: &str) -> Result<StateId> {
     let spec = spec.ok_or_else(|| anyhow!(message.to_string()))?;
     repo.resolve_state(spec)?
         .ok_or_else(|| anyhow!(message.to_string()))
@@ -310,8 +306,8 @@ fn collect_worktree_split_paths(
 
 fn collect_state_move_paths(
     repo: &Repository,
-    base: &ChangeId,
-    current: &ChangeId,
+    base: &StateId,
+    current: &StateId,
     prefixes: &[String],
 ) -> Result<Vec<String>> {
     let base_tree = repo
@@ -354,7 +350,7 @@ fn apply_selected_worktree_paths(
 
 fn apply_selected_state_paths(
     source_repo: &Repository,
-    state_id: &ChangeId,
+    state_id: &StateId,
     target_repo: &Repository,
     paths: &[String],
 ) -> Result<()> {
@@ -371,7 +367,7 @@ fn apply_selected_state_paths(
 
 fn restore_paths_from_state(
     repo: &Repository,
-    baseline: Option<ChangeId>,
+    baseline: Option<StateId>,
     paths: &[String],
 ) -> Result<()> {
     let tree = if let Some(state_id) = baseline {

@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use objects::{
-    object::{ActionId, ChangeId, ContentHash},
+    object::{ActionId, ContentHash, StateAttachmentBody, StateId},
     store::ObjectStore,
 };
 use repo::Repository;
@@ -37,7 +37,7 @@ impl LocalSync {
     }
 
     /// List all threads in the source repository.
-    pub fn list_threads(&self) -> Result<Vec<(String, ChangeId)>> {
+    pub fn list_threads(&self) -> Result<Vec<(String, StateId)>> {
         let mut threads = Vec::new();
         for thread in self.source.refs().list_threads()? {
             if let Some(state_id) = self.source.refs().get_thread(&thread)? {
@@ -48,7 +48,7 @@ impl LocalSync {
     }
 
     /// List all markers in the source repository.
-    pub fn list_markers(&self) -> Result<Vec<(String, ChangeId)>> {
+    pub fn list_markers(&self) -> Result<Vec<(String, StateId)>> {
         let mut markers = Vec::new();
         for marker in self.source.refs().list_markers()? {
             if let Some(state_id) = self.source.refs().get_marker(&marker)? {
@@ -59,7 +59,7 @@ impl LocalSync {
     }
 
     /// Fetch a state and all its dependencies from source to target.
-    pub fn fetch_state(&self, target: &Repository, state_id: &ChangeId) -> Result<usize> {
+    pub fn fetch_state(&self, target: &Repository, state_id: &StateId) -> Result<usize> {
         let transfer_plan = self.plan_state_transfer(*state_id, None)?;
         self.copy_transfer_plan(target, &transfer_plan)
     }
@@ -71,7 +71,7 @@ impl LocalSync {
     pub fn fetch_state_with_depth(
         &self,
         target: &Repository,
-        state_id: &ChangeId,
+        state_id: &StateId,
         depth: u32,
     ) -> Result<usize> {
         let state_already_present = target.store().get_state(state_id)?.is_some();
@@ -85,7 +85,7 @@ impl LocalSync {
 
     fn plan_state_transfer(
         &self,
-        state_id: ChangeId,
+        state_id: StateId,
         depth: Option<u32>,
     ) -> Result<RepositoryTransferPlan> {
         // Local sync still executes through the existing dependency-preserving
@@ -125,7 +125,7 @@ impl LocalSync {
             (ObjectId::Hash(hash), ObjectType::Blob) => self.copy_blob(target, hash),
             (ObjectId::Hash(hash), ObjectType::Tree) => self.copy_tree(target, hash),
             (ObjectId::Hash(hash), ObjectType::Action) => self.copy_action(target, hash),
-            (ObjectId::ChangeId(state_id), ObjectType::State) => self.copy_state(target, state_id),
+            (ObjectId::StateId(state_id), ObjectType::State) => self.copy_state(target, state_id),
             (_, ObjectType::Redaction | ObjectType::StateVisibility) => Ok(false),
             (id, obj_type) => Err(anyhow!(
                 "transfer plan object {id:?} has incompatible type {obj_type:?}"
@@ -160,19 +160,71 @@ impl LocalSync {
         Ok(true)
     }
 
-    fn copy_state(&self, target: &Repository, state_id: &ChangeId) -> Result<bool> {
-        let target_state = target.store().get_state(state_id)?;
-        let state_already_present = target_state.is_some();
+    fn copy_state(&self, target: &Repository, state_id: &StateId) -> Result<bool> {
+        let state_already_present = target.store().get_state(state_id)?.is_some();
         let state = self
             .source
             .store()
             .get_state(state_id)?
             .ok_or_else(|| anyhow!("State {} not found in source", state_id))?;
 
-        if !state_already_present || state_metadata_roots_changed(target_state.as_ref(), &state) {
+        if !state_already_present {
             target.store().put_state(&state)?;
         }
+        self.copy_state_attachments(target, state_id)?;
         Ok(!state_already_present)
+    }
+
+    fn copy_state_attachments(&self, target: &Repository, state_id: &StateId) -> Result<()> {
+        let mut pending = self.source.list_state_attachments(state_id)?;
+        while !pending.is_empty() {
+            let mut ready = None;
+            for (index, attachment) in pending.iter().enumerate() {
+                if let Some(prior) = attachment.supersedes
+                    && target.get_state_attachment(state_id, &prior)?.is_none()
+                {
+                    continue;
+                }
+                ready = Some(index);
+                break;
+            }
+            let Some(index) = ready else {
+                return Err(anyhow!(
+                    "state attachment history for {} has an unresolved predecessor",
+                    state_id
+                ));
+            };
+            let attachment = pending.remove(index);
+            match &attachment.body {
+                StateAttachmentBody::Context(root) => self.copy_tree_closure(target, root)?,
+                StateAttachmentBody::RiskSignals(hash)
+                | StateAttachmentBody::ReviewSignatures(hash)
+                | StateAttachmentBody::Discussions(hash)
+                | StateAttachmentBody::StructuredConflicts(hash) => {
+                    self.copy_blob(target, hash)?;
+                }
+                StateAttachmentBody::Signature(_) => {}
+            }
+            target.put_state_attachment(&attachment)?;
+        }
+        Ok(())
+    }
+
+    fn copy_tree_closure(&self, target: &Repository, root: &ContentHash) -> Result<()> {
+        let tree = self
+            .source
+            .store()
+            .get_tree(root)?
+            .ok_or_else(|| anyhow!("Tree {} not found in source", root))?;
+        for entry in tree.entries() {
+            if let Some(tree_hash) = entry.tree_hash() {
+                self.copy_tree_closure(target, &tree_hash)?;
+            } else if let Some(blob_hash) = entry.blob_hash() {
+                self.copy_blob(target, &blob_hash)?;
+            }
+        }
+        target.store().put_tree(&tree)?;
+        Ok(())
     }
 
     fn copy_planned_sidecar(&self, target: &Repository, object: &PlannedObject) -> Result<()> {
@@ -180,7 +232,7 @@ impl LocalSync {
             (ObjectId::Hash(hash), ObjectType::Redaction) => {
                 self.propagate_redactions_for_blob(target, hash)
             }
-            (ObjectId::ChangeId(state_id), ObjectType::StateVisibility) => {
+            (ObjectId::StateId(state_id), ObjectType::StateVisibility) => {
                 self.propagate_state_visibility_for_state(target, state_id)
             }
             (_, ObjectType::Blob | ObjectType::Tree | ObjectType::State | ObjectType::Action) => {
@@ -195,10 +247,10 @@ impl LocalSync {
     fn mark_shallow_boundaries(
         &self,
         target: &Repository,
-        state_id: ChangeId,
+        state_id: StateId,
         max_depth: u32,
     ) -> Result<()> {
-        let mut seen: HashSet<ChangeId> = HashSet::new();
+        let mut seen: HashSet<StateId> = HashSet::new();
         let mut queue = VecDeque::from([(state_id, 0u32)]);
         while let Some((id, depth)) = queue.pop_front() {
             if !seen.insert(id) {
@@ -246,7 +298,7 @@ impl LocalSync {
     fn propagate_state_visibility_for_state(
         &self,
         target: &Repository,
-        state: &ChangeId,
+        state: &StateId,
     ) -> Result<()> {
         let Some(bytes) = self.source.get_state_visibility_bytes_for_state(state)? else {
             return Ok(());
@@ -268,22 +320,12 @@ impl LocalSync {
     }
 }
 
-fn state_metadata_roots_changed(
-    target_state: Option<&objects::object::State>,
-    source_state: &objects::object::State,
-) -> bool {
-    let Some(target_state) = target_state else {
-        return true;
-    };
-    target_state.risk_signals != source_state.risk_signals
-        || target_state.review_signatures != source_state.review_signatures
-        || target_state.discussions != source_state.discussions
-        || target_state.structured_conflicts != source_state.structured_conflicts
-}
-
 #[cfg(test)]
 mod tests {
-    use objects::object::{Attribution, Principal};
+    use objects::object::{
+        Attribution, Blob, Principal, StateAttachment, StateAttachmentBody, Tree, TreeEntry,
+    };
+    use repo::StateAttachmentKind;
     use tempfile::TempDir;
 
     use super::*;
@@ -292,11 +334,11 @@ mod tests {
         Attribution::human(Principal::new("Test User", "test@example.com"))
     }
 
-    fn capture(repo: &Repository, file_content: &str, message: &str) -> ChangeId {
+    fn capture(repo: &Repository, file_content: &str, message: &str) -> StateId {
         std::fs::write(repo.root().join("file.txt"), file_content).unwrap();
         repo.snapshot_with_attribution(Some(message.to_string()), None, attribution())
             .unwrap()
-            .change_id
+            .state_id
     }
 
     #[test]
@@ -327,6 +369,56 @@ mod tests {
         assert!(
             !target.is_shallow(&second),
             "incremental shallow re-fetch of an already-present tip must not graft its parent"
+        );
+    }
+
+    #[test]
+    fn fetch_copies_attachment_history_and_context_objects() {
+        let source_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let source = Repository::init_default(source_dir.path()).unwrap();
+        let target = Repository::init_default(target_dir.path()).unwrap();
+        let state_id = capture(&source, "one\n", "one");
+
+        let context_blob = source
+            .store()
+            .put_blob(&Blob::from("context"))
+            .expect("put context blob");
+        let context_root = source
+            .store()
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("context.msgpack", context_blob, false).unwrap(),
+            ]))
+            .expect("put context tree");
+        let first = StateAttachment {
+            state_id,
+            body: StateAttachmentBody::Context(context_root),
+            attribution: attribution(),
+            created_at: chrono::Utc::now(),
+            supersedes: None,
+        };
+        let first_id = source.put_state_attachment(&first).expect("put first");
+        let second = StateAttachment {
+            state_id,
+            body: StateAttachmentBody::Context(context_root),
+            attribution: attribution(),
+            created_at: first.created_at + chrono::Duration::seconds(1),
+            supersedes: Some(first_id),
+        };
+        source.put_state_attachment(&second).expect("put second");
+
+        LocalSync::open(source_dir.path())
+            .unwrap()
+            .fetch_state(&target, &state_id)
+            .expect("fetch state");
+
+        assert!(target.store().get_tree(&context_root).unwrap().is_some());
+        assert!(target.store().get_blob(&context_blob).unwrap().is_some());
+        assert_eq!(
+            target
+                .latest_state_attachment(&state_id, StateAttachmentKind::Context)
+                .unwrap(),
+            Some(second)
         );
     }
 }

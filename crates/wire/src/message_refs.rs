@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::object::ChangeId;
+use objects::object::StateId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,20 +75,20 @@ impl RefFilter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HeadInfo {
     Attached { thread: String },
-    Detached { state: ChangeId },
+    Detached { state: StateId },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefsList {
     pub head: HeadInfo,
-    pub head_state: Option<ChangeId>,
+    pub head_state: Option<StateId>,
     pub refs: Vec<RefEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefEntry {
     pub name: String,
-    pub change_id: ChangeId,
+    pub state_id: StateId,
     pub is_thread: bool,
 }
 
@@ -97,15 +97,15 @@ pub struct UpdateRef {
     pub name: String,
     #[serde(default)]
     pub is_thread: bool,
-    pub old_value: Option<ChangeId>,
-    pub new_value: ChangeId,
+    pub old_value: Option<StateId>,
+    pub new_value: StateId,
     pub force: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefUpdated {
     pub success: bool,
-    pub old_value: Option<ChangeId>,
+    pub old_value: Option<StateId>,
     pub error: Option<String>,
 }
 

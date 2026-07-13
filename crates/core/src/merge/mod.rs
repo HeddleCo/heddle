@@ -27,7 +27,7 @@ use merge::{
     detect_renames_between_trees, merge_trees,
 };
 use objects::{
-    object::{Attribution, ChangeId, ContentHash, ThreadName, Tree},
+    object::{Attribution, ContentHash, StateId, ThreadName, Tree},
     store::{ActorPresenceStatus, ActorPresenceStore, ObjectStore},
 };
 use oplog::{OpBatch, OpLogBackend, OpLogRecorder, OpRecord};
@@ -619,7 +619,7 @@ pub fn merge_thread_into_current_with_machine_contract(
 
     let current_change = repo
         .current_state()?
-        .map(|state| state.change_id)
+        .map(|state| state.state_id)
         .ok_or_else(|| {
             anyhow!(
                 "No current state to merge into; capture or bootstrap the repository before merging"
@@ -658,7 +658,7 @@ pub fn merge_thread_into_current_with_machine_contract(
             attempt.strategy(),
             Some(PreviewTarget {
                 label: &current_thread,
-                change_id: current_state.change_id,
+                state_id: current_state.state_id,
             }),
         )?),
         None => None,
@@ -688,7 +688,7 @@ pub fn merge_thread_into_current_with_machine_contract(
     let merge_plan = MergePlan::for_merge_command(
         repo,
         &mut graph,
-        &current_state.change_id,
+        &current_state.state_id,
         &merge_target_id,
         ConflictLabels {
             current: &current_label,
@@ -704,7 +704,7 @@ pub fn merge_thread_into_current_with_machine_contract(
     // payload is wrong for non-fast-forward 3-way merges (it can include
     // removals of current-branch edits that the merge actually preserves)
     // and for `AlreadyUpToDate` (it can be non-empty when nothing landed).
-    let diff_for = |from: &ChangeId, to: &ChangeId| -> Result<Option<DiffReport>> {
+    let diff_for = |from: &StateId, to: &StateId| -> Result<Option<DiffReport>> {
         if !with_diff {
             return Ok(None);
         }
@@ -745,7 +745,7 @@ pub fn merge_thread_into_current_with_machine_contract(
         // empty; producing `current..target` would make the JSON falsely
         // claim a change landed.
         let already_up_to_date_diff = if with_diff {
-            Some(empty_diff_output(&current_state.change_id))
+            Some(empty_diff_output(&current_state.state_id))
         } else {
             None
         };
@@ -777,13 +777,13 @@ pub fn merge_thread_into_current_with_machine_contract(
         // Use the parent↔thread-tip diff as the source of truth for
         // which paths the merge writes — see `merge_changed_paths` for
         // why thread.changed_paths can't be relied on here.
-        let ff_paths = merge_changed_paths(repo, &current_state.change_id, &merge_target_id)?;
+        let ff_paths = merge_changed_paths(repo, &current_state.state_id, &merge_target_id)?;
 
         // FF: current..target IS the change set that lands. Compute once
         // and reuse for any per-branch return below.
         let (ff_renames, ff_directory_renames) =
-            fast_forward_renames(repo, &current_state.change_id, &merge_target_id)?;
-        let ff_diff = diff_for(&current_state.change_id, &merge_target_id)?
+            fast_forward_renames(repo, &current_state.state_id, &merge_target_id)?;
+        let ff_diff = diff_for(&current_state.state_id, &merge_target_id)?
             .map(|diff| diff_with_known_renames(diff, &ff_renames));
 
         // Pre-flight `--git-commit` validation (real merge only). On
@@ -869,7 +869,7 @@ pub fn merge_thread_into_current_with_machine_contract(
                     repo.oplog().record_fast_forward(
                         &ThreadName::new(track_name),
                         target_thread,
-                        &current_state.change_id,
+                        &current_state.state_id,
                         &merge_target_id,
                         Some(&repo.op_scope()),
                     )?;
@@ -1104,7 +1104,7 @@ pub fn merge_thread_into_current_with_machine_contract(
                 git_commit::build_commit_message(&preview_message, "<pending>", &attribution);
             Some(GitCommitPreview {
                 message: preview_msg,
-                files: merge_changed_paths(repo, &current_state.change_id, &merge_target_id)?,
+                files: merge_changed_paths(repo, &current_state.state_id, &merge_target_id)?,
             })
         } else {
             None
@@ -1115,7 +1115,7 @@ pub fn merge_thread_into_current_with_machine_contract(
         // even though a real 3-way merge would preserve them.
         let preview_path_diff = compute_tree_diff(
             repo,
-            &current_state.change_id,
+            &current_state.state_id,
             &merge_result.tree,
             "<merged-preview>",
             with_diff && use_semantic,
@@ -1165,7 +1165,7 @@ pub fn merge_thread_into_current_with_machine_contract(
 
     if !merge_result.conflicts.is_empty() {
         merge_manager.start(
-            current_state.change_id,
+            current_state.state_id,
             merge_target_id,
             Some(merge_base_id),
             merge_result.conflicts.clone(),
@@ -1176,7 +1176,7 @@ pub fn merge_thread_into_current_with_machine_contract(
         // user must resolve before any well-defined diff exists. Empty
         // diff is the honest signal.
         let conflict_diff = if with_diff {
-            Some(empty_diff_output(&current_state.change_id))
+            Some(empty_diff_output(&current_state.state_id))
         } else {
             None
         };
@@ -1217,7 +1217,7 @@ pub fn merge_thread_into_current_with_machine_contract(
         // full payload.
         let no_commit_path_diff = compute_tree_diff(
             repo,
-            &current_state.change_id,
+            &current_state.state_id,
             &merge_result.tree,
             "<merged-no-commit>",
             false,
@@ -1263,7 +1263,7 @@ pub fn merge_thread_into_current_with_machine_contract(
     // can be empty in synthetic / lightweight setups, but the diff is
     // ground truth for what the merge actually wrote.
     let merge_paths: Vec<String> = if git_commit {
-        merge_changed_paths(repo, &current_state.change_id, &merge_target_id)?
+        merge_changed_paths(repo, &current_state.state_id, &merge_target_id)?
     } else {
         Vec::new()
     };
@@ -1288,7 +1288,7 @@ pub fn merge_thread_into_current_with_machine_contract(
         // any cleanup. Empty diff: nothing landed, so nothing to
         // describe.
         let blocked_diff = if with_diff {
-            Some(empty_diff_output(&current_state.change_id))
+            Some(empty_diff_output(&current_state.state_id))
         } else {
             None
         };
@@ -1349,8 +1349,8 @@ pub fn merge_thread_into_current_with_machine_contract(
     }
     if let Some(thread) = thread.as_mut() {
         thread.state = ThreadState::Merged;
-        thread.merged_state = Some(new_state.change_id.short());
-        thread.current_state = Some(new_state.change_id.short());
+        thread.merged_state = Some(new_state.state_id.short());
+        thread.current_state = Some(new_state.state_id.short());
         thread.updated_at = chrono::Utc::now();
         thread.freshness = ThreadFreshness::Current;
         thread_manager.save(thread)?;
@@ -1369,13 +1369,13 @@ pub fn merge_thread_into_current_with_machine_contract(
     if git_commit {
         let commit_message = git_commit::build_commit_message(
             &merge_message,
-            &new_state.change_id.short(),
+            &new_state.state_id.short(),
             &attribution,
         );
         let extra_parents = source_git_parent.clone().into_iter().collect::<Vec<_>>();
         match git_commit::write_git_commit(
             repo,
-            &new_state.change_id,
+            &new_state.state_id,
             &merge_paths,
             &commit_message,
             &extra_parents,
@@ -1384,7 +1384,7 @@ pub fn merge_thread_into_current_with_machine_contract(
                 git_commit_info = Some(info.clone());
                 if let Err(err) = finalize_merge_git_checkpoint(
                     repo,
-                    &new_state.change_id,
+                    &new_state.state_id,
                     git_branch_before.unwrap_or_else(|| "HEAD".to_string()),
                     git_oid_before,
                     &info.sha,
@@ -1392,20 +1392,20 @@ pub fn merge_thread_into_current_with_machine_contract(
                 ) {
                     tracing::warn!(
                         error = %err,
-                        state = %new_state.change_id.short(),
+                        state = %new_state.state_id.short(),
                         git_commit = %info.sha,
                         "git commit succeeded after heddle merge, but checkpoint metadata recording failed"
                     );
                     post_snapshot_git_blockers.push(format!(
                         "git commit {} was written for Heddle merge {}, but checkpoint metadata recording failed: {}",
                         info.sha,
-                        new_state.change_id.short(),
+                        new_state.state_id.short(),
                         err
                     ));
                     post_snapshot_git_blockers.push(format!(
                         "recovery: Heddle merge state {} and Git commit {} are intact; run `heddle verify` \
                          and use its primary recovery command before undoing this merge",
-                        new_state.change_id.short(),
+                        new_state.state_id.short(),
                         info.sha
                     ));
                 }
@@ -1413,18 +1413,18 @@ pub fn merge_thread_into_current_with_machine_contract(
             Err(err) => {
                 tracing::warn!(
                     error = %err,
-                    state = %new_state.change_id.short(),
+                    state = %new_state.state_id.short(),
                     "git commit failed after heddle merge state was written"
                 );
                 post_snapshot_git_blockers.push(format!(
                     "git commit failed after heddle merge {} landed: {}",
-                    new_state.change_id.short(),
+                    new_state.state_id.short(),
                     err
                 ));
                 post_snapshot_git_blockers.push(format!(
                     "recovery: heddle merge state {} is intact; resolve the Git checkout issue \
                      (identity, locks, or filesystem errors) and run `heddle commit -m \"{}\"` — do NOT re-run `heddle merge`",
-                    new_state.change_id.short(),
+                    new_state.state_id.short(),
                     merge_message
                 ));
             }
@@ -1438,8 +1438,8 @@ pub fn merge_thread_into_current_with_machine_contract(
     // preserved.
     let committed_path_diff = compute_state_diff(
         repo,
-        &current_state.change_id,
-        &new_state.change_id,
+        &current_state.state_id,
+        &new_state.state_id,
         with_diff && use_semantic,
         if with_diff { 3 } else { 0 },
     )
@@ -1448,11 +1448,11 @@ pub fn merge_thread_into_current_with_machine_contract(
     let committed_diff = with_diff.then_some(committed_path_diff);
 
     let final_message = if post_snapshot_git_blockers.is_empty() {
-        format!("Merged as {}", new_state.change_id.short())
+        format!("Merged as {}", new_state.state_id.short())
     } else {
         format!(
             "Merged as {} (heddle); git commit failed",
-            new_state.change_id.short()
+            new_state.state_id.short()
         )
     };
 
@@ -1469,7 +1469,7 @@ pub fn merge_thread_into_current_with_machine_contract(
         message: final_message,
         renames: rename_entries,
         directory_renames: dir_rename_entries,
-        merge_state: Some(new_state.change_id.short()),
+        merge_state: Some(new_state.state_id.short()),
         fast_forward: false,
         preview_only: false,
         semantic_changes: top_level_semantic(committed_diff.as_ref()),
@@ -1573,7 +1573,7 @@ fn state_intent(repo: &Repository, state: Option<&str>) -> Option<String> {
 fn source_git_parent_for_thread(
     repo: &Repository,
     track_name: &str,
-    merge_target_id: &ChangeId,
+    merge_target_id: &StateId,
 ) -> Result<Option<String>> {
     if repo.capability() != repo::RepositoryCapability::GitOverlay {
         return Ok(None);
@@ -1607,8 +1607,8 @@ fn source_git_parent_for_thread(
 /// land in the commit.
 fn merge_changed_paths(
     repo: &Repository,
-    parent_tip: &ChangeId,
-    thread_tip: &ChangeId,
+    parent_tip: &StateId,
+    thread_tip: &StateId,
 ) -> Result<Vec<String>> {
     let diff = compute_state_diff(repo, parent_tip, thread_tip, false, 0)?;
     let mut out = Vec::with_capacity(diff.changes.len());
@@ -1623,7 +1623,7 @@ fn merge_changed_paths(
 
 fn finalize_merge_git_checkpoint(
     repo: &Repository,
-    state: &ChangeId,
+    state: &StateId,
     branch: String,
     previous_git_oid: Option<String>,
     git_commit: &str,
@@ -1670,7 +1670,7 @@ fn finalize_merge_git_checkpoint(
     Ok(())
 }
 
-fn find_recent_merge_batch(repo: &Repository, state: &ChangeId) -> Result<OpBatch> {
+fn find_recent_merge_batch(repo: &Repository, state: &StateId) -> Result<OpBatch> {
     repo.oplog()
         .recent_batches_scoped(12, Some(&repo.op_scope()))?
         .into_iter()
@@ -1688,7 +1688,7 @@ fn find_recent_merge_batch(repo: &Repository, state: &ChangeId) -> Result<OpBatc
         })
 }
 
-fn merge_op_targets_state(op: &OpRecord, state: &ChangeId) -> bool {
+fn merge_op_targets_state(op: &OpRecord, state: &StateId) -> bool {
     match op {
         OpRecord::Snapshot { new_state, .. } => new_state == state,
         OpRecord::Goto { target, .. } => target == state,
@@ -1779,7 +1779,7 @@ fn validate_git_commit_preconditions_extended(
 /// that didn't actually advance state (already-up-to-date, conflicted,
 /// pre-snapshot blocked) so the JSON honestly reports "no change set
 /// landed" instead of pointing at an arbitrary parent..target diff.
-fn empty_diff_output(state_id: &ChangeId) -> DiffReport {
+fn empty_diff_output(state_id: &StateId) -> DiffReport {
     DiffReport::new(
         Some(state_id.short()),
         Some(state_id.short()),
@@ -1848,9 +1848,9 @@ fn list_surviving_entries(path: &Path) -> std::io::Result<Vec<String>> {
 
 pub fn bench_find_merge_base(
     repo: &Repository,
-    state_a: &ChangeId,
-    state_b: &ChangeId,
-) -> Result<Option<ChangeId>> {
+    state_a: &StateId,
+    state_b: &StateId,
+) -> Result<Option<StateId>> {
     find_merge_base(repo, state_a, state_b)
 }
 
@@ -1866,16 +1866,16 @@ pub enum ThreeWayMergeOutcome {
     Conflicted {
         tree: Tree,
         paths: Vec<String>,
-        base: ChangeId,
+        base: StateId,
     },
     /// Already-integrated or fast-forward — caller can take a
     /// simpler advance path. The contained `target` is the tip the
     /// caller should advance to.
     AlreadyIntegrated {
-        target: ChangeId,
+        target: StateId,
     },
     FastForward {
-        target: ChangeId,
+        target: StateId,
     },
 }
 
@@ -1889,8 +1889,8 @@ pub enum ThreeWayMergeOutcome {
 /// responsible for applying it to a worktree and snapshotting.
 pub fn try_three_way_merge_between_tips(
     parent_repo: &Repository,
-    current_tip: &ChangeId,
-    target_tip: &ChangeId,
+    current_tip: &StateId,
+    target_tip: &StateId,
     labels: ConflictLabels<'_>,
 ) -> Result<ThreeWayMergeOutcome> {
     let mut graph = CommitGraphIndex::new(parent_repo);
@@ -1971,8 +1971,8 @@ pub fn bench_detect_renames(
 
 fn fast_forward_renames(
     repo: &Repository,
-    from: &ChangeId,
-    to: &ChangeId,
+    from: &StateId,
+    to: &StateId,
 ) -> Result<(Vec<RenameEntry>, Vec<RenameEntry>)> {
     let from_tree = load_state_tree(repo, from)?;
     let to_tree = load_state_tree(repo, to)?;
@@ -2009,15 +2009,15 @@ fn rename_options() -> RenameOptions {
     }
 }
 
-fn load_state_tree(repo: &Repository, change_id: &ChangeId) -> Result<Tree> {
+fn load_state_tree(repo: &Repository, state_id: &StateId) -> Result<Tree> {
     let state = repo
         .store()
-        .get_state(change_id)?
-        .ok_or_else(|| anyhow!("State '{}' not found", change_id.short()))?;
+        .get_state(state_id)?
+        .ok_or_else(|| anyhow!("State '{}' not found", state_id.short()))?;
     repo.store().get_tree(&state.tree)?.ok_or_else(|| {
         anyhow!(
             "State '{}' references missing tree {}",
-            change_id.short(),
+            state_id.short(),
             state.tree
         )
     })
@@ -2045,7 +2045,7 @@ pub fn build_thread_preview_report(
 
 /// Caller-supplied override for the destination side of the preview's
 /// 3-way merge. When `Some`, the inner preview MUST compute against
-/// this `(label, change_id)` instead of `thread.target_thread`. Used by
+/// this `(label, state_id)` instead of `thread.target_thread`. Used by
 /// `merge_thread_into_current` so the preview matches the actual merge
 /// — `heddle merge A` from thread B merges A → B, but A's
 /// `target_thread` is whatever A was created from (often `main`), so
@@ -2053,7 +2053,7 @@ pub fn build_thread_preview_report(
 /// contradicts the real outcome (heddle#144).
 pub struct PreviewTarget<'a> {
     pub label: &'a str,
-    pub change_id: ChangeId,
+    pub state_id: StateId,
 }
 
 fn build_thread_preview_report_with_graph(
@@ -2070,8 +2070,8 @@ fn build_thread_preview_report_with_graph(
     // merge command supplies the actual current HEAD); otherwise fall
     // back to `thread.target_thread` for callers like `ready` / `sync` /
     // `land` that don't carry an explicit merge destination.
-    let resolved_target: Option<(String, ChangeId)> = if let Some(ovr) = target_override {
-        Some((ovr.label.to_string(), ovr.change_id))
+    let resolved_target: Option<(String, StateId)> = if let Some(ovr) = target_override {
+        Some((ovr.label.to_string(), ovr.state_id))
     } else if let Some(name) = thread.target_thread.as_deref() {
         let id = repo
             .refs()
@@ -3105,7 +3105,7 @@ mod tests {
 
     #[test]
     fn coordination_blocker_recommendations_are_machine_actions() {
-        let merge_state = "hd-landed123".to_string();
+        let merge_state = "hs-landed123".to_string();
         let post_snapshot = coordination_blocker_recommended_action(Some(&merge_state));
         assert_eq!(post_snapshot, "heddle commit -m \"...\"");
         assert!(
@@ -3131,7 +3131,7 @@ mod tests {
 
     #[test]
     fn empty_diff_output_is_self_consistent_and_serializes() {
-        let id = objects::object::ChangeId::generate();
+        let id = objects::object::StateId::generate();
         let out = empty_diff_output(&id);
 
         assert_eq!(out.from_state.as_deref(), Some(id.short()).as_deref());

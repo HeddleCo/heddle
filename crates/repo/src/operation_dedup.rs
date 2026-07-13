@@ -916,7 +916,7 @@ mod tests {
             ))?;
             if !self.injected {
                 self.injected = true;
-                let state = objects::object::ChangeId::generate();
+                let state = crate::test_state_id();
                 tx.repo().oplog().record_batch(vec![
                     oplog::OpRecord::Snapshot {
                         new_state: state,

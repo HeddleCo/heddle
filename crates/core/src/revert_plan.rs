@@ -81,7 +81,7 @@ pub struct RevertSuccessFacts<'a> {
     pub outcome: RevertOutcome,
     pub state_short: &'a str,
     /// New change id short form when [`RevertOutcome::Committed`].
-    pub new_change_id_short: Option<&'a str>,
+    pub new_state_id_short: Option<&'a str>,
 }
 
 /// Human/JSON success message for a completed revert.
@@ -100,11 +100,11 @@ pub fn revert_success_message(facts: &RevertSuccessFacts<'_>, mode: RevertMessag
             "Changes applied to worktree (not committed)".to_string()
         }
         (RevertOutcome::Committed, RevertMessageMode::Text) => {
-            let new_id = facts.new_change_id_short.unwrap_or("");
+            let new_id = facts.new_state_id_short.unwrap_or("");
             format!("Reverted {} as {}", facts.state_short, new_id)
         }
         (RevertOutcome::Committed, RevertMessageMode::Json) => {
-            let new_id = facts.new_change_id_short.unwrap_or("");
+            let new_id = facts.new_state_id_short.unwrap_or("");
             format!("Created revert state {new_id}")
         }
     }
@@ -134,18 +134,18 @@ mod tests {
     #[test]
     fn default_and_success_messages() {
         assert_eq!(
-            default_revert_commit_message("hd-deadbee"),
-            "Revert hd-deadbee"
+            default_revert_commit_message("hs-deadbee"),
+            "Revert hs-deadbee"
         );
 
         let no_commit = RevertSuccessFacts {
             outcome: RevertOutcome::AppliedNotCommitted,
-            state_short: "hd-aaaa",
-            new_change_id_short: None,
+            state_short: "hs-aaaa",
+            new_state_id_short: None,
         };
         assert_eq!(
             revert_success_message(&no_commit, RevertMessageMode::Text),
-            "Reverted hd-aaaa (not committed)"
+            "Reverted hs-aaaa (not committed)"
         );
         assert_eq!(
             revert_success_message(&no_commit, RevertMessageMode::Json),
@@ -154,16 +154,16 @@ mod tests {
 
         let committed = RevertSuccessFacts {
             outcome: RevertOutcome::Committed,
-            state_short: "hd-aaaa",
-            new_change_id_short: Some("hd-bbbb"),
+            state_short: "hs-aaaa",
+            new_state_id_short: Some("hs-bbbb"),
         };
         assert_eq!(
             revert_success_message(&committed, RevertMessageMode::Text),
-            "Reverted hd-aaaa as hd-bbbb"
+            "Reverted hs-aaaa as hs-bbbb"
         );
         assert_eq!(
             revert_success_message(&committed, RevertMessageMode::Json),
-            "Created revert state hd-bbbb"
+            "Created revert state hs-bbbb"
         );
     }
 }

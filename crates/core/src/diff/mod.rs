@@ -10,8 +10,8 @@ use anyhow::{Result, anyhow};
 use objects::{
     HeddleError, RecoveryDetails,
     object::{
-        AnnotationStatus, Blob, ChangeId, ContextTarget, DiffKind, EntryType, FileChangeSet,
-        FileMode, SemanticChange, State, Tree, TreeEntry,
+        AnnotationStatus, Blob, ContextTarget, DiffKind, EntryType, FileChangeSet, FileMode,
+        SemanticChange, State, StateId, Tree, TreeEntry,
     },
     store::ObjectStore,
     worktree::{WorktreeStatus, diff_blobs},
@@ -394,9 +394,9 @@ fn file_change_set_from_status(status: &WorktreeStatus) -> FileChangeSet {
     changes
 }
 
-fn resolve_state_id(repository: &Repository, spec: &str) -> Result<ChangeId> {
+fn resolve_state_id(repository: &Repository, spec: &str) -> Result<StateId> {
     resolve_state_for_command(repository, spec, ResolvePolicy::minimal())
-        .map(|resolved| resolved.change_id)
+        .map(|resolved| resolved.state_id)
         .map_err(|error| match error {
             StateResolveError::Repository(err) => err.into(),
             StateResolveError::Failure(StateResolveFailure::NotFound { spec }) => {
@@ -408,7 +408,7 @@ fn resolve_state_id(repository: &Repository, spec: &str) -> Result<ChangeId> {
         })
 }
 
-fn require_resolved_state(repo: &Repository, id: &ChangeId) -> Result<State> {
+fn require_resolved_state(repo: &Repository, id: &StateId) -> Result<State> {
     repo.store().get_state(id)?.ok_or_else(|| {
         anyhow!(HeddleError::MissingObject {
             object_type: "state".to_string(),
@@ -1264,23 +1264,23 @@ fn head_from_tree(repo: &Repository) -> Result<Option<Tree>> {
 /// otherwise this errors out the same way `cmd_diff --semantic` does.
 pub fn compute_state_diff(
     repo: &Repository,
-    from_change_id: &ChangeId,
-    to_change_id: &ChangeId,
+    from_state_id: &StateId,
+    to_state_id: &StateId,
     semantic: bool,
     unified: usize,
 ) -> Result<DiffReport> {
-    let from_state = repo.store().get_state(from_change_id)?;
+    let from_state = repo.store().get_state(from_state_id)?;
     let from_tree = if let Some(ref state) = from_state {
         repo.store().get_tree(&state.tree)?
     } else {
         None
     };
 
-    let to_state = require_resolved_state(repo, to_change_id)?;
+    let to_state = require_resolved_state(repo, to_state_id)?;
     let to_tree = repo
         .store()
         .get_tree(&to_state.tree)?
-        .ok_or_else(|| anyhow!("Tree not found for state {}", to_change_id.short()))?;
+        .ok_or_else(|| anyhow!("Tree not found for state {}", to_state_id.short()))?;
 
     let from_hash = from_state
         .as_ref()
@@ -1339,8 +1339,8 @@ pub fn compute_state_diff(
     });
 
     let mut output = DiffReport::new(
-        Some(from_change_id.short()),
-        Some(to_change_id.short()),
+        Some(from_state_id.short()),
+        Some(to_state_id.short()),
         file_changes,
         semantic_changes,
         None,
@@ -1358,13 +1358,13 @@ pub fn compute_state_diff(
 /// rename-aware diff pipeline can address it by hash.
 pub fn compute_tree_diff(
     repo: &Repository,
-    from_change_id: &ChangeId,
+    from_state_id: &StateId,
     to_tree: &Tree,
     to_label: impl Into<String>,
     semantic: bool,
     unified: usize,
 ) -> Result<DiffReport> {
-    let from_state = repo.store().get_state(from_change_id)?;
+    let from_state = repo.store().get_state(from_state_id)?;
     let from_tree = if let Some(ref state) = from_state {
         repo.store().get_tree(&state.tree)?
     } else {
@@ -1429,7 +1429,7 @@ pub fn compute_tree_diff(
     });
 
     let mut output = DiffReport::new(
-        Some(from_change_id.short()),
+        Some(from_state_id.short()),
         Some(to_label.into()),
         file_changes,
         semantic_changes,
@@ -1663,14 +1663,14 @@ fn collect_file_context(
     state: &State,
     changes: &FileChangeSet,
 ) -> Result<Vec<FileContextEntry>> {
-    let Some(context_root) = &state.context else {
+    let Some(context_root) = repo.inherit_parent_context(state)? else {
         return Ok(Vec::new());
     };
 
     let mut entries = Vec::new();
     for change in changes {
         let target = ContextTarget::file(change.path.clone())?;
-        let Some(blob) = repo.get_context_blob(context_root, &target)? else {
+        let Some(blob) = repo.get_context_blob(&context_root, &target)? else {
             continue;
         };
         let annotations = blob
@@ -1699,11 +1699,11 @@ fn collect_file_context(
 }
 
 fn collect_state_guidance(repo: &Repository, state: &State) -> Result<Vec<ContextSnippet>> {
-    let Some(context_root) = &state.context else {
+    let Some(context_root) = repo.inherit_parent_context(state)? else {
         return Ok(Vec::new());
     };
-    let target = ContextTarget::state(state.change_id);
-    let Some(blob) = repo.get_context_blob(context_root, &target)? else {
+    let target = ContextTarget::state(state.state_id);
+    let Some(blob) = repo.get_context_blob(&context_root, &target)? else {
         return Ok(Vec::new());
     };
     Ok(blob
@@ -2684,7 +2684,7 @@ mod tests {
         std::fs::write(temp.path().join("a.txt"), "a").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
 
-        let err = resolve_state_for_command(&repo, "hd-zzzzzzzzzzzz", ResolvePolicy::minimal())
+        let err = resolve_state_for_command(&repo, "hs-zzzzzzzzzzzz", ResolvePolicy::minimal())
             .unwrap_err();
         let mapped = match err {
             StateResolveError::Failure(StateResolveFailure::NotFound { spec }) => {

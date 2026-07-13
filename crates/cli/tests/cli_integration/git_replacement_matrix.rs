@@ -439,12 +439,12 @@ fn git_replacement_matrix_native_repo_read_commands_without_git_on_path() {
         ],
         temp.path(),
     );
-    let first_id = first["change_id"]
+    let first_id = first["state_id"]
         .as_str()
         .expect("first capture id")
         .to_string();
     assert!(
-        first_id.starts_with("hd-"),
+        first_id.starts_with("hs-"),
         "native capture should produce Heddle state ids: {first}"
     );
 
@@ -478,7 +478,7 @@ fn git_replacement_matrix_native_repo_read_commands_without_git_on_path() {
         ],
         temp.path(),
     );
-    let second_id = second["change_id"]
+    let second_id = second["state_id"]
         .as_str()
         .expect("second capture id")
         .to_string();
@@ -490,14 +490,14 @@ fn git_replacement_matrix_native_repo_read_commands_without_git_on_path() {
         "{state_show}"
     );
     assert_eq!(
-        state_show["change_id"], second_id,
+        state_show["state_id"], second_id,
         "show HEAD should inspect the latest native Heddle state: {state_show}"
     );
 
     let state_inspect =
         assert_clean_json_without_git(&["--output", "json", "show", &first_id], temp.path());
     assert_eq!(
-        state_inspect["change_id"], first_id,
+        state_inspect["state_id"], first_id,
         "show <state> should route to native state show without git: {state_inspect}"
     );
 
@@ -574,10 +574,10 @@ fn git_replacement_matrix_everyday_save_read_machine_streams_without_git_on_path
         temp.path(),
     );
     assert!(
-        capture["change_id"]
+        capture["state_id"]
             .as_str()
             .unwrap_or("")
-            .starts_with("hd-")
+            .starts_with("hs-")
     );
 
     let checkpoint = assert_clean_json_without_git(
@@ -908,7 +908,7 @@ fn git_replacement_matrix_undo_preserves_recovery_marker_for_absorbed_edit() {
     let commit =
         assert_clean_json_without_git(&["--output", "json", "commit", "-m", "friction"], &work);
     assert_eq!(commit["output_kind"], "commit");
-    let friction_state = commit["change_id"]
+    let friction_state = commit["state_id"]
         .as_str()
         .expect("commit emits the absorbed heddle change-id")
         .to_string();

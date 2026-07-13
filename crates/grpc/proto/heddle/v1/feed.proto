@@ -93,7 +93,7 @@ message FeedItem {
   string headline = 4; // "objects: 3 files changed, 2 breaking API changes"
   string detail = 5; // truncated diff summary, pre-populated by materializer
   string repo_path = 6;
-  string resource_id = 7; // change_id, session_id, etc.
+  string resource_id = 7; // state_id, session_id, etc.
   FeedItemResolution resolution = 8;
   float confidence = 9; // 0.0-1.0, for future auto-resolution
   repeated FeedItemAction actions = 10;

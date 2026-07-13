@@ -90,7 +90,7 @@ struct DiagnoseThreadOutput {
 
 #[derive(Debug, Clone, Serialize)]
 struct DiagnoseStateOutput {
-    change_id: String,
+    state_id: String,
     tree: String,
     intent: Option<String>,
     git_checkpoint: Option<DiagnoseCheckpointOutput>,
@@ -317,11 +317,11 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
     let workspace = diagnose_workspace(&summaries);
     let thread = current_summary.map(diagnose_thread);
     let state = current_state.as_ref().map(|state| DiagnoseStateOutput {
-        change_id: state.change_id.short(),
+        state_id: state.state_id.short(),
         tree: state.tree.short(),
         intent: state.intent.clone(),
         git_checkpoint: repo
-            .latest_git_checkpoint_for_change(&state.change_id)
+            .latest_git_checkpoint_for_change(&state.state_id)
             .ok()
             .flatten()
             .map(|record| DiagnoseCheckpointOutput {
@@ -606,9 +606,9 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
 
     if let Some(state) = &output.state {
         if cli.verbose > 0 {
-            println!("State: {} ({})", state.change_id, state.tree);
+            println!("State: {} ({})", state.state_id, state.tree);
         } else {
-            println!("Saved change: {}", state.change_id);
+            println!("Saved change: {}", state.state_id);
         }
         if let Some(intent) = &state.intent {
             if cli.verbose > 0 {

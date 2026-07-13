@@ -7,7 +7,7 @@ use std::{
     process::{Command, Output},
 };
 
-use objects::object::{ChangeId, ContentHash};
+use objects::object::{ContentHash, StateId};
 use repo::{
     BranchCreatedV1, NativeToolCallRefV1, Repository, TimelineBranchId, TimelineBranchReason,
     TimelineMaterializationRecoveryStatus, TimelineMaterializeMode, TimelineMaterializeStatus,
@@ -116,7 +116,7 @@ fn timeline_materialize_fault_child_process() {
 
 struct Fixture {
     temp: TempDir,
-    state1: ChangeId,
+    state1: StateId,
 }
 
 fn create_fixture() -> Fixture {
@@ -177,14 +177,14 @@ fn native(call: &str) -> NativeToolCallRefV1 {
     }
 }
 
-fn write_state(repo: &Repository, root: &Path, path: &str, content: &str) -> ChangeId {
+fn write_state(repo: &Repository, root: &Path, path: &str, content: &str) -> StateId {
     fs::write(root.join(path), content).expect("write fixture file");
     repo.snapshot(Some(path.to_string()), None)
         .expect("capture fixture state")
-        .change_id
+        .id()
 }
 
-fn write_timeline(store: &TimelineStore, state0: ChangeId, state1: ChangeId, state2: ChangeId) {
+fn write_timeline(store: &TimelineStore, state0: StateId, state1: StateId, state2: StateId) {
     store
         .write_operation(&TimelineOperationEnvelope::new(
             TimelineOperationBodyV1::BranchCreated(BranchCreatedV1 {

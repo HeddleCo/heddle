@@ -443,7 +443,7 @@ fn test_merge_already_up_to_date() {
 /// from inside an attached parent thread used to call `repo.goto()`
 /// (which writes `Head::Detached`) without advancing the parent
 /// thread's ref. The user observed `Fast-forwarded to <id>` while
-/// `thread show <parent>` still reported the original change_id.
+/// `thread show <parent>` still reported the original state_id.
 ///
 /// The fix advances the *current* thread's ref to the merge target and
 /// re-attaches HEAD; this test asserts that after switching to the
@@ -461,7 +461,7 @@ fn test_merge_fast_forward_advances_current_thread() {
     fs::write(temp.path().join("new.txt"), "feature work").unwrap();
     heddle(&["capture", "-m", "Feature work"], Some(temp.path())).unwrap();
 
-    // Capture the change_id at the tip of `feature`.
+    // Capture the state_id at the tip of `feature`.
     let feature_show = heddle(
         &["thread", "show", "feature", "--output", "json"],
         Some(temp.path()),

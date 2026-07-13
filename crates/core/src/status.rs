@@ -1028,14 +1028,14 @@ fn clean_git_branch_reconcile_check(
 fn thread_tip_for_branch(
     repo: &Repository,
     branch: &str,
-) -> Result<Option<objects::object::ChangeId>> {
+) -> Result<Option<objects::object::StateId>> {
     repo.refs().get_thread(&ThreadName::new(branch))
 }
 
 fn mapped_change_relation(
     repo: &Repository,
-    git_mapped: &objects::object::ChangeId,
-    heddle_current: &objects::object::ChangeId,
+    git_mapped: &objects::object::StateId,
+    heddle_current: &objects::object::StateId,
 ) -> &'static str {
     let mut graph = CommitGraphIndex::new(repo);
     let git_is_ancestor = graph
@@ -1561,7 +1561,7 @@ pub struct ParallelThreadInfo {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct StateInfo {
-    pub change_id: String,
+    pub state_id: String,
     pub content_hash: String,
     pub intent: Option<String>,
 }
@@ -2118,18 +2118,18 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
 
     let late_state_start = Instant::now();
     let state_info = current_state.as_ref().map(|s| StateInfo {
-        change_id: s.change_id.short(),
+        state_id: s.state_id.short(),
         content_hash: s.compute_hash().short(),
         intent: s.intent.clone(),
     });
-    let current_state_short = current_state.as_ref().map(|state| state.change_id.short());
+    let current_state_short = current_state.as_ref().map(|state| state.state_id.short());
     let git_checkpoint = if trust.status == "needs_checkpoint" {
         None
     } else {
         current_state
             .as_ref()
             .and_then(|state| {
-                repo.latest_git_checkpoint_for_change(&state.change_id)
+                repo.latest_git_checkpoint_for_change(&state.state_id)
                     .ok()
                     .flatten()
             })
@@ -2358,7 +2358,7 @@ fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
         thread,
         base_state: None,
         base_root: None,
-        current_state: input.current_state.map(|state| state.change_id.short()),
+        current_state: input.current_state.map(|state| state.state_id.short()),
         path: None,
         execution_path: None,
         session_id: None,

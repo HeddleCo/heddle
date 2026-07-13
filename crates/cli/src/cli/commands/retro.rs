@@ -25,11 +25,11 @@ use heddle_core::retro_plan::{
     DEFAULT_FALLBACK_WINDOW_HOURS, MAX_OPLOG_BATCHES, agent_task_window_overlaps,
     agent_window_overlaps, choose_default_since_ts, context_annotation_in_window,
     display_free_text, duration_secs as plan_duration_secs, excerpt, is_turn_boundary_intent,
-    is_verify_fail_marker, is_verify_pass_signal, retro_header_line, short_change_id,
+    is_verify_fail_marker, is_verify_pass_signal, retro_header_line, short_state_id,
     timeline_step_in_window,
 };
 use objects::{
-    object::{ChangeId, State},
+    object::{State, StateId},
     store::{ActorPresenceStore, ActorPresenceStatus, AgentTaskRecord, AgentTaskStore, ObjectStore},
 };
 use oplog::OpRecord;
@@ -74,7 +74,7 @@ struct RetroOutput {
 
 #[derive(Serialize, Clone)]
 struct StateEntry {
-    change_id: String,
+    state_id: String,
     intent: Option<String>,
     confidence: Option<f32>,
     agent: Option<String>,
@@ -196,7 +196,7 @@ pub async fn cmd_retro(cli: &Cli, options: RetroCommandOptions) -> Result<()> {
     let mut merges = Vec::new();
     let mut undos = Vec::new();
     let mut verify_signals = Vec::new();
-    let mut seen_state_ids: HashSet<ChangeId> = HashSet::new();
+    let mut seen_state_ids: HashSet<StateId> = HashSet::new();
 
     for batch in &batches {
         // Batches arrive newest-first. We can stop once we hit one
@@ -317,7 +317,7 @@ pub async fn cmd_retro(cli: &Cli, options: RetroCommandOptions) -> Result<()> {
 
     let output = RetroOutput {
         since: since_id.map(|id| id.to_string_full()),
-        until: head_state.as_ref().map(|s| s.change_id.to_string_full()),
+        until: head_state.as_ref().map(|s| s.state_id.to_string_full()),
         duration_secs,
         states_captured,
         agents_active,
@@ -343,7 +343,7 @@ fn resolve_since_bound(
     repo: &Repository,
     since: Option<&str>,
     head_state: &Option<State>,
-) -> Result<(Option<ChangeId>, Option<DateTime<Utc>>)> {
+) -> Result<(Option<StateId>, Option<DateTime<Utc>>)> {
     if let Some(spec) = since {
         let id = resolve_state_id(repo, spec)?;
         let ts = repo.store().get_state(&id)?.map(|state| state.created_at);
@@ -550,12 +550,12 @@ fn collect_context_annotations(
     let Some(state) = head_state else {
         return Ok(Vec::new());
     };
-    let Some(context_root) = state.context.as_ref() else {
+    let Some(context_root) = repo.inherit_parent_context(state)? else {
         return Ok(Vec::new());
     };
 
     let entries = repo
-        .list_context_entries(context_root, None::<&Path>)
+        .list_context_entries(&context_root, None::<&Path>)
         .unwrap_or_default();
 
     let lo_secs = since_ts.map(|ts| ts.timestamp());
@@ -598,7 +598,7 @@ fn state_entry(state: &State, verbose: bool) -> StateEntry {
         .as_ref()
         .map(|i| if verbose { i.clone() } else { excerpt(i) });
     StateEntry {
-        change_id: state.change_id.to_string_full(),
+        state_id: state.state_id.to_string_full(),
         intent,
         confidence: state.confidence,
         agent: state
@@ -675,7 +675,7 @@ fn print_human(output: &RetroOutput, _verbose: bool) {
             .unwrap_or_else(|| "—".to_string());
         println!(
             "  {} {} conf={} [{}]",
-            short_change_id(&entry.change_id),
+            short_state_id(&entry.state_id),
             intent,
             confidence,
             entry.timestamp,
@@ -956,7 +956,7 @@ mod tests {
         let head_state = repo.current_state().unwrap();
         let output = RetroOutput {
             since: None,
-            until: head_state.map(|s| s.change_id.to_string_full()),
+            until: head_state.map(|s| s.state_id.to_string_full()),
             duration_secs: None,
             states_captured: Vec::new(),
             agents_active: Vec::new(),

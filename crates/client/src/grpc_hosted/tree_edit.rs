@@ -123,8 +123,8 @@ mod tests {
             let compared_to_supplied_tree = req.compare_tree.is_some();
             Ok(Response::new(StatusForThreadResponse {
                 thread: req.thread,
-                head_state: "hd-head".into(),
-                base_state: "hd-base".into(),
+                head_state: "hs-head".into(),
+                base_state: "hs-base".into(),
                 target_thread: "main".into(),
                 coordination_status: "ahead".into(),
                 changes: Some(ThreadPathSet {
@@ -146,8 +146,8 @@ mod tests {
                 return Err(Status::invalid_argument("from and to are both required"));
             }
             Ok(Response::new(DiffForThreadResponse {
-                from_state: "hd-from".into(),
-                to_state: "hd-to".into(),
+                from_state: "hs-from".into(),
+                to_state: "hs-to".into(),
                 files: vec![FileDiff {
                     path: "src/lib.rs".into(),
                     kind: "modified".into(),
@@ -222,7 +222,7 @@ mod tests {
         server.abort();
 
         assert_eq!(resp.thread, "feat/x");
-        assert_eq!(resp.head_state, "hd-head");
+        assert_eq!(resp.head_state, "hs-head");
         assert!(
             !resp.compared_to_supplied_tree,
             "no compare_tree supplied = committed-only status"
@@ -255,7 +255,7 @@ mod tests {
             return;
         };
         let from = Treeish {
-            value: Some(treeish::Value::StateId("hd-from".into())),
+            value: Some(treeish::Value::StateId("hs-from".into())),
         };
         let to = Treeish {
             value: Some(treeish::Value::Ref("feat/x".into())),
@@ -277,7 +277,7 @@ mod tests {
             return;
         };
         let resp = client
-            .log_for_thread("owner/repo", "feat/x", 3, Some("hd-since"), vec![], None)
+            .log_for_thread("owner/repo", "feat/x", 3, Some("hs-since"), vec![], None)
             .await
             .expect("log_for_thread");
         server.abort();

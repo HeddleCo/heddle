@@ -26,7 +26,7 @@
 
 use objects::{
     error::{HeddleError, Result},
-    object::{ChangeId, ContentHash, VisibilityTier},
+    object::{ContentHash, StateId, VisibilityTier},
 };
 use serde::{Deserialize, Serialize};
 
@@ -161,55 +161,55 @@ where
 #[derive(Debug, Clone, Deserialize)]
 enum StrictCurrentOpRecord {
     Snapshot {
-        new_state: ChangeId,
-        prev_head: Option<ChangeId>,
-        head: Option<ChangeId>,
+        new_state: StateId,
+        prev_head: Option<StateId>,
+        head: Option<StateId>,
         thread: Option<String>,
     },
     Goto {
-        target: ChangeId,
-        prev_head: Option<ChangeId>,
-        head: ChangeId,
+        target: StateId,
+        prev_head: Option<StateId>,
+        head: StateId,
     },
     ThreadCreate {
         name: String,
-        state: ChangeId,
+        state: StateId,
         manager_snapshot: Option<Vec<u8>>,
     },
     ThreadDelete {
         name: String,
-        state: ChangeId,
+        state: StateId,
     },
     ThreadUpdate {
         name: String,
-        old_state: ChangeId,
-        new_state: ChangeId,
+        old_state: StateId,
+        new_state: StateId,
         #[serde(default)]
         manager_snapshots: Option<ThreadUpdateSnapshots>,
     },
     Fork {
-        from: ChangeId,
-        new_state: ChangeId,
+        from: StateId,
+        new_state: StateId,
         thread: Option<String>,
-        head: Option<ChangeId>,
+        head: Option<StateId>,
     },
     Collapse {
-        sources: Vec<ChangeId>,
-        result: ChangeId,
+        sources: Vec<StateId>,
+        result: StateId,
         thread: Option<String>,
-        pre_thread_state: Option<ChangeId>,
+        pre_thread_state: Option<StateId>,
     },
     MarkerCreate {
         name: String,
-        state: ChangeId,
+        state: StateId,
     },
     MarkerDelete {
         name: String,
-        state: ChangeId,
+        state: StateId,
     },
     Checkpoint {
-        parent: Option<ChangeId>,
-        state: ChangeId,
+        parent: Option<StateId>,
+        state: StateId,
         thread: Option<String>,
     },
     TransactionAbort {
@@ -218,7 +218,7 @@ enum StrictCurrentOpRecord {
     },
     EphemeralThreadCollapse {
         thread: String,
-        final_state: ChangeId,
+        final_state: StateId,
     },
     ConflictResolved {
         conflict_id: String,
@@ -231,7 +231,7 @@ enum StrictCurrentOpRecord {
     Redact {
         redaction_id: ContentHash,
         blob: ContentHash,
-        state: ChangeId,
+        state: StateId,
         path: String,
     },
     Purge {
@@ -241,30 +241,30 @@ enum StrictCurrentOpRecord {
     FastForward {
         source_thread: String,
         target_thread: String,
-        pre_target_id: ChangeId,
-        post_target_id: ChangeId,
+        pre_target_id: StateId,
+        post_target_id: StateId,
     },
     GitCheckpoint {
         branch: String,
-        state: ChangeId,
+        state: StateId,
         previous_git_oid: Option<String>,
         new_git_oid: String,
     },
     RemoteThreadUpdate {
         remote: String,
         thread: String,
-        state: ChangeId,
+        state: StateId,
     },
     RemoteThreadDelete {
         remote: String,
         thread: String,
-        state: ChangeId,
+        state: StateId,
     },
     UndoRecoveryUpdate {
-        state: ChangeId,
+        state: StateId,
     },
     StateVisibilitySet {
-        state: ChangeId,
+        state: StateId,
         record_id: ContentHash,
         tier: VisibilityTier,
         #[serde(default)]
@@ -273,7 +273,7 @@ enum StrictCurrentOpRecord {
         new_sidecar: Option<Vec<u8>>,
     },
     StateVisibilityPromote {
-        state: ChangeId,
+        state: StateId,
         superseded: ContentHash,
         record_id: ContentHash,
         tier: VisibilityTier,
@@ -479,47 +479,47 @@ impl StrictCurrentOpRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum PreAtomicOpRecord {
     Snapshot {
-        new_state: ChangeId,
-        prev_head: Option<ChangeId>,
+        new_state: StateId,
+        prev_head: Option<StateId>,
         thread: Option<String>,
     },
     Goto {
-        target: ChangeId,
-        prev_head: Option<ChangeId>,
+        target: StateId,
+        prev_head: Option<StateId>,
     },
     ThreadCreate {
         name: String,
-        state: ChangeId,
+        state: StateId,
         manager_snapshot: Option<Vec<u8>>,
     },
     ThreadDelete {
         name: String,
-        state: ChangeId,
+        state: StateId,
     },
     ThreadUpdate {
         name: String,
-        old_state: ChangeId,
-        new_state: ChangeId,
+        old_state: StateId,
+        new_state: StateId,
     },
     Fork {
-        from: ChangeId,
-        new_state: ChangeId,
+        from: StateId,
+        new_state: StateId,
     },
     Collapse {
-        sources: Vec<ChangeId>,
-        result: ChangeId,
+        sources: Vec<StateId>,
+        result: StateId,
     },
     MarkerCreate {
         name: String,
-        state: ChangeId,
+        state: StateId,
     },
     MarkerDelete {
         name: String,
-        state: ChangeId,
+        state: StateId,
     },
     Checkpoint {
-        parent: Option<ChangeId>,
-        state: ChangeId,
+        parent: Option<StateId>,
+        state: StateId,
         thread: Option<String>,
     },
     TransactionAbort {
@@ -528,7 +528,7 @@ enum PreAtomicOpRecord {
     },
     EphemeralThreadCollapse {
         thread: String,
-        final_state: ChangeId,
+        final_state: StateId,
     },
     ConflictResolved {
         conflict_id: String,
@@ -541,7 +541,7 @@ enum PreAtomicOpRecord {
     Redact {
         redaction_id: ContentHash,
         blob: ContentHash,
-        state: ChangeId,
+        state: StateId,
         path: String,
     },
     Purge {
@@ -551,12 +551,12 @@ enum PreAtomicOpRecord {
     FastForward {
         source_thread: String,
         target_thread: String,
-        pre_target_id: ChangeId,
-        post_target_id: ChangeId,
+        pre_target_id: StateId,
+        post_target_id: StateId,
     },
     GitCheckpoint {
         branch: String,
-        state: ChangeId,
+        state: StateId,
         previous_git_oid: Option<String>,
         new_git_oid: String,
     },
@@ -699,50 +699,50 @@ impl PreAtomicOpRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum AtomicNoHeadOpRecord {
     Snapshot {
-        new_state: ChangeId,
-        prev_head: Option<ChangeId>,
+        new_state: StateId,
+        prev_head: Option<StateId>,
         thread: Option<String>,
     },
     Goto {
-        target: ChangeId,
-        prev_head: Option<ChangeId>,
+        target: StateId,
+        prev_head: Option<StateId>,
     },
     ThreadCreate {
         name: String,
-        state: ChangeId,
+        state: StateId,
         manager_snapshot: Option<Vec<u8>>,
     },
     ThreadDelete {
         name: String,
-        state: ChangeId,
+        state: StateId,
     },
     ThreadUpdate {
         name: String,
-        old_state: ChangeId,
-        new_state: ChangeId,
+        old_state: StateId,
+        new_state: StateId,
     },
     Fork {
-        from: ChangeId,
-        new_state: ChangeId,
+        from: StateId,
+        new_state: StateId,
         thread: Option<String>,
-        head: Option<ChangeId>,
+        head: Option<StateId>,
     },
     Collapse {
-        sources: Vec<ChangeId>,
-        result: ChangeId,
+        sources: Vec<StateId>,
+        result: StateId,
         thread: Option<String>,
     },
     MarkerCreate {
         name: String,
-        state: ChangeId,
+        state: StateId,
     },
     MarkerDelete {
         name: String,
-        state: ChangeId,
+        state: StateId,
     },
     Checkpoint {
-        parent: Option<ChangeId>,
-        state: ChangeId,
+        parent: Option<StateId>,
+        state: StateId,
         thread: Option<String>,
     },
     TransactionAbort {
@@ -751,7 +751,7 @@ enum AtomicNoHeadOpRecord {
     },
     EphemeralThreadCollapse {
         thread: String,
-        final_state: ChangeId,
+        final_state: StateId,
     },
     ConflictResolved {
         conflict_id: String,
@@ -764,7 +764,7 @@ enum AtomicNoHeadOpRecord {
     Redact {
         redaction_id: ContentHash,
         blob: ContentHash,
-        state: ChangeId,
+        state: StateId,
         path: String,
     },
     Purge {
@@ -774,27 +774,27 @@ enum AtomicNoHeadOpRecord {
     FastForward {
         source_thread: String,
         target_thread: String,
-        pre_target_id: ChangeId,
-        post_target_id: ChangeId,
+        pre_target_id: StateId,
+        post_target_id: StateId,
     },
     GitCheckpoint {
         branch: String,
-        state: ChangeId,
+        state: StateId,
         previous_git_oid: Option<String>,
         new_git_oid: String,
     },
     RemoteThreadUpdate {
         remote: String,
         thread: String,
-        state: ChangeId,
+        state: StateId,
     },
     RemoteThreadDelete {
         remote: String,
         thread: String,
-        state: ChangeId,
+        state: StateId,
     },
     UndoRecoveryUpdate {
-        state: ChangeId,
+        state: StateId,
     },
 }
 
@@ -957,8 +957,8 @@ impl AtomicNoHeadOpRecord {
 mod tests {
     use super::{tests_support, *};
 
-    fn cid(byte: u8) -> ChangeId {
-        ChangeId::from_bytes([byte; 16])
+    fn cid(byte: u8) -> StateId {
+        StateId::from_bytes([byte; 32])
     }
 
     fn hash(byte: u8) -> ContentHash {

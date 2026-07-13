@@ -331,17 +331,18 @@ fn now_rfc3339() -> String {
 
 #[cfg(test)]
 mod tests {
-    use crypto::StateSigningExt;
+    use crypto::{state_signature_from_signer, verify_state_signature_bytes};
     use objects::object::{Attribution, Principal, State, Tree};
     use tempfile::TempDir;
 
     use super::*;
 
-    fn signed_state_with(signer: &dyn Signer) -> State {
+    fn signed_state_with(signer: &dyn Signer) -> (State, objects::object::StateSignature) {
         let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
-        let mut state = State::new(Tree::new().hash(), vec![], attribution);
-        state.sign(signer).expect("sign state");
-        state
+        let state = State::new(Tree::new().hash(), vec![], attribution);
+        let signature =
+            state_signature_from_signer(&state.compute_hash(), signer).expect("sign state");
+        (state, signature)
     }
 
     #[test]
@@ -382,9 +383,8 @@ mod tests {
         let device = temp.path().join("device-identity.toml");
 
         let signer = resolve_signer(&local, &device).expect("resolve a local signer");
-        let state = signed_state_with(signer.as_ref());
-        state
-            .verify_signature()
+        let (state, signature) = signed_state_with(signer.as_ref());
+        verify_state_signature_bytes(&signature, &state.compute_hash())
             .expect("locally-signed state must verify");
 
         // The resolved key is the persisted local key.
@@ -401,9 +401,8 @@ mod tests {
         // First capture: no device key yet -> local key signs.
         let local_signer = resolve_signer(&local, &device).expect("local signer");
         let local_pubkey = hex::encode(local_signer.public_key());
-        let prior_state = signed_state_with(local_signer.as_ref());
-        prior_state
-            .verify_signature()
+        let (prior_state, prior_signature) = signed_state_with(local_signer.as_ref());
+        verify_state_signature_bytes(&prior_signature, &prior_state.compute_hash())
             .expect("local state verifies");
 
         // Reconcile: record a device key (a distinct keypair).
@@ -434,8 +433,7 @@ mod tests {
 
         // The prior local-signed state still verifies — its public key is
         // embedded, so reconciliation does not invalidate it.
-        prior_state
-            .verify_signature()
+        verify_state_signature_bytes(&prior_signature, &prior_state.compute_hash())
             .expect("prior local-signed state still verifies after device link");
     }
 

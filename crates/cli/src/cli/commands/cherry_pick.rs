@@ -8,7 +8,10 @@ use heddle_core::{
     cherry_pick_human_message, cherry_pick_json_status, default_cherry_pick_commit_message,
     plan_cherry_pick_resolve,
 };
-use objects::{object::Attribution, store::ObjectStore};
+use objects::{
+    object::{Attribution, ChangeLineage, ChangeLineageKind},
+    store::ObjectStore,
+};
 use repo::Repository;
 
 use super::{advice::RecoveryAdvice, worktree_safety::ensure_worktree_clean};
@@ -38,9 +41,9 @@ pub fn cmd_cherry_pick(
     ) {
         return Err(anyhow!(cherry_pick_commit_not_found_advice(&commit)));
     }
-    let change_id = resolved.expect("not-found gate above");
+    let state_id = resolved.expect("not-found gate above");
 
-    let loaded = repo.store().get_state(&change_id)?;
+    let loaded = repo.store().get_state(&state_id)?;
     if matches!(
         plan_cherry_pick_resolve(loaded.is_some()),
         CherryPickResolvePlan::NotFound
@@ -59,7 +62,7 @@ pub fn cmd_cherry_pick(
         let facts = CherryPickSuccessFacts {
             outcome: CherryPickOutcome::AppliedNotCommitted,
             commit: &commit,
-            new_change_id_short: None,
+            new_state_id_short: None,
         };
         if should_output_json(cli, Some(repo.config())) {
             let envelope = serde_json::json!({
@@ -76,12 +79,21 @@ pub fn cmd_cherry_pick(
         let cherry_message = message.unwrap_or_else(|| default_cherry_pick_commit_message(&commit));
         let attribution = Attribution::human(repo.get_principal()?);
 
-        let new_state = repo.snapshot_with_attribution(Some(cherry_message), None, attribution)?;
-        let new_short = new_state.change_id.short();
+        let new_state = repo.snapshot_with_attribution_and_lineage(
+            Some(cherry_message),
+            None,
+            attribution,
+            vec![ChangeLineage {
+                kind: ChangeLineageKind::CherryPick,
+                source_change: state.change_id,
+                source_state: state.id(),
+            }],
+        )?;
+        let new_short = new_state.state_id.short();
         let facts = CherryPickSuccessFacts {
             outcome: CherryPickOutcome::Committed,
             commit: &commit,
-            new_change_id_short: Some(&new_short),
+            new_state_id_short: Some(&new_short),
         };
 
         if should_output_json(cli, Some(repo.config())) {

@@ -1102,7 +1102,7 @@ fn resolve_push_state_id(
     state: Option<String>,
     thread: Option<&str>,
     force: bool,
-) -> Result<objects::object::ChangeId> {
+) -> Result<objects::object::StateId> {
     if let Some(state_str) = state {
         if matches!(state_str.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
             ensure_current_state(
@@ -1141,7 +1141,7 @@ fn resolve_push_state_id(
 async fn push_local(
     repo: &Repository,
     target_path: &std::path::Path,
-    state_id: &objects::object::ChangeId,
+    state_id: &objects::object::StateId,
     track_name: &str,
     plan: &PushPlan,
     cli: &Cli,
@@ -1189,7 +1189,7 @@ async fn push_local(
         println!(
             "{} pushed {} to {} ({})",
             style::ok_marker(),
-            style::change_id(&state_id.short().to_string()),
+            style::state_id(&state_id.short().to_string()),
             style::bold(track_name),
             style::count(objects_copied, "object")
         );
@@ -1209,7 +1209,7 @@ async fn push_local(
 /// A pushable Heddle thread paired with its tip state (heddle#838).
 struct PushableThread {
     name: String,
-    state: objects::object::ChangeId,
+    state: objects::object::StateId,
 }
 
 /// Enumerate the threads `--all-threads` should push on the native/hosted
@@ -1296,7 +1296,7 @@ async fn push_local_all_threads(
                     println!(
                         "{} pushed {} to {} ({})",
                         style::ok_marker(),
-                        style::change_id(&thread.state.short().to_string()),
+                        style::state_id(&thread.state.short().to_string()),
                         style::bold(&thread.name),
                         style::count(copied, "object")
                     );
@@ -1455,7 +1455,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
                     if let Some(state_val) = detail.strip_prefix("remote state: ") {
                         println!(
                             "{}",
-                            style::field("remote state", &style::change_id(state_val))
+                            style::field("remote state", &style::state_id(state_val))
                         );
                     } else {
                         println!("{detail}");
@@ -1478,7 +1478,7 @@ async fn push_network_one_thread(
     repo: &Repository,
     client: &mut HostedGrpcClient,
     repo_path: &str,
-    state_id: &objects::object::ChangeId,
+    state_id: &objects::object::StateId,
     track_name: &str,
     force: bool,
     progress: &objects::Progress,
@@ -1561,7 +1561,7 @@ async fn push_network_all_threads(
                                 if let Some(state_val) = detail.strip_prefix("remote state: ") {
                                     println!(
                                         "{}",
-                                        style::field("remote state", &style::change_id(state_val))
+                                        style::field("remote state", &style::state_id(state_val))
                                     );
                                 } else {
                                     println!("{detail}");
@@ -1823,7 +1823,7 @@ struct PushNetworkOptions<'a> {
     /// The single resolved state for a one-thread push (heddle#837). `None`
     /// when `all_threads` is set — the fan-out resolves each thread's tip
     /// itself (heddle#838).
-    state_id: Option<&'a objects::object::ChangeId>,
+    state_id: Option<&'a objects::object::StateId>,
     track_name: &'a str,
     force: bool,
     /// heddle#838: fan out over every pushable thread instead of the single

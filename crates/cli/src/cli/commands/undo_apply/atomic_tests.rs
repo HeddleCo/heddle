@@ -17,14 +17,14 @@ use super::*;
 /// holds both `a.txt` (from `s1`) and `b.txt` (from `s2`); `s1` holds only
 /// `a.txt`; the initial state holds neither. Returns the repo + temp dir +
 /// the two states.
-fn repo_with_two_snapshots() -> (TempDir, Repository, ChangeId, ChangeId) {
+fn repo_with_two_snapshots() -> (TempDir, Repository, StateId, StateId) {
     let temp = TempDir::new().unwrap();
     let repo = Repository::init_default(temp.path()).unwrap();
     std::fs::write(temp.path().join("a.txt"), "a").unwrap();
     let s1 = repo.snapshot(Some("s1".to_string()), None).unwrap();
     std::fs::write(temp.path().join("b.txt"), "b").unwrap();
     let s2 = repo.snapshot(Some("s2".to_string()), None).unwrap();
-    (temp, repo, s1.change_id, s2.change_id)
+    (temp, repo, s1.state_id, s2.state_id)
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn commit_marker_count_for(repo: &Repository, txid: &str) -> usize {
         .count()
 }
 
-fn main_thread(repo: &Repository) -> Option<ChangeId> {
+fn main_thread(repo: &Repository) -> Option<StateId> {
     repo.refs().get_thread(&ThreadName::new("main")).unwrap()
 }
 
@@ -69,7 +69,7 @@ fn main_thread(repo: &Repository) -> Option<ChangeId> {
 /// it exercises the real compensators + nesting + rewind path.
 struct FaultyUndo {
     batches: Vec<OpBatch>,
-    recovery_head: Option<ChangeId>,
+    recovery_head: Option<StateId>,
     fail_after: usize,
 }
 
@@ -1613,7 +1613,7 @@ fn step_nonatomic_restores_redaction_sidecar_when_a_later_batch_fails() {
 /// timestamp (so distinct records on the same state get distinct content
 /// hashes and accrete rather than dedup).
 fn visibility_record(
-    state: ChangeId,
+    state: StateId,
     tier: objects::object::VisibilityTier,
     ts: i64,
 ) -> objects::object::StateVisibility {

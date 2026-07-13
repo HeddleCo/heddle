@@ -39,7 +39,7 @@ pub async fn run(cli: &Cli, command: &ReviewCommands) -> Result<()> {
 #[derive(Serialize)]
 struct ReviewShowOutput {
     output_kind: &'static str,
-    change_id: String,
+    state_id: String,
     headline: String,
     agent_narrative: Option<String>,
     files_changed: u32,
@@ -140,7 +140,7 @@ async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
 
     let output = ReviewShowOutput {
         output_kind: "review_show",
-        change_id: bytes_to_change_id_string(&payload_resp.state_id),
+        state_id: bytes_to_state_id_string(&payload_resp.state_id),
         headline: summary.headline,
         agent_narrative: opt_string(payload_resp.agent_narrative),
         files_changed: summary.files_changed,
@@ -183,7 +183,7 @@ async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
 }
 
 fn render_text(out: &ReviewShowOutput, all_signals: bool) {
-    println!("review of state {}", out.change_id);
+    println!("review of state {}", out.state_id);
     if !out.headline.is_empty() {
         println!("  {}", out.headline);
     }
@@ -296,17 +296,17 @@ async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
         .map_err(status_to_anyhow)?
         .into_inner();
     if should_output_json(cli, None) {
-        let state_str = bytes_to_change_id_string(&resp.state_id);
+        let state_str = bytes_to_state_id_string(&resp.state_id);
         let out = serde_json::json!({
             "output_kind": "review_sign",
             "signature_id": resp.signature_id,
-            "change_id": state_str,
+            "state_id": state_str,
         });
         println!("{out}");
     } else {
         println!(
             "signed state {} as {} (signature_id {})",
-            bytes_to_change_id_string(&resp.state_id),
+            bytes_to_state_id_string(&resp.state_id),
             args.kind.as_wire(),
             resp.signature_id
         );
@@ -340,8 +340,8 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
 
     let mut next_state: Option<NextStateView> = None;
     for state in history {
-        let state_id_bytes = state.change_id.as_bytes().to_vec();
-        let state_id_str = state.change_id.to_string_full();
+        let state_id_bytes = state.state_id.as_bytes().to_vec();
+        let state_id_str = state.state_id.to_string_full();
         let signatures = svc
             .list_signatures(tonic::Request::new(ListSignaturesRequest {
                 repo_path: String::new(),
@@ -370,7 +370,7 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
 
         if !satisfied {
             next_state = Some(NextStateView {
-                change_id: state_id_str,
+                state_id: state_id_str,
                 headline: state.intent.clone().unwrap_or_default(),
                 existing_signatures: signatures.len() as u32,
             });
@@ -386,7 +386,7 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
         let envelope = match &next_state {
             Some(view) => serde_json::json!({
                 "output_kind": "review_next",
-                "change_id": view.change_id,
+                "state_id": view.state_id,
                 "headline": view.headline,
                 "existing_signatures": view.existing_signatures,
                 "next": view,
@@ -403,7 +403,7 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
     } else {
         match &next_state {
             Some(view) => {
-                println!("next pending review: {}", view.change_id);
+                println!("next pending review: {}", view.state_id);
                 if !view.headline.is_empty() {
                     println!("  {}", view.headline);
                 }
@@ -421,7 +421,7 @@ const NEXT_SCAN_LIMIT: usize = 50;
 
 #[derive(Serialize)]
 struct NextStateView {
-    change_id: String,
+    state_id: String,
     headline: String,
     existing_signatures: u32,
 }
@@ -552,13 +552,13 @@ fn review_mine_only_principal_required_advice() -> RecoveryAdvice {
     )
 }
 
-/// Render a 16-byte ChangeId from the wire as its display form. Empty input
+/// Render a 16-byte StateId from the wire as its display form. Empty input
 /// → empty string (matches the prior empty-string-sentinel behavior).
-fn bytes_to_change_id_string(bytes: &[u8]) -> String {
+fn bytes_to_state_id_string(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }
-    objects::object::ChangeId::try_from_slice(bytes)
+    objects::object::StateId::try_from_slice(bytes)
         .map(|id| id.to_string_full())
         .unwrap_or_default()
 }

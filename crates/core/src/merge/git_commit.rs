@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow};
 use heddle_git_projection::{git_core::LocalGitIdentity, git_export};
 use objects::{
     HeddleError, RecoveryDetails,
-    object::{Attribution, ChangeId},
+    object::{Attribution, StateId},
     store::ObjectStore,
 };
 use repo::Repository;
@@ -212,7 +212,7 @@ pub fn build_commit_message(
 /// Write a Git checkpoint commit for the landed Heddle merge state.
 pub fn write_git_commit(
     repo: &Repository,
-    state_id: &ChangeId,
+    state_id: &StateId,
     paths: &[String],
     message: &str,
     extra_parents: &[String],

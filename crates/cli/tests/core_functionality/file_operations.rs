@@ -108,7 +108,7 @@ fn test_symlink_handling() {
 fn test_nested_tracked_heddle_paths_are_not_ignored_by_status_or_snapshot() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
-    write_nested_tracked_heddle_fixture(temp.path(), "hd-examplehead-v1\n");
+    write_nested_tracked_heddle_fixture(temp.path(), "hs-examplehead-v1\n");
     heddle_must_succeed(
         &["capture", "-m", "Thread nested heddle files"],
         temp.path(),
@@ -123,7 +123,7 @@ fn test_nested_tracked_heddle_paths_are_not_ignored_by_status_or_snapshot() {
     );
     std::fs::write(
         temp.path().join("examples/calculator/.heddle/HEAD"),
-        "hd-examplehead-v2\n",
+        "hs-examplehead-v2\n",
     )
     .unwrap();
     let status = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
@@ -149,7 +149,7 @@ fn test_nested_tracked_heddle_paths_are_not_ignored_by_status_or_snapshot() {
     );
     let restored =
         std::fs::read_to_string(temp.path().join("examples/calculator/.heddle/HEAD")).unwrap();
-    assert_eq!(restored, "hd-examplehead-v1\n");
+    assert_eq!(restored, "hs-examplehead-v1\n");
 }
 
 #[test]

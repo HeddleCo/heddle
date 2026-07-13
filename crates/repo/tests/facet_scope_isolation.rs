@@ -11,7 +11,11 @@
 //! Plus: the well-known Git/Heddle content-side behavior is unchanged — the
 //! `content` facet composes to the same per-worktree scope token as before.
 
-use objects::object::ChangeId;
+use objects::object::StateId;
+
+fn state_id(value: u8) -> StateId {
+    StateId::from_bytes([value; 32])
+}
 use oplog::{OpLogBackend, OpLogRecorder};
 use repo::{Repository, SpoolFacet};
 use tempfile::TempDir;
@@ -44,9 +48,9 @@ fn facets_have_independent_batch_numbering_and_undo() {
     let gov_scope = repo.op_scope_for_facet(&SpoolFacet::Governance);
 
     // Two content ops, one governance op — interleaved, one shared repo.
-    let c1 = ChangeId::generate();
-    let c2 = ChangeId::generate();
-    let g1 = ChangeId::generate();
+    let c1 = state_id(1);
+    let c2 = state_id(2);
+    let g1 = state_id(3);
 
     oplog
         .record_snapshot(&c1, None, None, Some(&content_scope))
@@ -137,7 +141,7 @@ fn facets_have_independent_heads_and_refs() {
     );
 
     // Advance the governance HEAD — this moves only the governance thread ref.
-    let gov_state = ChangeId::generate();
+    let gov_state = state_id(4);
     repo.set_facet_head(&SpoolFacet::Governance, "main", &gov_state)
         .expect("set governance head");
 

@@ -22,8 +22,8 @@ struct ShowOutput {
     output_kind: &'static str,
     repository_capability: String,
     storage_model: String,
-    change_id: String,
-    change_id_full: String,
+    state_id: String,
+    state_id_full: String,
     content_hash: String,
     tree: String,
     parents: Vec<String>,
@@ -114,8 +114,8 @@ fn cmd_show_with_output_kind(
                 missing_branches: hint.missing_branches,
                 recommended_command: hint.recommended_command,
             }),
-        change_id: state.change_id.short(),
-        change_id_full: state.change_id.to_string_full(),
+        state_id: state.state_id.short(),
+        state_id_full: state.state_id.to_string_full(),
         content_hash: state.compute_hash().to_hex(),
         tree: state.tree.to_hex(),
         parents: state.parents.iter().map(|p| p.short()).collect(),
@@ -141,7 +141,7 @@ fn cmd_show_with_output_kind(
             lint_warnings: v.lint_warnings,
         }),
         git_checkpoint: repo
-            .latest_git_checkpoint_for_change(&state.change_id)
+            .latest_git_checkpoint_for_change(&state.state_id)
             .ok()
             .flatten()
             .map(|record| record.git_commit),
@@ -233,10 +233,10 @@ fn render_state(output: &ShowOutput, verbose: bool) {
     // editorial focus.
     println!(
         "State: {} ({})",
-        style::change_id(&output.change_id),
+        style::state_id(&output.state_id),
         style::dim(&output.content_hash[..8])
     );
-    println!("Full ID: {}", style::dim(&output.change_id_full));
+    println!("Full ID: {}", style::dim(&output.state_id_full));
     println!("Tree: {}", style::dim(&output.tree));
 
     if !output.parents.is_empty() {

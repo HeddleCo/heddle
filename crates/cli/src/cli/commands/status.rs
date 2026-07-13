@@ -868,11 +868,11 @@ fn render_status_thread(output: &StatusOutput, verbose: bool) {
         if verbose {
             println!(
                 "State: {} ({})",
-                style::change_id(&state.change_id),
+                style::state_id(&state.state_id),
                 style::dim(&state.content_hash)
             );
         } else {
-            println!("Saved change: {}", style::change_id(&state.change_id));
+            println!("Saved change: {}", style::state_id(&state.state_id));
         }
         if let Some(intent) = &state.intent {
             // Quote stays plain; the inner intent string is the
@@ -1733,13 +1733,13 @@ mod tests {
         // Advance main from the main repo dir (not from dest).
         fs::write(repo_dir.path().join("hello.txt"), b"hello world\n").unwrap();
         let snap = repo.snapshot(Some("advance".into()), None).unwrap();
-        assert_ne!(snap.change_id, mat.state_id);
+        assert_ne!(snap.state_id, mat.state_id);
 
         let infos = assess_materialized_threads(&repo);
         assert_eq!(infos.len(), 1);
         assert!(
             infos[0].stale,
-            "manifest still names mat.state_id but main head is at snap.change_id → stale"
+            "manifest still names mat.state_id but main head is at snap.state_id → stale"
         );
     }
 

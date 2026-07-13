@@ -4,7 +4,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{Attribution, ChangeId, ContentHash};
+use super::{Attribution, ContentHash, StateId};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileProvenance {
@@ -18,7 +18,7 @@ pub struct FileProvenance {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Origin {
-    pub state_id: ChangeId,
+    pub state_id: StateId,
     pub attribution: Attribution,
     /// Committer time — when the state object came into being. Stable
     /// across re-imports because it's part of the state hash.

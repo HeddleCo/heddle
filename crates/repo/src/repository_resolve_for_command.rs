@@ -3,7 +3,7 @@
 
 use objects::{
     error::{HeddleError, Result as HeddleResult},
-    object::ChangeId,
+    object::StateId,
 };
 
 use super::Repository;
@@ -48,7 +48,7 @@ impl<'a> ResolvePolicy<'a> {
 /// A state spec successfully resolved for command use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedState {
-    pub change_id: ChangeId,
+    pub state_id: StateId,
 }
 
 /// Structured lookup failures callers map to their own user-facing text.
@@ -123,7 +123,7 @@ pub fn resolve_state_for_command(
     }
 
     match repo.resolve_state(spec)? {
-        Some(change_id) => Ok(ResolvedState { change_id }),
+        Some(state_id) => Ok(ResolvedState { state_id }),
         None => resolve_missing_state(repo, spec, policy),
     }
 }
@@ -167,12 +167,12 @@ mod tests {
     use super::*;
     use crate::Repository;
 
-    fn repo_with_snapshot() -> (TempDir, Repository, ChangeId) {
+    fn repo_with_snapshot() -> (TempDir, Repository, StateId) {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("a.txt"), "a").unwrap();
         let state = repo.snapshot(Some("first".into()), None).unwrap();
-        (temp, repo, state.change_id)
+        (temp, repo, state.id())
     }
 
     #[test]
@@ -181,13 +181,13 @@ mod tests {
         let resolved =
             resolve_state_for_command(&repo, &id.to_string_full(), ResolvePolicy::minimal())
                 .unwrap();
-        assert_eq!(resolved.change_id, id);
+        assert_eq!(resolved.state_id, id);
     }
 
     #[test]
     fn minimal_policy_returns_not_found_without_hints() {
         let (_temp, repo, _) = repo_with_snapshot();
-        let err = resolve_state_for_command(&repo, "hd-zzzzzzzzzzzz", ResolvePolicy::minimal())
+        let err = resolve_state_for_command(&repo, "hs-zzzzzzzzzzzz", ResolvePolicy::minimal())
             .unwrap_err();
         assert!(matches!(
             err,
@@ -209,11 +209,11 @@ mod tests {
         };
 
         let resolved = resolve_state_for_command(&repo, "HEAD", policy).unwrap();
-        assert_eq!(resolved.change_id, id);
+        assert_eq!(resolved.state_id, id);
         assert!(!called.load(Ordering::SeqCst));
 
         let resolved = resolve_state_for_command(&repo, &id.to_string_full(), policy).unwrap();
-        assert_eq!(resolved.change_id, id);
+        assert_eq!(resolved.state_id, id);
         assert!(!called.load(Ordering::SeqCst));
     }
 
@@ -236,7 +236,7 @@ mod tests {
 
         let resolved = resolve_state_for_command(&repo, "HEAD", policy).unwrap();
         assert!(bootstrapped.load(Ordering::SeqCst));
-        assert_eq!(repo.head().unwrap(), Some(resolved.change_id));
+        assert_eq!(repo.head().unwrap(), Some(resolved.state_id));
     }
 
     #[cfg(feature = "git-overlay")]

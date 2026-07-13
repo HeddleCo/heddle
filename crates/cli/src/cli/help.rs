@@ -684,7 +684,7 @@ Common mappings:
 
 | Intent | Git Overlay | Native Heddle |
 |--------|-------------|---------------|
-| Save source history | `git commit` | `heddle commit` |
+| Save source history | `git commit` | `heddle capture` |
 | Isolate coordinated work | `heddle start` | `heddle start` |
 | Record a granular Heddle savepoint | `heddle capture` | `heddle capture` |
 | Check integration readiness | `heddle ready` | `heddle ready` |
@@ -960,8 +960,8 @@ Export metadata for Git readers:\n\
 \n\
 Every exported commit carries a footer at the tail of the commit message:\n\
 \n\
-    Heddle-State: <change_id>\n\
-    Heddle-URL: <hosted_url>/state/<change_id>     (omitted if no hosted URL)\n\
+    Heddle-State: <state_id>\n\
+    Heddle-URL: <hosted_url>/state/<state_id>     (omitted if no hosted URL)\n\
     Heddle-Annotations-Omitted: <count>\n\
 \n\
 This is the durable record — every reader on every host sees it regardless\n\

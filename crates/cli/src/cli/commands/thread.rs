@@ -26,7 +26,7 @@ pub use heddle_core::{
     find_thread_summary, thread_is_available_git_ref, thread_is_imported_git_ref,
 };
 use objects::{
-    object::{ChangeId, State, ThreadName},
+    object::{State, StateId, ThreadName},
     store::{
         ActorPresence, ActorPresenceStatus, ActorPresenceStore, ObjectStore, WriterLeaseStatus,
         WriterLeaseStore,
@@ -145,7 +145,7 @@ pub(crate) struct ThreadOpOutput {
 
 #[derive(Serialize)]
 pub(crate) struct ThreadCaptureOutput {
-    pub change_id: String,
+    pub state_id: String,
     pub created_at: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
@@ -238,7 +238,7 @@ pub(crate) fn cmd_thread_captures(
             .unwrap_or_else(|| "None".to_string());
         println!(
             "  {} {} {}",
-            style::accent(&capture.change_id),
+            style::accent(&capture.state_id),
             capture.message,
             style::dim(&format!("confidence {confidence}"))
         );
@@ -264,13 +264,13 @@ fn collect_thread_captures(
         .map(|thread| thread.base_state);
     let mut out = Vec::new();
     let mut cursor = Some(current);
-    while let Some(change_id) = cursor {
-        if base.as_deref() == Some(change_id.short().as_str())
-            || base.as_deref().and_then(|base| ChangeId::parse(base).ok()) == Some(change_id)
+    while let Some(state_id) = cursor {
+        if base.as_deref() == Some(state_id.short().as_str())
+            || base.as_deref().and_then(|base| StateId::parse(base).ok()) == Some(state_id)
         {
             break;
         }
-        let Some(state) = repo.store().get_state(&change_id)? else {
+        let Some(state) = repo.store().get_state(&state_id)? else {
             break;
         };
         if state
@@ -317,9 +317,9 @@ fn thread_capture_output(
     let message = state
         .intent
         .clone()
-        .unwrap_or_else(|| format!("Capture {}", state.change_id.short()));
+        .unwrap_or_else(|| format!("Capture {}", state.state_id.short()));
     ThreadCaptureOutput {
-        change_id: state.change_id.short(),
+        state_id: state.state_id.short(),
         created_at: state.created_at.to_rfc3339(),
         intent: state.intent.clone(),
         confidence: state.confidence,
@@ -853,7 +853,7 @@ fn render_thread_entry(entry: &ThreadSummary, verbose: bool) {
 pub(crate) fn start_transaction_id(
     scope: &str,
     name: &str,
-    base_state: &ChangeId,
+    base_state: &StateId,
     start_epoch: DateTime<Utc>,
 ) -> String {
     format!(
@@ -1217,13 +1217,13 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
 /// what it anchors on, so reconstruct the finalize inputs from it rather than
 /// re-running the fresh-start preflight (which would reject the now-non-empty
 /// checkout) or `execute` (whose `apply` would fail on the existing `.heddle`).
-/// `base_state` is the full `ChangeId` already resolved by `start_thread` (the
+/// `base_state` is the full `StateId` already resolved by `start_thread` (the
 /// record only persists the short form). No hydrate is re-run, so no hydrate
 /// note is emitted (the original start already linked the deps).
 fn finalize_committed_start(
     repo: &Repository,
     args: &ThreadStartArgs,
-    base_state: ChangeId,
+    base_state: StateId,
     actor_identity: &StartActorIdentity,
 ) -> Result<ThreadOpOutput> {
     let committed = ThreadManager::new(repo.heddle_dir())
@@ -1267,7 +1267,7 @@ fn finalize_thread_start(
     args: &ThreadStartArgs,
     thread_mode: &ThreadMode,
     abs_path: &Path,
-    base_state: ChangeId,
+    base_state: StateId,
     base_short: &str,
     base_root: &str,
     actor_identity: &StartActorIdentity,
@@ -1469,8 +1469,8 @@ fn active_reservation_advice(thread: &str, existing_path: Option<String>) -> Rec
 
 fn thread_anchor_mismatch_advice(
     thread: &str,
-    existing: &ChangeId,
-    requested: &ChangeId,
+    existing: &StateId,
+    requested: &StateId,
 ) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "thread_anchor_mismatch",
@@ -2369,11 +2369,7 @@ pub(crate) fn show_thread_summary(
             println!();
             println!("{}", style::section("Recent saved states"));
             for capture in captures {
-                println!(
-                    "  {} {}",
-                    style::accent(&capture.change_id),
-                    capture.message
-                );
+                println!("  {} {}", style::accent(&capture.state_id), capture.message);
             }
         }
         if summary.promotion_suggested && !summary.heavy_impact_paths.is_empty() {

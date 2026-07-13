@@ -14,7 +14,7 @@ use grpc::heddle::v1::{
     OperationHit, QueryOperationsRequest, QueryOperationsResponse, StreamOperationsRequest,
     operation_log_query_service_server::OperationLogQueryService,
 };
-use objects::{error::Result as HeddleResult, object::ChangeId};
+use objects::{error::Result as HeddleResult, object::StateId};
 use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord};
 use refs::operation_index::{IndexedOperation, OperationLogIndex, OperationLogQuery};
 use tokio_stream::wrappers::ReceiverStream;
@@ -84,8 +84,8 @@ fn hit_to_proto(hit: IndexedOperation) -> OperationHit {
         thread: hit.thread.unwrap_or_default(),
         symbols: hit.symbols,
         signal_kinds: hit.signal_kinds,
-        change_id: hit
-            .change_id
+        state_id: hit
+            .state_id
             .map(|c| c.as_bytes().to_vec())
             .unwrap_or_default(),
     }
@@ -145,7 +145,7 @@ fn indexed_from_oplog_entry(entry: &OpEntry) -> IndexedOperation {
         thread: thread_for(&entry.operation),
         symbols: Vec::new(),
         signal_kinds: Vec::new(),
-        change_id: primary_change_id(&entry.operation),
+        state_id: primary_state_id(&entry.operation),
     }
 }
 
@@ -217,7 +217,7 @@ fn thread_for(op: &OpRecord) -> Option<String> {
     }
 }
 
-fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
+fn primary_state_id(op: &OpRecord) -> Option<StateId> {
     match op {
         OpRecord::Snapshot { new_state, .. } => Some(*new_state),
         OpRecord::Goto { target, .. } => Some(*target),
@@ -287,7 +287,7 @@ mod tests {
     use std::sync::Arc;
 
     use futures::StreamExt;
-    use objects::object::ChangeId;
+    use objects::object::StateId;
     use refs::operation_index::IndexedOperation;
     use repo::{Repository, operation_dedup::OperationDedupStore};
     use tempfile::TempDir;
@@ -304,7 +304,7 @@ mod tests {
             thread: Some("main".into()),
             symbols: vec!["src/lib.rs:foo".into()],
             signal_kinds: vec![],
-            change_id: Some(ChangeId::from_bytes([1; 16])),
+            state_id: Some(StateId::from_bytes([1; 32])),
         }
     }
 
@@ -423,7 +423,7 @@ mod tests {
     #[serial_test::serial(process_global)]
     async fn query_reads_live_oplog_when_index_is_empty() {
         let (_t, svc) = fresh_service();
-        let state = ChangeId::from_bytes([2; 16]);
+        let state = StateId::from_bytes([2; 32]);
         write_oplog_record(
             &svc,
             OpRecord::Checkpoint {
@@ -446,7 +446,7 @@ mod tests {
         assert_eq!(resp.hits.len(), 1);
         assert_eq!(resp.hits[0].verb, "checkpoint");
         assert_eq!(resp.hits[0].thread, "main");
-        assert_eq!(resp.hits[0].change_id, state.as_bytes().to_vec());
+        assert_eq!(resp.hits[0].state_id, state.as_bytes().to_vec());
     }
 
     #[tokio::test]

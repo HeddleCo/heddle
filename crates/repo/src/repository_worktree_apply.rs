@@ -1249,7 +1249,7 @@ mod tests {
         let tree_one = repo.store().get_tree(&state_one.tree).unwrap().unwrap();
         let tree_two = repo.store().get_tree(&state_two.tree).unwrap().unwrap();
 
-        repo.goto(&state_one.change_id).unwrap();
+        repo.goto(&state_one.id()).unwrap();
         let keep_before = fs::metadata(&keep).unwrap().modified().unwrap();
 
         thread::sleep(Duration::from_millis(20));
@@ -1289,11 +1289,11 @@ mod tests {
         fs::write(temp_dir.path().join("target-only.txt"), "target file\n").unwrap();
         let state_two = repo.snapshot(Some("two".to_string()), None).unwrap();
 
-        repo.goto(&state_one.change_id).unwrap();
+        repo.goto(&state_one.id()).unwrap();
         fs::write(&tracked, "unsnapped edit\n").unwrap();
         fs::write(&notes, "local notes\n").unwrap();
 
-        let err = repo.goto(&state_two.change_id).unwrap_err();
+        let err = repo.goto(&state_two.id()).unwrap_err();
         match &err {
             HeddleError::Recovery(details) => {
                 assert_eq!(details.kind, "dirty_worktree");
@@ -1327,11 +1327,11 @@ mod tests {
         fs::write(temp_dir.path().join("target-only.txt"), "target file\n").unwrap();
         let state_two = repo.snapshot(Some("two".to_string()), None).unwrap();
 
-        repo.goto(&state_one.change_id).unwrap();
+        repo.goto(&state_one.id()).unwrap();
         fs::write(&tracked, "unsnapped edit\n").unwrap();
         fs::write(&notes, "local notes\n").unwrap();
 
-        repo.goto_discard_local(&state_two.change_id).unwrap();
+        repo.goto_discard_local(&state_two.id()).unwrap();
 
         assert_eq!(fs::read_to_string(&tracked).unwrap(), "target\n");
         assert!(!notes.exists());
@@ -1448,8 +1448,8 @@ mod tests {
         fs::write(&tracked, "target\n").unwrap();
         let state_two = repo.snapshot(Some("two".to_string()), None).unwrap();
 
-        repo.goto(&state_one.change_id).unwrap();
-        repo.goto(&state_two.change_id).unwrap();
+        repo.goto(&state_one.id()).unwrap();
+        repo.goto(&state_two.id()).unwrap();
 
         assert_eq!(fs::read_to_string(&tracked).unwrap(), "target\n");
     }

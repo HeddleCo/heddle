@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use objects::object::ChangeId;
+use objects::object::StateId;
 use oplog::OpRecord;
 use repo::{GitImportGuidance, GitRemoteTrackingStatus, RepositoryOperationStatus, shell_quote};
 
@@ -532,7 +532,7 @@ pub fn land_checkpoint_message(
 }
 
 /// Whether a change id matches a short or full display form from operator text.
-pub fn change_id_matches_display(short: &str, full: &str, display: &str) -> bool {
+pub fn state_id_matches_display(short: &str, full: &str, display: &str) -> bool {
     short == display || full == display
 }
 
@@ -540,15 +540,15 @@ pub fn change_id_matches_display(short: &str, full: &str, display: &str) -> bool
 pub fn op_targets_merge_state(op: &OpRecord, merge_state: &str) -> bool {
     match op {
         OpRecord::Snapshot { new_state, .. } => {
-            change_id_matches_display(&new_state.short(), &new_state.to_string_full(), merge_state)
+            state_id_matches_display(&new_state.short(), &new_state.to_string_full(), merge_state)
         }
         OpRecord::Checkpoint { state, .. } => {
-            change_id_matches_display(&state.short(), &state.to_string_full(), merge_state)
+            state_id_matches_display(&state.short(), &state.to_string_full(), merge_state)
         }
         OpRecord::Goto { target, .. } => {
-            change_id_matches_display(&target.short(), &target.to_string_full(), merge_state)
+            state_id_matches_display(&target.short(), &target.to_string_full(), merge_state)
         }
-        OpRecord::FastForward { post_target_id, .. } => change_id_matches_display(
+        OpRecord::FastForward { post_target_id, .. } => state_id_matches_display(
             &post_target_id.short(),
             &post_target_id.to_string_full(),
             merge_state,
@@ -577,9 +577,9 @@ pub fn op_targets_merge_state(op: &OpRecord, merge_state: &str) -> bool {
     }
 }
 
-/// Convenience: match a [`ChangeId`] against operator display text.
-pub fn change_id_matches_op_display(id: &ChangeId, display: &str) -> bool {
-    change_id_matches_display(&id.short(), &id.to_string_full(), display)
+/// Convenience: match a [`StateId`] against operator display text.
+pub fn state_id_matches_op_display(id: &StateId, display: &str) -> bool {
+    state_id_matches_display(&id.short(), &id.to_string_full(), display)
 }
 
 #[cfg(test)]
@@ -944,10 +944,10 @@ mod tests {
     }
 
     #[test]
-    fn change_id_matches_short_or_full() {
-        assert!(change_id_matches_display("abc", "abcdef", "abc"));
-        assert!(change_id_matches_display("abc", "abcdef", "abcdef"));
-        assert!(!change_id_matches_display("abc", "abcdef", "zzz"));
+    fn state_id_matches_short_or_full() {
+        assert!(state_id_matches_display("abc", "abcdef", "abc"));
+        assert!(state_id_matches_display("abc", "abcdef", "abcdef"));
+        assert!(!state_id_matches_display("abc", "abcdef", "zzz"));
     }
 
     #[test]

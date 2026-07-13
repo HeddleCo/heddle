@@ -156,7 +156,7 @@ message RemovePolicyGroupRequirementRequest {
 //
 // An approval is a record that a particular user signed off on a
 // particular (source_thread → target_thread) merge at a specific
-// `source_state` (the change_id at the source's head). The merge
+// `source_state` (the state_id at the source's head). The merge
 // gate consumes these rows and matches them against every policy
 // whose target glob matches `target_thread`.
 
@@ -227,7 +227,7 @@ message CheckMergeEligibilityResponse {
   // Each unmet requirement, with a human-readable reason. Empty
   // when `allowed = true`.
   repeated UnmetRequirement unmet = 2;
-  // Approvals the gate considered valid (matching change_id, not
+  // Approvals the gate considered valid (matching state_id, not
   // expired, not self-approval when forbidden, etc.).
   repeated ThreadApproval valid_approvals = 3;
 }

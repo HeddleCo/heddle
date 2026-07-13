@@ -3,7 +3,7 @@ use std::{sync::mpsc, time::Duration};
 
 use objects::{
     error::HeddleError,
-    object::{ChangeId, MarkerName, ThreadName},
+    object::{MarkerName, StateId, ThreadName},
 };
 use tempfile::TempDir;
 
@@ -29,7 +29,7 @@ fn packed_refs_product_stress_two_thousand_threads() {
     const N: usize = 2_000;
     let mut ids = Vec::with_capacity(N);
     for i in 0..N {
-        let id = ChangeId::generate();
+        let id = crate::refs::fresh_state_id();
         let name = ThreadName::new(format!("stress/thread-{i:05}"));
         refs.set_thread(&name, &id).unwrap();
         ids.push((name, id));
@@ -78,7 +78,7 @@ fn test_head_roundtrip_attached() {
 #[test]
 fn test_head_roundtrip_detached() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     let head = Head::Detached { state: id };
     refs.write_head(&head).unwrap();
     let read = refs.read_head().unwrap();
@@ -87,7 +87,7 @@ fn test_head_roundtrip_detached() {
 #[test]
 fn test_track_operations() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     refs.set_thread(&ThreadName::new("main"), &id).unwrap();
     let got = refs.get_thread(&ThreadName::new("main")).unwrap();
     assert_eq!(got, Some(id));
@@ -100,7 +100,7 @@ fn test_track_operations() {
 #[test]
 fn test_nested_threads() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     refs.set_thread(&ThreadName::new("agent/claude/refactor"), &id)
         .unwrap();
     let got = refs
@@ -114,8 +114,8 @@ fn test_nested_threads() {
 #[test]
 fn test_parent_and_child_threads_can_coexist() {
     let (_temp, refs) = create_ref_manager();
-    let parent = ChangeId::generate();
-    let child = ChangeId::generate();
+    let parent = crate::refs::fresh_state_id();
+    let child = crate::refs::fresh_state_id();
 
     refs.set_thread(&ThreadName::new("feature/orchestrator"), &parent)
         .unwrap();
@@ -146,7 +146,7 @@ fn test_parent_and_child_threads_can_coexist() {
 #[test]
 fn test_marker_operations() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     refs.create_marker(&MarkerName::new("v1.0.0"), &id).unwrap();
     let got = refs.get_marker(&MarkerName::new("v1.0.0")).unwrap();
     assert_eq!(got, Some(id));
@@ -156,7 +156,7 @@ fn test_marker_operations() {
 #[test]
 fn test_marker_no_overwrite() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     refs.create_marker(&MarkerName::new("v1.0.0"), &id).unwrap();
     let result = refs.create_marker(&MarkerName::new("v1.0.0"), &id);
     assert!(result.is_err());
@@ -164,7 +164,7 @@ fn test_marker_no_overwrite() {
 #[test]
 fn test_resolve() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     refs.set_thread(&ThreadName::new("main"), &id).unwrap();
     refs.write_head(&Head::Attached {
         thread: ThreadName::new("main"),
@@ -184,8 +184,8 @@ fn test_corerefbackend_trait_methods_dispatch() {
     // async trait methods. Exercise the trait surface explicitly so the
     // `impl CoreRefBackend for RefManager` async bodies are covered.
     let (_temp, refs) = create_ref_manager();
-    let thread_id = ChangeId::generate();
-    let marker_id = ChangeId::generate();
+    let thread_id = crate::refs::fresh_state_id();
+    let marker_id = crate::refs::fresh_state_id();
 
     CoreRefBackend::set_thread(&refs, &ThreadName::new("main"), &thread_id).unwrap();
     assert_eq!(
@@ -224,8 +224,8 @@ fn test_corerefbackend_trait_methods_dispatch() {
 #[test]
 fn test_track_cas_conflict() {
     let (_temp, refs) = create_ref_manager();
-    let id1 = ChangeId::generate();
-    let id2 = ChangeId::generate();
+    let id1 = crate::refs::fresh_state_id();
+    let id2 = crate::refs::fresh_state_id();
     refs.set_thread(&ThreadName::new("main"), &id1).unwrap();
     let result = refs.set_thread_cas(&ThreadName::new("main"), RefExpectation::Value(id2), &id2);
     assert!(matches!(result, Err(HeddleError::Conflict(_))));
@@ -237,8 +237,8 @@ fn test_track_cas_conflict() {
 #[test]
 fn test_update_refs_transaction_success() {
     let (_temp, refs) = create_ref_manager();
-    let id1 = ChangeId::generate();
-    let id2 = ChangeId::generate();
+    let id1 = crate::refs::fresh_state_id();
+    let id2 = crate::refs::fresh_state_id();
     refs.set_thread(&ThreadName::new("main"), &id1).unwrap();
     refs.write_head(&Head::Attached {
         thread: ThreadName::new("main"),
@@ -267,8 +267,8 @@ fn test_update_refs_transaction_success() {
 #[test]
 fn test_update_refs_transaction_conflict() {
     let (_temp, refs) = create_ref_manager();
-    let id1 = ChangeId::generate();
-    let id2 = ChangeId::generate();
+    let id1 = crate::refs::fresh_state_id();
+    let id2 = crate::refs::fresh_state_id();
     refs.set_thread(&ThreadName::new("main"), &id1).unwrap();
     refs.write_head(&Head::Attached {
         thread: ThreadName::new("main"),
@@ -303,28 +303,28 @@ fn test_update_refs_transaction_conflict() {
 #[test]
 fn test_invalid_track_name_path_traversal() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     let result = refs.set_thread(&ThreadName::new("../etc/passwd"), &id);
     assert!(matches!(result, Err(HeddleError::InvalidRefName(_))));
 }
 #[test]
 fn test_invalid_track_name_absolute_path() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     let result = refs.set_thread(&ThreadName::new("/etc/passwd"), &id);
     assert!(matches!(result, Err(HeddleError::InvalidRefName(_))));
 }
 #[test]
 fn test_invalid_track_name_with_backslash() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     let result = refs.set_thread(&ThreadName::new("\\windows\\system32"), &id);
     assert!(matches!(result, Err(HeddleError::InvalidRefName(_))));
 }
 #[test]
 fn test_invalid_marker_name_path_traversal() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     let result = refs.create_marker(&MarkerName::new("../../../root"), &id);
     assert!(matches!(result, Err(HeddleError::InvalidRefName(_))));
 }
@@ -333,11 +333,11 @@ fn test_set_remote_thread_waits_for_refs_lock() {
     let (_temp, refs) = create_ref_manager();
     let lock = refs.lock_refs().unwrap();
     let root = refs.root.clone();
-    let change_id = ChangeId::generate();
+    let state_id = crate::refs::fresh_state_id();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let refs = RefManager::new(root);
-        let result = refs.set_remote_thread("origin", &ThreadName::new("main"), &change_id);
+        let result = refs.set_remote_thread("origin", &ThreadName::new("main"), &state_id);
         tx.send(result).unwrap();
     });
     assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
@@ -348,8 +348,8 @@ fn test_set_remote_thread_waits_for_refs_lock() {
 #[test]
 fn test_delete_remote_thread_waits_for_refs_lock() {
     let (_temp, refs) = create_ref_manager();
-    let change_id = ChangeId::generate();
-    refs.set_remote_thread("origin", &ThreadName::new("main"), &change_id)
+    let state_id = crate::refs::fresh_state_id();
+    refs.set_remote_thread("origin", &ThreadName::new("main"), &state_id)
         .unwrap();
     let lock = refs.lock_refs().unwrap();
     let root = refs.root.clone();
@@ -362,17 +362,17 @@ fn test_delete_remote_thread_waits_for_refs_lock() {
     assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
     drop(lock);
     let result = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert_eq!(result.unwrap(), Some(change_id));
+    assert_eq!(result.unwrap(), Some(state_id));
 }
 
 #[test]
 fn test_ref_summary_index_rebuild_reports_repo_ref_shape() {
     let (_temp, refs) = create_ref_manager();
-    let main = ChangeId::generate();
-    let feature = ChangeId::generate();
-    let marker = ChangeId::generate();
-    let remote_main = ChangeId::generate();
-    let remote_feature = ChangeId::generate();
+    let main = crate::refs::fresh_state_id();
+    let feature = crate::refs::fresh_state_id();
+    let marker = crate::refs::fresh_state_id();
+    let remote_main = crate::refs::fresh_state_id();
+    let remote_feature = crate::refs::fresh_state_id();
 
     refs.set_thread(&ThreadName::new("main"), &main).unwrap();
     refs.set_thread(&ThreadName::new("feature/api"), &feature)
@@ -436,7 +436,7 @@ fn test_incremental_ref_summary_index_matches_full_rebuild() {
     // A mixed sequence exercising: many sets (the adopt-style growth), an
     // overwrite, deletes (loose + packed purge), packed entries, and a loose
     // override of a packed ref (the LooseAndPacked source case).
-    let ids: Vec<ChangeId> = (0..12).map(|_| ChangeId::generate()).collect();
+    let ids: Vec<StateId> = (0..12).map(|_| crate::refs::fresh_state_id()).collect();
 
     refs.set_thread(&ThreadName::new("main"), &ids[0]).unwrap();
     refs.set_thread(&ThreadName::new("feature/api"), &ids[1])
@@ -531,7 +531,7 @@ fn bench_incremental_vs_full_rebuild_scaling() {
         for i in 0..n {
             refs.set_thread(
                 &ThreadName::new(format!("branch-{i:05}")),
-                &ChangeId::generate(),
+                &crate::refs::fresh_state_id(),
             )
             .unwrap();
         }
@@ -539,8 +539,11 @@ fn bench_incremental_vs_full_rebuild_scaling() {
         // One incremental delta-fold (set an existing thread -> single delta).
         let incr = Instant::now();
         for _ in 0..ITERS {
-            refs.set_thread(&ThreadName::new("branch-00000"), &ChangeId::generate())
-                .unwrap();
+            refs.set_thread(
+                &ThreadName::new("branch-00000"),
+                &crate::refs::fresh_state_id(),
+            )
+            .unwrap();
         }
         let incr_per = incr.elapsed() / ITERS;
 
@@ -566,7 +569,7 @@ fn bench_incremental_vs_full_rebuild_scaling() {
         for i in 0..n {
             inc.set_thread(
                 &ThreadName::new(format!("branch-{i:05}")),
-                &ChangeId::generate(),
+                &crate::refs::fresh_state_id(),
             )
             .unwrap();
         }
@@ -577,7 +580,7 @@ fn bench_incremental_vs_full_rebuild_scaling() {
         for i in 0..n {
             full.set_thread(
                 &ThreadName::new(format!("branch-{i:05}")),
-                &ChangeId::generate(),
+                &crate::refs::fresh_state_id(),
             )
             .unwrap();
             full.rebuild_ref_summary_index().unwrap();
@@ -596,9 +599,9 @@ fn bench_incremental_vs_full_rebuild_scaling() {
 #[test]
 fn test_ref_summary_index_falls_back_when_sidecar_is_corrupt() {
     let (_temp, refs) = create_ref_manager();
-    let main = ChangeId::generate();
-    let marker = ChangeId::generate();
-    let remote = ChangeId::generate();
+    let main = crate::refs::fresh_state_id();
+    let marker = crate::refs::fresh_state_id();
+    let remote = crate::refs::fresh_state_id();
 
     refs.set_thread(&ThreadName::new("main"), &main).unwrap();
     refs.create_marker(&MarkerName::new("stable"), &marker)
@@ -635,8 +638,8 @@ fn test_ref_summary_index_falls_back_when_sidecar_is_corrupt() {
 #[test]
 fn undo_recovery_ref_is_isolated_from_user_marker_namespace() {
     let (_temp, refs) = create_ref_manager();
-    let recovery_state = ChangeId::generate();
-    let user_state = ChangeId::generate();
+    let recovery_state = crate::refs::fresh_state_id();
+    let user_state = crate::refs::fresh_state_id();
     assert_ne!(recovery_state, user_state);
 
     refs.set_undo_recovery(&recovery_state).unwrap();
@@ -706,8 +709,8 @@ fn undo_recovery_is_scoped_per_checkout_on_shared_ref_root() {
     let refs_a = RefManager::new(&shared_root).with_local_head(head_a);
     let refs_b = RefManager::new(&shared_root).with_local_head(head_b);
 
-    let state_a = ChangeId::generate();
-    let state_b = ChangeId::generate();
+    let state_a = crate::refs::fresh_state_id();
+    let state_b = crate::refs::fresh_state_id();
     assert_ne!(state_a, state_b);
 
     // Both checkouts run `heddle undo`, each recording its own pre-undo state.
@@ -747,7 +750,7 @@ mod chokepoint {
 
     use objects::{
         error::Result,
-        object::{ChangeId, MarkerName, ThreadName},
+        object::{MarkerName, StateId, ThreadName},
         sync::LockExt,
     };
     use tempfile::TempDir;
@@ -772,8 +775,8 @@ mod chokepoint {
     struct FakeReconciler {
         generation: AtomicU64,
         republish: Vec<RefUpdate>,
-        remote_updates: Vec<(String, ThreadName, Option<ChangeId>)>,
-        undo_recovery: Option<ChangeId>,
+        remote_updates: Vec<(String, ThreadName, Option<StateId>)>,
+        undo_recovery: Option<StateId>,
         calls: Arc<AtomicU64>,
     }
 
@@ -883,21 +886,21 @@ mod chokepoint {
         let (_t, dir) = manager();
 
         // `present` is pre-published with the same value the fold carries ⇒ skip.
-        let present_state = ChangeId::generate();
+        let present_state = crate::refs::fresh_state_id();
         // `stale` is pre-published with an OLD value; the fold carries a newer
         // committed value ⇒ it must be overwritten (authoritative-apply).
-        let stale_old = ChangeId::generate();
-        let stale_new = ChangeId::generate();
-        let absent_state = ChangeId::generate();
-        let marker_state = ChangeId::generate();
-        let remote_state = ChangeId::generate();
+        let stale_old = crate::refs::fresh_state_id();
+        let stale_new = crate::refs::fresh_state_id();
+        let absent_state = crate::refs::fresh_state_id();
+        let marker_state = crate::refs::fresh_state_id();
+        let remote_state = crate::refs::fresh_state_id();
         // A present-but-stale remote thread (overwrite) + a present remote thread
         // the fold deleted (remove) + a stale undo-recovery pointer (overwrite).
-        let remote_stale_old = ChangeId::generate();
-        let remote_stale_new = ChangeId::generate();
-        let remote_doomed = ChangeId::generate();
-        let undo_old = ChangeId::generate();
-        let undo_state = ChangeId::generate();
+        let remote_stale_old = crate::refs::fresh_state_id();
+        let remote_stale_new = crate::refs::fresh_state_id();
+        let remote_doomed = crate::refs::fresh_state_id();
+        let undo_old = crate::refs::fresh_state_id();
+        let undo_state = crate::refs::fresh_state_id();
 
         let calls = Arc::new(AtomicU64::new(0));
         let reconciler = Arc::new(FakeReconciler {
@@ -1030,7 +1033,7 @@ mod chokepoint {
             RefManager::new(&dir).with_committer(Arc::clone(&committer) as Arc<dyn RefCommitter>);
         refs.init().unwrap();
 
-        let state = ChangeId::generate();
+        let state = crate::refs::fresh_state_id();
         let records = vec![vec![1u8, 2, 3]];
         let updates = vec![RefUpdate::Thread {
             name: ThreadName::new("feature"),
@@ -1057,7 +1060,7 @@ mod chokepoint {
         let plain = RefManager::new(&dir2);
         plain.init().unwrap();
         plain.commit_and_publish(&[], &[], None).unwrap();
-        let other = ChangeId::generate();
+        let other = crate::refs::fresh_state_id();
         plain
             .commit_and_publish(
                 &[],
@@ -1084,7 +1087,7 @@ mod chokepoint {
         let plain = RefManager::new(&dir);
         plain.init().unwrap();
 
-        let state = ChangeId::generate();
+        let state = crate::refs::fresh_state_id();
         let result = plain.commit_and_publish(
             &[vec![1u8, 2, 3]],
             &[RefUpdate::Thread {
@@ -1132,7 +1135,7 @@ mod chokepoint {
         let updates = vec![RefUpdate::Thread {
             name: ThreadName::new("feature"),
             expected: RefExpectation::Missing,
-            new: Some(ChangeId::generate()),
+            new: Some(crate::refs::fresh_state_id()),
         }];
         // commit() reports the record durably committed (committed_for_reconcile);
         // publish then fails. Behavior must be Ok(()), not Err.
@@ -1160,8 +1163,8 @@ mod chokepoint {
         let refs = RefManager::new(&dir);
         refs.init().unwrap();
 
-        let s1 = ChangeId::generate();
-        let s2 = ChangeId::generate();
+        let s1 = crate::refs::fresh_state_id();
+        let s2 = crate::refs::fresh_state_id();
         // RefBackend trait surface for remotes.
         RefBackend::set_remote_thread(&refs, "origin", &ThreadName::new("rt1"), &s1).unwrap();
         refs.set_remote_thread("origin", &ThreadName::new("rt2"), &s2)
@@ -1189,8 +1192,8 @@ mod chokepoint {
         );
 
         // Threads + markers + pack_refs (packs loose refs into packed-refs).
-        let t = ChangeId::generate();
-        let m = ChangeId::generate();
+        let t = crate::refs::fresh_state_id();
+        let m = crate::refs::fresh_state_id();
         refs.set_thread(&ThreadName::new("main2"), &t).unwrap();
         refs.create_marker(&MarkerName::new("rel"), &m).unwrap();
         RefBackend::pack_refs(&refs).unwrap();

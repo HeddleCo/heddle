@@ -8,7 +8,7 @@ use super::{
     versioned_header::{HeaderChecksum, VersionedHeader},
 };
 use crate::{
-    object::{ChangeId, ContentHash},
+    object::{ContentHash, StateId},
     store::{Result, StoreError},
 };
 
@@ -20,7 +20,7 @@ pub(super) const PACK_DECOMPRESSION_INITIAL_CAP: usize = 4 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum PackObjectId {
     Hash(ContentHash),
-    ChangeId(ChangeId),
+    StateId(StateId),
 }
 
 impl PackObjectId {
@@ -30,9 +30,9 @@ impl PackObjectId {
                 buf.push(0);
                 buf.extend_from_slice(hash.as_bytes());
             }
-            Self::ChangeId(change_id) => {
+            Self::StateId(state_id) => {
                 buf.push(1);
-                buf.extend_from_slice(change_id.as_bytes());
+                buf.extend_from_slice(state_id.as_bytes());
             }
         }
     }
@@ -56,15 +56,15 @@ impl PackObjectId {
                 Ok((Self::Hash(hash), 33))
             }
             1 => {
-                if data.len() < 17 {
+                if data.len() < 33 {
                     return Err(StoreError::InvalidObject(
-                        "change id pack object id truncated".to_string(),
+                        "state id pack object id truncated".to_string(),
                     ));
                 }
-                let change_id = ChangeId::from_bytes(data[1..17].try_into().map_err(|_| {
-                    StoreError::InvalidObject("invalid change id length".to_string())
+                let state_id = StateId::from_bytes(data[1..33].try_into().map_err(|_| {
+                    StoreError::InvalidObject("invalid state id length".to_string())
                 })?);
-                Ok((Self::ChangeId(change_id), 17))
+                Ok((Self::StateId(state_id), 33))
             }
             _ => Err(StoreError::InvalidObject(format!(
                 "unknown pack object id tag {tag}"
@@ -206,13 +206,13 @@ pub fn try_decode_tagged_entry_header(data: &[u8]) -> Result<Option<PackEntryHea
                 (PackObjectId::Hash(hash), 33)
             }
             1 => {
-                if data.len() < 17 {
+                if data.len() < 33 {
                     return Ok(None);
                 }
-                let change_id = ChangeId::from_bytes(data[1..17].try_into().map_err(|_| {
-                    StoreError::InvalidObject("invalid change id length".to_string())
+                let state_id = StateId::from_bytes(data[1..33].try_into().map_err(|_| {
+                    StoreError::InvalidObject("invalid state id length".to_string())
                 })?);
-                (PackObjectId::ChangeId(change_id), 17)
+                (PackObjectId::StateId(state_id), 33)
             }
             _ => {
                 return Err(StoreError::InvalidObject(format!(
@@ -248,15 +248,15 @@ pub fn try_decode_tagged_entry_header(data: &[u8]) -> Result<Option<PackEntryHea
                 (PackObjectId::Hash(hash), 33)
             }
             1 => {
-                let end = header_len + 17;
+                let end = header_len + 33;
                 if data.len() < end {
                     return Ok(None);
                 }
-                let change_id =
-                    ChangeId::from_bytes(data[header_len + 1..end].try_into().map_err(|_| {
-                        StoreError::InvalidObject("invalid change id length".to_string())
+                let state_id =
+                    StateId::from_bytes(data[header_len + 1..end].try_into().map_err(|_| {
+                        StoreError::InvalidObject("invalid state id length".to_string())
                     })?);
-                (PackObjectId::ChangeId(change_id), 17)
+                (PackObjectId::StateId(state_id), 33)
             }
             _ => {
                 return Err(StoreError::InvalidObject(format!(
@@ -395,7 +395,7 @@ mod tests {
     fn tagged_pack_object_ids_round_trip() {
         let ids = [
             PackObjectId::Hash(ContentHash::compute(b"hash-object")),
-            PackObjectId::ChangeId(ChangeId::generate()),
+            PackObjectId::StateId(StateId::from_bytes([7; 32])),
         ];
 
         for id in ids {
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn tagged_entry_header_round_trips_mixed_identity() {
         let record = PackObjectRecord {
-            id: PackObjectId::ChangeId(ChangeId::generate()),
+            id: PackObjectId::StateId(StateId::from_bytes([8; 32])),
             obj_type: ObjectType::State,
             data: vec![1, 2, 3, 4, 5],
             delta_base: None,

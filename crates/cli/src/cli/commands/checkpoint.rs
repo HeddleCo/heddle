@@ -36,7 +36,7 @@ struct CheckpointOutput {
     output_kind: &'static str,
     status: &'static str,
     action: &'static str,
-    change_id: String,
+    state_id: String,
     git_commit: String,
     summary: String,
     capability: String,
@@ -78,14 +78,14 @@ pub async fn run(cli: &Cli, args: &CheckpointArgs) -> Result<()> {
     // the post-mutation output reflects the NEW git state, so the status walk
     // here is a different, necessary one. The redundant-walk elimination is
     // scoped to the PRE-mutation consumers inside `create_git_checkpoint_inner`.
-    let output = build_output(&repo, &state.change_id.short(), &record);
+    let output = build_output(&repo, &state.state_id.short(), &record);
 
     if should_output_json(cli, Some(repo.config())) {
         println!("{}", serde_json::to_string(&output)?);
     } else {
         println!(
             "Checkpointed {} as Git commit {}",
-            output.change_id,
+            output.state_id,
             &output.git_commit[..std::cmp::min(12, output.git_commit.len())]
         );
         if output.trust.verified {
@@ -196,7 +196,7 @@ fn create_git_checkpoint_inner(
                 )));
             }
         }
-        if let Some(record) = repo.latest_git_checkpoint_for_change(&existing_state.change_id)? {
+        if let Some(record) = repo.latest_git_checkpoint_for_change(&existing_state.state_id)? {
             return Ok(record);
         }
         git_overlay_txn::preflight_git_checkpoint_identity_for_principal(
@@ -301,7 +301,7 @@ fn create_git_checkpoint_inner(
 
 fn build_output(
     repo: &Repository,
-    change_id: &str,
+    state_id: &str,
     record: &GitCheckpointRecord,
 ) -> CheckpointOutput {
     // Fresh verification state: this runs AFTER the checkpoint advanced the Git
@@ -313,7 +313,7 @@ fn build_output(
         output_kind: "checkpoint",
         status: "checkpointed",
         action: "checkpoint",
-        change_id: change_id.to_string(),
+        state_id: state_id.to_string(),
         git_commit: record.git_commit.clone(),
         summary: record.summary.clone(),
         capability: repo.capability_label().to_string(),

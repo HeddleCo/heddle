@@ -5,7 +5,7 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
-use crate::object::{ChangeId, ContentHash};
+use crate::object::{ContentHash, StateId};
 
 /// Current timeline operation schema version.
 pub const TIMELINE_OPERATION_SCHEMA_VERSION: u16 = LatestTimelineOperationSchema::VERSION;
@@ -394,7 +394,7 @@ pub struct ToolCallStartedV1 {
     pub parent_step_id: Option<TimelineStepId>,
     pub native: NativeToolCallRefV1,
     pub tool_name: String,
-    pub before_state: ChangeId,
+    pub before_state: StateId,
     pub payload: Option<TimelineToolPayloadMetadata>,
     pub started_at_ms: i64,
 }
@@ -407,9 +407,9 @@ pub struct ToolCallFinishedV1 {
     pub branch_id: TimelineBranchId,
     pub native: NativeToolCallRefV1,
     pub status: TimelineToolCallStatus,
-    pub before_state: ChangeId,
-    pub after_state: ChangeId,
-    pub capture_state: Option<ChangeId>,
+    pub before_state: StateId,
+    pub after_state: StateId,
+    pub capture_state: Option<StateId>,
     pub capture_oplog_batch_id: Option<u64>,
     pub changed: bool,
     pub touched_paths: Vec<String>,
@@ -424,8 +424,8 @@ pub struct CursorMovedV1 {
     pub branch_id: TimelineBranchId,
     pub from_step_id: Option<TimelineStepId>,
     pub to_step_id: Option<TimelineStepId>,
-    pub from_state: ChangeId,
-    pub to_state: ChangeId,
+    pub from_state: StateId,
+    pub to_state: StateId,
     pub reason: TimelineCursorMoveReason,
     pub moved_at_ms: i64,
 }
@@ -437,7 +437,7 @@ pub struct BranchCreatedV1 {
     pub branch_id: TimelineBranchId,
     pub parent_branch_id: Option<TimelineBranchId>,
     pub from_step_id: Option<TimelineStepId>,
-    pub from_state: ChangeId,
+    pub from_state: StateId,
     pub reason: TimelineBranchReason,
     pub created_at_ms: i64,
 }
@@ -509,7 +509,7 @@ mod tests {
                 tool_call_id: "call-1".to_string(),
             },
             tool_name: "shell".to_string(),
-            before_state: ChangeId::from_bytes([1; 16]),
+            before_state: StateId::from_bytes([1; 32]),
             payload: Some(TimelineToolPayloadMetadata {
                 summary: Some("listed files".to_string()),
                 hash: Some(ContentHash::compute_typed(
@@ -562,7 +562,7 @@ mod tests {
                         parent_step_id: None,
                         native: sample_native("call-1"),
                         tool_name: "bash".to_string(),
-                        before_state: ChangeId::from_bytes([1; 16]),
+                        before_state: StateId::from_bytes([1; 32]),
                         payload: Some(sample_payload("started")),
                         started_at_ms: 1_700_000_000_001,
                     }),
@@ -582,9 +582,9 @@ mod tests {
                         branch_id: TimelineBranchId::new("tlb-main"),
                         native: sample_native("call-1"),
                         status: TimelineToolCallStatus::Succeeded,
-                        before_state: ChangeId::from_bytes([1; 16]),
-                        after_state: ChangeId::from_bytes([2; 16]),
-                        capture_state: Some(ChangeId::from_bytes([2; 16])),
+                        before_state: StateId::from_bytes([1; 32]),
+                        after_state: StateId::from_bytes([2; 32]),
+                        capture_state: Some(StateId::from_bytes([2; 32])),
                         capture_oplog_batch_id: Some(42),
                         changed: true,
                         touched_paths: vec!["tracked.txt".to_string()],
@@ -605,8 +605,8 @@ mod tests {
                         branch_id: TimelineBranchId::new("tlb-main"),
                         from_step_id: Some(TimelineStepId::new("tls-step")),
                         to_step_id: None,
-                        from_state: ChangeId::from_bytes([2; 16]),
-                        to_state: ChangeId::from_bytes([1; 16]),
+                        from_state: StateId::from_bytes([2; 32]),
+                        to_state: StateId::from_bytes([1; 32]),
                         reason: TimelineCursorMoveReason::Undo,
                         moved_at_ms: 1_700_000_000_003,
                     }),
@@ -621,7 +621,7 @@ mod tests {
                         branch_id: TimelineBranchId::new("tlb-child"),
                         parent_branch_id: Some(TimelineBranchId::new("tlb-main")),
                         from_step_id: Some(TimelineStepId::new("tls-step")),
-                        from_state: ChangeId::from_bytes([2; 16]),
+                        from_state: StateId::from_bytes([2; 32]),
                         reason: TimelineBranchReason::ExplicitFork,
                         created_at_ms: 1_700_000_000_004,
                     }),

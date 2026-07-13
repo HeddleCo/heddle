@@ -18,7 +18,7 @@ use grpc::heddle::v1::{
 };
 use objects::{
     Progress,
-    object::{ChangeId, ContentHash, MarkerName, ThreadName},
+    object::{ContentHash, MarkerName, StateId, ThreadName},
     store::{AnyStore, ObjectStore, PackObjectId},
 };
 use repo::{
@@ -50,7 +50,7 @@ use super::{
 struct PullOptions<'a> {
     local_thread: Option<&'a str>,
     depth: Option<u32>,
-    target_state: Option<ChangeId>,
+    target_state: Option<StateId>,
     materialization: PullMaterialization,
 }
 
@@ -110,12 +110,13 @@ pub struct PullObjectMix {
     pub actions: usize,
     pub redactions: usize,
     pub state_visibilities: usize,
+    pub state_attachments: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct HostedRefEntry {
     pub name: String,
-    pub change_id: ChangeId,
+    pub state_id: StateId,
     pub is_thread: bool,
     pub revision_address: String,
 }
@@ -129,6 +130,7 @@ impl PullObjectMix {
             ObjectTypeBucket::Action => self.actions += 1,
             ObjectTypeBucket::Redaction => self.redactions += 1,
             ObjectTypeBucket::StateVisibility => self.state_visibilities += 1,
+            ObjectTypeBucket::StateAttachment => self.state_attachments += 1,
         }
     }
 
@@ -139,6 +141,7 @@ impl PullObjectMix {
             + self.actions
             + self.redactions
             + self.state_visibilities
+            + self.state_attachments
     }
 }
 
@@ -168,7 +171,7 @@ impl HostedGrpcClient {
             .into_iter()
             .map(|entry| RefEntry {
                 name: entry.name,
-                change_id: entry.change_id,
+                state_id: entry.state_id,
                 is_thread: entry.is_thread,
             })
             .collect())
@@ -194,7 +197,7 @@ impl HostedGrpcClient {
             .map(|entry| {
                 Ok(HostedRefEntry {
                     name: entry.name,
-                    change_id: ChangeId::try_from_slice(&entry.change_id)
+                    state_id: StateId::try_from_slice(&entry.state_id)
                         .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
                     is_thread: entry.is_thread,
                     revision_address: entry.revision_address,
@@ -209,8 +212,8 @@ impl HostedGrpcClient {
         repo_path: &str,
         name: &str,
         is_thread: bool,
-        old_value: Option<ChangeId>,
-        new_value: ChangeId,
+        old_value: Option<StateId>,
+        new_value: StateId,
         force: bool,
         thread_metadata: Option<&SyncedThreadMetadata>,
     ) -> Result<RefUpdated, ProtocolError> {
@@ -243,7 +246,7 @@ impl HostedGrpcClient {
                 None
             } else {
                 Some(
-                    ChangeId::parse(&response.old_value)
+                    StateId::parse(&response.old_value)
                         .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
                 )
             },
@@ -255,7 +258,7 @@ impl HostedGrpcClient {
         &mut self,
         repo: &Repository,
         repo_path: &str,
-        local_state: ChangeId,
+        local_state: StateId,
         target_thread: &str,
         force: bool,
     ) -> Result<PushComplete, ProtocolError> {
@@ -290,7 +293,7 @@ impl HostedGrpcClient {
         &mut self,
         repo: &Repository,
         repo_path: &str,
-        local_state: ChangeId,
+        local_state: StateId,
         target_thread: &str,
         force: bool,
         progress: &Progress,
@@ -337,7 +340,7 @@ impl HostedGrpcClient {
         &mut self,
         repo: &Repository,
         repo_path: &str,
-        local_state: ChangeId,
+        local_state: StateId,
         target_thread: &str,
         force: bool,
         local_revision_address: String,
@@ -518,7 +521,7 @@ impl HostedGrpcClient {
                     None
                 } else {
                     Some(
-                        ChangeId::parse(&complete.new_state)
+                        StateId::parse(&complete.new_state)
                             .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
                     )
                 },
@@ -680,7 +683,7 @@ impl HostedGrpcClient {
         repo: &Repository,
         repo_path: &str,
         remote_thread: &str,
-        target_state: ChangeId,
+        target_state: StateId,
     ) -> Result<usize, ProtocolError> {
         self.pull_exchange(
             repo,
@@ -702,7 +705,7 @@ impl HostedGrpcClient {
         repo: &Repository,
         repo_path: &str,
         remote_thread: &str,
-        target_state: ChangeId,
+        target_state: StateId,
     ) -> Result<usize, ProtocolError> {
         self.pull_exchange(
             repo,
@@ -751,7 +754,7 @@ impl HostedGrpcClient {
         repo: &Repository,
         repo_path: &str,
         remote_thread: &str,
-        target_state: ChangeId,
+        target_state: StateId,
     ) -> Result<usize, ProtocolError> {
         let exchange = self
             .pull_exchange(
@@ -830,10 +833,7 @@ impl HostedGrpcClient {
                     .map(|value| value.to_string_full())
                     .unwrap_or_default(),
                 depth: options.depth.unwrap_or_default(),
-                exclude_states: exclude_states
-                    .iter()
-                    .map(ChangeId::to_string_full)
-                    .collect(),
+                exclude_states: exclude_states.iter().map(StateId::to_string_full).collect(),
                 transfer: Some(self.transport.transfer_checkpoint_with_mode(
                     transfer_id.clone(),
                     TransportMode::NativePack,
@@ -879,7 +879,7 @@ impl HostedGrpcClient {
             ready_wait: exchange_start.elapsed(),
             ..PullProfile::default()
         };
-        let remote_state = ChangeId::parse(&ready.remote_state)
+        let remote_state = StateId::parse(&ready.remote_state)
             .map_err(|err| ProtocolError::InvalidState(err.to_string()))?;
         let advertised_object_count = ready.objects_to_fetch.len();
         let PullWantPlan {
@@ -1010,9 +1010,9 @@ impl HostedGrpcClient {
                         .bytes_received
                         .saturating_add(transfer.state_visibility_blob.len());
                     profile.object_mix.record(ObjectType::StateVisibility);
-                    let state = ChangeId::parse(&transfer.state_id).map_err(|err| {
+                    let state = StateId::parse(&transfer.state_id).map_err(|err| {
                         ProtocolError::InvalidState(format!(
-                            "StateVisibilityTransfer.state_id is not a valid ChangeId: {err}"
+                            "StateVisibilityTransfer.state_id is not a valid StateId: {err}"
                         ))
                     })?;
                     let decode_start = Instant::now();
@@ -1047,7 +1047,7 @@ impl HostedGrpcClient {
                         None
                     } else {
                         Some(
-                            ChangeId::parse(&complete.new_state)
+                            StateId::parse(&complete.new_state)
                                 .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
                         )
                     };
@@ -1087,7 +1087,7 @@ impl HostedGrpcClient {
                                     (_, Some(obj_type)) => {
                                         profile.object_mix.record(obj_type);
                                     }
-                                    (PackObjectId::ChangeId(_), None) => {
+                                    (PackObjectId::StateId(_), None) => {
                                         profile.object_mix.record(ObjectType::State);
                                     }
                                     (PackObjectId::Hash(hash), None) => {
@@ -1279,7 +1279,10 @@ fn to_proto_planned_object(object: &PlannedObject) -> ObjectDescriptor {
 fn descriptor_id_from_plan(object: &PlannedObject) -> (String, String) {
     let id = match &object.id {
         wire::ObjectId::Hash(hash) => hash.to_hex(),
-        wire::ObjectId::ChangeId(change_id) => change_id.to_string_full(),
+        wire::ObjectId::StateId(state_id) => state_id.to_string_full(),
+        wire::ObjectId::StateAttachment { state, id } => {
+            format!("{}:{}", state.to_string_full(), id.as_hash().to_hex())
+        }
     };
     (id, object_type_name(object.obj_type).to_string())
 }
@@ -1314,9 +1317,9 @@ fn state_visibility_push_message(
     repo: &Repository,
     info: wire::ObjectInfo,
 ) -> Result<PushMessage, ProtocolError> {
-    let wire::ObjectId::ChangeId(state) = info.id else {
+    let wire::ObjectId::StateId(state) = info.id else {
         return Err(ProtocolError::InvalidState(
-            "wanted StateVisibility must be keyed by ObjectId::ChangeId(state)".to_string(),
+            "wanted StateVisibility must be keyed by ObjectId::StateId(state)".to_string(),
         ));
     };
     let state_id = state.to_string_full();
@@ -1347,7 +1350,7 @@ fn state_visibility_push_message(
 fn load_thread_metadata(
     repo: &Repository,
     target_thread: &str,
-    local_state: ChangeId,
+    local_state: StateId,
 ) -> Result<Option<SyncedThreadMetadata>, ProtocolError> {
     let thread_manager = ThreadManager::new(repo.heddle_dir());
     Ok(thread_manager.find_synced_record_by_thread(repo, target_thread, Some(local_state))?)
@@ -1355,7 +1358,7 @@ fn load_thread_metadata(
 
 fn plan_pull_wants(
     repo: &Repository,
-    remote_state: &ChangeId,
+    remote_state: &StateId,
     full_closure_available: bool,
     objects_to_fetch: Vec<ObjectDescriptor>,
     allow_partial_fetch: bool,
@@ -1381,7 +1384,8 @@ fn plan_pull_wants(
         let info = parse_descriptor_to_info(descriptor)?;
         let pack_id = match &info.id {
             wire::ObjectId::Hash(hash) => PackObjectId::Hash(*hash),
-            wire::ObjectId::ChangeId(change_id) => PackObjectId::ChangeId(*change_id),
+            wire::ObjectId::StateId(state_id) => PackObjectId::StateId(*state_id),
+            wire::ObjectId::StateAttachment { id, .. } => PackObjectId::Hash(*id.as_hash()),
         };
         let include = if request_full_closure {
             true
@@ -1415,7 +1419,7 @@ fn plan_pull_wants(
 fn supports_compact_full_pull(
     repo: &Repository,
     allow_partial_fetch: bool,
-    exclude_states: &[ChangeId],
+    exclude_states: &[StateId],
 ) -> Result<bool, ProtocolError> {
     if allow_partial_fetch || !exclude_states.is_empty() {
         return Ok(false);
@@ -1448,8 +1452,8 @@ fn supports_compact_full_pull(
 fn locally_complete_pull_head(
     repo: &Repository,
     remote_thread: &str,
-    target_state: Option<ChangeId>,
-) -> Result<Option<ChangeId>, ProtocolError> {
+    target_state: Option<StateId>,
+) -> Result<Option<StateId>, ProtocolError> {
     locally_complete_thread_head(repo, remote_thread, target_state)
 }
 
@@ -1464,8 +1468,8 @@ fn locally_complete_pull_head(
 fn locally_complete_local_thread_head(
     repo: &Repository,
     local_thread: &str,
-    target_state: Option<ChangeId>,
-) -> Result<Option<ChangeId>, ProtocolError> {
+    target_state: Option<StateId>,
+) -> Result<Option<StateId>, ProtocolError> {
     locally_complete_thread_head(repo, local_thread, target_state)
 }
 
@@ -1491,8 +1495,8 @@ fn locally_complete_local_thread_head(
 fn locally_complete_thread_head(
     repo: &Repository,
     thread: &str,
-    target_state: Option<ChangeId>,
-) -> Result<Option<ChangeId>, ProtocolError> {
+    target_state: Option<StateId>,
+) -> Result<Option<StateId>, ProtocolError> {
     // A target-state override pulls a specific state, not the thread tip;
     // advertising the thread head here would not match what's being fetched.
     if target_state.is_some() {
@@ -1521,7 +1525,7 @@ fn locally_complete_thread_head(
 
 fn should_request_full_closure(
     repo: &Repository,
-    remote_state: &ChangeId,
+    remote_state: &StateId,
     allow_partial_fetch: bool,
 ) -> Result<bool, ProtocolError> {
     if allow_partial_fetch || repo.store().has_state(remote_state)? {
@@ -1572,36 +1576,36 @@ fn apply_marker_snapshot(repo: &Repository, checkpoint: &[u8]) -> Result<bool, P
         if line.is_empty() {
             continue;
         }
-        let Some((name, change_id)) = line.split_once('\t') else {
+        let Some((name, state_id)) = line.split_once('\t') else {
             return Err(ProtocolError::InvalidState(
                 "invalid marker snapshot line".to_string(),
             ));
         };
-        let change_id = ChangeId::parse(change_id)
-            .map_err(|err| ProtocolError::InvalidState(err.to_string()))?;
-        if !repo.store().has_state(&change_id)? {
+        let state_id =
+            StateId::parse(state_id).map_err(|err| ProtocolError::InvalidState(err.to_string()))?;
+        if !repo.store().has_state(&state_id)? {
             continue;
         }
         let name = MarkerName::from(name);
         match repo.refs().get_marker(&name)? {
-            Some(existing) if existing == change_id => {}
+            Some(existing) if existing == state_id => {}
             Some(existing) => repo.refs().set_marker_cas(
                 &name,
                 refs::RefExpectation::Value(existing),
-                &change_id,
+                &state_id,
             )?,
-            None => repo.refs().create_marker(&name, &change_id)?,
+            None => repo.refs().create_marker(&name, &state_id)?,
         }
     }
 
     Ok(true)
 }
 
-fn change_id_string_to_bytes(s: &str) -> Vec<u8> {
+fn state_id_string_to_bytes(s: &str) -> Vec<u8> {
     if s.is_empty() {
         return Vec::new();
     }
-    objects::object::ChangeId::parse(s)
+    objects::object::StateId::parse(s)
         .map(|id| id.as_bytes().to_vec())
         .unwrap_or_default()
 }
@@ -1615,16 +1619,16 @@ fn to_proto_thread_metadata(metadata: &SyncedThreadMetadata) -> ThreadMetadata {
         thread_mode: metadata.mode.to_string(),
         thread_state: metadata.state.to_string(),
         freshness: metadata.freshness.to_string(),
-        base_state: change_id_string_to_bytes(&metadata.base_state),
-        base_root: change_id_string_to_bytes(&metadata.base_root),
+        base_state: state_id_string_to_bytes(&metadata.base_state),
+        base_root: state_id_string_to_bytes(&metadata.base_root),
         current_state: metadata
             .current_state
             .as_deref()
-            .map(change_id_string_to_bytes),
+            .map(state_id_string_to_bytes),
         merged_state: metadata
             .merged_state
             .as_deref()
-            .map(change_id_string_to_bytes),
+            .map(state_id_string_to_bytes),
         changed_paths: metadata.changed_paths.clone(),
         impact_categories: metadata
             .impact_categories
@@ -1679,22 +1683,27 @@ struct PullExchange {
     profile: PullProfile,
 }
 
-fn mark_missing_blobs_for_state(
-    repo: &Repository,
-    state_id: ChangeId,
-) -> Result<(), ProtocolError> {
+fn mark_missing_blobs_for_state(repo: &Repository, state_id: StateId) -> Result<(), ProtocolError> {
     let state = repo
         .store()
         .get_state(&state_id)?
         .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string_full()))?;
     let mut missing = wire::missing_blobs_in_tree(repo.store(), state.tree)?;
-    if let Some(context_root) = state.context.as_ref() {
-        missing.extend(wire::missing_blobs_in_tree(repo.store(), *context_root)?);
-    }
-    if let Some(discussions_blob) = state.discussions.as_ref()
-        && !repo.store().has_blob(discussions_blob)?
-    {
-        missing.push(*discussions_blob);
+    for attachment in repo.list_state_attachments(&state_id)? {
+        match attachment.body {
+            objects::object::StateAttachmentBody::Context(root) => {
+                missing.extend(wire::missing_blobs_in_tree(repo.store(), root)?);
+            }
+            objects::object::StateAttachmentBody::RiskSignals(hash)
+            | objects::object::StateAttachmentBody::ReviewSignatures(hash)
+            | objects::object::StateAttachmentBody::Discussions(hash)
+            | objects::object::StateAttachmentBody::StructuredConflicts(hash)
+                if !repo.store().has_blob(&hash)? =>
+            {
+                missing.push(hash)
+            }
+            _ => {}
+        }
     }
     missing
         .into_iter()
@@ -1703,18 +1712,24 @@ fn mark_missing_blobs_for_state(
 
 fn clear_missing_blobs_for_state(
     repo: &Repository,
-    state_id: ChangeId,
+    state_id: StateId,
 ) -> Result<(), ProtocolError> {
     let state = repo
         .store()
         .get_state(&state_id)?
         .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string_full()))?;
     let mut missing = wire::missing_blobs_in_tree(repo.store(), state.tree)?;
-    if let Some(context_root) = state.context.as_ref() {
-        missing.extend(wire::missing_blobs_in_tree(repo.store(), *context_root)?);
-    }
-    if let Some(discussions_blob) = state.discussions.as_ref() {
-        missing.push(*discussions_blob);
+    for attachment in repo.list_state_attachments(&state_id)? {
+        match attachment.body {
+            objects::object::StateAttachmentBody::Context(root) => {
+                missing.extend(wire::missing_blobs_in_tree(repo.store(), root)?);
+            }
+            objects::object::StateAttachmentBody::RiskSignals(hash)
+            | objects::object::StateAttachmentBody::ReviewSignatures(hash)
+            | objects::object::StateAttachmentBody::Discussions(hash)
+            | objects::object::StateAttachmentBody::StructuredConflicts(hash) => missing.push(hash),
+            _ => {}
+        }
     }
     missing
         .into_iter()
@@ -1734,7 +1749,7 @@ fn pull_transfer_id(
     remote_thread: &str,
     local_thread: Option<&str>,
     depth: Option<u32>,
-    target_state: Option<ChangeId>,
+    target_state: Option<StateId>,
 ) -> String {
     format!(
         "pull:{repo_path}:{remote_thread}:{}:{depth:?}:{}",
@@ -1745,7 +1760,7 @@ fn pull_transfer_id(
     )
 }
 
-fn push_transfer_id(repo_path: &str, local_state: ChangeId, target_thread: &str) -> String {
+fn push_transfer_id(repo_path: &str, local_state: StateId, target_thread: &str) -> String {
     format!(
         "push:{repo_path}:{}:{target_thread}",
         local_state.to_string_full()
@@ -2290,7 +2305,7 @@ fn git_lane_transfer_size(transfer: &GitLaneTransfer) -> usize {
 
 fn git_checkpoint_transfer_size(checkpoint: &GitCheckpointTransfer) -> usize {
     checkpoint
-        .heddle_change_id
+        .heddle_state_id
         .len()
         .saturating_add(checkpoint.git_commit_oid.len())
         .saturating_add(checkpoint.thread.len())
@@ -2555,7 +2570,7 @@ fn record_git_lane_checkpoint(
     git_repo: &SleyRepository,
     checkpoint: GitCheckpointTransfer,
 ) -> Result<(), ProtocolError> {
-    let state = ChangeId::try_from_slice(&checkpoint.heddle_change_id)
+    let state = StateId::try_from_slice(&checkpoint.heddle_state_id)
         .map_err(|err| ProtocolError::InvalidState(err.to_string()))?;
     let commit_oid = git_oid_from_bytes(
         git_repo,
@@ -2850,7 +2865,7 @@ mod tests {
     };
     use objects::{
         object::{
-            Attribution, Blob, ChangeId, ContentHash, Principal, Redaction, State, StateVisibility,
+            Attribution, Blob, ContentHash, Principal, Redaction, State, StateId, StateVisibility,
             StateVisibilityBlob, Tree, TreeEntry, VisibilityTier,
         },
         store::ObjectStore,
@@ -2886,18 +2901,18 @@ mod tests {
         }
     }
 
-    fn state_info(state: ChangeId) -> ObjectInfo {
+    fn state_info(state: StateId) -> ObjectInfo {
         ObjectInfo {
-            id: ObjectId::ChangeId(state),
+            id: ObjectId::StateId(state),
             obj_type: ObjectType::State,
             size: 0,
             delta_base: None,
         }
     }
 
-    fn state_visibility_info(state: ChangeId) -> ObjectInfo {
+    fn state_visibility_info(state: StateId) -> ObjectInfo {
         ObjectInfo {
-            id: ObjectId::ChangeId(state),
+            id: ObjectId::StateId(state),
             obj_type: ObjectType::StateVisibility,
             size: 0,
             delta_base: None,
@@ -2912,8 +2927,8 @@ mod tests {
     fn descriptor_id_from_info_matches_proto_encode_path() {
         let infos = [
             redaction_info(sample_blob()),
-            state_info(ChangeId::from_bytes([3u8; 16])),
-            state_visibility_info(ChangeId::from_bytes([9u8; 16])),
+            state_info(StateId::from_bytes([3u8; 32])),
+            state_visibility_info(StateId::from_bytes([9u8; 32])),
         ];
         for info in infos {
             assert_eq!(
@@ -2979,14 +2994,14 @@ mod tests {
         assert_eq!(indexed.pack_id.as_bytes(), pack.pack_id.as_slice());
         assert_eq!(indexed.objects.len(), 3);
 
-        let state = ChangeId::from_bytes([9u8; 16]);
+        let state = StateId::from_bytes([9u8; 32]);
         let ref_message = git_ref_update_message(
             "refs/heads/main",
             GrpcGitRefKind::Branch,
             commit_oid,
             None,
             Some(GitCheckpointTransfer {
-                heddle_change_id: state.as_bytes().to_vec().into(),
+                heddle_state_id: state.as_bytes().to_vec().into(),
                 git_commit_oid: commit_oid.as_bytes().to_vec().into(),
                 thread: "main".to_string(),
                 metadata_json: String::new(),
@@ -3002,7 +3017,7 @@ mod tests {
         assert_eq!(update.kind, GrpcGitRefKind::Branch as i32);
         assert_eq!(update.target_oid.as_ref(), commit_oid.as_bytes());
         let checkpoint = update.checkpoint.expect("checkpoint");
-        assert_eq!(checkpoint.heddle_change_id.as_ref(), state.as_bytes());
+        assert_eq!(checkpoint.heddle_state_id.as_ref(), state.as_bytes());
         assert_eq!(checkpoint.git_commit_oid.as_ref(), commit_oid.as_bytes());
         assert_eq!(checkpoint.thread, "main");
     }
@@ -3014,7 +3029,7 @@ mod tests {
             commit_oid,
             None,
             Some(GitCheckpointTransfer {
-                heddle_change_id: ChangeId::from_bytes([9u8; 16]).as_bytes().to_vec().into(),
+                heddle_state_id: StateId::from_bytes([9u8; 32]).as_bytes().to_vec().into(),
                 git_commit_oid: commit_oid.as_bytes().to_vec().into(),
                 thread: "main".to_string(),
                 metadata_json: String::new(),
@@ -3757,7 +3772,7 @@ mod tests {
     fn sample_redaction(blob: ContentHash) -> Redaction {
         Redaction {
             redacted_blob: blob,
-            state: ChangeId::from_bytes([1u8; 16]),
+            state: StateId::from_bytes([1u8; 32]),
             path: "config/secrets.toml".into(),
             reason: "leaked credential".into(),
             redactor: Principal {
@@ -3771,7 +3786,7 @@ mod tests {
         }
     }
 
-    fn sample_state_visibility(state: ChangeId) -> StateVisibility {
+    fn sample_state_visibility(state: StateId) -> StateVisibility {
         StateVisibility {
             state,
             tier: VisibilityTier::Restricted {
@@ -3801,7 +3816,7 @@ mod tests {
     #[test]
     fn native_pack_required_tracks_packable_pull_wants() {
         let blob = sample_blob();
-        let state = ChangeId::from_bytes([9u8; 16]);
+        let state = StateId::from_bytes([9u8; 32]);
 
         let sidecar_only = RepositoryTransferPlan::from_object_infos(
             vec![state_visibility_info(state)],
@@ -3839,9 +3854,9 @@ mod tests {
     }
 
     #[test]
-    fn plan_pull_wants_accumulates_state_and_visibility_for_same_change_id() {
+    fn plan_pull_wants_accumulates_state_and_visibility_for_same_state_id() {
         let (_dir, repo) = temp_repo();
-        let state = ChangeId::from_bytes([9u8; 16]);
+        let state = StateId::from_bytes([9u8; 32]);
         let plan = plan_pull_wants(
             &repo,
             &state,
@@ -3864,8 +3879,8 @@ mod tests {
 
         let wanted = plan
             .wanted_types
-            .get(&PackObjectId::ChangeId(state))
-            .expect("same ChangeId want entry");
+            .get(&PackObjectId::StateId(state))
+            .expect("same StateId want entry");
         assert_eq!(
             wanted.as_slice(),
             &[ObjectType::State, ObjectType::StateVisibility]
@@ -3878,7 +3893,7 @@ mod tests {
 
     #[derive(Clone)]
     struct SidecarOnlyPullService {
-        state: ChangeId,
+        state: StateId,
         state_visibility_blob: Vec<u8>,
     }
 
@@ -4055,7 +4070,7 @@ mod tests {
                 email: "grace@example.com".into(),
             }),
         );
-        let state_id = state.change_id;
+        let state_id = state.state_id;
         repo.store().put_state(&state).expect("put state");
         assert!(
             repo.get_state_visibility_bytes_for_state(&state_id)
@@ -4123,7 +4138,7 @@ mod tests {
                 email: "grace@example.com".into(),
             }),
         );
-        let state_id = state.change_id;
+        let state_id = state.state_id;
         repo.store().put_state(&state).expect("put state");
 
         // ~8 MiB blob: above tonic's 4 MiB default (which would reject at
@@ -4196,7 +4211,7 @@ mod tests {
                 email: "grace@example.com".into(),
             }),
         );
-        let state_id = state.change_id;
+        let state_id = state.state_id;
         repo.store().put_state(&state).expect("put state");
 
         // One byte past the decode limit. Content is irrelevant: decode is
@@ -4250,7 +4265,7 @@ mod tests {
 
     #[derive(Clone)]
     struct StateAndVisibilityPullService {
-        state: ChangeId,
+        state: StateId,
         pack_bundle: wire::NativePackBundle,
         state_visibility_blob: Vec<u8>,
     }
@@ -4500,7 +4515,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn state_and_visibility_same_change_id_pull_requests_pack_and_sidecar() {
+    async fn state_and_visibility_same_state_id_pull_requests_pack_and_sidecar() {
         let (_source_dir, source_repo) = temp_repo();
         let (_target_dir, target_repo) = temp_repo();
         let tree_hash = source_repo
@@ -4515,7 +4530,7 @@ mod tests {
                 email: "grace@example.com".into(),
             }),
         );
-        let state_id = state.change_id;
+        let state_id = state.state_id;
         source_repo
             .store()
             .put_state(&state)
@@ -4708,7 +4723,7 @@ mod tests {
     #[test]
     fn state_visibility_push_message_uses_state_keyed_sidecar_payload() {
         let (_dir, repo) = temp_repo();
-        let state = ChangeId::from_bytes([17u8; 16]);
+        let state = StateId::from_bytes([17u8; 32]);
         repo.put_state_visibility(sample_state_visibility(state))
             .expect("put state visibility");
         let expected_bytes = repo
@@ -4737,7 +4752,7 @@ mod tests {
 
     /// Put a state whose tree holds one blob into `repo`'s store. Returns the
     /// state id. With `parents`, builds a child on top of an existing state.
-    fn put_state_with_blob(repo: &Repository, contents: &str, parents: Vec<ChangeId>) -> ChangeId {
+    fn put_state_with_blob(repo: &Repository, contents: &str, parents: Vec<StateId>) -> StateId {
         let blob = Blob::from(contents);
         let blob_hash = repo.store().put_blob(&blob).expect("put blob");
         let tree = Tree::from_entries(vec![
@@ -4745,7 +4760,7 @@ mod tests {
         ]);
         let tree_hash = repo.store().put_tree(&tree).expect("put tree");
         let state = State::new_snapshot(tree_hash, parents, sample_attribution());
-        let state_id = state.change_id;
+        let state_id = state.state_id;
         repo.store().put_state(&state).expect("put state");
         state_id
     }
@@ -4822,7 +4837,7 @@ mod tests {
         // so the head must NOT be advertised. This is the dangerous case the
         // cardinal correctness constraint guards against.
         let (_dir, repo) = temp_repo();
-        let absent_parent = ChangeId::generate();
+        let absent_parent = StateId::from_bytes([21; 32]);
         let blob = Blob::from("orphan");
         let blob_hash = repo.store().put_blob(&blob).expect("put blob");
         let tree = Tree::from_entries(vec![
@@ -4831,7 +4846,7 @@ mod tests {
         let tree_hash = repo.store().put_tree(&tree).expect("put tree");
         // Child references a parent state that is NOT in the store.
         let child = State::new_snapshot(tree_hash, vec![absent_parent], sample_attribution());
-        let child_id = child.change_id;
+        let child_id = child.state_id;
         repo.store().put_state(&child).expect("put child state");
         repo.refs()
             .set_thread(&ThreadName::from("main"), &child_id)
@@ -4916,7 +4931,7 @@ mod tests {
         // interrupted prior pull or partial clone. Advertising this head would
         // make the server prune objects we lack. The gate must refuse.
         let (_dir, repo) = temp_repo();
-        let absent_parent = ChangeId::generate();
+        let absent_parent = StateId::from_bytes([22; 32]);
         let blob = Blob::from("orphan");
         let blob_hash = repo.store().put_blob(&blob).expect("put blob");
         let tree = Tree::from_entries(vec![
@@ -4924,7 +4939,7 @@ mod tests {
         ]);
         let tree_hash = repo.store().put_tree(&tree).expect("put tree");
         let child = State::new_snapshot(tree_hash, vec![absent_parent], sample_attribution());
-        let child_id = child.change_id;
+        let child_id = child.state_id;
         repo.store().put_state(&child).expect("put child state");
         repo.refs()
             .set_thread(&ThreadName::from("feature"), &child_id)
@@ -4945,7 +4960,7 @@ mod tests {
     /// (parent) closure.
     #[derive(Clone)]
     struct DeltaAwarePullService {
-        remote_state: ChangeId,
+        remote_state: StateId,
         /// Object descriptors keyed by the parent state that an advertised
         /// `exclude_states` entry would cover. If `exclude_states` contains
         /// `remote_state`, the delta is empty (short-circuit). If it contains
@@ -4953,7 +4968,7 @@ mod tests {
         /// contains neither, the full closure is sent.
         full_closure: Vec<ObjectInfo>,
         delta_objects: Vec<ObjectInfo>,
-        known_parent: ChangeId,
+        known_parent: StateId,
         full_pack: wire::NativePackBundle,
         delta_pack: wire::NativePackBundle,
         captured_exclude: std::sync::Arc<std::sync::Mutex<Option<Vec<String>>>>,
@@ -5162,7 +5177,7 @@ mod tests {
             remote_state: head,
             full_closure,
             delta_objects: Vec::new(),
-            known_parent: ChangeId::generate(),
+            known_parent: StateId::from_bytes([23; 32]),
             full_pack: full_pack.clone(),
             delta_pack: full_pack,
             captured_exclude: captured.clone(),
@@ -5337,7 +5352,7 @@ mod tests {
             remote_state: remote,
             full_closure: full_closure.clone(),
             delta_objects: Vec::new(),
-            known_parent: ChangeId::generate(),
+            known_parent: StateId::from_bytes([24; 32]),
             full_pack: full_pack.clone(),
             delta_pack: full_pack,
             captured_exclude: captured.clone(),
@@ -5513,7 +5528,7 @@ mod tests {
             remote_state: head,
             full_closure,
             delta_objects: Vec::new(),
-            known_parent: ChangeId::generate(),
+            known_parent: StateId::from_bytes([25; 32]),
             full_pack: full_pack.clone(),
             delta_pack: full_pack,
             captured_exclude: captured.clone(),

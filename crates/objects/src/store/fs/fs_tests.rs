@@ -11,7 +11,7 @@ use super::{
 use crate::{
     fs_atomic::temp_path,
     object::{
-        Action, Attribution, Blob, ChangeId, ContentHash, Operation, Principal, State, Tree,
+        Action, Attribution, Blob, ContentHash, Operation, Principal, State, StateId, Tree,
         TreeEntry,
     },
     store::{
@@ -226,7 +226,7 @@ fn list_states_sees_packs_installed_after_store_construction() {
 
     let mut builder = PackBuilder::new(CompressionConfig::disabled());
     builder.add_id(
-        PackObjectId::ChangeId(state.change_id),
+        PackObjectId::StateId(state.id()),
         PackObjectType::State,
         rmp_serde::to_vec_named(&state).unwrap(),
     );
@@ -235,7 +235,7 @@ fn list_states_sees_packs_installed_after_store_construction() {
 
     assert_eq!(
         store_a.list_states().unwrap(),
-        vec![state.change_id],
+        vec![state.id()],
         "stale pack manager must refresh before enumerating packed states"
     );
 }
@@ -348,7 +348,7 @@ fn install_pack_accepts_valid_mixed_native_pack() {
     let state = State::new(tree_hash, vec![], attribution.clone()).with_intent("packed state");
     let mut action = Action::new(
         None,
-        state.change_id,
+        state.id(),
         Operation::Snapshot,
         "packed action",
         attribution,
@@ -364,7 +364,7 @@ fn install_pack_accepts_valid_mixed_native_pack() {
         rmp_serde::to_vec_named(&tree).unwrap(),
     );
     builder.add_id(
-        PackObjectId::ChangeId(state.change_id),
+        PackObjectId::StateId(state.id()),
         PackObjectType::State,
         rmp_serde::to_vec_named(&state).unwrap(),
     );
@@ -386,91 +386,12 @@ fn install_pack_accepts_valid_mixed_native_pack() {
         tree.entries(),
     );
     assert_eq!(
-        store.get_state(&state.change_id).unwrap().unwrap().intent,
+        store.get_state(&state.id()).unwrap().unwrap().intent,
         Some("packed state".to_string()),
     );
     assert_eq!(
         store.get_action(&action_id).unwrap().unwrap().description,
         "packed action",
-    );
-}
-
-/// States are addressed by `change_id`, NOT content hash, so the same id can
-/// have a stale PACKED body and a newer LOOSE body — the #570 fidelity backfill
-/// re-hashes adopted states (packed at adopt time) and writes them loose. A
-/// cold read (cache miss) MUST return the loose body, not the stale packed one.
-/// Pre-fix the pack was consulted before the loose object and won. (heddle#570)
-#[test]
-fn loose_state_shadows_stale_packed_copy_on_cold_read() {
-    let (_temp, store) = create_test_store();
-
-    let tree = Tree::new();
-    let tree_hash = tree.hash();
-    store.put_tree(&tree).unwrap();
-    let attribution = Attribution::human(Principal::new("Adopt", "adopt@example.com"));
-    let packed = State::new(tree_hash, vec![], attribution).with_intent("stale-packed");
-    let change_id = packed.change_id;
-
-    let mut builder = PackBuilder::new(CompressionConfig::disabled());
-    builder.add_id(
-        PackObjectId::ChangeId(change_id),
-        PackObjectType::State,
-        rmp_serde::to_vec_named(&packed).unwrap(),
-    );
-    let (pack_data, index_data, _) = builder.build().unwrap();
-    store.install_pack(&pack_data, &index_data).unwrap();
-
-    // With only the packed copy present, the read returns it.
-    store.clear_recent_object_caches();
-    assert_eq!(
-        store.get_state(&change_id).unwrap().unwrap().intent,
-        Some("stale-packed".to_string()),
-        "packed state is read before any loose copy exists",
-    );
-
-    // The backfill rewrites the same change_id LOOSE with new content.
-    let fresh = packed.clone().with_intent("fresh-loose");
-    store.put_state(&fresh).unwrap();
-
-    // Cold read (cache miss) must return the loose body, not the packed one.
-    store.clear_recent_object_caches();
-    assert_eq!(
-        store.get_state(&change_id).unwrap().unwrap().intent,
-        Some("fresh-loose".to_string()),
-        "loose write shadows the stale packed copy on a cold read",
-    );
-}
-
-#[test]
-fn install_pack_refreshes_state_as_loose_authoritative_copy() {
-    let (_temp, store) = create_test_store();
-
-    let tree = Tree::new();
-    let tree_hash = tree.hash();
-    store.put_tree(&tree).unwrap();
-    let attribution = Attribution::human(Principal::new("Sync", "sync@example.com"));
-    let base = State::new(tree_hash, vec![], attribution);
-    let change_id = base.change_id;
-    store.put_state(&base).unwrap();
-
-    let discussion_hash = ContentHash::compute(b"discussion-sidecar");
-    let refreshed = base.clone().with_discussions(discussion_hash);
-    let mut builder = PackBuilder::new(CompressionConfig::disabled());
-    builder.add_id(
-        PackObjectId::ChangeId(change_id),
-        PackObjectType::State,
-        rmp_serde::to_vec_named(&refreshed).unwrap(),
-    );
-    let (pack_data, index_data, _) = builder.build().unwrap();
-
-    store.install_pack(&pack_data, &index_data).unwrap();
-
-    store.clear_recent_object_caches();
-    assert_eq!(
-        store.get_state(&change_id).unwrap().unwrap().discussions,
-        Some(discussion_hash),
-        "received state pack must refresh the loose state body so mutable \
-         tail pointers are visible on cold reads",
     );
 }
 
@@ -827,8 +748,8 @@ fn test_state_roundtrip() {
 
     store.put_state(&state).unwrap();
 
-    let retrieved = store.get_state(&state.change_id).unwrap().unwrap();
-    assert_eq!(retrieved.change_id, state.change_id);
+    let retrieved = store.get_state(&state.id()).unwrap().unwrap();
+    assert_eq!(retrieved.state_id, state.state_id);
     assert_eq!(retrieved.intent, Some("Test state".to_string()));
 }
 
@@ -851,7 +772,7 @@ fn test_state_roundtrip_preserves_non_utf8_raw_message() {
 
     store.put_state(&state).unwrap();
 
-    let retrieved = store.get_state(&state.change_id).unwrap().unwrap();
+    let retrieved = store.get_state(&state.id()).unwrap().unwrap();
     assert_eq!(
         retrieved.raw_message.as_deref(),
         Some(raw.as_slice()),
@@ -1030,15 +951,15 @@ fn test_get_state_rejects_wrong_object_swap() {
     let swapped_path = store
         .root
         .join("objects/states")
-        .join(format!("{}.state", state1.change_id.to_string_full()));
+        .join(format!("{}.state", state1.id().to_string_full()));
     std::fs::write(&swapped_path, rmp_serde::to_vec(&state2).unwrap()).unwrap();
     store.clear_recent_object_caches();
 
     let error = store
-        .get_state(&state1.change_id)
+        .get_state(&state1.id())
         .expect_err("swapped state should be rejected");
     assert!(
-        matches!(error, HeddleError::InvalidObject(message) if message.contains("state change_id mismatch"))
+        matches!(error, HeddleError::InvalidObject(message) if message.contains("state id mismatch"))
     );
 }
 
@@ -1049,7 +970,7 @@ fn test_get_action_rejects_wrong_object_swap() {
     let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
     let mut action1 = Action::new(
         None,
-        ChangeId::generate(),
+        StateId::from_bytes([3; 32]),
         Operation::Snapshot,
         "first action",
         attribution.clone(),
@@ -1057,7 +978,7 @@ fn test_get_action_rejects_wrong_object_swap() {
     .with_timestamp(Utc.timestamp_opt(1_700_000_000, 0).unwrap());
     let mut action2 = Action::new(
         None,
-        ChangeId::generate(),
+        StateId::from_bytes([4; 32]),
         Operation::Snapshot,
         "second action",
         attribution,

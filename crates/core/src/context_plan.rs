@@ -98,7 +98,7 @@ pub fn count_active_annotations(annotations: &[Annotation]) -> usize {
 pub fn context_target_kind_and_label(target: &ContextTarget) -> (&'static str, String) {
     match target {
         ContextTarget::File { path } => ("file", path.clone()),
-        ContextTarget::State { change_id } => ("state", change_id.to_string_full()),
+        ContextTarget::State { state_id } => ("state", state_id.to_string_full()),
     }
 }
 
@@ -106,7 +106,7 @@ pub fn context_target_kind_and_label(target: &ContextTarget) -> (&'static str, S
 pub fn audit_target_key(target: &ContextTarget) -> String {
     match target {
         ContextTarget::File { path } => path.clone(),
-        ContextTarget::State { change_id } => change_id.to_string_full(),
+        ContextTarget::State { state_id } => state_id.to_string_full(),
     }
 }
 
@@ -114,10 +114,10 @@ pub fn audit_target_key(target: &ContextTarget) -> String {
 pub fn audit_staleness_key(target: &ContextTarget, annotation: &Annotation) -> String {
     match target {
         ContextTarget::File { path } => format!("{path}:{}", annotation.scope),
-        ContextTarget::State { change_id } => {
+        ContextTarget::State { state_id } => {
             format!(
                 "state:{}:{}",
-                change_id.to_string_full(),
+                state_id.to_string_full(),
                 annotation.annotation_id
             )
         }

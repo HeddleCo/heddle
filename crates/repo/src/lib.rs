@@ -7,6 +7,16 @@ compile_error!(
      See crates/repo/Cargo.toml."
 );
 
+#[cfg(test)]
+pub(crate) fn test_state_id() -> objects::object::StateId {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let mut bytes = [0; 32];
+    bytes[..8].copy_from_slice(&NEXT.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+    objects::object::StateId::from_bytes(bytes)
+}
+
 pub mod atomic;
 pub mod daemon;
 #[cfg(feature = "tree-sitter-symbols")]
@@ -49,6 +59,7 @@ mod stat_signature;
 #[cfg(feature = "tree-sitter-symbols")]
 pub use semantic::symbol_resolver;
 mod stack_snapshot;
+mod state_attachments;
 mod thread_advice;
 pub mod thread_manifest;
 mod thread_model;
@@ -132,7 +143,8 @@ pub use snapshot_metadata::{
 pub use stack_snapshot::{
     REPOSITORY_SNAPSHOT_SCHEMA_VERSION, RepositorySnapshot, StackNextAction, ThreadSnapshot,
 };
-pub use stash::{StashEntry, StashManager};
+pub use stash::{StashEntry, StashId, StashManager};
+pub use state_attachments::StateAttachmentKind;
 pub use thread_advice::{
     RecommendedAction, ThreadAdvice, describe_thread_advice, describe_thread_advice_with_initial,
     shell_quote, thread_flag,

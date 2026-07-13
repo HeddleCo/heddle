@@ -40,7 +40,7 @@ message OperationHit {
   string thread = 6;
   repeated string symbols = 7;
   repeated string signal_kinds = 8;
-  bytes change_id = 9;
+  bytes state_id = 9;
 }
 
 message StreamOperationsRequest {

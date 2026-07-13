@@ -5,7 +5,7 @@
 //! Modeled on [`Redaction`](crate::object::Redaction): an *additive*
 //! sidecar record that lives outside the hashed `State` bytes, so changing a
 //! state's tier never mutates the state or invalidates its signature. The
-//! record is keyed by `ChangeId` (the state), not by a blob hash — commit
+//! record is keyed by `StateId`, not by a blob hash — commit
 //! visibility is a per-state property, where redaction is per-blob.
 //!
 //! **Absence ≡ public.** A public resolution stays record-free: the public
@@ -16,7 +16,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::object::{ChangeId, ContentHash, Principal, StateSignature, VisibilityTier};
+use crate::object::{ContentHash, Principal, StateId, StateSignature, VisibilityTier};
 
 /// Stable byte prefix the signing payload begins with. Bumping this versions
 /// the payload format itself; old signatures with the old prefix continue to
@@ -27,7 +27,7 @@ pub const STATE_VISIBILITY_SIGNING_PAYLOAD_VERSION_TAG: &[u8] = b"hd-statevis-v1
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateVisibility {
     /// The state (commit) this tier applies to.
-    pub state: ChangeId,
+    pub state: StateId,
     /// The audience tier the state's content is served at.
     pub tier: VisibilityTier,
     /// When set, the host materializes a superseding public record at this
@@ -232,7 +232,7 @@ mod tests {
 
     fn record(tier: VisibilityTier) -> StateVisibility {
         StateVisibility {
-            state: ChangeId::from_bytes([3u8; 16]),
+            state: StateId::from_bytes([3u8; 32]),
             tier,
             embargo_until: None,
             declarer: principal(),

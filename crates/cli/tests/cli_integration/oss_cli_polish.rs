@@ -1497,10 +1497,7 @@ fn op_id_replays_local_mutating_command_and_rejects_arg_conflict() {
     .unwrap();
     let parsed: Value = serde_json::from_str(&first).expect("first capture JSON should parse");
     assert!(
-        parsed["change_id"]
-            .as_str()
-            .unwrap_or("")
-            .starts_with("hd-"),
+        parsed["state_id"].as_str().unwrap_or("").starts_with("hs-"),
         "first capture should return a state id: {parsed}"
     );
     assert_eq!(parsed["op_id"], op_id);
@@ -1526,7 +1523,7 @@ fn op_id_replays_local_mutating_command_and_rejects_arg_conflict() {
     let replayed: Value =
         serde_json::from_str(&replay).expect("replayed capture JSON should parse");
     assert_eq!(
-        replayed["change_id"], parsed["change_id"],
+        replayed["state_id"], parsed["state_id"],
         "same op-id and args should replay the original mutation result"
     );
     assert_eq!(replayed["op_id"], op_id);
@@ -2014,7 +2011,7 @@ fn commit_schema_declares_real_op_id_commit_and_replay_fields() {
         ],
     );
     assert_eq!(
-        replayed["change_id"], first["change_id"],
+        replayed["state_id"], first["state_id"],
         "same op-id and args should replay the original commit result"
     );
     assert_eq!(replayed["output_kind"], "commit");
@@ -2545,7 +2542,7 @@ fn git_overlay_commit_without_no_all_checkpoints_pending_capture() {
         temp.path(),
         &["capture", "-m", "recoverable save", "--output", "json"],
     );
-    let captured_state = capture["change_id"]
+    let captured_state = capture["state_id"]
         .as_str()
         .expect("capture should report change id")
         .to_string();
@@ -2594,7 +2591,7 @@ fn git_overlay_commit_discloses_pending_capture_when_checkpointing_later_delta()
         temp.path(),
         &["capture", "-m", "recoverable save", "--output", "json"],
     );
-    let captured_state = capture["change_id"]
+    let captured_state = capture["state_id"]
         .as_str()
         .expect("capture should report change id")
         .to_string();
@@ -2925,7 +2922,7 @@ fn query_reads_live_oplog_before_operation_index_is_warm() {
         .unwrap_or_else(|| panic!("query should emit hits array: {query}"));
     assert!(
         hits.iter()
-            .any(|hit| hit["verb"] == "snapshot" && hit["change_id"].is_string()),
+            .any(|hit| hit["verb"] == "snapshot" && hit["state_id"].is_string()),
         "query should fall back to the live oplog when the sidecar index is empty: {query}"
     );
 }
@@ -3387,7 +3384,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
         temp.path(),
         &["capture", "-m", "captured again", "--output", "json"],
     );
-    let captured_again = capture_again["change_id"]
+    let captured_again = capture_again["state_id"]
         .as_str()
         .expect("capture should report a change id")
         .to_string();
@@ -3707,9 +3704,9 @@ fn native_commit_saves_heddle_state_without_impossible_checkpoint_recovery() {
     assert_eq!(commit["status"], "committed");
     assert_eq!(commit["action"], "commit");
     assert!(
-        commit["change_id"]
+        commit["state_id"]
             .as_str()
-            .is_some_and(|state| state.starts_with("hd-")),
+            .is_some_and(|state| state.starts_with("hs-")),
         "native commit should save a Heddle state: {commit}"
     );
     assert_eq!(commit["git_commit"], Value::Null);
@@ -3803,7 +3800,7 @@ fn core_mutations_emit_post_verification_in_json() {
     );
     let status_after_capture = json_value(temp.path(), &["status", "--output", "json"]);
     assert_eq!(
-        status_after_capture["state"]["change_id"], capture["change_id"],
+        status_after_capture["state"]["state_id"], capture["state_id"],
         "status should describe the captured state: {status_after_capture}"
     );
     assert_eq!(
@@ -3815,7 +3812,7 @@ fn core_mutations_emit_post_verification_in_json() {
         .as_array()
         .unwrap_or_else(|| panic!("log states should be an array: {log_after_capture}"))
         .iter()
-        .find(|entry| entry["change_id"] == capture["change_id"])
+        .find(|entry| entry["state_id"] == capture["state_id"])
         .unwrap_or_else(|| panic!("log should include captured state: {log_after_capture}"));
     assert_eq!(
         captured_log_entry["content_hash"], capture["content_hash"],
@@ -4537,12 +4534,7 @@ fn git_projection_commit_branch_and_switch_shims_work() {
     .unwrap();
     let commit: Value = serde_json::from_str(&commit_json).unwrap();
     assert_eq!(commit["action"], "commit");
-    assert!(
-        commit["change_id"]
-            .as_str()
-            .unwrap_or("")
-            .starts_with("hd-")
-    );
+    assert!(commit["state_id"].as_str().unwrap_or("").starts_with("hs-"));
     assert!(
         commit["git_commit"].as_str().unwrap_or("").len() >= 7,
         "commit shim should write a Git checkpoint: {commit}"
@@ -5057,7 +5049,7 @@ fn cherry_pick_missing_commit_uses_typed_advice() {
     heddle(&["capture", "-m", "base"], Some(temp.path())).unwrap();
 
     let output = heddle_output(
-        &["--output", "json", "cherry-pick", "hd-deadbeef1234"],
+        &["--output", "json", "cherry-pick", "hs-deadbeef1234"],
         Some(temp.path()),
     )
     .expect("invoke cherry-pick target refusal");
@@ -5077,7 +5069,7 @@ fn cherry_pick_missing_commit_uses_typed_advice() {
     assert!(
         envelope["error"]
             .as_str()
-            .is_some_and(|error| error.contains("commit 'hd-deadbeef1234' not found")),
+            .is_some_and(|error| error.contains("commit 'hs-deadbeef1234' not found")),
         "cherry-pick refusal should include full typed advice: {stderr}"
     );
     assert!(
@@ -5096,7 +5088,7 @@ fn switch_missing_state_uses_typed_advice() {
     heddle(&["capture", "-m", "base"], Some(temp.path())).unwrap();
 
     let output = heddle_output(
-        &["--output", "json", "switch", "hd-deadbeef1234"],
+        &["--output", "json", "switch", "hs-deadbeef1234"],
         Some(temp.path()),
     )
     .expect("invoke switch target refusal");
@@ -5116,7 +5108,7 @@ fn switch_missing_state_uses_typed_advice() {
     assert!(
         envelope["error"]
             .as_str()
-            .is_some_and(|error| error.contains("State not found: hd-deadbeef1234")),
+            .is_some_and(|error| error.contains("State not found: hs-deadbeef1234")),
         "switch missing state should include full typed advice: {stderr}"
     );
     assert!(
@@ -5201,7 +5193,7 @@ fn thread_start_anchor_mismatch_uses_typed_advice() {
         .current_state()
         .unwrap()
         .unwrap()
-        .change_id
+        .state_id
         .to_string();
 
     let output = heddle_output(
@@ -5312,7 +5304,7 @@ fn dirty_switch_start_path_and_drop_refuse_without_force() {
         .current_state()
         .unwrap()
         .unwrap()
-        .change_id
+        .state_id
         .to_string();
     std::fs::write(temp.path().join("tracked.txt"), "next\n").unwrap();
     heddle(&["capture", "-m", "next"], Some(temp.path())).unwrap();
@@ -5832,7 +5824,7 @@ fn revert_refuses_dirty_worktree_with_shared_advice() {
         .current_state()
         .unwrap()
         .unwrap()
-        .change_id
+        .state_id
         .to_string();
 
     std::fs::write(temp.path().join("tracked.txt"), "dirty\n").unwrap();
@@ -5869,7 +5861,7 @@ fn revert_empty_state_uses_typed_advice() {
         .current_state()
         .unwrap()
         .unwrap()
-        .change_id
+        .state_id
         .to_string();
 
     let output = heddle_output(&["--output", "json", "revert", &target], Some(temp.path()))
@@ -6919,7 +6911,7 @@ fn ready_capture_is_visible_and_carries_confidence() {
     assert!(text.status.success(), "ready should succeed");
     let stdout = String::from_utf8_lossy(&text.stdout);
     assert!(
-        stdout.contains("captured: yes (state hd-"),
+        stdout.contains("captured: yes (state hs-"),
         "ready text should explicitly name the captured state when it saves work: {stdout}"
     );
 
@@ -6942,7 +6934,7 @@ fn ready_capture_is_visible_and_carries_confidence() {
     assert!(
         json["captured_state"]
             .as_str()
-            .is_some_and(|state| state.starts_with("hd-")),
+            .is_some_and(|state| state.starts_with("hs-")),
         "ready JSON should carry the captured state id: {json}"
     );
 }
@@ -7373,7 +7365,7 @@ fn resolve_with_no_remaining_conflicts_keeps_full_typed_advice() {
     std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
     heddle(&["capture", "-m", "base"], Some(temp.path())).unwrap();
     let repo = Repository::open(temp.path()).unwrap();
-    let head = repo.current_state().unwrap().unwrap().change_id;
+    let head = repo.current_state().unwrap().unwrap().state_id;
     let merge_state = repo.merge_state_manager();
     merge_state
         .start(head, head, None, vec!["tracked.txt".to_string()])
@@ -9261,9 +9253,9 @@ fn unknown_state_id_hints_at_heddle_log_across_state_readers() {
     heddle(&["init"], Some(temp.path())).unwrap();
 
     for args in [
-        vec!["--output", "text", "switch", "hd-nonexistent"],
-        vec!["--output", "text", "show", "hd-nonexistent"],
-        vec!["--output", "text", "diff", "hd-nonexistent", "HEAD"],
+        vec!["--output", "text", "switch", "hs-nonexistent"],
+        vec!["--output", "text", "show", "hs-nonexistent"],
+        vec!["--output", "text", "diff", "hs-nonexistent", "HEAD"],
     ] {
         let output = heddle_output(&args, Some(temp.path()))
             .unwrap_or_else(|err| panic!("invoke heddle {args:?}: {err}"));
@@ -9676,9 +9668,9 @@ fn discuss_resolve_into_annotation_emits_resolved_annotation_json() {
     std::fs::create_dir_all(temp.path().join("src")).unwrap();
     std::fs::write(temp.path().join("src/lib.rs"), "fn foo() {}\n").unwrap();
     let capture = json_value(temp.path(), &["capture", "-m", "seed"]);
-    let state_id = capture["change_id"]
+    let state_id = capture["state_id"]
         .as_str()
-        .expect("capture output should include change_id")
+        .expect("capture output should include state_id")
         .to_string();
     let opened = json_value(
         temp.path(),
@@ -9719,9 +9711,12 @@ fn discuss_resolve_into_annotation_emits_resolved_annotation_json() {
     let annotation_id = resolved["resolved_annotation_id"]
         .as_str()
         .expect("resolved discussion should expose the created annotation id");
-    assert!(
-        annotation_id.starts_with("hd-"),
-        "annotation id should be a Heddle change id: {resolved}"
+    let parsed_annotation_id = uuid::Uuid::parse_str(annotation_id)
+        .unwrap_or_else(|error| panic!("annotation id should be a UUID: {error}: {resolved}"));
+    assert_eq!(
+        parsed_annotation_id.get_version_num(),
+        7,
+        "annotation id should be UUIDv7: {resolved}"
     );
     assert_eq!(
         resolved["resolution"]["annotation_id"].as_str(),
@@ -10430,7 +10425,7 @@ fn actor_explain_detached_head_recommends_minting_spawn_not_no_thread() {
         .current_state()
         .unwrap()
         .unwrap()
-        .change_id
+        .state_id
         .to_string();
     std::fs::write(temp.path().join("tracked.txt"), "next\n").unwrap();
     heddle(&["capture", "-m", "next"], Some(temp.path())).unwrap();

@@ -6,7 +6,7 @@ use tempfile::TempDir;
 
 use super::{ObjectType, PackBuilder, PackObjectId, PackReader, pack_index::PackIndex};
 use crate::{
-    object::{ChangeId, ContentHash},
+    object::{ContentHash, StateId},
     store::{StoreError, pack::pack_container_spec},
 };
 
@@ -81,7 +81,7 @@ fn test_pack_index_roundtrip() {
     let mut index = PackIndex::new();
     index.add(PackObjectId::Hash(create_test_hash(1)), 100);
     index.add(PackObjectId::Hash(create_test_hash(2)), 200);
-    index.add(PackObjectId::ChangeId(ChangeId::from_bytes([3; 16])), 300);
+    index.add(PackObjectId::StateId(StateId::from_bytes([3; 32])), 300);
     index.sort();
 
     let bytes = index.to_bytes();
@@ -96,7 +96,7 @@ fn test_pack_index_roundtrip() {
         Some(200)
     );
     assert_eq!(
-        restored.find(&PackObjectId::ChangeId(ChangeId::from_bytes([3; 16]))),
+        restored.find(&PackObjectId::StateId(StateId::from_bytes([3; 32]))),
         Some(300)
     );
     assert_eq!(

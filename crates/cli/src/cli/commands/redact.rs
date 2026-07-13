@@ -23,7 +23,7 @@ use crypto::{Signer, load_signer, verify_payload_signature};
 use heddle_core::{redaction_signature_status, short_public_key};
 use objects::{
     object::{
-        ChangeId, ContentHash, LeafPolicy, Redaction, RedactionsBlob, StateSignature,
+        ContentHash, LeafPolicy, Redaction, RedactionsBlob, StateId, StateSignature,
         TreePathResolveError, resolve_tree_path,
     },
     worktree::should_ignore,
@@ -467,9 +467,9 @@ fn emit_apply(cli: &Cli, output: &RedactApplyOutput) -> Result<()> {
     Ok(())
 }
 
-fn resolve_state(repo: &Repository, spec: &str) -> Result<ChangeId> {
+fn resolve_state(repo: &Repository, spec: &str) -> Result<StateId> {
     repo::resolve_state_for_command(repo, spec, repo::ResolvePolicy::minimal())
-        .map(|resolved| resolved.change_id)
+        .map(|resolved| resolved.state_id)
         .map_err(|error| match error {
             repo::StateResolveError::Repository(err) => err.into(),
             repo::StateResolveError::Failure(repo::StateResolveFailure::NotFound { spec }) => {
@@ -480,7 +480,7 @@ fn resolve_state(repo: &Repository, spec: &str) -> Result<ChangeId> {
         .with_context(|| format!("resolve state '{}'", spec))
 }
 
-pub(crate) fn blob_at_path(repo: &Repository, state: &ChangeId, path: &str) -> Result<ContentHash> {
+pub(crate) fn blob_at_path(repo: &Repository, state: &StateId, path: &str) -> Result<ContentHash> {
     let tree = repo
         .get_tree_for_state(state)
         .with_context(|| format!("load tree for state {}", state.short()))?
@@ -519,7 +519,7 @@ pub(crate) fn blob_at_path(repo: &Repository, state: &ChangeId, path: &str) -> R
 /// listing is small in practice; a flat index can be added if needed.
 pub(crate) fn resolve_redaction_id(repo: &Repository, spec: &str) -> Result<ContentHash> {
     let listing = repo.list_all_redactions()?;
-    let normalised = spec.trim_start_matches("hd-").to_ascii_lowercase();
+    let normalised = spec.trim_start_matches("hs-").to_ascii_lowercase();
     let mut candidates: Vec<ContentHash> = Vec::new();
     for (_blob, redactions_blob) in &listing {
         for redaction in &redactions_blob.redactions {
@@ -860,14 +860,14 @@ mod tree_path_tests {
 
     use super::blob_at_path;
 
-    fn state_with_tree(repo: &Repository, root_hash: ContentHash) -> objects::object::ChangeId {
+    fn state_with_tree(repo: &Repository, root_hash: ContentHash) -> objects::object::StateId {
         let state = State::new(
             root_hash,
             Vec::new(),
             Attribution::human(Principal::new("tester".to_string(), "tester@example.com")),
         );
         repo.store().put_state(&state).unwrap();
-        state.change_id
+        state.state_id
     }
 
     #[test]

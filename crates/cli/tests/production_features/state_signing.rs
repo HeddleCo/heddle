@@ -34,13 +34,12 @@ fn assert_head_signed(path: &std::path::Path, what: &str) {
         .expect("current state")
         .expect("repo has a HEAD state");
     assert!(
-        head.signature.is_some(),
+        repo.get_state_signature(&head.state_id).unwrap().is_some(),
         "{what}: authored HEAD state {} must be auto-signed, not stored unsigned",
-        head.change_id.short(),
+        head.state_id.short(),
     );
     assert_eq!(
-        repo.verify_state_signature(&head.change_id)
-            .expect("verify"),
+        repo.verify_state_signature(&head.state_id).expect("verify"),
         crypto::SignatureStatus::Valid,
         "{what}: the auto-signature on the HEAD state must verify",
     );
@@ -87,7 +86,7 @@ fn authored_commands_auto_sign_their_states() {
             &[
                 "collapse",
                 &first.to_string_full(),
-                &head.change_id.to_string_full(),
+                &head.state_id.to_string_full(),
                 "--into",
                 "combined",
             ],
@@ -235,7 +234,7 @@ fn test_state_signing_via_repository() {
     let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
     let state = objects::object::State::new(tree_hash, vec![], attribution);
     repo.store().put_state(&state).expect("put state");
-    let state_id = state.change_id;
+    let state_id = state.state_id;
 
     let status = repo.verify_state_signature(&state_id).expect("verify");
     assert_eq!(
@@ -268,24 +267,29 @@ fn test_signature_tampering_detected() {
     let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
     let state = objects::object::State::new(tree_hash, vec![], attribution);
     repo.store().put_state(&state).expect("put state");
-    let state_id = state.change_id;
+    let state_id = state.state_id;
 
     let signer = Ed25519Signer::generate().expect("generate key");
     repo.sign_state(&state_id, &signer).expect("sign state");
 
-    let mut state = repo
-        .store()
-        .get_state(&state_id)
-        .expect("get state")
-        .expect("state exists");
-
-    if let Some(ref mut sig) = state.signature {
-        let mut sig_bytes = hex::decode(&sig.signature).expect("decode");
-        sig_bytes[0] ^= 0xff;
-        sig.signature = hex::encode(&sig_bytes);
-    }
-
-    repo.store().put_state(&state).expect("put state");
+    let prior = repo
+        .latest_state_attachment(&state_id, repo::StateAttachmentKind::Signature)
+        .unwrap()
+        .unwrap();
+    let objects::object::StateAttachmentBody::Signature(mut signature) = prior.body else {
+        panic!("signature attachment")
+    };
+    let mut sig_bytes = hex::decode(&signature.signature).expect("decode");
+    sig_bytes[0] ^= 0xff;
+    signature.signature = hex::encode(&sig_bytes);
+    repo.put_state_attachment(&objects::object::StateAttachment {
+        state_id,
+        body: objects::object::StateAttachmentBody::Signature(signature),
+        attribution: state.attribution,
+        created_at: chrono::Utc::now(),
+        supersedes: Some(prior.id()),
+    })
+    .unwrap();
 
     let status = repo.verify_state_signature(&state_id).expect("verify");
     assert_eq!(

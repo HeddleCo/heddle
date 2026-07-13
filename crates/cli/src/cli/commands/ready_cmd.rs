@@ -298,7 +298,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
                 no_agent: false,
             },
         )?;
-        captured_state = Some(snapshot.change_id);
+        captured_state = Some(snapshot.state_id);
         thread = manager
             .load(&thread.id)?
             .or_else(|| current_thread(&repo).ok().flatten())
@@ -790,7 +790,7 @@ fn ready_merge_type_summary(report: &ThreadPreviewReport) -> String {
 
 fn ready_captured_label(summary: &ReadyReadinessSummary) -> String {
     match summary.captured_state.as_deref() {
-        Some(state) => format!("yes (state {})", style::change_id(state)),
+        Some(state) => format!("yes (state {})", style::state_id(state)),
         None if summary.captured => "yes".to_string(),
         None => "no".to_string(),
     }

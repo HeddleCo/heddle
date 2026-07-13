@@ -15,7 +15,7 @@ use objects::{
 use repo::compute_rewrite_pct;
 
 use super::{
-    apply_new_state, build_context_state, compute_source_hash, parse_kind, parse_scope,
+    compute_source_hash, context_root_for_state, parse_kind, parse_scope, put_context_attachment,
     read_annotation_content, resolve_scope_at_target, resolve_state, resolve_target, target_label,
 };
 use crate::{
@@ -78,25 +78,20 @@ pub async fn cmd_context_set(
         attribution.to_string(),
         Utc::now().timestamp(),
         source_hash,
-        Some(head_state.change_id),
+        Some(head_state.state_id),
     );
 
-    let mut blob = match &head_state.context {
+    let prior_root = context_root_for_state(&repo, &head_state)?;
+    let mut blob = match &prior_root {
         Some(root) => repo
             .get_context_blob(root, &target)?
             .unwrap_or_else(|| ContextBlob::new(vec![])),
         None => ContextBlob::new(vec![]),
     };
     blob.annotations.push(annotation);
-    let new_context_root = repo.set_context_blob(head_state.context.as_ref(), &target, &blob)?;
+    let new_context_root = repo.set_context_blob(prior_root.as_ref(), &target, &blob)?;
     let (_, label) = target_label(&target);
-    let new_state = build_context_state(
-        &repo,
-        &head_state,
-        Some(new_context_root),
-        format!("context: annotate {label}"),
-    )?;
-    apply_new_state(&repo, &new_state)?;
+    put_context_attachment(&repo, &head_state, Some(new_context_root))?;
 
     if should_output_json(cli, None) {
         println!(
@@ -105,7 +100,7 @@ pub async fn cmd_context_set(
                 "output_kind": "context_set",
                 "target": label,
                 "annotations": blob.annotations.len(),
-                "state": new_state.change_id.short(),
+                "state": head_state.state_id.short(),
             })
         );
     } else {
@@ -135,13 +130,11 @@ pub async fn cmd_context_edit(
     let content = read_annotation_content(message, file)?;
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;
     let head_state = resolve_state(&repo, None)?;
-    let context_root = head_state
-        .context
-        .as_ref()
+    let context_root = context_root_for_state(&repo, &head_state)?
         .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
 
     let (target, mut blob, index) = repo
-        .find_annotation(context_root, &annotation_id)?
+        .find_annotation(&context_root, &annotation_id)?
         .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::annotation_not_found(&annotation_id)))?;
 
     let annotation = blob
@@ -165,20 +158,13 @@ pub async fn cmd_context_edit(
         attribution.to_string(),
         Utc::now().timestamp(),
         source_hash,
-        Some(head_state.change_id),
+        Some(head_state.state_id),
     );
     let revision_count = annotation.revisions.len();
     let _ = annotation;
 
-    let new_context_root = repo.set_context_blob(Some(context_root), &target, &blob)?;
-    let (_, label) = target_label(&target);
-    let new_state = build_context_state(
-        &repo,
-        &head_state,
-        Some(new_context_root),
-        format!("context: revise {label}"),
-    )?;
-    apply_new_state(&repo, &new_state)?;
+    let new_context_root = repo.set_context_blob(Some(&context_root), &target, &blob)?;
+    put_context_attachment(&repo, &head_state, Some(new_context_root))?;
 
     if should_output_json(cli, None) {
         println!(
@@ -186,7 +172,7 @@ pub async fn cmd_context_edit(
             serde_json::json!({
                 "output_kind": "context_edit",
                 "annotation_id": annotation_id,
-                "state": new_state.change_id.short(),
+                "state": head_state.state_id.short(),
                 "revision_count": revision_count,
             })
         );
@@ -215,13 +201,11 @@ pub async fn cmd_context_supersede(
     let content = read_annotation_content(message, file)?;
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;
     let head_state = resolve_state(&repo, None)?;
-    let context_root = head_state
-        .context
-        .as_ref()
+    let context_root = context_root_for_state(&repo, &head_state)?
         .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
 
     let (original_target, mut original_blob, index) = repo
-        .find_annotation(context_root, &annotation_id)?
+        .find_annotation(&context_root, &annotation_id)?
         .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::annotation_not_found(&annotation_id)))?;
     let original_annotation = original_blob.annotations[index].clone();
     let original_revision = original_annotation.current_revision().cloned().unwrap();
@@ -251,14 +235,14 @@ pub async fn cmd_context_supersede(
         attribution.to_string(),
         Utc::now().timestamp(),
         source_hash,
-        Some(head_state.change_id),
+        Some(head_state.state_id),
     );
     replacement.supersedes_annotation_id = Some(annotation_id.clone());
     replacement.supersedes_rewrite_pct = Some(rewrite_pct);
 
     original_blob.annotations[index].mark_superseded();
     let mut next_root =
-        repo.set_context_blob(Some(context_root), &original_target, &original_blob)?;
+        repo.set_context_blob(Some(&context_root), &original_target, &original_blob)?;
 
     let mut replacement_blob = if target == original_target {
         original_blob
@@ -270,13 +254,7 @@ pub async fn cmd_context_supersede(
     next_root = repo.set_context_blob(Some(&next_root), &target, &replacement_blob)?;
 
     let (_, label) = target_label(&target);
-    let new_state = build_context_state(
-        &repo,
-        &head_state,
-        Some(next_root),
-        format!("context: supersede {label}"),
-    )?;
-    apply_new_state(&repo, &new_state)?;
+    put_context_attachment(&repo, &head_state, Some(next_root))?;
 
     if should_output_json(cli, None) {
         println!(
@@ -286,7 +264,7 @@ pub async fn cmd_context_supersede(
                 "annotation_id": annotation_id,
                 "replacement_target": label,
                 "rewrite_pct": rewrite_pct,
-                "state": new_state.change_id.short(),
+                "state": head_state.state_id.short(),
             })
         );
     } else {
@@ -311,7 +289,7 @@ pub async fn cmd_context_rm(
 
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;
     let head_state = resolve_state(&repo, None)?;
-    let Some(context_root) = &head_state.context else {
+    let Some(context_root) = context_root_for_state(&repo, &head_state)? else {
         return Err(anyhow::anyhow!(RecoveryAdvice::invalid_usage(
             "context_remove_empty",
             "No context annotations to remove",
@@ -334,15 +312,9 @@ pub async fn cmd_context_rm(
     };
 
     let new_context_root =
-        repo.remove_context_at_target(context_root, &target, scope_filter.as_ref())?;
+        repo.remove_context_at_target(&context_root, &target, scope_filter.as_ref())?;
     let (_, label) = target_label(&target);
-    let new_state = build_context_state(
-        &repo,
-        &head_state,
-        new_context_root,
-        format!("context: remove annotation from {label}"),
-    )?;
-    apply_new_state(&repo, &new_state)?;
+    put_context_attachment(&repo, &head_state, new_context_root)?;
 
     if should_output_json(cli, None) {
         println!(
@@ -351,7 +323,7 @@ pub async fn cmd_context_rm(
                 "output_kind": "context_rm",
                 "target": label,
                 "removed": true,
-                "state": new_state.change_id.short(),
+                "state": head_state.state_id.short(),
             })
         );
     } else {

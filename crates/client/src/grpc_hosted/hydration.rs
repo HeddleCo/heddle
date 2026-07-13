@@ -7,7 +7,7 @@ use std::{
 
 use objects::{
     error::HeddleError,
-    object::{ChangeId, ContentHash, ThreadName},
+    object::{ContentHash, StateId, ThreadName},
 };
 use repo::{BlobHydrator, Repository};
 use wire::ProtocolError;
@@ -39,7 +39,7 @@ impl HostedGrpcClient {
         repo: &Repository,
         repo_path: &str,
         remote_thread: &str,
-        target_state: ChangeId,
+        target_state: StateId,
     ) -> Result<usize, ProtocolError> {
         self.hydrate_missing_blobs_for_state(repo, repo_path, remote_thread, target_state)
             .await
@@ -199,7 +199,7 @@ enum HydrateMessage {
         repo: Arc<Repository>,
         repo_path: String,
         remote_thread: String,
-        target_state: ChangeId,
+        target_state: StateId,
         reply: mpsc::SyncSender<Result<usize, ProtocolError>>,
     },
 }
@@ -366,7 +366,7 @@ impl HydrationBridge {
         repo: &Repository,
         repo_path: &str,
         remote_thread: &str,
-        target_state: ChangeId,
+        target_state: StateId,
     ) -> Result<usize, ProtocolError> {
         self.hydrate_with_timeout(
             repo,
@@ -382,7 +382,7 @@ impl HydrationBridge {
         repo: &Repository,
         repo_path: &str,
         remote_thread: &str,
-        target_state: ChangeId,
+        target_state: StateId,
         timeout: Duration,
     ) -> Result<usize, ProtocolError> {
         let repo = Arc::new(Repository::open(repo.root()).map_err(ProtocolError::from)?);
@@ -425,7 +425,7 @@ async fn hydrate_with_rpc_timeout(
     repo: &Repository,
     repo_path: &str,
     remote_thread: &str,
-    target_state: ChangeId,
+    target_state: StateId,
     timeout: Duration,
 ) -> Result<usize, ProtocolError> {
     match tokio::time::timeout(
@@ -448,7 +448,7 @@ fn hydration_timeout_error(
     timeout: Duration,
     repo_path: &str,
     remote_thread: &str,
-    target_state: ChangeId,
+    target_state: StateId,
 ) -> ProtocolError {
     ProtocolError::Io(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
@@ -528,7 +528,7 @@ mod tests {
         repo_sync_service_client::RepoSyncServiceClient,
         tree_edit_service_client::TreeEditServiceClient,
     };
-    use objects::object::{Blob, ChangeId, ThreadName};
+    use objects::object::{Blob, StateId, ThreadName};
     use repo::Repository;
     use tempfile::TempDir;
     use tonic::transport::Endpoint;
@@ -686,10 +686,10 @@ mod tests {
     #[test]
     fn hydrate_after_thread_advance_uses_new_state() {
         // Build an inspecting bridge: instead of running real RPCs it
-        // records the ChangeId on each request and replies with an
+        // records the StateId on each request and replies with an
         // "io error: simulated". That lets us verify the bridge saw the
-        // post-advance ChangeId on the second call.
-        let recorded: Arc<std::sync::Mutex<Vec<ChangeId>>> =
+        // post-advance StateId on the second call.
+        let recorded: Arc<std::sync::Mutex<Vec<StateId>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded_for_worker = Arc::clone(&recorded);
         let (tx, rx) = mpsc::channel::<super::HydrateMessage>();
@@ -732,9 +732,9 @@ mod tests {
         let blake3 = Blob::new(b"a".to_vec()).hash();
         let _ = hydrator.hydrate(&repo, &blake3);
 
-        // Advance the local "main" thread to a fresh, distinct ChangeId.
-        let advanced = ChangeId::generate();
-        assert_ne!(advanced, first_tip, "fresh ChangeId must differ");
+        // Advance the local "main" thread to a fresh, distinct StateId.
+        let advanced = StateId::generate();
+        assert_ne!(advanced, first_tip, "fresh StateId must differ");
         repo.refs()
             .set_thread(&ThreadName::from("main"), &advanced)
             .expect("advance");
@@ -878,7 +878,7 @@ mod tests {
             repo: Arc::new(repo),
             repo_path: "org/acme/repo".to_string(),
             remote_thread: "main".to_string(),
-            target_state: ChangeId::generate(),
+            target_state: StateId::generate(),
             reply,
         };
         assert_send_static(&message);

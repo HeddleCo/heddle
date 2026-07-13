@@ -143,15 +143,15 @@ fn stop_watch(child: &mut std::process::Child, stderr_rx: &mpsc::Receiver<String
     .join("\n")
 }
 
-fn snapshot_change_id(output: &str) -> String {
+fn snapshot_state_id(output: &str) -> String {
     output
         .lines()
         .find_map(|line| {
             line.split_whitespace()
-                .find(|tok| tok.starts_with("hd-"))
+                .find(|tok| tok.starts_with("hs-"))
                 .map(str::to_string)
         })
-        .expect("snapshot output should contain hd-... short id")
+        .expect("snapshot output should contain hs-... short id")
 }
 
 fn has_line<F>(lines: &[String], mut predicate: F) -> bool
@@ -161,12 +161,12 @@ where
     lines.iter().any(|line| predicate(line))
 }
 
-fn text_watch_observed(lines: &[String], expected_change_ids: &[String]) -> bool {
+fn text_watch_observed(lines: &[String], expected_state_ids: &[String]) -> bool {
     has_line(lines, |line| {
         line.contains("snapshot")
-            && expected_change_ids
+            && expected_state_ids
                 .iter()
-                .any(|change_id| line.contains(change_id))
+                .any(|state_id| line.contains(state_id))
     })
 }
 
@@ -231,7 +231,7 @@ fn watch_streams_snapshot_text_mode() {
     );
 
     let mut lines = Vec::new();
-    let mut expected_change_ids = Vec::new();
+    let mut expected_state_ids = Vec::new();
     for attempt in 0..watch_trigger_attempts() {
         sleep_before_watch_trigger(attempt);
         std::fs::write(
@@ -244,11 +244,11 @@ fn watch_streams_snapshot_text_mode() {
             Some(temp.path()),
         )
         .expect("snapshot succeeds");
-        expected_change_ids.push(snapshot_change_id(&snap_output));
+        expected_state_ids.push(snapshot_state_id(&snap_output));
         lines.extend(collect_lines_until(&rx, watch_attempt_deadline(), |line| {
             line.contains("snapshot")
         }));
-        if text_watch_observed(&lines, &expected_change_ids) {
+        if text_watch_observed(&lines, &expected_state_ids) {
             break;
         }
     }
@@ -261,11 +261,11 @@ fn watch_streams_snapshot_text_mode() {
         "watch output missing snapshot kind: {context}"
     );
     assert!(
-        expected_change_ids
+        expected_state_ids
             .iter()
-            .any(|change_id| combined.contains(change_id)),
-        "watch output missing expected change_id {:?}: {context}",
-        expected_change_ids
+            .any(|state_id| combined.contains(state_id)),
+        "watch output missing expected state_id {:?}: {context}",
+        expected_state_ids
     );
 }
 
@@ -321,10 +321,10 @@ fn watch_emits_json_per_line() {
     let value: Value = serde_json::from_str(json_line)
         .unwrap_or_else(|err| panic!("invalid JSON {json_line:?}: {err}"));
 
-    // Schema: ts, kind, change_id, intent, confidence, actor, id, thread.
+    // Schema: ts, kind, state_id, intent, confidence, actor, id, thread.
     assert!(value["ts"].is_string(), "ts missing");
     assert_eq!(value["kind"], "snapshot");
-    assert!(value["change_id"].is_string(), "change_id missing");
+    assert!(value["state_id"].is_string(), "state_id missing");
     // intent may be null if config didn't propagate; just assert
     // presence of the field.
     assert!(value.get("intent").is_some(), "intent field missing");

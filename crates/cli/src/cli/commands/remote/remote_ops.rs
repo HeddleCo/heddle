@@ -23,7 +23,7 @@ use heddle_core::{
 // Re-export under the historical crate-local names for sibling modules.
 pub(crate) use heddle_core::{resolve_default_remote_name, resolved_default_remote_name};
 use objects::{
-    object::{ChangeId, ThreadName, Tree},
+    object::{StateId, ThreadName, Tree},
     store::ObjectStore,
 };
 use refs::Head;
@@ -82,8 +82,8 @@ struct GitOverlayPullOutputInput {
     branch: Option<String>,
     old_git_head: Option<String>,
     new_git_head: Option<String>,
-    old_state: Option<ChangeId>,
-    new_state: Option<ChangeId>,
+    old_state: Option<StateId>,
+    new_state: Option<StateId>,
     changed_paths: Vec<String>,
     outcome: GitPullOutcome,
     trust: RepositoryVerificationState,
@@ -189,7 +189,7 @@ fn render_pull_outcome_text(outcome: &PullOutcome, trust: &RepositoryVerificatio
             println!(
                 "{} pulled {} from {} ({})",
                 style::ok_marker(),
-                style::change_id(state),
+                style::state_id(state),
                 style::bold(thread),
                 style::count(objects, "object")
             );
@@ -201,7 +201,7 @@ fn render_pull_outcome_text(outcome: &PullOutcome, trust: &RepositoryVerificatio
             );
             for line in &text.detail_lines {
                 if let Some(state) = line.strip_prefix("state: ") {
-                    println!("{}", style::field("state", &style::change_id(state)));
+                    println!("{}", style::field("state", &style::state_id(state)));
                 } else {
                     println!("{line}");
                 }
@@ -484,7 +484,7 @@ async fn pull_local(
         println!(
             "{} pulled {} from {} ({})",
             style::ok_marker(),
-            style::change_id(&state_id.short().to_string()),
+            style::state_id(&state_id.short().to_string()),
             style::bold(remote_thread),
             style::count(objects_copied, "object")
         );
@@ -496,7 +496,7 @@ async fn pull_local(
         // Domain detail lines (e.g. hosted state field when objects omitted).
         for line in &text.detail_lines {
             if let Some(state) = line.strip_prefix("state: ") {
-                println!("{}", style::field("state", &style::change_id(state)));
+                println!("{}", style::field("state", &style::state_id(state)));
             } else {
                 println!("{line}");
             }
@@ -513,8 +513,8 @@ fn git_checkout_head_oid(root: &Path) -> Option<String> {
 
 fn changed_paths_between_states(
     repo: &Repository,
-    old_state: Option<&ChangeId>,
-    new_state: Option<&ChangeId>,
+    old_state: Option<&StateId>,
+    new_state: Option<&StateId>,
 ) -> Result<Vec<String>> {
     if old_state == new_state {
         return Ok(Vec::new());
@@ -583,7 +583,7 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
         )
         .await?;
 
-    // Keep typed ChangeId for ref/worktree I/O; map string fields for pure parse.
+    // Keep typed StateId for ref/worktree I/O; map string fields for pure parse.
     let final_state_id = result.final_state;
     let fields = HostedPullResultFields {
         success: result.success,

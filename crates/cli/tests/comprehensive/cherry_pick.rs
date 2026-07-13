@@ -69,7 +69,7 @@ fn test_cherry_pick_nonexistent_commit() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "content");
 
-    let result = heddle(&["cherry-pick", "hd-deadbeef1234"], Some(temp.path()));
+    let result = heddle(&["cherry-pick", "hs-deadbeef1234"], Some(temp.path()));
     assert!(result.is_err(), "should fail for nonexistent commit");
 }
 

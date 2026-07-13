@@ -3,25 +3,25 @@
 
 use std::{fmt, str::FromStr};
 
-use objects::object::ChangeId;
+use objects::object::StateId;
 use serde::{Deserialize, Serialize};
 
 /// A durable address for a revision-like object.
 ///
-/// `ChangeId` remains the identifier for Heddle-native captures. Git-overlay
+/// `StateId` remains the identifier for Heddle-native captures. Git-overlay
 /// checkpoints and external Git refs can point at a Git commit without
 /// pretending that commit is itself a Heddle [`State`](objects::object::State).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RevisionAddress {
-    Heddle(ChangeId),
+    Heddle(StateId),
     #[cfg(feature = "git-overlay")]
     GitCommit(String),
 }
 
 impl RevisionAddress {
-    pub fn heddle(change_id: ChangeId) -> Self {
-        Self::Heddle(change_id)
+    pub fn heddle(state_id: StateId) -> Self {
+        Self::Heddle(state_id)
     }
 
     #[cfg(feature = "git-overlay")]
@@ -41,7 +41,7 @@ impl RevisionAddress {
 impl fmt::Display for RevisionAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Heddle(change_id) => write!(f, "heddle:{}", change_id.to_string_full()),
+            Self::Heddle(state_id) => write!(f, "heddle:{}", state_id.to_string_full()),
             #[cfg(feature = "git-overlay")]
             Self::GitCommit(oid) => write!(f, "git:{oid}"),
         }
@@ -53,7 +53,7 @@ impl FromStr for RevisionAddress {
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         if let Some(value) = input.strip_prefix("heddle:") {
-            return ChangeId::parse(value)
+            return StateId::parse(value)
                 .map(Self::Heddle)
                 .map_err(|error| RevisionAddressParseError::InvalidHeddle(error.to_string()));
         }
@@ -92,7 +92,7 @@ pub enum RevisionAddressParseError {
     #[cfg(feature = "git-overlay")]
     #[error("invalid Git commit oid: {0}")]
     InvalidGitCommit(String),
-    #[error("invalid Heddle change id: {0}")]
+    #[error("invalid Heddle state id: {0}")]
     InvalidHeddle(String),
 }
 
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn heddle_revision_address_round_trips() {
-        let change = ChangeId::generate();
+        let change = crate::test_state_id();
         let address = RevisionAddress::heddle(change);
 
         assert_eq!(

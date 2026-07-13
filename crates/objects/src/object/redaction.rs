@@ -17,7 +17,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::object::{ChangeId, ContentHash, Principal, StateSignature};
+use crate::object::{ContentHash, Principal, StateId, StateSignature};
 
 /// Stable byte prefix the signing payload begins with. Bumping this versions
 /// the payload format itself; old signatures with the old prefix continue to
@@ -32,7 +32,7 @@ pub struct Redaction {
     /// The state in which the path resides. A redaction is *scoped* to the
     /// (blob, state, path) triple; `--all-states` produces one redaction
     /// per matching state.
-    pub state: ChangeId,
+    pub state: StateId,
     /// Path within the state's tree where the blob lives.
     pub path: String,
     /// Operator-supplied reason ("leaked credential", "PII", ...).
@@ -217,7 +217,7 @@ mod tests {
     fn redaction(blob: ContentHash, reason: &str) -> Redaction {
         Redaction {
             redacted_blob: blob,
-            state: ChangeId::from_bytes([1u8; 16]),
+            state: StateId::from_bytes([1u8; 32]),
             path: "config/secrets.toml".into(),
             reason: reason.into(),
             redactor: principal(),
@@ -345,8 +345,8 @@ mod proptests {
         any::<[u8; 32]>().prop_map(ContentHash::from_bytes)
     }
 
-    fn arb_change_id() -> impl Strategy<Value = ChangeId> {
-        any::<[u8; 16]>().prop_map(ChangeId::from_bytes)
+    fn arb_state_id() -> impl Strategy<Value = StateId> {
+        any::<[u8; 32]>().prop_map(StateId::from_bytes)
     }
 
     fn arb_redaction() -> impl Strategy<Value = Redaction> {
@@ -356,7 +356,7 @@ mod proptests {
         let secs = 946_684_800i64..4_102_444_800i64;
         (
             arb_blob_hash(),
-            arb_change_id(),
+            arb_state_id(),
             "[A-Za-z0-9._/-]{1,40}",
             "[A-Za-z0-9 ._:'-]{0,80}",
             arb_principal(),

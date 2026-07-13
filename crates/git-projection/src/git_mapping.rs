@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use objects::{object::ChangeId, store::ObjectStore};
+use objects::{object::StateId, store::ObjectStore};
 use serde::{Deserialize, Serialize};
 use sley::{ObjectFormat, ObjectId as SleyObjectId, ReferenceTarget, Repository as SleyRepository};
 
@@ -18,7 +18,7 @@ use super::git_core::{
 
 #[derive(Debug, Serialize, Deserialize)]
 struct MappingEntry {
-    change_id: String,
+    state_id: String,
     git_oid: String,
 }
 
@@ -35,21 +35,21 @@ struct GitIdentityIndex {
 impl GitIdentityIndex {
     fn from_notes(repo: &SleyRepository) -> GitProjectionResult<Self> {
         let mut index = Self::default();
-        for (change_id, git_oid) in super::git_notes::read_identity_mappings(repo)? {
-            index.mapping.insert_checked(change_id, git_oid)?;
+        for (state_id, git_oid) in super::git_notes::read_identity_mappings(repo)? {
+            index.mapping.insert_checked(state_id, git_oid)?;
         }
         Ok(index)
     }
 
     fn fill_gaps_from_cache(&mut self, cache: &SyncMapping) {
-        for (change_id, git_oid) in cache.iter() {
-            if self.mapping.get_git(change_id) == Some(*git_oid) {
+        for (state_id, git_oid) in cache.iter() {
+            if self.mapping.get_git(state_id) == Some(*git_oid) {
                 continue;
             }
-            if self.mapping.has_heddle(change_id) || self.mapping.has_git(*git_oid) {
+            if self.mapping.has_heddle(state_id) || self.mapping.has_git(*git_oid) {
                 continue;
             }
-            self.mapping.insert(*change_id, *git_oid);
+            self.mapping.insert(*state_id, *git_oid);
         }
     }
 
@@ -83,9 +83,9 @@ impl<'a> GitProjection<'a> {
 
         let mut mapping = SyncMapping::new();
         for entry in file.entries {
-            let change_id = ChangeId::parse(&entry.change_id)?;
+            let state_id = StateId::parse(&entry.state_id)?;
             let git_oid = parse_stored_git_oid(&entry.git_oid)?;
-            mapping.insert_checked(change_id, git_oid)?;
+            mapping.insert_checked(state_id, git_oid)?;
         }
 
         Ok(mapping)
@@ -108,8 +108,8 @@ impl<'a> GitProjection<'a> {
     fn mapping_bytes(mapping: &SyncMapping) -> GitProjectionResult<Vec<u8>> {
         let entries = mapping
             .iter()
-            .map(|(change_id, git_oid)| MappingEntry {
-                change_id: change_id.to_string_full(),
+            .map(|(state_id, git_oid)| MappingEntry {
+                state_id: state_id.to_string_full(),
                 git_oid: git_oid.to_string(),
             })
             .collect();
@@ -198,19 +198,19 @@ impl<'a> GitProjection<'a> {
         repo: &SleyRepository,
     ) -> GitProjectionResult<()> {
         let ingest = self.heddle_repo.git_overlay_ingest_commit_mapping()?;
-        for (git_sha, change_id) in ingest {
-            let change_id = ChangeId::parse(&change_id)?;
-            if self.heddle_repo.store().get_state(&change_id)?.is_none() {
+        for (git_sha, state_id) in ingest {
+            let state_id = StateId::parse(&state_id)?;
+            if self.heddle_repo.store().get_state(&state_id)?.is_none() {
                 continue;
             }
-            if self.mapping.has_heddle(&change_id) {
+            if self.mapping.has_heddle(&state_id) {
                 continue;
             }
             let git_oid = parse_stored_git_oid(&git_sha)?;
             if self.mapping.has_git(git_oid) || repo.read_object(&git_oid).is_err() {
                 continue;
             }
-            self.mapping.insert(change_id, git_oid);
+            self.mapping.insert(state_id, git_oid);
         }
         Ok(())
     }

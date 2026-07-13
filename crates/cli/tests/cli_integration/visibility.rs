@@ -44,9 +44,9 @@ fn capture_state(temp: &Path, message: &str) -> String {
     heddle(&["capture", "-m", message], Some(temp)).expect("capture");
     let raw = heddle(&["--output", "json", "log", "--limit", "1"], Some(temp)).unwrap();
     let value: Value = serde_json::from_str(&raw).unwrap();
-    value["states"][0]["change_id"]
+    value["states"][0]["state_id"]
         .as_str()
-        .expect("log --output json should expose change_id")
+        .expect("log --output json should expose state_id")
         .to_string()
 }
 
@@ -54,9 +54,9 @@ fn capture_state(temp: &Path, message: &str) -> String {
 fn latest_state(temp: &Path) -> String {
     let raw = heddle(&["--output", "json", "log", "--limit", "1"], Some(temp)).unwrap();
     let value: Value = serde_json::from_str(&raw).unwrap();
-    value["states"][0]["change_id"]
+    value["states"][0]["state_id"]
         .as_str()
-        .expect("log --output json should expose change_id")
+        .expect("log --output json should expose state_id")
         .to_string()
 }
 

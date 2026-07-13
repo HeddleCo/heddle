@@ -19,7 +19,7 @@ use heddle_core::{
     should_squash_land as core_should_squash_land,
 };
 use objects::{
-    object::{ChangeId, State, ThreadName},
+    object::{State, StateId, ThreadName},
     store::ObjectStore,
 };
 use oplog::{OpBatch, OpLogBackend, OpRecord};
@@ -1005,7 +1005,7 @@ fn collapse_thread_for_land(
     user_config: &UserConfig,
     thread: &Thread,
     message: Option<&str>,
-) -> Result<Option<ChangeId>> {
+) -> Result<Option<StateId>> {
     let sources = thread_source_states(repo, thread)?;
     if sources.len() <= 1 {
         return Ok(None);
@@ -1022,7 +1022,7 @@ fn collapse_thread_for_land(
         None,
         CollapsePublishedRef::Thread(ThreadName::new(&thread.id)),
     )?;
-    Ok(Some(result.change_id))
+    Ok(Some(result.state_id))
 }
 
 fn thread_source_states(repo: &Repository, thread: &Thread) -> Result<Vec<State>> {
@@ -1042,9 +1042,9 @@ fn thread_source_states(repo: &Repository, thread: &Thread) -> Result<Vec<State>
 
 fn collect_thread_sources(
     repo: &Repository,
-    state_id: ChangeId,
-    excluded: &HashSet<ChangeId>,
-    visited: &mut HashSet<ChangeId>,
+    state_id: StateId,
+    excluded: &HashSet<StateId>,
+    visited: &mut HashSet<StateId>,
     ordered: &mut Vec<State>,
 ) -> Result<()> {
     if excluded.contains(&state_id) || !visited.insert(state_id) {
@@ -1060,7 +1060,7 @@ fn collect_thread_sources(
     Ok(())
 }
 
-fn reachable_state_set(repo: &Repository, root: ChangeId) -> Result<HashSet<ChangeId>> {
+fn reachable_state_set(repo: &Repository, root: StateId) -> Result<HashSet<StateId>> {
     let mut reachable = HashSet::new();
     let mut stack = vec![root];
     while let Some(state_id) = stack.pop() {
@@ -1213,7 +1213,7 @@ fn coalesce_land_integration_and_checkpoint(
     repo: &Repository,
     merge_state: Option<&str>,
     git_commit: Option<&str>,
-    collapse_state: Option<&ChangeId>,
+    collapse_state: Option<&StateId>,
 ) -> Result<()> {
     let Some(merge_state) = merge_state else {
         return Ok(());
@@ -1234,10 +1234,7 @@ fn coalesce_land_integration_and_checkpoint(
     Ok(())
 }
 
-fn find_recent_land_collapse_batch(
-    repo: &Repository,
-    collapse_state: &ChangeId,
-) -> Result<OpBatch> {
+fn find_recent_land_collapse_batch(repo: &Repository, collapse_state: &StateId) -> Result<OpBatch> {
     repo.oplog()
         .recent_batches_scoped(12, Some(&repo.op_scope()))?
         .into_iter()

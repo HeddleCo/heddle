@@ -47,9 +47,9 @@ fn setup_repo_with_secret() -> (TempDir, String) {
     )
     .unwrap();
     let value: Value = serde_json::from_str(&raw).unwrap();
-    let state = value["states"][0]["change_id"]
+    let state = value["states"][0]["state_id"]
         .as_str()
-        .expect("log --output json should expose change_id")
+        .expect("log --output json should expose state_id")
         .to_string();
     (temp, state)
 }
@@ -82,9 +82,9 @@ fn setup_git_overlay_repo_with_secret() -> (TempDir, String) {
     )
     .unwrap();
     let value: Value = serde_json::from_str(&raw).unwrap();
-    let state = value["states"][0]["change_id"]
+    let state = value["states"][0]["state_id"]
         .as_str()
-        .expect("log --output json should expose change_id")
+        .expect("log --output json should expose state_id")
         .to_string();
     (temp, state)
 }
@@ -124,7 +124,7 @@ fn redact_apply_writes_record_and_emits_short_id() {
     let value: Value = serde_json::from_str(&raw).expect("redact apply output should be JSON");
     let redaction_id = value["redaction_id"].as_str().expect("redaction_id");
     // Redaction ids are blob-style ContentHash short forms (8 hex
-    // chars; no `hd-` prefix — that lives on ChangeId only). The
+    // chars; no `hs-` prefix — that lives on StateId only). The
     // contract is "non-empty, deterministic".
     assert_eq!(
         redaction_id.len(),

@@ -831,7 +831,7 @@ mod tests {
 
     #[test]
     fn typed_state_not_found_routes_through_recovery_details() {
-        let state = objects::object::ChangeId::generate();
+        let state = objects::object::StateId::generate();
         let err = anyhow!(HeddleError::StateNotFound(state));
 
         let classified = classify_error(&err);

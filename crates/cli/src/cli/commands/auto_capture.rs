@@ -35,7 +35,7 @@ impl AutoCaptureTrigger {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AutoCaptureOutcome {
     pub trigger: AutoCaptureTrigger,
-    pub change_id: String,
+    pub state_id: String,
 }
 
 pub(crate) fn auto_capture_command_boundary(
@@ -77,7 +77,7 @@ pub(crate) fn auto_capture_command_boundary(
     )?;
     let outcome = AutoCaptureOutcome {
         trigger,
-        change_id: snapshot.change_id,
+        state_id: snapshot.state_id,
     };
     emit_auto_capture(cli, repo, &outcome);
     Ok(Some(outcome))
@@ -92,7 +92,7 @@ fn emit_auto_capture(cli: &Cli, repo: &Repository, outcome: &AutoCaptureOutcome)
             "output_kind": "auto_capture",
             "status": "captured",
             "trigger": outcome.trigger.command(),
-            "change_id": outcome.change_id,
+            "state_id": outcome.state_id,
         });
         eprintln!("{}", record);
     } else {
@@ -100,7 +100,7 @@ fn emit_auto_capture(cli: &Cli, repo: &Repository, outcome: &AutoCaptureOutcome)
             "{} auto-captured dirty worktree before {} as {}",
             style::ok_marker(),
             outcome.trigger.command(),
-            style::change_id(&outcome.change_id),
+            style::state_id(&outcome.state_id),
         );
     }
 }
@@ -182,8 +182,8 @@ mod tests {
         .expect("dirty worktree should auto-capture");
 
         let head = repo.head().unwrap().expect("head after auto-capture");
-        assert_eq!(outcome.change_id, head.short());
-        assert_ne!(head, seed.change_id);
+        assert_eq!(outcome.state_id, head.short());
+        assert_ne!(head, seed.state_id);
         let status_options = crate::cli::worktree_status_options(Some(repo.config()));
         assert!(!worktree_dirty(&repo, &status_options).unwrap());
     }
@@ -207,7 +207,7 @@ mod tests {
         .unwrap();
 
         assert!(outcome.is_none());
-        assert_eq!(repo.head().unwrap(), Some(seed.change_id));
+        assert_eq!(repo.head().unwrap(), Some(seed.state_id));
         let status_options = crate::cli::worktree_status_options(Some(repo.config()));
         assert!(worktree_dirty(&repo, &status_options).unwrap());
     }
@@ -230,7 +230,7 @@ mod tests {
         .unwrap();
 
         assert!(outcome.is_none());
-        assert_eq!(repo.head().unwrap(), Some(seed.change_id));
+        assert_eq!(repo.head().unwrap(), Some(seed.state_id));
         let status_options = crate::cli::worktree_status_options(Some(repo.config()));
         assert!(!worktree_dirty(&repo, &status_options).unwrap());
     }

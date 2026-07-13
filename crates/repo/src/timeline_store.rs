@@ -12,7 +12,7 @@ use objects::{
     fs_atomic::write_file_atomic,
     lock::{RepoLock, WriteLockGuard},
     object::{
-        ChangeId, TimelineBranchId, TimelineCodecError, TimelineCursorMoveReason,
+        StateId, TimelineBranchId, TimelineCodecError, TimelineCursorMoveReason,
         TimelineOperationEnvelope, TimelineOperationId, TimelineStepId,
     },
 };
@@ -49,8 +49,8 @@ pub struct TimelineMaterializationRecoveryRecord {
     pub branch_id: TimelineBranchId,
     pub from_step_id: Option<TimelineStepId>,
     pub to_step_id: Option<TimelineStepId>,
-    pub from_state: ChangeId,
-    pub to_state: ChangeId,
+    pub from_state: StateId,
+    pub to_state: StateId,
     pub reason: TimelineCursorMoveReason,
     pub moved_at_ms: i64,
 }
@@ -62,8 +62,8 @@ impl TimelineMaterializationRecoveryRecord {
         branch_id: TimelineBranchId,
         from_step_id: Option<TimelineStepId>,
         to_step_id: Option<TimelineStepId>,
-        from_state: ChangeId,
-        to_state: ChangeId,
+        from_state: StateId,
+        to_state: StateId,
         reason: TimelineCursorMoveReason,
         moved_at_ms: i64,
     ) -> Self {
@@ -365,7 +365,7 @@ fn timeline_lock_error(err: objects::lock::LockError) -> HeddleError {
 #[cfg(test)]
 mod tests {
     use objects::object::{
-        BranchCreatedV1, ChangeId, TimelineBranchId, TimelineBranchReason, TimelineOperationBodyV1,
+        BranchCreatedV1, StateId, TimelineBranchId, TimelineBranchReason, TimelineOperationBodyV1,
         TimelineOperationEnvelope, TimelineStepId,
     };
     use tempfile::TempDir;
@@ -379,7 +379,7 @@ mod tests {
                 branch_id: TimelineBranchId::new("tlb-child"),
                 parent_branch_id: Some(TimelineBranchId::new("tlb-main")),
                 from_step_id: Some(TimelineStepId::new("tls-root")),
-                from_state: ChangeId::from_bytes([1; 16]),
+                from_state: StateId::from_bytes([1; 32]),
                 reason: TimelineBranchReason::ExplicitFork,
                 created_at_ms: 1_700_000_000_000,
             }),
@@ -436,8 +436,8 @@ mod tests {
             TimelineBranchId::new("tlb-main"),
             Some(TimelineStepId::new("tls-before")),
             Some(TimelineStepId::new("tls-after")),
-            ChangeId::from_bytes([1; 16]),
-            ChangeId::from_bytes([2; 16]),
+            StateId::from_bytes([1; 32]),
+            StateId::from_bytes([2; 32]),
             TimelineCursorMoveReason::SeekToolCall,
             42,
         );

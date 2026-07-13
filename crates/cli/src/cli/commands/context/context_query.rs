@@ -19,8 +19,9 @@ use repo::{
 use serde::Serialize;
 
 use super::{
-    AnnotationHistoryOutput, AnnotationOutput, ContextListRow, RevisionOutput, parse_scope,
-    print_context_get, resolve_state, resolve_state_id, target_label,
+    AnnotationHistoryOutput, AnnotationOutput, ContextListRow, RevisionOutput,
+    context_root_for_state, parse_scope, print_context_get, resolve_state, resolve_state_id,
+    target_label,
 };
 use crate::cli::{Cli, commands::RecoveryAdvice, should_output_json};
 
@@ -48,11 +49,11 @@ pub async fn cmd_context_get(
     let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let target = super::resolve_target(&repo, path, state)?;
-    let Some(context_root) = &state_obj.context else {
+    let Some(context_root) = context_root_for_state(&repo, &state_obj)? else {
         return print_context_get(cli, &target, Vec::new());
     };
 
-    let blob = repo.get_context_blob(context_root, &target)?;
+    let blob = repo.get_context_blob(&context_root, &target)?;
     let empty = objects::object::ContextBlob::new(vec![]);
     let blob_ref = blob.as_ref().unwrap_or(&empty);
     let scope_filter = match scope.as_deref() {
@@ -82,7 +83,7 @@ pub async fn cmd_context_list(
 ) -> Result<()> {
     let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
-    let Some(context_root) = &state_obj.context else {
+    let Some(context_root) = context_root_for_state(&repo, &state_obj)? else {
         if should_output_json(cli, None) {
             println!(
                 "{}",
@@ -94,7 +95,7 @@ pub async fn cmd_context_list(
         return Ok(());
     };
 
-    let entries = repo.list_context_entries(context_root, prefix.as_deref().map(Path::new))?;
+    let entries = repo.list_context_entries(&context_root, prefix.as_deref().map(Path::new))?;
 
     if should_output_json(cli, None) {
         let items: Vec<ContextListRow> = entries
@@ -159,13 +160,11 @@ pub async fn cmd_context_history(
 ) -> Result<()> {
     let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
-    let context_root = state_obj
-        .context
-        .as_ref()
+    let context_root = context_root_for_state(&repo, &state_obj)?
         .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
 
     let (target, blob, index) = repo
-        .find_annotation(context_root, &annotation_id)?
+        .find_annotation(&context_root, &annotation_id)?
         .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::annotation_not_found(&annotation_id)))?;
     let annotation = &blob.annotations[index];
     let (target_kind, target_label) = target_label(&target);
@@ -223,9 +222,7 @@ pub async fn cmd_context_check(
 ) -> Result<()> {
     let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
-    let context_root = state_obj
-        .context
-        .as_ref()
+    let context_root = context_root_for_state(&repo, &state_obj)?
         .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
 
     let target_filter = match (path, state) {
@@ -242,7 +239,7 @@ pub async fn cmd_context_check(
         }
     };
 
-    let entries = repo.list_context_entries(context_root, None)?;
+    let entries = repo.list_context_entries(&context_root, None)?;
     let filtered_entries: Vec<_> = entries
         .into_iter()
         .filter(|entry| {
@@ -394,7 +391,7 @@ pub async fn cmd_context_suggest(cli: &Cli, r#ref: Option<String>, limit: usize)
 pub async fn cmd_context_audit(cli: &Cli, r#ref: Option<String>) -> Result<()> {
     let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
-    let Some(context_root) = &state_obj.context else {
+    let Some(context_root) = context_root_for_state(&repo, &state_obj)? else {
         if should_output_json(cli, None) {
             println!(
                 "{}",
@@ -412,7 +409,7 @@ pub async fn cmd_context_audit(cli: &Cli, r#ref: Option<String>) -> Result<()> {
         return Ok(());
     };
 
-    let entries = repo.list_context_entries(context_root, None)?;
+    let entries = repo.list_context_entries(&context_root, None)?;
     let stale_map = staleness::check_context_staleness(&repo, &state_obj)?;
     let mut total = 0u32;
     let mut superseded = 0u32;

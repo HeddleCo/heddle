@@ -60,7 +60,7 @@ fn cmd_semantic_hot(
 ) -> Result<()> {
     let repo = cli.open_repo()?;
 
-    // Resolve `from` (or HEAD) to a concrete ChangeId. Walking from
+    // Resolve `from` (or HEAD) to a concrete StateId. Walking from
     // HEAD is the common case; allowing an explicit state lets users
     // ask "what's been hot in the last N commits before tag X?"
     let walk_from = match from.as_ref() {

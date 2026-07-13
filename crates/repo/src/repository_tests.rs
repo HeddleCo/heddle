@@ -3,8 +3,8 @@ use std::{fs, path::Path};
 
 use objects::{
     object::{
-        Attribution, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, State,
-        ThreadName, Tree, TreeEntry,
+        Attribution, Blob, ContentHash, EntryType, FileMode, Principal, State, StateId, ThreadName,
+        Tree, TreeEntry,
     },
     store::{ObjectStore, ShallowInfo},
     util::{gitlink_placeholder_bytes, symlink_target_bytes},
@@ -318,7 +318,7 @@ fn open_migrates_v1_tree_bytes_before_strict_tree_reads() {
         Vec::new(),
         Attribution::human(Principal::new("Migration Tester", "migration@example.test")),
     );
-    let state_id = state.change_id;
+    let state_id = state.id();
     repo.store().put_state(&state).unwrap();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &state_id)
@@ -355,7 +355,7 @@ fn test_init_fails_if_exists() {
 #[test]
 fn test_set_shallow_updates_memory_and_persists() {
     let (temp_dir, repo) = create_test_repo();
-    let state_id = ChangeId::generate();
+    let state_id = crate::test_state_id();
 
     repo.set_shallow(&state_id, &[]).unwrap();
 
@@ -393,7 +393,7 @@ fn test_snapshot_creates_state() {
     assert_eq!(state.parents, vec![initial_head]);
 
     let head = repo.head().unwrap();
-    assert_eq!(head, Some(state.change_id));
+    assert_eq!(head, Some(state.id()));
 }
 
 #[test]
@@ -476,7 +476,7 @@ fn snapshot_packs_blobs_and_leaves_no_loose_blob_files() {
     // The state itself must be reachable through the ref the
     // snapshot returned — no orphaned commit.
     let head = repo.head().unwrap();
-    assert_eq!(head, Some(state.change_id));
+    assert_eq!(head, Some(state.id()));
 }
 
 #[test]
@@ -504,7 +504,7 @@ fn snapshot_preserves_unchanged_materialized_gitlink_placeholder() {
     let recaptured = repo
         .snapshot(Some("recapture unchanged gitlink".to_string()), None)
         .unwrap();
-    assert_eq!(recaptured.parents, vec![baseline.change_id]);
+    assert_eq!(recaptured.parents, vec![baseline.id()]);
     let recaptured_tree = repo
         .store()
         .get_tree(&recaptured.tree)
@@ -627,16 +627,16 @@ fn snapshot_failure_leaves_ref_unchanged() {
     // Stage an unresolved merge — `snapshot()` checks for one up
     // front and returns `HeddleError::Conflict` before any writes —
     // then assert the head is identical to its pre-call value.
-    use objects::object::ChangeId;
+    use objects::object::StateId;
 
     let (temp_dir, repo) = create_test_repo();
     fs::write(temp_dir.path().join("a.txt"), "a").unwrap();
     let baseline = repo.snapshot(None, None).unwrap();
 
-    let theirs = ChangeId::from_bytes([0xff; 16]);
+    let theirs = StateId::from_bytes([0xff; 32]);
     repo.merge_state_manager()
         .start(
-            baseline.change_id,
+            baseline.id(),
             theirs,
             None,
             vec!["unresolved.txt".to_string()],
@@ -650,7 +650,7 @@ fn snapshot_failure_leaves_ref_unchanged() {
     // Head must still point at the baseline state — not at any
     // half-written successor.
     let head_after = repo.head().unwrap();
-    assert_eq!(head_after, Some(baseline.change_id));
+    assert_eq!(head_after, Some(baseline.id()));
 
     // Clean up so the harness's drop doesn't trip on a stale merge.
     repo.merge_state_manager().abort().unwrap();
@@ -674,7 +674,7 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
     );
     assert_eq!(
         repo.head().unwrap(),
-        Some(baseline.change_id),
+        Some(baseline.id()),
         "a pre-commit crash must leave the previous capture visible"
     );
 
@@ -698,7 +698,7 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
         .find(|entry| {
             matches!(
                 entry.operation,
-                OpRecord::Snapshot { new_state, .. } if new_state == captured.change_id
+                OpRecord::Snapshot { new_state, .. } if new_state == captured.id()
             )
         })
         .map(|entry| entry.batch_id)
@@ -735,7 +735,7 @@ fn test_snapshot_with_parent() {
     fs::write(temp_dir.path().join("b.txt"), "b").unwrap();
     let state2 = repo.snapshot(Some("Second".to_string()), None).unwrap();
 
-    assert_eq!(state2.parents, vec![state1.change_id]);
+    assert_eq!(state2.parents, vec![state1.id()]);
 }
 
 #[test]
@@ -794,7 +794,7 @@ fn test_goto_restores_state() {
     assert!(blob1.is_some(), "blob for a.txt v1 should exist");
     assert_eq!(blob1.unwrap().content_str(), Some("version 1"));
 
-    repo.goto(&state1.change_id).unwrap();
+    repo.goto(&state1.id()).unwrap();
 
     assert!(file_path.exists(), "a.txt should exist after goto");
     let content = fs::read_to_string(&file_path).unwrap();
@@ -815,7 +815,7 @@ fn test_goto_clears_non_empty_directories() {
 
     fs::write(temp_dir.path().join("new_file.txt"), "new").unwrap();
 
-    repo.goto_discard_local(&state1.change_id).unwrap();
+    repo.goto_discard_local(&state1.id()).unwrap();
 
     assert!(!temp_dir.path().join("new_file.txt").exists());
     assert!(temp_dir.path().join("subdir").exists());
@@ -1421,7 +1421,7 @@ fn test_query_history_since_with_path_filter_bounds_walk_first() {
     let query = HistoryQuery::new(repo.head().unwrap())
         .with_limit(10)
         .with_changed_paths(ChangedPathFilters::try_from_paths(["src.rs"]).unwrap())
-        .with_stop_at(Some(s2.change_id));
+        .with_stop_at(Some(s2.id()));
 
     let history = repo.query_history(&query).unwrap();
     let intents: Vec<_> = history
@@ -1435,9 +1435,9 @@ fn test_query_history_since_with_path_filter_bounds_walk_first() {
     // Sanity: confirm the bounded state itself is excluded (it would
     // have been filtered anyway, but the bound is exclusive by
     // contract).
-    assert!(!history.iter().any(|s| s.change_id == s2.change_id));
+    assert!(!history.iter().any(|s| s.id() == s2.id()));
     // And confirm `s1` is excluded — that's the regression.
-    assert!(!history.iter().any(|s| s.change_id == s1.change_id));
+    assert!(!history.iter().any(|s| s.id() == s1.id()));
 }
 
 /// Same shape as the path-filter regression but for `--agent`. Bound
@@ -1478,7 +1478,7 @@ fn test_query_history_since_with_agent_filter_bounds_walk_first() {
     let query = HistoryQuery::new(repo.head().unwrap())
         .with_limit(10)
         .with_agent_filter(Some("claude".to_string()))
-        .with_stop_at(Some(s2.change_id));
+        .with_stop_at(Some(s2.id()));
 
     let history = repo.query_history(&query).unwrap();
     let intents: Vec<_> = history
@@ -1487,7 +1487,7 @@ fn test_query_history_since_with_agent_filter_bounds_walk_first() {
         .collect();
 
     assert_eq!(intents, vec!["new claude"]);
-    assert!(!history.iter().any(|s| s.change_id == s1.change_id));
+    assert!(!history.iter().any(|s| s.id() == s1.id()));
 }
 
 #[test]
@@ -1553,10 +1553,7 @@ fn test_maintenance_run_prunes_and_rebuilds_pull_planner_sidecars() {
     let (temp_dir, repo) = create_test_repo();
 
     fs::write(temp_dir.path().join("README.md"), "alpha").unwrap();
-    let state = repo
-        .snapshot(Some("alpha".to_string()), None)
-        .unwrap()
-        .change_id;
+    let state = repo.snapshot(Some("alpha".to_string()), None).unwrap().id();
 
     let pull_root = temp_dir
         .path()
@@ -1595,7 +1592,7 @@ fn test_maintenance_run_prunes_and_rebuilds_pull_planner_sidecars() {
     )
     .unwrap();
     fs::write(plans_dir.join("corrupt-entry.json"), b"corrupt").unwrap();
-    let stale_state = ChangeId::generate();
+    let stale_state = crate::test_state_id();
     fs::write(
         plans_dir.join(format!(
             "{}--depth-full--exclude-af1349b9f5f9a1a6--full.json",
@@ -1663,12 +1660,12 @@ fn test_fast_forward_attached_preserves_head_and_advances_thread() {
         })
         .unwrap();
 
-    repo.fast_forward_attached(&state2.change_id).unwrap();
+    repo.fast_forward_attached(&state2.id()).unwrap();
 
     // Thread ref must advance to the target.
     assert_eq!(
         repo.refs().get_thread(&ThreadName::new("main")).unwrap(),
-        Some(state2.change_id),
+        Some(state2.id()),
         "main ref must advance to fast-forward target"
     );
     // HEAD must remain attached to "main".
@@ -1686,7 +1683,7 @@ fn test_fast_forward_attached_preserves_head_and_advances_thread() {
     if let Some(meta) = manager.find_by_thread("main").unwrap() {
         assert_eq!(
             meta.current_state.as_deref(),
-            Some(state2.change_id.short().as_str())
+            Some(state2.id().short().as_str())
         );
         assert!(matches!(meta.freshness, ThreadFreshness::Current));
     }
@@ -1705,17 +1702,17 @@ fn test_fast_forward_attached_when_detached_stays_detached() {
     let state2 = repo.snapshot(Some("Forward".to_string()), None).unwrap();
 
     // Detach HEAD at state1.
-    repo.goto(&state1.change_id).unwrap();
+    repo.goto(&state1.id()).unwrap();
     assert!(matches!(
         repo.refs().read_head().unwrap(),
         Head::Detached { .. }
     ));
 
-    repo.fast_forward_attached(&state2.change_id).unwrap();
+    repo.fast_forward_attached(&state2.id()).unwrap();
 
     let head = repo.refs().read_head().unwrap();
     match head {
-        Head::Detached { state } => assert_eq!(state, state2.change_id),
+        Head::Detached { state } => assert_eq!(state, state2.id()),
         Head::Attached { thread } => panic!(
             "fast_forward_attached must not re-attach a previously-detached HEAD; got Attached({thread})"
         ),
@@ -1742,9 +1739,9 @@ fn test_open_preserves_explicit_detached_head_in_git_overlay() {
     fs::write(temp_dir.path().join("a.txt"), "version 2").unwrap();
     let _state2 = repo.snapshot(Some("v2".to_string()), None).unwrap();
 
-    repo.goto(&state1.change_id).unwrap();
+    repo.goto(&state1.id()).unwrap();
     assert!(
-        matches!(repo.refs().read_head().unwrap(), Head::Detached { state } if state == state1.change_id),
+        matches!(repo.refs().read_head().unwrap(), Head::Detached { state } if state == state1.id()),
         "goto should leave HEAD detached at the target"
     );
     drop(repo);
@@ -1755,11 +1752,11 @@ fn test_open_preserves_explicit_detached_head_in_git_overlay() {
     let reopened = Repository::open(temp_dir.path()).unwrap();
     let head = reopened.refs().read_head().unwrap();
     assert!(
-        matches!(head, Head::Detached { state } if state == state1.change_id),
+        matches!(head, Head::Detached { state } if state == state1.id()),
         "reopen must preserve explicit detached HEAD; got {:?}",
         head
     );
-    assert_eq!(reopened.head().unwrap(), Some(state1.change_id));
+    assert_eq!(reopened.head().unwrap(), Some(state1.id()));
 }
 
 /// Characterization: git overlay HEAD inspection matches attached/detached/unborn

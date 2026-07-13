@@ -2,8 +2,8 @@
 //! Coverage for item 1.2 of the heddle 6→8 plan: every state-taking
 //! verb must accept the short ID form printed by `heddle log --output json`.
 //!
-//! Before this fix, `heddle log --output json` returned `change_id` in the
-//! short form (`hd-…12 chars`), but `heddle review show`, `heddle
+//! Before this fix, `heddle log --output json` returned `state_id` in the
+//! short form (`hs-…12 chars`), but `heddle review show`, `heddle
 //! discuss list`, and a couple of others rejected anything that wasn't
 //! a 16-byte full ID. The CLI's own JSON shape was unparseable by its
 //! own commands. This test pins the contract.
@@ -31,9 +31,9 @@ fn setup_repo() -> TempDir {
 fn first_short_id(repo: &std::path::Path) -> String {
     let raw = heddle(&["--output", "json", "log", "--limit", "1"], Some(repo)).unwrap();
     let value: Value = serde_json::from_str(&raw).unwrap();
-    value["states"][0]["change_id"]
+    value["states"][0]["state_id"]
         .as_str()
-        .expect("log --output json should expose change_id")
+        .expect("log --output json should expose state_id")
         .to_string()
 }
 
@@ -51,7 +51,7 @@ fn review_show_accepts_short_id() {
     let value: Value = serde_json::from_str(&raw).expect("review show output should be JSON");
     // Server normalizes back to the full form on the way out, but it
     // must round-trip to a state with a matching prefix.
-    let returned = value["change_id"].as_str().expect("change_id present");
+    let returned = value["state_id"].as_str().expect("state_id present");
     assert!(
         returned.starts_with(&short),
         "round-trip should resolve to the same state: short={short}, returned={returned}"
@@ -82,7 +82,7 @@ fn show_accepts_short_id() {
     let raw = heddle(&["show", &short, "--output", "json"], Some(temp.path()))
         .expect("show should accept short IDs");
     let value: Value = serde_json::from_str(&raw).expect("show output should be JSON");
-    assert_eq!(value["change_id"].as_str(), Some(short.as_str()));
+    assert_eq!(value["state_id"].as_str(), Some(short.as_str()));
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn compare_accepts_short_id() {
     )
     .unwrap();
     let log_val: Value = serde_json::from_str(&raw).unwrap();
-    let short_a = log_val["states"][1]["change_id"].as_str().unwrap();
+    let short_a = log_val["states"][1]["state_id"].as_str().unwrap();
 
     let _output = heddle(
         &["--output", "json", "diff", short_a, &short_b],
@@ -145,7 +145,7 @@ fn cherry_pick_accepts_short_id() {
     )
     .unwrap();
     let log_val: Value = serde_json::from_str(&raw).unwrap();
-    let older_short = log_val["states"][1]["change_id"].as_str().unwrap();
+    let older_short = log_val["states"][1]["state_id"].as_str().unwrap();
 
     // `--no-commit` keeps this test scoped to argument parsing — we
     // care that the verb accepts the short form, not that the merge
@@ -191,7 +191,7 @@ fn log_since_accepts_short_id() {
     )
     .unwrap();
     let log_val: Value = serde_json::from_str(&raw).unwrap();
-    let oldest_short = log_val["states"][1]["change_id"].as_str().unwrap();
+    let oldest_short = log_val["states"][1]["state_id"].as_str().unwrap();
 
     heddle(
         &["--output", "json", "log", "--since", oldest_short],
@@ -216,13 +216,13 @@ fn marker_then_show_accepts_marker_name() {
     )
     .expect("show should accept marker names");
     let value: Value = serde_json::from_str(&raw).expect("show output should be JSON");
-    assert!(value["change_id"].is_string());
+    assert!(value["state_id"].is_string());
 }
 
 #[test]
 fn unknown_state_id_yields_state_not_found() {
     let temp = setup_repo();
-    let result = heddle(&["show", "hd-zzzzzzzzzzzz"], Some(temp.path()));
+    let result = heddle(&["show", "hs-zzzzzzzzzzzz"], Some(temp.path()));
     let err = result.expect_err("unknown id should fail");
     assert!(
         err.contains("State not found"),

@@ -103,7 +103,7 @@ fn test_gc_after_multiple_snapshots() {
     assert!(result.is_ok(), "gc failed: {:?}", result.err());
 
     let status = status_json(temp.path());
-    assert!(status["state"]["change_id"].is_string());
+    assert!(status["state"]["state_id"].is_string());
 
     let packs_dir = temp.path().join(".heddle").join("packs");
     assert!(packs_dir.exists(), "packs directory should exist");
@@ -137,9 +137,9 @@ fn test_read_from_packfile() {
     let parsed: serde_json::Value = serde_json::from_str(&log_json).unwrap();
     let parent = parsed["states"][0]["parents"][0]
         .as_str()
-        .expect("HEAD should expose a parent change_id after two snapshots")
+        .expect("HEAD should expose a parent state_id after two snapshots")
         .to_string();
-    let head = parsed["states"][0]["change_id"]
+    let head = parsed["states"][0]["state_id"]
         .as_str()
         .unwrap()
         .to_string();

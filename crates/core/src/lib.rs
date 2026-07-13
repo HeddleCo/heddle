@@ -92,10 +92,10 @@ pub use agent_ops::{
 };
 pub use approval_plan::{
     EligibilitySummary, approval_recorded_message, approval_revoked_message,
-    approvals_empty_message, approvals_header, change_id_bytes_to_string,
-    eligibility_allowed_message, eligibility_approvals_counted_message,
-    eligibility_blocked_message, format_unix_secs_display, format_unix_secs_label,
-    plan_eligibility_summary, short_change_id, timestamp_secs_u64, unmet_requirement_line,
+    approvals_empty_message, approvals_header, eligibility_allowed_message,
+    eligibility_approvals_counted_message, eligibility_blocked_message, format_unix_secs_display,
+    format_unix_secs_label, plan_eligibility_summary, short_state_id, state_id_bytes_to_string,
+    timestamp_secs_u64, unmet_requirement_line,
 };
 pub use cherry_pick_plan::{
     CherryPickOutcome, CherryPickResolvePlan, CherryPickSuccessFacts,
@@ -384,10 +384,9 @@ pub use visibility_plan::{visibility_tier_kind, visibility_tier_label};
 pub use workflow::{
     AUTO_LAND_CONFIDENCE_RECOVERY_ACTION, AUTO_LAND_CONFIDENCE_THRESHOLD, AutoLandPolicyInput,
     LandPushOptions, LandPushPlan, LandPushPlanError, ReadyDecision, ReadyDecisionInput,
-    auto_land_confidence_recovery_action, auto_land_policy_blockers, change_id_matches_display,
-    change_id_matches_op_display, classify_ready_decision, has_integration_target,
-    integrated_land_next_action, integration_blocker_recommended_action, integration_blockers,
-    is_heavy_impact_advisory, is_integration_clear, is_manual_review_blocker,
+    auto_land_confidence_recovery_action, auto_land_policy_blockers, classify_ready_decision,
+    has_integration_target, integrated_land_next_action, integration_blocker_recommended_action,
+    integration_blockers, is_heavy_impact_advisory, is_integration_clear, is_manual_review_blocker,
     land_blockers_for_preview, land_checkpoint_message, land_performed_steps, land_skipped_steps,
     land_text_step, land_warnings_for_preview, non_staleness_blockers, op_targets_merge_state,
     plan_land_push, quote_recommended_action_arg, ready_freshness_summary,
@@ -395,4 +394,5 @@ pub use workflow::{
     ready_report_recommended_action, ready_scoped_next_action, ready_status_summary,
     ready_verification_preflight_blocks, ready_verification_status_blocks, recovery_scope_checkout,
     rewrite_land_action_for_default_remote, scope_action_to_repo, should_squash_land,
+    state_id_matches_display, state_id_matches_op_display,
 };

@@ -8,19 +8,19 @@ use std::{
 
 use objects::{
     error::{HeddleError, Result},
-    object::{ChangeId, ThreadName},
+    object::{StateId, ThreadName},
 };
 
 #[cfg(test)]
 use super::packed_refs::PackedRefs;
 use super::{
-    RefManager, RefUpdate, format_change_id_text, parse_change_id_text,
+    RefManager, RefUpdate, format_state_id_text, parse_state_id_text,
     reconcile::{LoadRequest, Loaded},
     ref_summary_index::SummaryDelta,
     refs_storage::RefsLock,
     refs_types::{
-        describe_change_id, describe_expectation_change_id, describe_expectation_head,
-        describe_head, matches_expectation,
+        describe_expectation_head, describe_expectation_state_id, describe_head, describe_state_id,
+        matches_expectation,
     },
 };
 use crate::fs_atomic::{stage_temp_files_durable, sync_directory};
@@ -32,11 +32,11 @@ enum PackedRemove {
 
 /// Map a planned thread write to its summary-index delta: a set when `new` is
 /// `Some`, a delete (loose + packed are both purged) when `None`.
-fn thread_summary_delta(name: &str, new: Option<&ChangeId>) -> SummaryDelta {
+fn thread_summary_delta(name: &str, new: Option<&StateId>) -> SummaryDelta {
     match new {
-        Some(change_id) => SummaryDelta::SetThread {
+        Some(state_id) => SummaryDelta::SetThread {
             name: name.to_string(),
-            change_id: *change_id,
+            state_id: *state_id,
         },
         None => SummaryDelta::DeleteThread {
             name: name.to_string(),
@@ -46,11 +46,11 @@ fn thread_summary_delta(name: &str, new: Option<&ChangeId>) -> SummaryDelta {
 
 /// Map a planned marker write to its summary-index delta (see
 /// [`thread_summary_delta`]).
-fn marker_summary_delta(name: &str, new: Option<&ChangeId>) -> SummaryDelta {
+fn marker_summary_delta(name: &str, new: Option<&StateId>) -> SummaryDelta {
     match new {
-        Some(change_id) => SummaryDelta::SetMarker {
+        Some(state_id) => SummaryDelta::SetMarker {
             name: name.to_string(),
-            change_id: *change_id,
+            state_id: *state_id,
         },
         None => SummaryDelta::DeleteMarker {
             name: name.to_string(),
@@ -75,11 +75,11 @@ impl RefManager {
     fn read_track_with_packed_fallback(
         &self,
         name: &ThreadName,
-    ) -> Result<(PathBuf, Option<ChangeId>, Option<String>)> {
+    ) -> Result<(PathBuf, Option<StateId>, Option<String>)> {
         let path = self.thread_path(name)?;
         let raw = self.read_optional_string(&path)?;
         if let Some(ref contents) = raw {
-            match parse_change_id_text(contents) {
+            match parse_state_id_text(contents) {
                 Ok(id) => return Ok((path, Some(id), raw)),
                 Err(_) => {
                     return Err(HeddleError::InvalidObject(format!(
@@ -91,7 +91,7 @@ impl RefManager {
             }
         }
         let packed_id = self.load_packed_refs_cached()?.get_thread(name);
-        let effective_prev = packed_id.map(|id| format_change_id_text(&id));
+        let effective_prev = packed_id.map(|id| format_state_id_text(&id));
         Ok((path, packed_id, effective_prev))
     }
 
@@ -99,10 +99,10 @@ impl RefManager {
         &self,
         path: &std::path::Path,
         name: &str,
-    ) -> Result<(Option<ChangeId>, Option<String>)> {
+    ) -> Result<(Option<StateId>, Option<String>)> {
         let raw = self.read_optional_string(path)?;
         if let Some(ref contents) = raw {
-            match parse_change_id_text(contents) {
+            match parse_state_id_text(contents) {
                 Ok(id) => return Ok((Some(id), raw)),
                 Err(_) => {
                     return Err(HeddleError::InvalidObject(format!(
@@ -114,7 +114,7 @@ impl RefManager {
             }
         }
         let packed_id = self.load_packed_refs_cached()?.get_marker(name);
-        let effective_prev = packed_id.map(|id| format_change_id_text(&id));
+        let effective_prev = packed_id.map(|id| format_state_id_text(&id));
         Ok((packed_id, effective_prev))
     }
 
@@ -206,13 +206,13 @@ impl RefManager {
                         return Err(HeddleError::Conflict(format!(
                             "thread {} expected {}, found {}",
                             name,
-                            describe_expectation_change_id(expected),
-                            describe_change_id(current)
+                            describe_expectation_state_id(expected),
+                            describe_state_id(current)
                         )));
                     }
 
-                    let new_content = new.as_ref().map(format_change_id_text);
-                    let previous_content = current.as_ref().map(format_change_id_text);
+                    let new_content = new.as_ref().map(format_state_id_text);
+                    let previous_content = current.as_ref().map(format_state_id_text);
                     let packed_remove = if new.is_none() && current.is_some() {
                         Some(PackedRemove::Thread(name.to_string()))
                     } else {
@@ -252,13 +252,13 @@ impl RefManager {
                         return Err(HeddleError::Conflict(format!(
                             "marker {} expected {}, found {}",
                             name,
-                            describe_expectation_change_id(expected),
-                            describe_change_id(current)
+                            describe_expectation_state_id(expected),
+                            describe_state_id(current)
                         )));
                     }
 
-                    let new_content = new.as_ref().map(format_change_id_text);
-                    let previous_content = current.as_ref().map(format_change_id_text);
+                    let new_content = new.as_ref().map(format_state_id_text);
+                    let previous_content = current.as_ref().map(format_state_id_text);
                     let packed_remove = if new.is_none() && current.is_some() {
                         Some(PackedRemove::Marker(name.to_string()))
                     } else {
@@ -354,7 +354,7 @@ impl RefManager {
                     let summary_delta = Some(thread_summary_delta(name.as_str(), new.as_ref()));
                     plans.push(RefUpdatePlan {
                         path,
-                        new_content: new.as_ref().map(format_change_id_text),
+                        new_content: new.as_ref().map(format_state_id_text),
                         previous_content: effective_prev,
                         description: format!("thread {}", name),
                         temp_path: None,
@@ -377,7 +377,7 @@ impl RefManager {
                     let summary_delta = Some(marker_summary_delta(name, new.as_ref()));
                     plans.push(RefUpdatePlan {
                         path,
-                        new_content: new.as_ref().map(format_change_id_text),
+                        new_content: new.as_ref().map(format_state_id_text),
                         previous_content: effective_prev,
                         description: format!("marker {}", name),
                         temp_path: None,
@@ -604,8 +604,8 @@ mod tests {
     #[test]
     fn rollback_restores_packed_refs_snapshot() {
         let (_temp, refs) = create_ref_manager();
-        let change_id = ChangeId::generate();
-        refs.set_thread(&ThreadName::new("packed-only"), &change_id)
+        let state_id = crate::refs::fresh_state_id();
+        refs.set_thread(&ThreadName::new("packed-only"), &state_id)
             .unwrap();
         refs.pack_refs().unwrap();
 
@@ -620,7 +620,7 @@ mod tests {
         let plans = vec![RefUpdatePlan {
             path: thread_path.clone(),
             new_content: None,
-            previous_content: Some(format!("{}\n", change_id.to_string_full())),
+            previous_content: Some(format!("{}\n", state_id.to_string_full())),
             description: "thread packed-only".to_string(),
             temp_path: None,
             packed_remove: Some(PackedRemove::Thread("packed-only".to_string())),
@@ -645,7 +645,7 @@ mod tests {
     struct OneMarkerReconciler {
         generation: Arc<AtomicU64>,
         name: MarkerName,
-        state: ChangeId,
+        state: StateId,
     }
 
     impl RefReconciler for OneMarkerReconciler {
@@ -682,7 +682,7 @@ mod tests {
         let generation = Arc::new(AtomicU64::new(0));
         let good = MarkerName::new("good");
         let bad = MarkerName::new("bad");
-        let committed_state = ChangeId::generate();
+        let committed_state = crate::refs::fresh_state_id();
         let refs = RefManager::new(temp.path().join(".heddle")).with_reconciler(Arc::new(
             OneMarkerReconciler {
                 generation: Arc::clone(&generation),
@@ -700,7 +700,7 @@ mod tests {
             RefUpdate::Marker {
                 name: bad.clone(),
                 expected: super::super::RefExpectation::Missing,
-                new: Some(ChangeId::generate()),
+                new: Some(crate::refs::fresh_state_id()),
             },
         ];
         let lock = refs.lock_refs().unwrap();

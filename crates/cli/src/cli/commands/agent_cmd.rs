@@ -512,7 +512,7 @@ fn existing_thread_execution_path(
 fn ensure_thread_record(
     repo: &Repository,
     thread_name: &str,
-    anchor: &objects::object::ChangeId,
+    anchor: &objects::object::StateId,
     task: &Option<String>,
 ) -> Result<()> {
     let manager = ThreadManager::new(repo.heddle_dir());
