@@ -8,15 +8,15 @@ use super::AuthCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    AgentCommands, CheckpointArgs, CompletionSubject, ContextCommands, DiscussCommands,
-    HookCommands, IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands,
-    ReviewCommands, ShellCommands, ThreadCommands, TransactionCommands, VisibilityCommands,
+    AgentCommands, CompletionSubject, ContextCommands, DiscussCommands, HookCommands,
+    IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
+    ShellCommands, ThreadCommands, TransactionCommands, VisibilityCommands,
     commands_args::{
         ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
-        CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs, LandArgs,
-        LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
-        SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs,
-        SnapshotArgs, SyncArgs, ThreadStartArgs, TimelineArgs, TryArgs, UndoArgs, WatchArgs,
+        CloneArgs, CollapseArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs, LandArgs, LogArgs,
+        PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
+        SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, SnapshotArgs,
+        SyncArgs, ThreadStartArgs, TimelineArgs, TryArgs, UndoArgs, WatchArgs,
     },
 };
 #[cfg(feature = "git-overlay")]
@@ -192,12 +192,6 @@ Examples:
 
     /// Capture a recoverable Heddle step for undo, provenance, and review.
     Capture(SnapshotArgs),
-
-    /// Save current work as one Heddle change, plus a Git checkpoint in Git-overlay repos.
-    Commit(CommitArgs),
-
-    /// Commit the current captured work to the Git-overlay branch/index.
-    Checkpoint(CheckpointArgs),
 
     /// Show state history.
     ///
@@ -404,17 +398,14 @@ Examples:
         command: ExportCommands,
     },
 
-    /// Push to a remote repository.
+    /// Push native Heddle source history to a remote.
     ///
-    /// In Git-overlay mode, push writes plain Git refs the remote's users can
-    /// inspect with `git ls-remote`: each Heddle thread's state goes to
-    /// `refs/heads/<thread>`, Heddle metadata (state identity carried as Git
-    /// notes) goes to `refs/notes/heddle`, and with `--all-threads` Git tags go
-    /// to `refs/tags/<tag>`. JSON output lists the refs actually written this
-    /// invocation in `refs_written`.
+    /// Git Overlay refuses this verb with exact direct-`git push` recovery.
     Push(PushArgs),
 
-    /// Pull from a remote repository.
+    /// Pull native Heddle source history from a remote.
+    ///
+    /// Git Overlay refuses this verb with exact direct-`git pull` recovery.
     Pull(PullArgs),
 
     /// Manage remote repositories.

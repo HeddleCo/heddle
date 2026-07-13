@@ -621,7 +621,11 @@ fn render_short_status(output: &StatusOutput) {
 }
 
 fn short_status_health(output: &StatusOutput) -> String {
-    if output.recommended_action == "heddle push" && output.thread_health == "clean" {
+    if matches!(
+        output.recommended_action.as_str(),
+        "heddle push" | "git push"
+    ) && output.thread_health == "clean"
+    {
         "ready to push".to_string()
     } else {
         human_thread_health(&output.thread_health)
@@ -1242,9 +1246,9 @@ fn status_next_reason(output: &StatusOutput) -> &'static str {
 fn status_next_follow_up(output: &StatusOutput) -> Option<&'static str> {
     let action = output.recommended_action.as_str();
     if action.contains("commit") && status_has_publish_target(output) {
-        Some("run `heddle push` when the Git commit is ready to publish")
+        Some("run `git push` when the Git commit is ready to publish")
     } else if action.contains("ready") {
-        Some("run `heddle land --thread <thread> --no-push` after readiness passes")
+        Some("run `heddle land --thread <thread>` after readiness passes")
     } else if action.contains("land") {
         Some("add `--push` only when a remote is configured and the thread should be published")
     } else if action.contains("resolve") || action.contains("continue") || action.contains("abort")
@@ -1378,7 +1382,7 @@ fn render_git_index_status(index: &CoreGitIndexPlan) {
     if index.commit_mode == "staged_index" && !index.preserved_after_commit.is_empty() {
         println!(
             "  include the rest with: {}",
-            style::bold("heddle commit --all -m \"...\"")
+            style::bold("heddle capture -m \"...\" && git commit -am \"...\"")
         );
     }
 }
@@ -1393,13 +1397,11 @@ fn git_index_extra_path_label(index: &CoreGitIndexPlan, kind: &'static str) -> S
 
 fn git_index_commit_scope_text(index: &CoreGitIndexPlan) -> &'static str {
     match index.commit_mode {
-        "staged_index" => "plain `heddle commit` checkpoints staged paths only",
-        "worktree_all" => "plain `heddle commit` captures and checkpoints all current paths",
-        "worktree_all_explicit" => {
-            "`heddle commit --all` captures and checkpoints staged, unstaged, and untracked paths"
-        }
+        "staged_index" => "`git commit` records staged paths",
+        "worktree_all" => "capture records Heddle provenance; `git commit` records source history",
+        "worktree_all_explicit" => "capture first, then stage and commit the intended Git paths",
         "none" => "no Git paths are ready to commit",
-        _ => "`heddle commit` captures and checkpoints the current Git worktree",
+        _ => "capture Heddle provenance, then commit source history with Git",
     }
 }
 

@@ -132,8 +132,8 @@ metadata only; it does not import Git history or write Git-tracked files.
     "left Git-tracked files untouched"
   ],
   "message": "Initialized Heddle data in /repo/.heddle for Git-overlay workflows",
-  "next_action": "heddle commit -m \"...\"",
-  "recommended_action": "heddle commit -m \"...\""
+  "next_action": "heddle capture -m \"...\"",
+  "recommended_action": "heddle capture -m \"...\""
 }
 ```
 
@@ -347,22 +347,22 @@ standard recovery fields plus nested verification proof:
 {
   "error": "Repository is not verified: dirty_worktree",
   "exit_code": 1,
-  "hint": "Run `heddle commit -m <message>` to clear the primary verification blocker.",
+  "hint": "Run `heddle capture -m <message>` to clear the primary verification blocker.",
   "kind": "verify_failed",
   "unsafe_condition": "worktree has unsaved changes",
   "would_change": "`heddle verify` is a strict proof gate and returns nonzero until every verification check is clean",
   "preserved": "verify is observe-only; repository objects, refs, index, and worktree files were left unchanged",
-  "primary_command": "heddle commit -m <message>",
+  "primary_command": "heddle capture -m <message>",
   "primary_command_template": {
-    "action": "heddle commit -m <message>",
+    "action": "heddle capture -m <message>",
     "argv_template": ["heddle", "commit", "-m", "<message>"],
     "required_inputs": ["message"],
     "agent_may_fill": true
   },
-  "recovery_commands": ["heddle commit -m <message>", "heddle verify"],
+  "recovery_commands": ["heddle capture -m <message>", "heddle verify"],
   "recovery_action_templates": [
     {
-      "action": "heddle commit -m <message>",
+      "action": "heddle capture -m <message>",
       "argv_template": ["heddle", "commit", "-m", "<message>"],
       "required_inputs": ["message"],
       "agent_may_fill": true
@@ -384,12 +384,9 @@ standard recovery fields plus nested verification proof:
 ## Core loop mutation schemas
 
 These verbs are the everyday loop agents use after discovery through
-`heddle help --output json`: capture state, save it as a
-Git-compatible commit when needed, undo/redo the last logical
-operation, and ask whether a thread is ready. The lower-level
-`checkpoint` command is documented here as an advanced native surface
-for writing a Git-facing commit boundary; the first-run loop should
-prefer `commit`.
+`heddle help --output json`: capture state, undo/redo the last logical
+operation, and ask whether a thread is ready. Git Overlay source commits
+remain direct `git commit` operations.
 
 `heddle capture --output json` emits:
 
@@ -411,45 +408,6 @@ prefer `commit`.
   "promotion_suggested": false,
   "heavy_impact_paths": [],
   "message": "captured state hd-capture123"
-}
-```
-
-`heddle checkpoint --output json` emits:
-
-```json
-{
-  "output_kind": "checkpoint",
-  "status": "checkpointed",
-  "action": "checkpoint",
-  "change_id": "hd-capture123",
-  "git_commit": "abc123",
-  "summary": "wrote Git checkpoint abc123 for hd-capture123",
-  "capability": "git-overlay",
-  "storage_model": "git+heddle-sidecar",
-  "committed_at": "2026-05-23T00:00:00Z"
-}
-```
-
-`heddle commit --output json` emits:
-
-```json
-{
-  "output_kind": "commit",
-  "status": "committed",
-  "action": "commit",
-  "change_id": "hd-capture123",
-  "git_commit": "abc123",
-  "summary": "captured Heddle state and wrote Git checkpoint",
-  "confidence": 0.9,
-  "principal": {"name": "Ada Agent", "email": "ada-agent@example.com"},
-  "agent": {
-    "provider": "codex",
-    "model": "gpt-5-codex"
-  },
-  "next_action": null,
-  "next_action_template": null,
-  "recommended_action": null,
-  "recommended_action_template": null
 }
 ```
 
@@ -509,8 +467,8 @@ saves a Heddle state without recommending a Git checkpoint.
   "message": "Thread 'feature/parser' is ready to integrate",
   "blockers": [],
   "warnings": [],
-  "next_action": "heddle land --thread feature/parser --no-push",
-  "recommended_action": "heddle land --thread feature/parser --no-push",
+  "next_action": "heddle land --thread feature/parser",
+  "recommended_action": "heddle land --thread feature/parser",
   "captured": true,
   "captured_state": "hd-sqr398dvx9ay",
   "thread_state": "ready",
@@ -552,10 +510,8 @@ saves a Heddle state without recommending a Git checkpoint.
   "git_commit": "abc123",
   "synced": false,
   "integrated": true,
-  "pushed": false,
-  "pushed_remote": null,
   "performed_steps": ["merge", "checkpoint"],
-  "skipped_steps": ["capture(no changes)", "sync(current)", "push(not requested)"],
+  "skipped_steps": ["capture(no changes)", "sync(current)"],
   "merge_state": "hd-land123",
   "chosen_path": "capture_sync_merge_checkpoint"
 }
@@ -565,23 +521,21 @@ saves a Heddle state without recommending a Git checkpoint.
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
-| `change_id` | string | required when present | Stable Heddle state ID for the captured or committed state. |
+| `change_id` | string | required when present | Stable Heddle state ID for the captured state. |
 | `content_hash` | string | required for `capture` | Short content hash for the captured state. |
 | `intent` | string \| null | required for `capture` | User-provided intent/message, when supplied. |
 | `confidence` | number \| null | required for `capture` | Agent or human confidence score, when supplied. |
-| `principal`, `agent` | object / object \| null | required for `capture`/`commit` | Accountable principal and optional agent/model provenance recorded on the captured state. |
+| `principal`, `agent` | object / object \| null | required for `capture` | Accountable principal and optional agent/model provenance recorded on the captured state. |
 | `promotion_suggested`, `heavy_impact_paths` | bool / array<string> | required for `capture` | Thread-promotion signal. Empty array if none. |
 | `output_kind`, `status` | string \| null | required when present | Stable output discriminator and machine status; `undo` and `undo --redo` report `completed` or `preview`. |
 | `message`, `summary` | string \| null | required when present | Human-readable result. |
 | `next_action`, `recommended_action` | string \| null | required | Primary next command, if one is known. |
 | `next_action_template`, `recommended_action_template` | object \| null | required | Fillable template metadata (`argv_template`, `required_inputs`, `agent_may_fill`) for the next/recommended command; present for every valid action, `null` when none. |
-| `git_commit` | string \| null | required for `checkpoint`/`commit` | Git commit OID produced by the checkpoint path; `null` for native Heddle commits. |
-| `capability`, `storage_model`, `committed_at` | string | required for `checkpoint` | Repository mode, storage model, and checkpoint timestamp. |
-| `status` | string | required for `capture`/`checkpoint`/`commit`/`ready`/`land` | Machine-stable success status for the operation. |
-| `action` | string | required for `capture`/`checkpoint`/`commit`/`undo`/`undo --redo`/`land` | Logical operation name. |
+| `status` | string | required for `capture`/`ready`/`land` | Machine-stable success status for the operation. |
+| `action` | string | required for `capture`/`undo`/`undo --redo`/`land` | Logical operation name. |
 | `batches` | array<object> | required for `undo`/`undo --redo` | Oplog batches affected by the operation. Empty if none are reported. |
 | `thread_state`, `readiness`, `report` | string \| null / object / object | required for `ready` | Readiness result, stable human/machine summary, and structured preview report. `readiness` always carries the same fields; non-applicable checks/integration/freshness/merge details are represented with explicit `not_run`, `not checked`, or `n/a` values and reasons rather than omitted. |
-| `thread`, `captured`, `checkpointed`, `synced`, `integrated`, `pushed`, `pushed_remote` | string / bool / string \| null | required for `land` | Thread landed, which local/publish steps completed, and the remote name pushed when publish ran. |
+| `thread`, `captured`, `checkpointed`, `synced`, `integrated` | string / bool | required for `land` | Thread landed and which local integration steps completed. |
 | `performed_steps`, `skipped_steps`, `merge_state`, `chosen_path` | array<string> / string \| null / string | required for `land` | Machine-readable path through the land loop and the merge state landed, when one exists. |
 | `verification` | object \| null | required | Post-operation verification proof. `null` only for undo / undo --redo paths that cannot compute it. |
 
@@ -793,8 +747,8 @@ Report manual follow-up after a blocked or refreshed thread.
   "message": "Thread requires a manual follow-up",
   "blockers": [],
   "warnings": [],
-  "next_action": "heddle land --thread feature/parser --no-push",
-  "recommended_action": "heddle land --thread feature/parser --no-push",
+  "next_action": "heddle land --thread feature/parser",
+  "recommended_action": "heddle land --thread feature/parser",
   "thread": "feature/parser"
 }
 ```
@@ -2606,7 +2560,7 @@ instead of treating it as a global catalog option.
   ],
   "recommended_action_placeholders": [
     "heddle capture -m \"...\"",
-    "heddle commit -m \"...\"",
+    "heddle capture -m \"...\"",
     "heddle ready -m \"...\"",
     "heddle remote add <name> <url>",
     "heddle clone <remote> <path>",
@@ -2618,7 +2572,7 @@ instead of treating it as a global catalog option.
   ],
   "recommended_action_templates": [
     {
-      "action": "heddle commit -m \"...\"",
+      "action": "heddle capture -m \"...\"",
       "argv_template": ["/path/to/heddle", "commit", "-m", "<message>"],
       "required_inputs": ["message"],
       "agent_may_fill": true
@@ -3343,7 +3297,7 @@ no record exists — public-by-absence):
 `heddle resolve --output json` emits:
 
 ```json
-{"output_kind": "resolve", "message": "Resolved src/lib.rs; completed merge", "resolved": ["src/lib.rs"], "remaining": [], "continued": true, "continuation_status": "continued", "continuation_message": "Completed the in-progress Heddle merge", "next_action": "heddle land --thread feature/auth --no-push", "recommended_action": "heddle land --thread feature/auth --no-push"}
+{"output_kind": "resolve", "message": "Resolved src/lib.rs; completed merge", "resolved": ["src/lib.rs"], "remaining": [], "continued": true, "continuation_status": "continued", "continuation_message": "Completed the in-progress Heddle merge", "next_action": "heddle land --thread feature/auth", "recommended_action": "heddle land --thread feature/auth"}
 ```
 
 `heddle retro --output json` emits the same shape with bounded session data;
@@ -3365,7 +3319,7 @@ no record exists — public-by-absence):
 The following verbs also emit `--output json`. Their shapes follow the same
 discipline; see the corresponding handler in `crates/cli/src/cli/commands/`:
 
-`heddle checkpoint`, `heddle cherry-pick`,
+`heddle cherry-pick`,
 `heddle clone`, `heddle collapse`,
 `heddle context get/set`, `heddle diff`, `heddle expand`,
 `heddle discuss`, `heddle doctor docs`,

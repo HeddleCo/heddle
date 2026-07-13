@@ -34,6 +34,7 @@ use sley::{ConfigEdit, ConfigEditPlan, RemoteConfigSet, Repository as SleyReposi
 use super::super::{
     action_line::print_next,
     advice::RecoveryAdvice,
+    source_authority::SourceAuthorityDispatch,
     verification_health::{
         RepositoryVerificationState, build_plain_git_verification_probe,
         build_repository_verification_state,
@@ -258,6 +259,13 @@ pub async fn cmd_pull(
     insecure: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
+    SourceAuthorityDispatch::for_repo(&repo)
+        .require_pull(
+            remote.as_deref(),
+            thread.as_deref(),
+            local_thread.as_deref(),
+        )
+        .map_err(anyhow::Error::new)?;
     let has_default_remote = resolved_default_remote_name(&repo)?.is_some();
     let pull_uses_hosted_network = super::push_target_is_hosted_network(&repo, remote.as_deref());
     // Match preflight_native_remote_transport: overlay capability never

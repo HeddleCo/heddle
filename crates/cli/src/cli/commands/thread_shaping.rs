@@ -25,7 +25,7 @@ use super::{
         capture_thread_update_before, current_thread_ref_state, load_thread, refresh_thread,
         refresh_thread_freshness, save_thread_update_with_oplog, thread_not_found_advice,
     },
-    thread_landing::{land_command_for_thread, land_command_with_push_target},
+    thread_landing::{land_command_for_thread, land_local_command},
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 use crate::{
@@ -524,7 +524,7 @@ fn thread_resolve_refresh_operator(
     thread_id: &str,
     trust: &RepositoryVerificationState,
 ) -> OperatorCommandOutput {
-    let land_command = land_command_with_push_target(thread_id, trust.default_remote.is_some());
+    let land_command = land_local_command(thread_id);
     if trust.verified {
         return OperatorCommandOutput {
             status: "synced".to_string(),
@@ -710,7 +710,7 @@ mod tests {
         assert_eq!(clean.status, "synced");
         assert_eq!(
             clean.recommended_action.as_deref(),
-            Some("heddle land --thread feature/clean --no-push")
+            Some("heddle land --thread feature/clean")
         );
 
         let blocked = thread_resolve_refresh_operator("feature/blocked", &trust_state(false));

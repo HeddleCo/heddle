@@ -113,11 +113,11 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
             let _ = writeln!(out);
             let _ = writeln!(
                 out,
-                "Existing Git: heddle status -> heddle init -> heddle verify -> heddle commit -m \"...\" -> heddle push"
+                "Existing Git: heddle status -> heddle init -> heddle capture -m \"...\" -> git commit -> git push"
             );
             let _ = writeln!(
                 out,
-                "Isolated work: heddle start <name> --path ../<name> -> heddle commit -m \"...\" -> heddle ready -> heddle land"
+                "Isolated work: heddle start <name> --path ../<name> -> heddle capture -m \"...\" -> heddle ready -> heddle land"
             );
             let _ = writeln!(out);
             let _ = writeln!(
@@ -126,7 +126,7 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
             );
             let _ = writeln!(
                 out,
-                "Start here: `heddle init`, `heddle commit`, or `heddle clone`."
+                "Start here: `heddle init`, `heddle capture`, or `heddle clone`."
             );
             let _ = writeln!(
                 out,
@@ -641,8 +641,7 @@ Core nouns:
   Use it for risky edits, agent work, or parallel experiments without stash
   juggling.
 - Capture: a cheap recoverable save point on the current thread.
-- Commit: the normal save path; Git-overlay repos also write the Git Checkpoint.
-- Checkpoint: the advanced Git-overlay boundary for already-captured work.
+- Capture: the Heddle save boundary for provenance, undo, and review.
 - Verify: the proof surface. It says whether Heddle, Git mapping, worktree,
   remotes, active operations, clone state, and machine contracts agree.
 
@@ -650,7 +649,7 @@ Everyday loop:
 
     heddle status
     heddle diff
-    heddle commit -m "..."
+    heddle capture -m "..."
     heddle start <name> --path ../<name>
     heddle ready
     heddle land --thread <name>
@@ -684,7 +683,7 @@ Common mappings:
 
 | Intent | Git Overlay | Native Heddle |
 |--------|-------------|---------------|
-| Save source history | `git commit` | `heddle commit` |
+| Save source history | `git commit` | `heddle capture` |
 | Isolate coordinated work | `heddle start` | `heddle start` |
 | Record a granular Heddle savepoint | `heddle capture` | `heddle capture` |
 | Check integration readiness | `heddle ready` | `heddle ready` |
@@ -714,8 +713,8 @@ between threads with `heddle thread switch <name>`, and integrate with\n\
   is just a ref.\n\
 - Multiple threads coexist on disk simultaneously without `git stash` /\n\
   `git worktree` gymnastics. Each thread's working tree is its own.\n\
-- `heddle capture` records Heddle-native work; `heddle checkpoint`\n\
-  writes the Git-facing commit boundary for already-captured work.\n\
+- `heddle capture` records Heddle-native work; `git commit` writes Git\n\
+  history directly in Git Overlay.\n\
 \n\
 # Workspace modes (`--workspace`)\n\
 \n\
@@ -778,17 +777,13 @@ Resolution paths:\n\
 - In Git Overlay, `git switch` and `git checkout` remain Git operations.\n\
   They do not change Heddle's active thread or coordination metadata.\n\
 \n\
-# Capture vs. checkpoint\n\
+# Capture and Git commits\n\
 \n\
 - `heddle capture` records a recoverable Heddle step on the current\n\
   thread — for undo, provenance, and review. Captures are\n\
   fine-grained and accumulate freely as work progresses.\n\
-- `heddle checkpoint` commits the current captured work to the\n\
-  git-overlay branch/index. It refuses when the worktree has changes\n\
-  that haven't been captured yet — capture first, then checkpoint.\n\
-- The split lets agents and tools take many small captures (cheap,\n\
-  reversible) without producing a noisy git history; checkpoints are\n\
-  the durable downstream record.\n\
+- In Git Overlay, run `git commit` directly when source history is ready.\n\
+- Agents and tools can take many small captures without producing noisy Git history.\n\
 \n\
 See also: `heddle help advanced` for the full operational surface,\n\
 `heddle thread --help` for the thread subcommand list.\n";
@@ -813,7 +808,7 @@ authoritative per-command contract, use `heddle help --output json`.\n";
 
 const REMOTES_TOPIC: &str = "Remotes — local, Git-overlay, and hosted destinations.\n\
 \n\
-Core loop:\n\
+Native Heddle loop:\n\
 \n\
     heddle remote add origin <url-or-path>\n\
     heddle remote set-default origin\n\
@@ -821,14 +816,13 @@ Core loop:\n\
     heddle pull\n\
     heddle verify\n\
 \n\
-Remote values may be hosted endpoints, Git URLs, file URLs, or local bare Git\n\
-paths depending on the workflow. `push` and `pull` use the default remote\n\
-unless a positional remote is supplied. In Git Overlay, use `git fetch` for\n\
-a Git-only remote update. `heddle verify` reports repository verification\n\
+Remote values may be hosted endpoints or native Heddle paths. `push` and `pull`\n\
+use the default remote unless a positional remote is supplied. In Git Overlay,\n\
+run `git fetch`, `git pull`, and `git push` directly. `heddle verify` reports repository verification\n\
 state before and after Heddle remote operations.\n\
 \n\
 When a remote action is unsafe, Heddle reports the blocker and one primary\n\
-next command instead of falling back to raw Git.\n";
+next command, including exact direct-Git argv when Git owns source history.\n";
 
 const GIT_DEPENDENCIES_TOPIC: &str = "Git executable dependencies — what works without `git` on PATH.\n\
 \n\
@@ -896,18 +890,19 @@ Start in an existing Git checkout:\n\
 Save and sync ordinary work:\n\
 \n\
     heddle diff\n\
-    heddle commit -m \"...\"                    # save state and write the Git Checkpoint\n\
-    # advanced split: heddle capture -m \"...\" && heddle checkpoint -m \"...\"\n\
-    heddle push\n\
+    heddle capture -m \"...\"                   # save Heddle provenance\n\
+    git commit -am \"...\"                       # Git owns source history\n\
+    git push\n\
 \n\
 Isolate risky work:\n\
 \n\
     heddle start <name> --path ../<name>\n\
     cd ../<name>\n\
-    heddle commit -m \"...\"\n\
+    heddle capture -m \"...\"\n\
     heddle ready\n\
     cd -\n\
-    heddle land --thread <name> --no-push     # add --push when ready to publish\n\
+    heddle land --thread <name>\n\
+    git push\n\
 \n\
 Recover or prove state:\n\
 \n\
@@ -916,8 +911,7 @@ Recover or prove state:\n\
 \n\
 State-specific recovery:\n\
 \n\
-    Worktree has unsaved edits: heddle commit -m \"...\"\n\
-    Captured in Heddle but not Git: heddle checkpoint -m \"...\"\n\
+    Worktree has unsaved edits: heddle capture -m \"...\", then git commit\n\
     Adopt Git refs into Heddle-native source storage: heddle adopt --ref <branch>\n";
 
 const GIT_PROJECTION_TOPIC: &str = "Git Projection — use Heddle with existing Git repos without a hidden mirror.\n\
@@ -944,11 +938,13 @@ Explicit conversion to native Heddle storage:\n\
 Daily loop:\n\
 \n\
     heddle status\n\
-    heddle commit -m \"...\"                    # save state and write the Git Checkpoint\n\
-    heddle push                               # Git-overlay remotes use the top-level verb\n\
+    heddle capture -m \"...\"                   # save Heddle provenance\n\
+    git commit -am \"...\"\n\
+    git push\n\
     heddle start <name> --path ../<name>\n\
     heddle ready --thread <name>              # or cd into ../<name> and run heddle ready\n\
-    heddle land --thread <name> --no-push     # add --push to land and push together\n\
+    heddle land --thread <name>\n\
+    git push\n\
 \n\
 Recovery and inspection:\n\
 \n\
@@ -1058,7 +1054,7 @@ mod tests {
         }
     }
 
-    /// Regression: heddle#150. `query`, `capture`, `checkpoint`, `continue`, and
+    /// Regression: heddle#150. `query`, `capture`, `continue`, and
     /// `abort` are referenced in inline tips and error messages but
     /// were absent from the `heddle help advanced` listing, leaving
     /// users unable to discover the verb they were told to run.
@@ -1068,7 +1064,6 @@ mod tests {
         for verb in [
             "query",
             "capture",
-            "checkpoint",
             "continue",
             "abort",
             "shell",
@@ -1090,7 +1085,7 @@ mod tests {
     fn everyday_verbs_surface_the_core_loop() {
         let everyday: std::collections::HashSet<&str> = everyday_verbs().into_iter().collect();
         for verb in [
-            "init", "clone", "status", "start", "commit", "ready", "diff", "land", "resolve",
+            "init", "clone", "status", "start", "capture", "ready", "diff", "land", "resolve",
             "undo", "log", "show", "pull", "push", "doctor", "verify",
         ] {
             assert!(
@@ -1297,7 +1292,7 @@ mod tests {
         for argv in [
             &["clone", "--help"][..],
             &["status", "--help"][..],
-            &["commit", "--help"][..],
+            &["capture", "--help"][..],
             &["thread", "--help"][..],
             &["push", "--help"][..],
         ] {

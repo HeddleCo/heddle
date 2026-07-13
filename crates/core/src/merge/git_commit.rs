@@ -370,7 +370,7 @@ fn merge_git_commit_failed_advice(stage: &'static str, detail: String) -> Heddle
     HeddleError::recovery(RecoveryDetails::safety_refusal(
         "merge_git_commit_failed",
         format!("{stage} failed while finalizing merge --git-commit: {detail}"),
-        "Resolve the Git checkout issue, then run `heddle commit -m \"...\"`; do not rerun `heddle merge`.",
+        "Resolve the Git checkout issue, then run `heddle capture -m \"...\"` and `git commit -m \"...\"`; do not rerun the integration.",
         format!("{stage} failed after Heddle merge commit coordination started"),
         "retrying the Heddle merge could duplicate or obscure the already-landed Heddle merge state",
         "the Heddle merge state is preserved; the Git commit writer did not report a completed commit",

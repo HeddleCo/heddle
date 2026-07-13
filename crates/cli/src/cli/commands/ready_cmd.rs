@@ -517,7 +517,7 @@ fn ready_blocked_by_missing_intent(output: &ReadyOutput) -> bool {
             .operator
             .recommended_action
             .as_deref()
-            .is_some_and(|action| action == "heddle commit -m \"...\"")
+            .is_some_and(|action| action == "heddle capture -m \"...\"")
 }
 
 fn write_trust_blocked_setup(recommended_action: Option<&str>) {
@@ -642,7 +642,7 @@ fn missing_ready_capture_intent_output(
             format!("uncaptured path(s): {shown}, and {overflow} more")
         }
     };
-    let recommended_action = "heddle commit -m \"...\"".to_string();
+    let recommended_action = "heddle capture -m \"...\"".to_string();
     Ok(ReadyOutput {
         operator: OperatorCommandOutput {
             status: "blocked".to_string(),
@@ -871,9 +871,9 @@ mod tests {
         assert_eq!(
             ready_report_recommended_action(&report(
                 "fast_forward",
-                "heddle land --thread feature --no-push"
+                "heddle land --thread feature"
             )),
-            Some("heddle land --thread feature --no-push".to_string())
+            Some("heddle land --thread feature".to_string())
         );
     }
 }

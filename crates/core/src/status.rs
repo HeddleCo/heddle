@@ -11,6 +11,7 @@ use std::{
     time::Instant,
 };
 
+use crate::source_authority::{SourceAction, SourceAuthorityActions};
 use chrono::Utc;
 use cli_shared::remote::RemoteConfig;
 use objects::{
@@ -44,7 +45,7 @@ pub use verdict::{
 use self::next_action::{
     NextActionInput, canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
     contextual_thread_action, effective_next_action, heddle_action, non_empty_action,
-    remote_tracking_next_action, remote_tracking_status,
+    remote_tracking_status,
 };
 use crate::{
     ActionTemplate, ExecutionContext, HeddleReport, MachineOutputKind, OutputDiscriminator,
@@ -316,6 +317,7 @@ pub fn build_repository_verification_health_with_worktree_status(
     repo: &Repository,
     worktree_status: &Result<Option<WorktreeStatus>>,
 ) -> RepositoryVerificationHealth {
+    let source_actions = SourceAuthorityActions::new(repo.source_authority());
     if repo.capability() != RepositoryCapability::GitOverlay {
         // An in-progress operation (e.g. a conflicted merge awaiting `heddle
         // continue`/`heddle abort`) takes precedence over worktree dirtiness:
@@ -323,7 +325,7 @@ pub fn build_repository_verification_health_with_worktree_status(
         // at completing the operation, not at capturing the half-merged tree.
         // The pre-facade `build_native_heddle_health` checked this first;
         // dropping it made native `status`/`thread show`/`doctor` recommend
-        // `heddle commit` mid-merge instead of `heddle continue`.
+        // `heddle capture` mid-merge instead of `heddle continue`.
         match repo.operation_status() {
             Ok(Some(operation)) => {
                 return RepositoryVerificationHealth {
@@ -377,10 +379,7 @@ pub fn build_repository_verification_health_with_worktree_status(
                     status: "uncaptured".to_string(),
                     clean: false,
                     summary: summary.clone(),
-                    recovery_commands: vec![
-                        "heddle commit -m \"...\"".to_string(),
-                        "heddle capture -m \"...\"".to_string(),
-                    ],
+                    recovery_commands: vec![source_actions.display(SourceAction::Capture)],
                     checks: vec![RepositoryVerificationCheck {
                         name: "heddle_worktree".to_string(),
                         status: "uncaptured".to_string(),
@@ -646,7 +645,7 @@ pub fn build_repository_verification_health_with_worktree_status(
                     summary: format!(
                         "{changed} Git worktree path(s) are captured in Heddle but not checkpointed to Git"
                     ),
-                    recovery_commands: vec!["heddle checkpoint -m \"...\"".to_string()],
+                    recovery_commands: vec![source_actions.display(SourceAction::GitCommit)],
                     checks,
                 };
             }
@@ -655,9 +654,8 @@ pub fn build_repository_verification_health_with_worktree_status(
                 clean: false,
                 summary: format!("{changed} Git worktree path(s) have uncommitted changes"),
                 recovery_commands: vec![
-                    "heddle commit -m \"...\"".to_string(),
-                    "heddle capture -m \"...\"".to_string(),
-                    "heddle stash push -m \"...\"".to_string(),
+                    source_actions.display(SourceAction::Capture),
+                    source_actions.display(SourceAction::GitCommit),
                 ],
                 checks,
             }
@@ -679,7 +677,7 @@ pub fn build_repository_verification_health_with_worktree_status(
                         .cloned()
                         .unwrap_or_else(|| "<branch>".to_string());
                     let recovery = if status == "needs_checkpoint" {
-                        "heddle checkpoint -m \"...\"".to_string()
+                        source_actions.display(SourceAction::GitCommit)
                     } else {
                         canonical_git_repair_ref_preview_command(None, &ref_name)
                     };
@@ -730,11 +728,7 @@ pub fn build_repository_verification_health_with_worktree_status(
                     summary: format!(
                         "{changed} Heddle worktree path(s) differ from the current state"
                     ),
-                    recovery_commands: vec![
-                        "heddle commit -m \"...\"".to_string(),
-                        "heddle capture -m \"...\"".to_string(),
-                        "heddle stash push -m \"...\"".to_string(),
-                    ],
+                    recovery_commands: vec![source_actions.display(SourceAction::Capture)],
                     checks,
                 };
             }
@@ -1233,7 +1227,7 @@ fn remote_drift_recovery_commands(
     status: &str,
 ) -> Vec<String> {
     match status {
-        "remote_behind" => vec!["heddle pull".to_string()],
+        "remote_behind" => vec!["git pull".to_string()],
         "remote_diverged" => {
             let upstream = remote.upstream.trim();
             if upstream.is_empty() {
@@ -1249,11 +1243,16 @@ fn remote_drift_recovery_commands(
         }
         "remote_contains_undone_checkpoint" => {
             vec![
-                "heddle push --force".to_string(),
+                "git push --force-with-lease".to_string(),
                 "heddle undo --redo".to_string(),
             ]
         }
-        _ => remote_tracking_next_action(remote).into_iter().collect(),
+        _ => crate::status::next_action::remote_tracking_next_action_for(
+            remote,
+            repo.source_authority(),
+        )
+        .into_iter()
+        .collect(),
     }
 }
 
@@ -2330,6 +2329,7 @@ fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
             None,
             None,
         )
+        .with_source_authority(input.repo.source_authority())
         .with_verification(&input.trust),
     );
     let worktree_clean = input.changes.is_empty();
@@ -2512,7 +2512,7 @@ fn apply_status_advice(
         trust.worktree_dirty = true;
         trust.worktree_state = "dirty".to_string();
         trust.summary = dirty_summary.clone();
-        trust.recommended_action = "heddle commit -m \"...\"".to_string();
+        trust.recommended_action = "heddle capture -m \"...\"".to_string();
         trust.recommended_action_template = action_template(&trust.recommended_action);
         trust.recovery_commands = vec![trust.recommended_action.clone()];
         trust.recovery_action_templates = action_templates(&trust.recovery_commands);
@@ -2576,6 +2576,7 @@ fn apply_status_advice(
             import_hint.as_ref(),
             fallback,
         )
+        .with_source_authority(repo.source_authority())
         .current_thread(thread_health)
         .with_verification(&trust),
     );
@@ -2600,7 +2601,7 @@ fn apply_status_advice(
     let recommended_action =
         if git_backed_mapping && trust.status != "needs_checkpoint" && output.operation.is_none() {
             if has_changes {
-                "heddle commit -m \"...\"".to_string()
+                "heddle capture -m \"...\"".to_string()
             } else {
                 String::new()
             }
@@ -3102,7 +3103,7 @@ fn first_save_recommendation(
         return None;
     }
     let empty_log = current_state.map(is_synthetic_root).unwrap_or(true);
-    empty_log.then(|| "heddle commit -m \"...\"".to_string())
+    empty_log.then(|| "heddle capture -m \"...\"".to_string())
 }
 
 fn remote_tracking_with_verification_action(

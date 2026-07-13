@@ -459,6 +459,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadListEntry
                     import_hint.as_ref(),
                     Some(&summary.recommended_action),
                 )
+                .with_source_authority(repo.source_authority())
                 .current_thread(Some(&summary.thread_health)),
             );
             summary.recommended_action = contextual_thread_action(

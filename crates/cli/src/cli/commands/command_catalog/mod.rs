@@ -381,9 +381,7 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     // argv because the literal ellipsis would create bad history.
     "heddle capture -m \"...\"",
     "heddle capture -m \"...\" --confidence <confidence>",
-    "heddle checkpoint -m \"...\"",
-    "heddle commit -m \"...\"",
-    "heddle commit -m \"...\" --confidence <confidence>",
+    "git commit -m \"...\"",
     "heddle init --principal-name <name> --principal-email <email>",
     "heddle ready -m \"...\"",
     "heddle context get --path <path>",
@@ -433,33 +431,8 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "heddle checkpoint -m \"...\"",
-        &["heddle", "checkpoint", "-m", "<message>"],
-        &["message"],
-        true,
-    ),
-    (
-        "heddle commit -m \"...\"",
-        &["heddle", "commit", "-m", "<message>"],
-        &["message"],
-        true,
-    ),
-    (
-        "heddle commit -m \"...\" --confidence <confidence>",
-        &[
-            "heddle",
-            "commit",
-            "-m",
-            "<message>",
-            "--confidence",
-            "<confidence>",
-        ],
-        &["message", "confidence"],
-        true,
-    ),
-    (
-        "heddle commit --all -m \"...\"",
-        &["heddle", "commit", "--all", "-m", "<message>"],
+        "git commit -m \"...\"",
+        &["git", "commit", "-m", "<message>"],
         &["message"],
         true,
     ),
@@ -1513,36 +1486,19 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["capture"],
-        category(
-            json_discriminators(
-                documented_schemas(compact_json(CAPTURE), &["capture"]),
-                &[json_discriminator(
-                    Some("capture"),
-                    "output_kind",
-                    "capture",
-                )],
-            ),
-            "states",
-        ),
-    ),
-    entry(
-        &["checkpoint"],
-        category(
-            json_discriminators(
-                documented_schemas(
-                    CommandContract {
-                        writes_git_refs: true,
-                        ..CAPTURE
-                    },
-                    &["checkpoint"],
+        front_door(
+            category(
+                json_discriminators(
+                    documented_schemas(compact_json(CAPTURE), &["capture"]),
+                    &[json_discriminator(
+                        Some("capture"),
+                        "output_kind",
+                        "capture",
+                    )],
                 ),
-                &[json_discriminator(
-                    Some("checkpoint"),
-                    "output_kind",
-                    "checkpoint",
-                )],
+                "states",
             ),
-            "states",
+            30,
         ),
     ),
     entry(
@@ -1620,36 +1576,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 &[json_discriminator(Some("expand"), "output_kind", "expand")],
             ),
             "states",
-        ),
-    ),
-    entry(
-        &["commit"],
-        exits(
-            front_door(
-                advertised_action(
-                    json_discriminators(
-                        documented_schemas(
-                            CommandContract {
-                                writes_git_refs: true,
-                                ..CAPTURE
-                            },
-                            &["commit"],
-                        ),
-                        &[json_discriminator(Some("commit"), "output_kind", "commit")],
-                    ),
-                    "heddle commit -m <message>",
-                    &["heddle", "commit", "-m", "<message>"],
-                    &["message"],
-                    true,
-                    false,
-                ),
-                30,
-            ),
-            &[
-                (0, "ok"),
-                (65, "dirty worktree refused or unmergeable input"),
-                (74, "io while writing state"),
-            ],
         ),
     ),
     entry(
@@ -4135,10 +4061,7 @@ fn dynamic_message_recommended_action_template(
     match argv {
         [heddle, command, message_flag, message]
             if heddle == "heddle"
-                && matches!(
-                    command.as_str(),
-                    "capture" | "checkpoint" | "commit" | "ready"
-                )
+                && matches!(command.as_str(), "capture" | "ready")
                 && is_message_flag(message_flag)
                 && is_message_placeholder_arg(message) =>
         {
@@ -4197,7 +4120,7 @@ fn dynamic_message_recommended_action_template(
             confidence,
         ] if heddle == "heddle"
             && repo_flag == "--repo"
-            && matches!(command.as_str(), "capture" | "commit")
+            && command == "capture"
             && is_message_flag(message_flag)
             && is_message_placeholder_arg(message)
             && confidence_flag == "--confidence"
@@ -4430,8 +4353,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Land(_) => vec!["land"],
         Commands::Ready(_) => vec!["ready"],
         Commands::Capture(_) => vec!["capture"],
-        Commands::Commit(_) => vec!["commit"],
-        Commands::Checkpoint(_) => vec!["checkpoint"],
         Commands::Log(_) => vec!["log"],
         Commands::Show { .. } => vec!["show"],
         Commands::Retro(_) => vec!["retro"],

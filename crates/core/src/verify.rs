@@ -16,6 +16,7 @@ use sley::{Repository as SleyRepository, ShortStatusOptions, StatusUntrackedMode
 use crate::{
     ExecutionContext, HeddleReport, MachineOutputKind, OnboardingFacts, OutputDiscriminator,
     ReportContract, plan_repository_onboarding, schema_for_report,
+    source_authority::{SourceAction, SourceAuthorityActions},
     status::{
         RepositoryVerificationHealth, build_repository_verification_health_with_worktree_status,
         default_remote_name, git_default_remote_name_from_repo,
@@ -705,7 +706,7 @@ pub fn build_repository_verification_state_with_worktree_status_and_machine_cont
     let machine_contract_coverage = machine_contract_input.coverage.clone();
     let machine_contract_clean = machine_contract_is_clean(&machine_contract_coverage);
     let mut recovery_commands = health.recovery_commands.clone();
-    let remote_action = remote_sync_action(&health);
+    let remote_action = remote_sync_action(&health, repo.source_authority());
     let (workflow_status, workflow_summary) = workflow_status(repo, heddle_thread.as_deref());
     let workflow_action = if health.clean && workflow_status == "ready" {
         workflow_primary_action(repo)
@@ -734,6 +735,7 @@ pub fn build_repository_verification_state_with_worktree_status_and_machine_cont
         &workflow_status,
         &workflow_summary,
         workflow_action.as_deref(),
+        repo.source_authority(),
     );
     RepositoryVerificationState {
         verified: health.clean && machine_contract_clean,
@@ -788,6 +790,7 @@ fn verification_checks_from_health(
     workflow_status: &str,
     workflow_summary: &str,
     workflow_action: Option<&str>,
+    source_authority: repo::RepositorySourceAuthority,
 ) -> Vec<VerificationCheck> {
     let mut checks = vec![
         git_verification_check(is_git_overlay),
@@ -801,7 +804,7 @@ fn verification_checks_from_health(
         ),
         mapping_verification_check(health, is_git_overlay),
         worktree_verification_check(health),
-        remote_verification_check(health),
+        remote_verification_check(health, source_authority),
         operation_verification_check(health),
         workflow_verification_check(health, workflow_status, workflow_summary, workflow_action),
     ];
@@ -974,7 +977,10 @@ fn worktree_verification_check(health: &RepositoryVerificationHealth) -> Verific
     )
 }
 
-fn remote_verification_check(health: &RepositoryVerificationHealth) -> VerificationCheck {
+fn remote_verification_check(
+    health: &RepositoryVerificationHealth,
+    source_authority: repo::RepositorySourceAuthority,
+) -> VerificationCheck {
     if let Some(check) = find_health_check(health, "remote_tracking") {
         if matches!(check.status.as_str(), "remote_ahead" | "remote_untracked") {
             let mut remote_check = verification_check(
@@ -982,7 +988,7 @@ fn remote_verification_check(health: &RepositoryVerificationHealth) -> Verificat
                 true,
                 &check.status,
                 &check.summary,
-                remote_sync_action(health),
+                remote_sync_action(health, source_authority),
                 Vec::new(),
             );
             remote_check.details = check.details.clone();
@@ -1125,10 +1131,13 @@ fn verification_check_from_health(
     check
 }
 
-fn remote_sync_action(health: &RepositoryVerificationHealth) -> Option<String> {
+fn remote_sync_action(
+    health: &RepositoryVerificationHealth,
+    source_authority: repo::RepositorySourceAuthority,
+) -> Option<String> {
     find_health_check(health, "remote_tracking").and_then(|check| {
         matches!(check.status.as_str(), "remote_ahead" | "remote_untracked")
-            .then(|| "heddle push".to_string())
+            .then(|| SourceAuthorityActions::new(source_authority).display(SourceAction::Push))
     })
 }
 
@@ -1271,7 +1280,7 @@ fn concrete_action_template(action: &str) -> Option<ActionTemplate> {
         return None;
     }
     let argv = split_action(action).ok()?;
-    (argv.first().map(String::as_str) == Some("heddle")).then(|| ActionTemplate {
+    matches!(argv.first().map(String::as_str), Some("heddle" | "git")).then(|| ActionTemplate {
         action: action.to_string(),
         argv_template: normalize_heddle_argv(argv),
         required_inputs: Vec::new(),
@@ -1288,20 +1297,8 @@ fn recommended_action_templates() -> Vec<ActionTemplate> {
             true,
         ),
         (
-            "heddle checkpoint -m \"...\"",
-            &["heddle", "checkpoint", "-m", "<message>"][..],
-            &["message"][..],
-            true,
-        ),
-        (
-            "heddle commit -m \"...\"",
-            &["heddle", "commit", "-m", "<message>"][..],
-            &["message"][..],
-            true,
-        ),
-        (
-            "heddle commit --all -m \"...\"",
-            &["heddle", "commit", "--all", "-m", "<message>"][..],
+            "git commit -m \"...\"",
+            &["git", "commit", "-m", "<message>"][..],
             &["message"][..],
             true,
         ),
@@ -1762,7 +1759,7 @@ mod setup_guidance_tests {
 
     #[test]
     fn repository_setup_guidance_skips_non_setup_statuses() {
-        let state = bare_verification_state("dirty_worktree", "heddle commit -m \"...\"");
+        let state = bare_verification_state("dirty_worktree", "heddle capture -m \"...\"");
         assert!(repository_setup_guidance(&state).is_none());
     }
 }

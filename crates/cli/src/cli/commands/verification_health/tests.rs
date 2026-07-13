@@ -172,7 +172,7 @@ fn repository_verification_blocked_advice_keeps_primary_override_first() {
     let advice = repository_verification_blocked_advice(
         "git_checkpoint_preflight_blocked",
         "blocked",
-        "retrying `heddle commit`",
+        "retrying `heddle capture`",
         &trust,
         "unsafe",
         "would change",

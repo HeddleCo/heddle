@@ -30,7 +30,6 @@ mod ff_record;
 mod fsck;
 mod gc;
 mod git_overlay_txn;
-mod git_projection;
 #[cfg(feature = "git-overlay")]
 mod git_projection_io;
 pub(crate) mod heddleignore_defaults;
@@ -68,6 +67,7 @@ mod session;
 mod shell;
 mod show;
 pub(crate) mod snapshot;
+mod source_authority;
 mod start_atomic;
 mod status;
 mod thread;
@@ -105,7 +105,6 @@ pub use agent_cmd::{
     agent_api_schema, cmd_agent_capture, cmd_agent_heartbeat, cmd_agent_list, cmd_agent_ready,
     cmd_agent_release, cmd_agent_reserve,
 };
-pub use checkpoint::run as cmd_checkpoint;
 pub use cherry_pick::cmd_cherry_pick;
 pub use clone::{
     CLONE_CONNECTION_OUTPUT_KIND, CLONE_OUTPUT_KIND, GitOverlayBlobHydrator, cmd_clone,
@@ -139,7 +138,6 @@ pub use error_envelope::{
 pub use expand::cmd_expand;
 pub use fsck::cmd_fsck;
 pub use gc::cmd_gc;
-pub use git_projection::cmd_commit_git_projection;
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 pub use git_projection_io::cmd_context_reason_git;
 #[cfg(feature = "git-overlay")]
