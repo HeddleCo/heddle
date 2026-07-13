@@ -434,15 +434,6 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn git_remote_name_invalid(name: &str) -> Self {
-        Self::invalid_usage(
-            "git_remote_name_invalid",
-            format!("invalid Git remote name for Git-overlay repository: {name}"),
-            "Use a Git remote name without spaces, control characters, path separators, ref metacharacters, leading dots, or a `.lock` suffix.",
-            "heddle remote list",
-        )
-    }
-
     pub(crate) fn hook_veto(hook: &str, action: &str, reason: impl Into<String>) -> Self {
         let reason = reason.into();
         Self::safety_refusal(
@@ -928,56 +919,6 @@ impl RecoveryAdvice {
                 "heddle remote list".to_string(),
                 "heddle remote add <name> <url>".to_string(),
             ],
-        )
-    }
-
-    pub(crate) fn git_remote_in_included_config(name: &str, path: &std::path::Path) -> Self {
-        let path = path.display();
-        Self::safety_refusal(
-            "git_remote_in_included_config",
-            format!(
-                "Remote '{name}' is defined in an included Git config that heddle won't edit: {path}"
-            ),
-            "Edit the included config file directly, or move the `[remote]` section into the repository's own `.git/config`.",
-            format!(
-                "remote '{name}' resolves to a `[remote]` section in '{path}', reached through an include.path/includeIf directive outside the repository's Git directory"
-            ),
-            "editing that file would mutate config the user pulled in via an include directive rather than the repository's own config",
-            "remote configuration, refs, objects, and worktree files were left unchanged",
-            "heddle remote list",
-            vec!["heddle remote list".to_string()],
-        )
-    }
-
-    pub(crate) fn git_overlay_tracking_refresh_failed(
-        remote_name: &str,
-        full_ref: &str,
-        cause: Option<String>,
-    ) -> Self {
-        let fetch_command = format!("git fetch {remote_name}");
-        let error = match cause {
-            Some(cause) => format!(
-                "Pushed to {remote_name}, but could not refresh local tracking ref {full_ref}: {cause}"
-            ),
-            None => {
-                format!(
-                    "Pushed to {remote_name}, but could not refresh local tracking ref {full_ref}"
-                )
-            }
-        };
-        Self::safety_refusal(
-            "git_overlay_tracking_refresh_failed",
-            error,
-            format!(
-                "Run `{fetch_command}` if `heddle verify` still reports remote drift after the push."
-            ),
-            format!("remote push completed, but local Git tracking ref {full_ref} was not updated"),
-            format!(
-                "updating {full_ref} would record the pushed HEAD as the local tracking view of {remote_name}"
-            ),
-            "the remote push completed; the failed tracking-ref refresh did not make additional local tracking changes",
-            fetch_command.clone(),
-            vec![fetch_command, "heddle verify".to_string()],
         )
     }
 

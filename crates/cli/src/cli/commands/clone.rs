@@ -17,7 +17,6 @@ use heddle_client::grpc_hosted::{HostedRefEntry, PullMaterialization};
 use heddle_core::{
     CloneMode, ClonePlanError, ClonePlanFacts, ClonePlanOptions, CloneRemoteSource,
     UnsupportedCloneFlag, looks_like_git_overlay_url, plan_clone,
-    status::next_action::canonical_git_import_ref_command,
 };
 #[cfg(feature = "client")]
 use heddle_core::{
@@ -38,10 +37,9 @@ use repo::{BlobHydrator, Repository};
 use serde::Serialize;
 #[cfg(feature = "client")]
 use sley::plumbing::sley_worktree;
-use sley::{
-    ConfigEdit, ConfigEditPlan, ConfigEditScope, ConfigSectionEntry, GitObjectType,
-    IndexWriteOptions, ObjectId, RefPrecondition, RemoteConfigSet, Repository as SleyRepository,
-};
+use sley::{GitObjectType, ObjectId};
+#[cfg(any(feature = "client", test))]
+use sley::Repository as SleyRepository;
 
 use super::{
     advice::RecoveryAdvice,
@@ -52,13 +50,7 @@ use crate::remote::credential_key_from_remote_url;
 use crate::{
     cli::{Cli, should_output_json, style},
     client::LocalSync,
-    git_projection_engine::{
-        GitProjection,
-        git_core::{
-            clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference, write_head_symref,
-        },
-        git_ingest::import_git_history,
-    },
+    git_projection_engine::git_core::open_repo,
     remote::{Remote, RemoteConfig, RemoteTarget},
 };
 

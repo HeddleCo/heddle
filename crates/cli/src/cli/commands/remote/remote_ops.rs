@@ -3,7 +3,6 @@
 
 #[cfg(feature = "client")]
 use std::net::SocketAddr;
-use std::path::Path;
 
 use anyhow::{Context, Result};
 #[cfg(feature = "client")]
@@ -134,6 +133,7 @@ fn map_pull_failure(failure: PullFailure) -> anyhow::Error {
 }
 
 /// Print unstyled domain pull text with CLI markers / emphasis.
+#[cfg(feature = "client")]
 fn render_pull_outcome_text(outcome: &PullOutcome, trust: &RepositoryVerificationState) {
     let text = format_pull_outcome_text(outcome, 8);
     if outcome.changed {
@@ -436,6 +436,7 @@ async fn pull_local(
     Ok(())
 }
 
+#[cfg(feature = "client")]
 async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Result<()> {
     let repo_path = options
         .repo_path

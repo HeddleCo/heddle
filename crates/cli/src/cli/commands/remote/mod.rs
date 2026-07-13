@@ -24,14 +24,12 @@ use heddle_core::{
     transport_error_message,
 };
 use objects::object::ThreadName;
-use refs::Head;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 #[cfg(feature = "client")]
 use wire::ProtocolError;
 
 use super::{
-    action_line::print_next,
     advice::RecoveryAdvice,
     auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
     command_catalog::{ActionFields, ActionTemplate},
@@ -351,76 +349,6 @@ pub(super) fn map_push_failure(failure: PushFailure) -> anyhow::Error {
                 anyhow!("failed to push thread '{track_name}': {error}")
             }
         }
-    }
-}
-
-/// Print unstyled domain push text with CLI markers / emphasis.
-fn render_push_outcome_text(
-    outcome: &PushOutcome,
-    track_name: Option<&str>,
-    trust: &RepositoryVerificationState,
-) {
-    let text = format_push_outcome_text(outcome, track_name);
-    // Restyle headline pieces lightly: keep domain wording, add ok marker.
-    println!("{} {}", style::ok_marker(), text.headline);
-    for line in &text.detail_lines {
-        if let Some(rest) = line.strip_prefix("Force: ") {
-            println!("Force: {rest}");
-        } else if let Some(rest) = line.strip_prefix("Git interop: published ") {
-            // Domain line is "Git interop: published refs/notes/heddle; …"
-            if let Some((notes, tail)) = rest.split_once(';') {
-                println!(
-                    "Git interop: published {};{}",
-                    style::bold(notes.trim()),
-                    tail
-                );
-            } else {
-                println!("{line}");
-            }
-        } else if let Some(rest) = line.strip_prefix("Git tracking: configured remote ") {
-            // "name -> url for future…"
-            if let Some((name, after)) = rest.split_once(" -> ") {
-                if let Some((url, tail)) = after.split_once(" for future") {
-                    println!(
-                        "Git tracking: configured remote {} -> {} for future{tail}",
-                        style::bold(name),
-                        style::dim(url)
-                    );
-                } else {
-                    println!("{line}");
-                }
-            } else {
-                println!("{line}");
-            }
-        } else if let Some(rest) = line.strip_prefix("Git tracking: branch ") {
-            // "branch tracks remote/branch."
-            if let Some((branch, after)) = rest.split_once(" tracks ") {
-                if let Some((remote, branch2)) = after.trim_end_matches('.').split_once('/') {
-                    println!(
-                        "Git tracking: branch {} tracks {}/{branch2}.",
-                        style::bold(branch),
-                        style::bold(remote),
-                    );
-                } else {
-                    println!("{line}");
-                }
-            } else {
-                println!("{line}");
-            }
-        } else {
-            println!("{line}");
-        }
-    }
-    println!(
-        "Workspace: {}",
-        if trust.verified {
-            style::accent("verified")
-        } else {
-            style::warn(&trust.status)
-        }
-    );
-    if !trust.recommended_action.is_empty() {
-        print_next(&trust.recommended_action);
     }
 }
 

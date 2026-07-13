@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Top-level CLI commands.
 
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{Args, Subcommand};
 
 #[cfg(feature = "client")]
 use super::AuthCommands;
