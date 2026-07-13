@@ -510,7 +510,7 @@ Existing budgets / other benches:
 
 - `crates/cli/tests/cli_integration/perf_core_loop.rs` (ignored release smoke)
 - Criterion benches under objects/refs/oplog/cli/mount/semantic
-- Weekly `.github/workflows/benchmarks.yml`
+- Manually dispatched `.github/workflows/benchmarks.yml`
 
 **Still open for broader speed claims:** multi-host / platform matrix, quieter-host
 re-run, and any cross-tool comparison with equal work and require-success.

@@ -18,7 +18,7 @@ This file does **not** invent product wins. Cross-check `GAP_MAP.md` L1/L2/L3/L6
 |------|--------|------------------|
 | Windows materialization (worktree / thread paths) | **Foundation** / residual open | See [Windows materialization inventory](#windows-materialization-inventory) below. Partial in product contract; edge-case certification **not** claimed. |
 | Windows ProjFS mount | **Foundation** | CI job `projfs-smoke` on `windows-latest` (`rust-tests.yml`); optional feature enable + ignored smoke; can self-skip if ProjFS unavailable. Mount is **optional** product surface at runtime (kernel adapter may be missing). |
-| Linux FUSE mount | **Foundation** | CI `fuse-smoke` + post-merge `fuse-bench` on `ubuntu-latest`. Optional `mount` feature / native adapter. |
+| Linux FUSE mount | **Foundation** | CI `fuse-smoke` on `ubuntu-latest`; performance coverage is manual via the `Benchmarks` workflow. Optional `mount` feature / native adapter. |
 | macOS FSKit mount | **Foundation** | CI `fskit-check` on `macos-26`: `cargo check -p heddle-mount --features fskit` when mount paths change — **compile**, not full mount e2e in PR matrix. |
 | Mount feature optional | **Shipped** (product stance) | Local VCS must not require FUSE/ProjFS/FSKit at runtime; failures degrade. (CLI Cargo `default` may include the `mount` feature for install convenience — product stance is still “mount not required for core VCS.”) |
 | packed-refs scale | **Shipped** with known degradation | Packed-refs implemented; **degrades ~10k+ refs** (`AGENTS.md`). Stress recipe: [`PACKED_REFS_STRESS.md`](PACKED_REFS_STRESS.md). |
@@ -73,7 +73,7 @@ Derived from `.github/workflows/rust-tests.yml` (and related workflows). Dogfood
 | Main `check-and-test` (build/clippy/tests, affected pkgs) | **Yes** — `blacksmith-4vcpu-ubuntu-2404-arm` | **No** (not the PR test matrix host) | **No** |
 | Facade render-free / path-change detection | **Yes** (`ubuntu-latest`) | No | No |
 | Fault-injection / coverage / postgres jobs | **Yes** (Linux ARM where configured) | No | No |
-| FUSE mount smoke / bench | **Yes** (`ubuntu-latest`, mount path changes / post-merge bench) | No | No |
+| FUSE mount smoke | **Yes** (`ubuntu-latest`, mount path changes); benchmarks are manual | No | No |
 | FSKit | No | **Compile check only** (`macos-26`, mount path changes) | No |
 | ProjFS mount smoke | No | No | **Yes** (`windows-latest`, mount path changes; may self-skip) |
 | Full curated program suite (`run-baseline.sh --suite curated`) | **Local/program stamps** (often macOS dogfood + Linux agents) — not a dedicated multi-OS GitHub matrix job named for Wave 7 | Program dogfood + release macOS build paths exist separately | **Unknown / not matrixed** as full curated suite |

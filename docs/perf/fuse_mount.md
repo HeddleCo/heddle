@@ -23,19 +23,9 @@ python3 scripts/fuse-bench-compare.py \
     --threshold 0.20
 ```
 
-The same compare runs in CI on every PR touching `crates/mount/`,
-`crates/objects/`, `crates/repo/`, `crates/refs/`, `crates/oplog/`,
-`crates/crypto/`, `crates/wire/`, `crates/runtime-bridge/`, the
-compare script and its tests, the workflow itself, or any
-workspace-shared build input (`Cargo.lock`, root `Cargo.toml`) —
-see the `fuse-bench-gate` + `fuse-bench` jobs in
-`.github/workflows/rust-tests.yml`. The crate list is the
-transitive closure under `crates/mount/Cargo.toml` (mount → repo →
-crypto/oplog/wire/objects/refs → optional runtime-bridge); update
-it when the mount adds or drops a transitive dep. The gate also
-runs fail-closed (i.e. runs the bench) if `git fetch` or `git
-diff` errors so a flaky base-branch fetch can't silently remove
-perf coverage.
+The manually dispatched `Benchmarks` workflow runs the complete Criterion
+suite, preserves raw artifacts and history, and applies this committed FUSE
+baseline comparison. Benchmarks are not part of automatic PR or push CI.
 
 ## What the bench measures
 
@@ -104,7 +94,7 @@ The budgets in the rightmost column are how-bad-is-too-bad, not
 how-good-we-want-to-be. They're picked from the first run of the
 suite (the "ratio" column) plus ~50% headroom for the kind of
 variance a shared CI runner produces. **Hitting a budget is *not*
-what fails the `fuse-bench` CI job** — the actual gate is
+what fails the manual `Benchmarks` workflow** — the actual gate is
 `scripts/fuse-bench-compare.py`'s `+20% vs baseline` check against
 `crates/mount/benches/fuse_e2e_baseline.json`. The budgets here are
 the editorial "this is what we tolerate against vanilla" view for

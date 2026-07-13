@@ -132,7 +132,7 @@ fn run_bench(worker_bin: &Path) {
     let p99 = durs[(SAMPLES * 99) / 100];
     let max = *durs.last().unwrap();
     println!("fuse_worker_ipc: p50={:?} p99={:?} max={:?}", p50, p99, max);
-    // Invariant: every [[bench]] the weekly workflow feeds to github-action-benchmark
+    // Invariant: every [[bench]] the manual workflow feeds to github-action-benchmark
     // must emit a libtest-format line parseable by `tool: cargo`; Criterion benches
     // get this from `--output-format bencher`, while custom-main benches print it.
     let p50_ns = p50.as_nanos();

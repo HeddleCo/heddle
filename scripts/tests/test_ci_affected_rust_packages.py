@@ -51,7 +51,6 @@ class AffectedRustPackagesTests(unittest.TestCase):
                 outputs[key] = value
         return {
             "all": outputs["all_packages"] == "true",
-            "bench_all": outputs["bench_all"] == "true",
             "selected": [
                 package for package in outputs["package_names_csv"].split(",") if package
             ],
@@ -95,10 +94,9 @@ class AffectedRustPackagesTests(unittest.TestCase):
         result = self.select(["Cargo.lock"])
         self.assertTrue(result["all"])
 
-    def test_explicit_all_selects_every_package_and_benchmarks(self):
+    def test_explicit_all_selects_every_package(self):
         result = self.select_all()
         self.assertTrue(result["all"])
-        self.assertTrue(result["bench_all"])
         self.assertEqual(
             result["selected"],
             ["heddle-objects", "heddle-repo", "heddle-cli", "heddle-review"],

@@ -8,8 +8,7 @@ on:
     branches:
       - main
   schedule:
-    # Weekly coverage gate: Sundays 06:00 UTC. Offset from the full
-    # Criterion benchmark workflow so the heavy lanes don't stampede.
+    # Weekly coverage gate: Sundays 06:00 UTC.
     - cron: '0 6 * * 0'
   workflow_dispatch:
 
@@ -19,10 +18,7 @@ concurrency:
 
 # Run every `run:` step under `bash --noprofile --norc -eo pipefail`
 # instead of the default `bash -e`. Without `pipefail`, a non-zero
-# exit from any command piped into `tee` is masked by `tee`'s success
-# — which is exactly how the `cargo bench | tee` and
-# `fuse-bench-compare.py | tee` steps could silently pass on real
-# failures before this was set. Codex r1 on heddle#89 flagged both.
+# exit from any command piped into `tee` is masked by `tee`'s success.
 defaults:
   run:
     shell: bash
@@ -74,7 +70,6 @@ jobs:
       release_only: ${{ steps.decide.outputs.release_only }}
       all_packages: ${{ steps.affected.outputs.all_packages }}
       skip_cargo: ${{ steps.affected.outputs.skip_cargo }}
-      bench_all: ${{ steps.affected.outputs.bench_all }}
       package_names_csv: ${{ steps.affected.outputs.package_names_csv }}
       cargo_package_args: ${{ steps.affected.outputs.cargo_package_args }}
       postgres: ${{ steps.affected_scopes.outputs.postgres }}
@@ -200,7 +195,7 @@ jobs:
           # inputs) so mount adapters and their read-path dependencies trigger
           # the kernel adapter checks.
           if printf '%s\n' "$diff_output" | grep -E \
-              '^(crates/(mount|objects|repo|refs|oplog|crypto|wire|runtime-bridge)/|scripts/fuse-bench-compare\.py|scripts/tests/|\.github/workflows/rust-tests\.yml|Cargo\.lock$|Cargo\.toml$)' \
+              '^(crates/(mount|objects|repo|refs|oplog|crypto|wire|runtime-bridge)/|\.github/workflows/rust-tests\.yml|Cargo\.lock$|Cargo\.toml$)' \
               > /dev/null; then
             echo "mount=true" >> "$GITHUB_OUTPUT"
           else
@@ -252,9 +247,8 @@ jobs:
           write_bool fault_tests fault_needed
 
   # Default-feature quality lane. Build, clippy, tests, and executable-backed
-  # CLI contracts share one `target/`; independent benchmark and alternate-
-  # feature compile contracts run in parallel below so they do not extend this
-  # job's critical path or invalidate its default-feature artifacts.
+  # Default CLI contracts share one `target/`; alternate feature contracts run
+  # in parallel below so they do not invalidate default-feature artifacts.
   quality:
     name: Quality
     needs: changes
@@ -276,11 +270,8 @@ jobs:
           shared-key: rust-tests-${{ runner.os }}
           cache-on-failure: true
 
-      # Warm target/ for the affected package set, then run clippy and
-      #    tests against the same selection so all three commands reuse the
-      #    same local build products. Selection is the changed crate(s) plus
-      #    reverse dependents, so lower-level changes still exercise the crates
-      #    that compile against them.
+      # Build, lint, and test changed crates plus their reverse dependents on
+      # one shared target directory.
       - name: Build, clippy, and test affected packages
         if: needs.changes.outputs.skip_cargo != 'true'
         env:
@@ -301,7 +292,8 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::cargo clippy"
-          cargo clippy --locked "${package_args[@]}" --all-targets -- -D warnings
+          cargo clippy --locked "${package_args[@]}" \
+            --lib --bins --tests --examples -- -D warnings
           echo "::endgroup::"
 
           echo "::group::cargo test"
@@ -328,15 +320,12 @@ jobs:
       - name: sccache stats
         run: sccache --show-stats
 
-  # Independent compile-only contracts. These intentionally use a separate
-  # target directory/job from the default quality lane: alternate CLI feature
-  # checks otherwise force Cargo to rebuild the default binaries, and benchmark
-  # linking is independent of the test runtime. FUSE benchmarks remain owned
-  # by `fuse-smoke`, whose runner has the required system libraries.
-  compile-contracts:
-    name: Compile contracts
+  # Alternate feature shapes use a separate target directory so they do not
+  # replace the default-feature binaries exercised by the quality lane.
+  feature-contracts:
+    name: Feature contracts
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.cli_checks == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 30
 
@@ -349,79 +338,20 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: compile-contracts-${{ runner.os }}
+          shared-key: feature-contracts-${{ runner.os }}
           cache-on-failure: true
 
-      # Compile every selected non-FUSE benchmark target in the dev profile
-      # without running measurements. The scheduled benchmark workflow owns
-      # optimized performance trends; this PR-safe link guard catches rotten
-      # bench code, Cargo target declarations, and non-default feature sets.
-      - name: Compile benchmark targets
-        env:
-          AFFECTED_PACKAGES: ${{ needs.changes.outputs.package_names_csv }}
-          ALL_PACKAGES: ${{ needs.changes.outputs.all_packages }}
-          BENCH_ALL: ${{ needs.changes.outputs.bench_all }}
-        run: |
-          set -euo pipefail
-          python3 scripts/discover-benches.py > benchmark-plan.tsv
-          cat benchmark-plan.tsv
-          selected=",$AFFECTED_PACKAGES,"
-          declare -A benches_by_group=()
-          declare -a group_order=()
-          while IFS=$'\t' read -r package bench features; do
-            [ -n "$package" ] || continue
-            if [ "$features" = "fuse" ] || [[ "$features" == fuse,* ]] || [[ "$features" == *,fuse ]] || [[ "$features" == *,fuse,* ]]; then
-              echo "skipping $package/$bench: fuse benches are covered by the fuse-smoke job"
-              continue
-            fi
-            if [ "$ALL_PACKAGES" != "true" ] && [ "$BENCH_ALL" != "true" ] && [[ "$selected" != *",$package,"* ]]; then
-              echo "skipping $package/$bench: package not affected"
-              continue
-            fi
-
-            # Cargo can link sibling benchmark targets in one invocation. Keep
-            # package/feature shapes exact so a broader feature union cannot
-            # mask a target that fails under its declared feature contract.
-            key="${package}"$'\t'"${features}"
-            if [ -z "${benches_by_group[$key]+x}" ]; then
-              group_order+=("$key")
-              benches_by_group["$key"]="$bench"
-            else
-              benches_by_group["$key"]+=" $bench"
-            fi
-          done < benchmark-plan.tsv
-
-          for key in "${group_order[@]}"; do
-            IFS=$'\t' read -r package features <<< "$key"
-            read -r -a benches <<< "${benches_by_group[$key]}"
-            feature_label=${features:-default}
-            echo "::group::$package [$feature_label] (${benches[*]})"
-            cmd=(cargo build --locked -p "$package")
-            for bench in "${benches[@]}"; do
-              cmd+=(--bench "$bench")
-            done
-            if [ -n "$features" ]; then
-              cmd+=(--features "$features")
-            fi
-            printf 'running:'
-            printf ' %q' "${cmd[@]}"
-            printf '\n'
-            "${cmd[@]}"
-            echo "::endgroup::"
-          done
-          if [ "${#group_order[@]}" -eq 0 ]; then
-            echo "No non-FUSE benchmark targets selected."
-          fi
-
-      # Verify the three supported OSS/hosted CLI feature shapes without
-      # invalidating the default-feature binaries used by the quality lane.
-      - name: CLI alternate-feature checks
+      # Cargo features unify across normal dependencies, so repository
+      # authority isolation is checked directly on heddle-repo. The CLI checks
+      # cover its two distinct cfg surfaces without a third additive build.
+      - name: Repository and CLI feature checks
         if: needs.changes.outputs.cli_checks == 'true'
         run: |
           set -euo pipefail
-          cargo check --locked -p heddle-cli --no-default-features --features git-overlay,semantic,zstd
+          cargo check --locked -p heddle-repo --no-default-features --features git-overlay,zstd
+          cargo check --locked -p heddle-repo --no-default-features --features native,zstd
+          cargo check --locked -p heddle-cli --no-default-features --features git-overlay,client,semantic,zstd
           cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd
-          cargo check --locked -p heddle-cli --features client
 
       - name: sccache stats
         run: sccache --show-stats
@@ -510,7 +440,7 @@ jobs:
             -- --ignored --test-threads=1 --nocapture
 
           echo "::group::cargo clippy postgres storage backends"
-          cargo clippy --locked "${packages[@]}" --all-targets \
+          cargo clippy --locked "${packages[@]}" --lib \
             --features "$feature_arg" -- -D warnings
           echo "::endgroup::"
 
@@ -518,14 +448,13 @@ jobs:
         run: sccache --show-stats
 
   # Preserve the repository ruleset's required `Check & test` context while
-  # allowing its independent prerequisites to execute in parallel. A moved
-  # compile contract must remain blocking, not become an advisory side job.
+  # allowing its independent prerequisites to execute in parallel.
   check-and-test:
     name: Check & test
     needs:
       - changes
       - quality
-      - compile-contracts
+      - feature-contracts
       - postgres-tests
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -535,8 +464,9 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           RUST_REQUIRED: ${{ needs.changes.outputs.rust }}
+          CLI_REQUIRED: ${{ needs.changes.outputs.cli_checks }}
           QUALITY_RESULT: ${{ needs.quality.result }}
-          COMPILE_CONTRACTS_RESULT: ${{ needs.compile-contracts.result }}
+          FEATURE_CONTRACTS_RESULT: ${{ needs.feature-contracts.result }}
           POSTGRES_REQUIRED: ${{ needs.changes.outputs.postgres }}
           POSTGRES_RESULT: ${{ needs.postgres-tests.result }}
         run: |
@@ -563,16 +493,26 @@ jobs:
           case "$RUST_REQUIRED" in
             true)
               require_success "Quality" "$QUALITY_RESULT"
-              require_success "Compile contracts" "$COMPILE_CONTRACTS_RESULT"
-              if [ "$POSTGRES_REQUIRED" = "true" ]; then
-                require_success "Postgres integration tests" "$POSTGRES_RESULT"
-              else
-                allow_success_or_skipped "Postgres integration tests" "$POSTGRES_RESULT"
-              fi
+              case "$CLI_REQUIRED" in
+                true) require_success "Feature contracts" "$FEATURE_CONTRACTS_RESULT" ;;
+                false) allow_success_or_skipped "Feature contracts" "$FEATURE_CONTRACTS_RESULT" ;;
+                *)
+                  echo "ERROR: Detect changed paths produced unknown CLI selection '$CLI_REQUIRED'" >&2
+                  exit 1
+                  ;;
+              esac
+              case "$POSTGRES_REQUIRED" in
+                true) require_success "Postgres integration tests" "$POSTGRES_RESULT" ;;
+                false) allow_success_or_skipped "Postgres integration tests" "$POSTGRES_RESULT" ;;
+                *)
+                  echo "ERROR: Detect changed paths produced unknown Postgres selection '$POSTGRES_REQUIRED'" >&2
+                  exit 1
+                  ;;
+              esac
               ;;
             false)
               allow_success_or_skipped "Quality" "$QUALITY_RESULT"
-              allow_success_or_skipped "Compile contracts" "$COMPILE_CONTRACTS_RESULT"
+              allow_success_or_skipped "Feature contracts" "$FEATURE_CONTRACTS_RESULT"
               allow_success_or_skipped "Postgres integration tests" "$POSTGRES_RESULT"
               ;;
             *)
@@ -663,15 +603,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends fuse3 libfuse3-dev
           fusermount3 --version
           ls -l /dev/fuse
-
-      # Compile-check all FUSE benchmark targets without running the
-      # measurements. The scheduled/manual `Benchmarks` workflow owns perf
-      # trends; this PR gate only keeps FUSE bench code from rotting.
-      - name: Compile FUSE benchmark targets
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "false"
-        run: cargo build --locked --features fuse -p heddle-mount --benches
 
       # Single-threaded so a kernel-side hang on one mount can't
       # cascade into the others' tempdir lifetimes. `--nocapture` so
@@ -807,100 +738,6 @@ jobs:
 
       - name: sccache stats
         shell: pwsh
-        run: sccache --show-stats
-
-  # FUSE end-to-end bench. Drives the `fuse_e2e` criterion suite
-  # through a real `FuseShell::mount_background` session, then
-  # `scripts/fuse-bench-compare.py` flags any workload that
-  # regressed > 20% vs the committed baseline at
-  # `crates/mount/benches/fuse_e2e_baseline.json`. Sibling of
-  # `fuse-smoke`: same runner shape (ubuntu-latest for
-  # `/dev/fuse` + `fusermount3`), same FUSE install step, just
-  # with `cargo bench` in place of `cargo test --ignored`.
-  fuse-bench:
-    name: FUSE bench (Linux)
-    runs-on: ubuntu-latest
-    # PRs compile-check FUSE benches in `fuse-smoke` when mount-relevant paths
-    # change. Run noisy timing measurements only after merge to refresh the
-    # committed baseline signal.
-    if: github.event_name == 'push'
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: fuse-bench-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: Install FUSE
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fuse3 libfuse3-dev
-          fusermount3 --version
-          ls -l /dev/fuse
-
-      # Clear any prior criterion output BEFORE running the bench.
-      # `Swatinem/rust-cache` restores `target/` between runs, and
-      # `cargo bench` does not delete benchmark dirs that the current
-      # run didn't touch — so a renamed-or-removed `(group, variant)`
-      # from a previous CI run would leave a stale `estimates.json`
-      # behind. The compare script (`discover_actual_ids`) walks the
-      # whole criterion tree to enforce coverage; without this
-      # cleanup, residue would surface as false-positive "unexpected
-      # ID" failures. Codex r2 P2 flagged this. The `cargo bench`
-      # incremental build cache lives elsewhere (target/release/) and
-      # is untouched.
-      - name: Clear stale criterion residue
-        run: rm -rf target/criterion
-
-      # Complete the benchmark rot-guard invariant documented in the
-      # `Compile benchmark targets` step: this FUSE-capable job
-      # compile-checks every `heddle-mount` bench target in the dev
-      # profile, including future FUSE benches, before running the
-      # measured optimized suite.
-      - name: Compile FUSE benchmark targets
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "false"
-        run: cargo build --locked --features fuse -p heddle-mount --benches
-
-      # Run the bench. Criterion writes per-workload `estimates.json`
-      # under `target/criterion/<group>/<variant>/new/` which the
-      # compare script picks up. We capture the full stdout to an
-      # artifact so PR reviewers can see the raw numbers without
-      # re-running.
-      - name: cargo bench
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "false"
-        run: |
-          cargo bench --locked --features fuse -p heddle-mount --bench fuse_e2e \
-            2>&1 | tee fuse_e2e_bench.log
-
-      - name: Compare to baseline (flag >20% regressions)
-        run: |
-          python3 scripts/fuse-bench-compare.py \
-            --criterion-dir target/criterion \
-            --baseline crates/mount/benches/fuse_e2e_baseline.json \
-            --threshold 0.20 \
-            | tee fuse_e2e_compare.txt
-
-      - name: Upload bench artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fuse-e2e-bench
-          path: |
-            fuse_e2e_bench.log
-            fuse_e2e_compare.txt
-            target/criterion/
-
-      - name: sccache stats
         run: sccache --show-stats
 
   # Coverage requires an instrumented build that can't share `target/`

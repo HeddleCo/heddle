@@ -8,7 +8,7 @@ set -euo pipefail
 # intentionally fail-closed: workspace-wide inputs or unknown build-relevant
 # paths select the whole workspace. Crate paths select the owning crate plus
 # every workspace crate that depends on it, including dev-dependencies, because
-# `cargo test` and `cargo clippy --all-targets` compile test targets too.
+# the quality lane compiles test targets too.
 
 DOC_PACKAGE=heddle-cli
 CLI_PACKAGE=heddle-cli
@@ -140,7 +140,6 @@ add_direct_package() {
 }
 
 all_packages=false
-bench_all=false
 
 classify_path() {
   local path=$1
@@ -152,17 +151,12 @@ classify_path() {
       add_reason "$path: workspace-wide Rust input"
       return 0
       ;;
-    scripts/discover-benches.py)
-      bench_all=true
-      add_reason "$path: benchmark discovery changed"
-      return 0
-      ;;
     scripts/check-default-cli-contracts.sh)
       add_direct_package "$CLI_PACKAGE"
       add_reason "$path: CLI executable contract changed"
       return 0
       ;;
-    scripts/fuse-bench-compare.py|scripts/tests/*)
+    scripts/discover-benches.py|scripts/fuse-bench-compare.py|scripts/tests/*)
       add_reason "$path: script-only Rust-lane check"
       return 0
       ;;
@@ -195,7 +189,6 @@ classify_path() {
 
 if [ "$select_all" = "true" ]; then
   all_packages=true
-  bench_all=true
   add_reason "explicit full-workspace selection"
 else
   path_count=0
@@ -208,7 +201,6 @@ else
 
   if [ "$path_count" -eq 0 ]; then
     all_packages=true
-    bench_all=true
     add_reason "empty changed-path list; fail-closed full workspace"
   fi
 fi
@@ -257,12 +249,6 @@ else
   done
 fi
 
-if [ "$bench_all" = "true" ] || [ "$all_packages" = "true" ]; then
-  bench_all_output=true
-else
-  bench_all_output=false
-fi
-
 if [ "${#selected_names[@]}" -eq 0 ]; then
   skip_cargo=true
 else
@@ -290,7 +276,6 @@ reason=${reason//$'\n'/ }
 outputs=(
   "all_packages=$all_packages"
   "skip_cargo=$skip_cargo"
-  "bench_all=$bench_all_output"
   "package_names_csv=$package_names_csv"
   "cargo_package_args=$cargo_package_args"
   "reason=$reason"
