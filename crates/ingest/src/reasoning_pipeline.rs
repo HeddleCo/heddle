@@ -68,7 +68,7 @@ pub struct ReasoningPipelineParams {
     pub keep: KeepParams,
     /// Write surviving annotations to the Heddle store. Dry-run callers
     /// set this false so matching/extraction/quality scoring still run,
-    /// but no state is mutated.
+    /// but no context attachment is written.
     pub emit_annotations: bool,
     /// Maximum candidate-quality examples to retain for dry-run reports.
     pub preview_limit: usize,
@@ -1033,14 +1033,19 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, Utc};
     use objects::{
-        object::{Blob, Tree, TreeEntry},
+        object::{Blob, StateAttachmentBody, Tree, TreeEntry},
         store::InMemoryStore,
     };
-    use repo::Repository;
+    use repo::{Repository, StateAttachmentKind};
     use tempfile::TempDir;
 
     use super::*;
     use crate::transcript::{FileTouch, TouchKind};
+
+    fn test_state_id() -> StateId {
+        static NEXT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+        StateId::from_bytes([NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); 32])
+    }
 
     /// Write a small Claude JSONL transcript to disk that touches
     /// `src/auth.rs` and emits a load-bearing rule in an assistant
@@ -1271,9 +1276,14 @@ mod tests {
         // Verify the annotation surface: the state for head_sha should
         // now have a context blob at __files/src/auth.rs with an
         // Invariant-kind annotation.
-        let change_id = map.get_commit(&head_sha).unwrap();
-        let state = repo.store().get_state(&change_id).unwrap().unwrap();
-        let root = state.context.expect("context should be set");
+        let state_id = map.get_commit(&head_sha).unwrap();
+        let attachment = repo
+            .latest_state_attachment(&state_id, StateAttachmentKind::Context)
+            .unwrap()
+            .expect("context attachment should be set");
+        let StateAttachmentBody::Context(root) = attachment.body else {
+            panic!("expected context attachment")
+        };
         let blob = repo
             .get_context_blob(&root, &ContextTarget::file("src/auth.rs").unwrap())
             .unwrap()
@@ -1454,13 +1464,10 @@ mod tests {
     #[test]
     fn default_commits_are_sorted() {
         let mut map = ShaMap::new();
-        use objects::object::ChangeId;
-        map.insert_commit(&"b".repeat(40), ChangeId::generate())
-            .unwrap();
-        map.insert_commit(&"a".repeat(40), ChangeId::generate())
-            .unwrap();
-        map.insert_commit(&"c".repeat(40), ChangeId::generate())
-            .unwrap();
+        use objects::object::StateId;
+        map.insert_commit(&"b".repeat(40), test_state_id()).unwrap();
+        map.insert_commit(&"a".repeat(40), test_state_id()).unwrap();
+        map.insert_commit(&"c".repeat(40), test_state_id()).unwrap();
         let got = pipeline_default_commits(&map);
         let want: Vec<String> = vec!["a".repeat(40), "b".repeat(40), "c".repeat(40)];
         assert_eq!(got, want);
