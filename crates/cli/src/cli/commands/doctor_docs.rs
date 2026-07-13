@@ -1048,7 +1048,7 @@ mod tests {
     fn rejects_authority_inconsistent_recommendations() {
         for invocation in [
             "`heddle fetch origin`",
-            "`heddle thread switch main`",
+            "`heddle switch main`",
             "`heddle land feature --push`",
             "`heddle land feature --publish`",
         ] {
@@ -1061,6 +1061,21 @@ mod tests {
                 "expected authority-conflict finding for {invocation}: {issues:?}",
             );
         }
+    }
+
+    #[test]
+    fn accepts_native_thread_switch_recommendations() {
+        let mut issues = Vec::new();
+        scan_markdown(
+            "test.md",
+            "Resume work with `heddle thread switch main`.",
+            &cli(),
+            &mut issues,
+        );
+        assert!(
+            issues.is_empty(),
+            "thread switch is part of Heddle's native thread surface: {issues:?}",
+        );
     }
 
     #[test]

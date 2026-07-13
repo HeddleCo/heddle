@@ -888,7 +888,10 @@ mod tests {
         )));
         let classified = classify_error(&dirty);
         assert_ne!(classified.primary_command, "heddle help --output json");
-        assert_eq!(classified.recovery_commands.len(), 3);
+        assert_eq!(
+            classified.recovery_commands,
+            vec![super::super::advice::DIRTY_WORKTREE_CAPTURE_COMMAND.to_string()]
+        );
     }
 
     #[test]
