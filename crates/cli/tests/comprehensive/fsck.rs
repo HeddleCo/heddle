@@ -25,9 +25,16 @@ fn test_fsck_orphaned_objects() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "content");
 
+    heddle(&["thread", "create", "orphan"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "orphan"], Some(temp.path())).unwrap();
     fs::write(temp.path().join("orphan.txt"), "orphan content").unwrap();
     heddle(&["capture", "-m", "Orphan"], Some(temp.path())).unwrap();
-    heddle(&["switch", "HEAD~1"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+    heddle(
+        &["thread", "drop", "orphan", "--delete-thread"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     let result = heddle(&["fsck", "--full"], Some(temp.path()));
     assert!(result.is_ok(), "fsck should complete: {:?}", result.err());

@@ -2,17 +2,23 @@
 use super::*;
 
 #[test]
-fn test_init_in_existing_repo() {
+fn test_init_in_existing_repo_is_idempotent() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    fs::write(temp.path().join("file.txt"), "content").unwrap();
+    heddle(&["capture", "-m", "Initial"], Some(temp.path())).unwrap();
+    let state_before = status_json(temp.path())["state"]["state_id"].clone();
 
     let result = heddle(&["init"], Some(temp.path()));
-    assert!(result.is_err(), "should fail to init in existing repo");
-    let err = result.unwrap_err();
     assert!(
-        err.contains("already exists") || err.contains("already initialized"),
-        "should report repo exists: {}",
-        err
+        result.is_ok(),
+        "reinitializing an existing repo should succeed: {:?}",
+        result.err()
+    );
+    assert_eq!(
+        status_json(temp.path())["state"]["state_id"],
+        state_before,
+        "idempotent init must preserve the current state"
     );
 }
 
@@ -29,21 +35,12 @@ fn test_init_in_nested_directory() {
 }
 
 #[test]
-fn test_goto_nonexistent_state() {
+fn test_switch_nonexistent_thread() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "content");
 
-    let result = heddle(&["switch", "hs-deadbeef1234"], Some(temp.path()));
-    assert!(result.is_err(), "goto nonexistent state should fail");
-}
-
-#[test]
-fn test_goto_invalid_state_format() {
-    let temp = TempDir::new().unwrap();
-    setup_repo_with_file(&temp, "file.txt", "content");
-
-    let result = heddle(&["switch", "not-a-valid-id"], Some(temp.path()));
-    assert!(result.is_err(), "goto invalid format should fail");
+    let result = heddle(&["thread", "switch", "nonexistent"], Some(temp.path()));
+    assert!(result.is_err(), "switching to a missing thread should fail");
 }
 
 #[test]
@@ -55,12 +52,12 @@ fn test_snapshot_in_non_repo() {
 }
 
 #[test]
-fn test_merge_nonexistent_track() {
+fn test_land_nonexistent_thread() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "content");
 
-    let result = heddle(&["merge", "nonexistent"], Some(temp.path()));
-    assert!(result.is_err(), "merge nonexistent thread should fail");
+    let result = heddle(&["land", "--thread", "nonexistent"], Some(temp.path()));
+    assert!(result.is_err(), "landing a missing thread should fail");
 }
 
 #[test]
