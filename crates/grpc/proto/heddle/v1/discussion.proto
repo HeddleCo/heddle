@@ -2,18 +2,32 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "google/protobuf/timestamp.proto";
 import "heddle/v1/content.proto";
 import "heddle/v1/state_review.proto";
 
 // Discussion CRUD over the per-state `Discussion` blob.
 service DiscussionService {
-  rpc OpenDiscussion(OpenDiscussionRequest) returns (Discussion);
-  rpc AppendTurn(AppendTurnRequest) returns (Discussion);
-  rpc ResolveDiscussion(ResolveDiscussionRequest) returns (Discussion);
-  rpc ListByState(ListDiscussionsByStateRequest) returns (ListDiscussionsResponse);
-  rpc ListBySymbol(ListDiscussionsBySymbolRequest) returns (ListDiscussionsResponse);
-  rpc GetDiscussion(GetDiscussionRequest) returns (Discussion);
+  rpc OpenDiscussion(OpenDiscussionRequest) returns (Discussion) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc AppendTurn(AppendTurnRequest) returns (Discussion) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ResolveDiscussion(ResolveDiscussionRequest) returns (Discussion) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ListByState(ListDiscussionsByStateRequest) returns (ListDiscussionsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc ListBySymbol(ListDiscussionsBySymbolRequest) returns (ListDiscussionsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetDiscussion(GetDiscussionRequest) returns (Discussion) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 }
 
 message OpenDiscussionRequest {
@@ -24,14 +38,14 @@ message OpenDiscussionRequest {
   // Optional override; empty uses the configured discussion visibility policy.
   string visibility = 5;
   string thread_ref = 6;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message AppendTurnRequest {
   string repo_path = 1;
   string discussion_id = 2;
   string body = 3;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message ResolveDiscussionRequest {
@@ -45,7 +59,7 @@ message ResolveDiscussionRequest {
     ResolveByEdit by_edit = 4;
     ResolveDismissed dismissed = 5;
   }
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 
   message ResolveIntoAnnotation {
     ContextAnnotationKind kind = 1;

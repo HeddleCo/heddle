@@ -2,22 +2,32 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "google/protobuf/timestamp.proto";
 
 // Transactions buffer multiple state-changing operations and apply
 // them atomically on commit.
 service TransactionService {
-  rpc BeginTransaction(BeginTransactionRequest) returns (BeginTransactionResponse);
-  rpc CommitTransaction(CommitTransactionRequest) returns (CommitTransactionResponse);
-  rpc AbortTransaction(AbortTransactionRequest) returns (AbortTransactionResponse);
-  rpc GetTransactionStatus(GetTransactionStatusRequest) returns (TransactionStatus);
+  rpc BeginTransaction(BeginTransactionRequest) returns (BeginTransactionResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc CommitTransaction(CommitTransactionRequest) returns (CommitTransactionResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc AbortTransaction(AbortTransactionRequest) returns (AbortTransactionResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc GetTransactionStatus(GetTransactionStatusRequest) returns (TransactionStatus) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 }
 
 message BeginTransactionRequest {
   string repo_path = 1;
   string thread = 2;
   string message = 3;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message BeginTransactionResponse {
@@ -28,7 +38,7 @@ message BeginTransactionResponse {
 message CommitTransactionRequest {
   string repo_path = 1;
   string transaction_id = 2;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message CommitTransactionResponse {
@@ -40,7 +50,7 @@ message AbortTransactionRequest {
   string repo_path = 1;
   string transaction_id = 2;
   string reason = 3;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message AbortTransactionResponse {

@@ -2,22 +2,41 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "google/protobuf/timestamp.proto";
 import "heddle/v1/common.proto";
 import "heddle/v1/policies.proto";
 import "heddle/v1/support.proto";
-import "heddle/v1/threads.proto";
 
 service HostedUserService {
-  rpc GetCurrentUserNamespace(GetCurrentUserNamespaceRequest) returns (HostedNamespace);
-  rpc CreateNamespace(CreateNamespaceRequest) returns (HostedNamespace);
-  rpc UpdateNamespace(UpdateNamespaceRequest) returns (HostedNamespace);
-  rpc SetNamespaceVisibility(SetNamespaceVisibilityRequest) returns (HostedNamespace);
-  rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteResponse);
-  rpc CreateRepository(CreateRepositoryRequest) returns (HostedRepository);
-  rpc ListSpools(ListSpoolsRequest) returns (ListSpoolsResponse);
-  rpc UpdateRepository(UpdateRepositoryRequest) returns (HostedRepository);
-  rpc DeleteRepository(DeleteRepositoryRequest) returns (DeleteResponse);
+  rpc GetCurrentUserNamespace(GetCurrentUserNamespaceRequest) returns (HostedNamespace) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc CreateNamespace(CreateNamespaceRequest) returns (HostedNamespace) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc UpdateNamespace(UpdateNamespaceRequest) returns (HostedNamespace) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc SetNamespaceVisibility(SetNamespaceVisibilityRequest) returns (HostedNamespace) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc CreateRepository(CreateRepositoryRequest) returns (HostedRepository) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ListSpools(ListSpoolsRequest) returns (ListSpoolsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc UpdateRepository(UpdateRepositoryRequest) returns (HostedRepository) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc DeleteRepository(DeleteRepositoryRequest) returns (DeleteResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
   // ── Unified spool settings (any spool: namespace or repo) ────────
   // One settings-READ + two settings-WRITEs keyed on `full_path`, so the
@@ -28,25 +47,41 @@ service HostedUserService {
   // contract only (weft#472).
   //
   // Read the full settings + summary metadata for any spool in one call.
-  rpc GetSpool(GetSpoolRequest) returns (HostedSpool);
+  rpc GetSpool(GetSpoolRequest) returns (HostedSpool) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // Write a spool's visibility (separate storage column). Mirrors
   // SetNamespaceVisibility but keyed on `full_path` so it applies to repos too.
-  rpc SetSpoolVisibility(SetSpoolVisibilityRequest) returns (HostedSpool);
+  rpc SetSpoolVisibility(SetSpoolVisibilityRequest) returns (HostedSpool) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
   // Write a spool's general settings (description, etc.). Gives repos a
   // description-write path (UpdateRepository stays rename-only). The server
   // enforces which fields are settable.
-  rpc UpdateSpoolSettings(UpdateSpoolSettingsRequest) returns (HostedSpool);
-  rpc CreateGrant(CreateGrantRequest) returns (HostedGrant);
-  rpc ListGrants(ListGrantsRequest) returns (ListGrantsResponse);
-  rpc UpdateGrant(UpdateGrantRequest) returns (HostedGrant);
-  rpc DeleteGrant(DeleteGrantRequest) returns (DeleteResponse);
+  rpc UpdateSpoolSettings(UpdateSpoolSettingsRequest) returns (HostedSpool) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc CreateGrant(CreateGrantRequest) returns (HostedGrant) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ListGrants(ListGrantsRequest) returns (ListGrantsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc UpdateGrant(UpdateGrantRequest) returns (HostedGrant) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc DeleteGrant(DeleteGrantRequest) returns (DeleteResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
   // Resolve opaque subjects (from grants/annotations) to human display
   // info. Today only WhoAmI exists (current session); this is the batch
   // subject-resolution surface the grant/member UIs need so they can render
   // a name + handle instead of the raw subject. Backend impl lives in weft
   // (a follow-up); this is the contract only.
-  rpc ResolveSubjects(ResolveSubjectsRequest) returns (ResolveSubjectsResponse);
+  rpc ResolveSubjects(ResolveSubjectsRequest) returns (ResolveSubjectsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 
   // Resolve a bare handle name (canonical text or bare name) to its
   // principal, so the frontend can route `/gh:<name>` / `/<name>` /
@@ -57,57 +92,111 @@ service HostedUserService {
   // redirect target when available; an active name → the principal. The
   // subject must NOT appear except as that `/u:` redirect target. Backend
   // impl lives in weft (a follow-up); this is the contract only (weft#467).
-  rpc ResolveHandle(ResolveHandleRequest) returns (ResolveHandleResponse);
+  rpc ResolveHandle(ResolveHandleRequest) returns (ResolveHandleResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 
   // ── Thread merge approvals ───────────────────────────────────────
-  rpc ApproveThread(ApproveThreadRequest) returns (ThreadApproval);
-  rpc RevokeApproval(RevokeApprovalRequest) returns (DeleteResponse);
-  rpc ListThreadApprovals(ListThreadApprovalsRequest) returns (ListThreadApprovalsResponse);
-  rpc CheckMergeEligibility(CheckMergeEligibilityRequest) returns (CheckMergeEligibilityResponse);
+  rpc ApproveThread(ApproveThreadRequest) returns (ThreadApproval) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc RevokeApproval(RevokeApprovalRequest) returns (DeleteResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ListThreadApprovals(ListThreadApprovalsRequest) returns (ListThreadApprovalsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc CheckMergeEligibility(CheckMergeEligibilityRequest) returns (CheckMergeEligibilityResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 
   // ── Namespace-scoped invitations and members (formerly admin) ────
-  rpc CreateInvitation(CreateInvitationRequest) returns (Invitation);
-  rpc ListInvitations(ListInvitationsRequest) returns (ListInvitationsResponse);
-  rpc RevokeInvitation(RevokeInvitationRequest) returns (DeleteResponse);
-  rpc ListMembers(ListMembersRequest) returns (ListMembersResponse);
+  rpc CreateInvitation(CreateInvitationRequest) returns (Invitation) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ListInvitations(ListInvitationsRequest) returns (ListInvitationsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc RevokeInvitation(RevokeInvitationRequest) returns (DeleteResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ListMembers(ListMembersRequest) returns (ListMembersResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 
   // ── Approval groups (reusable approver pools) ────────────────────
   // Admin role on the repo's parent namespace required to create or
   // mutate; Reader is enough to list.
-  rpc CreateApprovalGroup(CreateApprovalGroupRequest) returns (ApprovalGroup);
-  rpc ListApprovalGroups(ListApprovalGroupsRequest) returns (ListApprovalGroupsResponse);
-  rpc DeleteApprovalGroup(DeleteApprovalGroupRequest) returns (DeleteResponse);
-  rpc AddApprovalGroupMember(AddApprovalGroupMemberRequest) returns (ApprovalGroupMember);
-  rpc RemoveApprovalGroupMember(RemoveApprovalGroupMemberRequest) returns (DeleteResponse);
+  rpc CreateApprovalGroup(CreateApprovalGroupRequest) returns (ApprovalGroup) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ListApprovalGroups(ListApprovalGroupsRequest) returns (ListApprovalGroupsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc DeleteApprovalGroup(DeleteApprovalGroupRequest) returns (DeleteResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc AddApprovalGroupMember(AddApprovalGroupMemberRequest) returns (ApprovalGroupMember) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc RemoveApprovalGroupMember(RemoveApprovalGroupMemberRequest) returns (DeleteResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
   // ── Thread policies (branch protection) ──────────────────────────
-  rpc CreateThreadPolicy(CreateThreadPolicyRequest) returns (ThreadPolicy);
-  rpc ListThreadPolicies(ListThreadPoliciesRequest) returns (ListThreadPoliciesResponse);
-  rpc DeleteThreadPolicy(DeleteThreadPolicyRequest) returns (DeleteResponse);
-  rpc AddPolicyGroupRequirement(AddPolicyGroupRequirementRequest) returns (PolicyGroupRequirement);
-  rpc RemovePolicyGroupRequirement(RemovePolicyGroupRequirementRequest) returns (DeleteResponse);
+  rpc CreateThreadPolicy(CreateThreadPolicyRequest) returns (ThreadPolicy) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ListThreadPolicies(ListThreadPoliciesRequest) returns (ListThreadPoliciesResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc DeleteThreadPolicy(DeleteThreadPolicyRequest) returns (DeleteResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc AddPolicyGroupRequirement(AddPolicyGroupRequirementRequest) returns (PolicyGroupRequirement) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc RemovePolicyGroupRequirement(RemovePolicyGroupRequirementRequest) returns (DeleteResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
   // ── Operator-only listings (gate on staff scope) ─────────────────
-  rpc ListActors(ListActorsRequest) returns (ListActorsResponse);
-  rpc ListWorktrees(ListWorktreesRequest) returns (ListWorktreesResponse);
+  rpc ListActors(ListActorsRequest) returns (ListActorsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc ListWorktrees(ListWorktreesRequest) returns (ListWorktreesResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 
   // ── Support access — customer-issued temporary admin grants for
   // Heddle staff. The grantor must hold Admin on the namespace/repo;
   // the grantee is a staff email. The server materialises a real
   // `hosted_grants` row plus a `support_access_audit` row, both
   // bounded by the supplied TTL.
-  rpc GrantSupportAccess(GrantSupportAccessRequest) returns (SupportAccessGrant);
-  rpc ListSupportAccessGrants(ListSupportAccessGrantsRequest) returns (ListSupportAccessGrantsResponse);
-  rpc RevokeSupportAccess(RevokeSupportAccessRequest) returns (DeleteResponse);
+  rpc GrantSupportAccess(GrantSupportAccessRequest) returns (SupportAccessGrant) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ListSupportAccessGrants(ListSupportAccessGrantsRequest) returns (ListSupportAccessGrantsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc RevokeSupportAccess(RevokeSupportAccessRequest) returns (DeleteResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
   // ── Caller-owned bookmarks ───────────────────────────────────────
   // Accepts both user and anonymous biscuits. Anonymous callers can
   // only write their own bookmark rows; promotion migrates those rows
   // to the eventual user account without granting repo/namespace write
   // permissions.
-  rpc ListBookmarks(ListBookmarksRequest) returns (ListBookmarksResponse);
-  rpc UpsertBookmark(UpsertBookmarkRequest) returns (Bookmark);
-  rpc DeleteBookmark(DeleteBookmarkRequest) returns (DeleteResponse);
+  rpc ListBookmarks(ListBookmarksRequest) returns (ListBookmarksResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc UpsertBookmark(UpsertBookmarkRequest) returns (Bookmark) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc DeleteBookmark(DeleteBookmarkRequest) returns (DeleteResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 
   // --- Spool child edges + monorepo resolution + facet history ---
   // (Spool epic P8a, weft#358). ADDITIVE: exposes the P4-P7 spool
@@ -120,24 +209,36 @@ service HostedUserService {
   // child's current content head. Mutates only the parent's children edge-set
   // (refs/spool/children/edges), never the parent's Content facet. Mirrors
   // weft `children::attach_child_tx` -> ChildEdge.
-  rpc AttachChild(AttachChildRequest) returns (ChildEdge);
+  rpc AttachChild(AttachChildRequest) returns (ChildEdge) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // Detach the child mounted at `mount_name` under `parent_path`. Mirrors weft
   // `children::detach_child_tx` (bool removed).
-  rpc DetachChild(DetachChildRequest) returns (DetachChildResponse);
+  rpc DetachChild(DetachChildRequest) returns (DetachChildResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // List the child edges of `parent_path`, each resolved with its anchored
   // state + moving-anchored-ff status. Read-only; moves no edge. Mirrors weft
   // `children::list_children` -> Vec<ChildEdge>.
-  rpc ListChildren(ListChildrenRequest) returns (ListChildrenResponse);
+  rpc ListChildren(ListChildrenRequest) returns (ListChildrenResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // Recursively resolve the monorepo rooted at `root_path` into the caller's
   // coherent visible slice (per-child visibility, cycle guard, depth bound).
   // Mirrors weft `children::resolve_monorepo` -> MonorepoNode.
-  rpc ResolveMonorepo(ResolveMonorepoRequest) returns (MonorepoNode);
+  rpc ResolveMonorepo(ResolveMonorepoRequest) returns (MonorepoNode) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // Walk `spool_path`'s governance facet history newest-first (first-parent).
   // Mirrors weft `governance::governance_history` -> Vec<GovernanceHistoryEntry>.
-  rpc GetGovernanceHistory(GetGovernanceHistoryRequest) returns (GetGovernanceHistoryResponse);
+  rpc GetGovernanceHistory(GetGovernanceHistoryRequest) returns (GetGovernanceHistoryResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // Walk `spool_path`'s membership facet history newest-first (first-parent).
   // Mirrors weft `membership::membership_history` -> Vec<MembershipHistoryEntry>.
-  rpc GetMembershipHistory(GetMembershipHistoryRequest) returns (GetMembershipHistoryResponse);
+  rpc GetMembershipHistory(GetMembershipHistoryRequest) returns (GetMembershipHistoryResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 
   // ── Git-native identity proofs (Prove; wraps weft's F1a engine) ──
   // A caller proves control of a repo on an external host by publishing a
@@ -146,12 +247,18 @@ service HostedUserService {
   //
   // Start a proof: the server returns the exact marker line + well-known path
   // the caller must publish to `repo` on `host`.
-  rpc RequestProofChallenge(RequestProofChallengeRequest) returns (RequestProofChallengeResponse);
+  rpc RequestProofChallenge(RequestProofChallengeRequest) returns (RequestProofChallengeResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_TRANSIENT_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // Submit a started challenge for verification; the server fetches the marker
   // and returns the resulting status.
-  rpc SubmitProof(SubmitProofRequest) returns (SubmitProofResponse);
+  rpc SubmitProof(SubmitProofRequest) returns (SubmitProofResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // List the caller's own proofs.
-  rpc ListProofs(ListProofsRequest) returns (ListProofsResponse);
+  rpc ListProofs(ListProofsRequest) returns (ListProofsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 
   // ── Handle / escrow (wraps weft's F3a engine) ───────────────────
   // Availability + right-of-first-refusal escrow + self-claim for native
@@ -159,14 +266,20 @@ service HostedUserService {
   //
   // Report a native handle's availability + whether it is held for a verified
   // owner.
-  rpc GetHandleStatus(GetHandleStatusRequest) returns (GetHandleStatusResponse);
+  rpc GetHandleStatus(GetHandleStatusRequest) returns (GetHandleStatusResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // Start the 30-day right-of-first-refusal on a held name.
-  rpc RequestHeldName(RequestHeldNameRequest) returns (RequestHeldNameResponse);
+  rpc RequestHeldName(RequestHeldNameRequest) returns (RequestHeldNameResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // An existing verified owner self-claims their held native name (the
   // existing-user native-claim path the escrow engine's `held_check_in_txn`
   // co-holder branch was built for; weft#456 subject-canonicalization is a
   // handler-side dep, not a proto concern).
-  rpc ClaimHandle(ClaimHandleRequest) returns (ClaimHandleResponse);
+  rpc ClaimHandle(ClaimHandleRequest) returns (ClaimHandleResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
 }
 
 // Namespace kinds in the hosted control plane. `USER` namespaces are
@@ -267,8 +380,7 @@ message CreateNamespaceRequest {
   string parent_path = 3;
   string display_name = 4;
   SpoolSettings settings = 5;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message UpdateNamespaceRequest {
@@ -276,21 +388,18 @@ message UpdateNamespaceRequest {
   string new_slug = 2;
   string display_name = 3;
   bool clear_display_name = 4;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message SetNamespaceVisibilityRequest {
   string full_path = 1;
   SpoolVisibility visibility = 2;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message DeleteNamespaceRequest {
   string full_path = 1;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message ListSpoolsRequest {
@@ -300,21 +409,18 @@ message ListSpoolsRequest {
 message CreateRepositoryRequest {
   string namespace_path = 1;
   string slug = 2;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message UpdateRepositoryRequest {
   string full_path = 1;
   string new_slug = 2;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message DeleteRepositoryRequest {
   string full_path = 1;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message ListGrantsRequest {
@@ -325,23 +431,20 @@ message CreateGrantRequest {
   string subject = 1;
   HostedRole role = 2;
   GrantTargetRef target = 3;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message UpdateGrantRequest {
   string subject = 1;
   HostedRole role = 2;
   GrantTargetRef target = 3;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message DeleteGrantRequest {
   string subject = 1;
   GrantTargetRef target = 2;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message ListActorsRequest {}
@@ -431,8 +534,7 @@ message GetSpoolRequest {
 message SetSpoolVisibilityRequest {
   string full_path = 1;
   SpoolVisibility visibility = 2; // reuses the existing enum
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 // General settings write for any spool (description, etc.). Carries the whole
@@ -441,8 +543,7 @@ message SetSpoolVisibilityRequest {
 message UpdateSpoolSettingsRequest {
   string full_path = 1;
   SpoolSettings settings = 2;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message Bookmark {
@@ -468,15 +569,13 @@ message UpsertBookmarkRequest {
   string full_path = 2;
   string name = 3;
   string folder = 4;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message DeleteBookmarkRequest {
   string resource_kind = 1;
   string full_path = 2;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message HostedGrant {
@@ -550,8 +649,7 @@ message CreateInvitationRequest {
   google.protobuf.Timestamp expires_at = 4; // 0 = no expiry
   string metadata = 5; // optional caller-supplied JSON; pass "{}" if none
 
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message ListInvitationsRequest {
@@ -565,8 +663,7 @@ message ListInvitationsResponse {
 
 message RevokeInvitationRequest {
   string id = 1;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 // Members = direct grants + pending invitations for a namespace.

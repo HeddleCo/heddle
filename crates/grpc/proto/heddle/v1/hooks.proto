@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "google/protobuf/timestamp.proto";
 import "heddle/v1/common.proto";
 
@@ -12,19 +14,30 @@ import "heddle/v1/common.proto";
 // implementations call back via `RespondToHook` to deliver the hook's
 // JSON-encoded reply or veto.
 service HookService {
-  rpc RegisterHook(RegisterHookRequest) returns (Hook);
-  rpc DeregisterHook(DeregisterHookRequest) returns (DeleteResponse);
-  rpc ListHooks(ListHooksRequest) returns (ListHooksResponse);
-  rpc GetHookEventSchema(GetHookEventSchemaRequest) returns (GetHookEventSchemaResponse);
+  rpc RegisterHook(RegisterHookRequest) returns (Hook) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc DeregisterHook(DeregisterHookRequest) returns (DeleteResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ListHooks(ListHooksRequest) returns (ListHooksResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetHookEventSchema(GetHookEventSchemaRequest) returns (GetHookEventSchemaResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // Server-streamed live event delivery. Each event carries an
   // opaque `hook_event_id` correlator that the subscriber echoes
-  // back to `RespondToHook`. Read-shaped — no idempotency.
-  rpc SubscribeHookEvents(SubscribeHookEventsRequest) returns (stream HookEvent);
+  // back to `RespondToHook`.
+  rpc SubscribeHookEvents(SubscribeHookEventsRequest) returns (stream HookEvent) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // Deliver the hook's reply (or veto via `abort`) for a previously
-  // received event. State-changing — caller supplies
-  // `client_operation_id` for retry safety, though the broker will
-  // also dedup on `hook_event_id` since each id is single-shot.
-  rpc RespondToHook(RespondToHookRequest) returns (RespondToHookResponse);
+  // received event. The broker also deduplicates on the single-shot
+  // `hook_event_id`.
+  rpc RespondToHook(RespondToHookRequest) returns (RespondToHookResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_TRANSIENT_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
 }
 
 message RegisterHookRequest {
@@ -34,7 +47,7 @@ message RegisterHookRequest {
   // Subscribed event names. See `GetHookEventSchema` for the catalog.
   repeated string events = 4;
   uint32 timeout_ms = 5;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message Hook {
@@ -47,7 +60,7 @@ message Hook {
 message DeregisterHookRequest {
   string repo_path = 1;
   string name = 2;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message ListHooksRequest {
@@ -115,7 +128,7 @@ message RespondToHookRequest {
   // Free-form JSON-encoded extension payload. Decoded into
   // `HookResponse.extra` on the emit-side.
   string extra_signals_json = 4;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message RespondToHookResponse {

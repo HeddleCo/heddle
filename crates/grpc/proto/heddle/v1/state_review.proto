@@ -2,40 +2,45 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "google/protobuf/timestamp.proto";
 import "heddle/v1/common.proto";
 
 // =====================================================================
 // Foundation services for the Review and Agent-First CLI epics.
-//
-// Idempotency contract: every state-changing RPC defined below carries
-// `string client_operation_id = 100` (UUID v4 string, optional). When
-// the server sees the same id twice with the same request body it
-// returns the original outcome bit-identical; the same id with a
-// different body returns FAILED_PRECONDITION. New state-changing RPCs
-// added to existing services should reserve tag 100 for the same field
-// going forward — the value of 100 is grep-able and leaves room for
-// pre-existing fields below it.
 // =====================================================================
 
 // State review surface. Distinct from the GitHub-PR-focused ReviewService
 // above. Ships the review payload that powers both the CLI's
 // `heddle review show` and the web's state-review route.
 service StateReviewService {
-  rpc GetReviewPayload(GetReviewPayloadRequest) returns (ReviewPayload);
-  rpc SignState(SignStateRequest) returns (SignStateResponse);
-  rpc ListSignatures(ListSignaturesRequest) returns (ListSignaturesResponse);
+  rpc GetReviewPayload(GetReviewPayloadRequest) returns (ReviewPayload) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc SignState(SignStateRequest) returns (SignStateResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ListSignatures(ListSignaturesRequest) returns (ListSignaturesResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // +weft#481: record a signed SIGN/HOLD/REJECT reviewer verdict. Fully
   // DECOUPLED from `StateStatus` — a verdict is reviewer opinion appended to
   // the content-addressed signature blob and NEVER changes status or mints a
   // successor. REJECT authz = repo Write parity (same gate as a positive SIGN).
-  rpc RecordVerdict(RecordVerdictRequest) returns (RecordVerdictResponse);
+  rpc RecordVerdict(RecordVerdictRequest) returns (RecordVerdictResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
   // +weft#482: server-side review-check progress. `RecordCheckAck` records a
   // signed per-file / per-risk-signal ack; `GetReviewProgress` returns the
   // acks (optionally filtered by user) so clients render "N/M reviewed" from
   // real evidence. Backed by a dedicated table; the wire is storage-invisible.
-  rpc RecordCheckAck(RecordCheckAckRequest) returns (RecordCheckAckResponse);
-  rpc GetReviewProgress(GetReviewProgressRequest) returns (GetReviewProgressResponse);
+  rpc RecordCheckAck(RecordCheckAckRequest) returns (RecordCheckAckResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc GetReviewProgress(GetReviewProgressRequest) returns (GetReviewProgressResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 }
 
 // Reviewer verdict (weft#481). Opinion-only — orthogonal to `StateStatus`.
@@ -189,7 +194,7 @@ message SignStateRequest {
   // skewed more than `SIGN_TIMESTAMP_SKEW_SECS` from its own clock so the
   // signature can be reproduced and verified deterministically.
   google.protobuf.Timestamp signed_at = 9;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 // Scope of a review signature — either the whole change or a list of
@@ -253,7 +258,7 @@ message RecordVerdictRequest {
   // Raw signature bytes over the v2 canonical signing payload (incl. verdict).
   bytes signature = 8;
   google.protobuf.Timestamp signed_at = 9;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message RecordVerdictResponse {
@@ -290,7 +295,7 @@ message RecordCheckAckRequest {
   bytes public_key = 7;
   bytes signature = 8;
   google.protobuf.Timestamp acked_at = 9;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message RecordCheckAckResponse {

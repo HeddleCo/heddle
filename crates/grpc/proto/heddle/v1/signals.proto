@@ -2,13 +2,21 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "heddle/v1/state_review.proto";
 
 // Risk signal computation + repo-level health.
 service SignalService {
-  rpc ComputeStateSignals(ComputeStateSignalsRequest) returns (ComputeStateSignalsResponse);
-  rpc GetRepoSignalHealth(GetRepoSignalHealthRequest) returns (RepoSignalHealthReport);
-  rpc SubscribeSignalUpdates(SubscribeSignalUpdatesRequest) returns (stream SignalUpdate);
+  rpc ComputeStateSignals(ComputeStateSignalsRequest) returns (ComputeStateSignalsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetRepoSignalHealth(GetRepoSignalHealthRequest) returns (RepoSignalHealthReport) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc SubscribeSignalUpdates(SubscribeSignalUpdatesRequest) returns (stream SignalUpdate) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 }
 
 message ComputeStateSignalsRequest {

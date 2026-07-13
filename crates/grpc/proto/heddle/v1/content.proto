@@ -2,29 +2,65 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "google/protobuf/timestamp.proto";
 import "heddle/v1/common.proto";
 
 service ContentService {
-  rpc GetRefs(GetRefsRequest) returns (GetRefsResponse);
-  rpc ListStates(ListStatesRequest) returns (ListStatesResponse);
-  rpc GetState(GetStateRequest) returns (StateSummary);
-  rpc GetBlame(GetBlameRequest) returns (GetBlameResponse);
-  rpc ListProvenanceSummaries(ListProvenanceSummariesRequest) returns (ListProvenanceSummariesResponse);
-  rpc GetTree(GetTreeRequest) returns (TreeResponse);
-  rpc GetBlob(GetBlobRequest) returns (BlobResponse);
-  rpc GetCompare(GetCompareRequest) returns (CompareResponse);
-  rpc GetDiff(GetStateRequest) returns (DiffResponse);
+  rpc GetRefs(GetRefsRequest) returns (GetRefsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc ListStates(ListStatesRequest) returns (ListStatesResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetState(GetStateRequest) returns (StateSummary) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetBlame(GetBlameRequest) returns (GetBlameResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc ListProvenanceSummaries(ListProvenanceSummariesRequest) returns (ListProvenanceSummariesResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetTree(GetTreeRequest) returns (TreeResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetBlob(GetBlobRequest) returns (BlobResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetCompare(GetCompareRequest) returns (CompareResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetDiff(GetStateRequest) returns (DiffResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // Walk recent history and aggregate semantic-change events to surface
   // the files or functions with the most activity.
-  rpc GetSemanticHotSpots(GetSemanticHotSpotsRequest) returns (GetSemanticHotSpotsResponse);
-  rpc ListActions(GetStateRequest) returns (ActionsResponse);
-  rpc ListContext(ListContextRequest) returns (ListContextResponse);
-  rpc GetContextHistory(GetContextHistoryRequest) returns (GetContextHistoryResponse);
-  rpc ListContextSuggestions(ListContextSuggestionsRequest) returns (ListContextSuggestionsResponse);
-  rpc SetContext(SetContextRequest) returns (SetContextResponse);
-  rpc ReviseContext(ReviseContextRequest) returns (ReviseContextResponse);
-  rpc SupersedeContext(SupersedeContextRequest) returns (SupersedeContextResponse);
+  rpc GetSemanticHotSpots(GetSemanticHotSpotsRequest) returns (GetSemanticHotSpotsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc ListActions(GetStateRequest) returns (ActionsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc ListContext(ListContextRequest) returns (ListContextResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetContextHistory(GetContextHistoryRequest) returns (GetContextHistoryResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc ListContextSuggestions(ListContextSuggestionsRequest) returns (ListContextSuggestionsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc SetContext(SetContextRequest) returns (SetContextResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc ReviseContext(ReviseContextRequest) returns (ReviseContextResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc SupersedeContext(SupersedeContextRequest) returns (SupersedeContextResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
 }
 
 message GetRefsRequest {
@@ -458,8 +494,7 @@ message SetContextRequest {
   string agent_model = 7;
   optional bytes target_state_id = 8;
   ContextAnnotationKind kind = 9;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message SetContextResponse {

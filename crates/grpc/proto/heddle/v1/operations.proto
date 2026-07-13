@@ -2,10 +2,16 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 // Structured query over the operation log + cross-cutting index.
 service OperationLogQueryService {
-  rpc QueryOperations(QueryOperationsRequest) returns (QueryOperationsResponse);
-  rpc StreamOperations(StreamOperationsRequest) returns (stream OperationHit);
+  rpc QueryOperations(QueryOperationsRequest) returns (QueryOperationsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc StreamOperations(StreamOperationsRequest) returns (stream OperationHit) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 }
 
 message QueryOperationsRequest {

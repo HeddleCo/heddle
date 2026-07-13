@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "heddle/v1/content.proto";
 
 // Read-side tree-edit RPCs for hosted threads (heddle#409, from spike #267).
@@ -26,12 +28,18 @@ import "heddle/v1/content.proto";
 service TreeEditService {
   // Committed-thread status by default; dirty overlay only when `compare_tree`
   // is supplied. Never reports an implicit client filesystem.
-  rpc StatusForThread(StatusForThreadRequest) returns (StatusForThreadResponse);
+  rpc StatusForThread(StatusForThreadRequest) returns (StatusForThreadResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // Diff between two named treeish points (committed ref / staged capture /
   // inline tree). Reuses the `FileDiff` / `CompareSummary` content shapes.
-  rpc DiffForThread(DiffForThreadRequest) returns (DiffForThreadResponse);
+  rpc DiffForThread(DiffForThreadRequest) returns (DiffForThreadResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
   // First-parent history for a thread, reusing the `StateSummary` shape.
-  rpc LogForThread(LogForThreadRequest) returns (LogForThreadResponse);
+  rpc LogForThread(LogForThreadRequest) returns (LogForThreadResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 }
 
 // A point in the object graph that can be diffed or compared against. The
