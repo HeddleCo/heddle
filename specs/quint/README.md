@@ -12,6 +12,7 @@ Formal models of Heddle's core state machines, verified via random simulation an
 | `agent_lifecycle.qnt` | Agent spawn/done/merge + stale pruning | No backward transitions, completion time consistency | 4 |
 | `worktree_lifecycle.qnt` | Patch worktree create/switch/delete | Cannot delete current, unique names, current always exists | 4 |
 | `repository_ops.qnt` | Composed snapshot/goto/merge guards | Attached HEAD valid, clean state when no merge | 5 |
+| `collaboration_convergence.qnt` | Immutable collaboration op-set replication and hosted disposition | Causal closure, deterministic convergence, accepted/rejected/blocked separation | 6 |
 
 ## Install
 
