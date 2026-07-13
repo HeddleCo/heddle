@@ -6,7 +6,7 @@
 //! - pure active-only (and related) filters over [`ActorPresence`] slices
 //! - assembling a single actor entry plus ancestry chain for presence JSON
 //! - pure [`complete_actor_entry`] / [`plan_actor_done`] and thin
-//!   [`mark_actor_done`] for `actor done`
+//!   [`mark_actor_done`] for `agent presence complete`
 //!
 //! Human/JSON rendering and implicit session resolution (current-lane / path /
 //! any-active fallbacks) stay CLI-owned because they couple to recovery advice
@@ -20,7 +20,7 @@ use objects::store::{
 use repo::Repository;
 use serde::Serialize;
 
-/// Machine JSON for `heddle actor list` domain fields (stable field names).
+/// Machine JSON for `heddle agent presence list` domain fields (stable field names).
 ///
 /// CLI may wrap this with a `verification` envelope; domain fields here match
 /// the public `actor_list` contract (`output_kind`, `actors`, `active_only`).
@@ -210,8 +210,8 @@ pub fn list_actors_from_registry(
 
 /// Assemble a single actor entry plus ancestry chain (pure relative to I/O).
 ///
-/// Used by `actor show` / `actor spawn` machine JSON after the caller has
-/// resolved which registry entry to surface.
+/// Used by `agent presence show` machine JSON after the caller has resolved
+/// which registry entry to surface.
 pub fn assemble_actor_entry(
     registry: &ActorPresenceStore,
     entry: &ActorPresence,
