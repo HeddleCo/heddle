@@ -198,6 +198,16 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["discuss", "resolve"],
         &["discuss", "resolve", "discussion-1", "--mode", "dismiss"],
     ),
+    sample(
+        &["discuss", "reopen"],
+        &[
+            "discuss",
+            "reopen",
+            "discussion-1",
+            "--reason",
+            "new evidence",
+        ],
+    ),
     sample(&["discuss", "list"], &["discuss", "list"]),
     sample(&["discuss", "show"], &["discuss", "show", "discussion-1"]),
     sample(&["doctor"], &["doctor"]),
@@ -956,7 +966,9 @@ fn leaf_catalog_entries_publish_exact_output_modes() {
                 .output_modes
                 .iter()
                 .any(|mode| mode == "json-compact"),
-            command_contract(&command.path).supports_json_compact,
+            raw_command_contract_for_path(command.path.iter().map(String::as_str))
+                .expect("catalog entries have command contracts")
+                .supports_json_compact,
             "{} must expose its compact projection without trial execution",
             command.display,
         );
@@ -1263,6 +1275,10 @@ fn sidecar_only_effect_sets_exclude_refs() {
         &["agent", "task", "create"],
         &["agent", "task", "update"],
         &["context", "reason", "git"],
+        &["discuss", "open"],
+        &["discuss", "append"],
+        &["discuss", "resolve"],
+        &["discuss", "reopen"],
         &["review", "sign"],
         &["agent", "provenance", "begin"],
         &["agent", "provenance", "segment"],
@@ -1288,9 +1304,6 @@ fn state_attached_effect_sets_include_refs() {
         &["context", "edit"],
         &["context", "supersede"],
         &["context", "rm"],
-        &["discuss", "open"],
-        &["discuss", "append"],
-        &["discuss", "resolve"],
     ] {
         assert_command_effects(
             path,
@@ -1568,6 +1581,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "discuss open",
             "discuss append",
             "discuss resolve",
+            "discuss reopen",
             "discuss list",
             "discuss show",
             "doctor",

@@ -13,7 +13,6 @@ use std::{collections::BTreeSet, path::Path};
 #[cfg(test)]
 pub(crate) use heddle_core::VerificationCheck;
 #[cfg(test)]
-use heddle_core::status::next_action::remote_tracking_next_action;
 use heddle_core::status::next_action::{
     canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
     heddle_action as core_heddle_action, import_guidance_includes_active_branch,

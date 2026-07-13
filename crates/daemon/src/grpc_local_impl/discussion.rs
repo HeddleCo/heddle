@@ -11,7 +11,7 @@ use grpc::heddle::v1::{
     discussion_service_server::DiscussionService,
 };
 use objects::object::{
-    CollabOpId, CollaborationAnchor, CollaborationIdempotencyKey, CollaborationOperationBodyV1,
+    CollaborationAnchor, CollaborationIdempotencyKey, CollaborationOperationBodyV1,
     CollaborationOperationEnvelope, CollaborationResolution, DiscussionRecordId, DiscussionTurnV1,
     MaterializedDiscussion, OperationId, StateId, VisibilityTier,
 };
