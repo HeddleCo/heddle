@@ -21,7 +21,8 @@ use super::{
         build_repository_verification_state,
         build_repository_verification_state_with_worktree_status,
         git_overlay_mutation_preflight_advice_with_worktree_status,
-        raw_git_operation_mutation_advice, repository_verification_blocked_advice,
+        plain_git_mutation_preflight_advice, raw_git_operation_mutation_advice,
+        repository_verification_blocked_advice,
     },
 };
 use heddle_git_projection::git_core::{
@@ -38,6 +39,13 @@ pub(crate) fn gather_mutation_facts(repo: &Repository) -> GitOverlayMutationFact
     GitOverlayMutationFacts {
         worktree_status: repo.git_overlay_worktree_status(),
     }
+}
+
+pub(crate) fn preflight_checkpoint_repository(start: &std::path::Path, action: &str) -> Result<()> {
+    if let Some(advice) = plain_git_mutation_preflight_advice(start, action)? {
+        return Err(anyhow!(advice));
+    }
+    Ok(())
 }
 
 pub(crate) fn preflight_checkpoint(

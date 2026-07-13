@@ -9,9 +9,9 @@ use super::{
     advice::RecoveryAdvice,
     checkpoint::{GitCheckpointRequest, create_git_checkpoint},
     command_catalog::ActionTemplate,
+    git_overlay_txn,
     verification_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
-        plain_git_mutation_preflight_advice,
     },
 };
 use crate::cli::{Cli, CommitArgs, should_output_json, style, worktree_status_options};
@@ -38,9 +38,7 @@ pub fn cmd_commit(cli: &Cli, args: CommitArgs) -> Result<()> {
         cwd = std::env::current_dir()?;
         &cwd
     };
-    if let Some(advice) = plain_git_mutation_preflight_advice(start, "commit")? {
-        return Err(anyhow!(advice));
-    }
+    git_overlay_txn::preflight_checkpoint_repository(start, "commit")?;
 
     let repo = cli.open_repo()?;
     if repo.source_authority() != repo::RepositorySourceAuthority::GitOverlay {
