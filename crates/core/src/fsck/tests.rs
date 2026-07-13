@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-use crypto::{Ed25519Signer, StateSigningExt};
+use crypto::Ed25519Signer;
 use objects::{
     object::{
-        Attribution, Blob, FileProvenance, LineSpan, Origin, OriginSet, Principal, State, Tree,
-        TreeEntry,
+        Attribution, Blob, FileProvenance, LineSpan, Origin, OriginSet, Principal, State,
+        StateAttachment, StateAttachmentBody, Tree, TreeEntry,
     },
     store::ObjectStore,
 };
@@ -27,7 +27,7 @@ fn put_empty_tree(repo: &Repository) -> objects::error::Result<objects::object::
     repo.store().put_tree(&Tree::new())
 }
 
-fn sample_origin(state_id: objects::object::ChangeId) -> Origin {
+fn sample_origin(state_id: objects::object::StateId) -> Origin {
     Origin {
         state_id,
         attribution: sample_attribution(),
@@ -37,41 +37,32 @@ fn sample_origin(state_id: objects::object::ChangeId) -> Origin {
 }
 
 #[test]
-fn test_check_states_thorough_rejects_parent_cycles() {
-    let (_temp, repo) = setup_repo();
-    let tree_hash = put_empty_tree(&repo).expect("put tree");
-    let state_a_id = objects::object::ChangeId::generate();
-    let state_b_id = objects::object::ChangeId::generate();
-
-    let state_a =
-        State::new(tree_hash, vec![state_b_id], sample_attribution()).with_change_id(state_a_id);
-    let state_b =
-        State::new(tree_hash, vec![state_a_id], sample_attribution()).with_change_id(state_b_id);
-
-    repo.store().put_state(&state_a).expect("put state a");
-    repo.store().put_state(&state_b).expect("put state b");
-
-    let mut errors = Vec::new();
-    let mut objects_checked = 0;
-    check_states(&repo, &mut errors, &mut objects_checked, true).expect("check states");
-
-    assert!(
-        errors.iter().any(|error| error.kind == "state_cycle"),
-        "expected cycle error, got {:?}",
-        errors.iter().map(|error| &error.kind).collect::<Vec<_>>()
-    );
-}
-
-#[test]
 fn test_check_states_thorough_rejects_invalid_signature() {
     let (_temp, repo) = setup_repo();
     let tree_hash = put_empty_tree(&repo).expect("put tree");
-    let mut state = State::new(tree_hash, vec![], sample_attribution());
+    let state = State::new(tree_hash, vec![], sample_attribution());
     let signer = Ed25519Signer::from_seed(&[7u8; 32]).expect("create signer");
 
-    state.sign(&signer).expect("sign state");
-    state.signature.as_mut().expect("signature").signature = "00".repeat(64);
     repo.store().put_state(&state).expect("put state");
+    repo.sign_state(&state.state_id, &signer)
+        .expect("sign state");
+    let prior = repo
+        .latest_state_attachment(&state.state_id, repo::StateAttachmentKind::Signature)
+        .expect("read signature attachment")
+        .expect("signature attachment");
+    let prior_id = prior.id();
+    let StateAttachmentBody::Signature(mut signature) = prior.body else {
+        panic!("expected signature attachment")
+    };
+    signature.signature = "00".repeat(64);
+    repo.put_state_attachment(&StateAttachment {
+        state_id: state.state_id,
+        body: StateAttachmentBody::Signature(signature),
+        attribution: sample_attribution(),
+        created_at: chrono::Utc::now() + chrono::Duration::seconds(1),
+        supersedes: Some(prior_id),
+    })
+    .expect("put invalid signature attachment");
 
     let mut errors = Vec::new();
     let mut objects_checked = 0;
@@ -102,7 +93,7 @@ fn test_check_states_thorough_rejects_invalid_provenance() {
             line_len: 1,
             origin_set_index: 0,
         }],
-        vec![sample_origin(objects::object::ChangeId::generate())],
+        vec![sample_origin(objects::object::StateId::from_bytes([7; 32]))],
         vec![OriginSet {
             origin_indexes: vec![0],
         }],
