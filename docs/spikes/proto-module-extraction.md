@@ -1,7 +1,7 @@
 # Spike: extract the gRPC contract into a dedicated API repository
 
-Status: accepted direction, preflight in progress · Clean the contract first,
-then extract it without combining the move with a schema redesign.
+Status: accepted direction, Heddle redesign in progress · Publish the identity
+and pruning cutover first, then extract those exact bytes.
 
 ## Why now
 
@@ -78,12 +78,12 @@ tag publishes `heddle-grpc` to crates.io and `@heddleco/grpc` to GitHub Packages
 Publication is automated and retryable; Heddle's manual npm dispatch is retired
 after cutover.
 
-### 5. Versioning: continue the existing line
+### 5. Versioning: separate redesign from relocation
 
-Do not reset to 0.1. The first API-repository release uses the next unused
-version after 0.22 (expected to be 0.23) and must be content-equivalent to the
-cleaned Heddle baseline. Registry availability is checked immediately before
-tagging.
+Do not reset to 0.1. Heddle publishes the coordinated identity and pruning
+contract as 0.23. After every consumer uses it, `HeddleCo/api` imports that
+frozen source unchanged and publishes 0.24. Registry availability is checked
+immediately before each tag.
 
 ### 6. Consumers use published artifacts
 
@@ -102,24 +102,27 @@ vendored proto mirror. Committed consumer manifests point at released artifacts.
 - Generate and check TypeScript root exports from the same proto inventory.
 - Refresh documentation and run Rust generation, contract audit, TypeScript
   generation/typecheck, and package smoke checks.
+- Publish coordinated Rust and TypeScript SDK 0.23 from Heddle and cut Heddle,
+  Weft, and Tapestry to it.
 
 Exit gate: every contract consumer inside Heddle sees the same schema inventory,
-and adding a proto file without entrypoint/export coverage fails CI.
+adding a proto file without entrypoint/export coverage fails CI, and all three
+products consume 0.23.
 
 ### Phase 0 — stand up `HeddleCo/api`
 
-- Copy the cleaned proto tree and current Rust/TypeScript generator setup.
+- Copy the frozen 0.23 proto tree and current Rust/TypeScript generator setup.
 - Add Buf configuration, compatibility gates, protected release permissions,
   and package ownership.
 - Record source-tree, descriptor, generated Rust, generated TypeScript, and
   package checksums.
 - Build clean candidate packages without changing consumers.
 
-Exit gate: candidate outputs match the cleaned Heddle baseline, including
+Exit gate: candidate outputs match Heddle SDK 0.23, including
 service paths, descriptor contents, byte mappings, request-signing bytes, and
 public SDK exports.
 
-### Phase 1 — publish the no-redesign API release
+### Phase 1 — publish API SDK 0.24
 
 - Build, test, and pack both SDKs before publication.
 - Publish Rust, verify a clean downstream build, then publish TypeScript and
@@ -175,15 +178,14 @@ schema partitioning, SDK feature profiles, pre-generated Rust, or final Rust
 operation interfaces. Those are follow-up deepening candidates after the
 publication seam is proven.
 
-The current `state_id`/`change_id`/revision-address vocabulary is not accepted as
-a coherent identity contract. ADR 0045 makes that a coordinated semantic
-cutover gate before stable v1, without combining it with repository relocation.
+Further package restructuring, local/hosted schema partitioning, and generator
+replacement remain independent changes after the authority-transfer seam is
+proven.
 
 ## Remaining maintainer inputs
 
 1. Confirm API repository visibility, CODEOWNERS, and release administrators.
 2. Confirm crates.io and GitHub Packages credentials/ownership transfer.
-3. Choose Buf's comparison source: API git history or a published Buf module.
-4. Confirm the next unused SDK version at release time.
-5. Complete the Weft `weftctl` direct-versus-transitive dependency audit.
-6. Identify any external descriptor/reflection consumers before deletion.
+3. Confirm 0.23 and 0.24 availability at release time.
+4. Complete the Weft `weftctl` direct-versus-transitive dependency audit.
+5. Identify any external descriptor/reflection consumers before deletion.

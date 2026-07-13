@@ -10,11 +10,11 @@ source, descriptors, compatibility policy, Rust and TypeScript generation, and
 coordinated SDK publication. Heddle owns local implementations, Weft owns hosted
 implementations, and Tapestry remains a consumer.
 
-The move follows a clean, then extract, then cut over sequence. Heddle first
-establishes one flat `heddle.v1` source inventory and one complete entrypoint.
-The first API-repository release preserves service paths, request field numbers,
-tonic byte mappings, and generated SDK behavior. Consumer changes and schema
-redesigns do not share a release with repository relocation.
+The move follows a redesign, publish, extract, then cut over sequence. Heddle
+publishes the approved identity split and pre-1.0 pruning as SDK 0.23. After
+Heddle, Weft, and Tapestry consume that release, its exact contract becomes the
+input to `HeddleCo/api`. The API repository publishes the unchanged relocation
+as 0.24. Consumer changes and repository relocation do not share a release.
 
 ## RPC contract metadata
 
@@ -54,13 +54,22 @@ not allow-list exceptions.
 
 ## Identity boundary
 
-The existing contract uses `state_id`, `change_id`, revision-address strings,
-and Git object identifiers inconsistently. Extraction must not treat those names
-as one coherent identity type. Before a stable v1 contract, a coordinated API and
-consumer change must distinguish physical `StateId`, rewrite-stable `ChangeId`,
-and Git revision/OID identity, with typed wire representations and one canonical
-CLI display encoding. Repository relocation may preserve the current wire shape
-for parity, but it does not settle that semantic design.
+SDK 0.23 distinguishes immutable 32-byte physical `StateId`, rewrite-stable
+16-byte `ChangeId`, validated `SpoolId`, and Git revision/OID identity. Physical
+state fields carry `StateId`; logical lineage fields carry `ChangeId`; the CLI
+encodes them as `hs-` and `hc-`. The 0.24 API-repository release preserves that
+wire contract unchanged.
+
+## Authority transfer
+
+The protected API release tag is the authority-transfer event. Before 0.24 is
+published, Heddle's frozen 0.23 tree is historical input. After publication,
+Heddle switches its three direct consumers to exact registry version 0.24 and
+deletes its schema, generators, generated TypeScript, and publication jobs in
+one change. There is no dual writable source or vendored compatibility lane.
+
+If a gate fails before publication, authority does not move. If either immutable
+package has published, repair rolls forward with a new shared version.
 
 ## Consequences
 
