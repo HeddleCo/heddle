@@ -7,7 +7,7 @@
 //! module injects command-catalog coverage, builds refusal advice, and
 //! formats setup guidance for text/render paths.
 
-use std::{collections::BTreeSet, path::Path};
+use std::{collections::BTreeSet, path::Path, sync::OnceLock};
 
 // Re-exported for unit tests in operator/thread_shaping modules.
 #[cfg(test)]
@@ -754,6 +754,13 @@ pub(crate) fn action_templates(commands: &[String]) -> Vec<ActionTemplate> {
         .collect()
 }
 pub(crate) fn machine_contract_coverage() -> MachineContractCoverage {
+    static COVERAGE: OnceLock<MachineContractCoverage> = OnceLock::new();
+    COVERAGE
+        .get_or_init(build_machine_contract_coverage)
+        .clone()
+}
+
+fn build_machine_contract_coverage() -> MachineContractCoverage {
     const EXAMPLE_LIMIT: usize = 8;
     let catalog = build_command_catalog();
     let commands = catalog.commands;
@@ -1013,7 +1020,7 @@ fn machine_contract_verified_scope(command: &super::command_catalog::CommandCata
     command.help_visibility == "everyday"
         || matches!(
             command.path.first().map(String::as_str),
-            Some("actor" | "agent" | "commands" | "schemas" | "session")
+            Some("agent" | "schemas")
         )
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
