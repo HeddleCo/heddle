@@ -771,13 +771,12 @@ impl OpLogBackend for OpLog {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::ChangeId;
     use tempfile::TempDir;
 
     use super::*;
 
     fn snapshot_record() -> OpRecord {
-        let state = ChangeId::generate();
+        let state = crate::oplog::fresh_state_id();
         OpRecord::Snapshot {
             new_state: state,
             prev_head: None,

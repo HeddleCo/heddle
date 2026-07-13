@@ -7,7 +7,7 @@
 
 use objects::{
     error::Result,
-    object::{ChangeId, ContentHash, MarkerName, ThreadName, VisibilityTier},
+    object::{ContentHash, MarkerName, StateId, ThreadName, VisibilityTier},
 };
 
 use super::{
@@ -29,8 +29,8 @@ pub struct VisibilitySidecarSnapshots {
 pub trait OpLogRecorder: OpLogBackend {
     fn record_snapshot(
         &self,
-        new_state: &ChangeId,
-        prev_head: Option<&ChangeId>,
+        new_state: &StateId,
+        prev_head: Option<&StateId>,
         thread: Option<&str>,
         scope: Option<&str>,
     ) -> Result<u64> {
@@ -48,8 +48,8 @@ pub trait OpLogRecorder: OpLogBackend {
 
     fn record_goto(
         &self,
-        target: &ChangeId,
-        prev_head: Option<&ChangeId>,
+        target: &StateId,
+        prev_head: Option<&StateId>,
         scope: Option<&str>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
@@ -78,7 +78,7 @@ pub trait OpLogRecorder: OpLogBackend {
     fn record_thread_create(
         &self,
         name: &ThreadName,
-        state: &ChangeId,
+        state: &StateId,
         manager_snapshot: Option<Vec<u8>>,
         scope: Option<&str>,
     ) -> Result<u64> {
@@ -96,7 +96,7 @@ pub trait OpLogRecorder: OpLogBackend {
     fn record_thread_delete(
         &self,
         name: &ThreadName,
-        state: &ChangeId,
+        state: &StateId,
         scope: Option<&str>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
@@ -112,8 +112,8 @@ pub trait OpLogRecorder: OpLogBackend {
     fn record_thread_update(
         &self,
         name: &ThreadName,
-        old_state: &ChangeId,
-        new_state: &ChangeId,
+        old_state: &StateId,
+        new_state: &StateId,
         manager_snapshots: Option<ThreadUpdateSnapshots>,
         scope: Option<&str>,
     ) -> Result<u64> {
@@ -133,7 +133,7 @@ pub trait OpLogRecorder: OpLogBackend {
         &self,
         old_name: &ThreadName,
         new_name: &ThreadName,
-        state: &ChangeId,
+        state: &StateId,
         scope: Option<&str>,
     ) -> Result<Vec<u64>> {
         self.record_batch_scoped(
@@ -157,10 +157,10 @@ pub trait OpLogRecorder: OpLogBackend {
     /// re-materialize it.
     fn record_fork(
         &self,
-        from: &ChangeId,
-        new_state: &ChangeId,
+        from: &StateId,
+        new_state: &StateId,
         thread: Option<&str>,
-        head: Option<&ChangeId>,
+        head: Option<&StateId>,
         scope: Option<&str>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
@@ -179,8 +179,8 @@ pub trait OpLogRecorder: OpLogBackend {
     /// thread ref, `None` for a detached HEAD at `result`).
     fn record_collapse(
         &self,
-        sources: &[ChangeId],
-        result: &ChangeId,
+        sources: &[StateId],
+        result: &StateId,
         thread: Option<&str>,
         scope: Option<&str>,
     ) -> Result<u64> {
@@ -200,7 +200,7 @@ pub trait OpLogRecorder: OpLogBackend {
         &self,
         remote: &str,
         thread: &str,
-        state: &ChangeId,
+        state: &StateId,
         scope: Option<&str>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
@@ -218,7 +218,7 @@ pub trait OpLogRecorder: OpLogBackend {
         &self,
         remote: &str,
         thread: &str,
-        state: &ChangeId,
+        state: &StateId,
         scope: Option<&str>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
@@ -233,13 +233,13 @@ pub trait OpLogRecorder: OpLogBackend {
     }
 
     /// Record an undo-recovery pointer publish. Local refs pass `op_scope()`.
-    fn record_undo_recovery_update(&self, state: &ChangeId, scope: Option<&str>) -> Result<u64> {
+    fn record_undo_recovery_update(&self, state: &StateId, scope: Option<&str>) -> Result<u64> {
         let ids =
             self.record_batch_scoped(vec![OpRecord::UndoRecoveryUpdate { state: *state }], scope)?;
         Ok(ids[0])
     }
 
-    fn record_marker_create(&self, name: &MarkerName, state: &ChangeId) -> Result<u64> {
+    fn record_marker_create(&self, name: &MarkerName, state: &StateId) -> Result<u64> {
         let ids = self.record_batch(vec![OpRecord::MarkerCreate {
             name: name.to_string(),
             state: *state,
@@ -247,7 +247,7 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    fn record_marker_delete(&self, name: &MarkerName, state: &ChangeId) -> Result<u64> {
+    fn record_marker_delete(&self, name: &MarkerName, state: &StateId) -> Result<u64> {
         let ids = self.record_batch(vec![OpRecord::MarkerDelete {
             name: name.to_string(),
             state: *state,
@@ -261,7 +261,7 @@ pub trait OpLogRecorder: OpLogBackend {
         &self,
         redaction_id: &ContentHash,
         blob: &ContentHash,
-        state: &ChangeId,
+        state: &StateId,
         path: &str,
         scope: Option<&str>,
     ) -> Result<u64> {
@@ -299,7 +299,7 @@ pub trait OpLogRecorder: OpLogBackend {
     /// per-state sidecar bytes before/after the put so undo/redo can restore it.
     fn record_state_visibility_set(
         &self,
-        state: &ChangeId,
+        state: &StateId,
         record_id: &ContentHash,
         tier: &VisibilityTier,
         sidecar: VisibilitySidecarSnapshots,
@@ -322,7 +322,7 @@ pub trait OpLogRecorder: OpLogBackend {
     /// per-state sidecar before/after the put so undo/redo can restore it.
     fn record_state_visibility_promote(
         &self,
-        state: &ChangeId,
+        state: &StateId,
         superseded: &ContentHash,
         record_id: &ContentHash,
         tier: &VisibilityTier,
@@ -349,8 +349,8 @@ pub trait OpLogRecorder: OpLogBackend {
         &self,
         source_thread: &ThreadName,
         target_thread: &ThreadName,
-        pre_target_id: &ChangeId,
-        post_target_id: &ChangeId,
+        pre_target_id: &StateId,
+        post_target_id: &StateId,
         scope: Option<&str>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(

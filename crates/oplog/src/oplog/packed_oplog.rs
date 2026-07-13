@@ -2595,13 +2595,13 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use heddle_schema::op_record::tests_support::{encode_atomic_no_head, encode_pre_atomic};
-    use objects::object::ChangeId;
+    use objects::object::StateId;
     use tempfile::TempDir;
 
     use super::*;
 
     fn make_entry(id: u64, scope: Option<&str>) -> OpEntry {
-        let state = ChangeId::generate();
+        let state = crate::oplog::fresh_state_id();
         OpEntry {
             id,
             timestamp: Utc::now(),
@@ -2915,15 +2915,15 @@ mod tests {
     fn pre_atomic_v2_records_migrate_to_current_schema() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("oplog.bin");
-        let detached_snapshot = ChangeId::generate();
-        let attached_snapshot = ChangeId::generate();
-        let goto_target = ChangeId::generate();
-        let fork_from = ChangeId::generate();
-        let fork_result = ChangeId::generate();
-        let collapse_source = ChangeId::generate();
-        let collapse_result = ChangeId::generate();
-        let thread_state = ChangeId::generate();
-        let marker_state = ChangeId::generate();
+        let detached_snapshot = crate::oplog::fresh_state_id();
+        let attached_snapshot = crate::oplog::fresh_state_id();
+        let goto_target = crate::oplog::fresh_state_id();
+        let fork_from = crate::oplog::fresh_state_id();
+        let fork_result = crate::oplog::fresh_state_id();
+        let collapse_source = crate::oplog::fresh_state_id();
+        let collapse_result = crate::oplog::fresh_state_id();
+        let thread_state = crate::oplog::fresh_state_id();
+        let marker_state = crate::oplog::fresh_state_id();
 
         let mut entries = Vec::new();
         let mut snapshot_detached = make_batch_entry(1, 1, 0, Some("lane"));
@@ -3051,10 +3051,10 @@ mod tests {
     fn atomic_no_head_v2_records_preserve_head_remote_and_transaction_mappings() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("oplog.bin");
-        let snapshot_state = ChangeId::generate();
-        let goto_target = ChangeId::generate();
-        let remote_state = ChangeId::generate();
-        let undo_state = ChangeId::generate();
+        let snapshot_state = crate::oplog::fresh_state_id();
+        let goto_target = crate::oplog::fresh_state_id();
+        let remote_state = crate::oplog::fresh_state_id();
+        let undo_state = crate::oplog::fresh_state_id();
 
         let mut entries = Vec::new();
         let mut snapshot = make_batch_entry(1, 1, 0, Some("lane"));
@@ -3138,7 +3138,7 @@ mod tests {
     fn current_v3_attached_nil_head_snapshot_migrates_without_losing_thread() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("oplog.bin");
-        let snapshot_state = ChangeId::generate();
+        let snapshot_state = crate::oplog::fresh_state_id();
         let mut snapshot = make_batch_entry(1, 1, 0, Some("lane"));
         snapshot.operation = OpRecord::Snapshot {
             new_state: snapshot_state,
@@ -3177,9 +3177,9 @@ mod tests {
     fn mixed_schema_v3_entries_migrate_per_entry_to_current_schema() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("oplog.bin");
-        let pre_atomic_state = ChangeId::generate();
-        let atomic_state = ChangeId::generate();
-        let current_state = ChangeId::generate();
+        let pre_atomic_state = crate::oplog::fresh_state_id();
+        let atomic_state = crate::oplog::fresh_state_id();
+        let current_state = crate::oplog::fresh_state_id();
 
         let mut pre_atomic_snapshot = make_batch_entry(1, 1, 0, Some("lane"));
         pre_atomic_snapshot.operation = OpRecord::Snapshot {
@@ -3296,14 +3296,14 @@ mod tests {
     fn current_v3_records_are_semantically_identical_after_ensure_latest() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("oplog.bin");
-        let state_1 = ChangeId::generate();
-        let state_2 = ChangeId::generate();
-        let state_3 = ChangeId::generate();
-        let state_4 = ChangeId::generate();
-        let state_5 = ChangeId::generate();
-        let state_6 = ChangeId::generate();
-        let state_7 = ChangeId::generate();
-        let state_8 = ChangeId::generate();
+        let state_1 = crate::oplog::fresh_state_id();
+        let state_2 = crate::oplog::fresh_state_id();
+        let state_3 = crate::oplog::fresh_state_id();
+        let state_4 = crate::oplog::fresh_state_id();
+        let state_5 = crate::oplog::fresh_state_id();
+        let state_6 = crate::oplog::fresh_state_id();
+        let state_7 = crate::oplog::fresh_state_id();
+        let state_8 = crate::oplog::fresh_state_id();
 
         let mut entries = Vec::new();
         let mut attached_snapshot = make_batch_entry(1, 1, 0, Some("lane"));
@@ -3441,8 +3441,8 @@ mod tests {
         assert!(matches!(
             &loaded.entries[3].operation,
             OpRecord::Fork { from, new_state, thread: None, head: None }
-                if *from == ChangeId::from_bytes([4; 16])
-                    && *new_state == ChangeId::from_bytes([5; 16])
+                if *from == StateId::from_bytes([4; 32])
+                    && *new_state == StateId::from_bytes([5; 32])
         ));
 
         PackedOpLog::ensure_latest(&path).unwrap();
@@ -3600,11 +3600,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("oplog.bin");
         let mut log = PackedOpLog::new(path.clone());
-        log.append(
-            (1..=BATCH_COUNT)
-                .map(|id| make_entry(id, None))
-                .collect(),
-        );
+        log.append((1..=BATCH_COUNT).map(|id| make_entry(id, None)).collect());
         log.head_id = BATCH_COUNT;
         log.save().unwrap();
 
@@ -3633,7 +3629,7 @@ mod tests {
         let path = tmp.path().join("oplog.bin");
         let mut op = make_entry(1, Some("lane"));
         op.operation = OpRecord::Snapshot {
-            new_state: ChangeId::generate(),
+            new_state: crate::oplog::fresh_state_id(),
             prev_head: None,
             head: None,
             thread: Some("main".into()),
@@ -3661,7 +3657,7 @@ mod tests {
         let path = tmp.path().join("oplog.bin");
         let mut op = make_entry(1, Some("lane"));
         op.operation = OpRecord::Snapshot {
-            new_state: ChangeId::generate(),
+            new_state: crate::oplog::fresh_state_id(),
             prev_head: None,
             head: None,
             thread: Some("main".into()),

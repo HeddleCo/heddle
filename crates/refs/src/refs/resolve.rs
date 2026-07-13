@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pure refspec resolution helpers.
 
-use objects::object::ChangeId;
+use objects::object::StateId;
 
 use super::{Head, UNDO_RECOVERY_HANDLE};
 
@@ -11,12 +11,12 @@ pub fn resolve_refspec<E, ReadHead, GetThread, GetMarker, GetUndoRecovery>(
     get_thread: GetThread,
     get_marker: GetMarker,
     get_undo_recovery: GetUndoRecovery,
-) -> Result<Option<ChangeId>, E>
+) -> Result<Option<StateId>, E>
 where
     ReadHead: FnOnce() -> Result<Head, E>,
-    GetThread: Fn(&str) -> Result<Option<ChangeId>, E>,
-    GetMarker: Fn(&str) -> Result<Option<ChangeId>, E>,
-    GetUndoRecovery: FnOnce() -> Result<Option<ChangeId>, E>,
+    GetThread: Fn(&str) -> Result<Option<StateId>, E>,
+    GetMarker: Fn(&str) -> Result<Option<StateId>, E>,
+    GetUndoRecovery: FnOnce() -> Result<Option<StateId>, E>,
 {
     if refspec == "@" || refspec == "HEAD" {
         return match read_head()? {
@@ -37,7 +37,7 @@ where
     if let Some(id) = get_marker(refspec)? {
         return Ok(Some(id));
     }
-    if let Ok(id) = ChangeId::parse(refspec) {
+    if let Ok(id) = StateId::parse(refspec) {
         return Ok(Some(id));
     }
     Ok(None)

@@ -559,7 +559,6 @@ impl OpLogBackend for PgOpLogBackend {
 // ── Issue #62 regression: current-thread runtime panic ──────────────────────
 #[cfg(test)]
 mod current_thread_runtime_tests {
-    use objects::object::ChangeId;
     use sqlx::{Executor, PgPool, postgres::PgPoolOptions};
 
     use super::*;
@@ -703,7 +702,7 @@ mod current_thread_runtime_tests {
         let ids = backend
             .record_batch_scoped(
                 vec![OpRecord::Snapshot {
-                    new_state: ChangeId::generate(),
+                    new_state: crate::oplog::fresh_state_id(),
                     prev_head: None,
                     head: None,
                     thread: Some("main".to_string()),

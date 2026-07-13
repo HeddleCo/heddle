@@ -22,7 +22,7 @@ use std::{
 
 use chrono::{TimeZone, Utc};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use objects::object::{ChangeId, Principal};
+use objects::object::{Principal, StateId};
 use oplog::{
     ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpEntry, OpLog, OpLogBackend,
     OpLogRecorder, OpRecord,
@@ -78,11 +78,15 @@ fn copy_dir(from: impl AsRef<Path>, to: impl AsRef<Path>) {
     }
 }
 
-fn cid_for(i: usize) -> ChangeId {
-    let raw = SEED
+fn state_id_for(i: usize) -> StateId {
+    let first = SEED
         .wrapping_add(i as u128)
         .wrapping_mul(0x9e37_79b9_7f4a_7c15_6eed_0e9d_a4d9_4a4f);
-    ChangeId::from_bytes(raw.to_le_bytes())
+    let second = first.rotate_left(61) ^ 0x6a09_e667_f3bc_c908_bb67_ae85_84ca_a73b;
+    let mut bytes = [0; 32];
+    bytes[..16].copy_from_slice(&first.to_le_bytes());
+    bytes[16..].copy_from_slice(&second.to_le_bytes());
+    StateId::from_bytes(bytes)
 }
 
 fn thread_name(i: usize) -> String {
@@ -92,8 +96,8 @@ fn thread_name(i: usize) -> String {
 fn update_record(i: usize) -> OpRecord {
     OpRecord::ThreadUpdate {
         name: thread_name(i),
-        old_state: cid_for(i),
-        new_state: cid_for(i + 1),
+        old_state: state_id_for(i),
+        new_state: state_id_for(i + 1),
         manager_snapshots: None,
     }
 }
@@ -179,8 +183,8 @@ fn bench_append_throughput(c: &mut Criterion) {
                         let log = layout.log();
                         let id = log
                             .record_snapshot(
-                                &cid_for(existing + 1),
-                                Some(&cid_for(existing)),
+                                &state_id_for(existing + 1),
+                                Some(&state_id_for(existing)),
                                 None,
                                 None,
                             )
