@@ -515,7 +515,7 @@ fn agent_api_capture_and_ready_require_active_session() {
     )
     .unwrap();
     assert_eq!(capture["intent"], "first agent capture");
-    assert!(capture["change_id"].as_str().unwrap().starts_with("hd-"));
+    assert!(capture["state_id"].as_str().unwrap().starts_with("hs-"));
     let log: Value = serde_json::from_str(
         &heddle(&["--output", "json", "log", "-n", "1"], Some(main.path())).unwrap(),
     )
@@ -1579,11 +1579,11 @@ fn undo_is_scoped_to_the_current_thread() {
 
     assert_ne!(
         auth_thread["current_state"].as_str().unwrap(),
-        auth_snapshot["change_id"].as_str().unwrap()
+        auth_snapshot["state_id"].as_str().unwrap()
     );
     assert_eq!(
         search_thread["current_state"].as_str().unwrap(),
-        search_snapshot["change_id"].as_str().unwrap()
+        search_snapshot["state_id"].as_str().unwrap()
     );
 
     heddle(&["undo", "--redo"], Some(&auth_path)).unwrap();

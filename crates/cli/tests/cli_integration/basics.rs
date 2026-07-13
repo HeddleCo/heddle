@@ -231,7 +231,7 @@ fn test_cli_capture_refuses_noop_worktree() {
     heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
     let before = heddle(&["show", "HEAD", "--output", "json"], Some(temp.path())).unwrap();
     let before: Value = serde_json::from_str(&before).expect("show HEAD should be JSON");
-    let before_id = before["change_id"].as_str().expect("show HEAD change id");
+    let before_id = before["state_id"].as_str().expect("show HEAD change id");
 
     let output = heddle_output(
         &["--output", "json", "capture", "-m", "noop"],
@@ -248,7 +248,7 @@ fn test_cli_capture_refuses_noop_worktree() {
 
     let after = heddle(&["show", "HEAD", "--output", "json"], Some(temp.path())).unwrap();
     let after: Value = serde_json::from_str(&after).expect("show HEAD should be JSON");
-    assert_eq!(after["change_id"].as_str(), Some(before_id));
+    assert_eq!(after["state_id"].as_str(), Some(before_id));
 }
 
 fn seed_git_history(path: &std::path::Path, commit_count: usize) {
@@ -1078,7 +1078,7 @@ fn test_cli_ready_in_plain_git_repo_captures_mixed_git_state() {
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
             .unwrap();
-    assert!(status["state"]["change_id"].as_str().is_some());
+    assert!(status["state"]["state_id"].as_str().is_some());
     assert_eq!(status["verification"]["status"], "needs_checkpoint");
     assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
 }
@@ -1624,7 +1624,7 @@ fn test_cli_import_git_ref_imports_only_selected_tag() {
 
     let v1 = heddle(&["show", "v1.0.0", "--output", "json"], Some(temp.path())).unwrap();
     let parsed_v1: Value = serde_json::from_str(&v1).unwrap();
-    assert!(parsed_v1["change_id"].as_str().is_some());
+    assert!(parsed_v1["state_id"].as_str().is_some());
 
     let v2_err = heddle(&["show", "v2.0.0", "--output", "json"], Some(temp.path()))
         .unwrap_err()
@@ -1722,9 +1722,9 @@ fn test_cli_show_head_tracks_git_branch_switch_after_bootstrap() {
     let output = heddle(&["show", "HEAD", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "git-overlay");
-    assert!(parsed["change_id"].as_str().is_some());
+    assert!(parsed["state_id"].as_str().is_some());
     assert_ne!(
-        parsed["change_id"], before["change_id"],
+        parsed["state_id"], before["state_id"],
         "show HEAD should follow the switched Git branch, not stale bootstrap state: {parsed}"
     );
 }
@@ -1763,7 +1763,7 @@ fn test_cli_ready_captures_current_git_branch_after_switch() {
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
             .unwrap();
     assert_eq!(status["thread"], "support/ready-switch");
-    assert!(status["state"]["change_id"].as_str().is_some());
+    assert!(status["state"]["state_id"].as_str().is_some());
     assert_eq!(status["verification"]["status"], "needs_checkpoint");
     assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
 }
@@ -1852,7 +1852,7 @@ fn test_cli_snapshot_creates_state() {
 
     let output = heddle(&["capture", "-m", "Initial commit"], Some(temp.path())).unwrap();
     assert!(
-        output.contains("Created state") || output.contains("hd-"),
+        output.contains("Created state") || output.contains("hs-"),
         "Should show created state: {}",
         output
     );
@@ -1964,7 +1964,7 @@ fn test_cli_checkpoint_creates_git_commit_and_records_mapping() {
     let git_commit = String::from_utf8(head.stdout).unwrap().trim().to_string();
     assert!(!git_commit.is_empty());
 
-    // Heddle records change_id provenance on `refs/notes/heddle`
+    // Heddle records state_id provenance on `refs/notes/heddle`
     // inside the legacy Bridge Mirror at `.heddle/git/` rather than rewriting
     // commit messages with a `Heddle-Change:` trailer — that keeps Git
     // commit SHAs stable across heddle imports/exports and keeps normal
@@ -1985,7 +1985,7 @@ fn test_cli_checkpoint_creates_git_commit_and_records_mapping() {
     );
     let note_body = String::from_utf8(notes.stdout).unwrap();
     assert!(
-        note_body.contains("hd-"),
+        note_body.contains("hs-"),
         "note body should embed a Heddle change id: {note_body}"
     );
     let git_log = Command::new("git")
@@ -2070,7 +2070,7 @@ fn test_cli_ready_in_git_overlay_auto_captures_initial_state() {
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
             .unwrap();
-    assert!(status["state"]["change_id"].as_str().is_some());
+    assert!(status["state"]["state_id"].as_str().is_some());
     assert!(status["git_checkpoint"].is_null());
     assert_eq!(status["verification"]["status"], "needs_checkpoint");
     assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
@@ -2103,7 +2103,7 @@ fn test_cli_start_bootstraps_current_state_in_plain_git_repo() {
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
             .unwrap();
-    assert!(status["state"]["change_id"].as_str().is_some());
+    assert!(status["state"]["state_id"].as_str().is_some());
 }
 
 #[test]
@@ -2122,7 +2122,7 @@ fn test_cli_marker_create_bootstraps_current_state_in_plain_git_repo() {
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
             .unwrap();
-    assert!(status["state"]["change_id"].as_str().is_some());
+    assert!(status["state"]["state_id"].as_str().is_some());
 }
 
 #[test]
@@ -2141,7 +2141,7 @@ fn test_cli_thread_create_bootstraps_current_state_in_plain_git_repo() {
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
             .unwrap();
-    assert!(status["state"]["change_id"].as_str().is_some());
+    assert!(status["state"]["state_id"].as_str().is_some());
 }
 
 #[test]
@@ -2303,11 +2303,11 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
     .unwrap();
     assert_eq!(
         auth_thread["current_state"].as_str().unwrap(),
-        auth_capture["change_id"].as_str().unwrap()
+        auth_capture["state_id"].as_str().unwrap()
     );
     assert_eq!(
         search_thread["current_state"].as_str().unwrap(),
-        search_capture["change_id"].as_str().unwrap()
+        search_capture["state_id"].as_str().unwrap()
     );
 
     let auth_checkpoint_err = heddle(
@@ -2414,7 +2414,7 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
         );
         let note_body = String::from_utf8(notes.stdout).unwrap();
         assert!(
-            note_body.contains("hd-"),
+            note_body.contains("hs-"),
             "note for {git_commit} should embed a Heddle change id: {note_body}"
         );
     }
@@ -2605,7 +2605,7 @@ fn test_cli_snapshot_no_agent_ignores_corrupt_session_state() {
     )
     .unwrap();
     assert!(
-        output.contains("Created state") || output.contains("hd-"),
+        output.contains("Created state") || output.contains("hs-"),
         "human snapshot should not require session state: {}",
         output
     );
@@ -2666,8 +2666,8 @@ fn test_cli_snapshot_without_confidence_records_none() {
         "snapshot output should expose absent confidence as null: {snapshot_json:#}"
     );
 
-    let change_id = snapshot_json["change_id"].as_str().unwrap();
-    let show_json = heddle(&["show", "--output", "json", change_id], Some(temp.path())).unwrap();
+    let state_id = snapshot_json["state_id"].as_str().unwrap();
+    let show_json = heddle(&["show", "--output", "json", state_id], Some(temp.path())).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&show_json).unwrap();
     assert!(
         parsed["confidence"].is_null(),
@@ -2695,7 +2695,7 @@ fn test_cli_log_shows_history() {
 
     let output = heddle(&["log"], Some(temp.path())).unwrap();
     assert!(
-        output.contains("Commit 1") || output.contains("hd-"),
+        output.contains("Commit 1") || output.contains("hs-"),
         "Should show commits: {}",
         output
     );
@@ -2884,7 +2884,7 @@ fn test_cli_show_state_details() {
 
     let output = heddle(&["show", "HEAD"], Some(temp.path())).unwrap();
     assert!(
-        output.contains("Test state") || output.contains("hd-"),
+        output.contains("Test state") || output.contains("hs-"),
         "Should show state details: {}",
         output
     );
@@ -3073,34 +3073,34 @@ fn test_cli_undo_redo() {
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle(&["capture", "-m", "State 1"], Some(temp.path())).unwrap();
     let head_after_first = status_json(temp.path());
-    let first_id = head_after_first["state"]["change_id"]
+    let first_id = head_after_first["state"]["state_id"]
         .as_str()
-        .expect("state change_id should be string")
+        .expect("state state_id should be string")
         .to_string();
     assert_eq!(head_after_first["thread"].as_str().unwrap_or(""), "main");
 
     std::fs::write(temp.path().join("file.txt"), "updated").unwrap();
     heddle(&["capture", "-m", "State 2"], Some(temp.path())).unwrap();
     let head_after_second = status_json(temp.path());
-    let second_id = head_after_second["state"]["change_id"]
+    let second_id = head_after_second["state"]["state_id"]
         .as_str()
-        .expect("state change_id should be string")
+        .expect("state state_id should be string")
         .to_string();
 
     assert!(heddle(&["undo"], Some(temp.path())).is_ok());
     let head_after_undo = status_json(temp.path());
-    let undo_id = head_after_undo["state"]["change_id"]
+    let undo_id = head_after_undo["state"]["state_id"]
         .as_str()
-        .expect("state change_id should be string")
+        .expect("state state_id should be string")
         .to_string();
     assert_eq!(head_after_undo["thread"].as_str().unwrap_or(""), "main");
     assert_eq!(undo_id, first_id, "Undo should move to previous state");
 
     assert!(heddle(&["undo", "--redo"], Some(temp.path())).is_ok());
     let head_after_redo = status_json(temp.path());
-    let redo_id = head_after_redo["state"]["change_id"]
+    let redo_id = head_after_redo["state"]["state_id"]
         .as_str()
-        .expect("state change_id should be string")
+        .expect("state state_id should be string")
         .to_string();
     assert_eq!(head_after_redo["thread"].as_str().unwrap_or(""), "main");
     assert_eq!(redo_id, second_id, "Redo should restore latest state");
@@ -3134,11 +3134,11 @@ fn test_cli_show_renders_absent_confidence_as_em_dash() {
         "fixture must have None confidence so the test exercises the absent branch",
     );
     repo.store().put_state(&state).expect("put state");
-    let short_id = state.change_id.short();
+    let short_id = state.state_id.short();
     // Advance the seeded `main` thread to our `None`-confidence state so
     // `heddle log` (which walks from HEAD) actually traverses it.
     repo.refs()
-        .set_thread(&ThreadName::new("main"), &state.change_id)
+        .set_thread(&ThreadName::new("main"), &state.state_id)
         .expect("set main thread");
     drop(repo);
 

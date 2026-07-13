@@ -522,7 +522,7 @@ fn realworld_git_annotated_tag_rename_round_trips() {
 /// thread.
 #[test]
 #[ignore = "nightly real-world matrix: cherry-pick distinctness"]
-fn realworld_git_cherry_pick_assigns_distinct_change_ids() {
+fn realworld_git_cherry_pick_assigns_distinct_state_ids() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
@@ -594,14 +594,8 @@ fn realworld_git_cherry_pick_assigns_distinct_change_ids() {
         &heddle_with_host_git(&["--output", "json", "log", "feature/b", "-n", "1"], &work).unwrap(),
     )
     .unwrap();
-    let id_a = log_a["states"][0]["change_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let id_b = log_b["states"][0]["change_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_a = log_a["states"][0]["state_id"].as_str().unwrap().to_string();
+    let id_b = log_b["states"][0]["state_id"].as_str().unwrap().to_string();
     assert_ne!(
         id_a, id_b,
         "cherry-picked commits must mint distinct heddle change ids — got {id_a} on both"
@@ -649,19 +643,19 @@ fn realworld_git_gc_prunes_unreachable_mapping_entries() {
         .join("git-projection")
         .join("git-projection-mapping.json");
     let mapping_text = std::fs::read_to_string(&mapping_path).expect("mapping json");
-    let original_entries = mapping_text.matches("\"change_id\"").count();
+    let original_entries = mapping_text.matches("\"state_id\"").count();
 
     // Inject a fabricated entry pointing at a never-reachable oid.
-    // The format is the same `entries: [{change_id, git_oid}]`
+    // The format is the same `entries: [{state_id, git_oid}]`
     // sidecar gix-bridge writes; we splice a row in.
     let mut value: Value = serde_json::from_str(&mapping_text).unwrap();
     let entries = value["entries"].as_array_mut().unwrap();
-    // Synthetic change_id: 26 lowercase base32 chars after the
-    // `hd-` prefix (the encoding `ChangeId::parse` enforces). Pairs
+    // Synthetic state_id: 52 lowercase base32 chars after the
+    // `hs-` prefix (the encoding `StateId::parse` enforces). Pairs
     // with a synthetic git oid that no real ref points at, so gc
     // must treat the row as garbage.
     entries.push(serde_json::json!({
-        "change_id": "hd-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "state_id": "hs-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "git_oid": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
     }));
     std::fs::write(&mapping_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
@@ -999,9 +993,9 @@ fn marketing_moments_walkthrough_against_real_fixture() {
         serde_json::from_str(&checkpoint_out).expect("(M11) checkpoint output should parse");
     assert!(
         checkpoint["state"].as_str().is_some()
-            || checkpoint["change_id"].as_str().is_some()
+            || checkpoint["state_id"].as_str().is_some()
             || checkpoint["recorded"].as_bool().unwrap_or(false),
-        "(M11) checkpoint should report the new state/change_id: {checkpoint_out}"
+        "(M11) checkpoint should report the new state/state_id: {checkpoint_out}"
     );
 
     // ── (7) Heddle-native recovery verbs are wired ──

@@ -826,7 +826,7 @@ mod tests {
             anchor_root: None,
             reservation_token: None,
             path: None,
-            base_state: "hd-base".to_string(),
+            base_state: "hs-base".to_string(),
             started_at: Utc::now(),
             provider: None,
             model: None,

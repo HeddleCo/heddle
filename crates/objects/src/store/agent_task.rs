@@ -288,7 +288,7 @@ mod tests {
             "main".into(),
         );
         task.body = "Do the thing".into();
-        task.base_state = Some("hd-base".into());
+        task.base_state = Some("hs-base".into());
         task.base_root = Some("root123".into());
 
         let created = store.create(task).unwrap();
@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(loaded.title, "Demo task");
         assert_eq!(loaded.body, "Do the thing");
         assert_eq!(loaded.target_thread, "main");
-        assert_eq!(loaded.base_state.as_deref(), Some("hd-base"));
+        assert_eq!(loaded.base_state.as_deref(), Some("hs-base"));
         assert_eq!(loaded.base_root.as_deref(), Some("root123"));
     }
 

@@ -8,7 +8,7 @@ fn test_fsck_dangling_ref() {
 
     heddle(&["thread", "create", "orphan"], Some(temp.path())).unwrap();
     let thread_path = temp.path().join(".heddle/refs/threads/orphan");
-    fs::write(&thread_path, "hd-deadbeef12345678901234567890").unwrap();
+    fs::write(&thread_path, "hs-deadbeef12345678901234567890").unwrap();
 
     let result = heddle(&["fsck"], Some(temp.path()));
     assert!(result.is_err(), "fsck should fail with dangling ref");
