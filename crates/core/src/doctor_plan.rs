@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Pure diagnose/doctor display helpers (no repo I/O).
+//! Pure doctor/doctor display helpers (no repo I/O).
 //!
 //! Owns path previews, visibility labels, and human section headers for
-//! `heddle doctor` / diagnose that can be decided from already-collected
+//! `heddle doctor` / doctor that can be decided from already-collected
 //! facts. Worktree status, thread advice, and RecoveryAdvice stay CLI-owned.
 
-/// Human title for the diagnose text header (`Doctor`).
-pub const DIAGNOSE_SECTION_DOCTOR: &str = "Doctor";
+/// Human title for the doctor text header (`Doctor`).
+pub const DOCTOR_SECTION_TITLE: &str = "Doctor";
 
 /// Human label when no thread is attached.
-pub const DIAGNOSE_THREAD_DETACHED: &str = "Thread: detached";
+pub const DOCTOR_THREAD_DETACHED: &str = "Thread: detached";
 
 /// Human label when HEAD has no state yet.
-pub const DIAGNOSE_STATE_INITIAL: &str = "State: (initial)";
+pub const DOCTOR_STATE_INITIAL: &str = "State: (initial)";
 
 /// Preview up to five changed paths, then `+N more` when `total` exceeds shown.
 ///
@@ -36,11 +36,11 @@ pub fn changed_path_preview(
     paths.join(", ")
 }
 
-/// Visibility label for a diagnose thread line.
+/// Visibility label for a doctor thread line.
 ///
 /// Prefer a resolved workspace `mode_label` (e.g. `"main checkout"`) when
 /// present; otherwise fall back to the thread's visibility string.
-pub fn diagnose_thread_visibility_label<'a>(
+pub fn doctor_thread_visibility_label<'a>(
     mode_label: Option<&'a str>,
     visibility: &'a str,
 ) -> &'a str {
@@ -48,7 +48,7 @@ pub fn diagnose_thread_visibility_label<'a>(
 }
 
 /// Health status tokens used when no current thread summary is available.
-pub fn diagnose_detached_health_status(worktree_dirty: bool, initial_state: bool) -> &'static str {
+pub fn doctor_detached_health_status(worktree_dirty: bool, initial_state: bool) -> &'static str {
     if worktree_dirty && initial_state {
         "uncaptured"
     } else if worktree_dirty {
@@ -59,12 +59,12 @@ pub fn diagnose_detached_health_status(worktree_dirty: bool, initial_state: bool
 }
 
 /// Changes summary line: `N modified, M added, D deleted`.
-pub fn diagnose_changes_summary(modified: usize, added: usize, deleted: usize) -> String {
+pub fn doctor_changes_summary(modified: usize, added: usize, deleted: usize) -> String {
     format!("{modified} modified, {added} added, {deleted} deleted")
 }
 
 /// Workspace summary line from counts.
-pub fn diagnose_workspace_summary(
+pub fn doctor_workspace_summary(
     thread_count: usize,
     parallel_count: usize,
     ready_count: usize,
@@ -98,28 +98,25 @@ mod tests {
     #[test]
     fn visibility_label_prefers_mode() {
         assert_eq!(
-            diagnose_thread_visibility_label(Some("main checkout"), "visible"),
+            doctor_thread_visibility_label(Some("main checkout"), "visible"),
             "main checkout"
         );
         assert_eq!(
-            diagnose_thread_visibility_label(None, "no dedicated checkout"),
+            doctor_thread_visibility_label(None, "no dedicated checkout"),
             "no dedicated checkout"
         );
     }
 
     #[test]
     fn detached_health_and_summaries() {
-        assert_eq!(diagnose_detached_health_status(true, true), "uncaptured");
+        assert_eq!(doctor_detached_health_status(true, true), "uncaptured");
+        assert_eq!(doctor_detached_health_status(true, false), "dirty_worktree");
+        assert_eq!(doctor_detached_health_status(false, true), "detached");
         assert_eq!(
-            diagnose_detached_health_status(true, false),
-            "dirty_worktree"
-        );
-        assert_eq!(diagnose_detached_health_status(false, true), "detached");
-        assert_eq!(
-            diagnose_changes_summary(1, 2, 3),
+            doctor_changes_summary(1, 2, 3),
             "1 modified, 2 added, 3 deleted"
         );
-        assert!(diagnose_workspace_summary(3, 1, 1, 0, 2).contains("3 thread(s)"));
-        assert_eq!(DIAGNOSE_SECTION_DOCTOR, "Doctor");
+        assert!(doctor_workspace_summary(3, 1, 1, 0, 2).contains("3 thread(s)"));
+        assert_eq!(DOCTOR_SECTION_TITLE, "Doctor");
     }
 }

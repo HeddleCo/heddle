@@ -12,7 +12,7 @@ Target rows describe the next model and must not be cited as shipped behavior.
 ## Terminology
 
 - `RepositoryVerificationState` is the canonical proof surface. `heddle verify
-  --output json` emits it directly when clean; `status`, `diagnose`,
+  --output json` emits it directly when clean; `status`, `doctor`,
   `thread list/show`, many
   post-operation envelopes, and mutating command preflights embed or defer to
   the same shape. `import git` and `fsck --repair git` post-operation

@@ -19,9 +19,9 @@ pub(crate) mod compact;
 mod completion;
 mod context;
 mod daemon;
-mod diagnose;
 mod diff;
 mod discuss;
+mod doctor;
 mod doctor_docs;
 mod doctor_schemas;
 mod error_envelope;
@@ -113,9 +113,9 @@ pub use context::{
 #[allow(unused_imports)]
 pub(crate) use daemon::client as daemon_client;
 pub use daemon::{cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop};
-pub use diagnose::cmd_diagnose;
 pub use diff::cmd_diff;
 pub use discuss::run as cmd_discuss;
+pub use doctor::cmd_doctor;
 pub use doctor_docs::cmd_doctor_docs;
 pub use doctor_schemas::{cmd_doctor_schemas, documented_samples_with_bound_verbs};
 pub use error_envelope::{

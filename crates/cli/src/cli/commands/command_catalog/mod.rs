@@ -1834,11 +1834,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         front_door(
             json_discriminators(
                 documented_schemas(READ_JSON, &["doctor"]),
-                &[json_discriminator(
-                    Some("doctor"),
-                    "output_kind",
-                    "diagnose",
-                )],
+                &[json_discriminator(Some("doctor"), "output_kind", "doctor")],
             ),
             120,
         ),

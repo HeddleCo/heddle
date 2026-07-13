@@ -60,26 +60,17 @@ pub struct AdoptArgs {
     pub refs: Vec<String>,
 }
 
-/// Arguments for the `diagnose` command.
-#[derive(Clone, Debug, clap::Args)]
-pub struct DiagnoseArgs {
-    /// Include local timing for the diagnosis read path.
-    #[arg(long)]
-    pub profile: bool,
-}
-
 /// Arguments for the `doctor` command (and its subcommands).
 ///
-/// `heddle doctor` with no subcommand runs the legacy diagnose summary
-/// (repository, thread, actor, workspace health). `heddle doctor docs`
+/// `heddle doctor` with no subcommand reports repository, thread, actor,
+/// and workspace health. `heddle doctor docs`
 /// runs the documentation truthfulness checker — see [`DoctorDocsArgs`]
 /// for that surface.
 #[derive(Clone, Debug, clap::Args)]
 pub struct DoctorArgs {
     /// Include local timing for the diagnosis read path.
     ///
-    /// Only honoured when no subcommand is given (i.e. when `heddle
-    /// doctor` runs the legacy diagnose summary). Subcommands like
+    /// Only honoured when no subcommand is given. Subcommands like
     /// `heddle doctor docs` ignore it.
     #[arg(long, global = false)]
     pub profile: bool,

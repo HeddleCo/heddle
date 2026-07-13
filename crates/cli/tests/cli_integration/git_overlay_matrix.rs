@@ -1053,9 +1053,9 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
         bridge_text.contains("heddle init") && !bridge_text.contains("heddle adopt"),
         "unborn status text should not recommend invalid adoption: {bridge_text}"
     );
-    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
-    assert_eq!(diagnose["recommended_action"], "heddle init");
-    assert_no_legacy_verification_sidecars(&diagnose);
+    let doctor = json(temp.path(), &["doctor", "--output", "json"]);
+    assert_eq!(doctor["recommended_action"], "heddle init");
+    assert_no_legacy_verification_sidecars(&doctor);
 
     let failed_adopt = heddle_output(
         &["--output", "json", "adopt", "--ref", "trunk"],
@@ -1078,9 +1078,9 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
 
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
-    assert_git_overlay_basics(&diagnose);
-    assert_eq!(diagnose["thread"]["name"], "trunk");
+    let doctor = json(temp.path(), &["doctor", "--output", "json"]);
+    assert_git_overlay_basics(&doctor);
+    assert_eq!(doctor["thread"]["name"], "trunk");
 
     let thread_list = json(temp.path(), &["thread", "list", "--output", "json"]);
     assert_eq!(thread_list["current"], "trunk");
@@ -1226,20 +1226,20 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
     assert_eq!(thread_show["verification"]["status"], "clean");
     assert_eq!(thread_show["recommended_action"], Value::Null);
     assert_verify_check_rows(&thread_show["verification"]);
-    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
-    assert_eq!(diagnose["verification"]["verified"], true);
-    assert_eq!(diagnose["verification"]["status"], "clean");
-    assert_eq!(diagnose["verification"]["recommended_action"], Value::Null);
-    assert_eq!(diagnose["recommended_action"], "heddle ready --thread main");
+    let doctor = json(temp.path(), &["doctor", "--output", "json"]);
+    assert_eq!(doctor["verification"]["verified"], true);
+    assert_eq!(doctor["verification"]["status"], "clean");
+    assert_eq!(doctor["verification"]["recommended_action"], Value::Null);
+    assert_eq!(doctor["recommended_action"], "heddle ready --thread main");
     assert!(
-        diagnose["recovery_commands"]
+        doctor["recovery_commands"]
             .as_array()
             .unwrap()
             .iter()
             .all(|command| command
                 .as_str()
                 .is_some_and(|command| !command.contains("heddle adopt"))),
-        "clean direct-backed diagnostics should not require adoption: {diagnose}"
+        "clean direct-backed diagnostics should not require adoption: {doctor}"
     );
     let bridge = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["verification"]["status"], "clean");
@@ -1265,12 +1265,12 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
         !verify_text.contains("not checked"),
         "clean verify text should render all proof rows as checked: {verify_text}"
     );
-    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
-    assert_eq!(diagnose["output_kind"], "diagnose");
-    assert_eq!(diagnose["verification"]["verified"], true);
-    assert_eq!(diagnose["verification"]["status"], "clean");
-    assert_eq!(diagnose["recommended_action"], Value::Null);
-    assert_eq!(diagnose["health"]["recommended_action"], Value::Null);
+    let doctor = json(temp.path(), &["doctor", "--output", "json"]);
+    assert_eq!(doctor["output_kind"], "doctor");
+    assert_eq!(doctor["verification"]["verified"], true);
+    assert_eq!(doctor["verification"]["status"], "clean");
+    assert_eq!(doctor["recommended_action"], Value::Null);
+    assert_eq!(doctor["health"]["recommended_action"], Value::Null);
     let status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(status["output_kind"], "status");
     assert_eq!(status["verification"]["verified"], true);
@@ -4245,8 +4245,8 @@ fn git_overlay_matrix_subdirectory_dirty_commands() {
             .any(|value| value == "new.txt")
     );
 
-    let diagnose = json(&nested, &["doctor", "--output", "json"]);
-    assert_eq!(diagnose["changes"]["total"], 2);
+    let doctor = json(&nested, &["doctor", "--output", "json"]);
+    assert_eq!(doctor["changes"]["total"], 2);
 
     let show = json(&nested, &["show", "HEAD", "--output", "json"]);
     assert!(show["state_id"].as_str().is_some());
@@ -4354,10 +4354,10 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     let same_state_diff = json(temp.path(), &["diff", "HEAD", "HEAD"]);
     assert_eq!(same_state_diff["stats"]["files_changed"], 0);
 
-    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
+    let doctor = json(temp.path(), &["doctor", "--output", "json"]);
     assert_eq!(
-        diagnose["changes"]["total"], 0,
-        "diagnose must not resurrect stale Heddle-vs-state paths when Git is clean: {diagnose}"
+        doctor["changes"]["total"], 0,
+        "doctor must not resurrect stale Heddle-vs-state paths when Git is clean: {doctor}"
     );
     let diff = json(temp.path(), &["diff", "--output", "json", "--stat"]);
     let diff_changes = diff["changes"]
@@ -4374,10 +4374,10 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     let dirty_status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(dirty_status["changed_path_count"], 1);
     assert_eq!(dirty_status["verification"]["worktree_state"], "dirty");
-    let dirty_diagnose = json(temp.path(), &["doctor", "--output", "json"]);
+    let dirty_doctor = json(temp.path(), &["doctor", "--output", "json"]);
     assert_eq!(
-        dirty_diagnose["changes"]["total"], 1,
-        "diagnose should show the same current Git dirty set as status: {dirty_diagnose}"
+        dirty_doctor["changes"]["total"], 1,
+        "doctor should show the same current Git dirty set as status: {dirty_doctor}"
     );
     let dirty_diff = json(temp.path(), &["diff", "--output", "json", "--stat"]);
     let dirty_changes = dirty_diff["changes"].as_object().unwrap_or_else(|| {
@@ -4768,8 +4768,8 @@ fn git_overlay_matrix_non_main_default_branch_commands() {
     let status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(status["thread"], "develop");
 
-    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
-    assert_eq!(diagnose["thread"]["name"], "develop");
+    let doctor = json(temp.path(), &["doctor", "--output", "json"]);
+    assert_eq!(doctor["thread"]["name"], "develop");
 
     let thread_list = json(temp.path(), &["thread", "list", "--output", "json"]);
     assert_eq!(thread_list["current"], "develop");
@@ -4928,8 +4928,8 @@ fn git_overlay_matrix_detached_at_tag_status_commands() {
         "status should remain usable when detached at a tag: {status}"
     );
 
-    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
-    assert_git_overlay_basics(&diagnose);
+    let doctor = json(temp.path(), &["doctor", "--output", "json"]);
+    assert_git_overlay_basics(&doctor);
 
     let show = json(temp.path(), &["show", "HEAD", "--output", "json"]);
     assert_git_overlay_basics(&show);
@@ -7410,8 +7410,8 @@ fn git_overlay_matrix_rebase_and_cherry_pick_sequences_remain_coherent() {
         "status should stay coherent during rebase conflict: {status}"
     );
 
-    let diagnose = json(rebase_repo.path(), &["doctor", "--output", "json"]);
-    assert_eq!(diagnose["repository_capability"], "git-overlay");
+    let doctor = json(rebase_repo.path(), &["doctor", "--output", "json"]);
+    assert_eq!(doctor["repository_capability"], "git-overlay");
 
     let worktree = json(rebase_repo.path(), &["status", "--output", "json"]);
     assert_eq!(worktree["repository_capability"], "git-overlay");
@@ -7935,8 +7935,8 @@ fn git_overlay_matrix_in_progress_operations_surface_consistently() {
         status["operation"]["next_action"],
         raw_git_preservation_action()
     );
-    let diagnose = json(rebase_repo.path(), &["doctor", "--output", "json"]);
-    assert_eq!(diagnose["operation"]["kind"], "rebase");
+    let doctor = json(rebase_repo.path(), &["doctor", "--output", "json"]);
+    assert_eq!(doctor["operation"]["kind"], "rebase");
     let workspace = json(rebase_repo.path(), &["status", "--output", "json"]);
     assert_eq!(workspace["operation"]["kind"], "rebase");
     let thread_list = json(rebase_repo.path(), &["thread", "list", "--output", "json"]);
@@ -8267,11 +8267,8 @@ fn git_overlay_matrix_sync_and_primary_guidance_prefer_heddle_verbs() {
     assert_eq!(status_before["remote_tracking"]["behind"], 1);
     assert_eq!(status_before["recommended_action"], "heddle pull");
 
-    let diagnose_before = json(temp.path(), &["doctor", "--output", "json"]);
-    assert_eq!(
-        diagnose_before["health"]["recommended_action"],
-        "heddle pull"
-    );
+    let doctor_before = json(temp.path(), &["doctor", "--output", "json"]);
+    assert_eq!(doctor_before["health"]["recommended_action"], "heddle pull");
 
     let sync = json(temp.path(), &["--output", "json", "sync"]);
     assert_eq!(sync["status"], "synced");
@@ -8607,7 +8604,7 @@ fn git_overlay_matrix_operator_states_survive_reopen_and_keep_guidance_consisten
     start_conflicted_heddle_merge(temp.path());
 
     let status = json(temp.path(), &["status", "--output", "json"]);
-    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
+    let doctor = json(temp.path(), &["doctor", "--output", "json"]);
     let thread_show = json(
         temp.path(),
         &["thread", "show", "feature", "--output", "json"],
@@ -8615,11 +8612,11 @@ fn git_overlay_matrix_operator_states_survive_reopen_and_keep_guidance_consisten
     let workspace = json(temp.path(), &["status", "--output", "json"]);
 
     assert_eq!(status["operation"]["kind"], "merge");
-    assert_eq!(diagnose["operation"]["kind"], "merge");
+    assert_eq!(doctor["operation"]["kind"], "merge");
     assert_eq!(thread_show["operation"]["kind"], "merge");
     assert_eq!(workspace["operation"]["kind"], "merge");
     assert_eq!(status["recommended_action"], "heddle continue");
-    assert_eq!(diagnose["health"]["recommended_action"], "heddle continue");
+    assert_eq!(doctor["health"]["recommended_action"], "heddle continue");
     assert_eq!(thread_show["recommended_action"], "heddle continue");
     assert_eq!(workspace["recommended_action"], "heddle continue");
 

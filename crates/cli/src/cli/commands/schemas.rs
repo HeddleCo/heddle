@@ -127,7 +127,7 @@ schema_registry! {
     (&["import git"], ImportGitSchema),
     (&["sync git"], SyncGitSchema),
     (&["revert"], RevertSchema),
-    (&["doctor"], DiagnoseSchema),
+    (&["doctor"], DoctorSchema),
     (&["doctor docs"], DoctorDocsSchema),
     (&["doctor schemas"], DoctorSchemasSchema),
     (&["agent presence show"], AgentPresenceSingleSchema),
@@ -2817,11 +2817,11 @@ pub struct RevertSchema {
 
 // ---- git overlay diagnostics ---------------------------------------------
 
-// ---- diagnose -------------------------------------------------------------
+// ---- doctor ---------------------------------------------------------------
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct DiagnoseSchema {
-    pub output_kind: Option<String>,
+pub struct DoctorSchema {
+    pub output_kind: String,
     pub repository: String,
     pub repository_capability: String,
     pub storage_model: String,

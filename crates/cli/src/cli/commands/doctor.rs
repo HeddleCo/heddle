@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Diagnose command.
+//! Doctor command.
 
 use std::time::Instant;
 
 use anyhow::Result;
 use chrono::Utc;
-use heddle_core::diagnose_plan::{
-    DIAGNOSE_SECTION_DOCTOR, DIAGNOSE_STATE_INITIAL, DIAGNOSE_THREAD_DETACHED,
-    changed_path_preview, diagnose_changes_summary, diagnose_detached_health_status,
-    diagnose_thread_visibility_label, diagnose_workspace_summary,
+use heddle_core::doctor_plan::{
+    DOCTOR_SECTION_TITLE, DOCTOR_STATE_INITIAL, DOCTOR_THREAD_DETACHED, changed_path_preview,
+    doctor_changes_summary, doctor_detached_health_status, doctor_thread_visibility_label,
+    doctor_workspace_summary,
 };
 use objects::object::Tree;
 use repo::{
@@ -33,37 +33,37 @@ use super::{
         trust_visible_worktree_status,
     },
 };
-use crate::cli::{Cli, DiagnoseArgs, should_output_json, style, worktree_status_options};
+use crate::cli::{Cli, should_output_json, style, worktree_status_options};
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct DiagnoseOutput {
+pub(crate) struct DoctorOutput {
     output_kind: &'static str,
     repository: String,
     repository_capability: String,
     storage_model: String,
     hosted_enabled: bool,
     #[serde(skip)]
-    import_guidance: Option<DiagnoseImportGuidanceOutput>,
+    import_guidance: Option<DoctorImportGuidanceOutput>,
     #[serde(skip)]
     verification_health: RepositoryVerificationHealth,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
     operation: Option<RepositoryOperationStatus>,
     remote_tracking: Option<GitRemoteTrackingStatus>,
-    thread: Option<DiagnoseThreadOutput>,
-    state: Option<DiagnoseStateOutput>,
-    changes: DiagnoseChangesOutput,
-    workspace: DiagnoseWorkspaceOutput,
-    health: DiagnoseHealthOutput,
+    thread: Option<DoctorThreadOutput>,
+    state: Option<DoctorStateOutput>,
+    changes: DoctorChangesOutput,
+    workspace: DoctorWorkspaceOutput,
+    health: DoctorHealthOutput,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
     recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
-    profile: Option<DiagnoseProfileOutput>,
+    profile: Option<DoctorProfileOutput>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct DiagnoseThreadOutput {
+struct DoctorThreadOutput {
     name: String,
     visibility: String,
     coordination_status: CoordinationStatus,
@@ -89,21 +89,21 @@ struct DiagnoseThreadOutput {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct DiagnoseStateOutput {
+struct DoctorStateOutput {
     state_id: String,
     tree: String,
     intent: Option<String>,
-    git_checkpoint: Option<DiagnoseCheckpointOutput>,
+    git_checkpoint: Option<DoctorCheckpointOutput>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct DiagnoseCheckpointOutput {
+struct DoctorCheckpointOutput {
     git_commit: String,
     committed_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct DiagnoseChangesOutput {
+struct DoctorChangesOutput {
     modified: Vec<String>,
     added: Vec<String>,
     deleted: Vec<String>,
@@ -111,7 +111,7 @@ struct DiagnoseChangesOutput {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct DiagnoseWorkspaceOutput {
+struct DoctorWorkspaceOutput {
     thread_count: usize,
     parallel_count: usize,
     ready_count: usize,
@@ -120,7 +120,7 @@ struct DiagnoseWorkspaceOutput {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct DiagnoseHealthOutput {
+struct DoctorHealthOutput {
     output_kind: &'static str,
     status: String,
     blockers: Vec<String>,
@@ -130,7 +130,7 @@ struct DiagnoseHealthOutput {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct DiagnoseImportGuidanceOutput {
+struct DoctorImportGuidanceOutput {
     current_branch: String,
     missing_branch_count: usize,
     missing_branches: Vec<String>,
@@ -138,7 +138,7 @@ struct DiagnoseImportGuidanceOutput {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct DiagnoseProfileOutput {
+struct DoctorProfileOutput {
     repo_open_ms: u128,
     current_state_ms: u128,
     worktree_status_ms: u128,
@@ -146,19 +146,19 @@ struct DiagnoseProfileOutput {
     total_ms: u128,
 }
 
-pub fn cmd_diagnose(cli: &Cli, args: DiagnoseArgs) -> Result<()> {
-    let output = build_diagnose_output(cli, args.profile)?;
-    render_diagnose(cli, &output);
+pub fn cmd_doctor(cli: &Cli, include_profile: bool) -> Result<()> {
+    let output = build_doctor_output(cli, include_profile)?;
+    render_doctor(cli, &output);
     Ok(())
 }
 
-fn build_plain_git_diagnose_output(cli: &Cli) -> Result<Option<DiagnoseOutput>> {
+fn build_plain_git_doctor_output(cli: &Cli) -> Result<Option<DoctorOutput>> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
     let Some(probe) = build_plain_git_verification_probe(start)? else {
         return Ok(None);
     };
-    let changes = DiagnoseChangesOutput {
+    let changes = DoctorChangesOutput {
         modified: probe
             .changes
             .modified
@@ -196,8 +196,8 @@ fn build_plain_git_diagnose_output(cli: &Cli) -> Result<Option<DiagnoseOutput>> 
             })
             .collect(),
     };
-    Ok(Some(DiagnoseOutput {
-        output_kind: "diagnose",
+    Ok(Some(DoctorOutput {
+        output_kind: "doctor",
         repository: probe.root.display().to_string(),
         repository_capability: "plain-git".to_string(),
         storage_model: "git-only".to_string(),
@@ -210,15 +210,15 @@ fn build_plain_git_diagnose_output(cli: &Cli) -> Result<Option<DiagnoseOutput>> 
         thread: None,
         state: None,
         changes,
-        workspace: DiagnoseWorkspaceOutput {
+        workspace: DoctorWorkspaceOutput {
             thread_count: 0,
             parallel_count: 0,
             ready_count: 0,
             blocked_count: 0,
             active_actor_count: 0,
         },
-        health: DiagnoseHealthOutput {
-            output_kind: "diagnose_health",
+        health: DoctorHealthOutput {
+            output_kind: "doctor_health",
             status: trust.status.clone(),
             blockers: vec![trust.summary.clone()],
             recommended_action: trust.recommended_action.clone(),
@@ -231,8 +231,8 @@ fn build_plain_git_diagnose_output(cli: &Cli) -> Result<Option<DiagnoseOutput>> 
     }))
 }
 
-pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<DiagnoseOutput> {
-    if let Some(output) = build_plain_git_diagnose_output(cli)? {
+pub(crate) fn build_doctor_output(cli: &Cli, include_profile: bool) -> Result<DoctorOutput> {
+    if let Some(output) = build_plain_git_doctor_output(cli)? {
         return Ok(output);
     }
     let total_start = Instant::now();
@@ -267,7 +267,7 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
         let tree = Tree::new();
         repo.compare_worktree_cached_with_options(&tree, &status_options)?
     };
-    let changes = DiagnoseChangesOutput {
+    let changes = DoctorChangesOutput {
         modified: status
             .modified
             .iter()
@@ -304,7 +304,7 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
         .as_ref()
         .map(is_synthetic_root)
         .unwrap_or(true);
-    let mut health = diagnose_health(&repo, current_summary, changes.total > 0, initial_state);
+    let mut health = doctor_health(&repo, current_summary, changes.total > 0, initial_state);
     if !verification_health.clean && operation.is_none() {
         health.status = verification_health.status.clone();
         health.recommended_action = primary_recovery_command(&verification_health)
@@ -314,9 +314,9 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
             health.blockers.push(verification_health.summary.clone());
         }
     }
-    let workspace = diagnose_workspace(&summaries);
-    let thread = current_summary.map(diagnose_thread);
-    let state = current_state.as_ref().map(|state| DiagnoseStateOutput {
+    let workspace = doctor_workspace(&summaries);
+    let thread = current_summary.map(doctor_thread);
+    let state = current_state.as_ref().map(|state| DoctorStateOutput {
         state_id: state.state_id.short(),
         tree: state.tree.short(),
         intent: state.intent.clone(),
@@ -324,13 +324,13 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
             .latest_git_checkpoint_for_state(&state.state_id)
             .ok()
             .flatten()
-            .map(|record| DiagnoseCheckpointOutput {
+            .map(|record| DoctorCheckpointOutput {
                 git_commit: record.git_commit,
                 committed_at: record.committed_at,
             }),
     });
 
-    let profile = include_profile.then(|| DiagnoseProfileOutput {
+    let profile = include_profile.then(|| DoctorProfileOutput {
         repo_open_ms,
         current_state_ms,
         worktree_status_ms,
@@ -349,8 +349,8 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
         } else {
             health.recommended_action.clone()
         };
-        DiagnoseHealthOutput {
-            output_kind: "diagnose_health",
+        DoctorHealthOutput {
+            output_kind: "doctor_health",
             recommended_action: recommended_action.clone(),
             recommended_action_template: action_template(&recommended_action),
             ..health
@@ -367,20 +367,18 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
         trust.recommended_action_template.clone()
     };
 
-    Ok(DiagnoseOutput {
-        output_kind: "diagnose",
+    Ok(DoctorOutput {
+        output_kind: "doctor",
         repository: repo.root().display().to_string(),
         repository_capability: repo.capability_label().to_string(),
         storage_model: repo.storage_model_label().to_string(),
         hosted_enabled: repo.hosted_enabled(),
-        import_guidance: import_hint
-            .clone()
-            .map(|hint| DiagnoseImportGuidanceOutput {
-                current_branch: hint.current_branch,
-                missing_branch_count: hint.missing_branch_count,
-                missing_branches: hint.missing_branches,
-                recommended_command: hint.recommended_command,
-            }),
+        import_guidance: import_hint.clone().map(|hint| DoctorImportGuidanceOutput {
+            current_branch: hint.current_branch,
+            missing_branch_count: hint.missing_branch_count,
+            missing_branches: hint.missing_branches,
+            recommended_command: hint.recommended_command,
+        }),
         verification_health,
         trust: trust.clone(),
         operation: operation.clone(),
@@ -397,8 +395,8 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
     })
 }
 
-fn diagnose_thread(summary: &ThreadSummary) -> DiagnoseThreadOutput {
-    DiagnoseThreadOutput {
+fn doctor_thread(summary: &ThreadSummary) -> DoctorThreadOutput {
+    DoctorThreadOutput {
         name: summary.name.clone(),
         visibility: summary.visibility.clone(),
         coordination_status: summary.coordination_status,
@@ -422,8 +420,8 @@ fn diagnose_thread(summary: &ThreadSummary) -> DiagnoseThreadOutput {
     }
 }
 
-fn diagnose_workspace(summaries: &[ThreadSummary]) -> DiagnoseWorkspaceOutput {
-    DiagnoseWorkspaceOutput {
+fn doctor_workspace(summaries: &[ThreadSummary]) -> DoctorWorkspaceOutput {
+    DoctorWorkspaceOutput {
         thread_count: summaries.len(),
         parallel_count: summaries
             .iter()
@@ -454,21 +452,21 @@ fn diagnose_workspace(summaries: &[ThreadSummary]) -> DiagnoseWorkspaceOutput {
     }
 }
 
-fn diagnose_health(
+fn doctor_health(
     repo: &Repository,
     current_summary: Option<&ThreadSummary>,
     worktree_dirty: bool,
     initial_state: bool,
-) -> DiagnoseHealthOutput {
+) -> DoctorHealthOutput {
     let Some(summary) = current_summary else {
         let recommended_action = if worktree_dirty {
             "heddle capture -m \"...\""
         } else {
             ""
         };
-        return DiagnoseHealthOutput {
-            output_kind: "diagnose_health",
-            status: diagnose_detached_health_status(worktree_dirty, initial_state).to_string(),
+        return DoctorHealthOutput {
+            output_kind: "doctor_health",
+            status: doctor_detached_health_status(worktree_dirty, initial_state).to_string(),
             blockers: Vec::new(),
             recommended_action: recommended_action.to_string(),
             recommended_action_template: action_template(recommended_action),
@@ -516,8 +514,8 @@ fn diagnose_health(
     let advice =
         describe_thread_advice_with_initial(&thread, worktree_dirty, 0, false, initial_state);
     let recommended_action = advice.recommended_action;
-    DiagnoseHealthOutput {
-        output_kind: "diagnose_health",
+    DoctorHealthOutput {
+        output_kind: "doctor_health",
         status: advice.thread_health,
         blockers: advice.blockers,
         recommended_action: recommended_action.clone(),
@@ -525,18 +523,18 @@ fn diagnose_health(
     }
 }
 
-fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
+fn render_doctor(cli: &Cli, output: &DoctorOutput) {
     if should_output_json(cli, None) {
         println!(
             "{}",
-            serde_json::to_string(output).expect("diagnose JSON serializes")
+            serde_json::to_string(output).expect("doctor JSON serializes")
         );
         return;
     }
 
     println!(
         "{} {}",
-        style::bold(DIAGNOSE_SECTION_DOCTOR),
+        style::bold(DOCTOR_SECTION_TITLE),
         style::dim(&output.repository)
     );
     println!(
@@ -574,7 +572,7 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
         println!(
             "Thread: {} [{} · {}]",
             thread.name,
-            diagnose_thread_visibility(thread),
+            doctor_thread_visibility(thread),
             thread.coordination_status
         );
         if let Some(path) = thread.path.as_ref().or(thread.execution_path.as_ref()) {
@@ -601,7 +599,7 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
             }
         }
     } else {
-        println!("{DIAGNOSE_THREAD_DETACHED}");
+        println!("{DOCTOR_THREAD_DETACHED}");
     }
 
     if let Some(state) = &output.state {
@@ -632,12 +630,12 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
             println!("Capture durability: local only");
         }
     } else {
-        println!("{DIAGNOSE_STATE_INITIAL}");
+        println!("{DOCTOR_STATE_INITIAL}");
     }
 
     println!(
         "Changes: {}",
-        diagnose_changes_summary(
+        doctor_changes_summary(
             output.changes.modified.len(),
             output.changes.added.len(),
             output.changes.deleted.len()
@@ -657,7 +655,7 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
 
     println!(
         "Workspace: {}",
-        diagnose_workspace_summary(
+        doctor_workspace_summary(
             output.workspace.thread_count,
             output.workspace.parallel_count,
             output.workspace.ready_count,
@@ -684,8 +682,8 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
     }
 }
 
-fn diagnose_thread_visibility(thread: &DiagnoseThreadOutput) -> &str {
-    diagnose_thread_visibility_label(
+fn doctor_thread_visibility(thread: &DoctorThreadOutput) -> &str {
+    doctor_thread_visibility_label(
         thread.mode.as_ref().map(thread_workspace_label),
         &thread.visibility,
     )

@@ -2803,7 +2803,7 @@ data, not JSON contract fields.
 
 ```json
 {
-  "output_kind": "diagnose",
+  "output_kind": "doctor",
   "repository": "/work/project",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
@@ -2815,7 +2815,7 @@ data, not JSON contract fields.
   "state": null,
   "changes": {"modified": [], "added": [], "deleted": []},
   "workspace": {"thread_count": 0},
-  "health": {"status": "clean"},
+  "health": {"output_kind": "doctor_health", "status": "clean"},
   "recommended_action": "",
   "recovery_commands": [],
   "profile": null

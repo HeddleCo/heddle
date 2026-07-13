@@ -769,12 +769,12 @@ export interface DaemonStopSchema {
   [key: string]: unknown;
 }
 
-export interface DiagnoseSchema {
+export interface DoctorSchema {
   changes: unknown;
   health: unknown;
   hosted_enabled: boolean;
   operation?: unknown;
-  output_kind: "diagnose";
+  output_kind: "doctor";
   profile?: unknown;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -3335,7 +3335,7 @@ export interface HeddleVerbOutputs {
   "discuss open": DiscussOpenSchema;
   "discuss resolve": DiscussResolveSchema;
   "discuss show": DiscussShowSchema;
-  doctor: DiagnoseSchema;
+  doctor: DoctorSchema;
   "doctor docs": DoctorDocsSchema;
   "doctor schemas": DoctorSchemasSchema;
   error: ErrorEnvelopeSchema;

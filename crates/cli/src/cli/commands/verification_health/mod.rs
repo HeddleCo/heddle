@@ -170,7 +170,7 @@ pub(crate) fn build_repository_verification_state_with_worktree_status(
     )
 }
 
-/// Core-owned health proof (CLI may inspect recovery commands for diagnose text).
+/// Core-owned health proof (CLI may inspect recovery commands for doctor text).
 pub(crate) fn build_verification_health(repo: &Repository) -> RepositoryVerificationHealth {
     let worktree_status = worktree_status_for_verification(repo);
     heddle_core::status::build_repository_verification_health_with_worktree_status(

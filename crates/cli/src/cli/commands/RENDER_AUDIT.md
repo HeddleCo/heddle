@@ -33,7 +33,7 @@ of each file. Treat the table as a punch list, not a contract.
 | `context/context_mutate.rs`                                   | partial    |                                                    |
 | `context/context_query.rs`                                    | partial    |                                                    |
 | `daemon/cmd.rs`                                               | partial    |                                                    |
-| `diagnose.rs`                                                 | partial    |                                                    |
+| `doctor.rs`                                                   | partial    |                                                    |
 | `diff/diff_output.rs`                                         | compliant  | Canonical example.                                 |
 | `discuss.rs`                                                  | partial    |                                                    |
 | `fetch.rs`                                                    | partial    |                                                    |

@@ -259,8 +259,6 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         "agent ready" => Some("ready"),
         "start" => Some("thread_start"),
         "switch" => Some("thread_switch"),
-        // `doctor` is implemented by the diagnose module.
-        "doctor" => Some("diagnose"),
         // The garbage-collection wrapper emits its inner tool's kind.
         "maintenance gc" => Some("gc"),
         // `redact purge` preserves the pre-consolidation wire values.
@@ -723,8 +721,8 @@ fn runtime_invocation_args(
         // payload) in the shared init'd fixture, verified live before
         // being added here. Each pins runtime emission against the
         // catalog value, including the override-table verbs (`branch` →
-        // `thread_list`, `doctor` → `diagnose`, `inspect` →
-        // `thread_show`, and `maintenance gc` → `gc`).
+        // `thread_list`, `inspect` → `thread_show`, and `maintenance gc` →
+        // `gc`).
         // `inspect` names `main` explicitly because the earlier `fork`
         // invocation leaves the shared fixture without a current
         // thread; `ready` (which rejects imported-Git-ref targets and

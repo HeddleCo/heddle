@@ -865,7 +865,7 @@ fn test_cli_status_in_plain_git_repo_works_from_subdirectory() {
 }
 
 #[test]
-fn test_cli_diagnose_in_plain_git_repo_uses_git_baseline() {
+fn test_cli_doctor_in_plain_git_repo_uses_git_baseline() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
@@ -880,7 +880,7 @@ fn test_cli_diagnose_in_plain_git_repo_uses_git_baseline() {
     assert_eq!(parsed["verification"]["status"], "needs_init");
     assert!(
         !temp.path().join(".heddle").exists(),
-        "diagnose in a plain Git repo must be observe-only"
+        "doctor in a plain Git repo must be observe-only"
     );
     assert_eq!(parsed["changes"]["total"], 2);
     assert!(
@@ -889,7 +889,7 @@ fn test_cli_diagnose_in_plain_git_repo_uses_git_baseline() {
             .unwrap()
             .iter()
             .any(|value| value == "tracked.txt"),
-        "diagnose should report tracked modification: {parsed}"
+        "doctor should report tracked modification: {parsed}"
     );
     assert!(
         parsed["changes"]["added"]
@@ -897,7 +897,7 @@ fn test_cli_diagnose_in_plain_git_repo_uses_git_baseline() {
             .unwrap()
             .iter()
             .any(|value| value == "plain.txt"),
-        "diagnose should report untracked addition: {parsed}"
+        "doctor should report untracked addition: {parsed}"
     );
 }
 
@@ -1670,15 +1670,15 @@ fn test_cli_import_git_defaults_to_current_repo_even_after_mirror_exists() {
 }
 
 #[test]
-fn test_cli_diagnose_tracks_git_branch_switch_after_bootstrap() {
+fn test_cli_doctor_tracks_git_branch_switch_after_bootstrap() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
-    git(&["branch", "support/diagnose-switch"], temp.path());
+    git(&["branch", "support/doctor-switch"], temp.path());
 
     let _ = heddle(&["doctor", "--output", "json"], Some(temp.path())).unwrap();
-    git(&["checkout", "support/diagnose-switch"], temp.path());
+    git(&["checkout", "support/doctor-switch"], temp.path());
     std::fs::write(temp.path().join("diag.txt"), "dirty").unwrap();
 
     let output = heddle(&["doctor", "--output", "json"], Some(temp.path())).unwrap();
@@ -1688,7 +1688,7 @@ fn test_cli_diagnose_tracks_git_branch_switch_after_bootstrap() {
     assert_no_legacy_verification_sidecars(&parsed);
     assert!(
         !temp.path().join(".heddle").exists(),
-        "diagnose should not bootstrap plain Git before explicit init"
+        "doctor should not bootstrap plain Git before explicit init"
     );
     assert!(
         parsed["changes"]["added"]
@@ -1696,7 +1696,7 @@ fn test_cli_diagnose_tracks_git_branch_switch_after_bootstrap() {
             .unwrap()
             .iter()
             .any(|value| value == "diag.txt"),
-        "diagnose should still reflect dirty state after branch switch: {parsed}"
+        "doctor should still reflect dirty state after branch switch: {parsed}"
     );
 }
 

@@ -33,7 +33,7 @@ Heuristic only: files under `crates/cli/src` defining `fn cmd_*`, sorted by LOC.
 | 784 | yes | `crates/cli/src/cli/commands/git_projection_io.rs` | `cmd_context_reason_git`, `cmd_export_git`, `cmd_import_git`, `cmd_sync_git` |
 | 742 | yes | `crates/cli/src/cli/commands/agent_presence.rs` | presence list, show, explain, and complete |
 | 719 | yes | `crates/cli/src/cli/commands/try_cmd.rs` | `cmd_try`, `cmd_try_refuses_name_collision_via_ref_only_thread` |
-| 693 | yes | `crates/cli/src/cli/commands/diagnose.rs` | `cmd_diagnose` |
+| 693 | yes | `crates/cli/src/cli/commands/doctor.rs` | `cmd_doctor` |
 | 538 | yes | `crates/cli/src/cli/commands/blame.rs` | `cmd_blame_with_output_kind`, `cmd_query_attribution` |
 | 504 | yes | `crates/cli/src/cli/commands/context/context_query.rs` | `cmd_context_audit`, `cmd_context_check`, `cmd_context_get`, `cmd_context_history`, `cmd_context_list`, `cmd_context_suggest` |
 | 476 | yes | `crates/cli/src/cli/commands/verify.rs` | `cmd_verify` |

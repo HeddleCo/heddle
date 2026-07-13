@@ -1300,7 +1300,7 @@ fn degraded_health(
         status: "degraded".to_string(),
         clean: false,
         summary: summary.to_string(),
-        recovery_commands: vec!["heddle diagnose".to_string()],
+        recovery_commands: vec!["heddle doctor".to_string()],
         checks,
     }
 }

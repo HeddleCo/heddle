@@ -14057,7 +14057,7 @@
         "operation": true,
         "output_kind": {
           "enum": [
-            "diagnose"
+            "doctor"
           ],
           "type": "string"
         },
@@ -14113,7 +14113,7 @@
         "recovery_commands",
         "output_kind"
       ],
-      "title": "DiagnoseSchema",
+      "title": "DoctorSchema",
       "type": "object"
     },
     "doctor docs": {

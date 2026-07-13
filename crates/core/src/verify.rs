@@ -1330,12 +1330,7 @@ fn recommended_action_templates() -> Vec<ActionTemplate> {
             false,
         ),
         ("heddle verify", &["heddle", "verify"][..], &[][..], false),
-        (
-            "heddle diagnose",
-            &["heddle", "diagnose"][..],
-            &[][..],
-            false,
-        ),
+        ("heddle doctor", &["heddle", "doctor"][..], &[][..], false),
         (
             "heddle doctor schemas --output json",
             &["heddle", "doctor", "schemas", "--output", "json"][..],

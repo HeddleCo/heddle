@@ -111,7 +111,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 
 1. Establish the core verification shape: `MachineContractInput`, `ActionAudience`, structured actions, richer `PlainGitProbe`, `verification` naming, and command-catalog proof injection.
 2. Shipped for `status`, `verify`, and `doctor`: public JSON uses `verification`; legacy `git_overlay_health` / `git_overlay_import_hint` sidecars are internal render/advice data rather than JSON contract fields.
-3. Migrate remaining CLI callers from CLI-owned proof builders to the core proof interface: `diagnose`, `ready`, `thread`, remote commands, merge/rebase/operator preflights, and post-operation envelopes.
+3. Migrate remaining CLI callers from CLI-owned proof builders to the core proof interface: `doctor`, `ready`, `thread`, remote commands, merge/rebase/operator preflights, and post-operation envelopes.
 4. Split and rename modules by cohesive responsibility after ownership is stable.
 5. Delete old CLI proof builders by migrated slice. Temporary equivalence tests may exist during migration, then should be removed or inverted into reachability tests proving no CLI-owned proof builder remains reachable.
 
