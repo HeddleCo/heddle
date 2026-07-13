@@ -2373,7 +2373,7 @@ fn test_cli_git_overlay_fetch_uses_configured_default_not_origin_fallback() {
 
 #[test]
 fn test_cli_git_overlay_remote_add_does_not_steal_tracked_branch_default() {
-    let fixture = GitOverlayFixture::adopted_main().with_bare_origin();
+    let fixture = GitOverlayFixture::imported_main().with_bare_origin();
     let work = fixture.path();
     let origin = fixture.origin_path();
     let backup = TempDir::new().unwrap();

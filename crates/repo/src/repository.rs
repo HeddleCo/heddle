@@ -62,7 +62,9 @@ use objects::{object::MarkerName, worktree::WorktreeStatus};
 use oplog::{OpLog, OpLogBackend, OpRecord};
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
 pub use refs::{RefSummaryIndexInspection, SpoolFacet};
-pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
+pub use repo_config::{
+    HostedConfig, OutputFormat, RedactConfig, RepoConfig, RepositorySourceAuthority, TrustedKey,
+};
 // Review-epic config types — re-exported here so the new
 // `repository_signals.rs` (and external crates wanting to construct a
 // custom signals config) don't need to reach into a private module path.
@@ -170,7 +172,7 @@ pub struct GitOverlayTagTip {
 
 /// How many Git commits reachable from a branch tip have no Heddle mapping
 /// (neither imported/projection-mapped nor checkpointed). Used to report
-/// how far a Git branch moved out-of-band before `heddle adopt --ref`
+/// how far a Git branch moved out-of-band before `heddle import git --ref`
 /// reconciles it.
 #[cfg(feature = "git-overlay")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -356,7 +358,22 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
         config: RepoConfig,
         shallow: ShallowInfo,
     ) -> Self {
-        let capability = repository_capability_for_root(&root);
+        let capability = repository_capability_for_authority(config.repository.source_authority);
+        Self::from_parts_with_capability(
+            root, heddle_dir, store, refs, oplog, config, shallow, capability,
+        )
+    }
+
+    fn from_parts_with_capability(
+        root: PathBuf,
+        heddle_dir: PathBuf,
+        store: S,
+        refs: R,
+        oplog: O,
+        config: RepoConfig,
+        shallow: ShallowInfo,
+        capability: RepositoryCapability,
+    ) -> Self {
         Self {
             root,
             heddle_dir,
@@ -425,6 +442,7 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
         store: S,
         config: RepoConfig,
         refs: RefManager,
+        capability: RepositoryCapability,
     ) -> Result<Self> {
         let actor = config
             .principal
@@ -448,8 +466,8 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
         // — a prior process's committed-but-unpublished crash tail on its next
         // read, without re-deriving long-since-deleted refs from ancient records.
         refs.init_reconcile_watermark()?;
-        Ok(Self::from_parts(
-            root, heddle_dir, store, refs, oplog, config, shallow,
+        Ok(Self::from_parts_with_capability(
+            root, heddle_dir, store, refs, oplog, config, shallow, capability,
         ))
     }
 }
@@ -530,6 +548,13 @@ impl Repository {
     /// the repository from an external source (e.g. git import) should use
     /// `init` directly so the imported refs become the sole source of truth.
     pub fn init(path: impl AsRef<Path>) -> Result<Self> {
+        Self::init_with_source_authority(path, RepositorySourceAuthority::Native)
+    }
+
+    fn init_with_source_authority(
+        path: impl AsRef<Path>,
+        source_authority: RepositorySourceAuthority,
+    ) -> Result<Self> {
         let root = path.as_ref().to_path_buf();
         let heddle_dir = root.join(".heddle");
 
@@ -553,7 +578,8 @@ impl Repository {
         let oplog = OpLog::new_unattributed(&heddle_dir);
         oplog.init()?;
 
-        let config = RepoConfig::default();
+        let mut config = RepoConfig::default();
+        config.repository.source_authority = source_authority;
         config.save(&heddle_dir.join("config.toml"))?;
 
         refs.write_head(&Head::Attached {
@@ -577,11 +603,10 @@ impl Repository {
         // point — parity with `open_raw`.
         refs.init_reconcile_watermark()?;
 
-        let capability = repository_capability_for_root(&root);
         Ok(Self {
             root,
             heddle_dir: heddle_dir.clone(),
-            capability,
+            capability: repository_capability_for_authority(source_authority),
             store: AnyStore::Fs(store),
             refs,
             oplog,
@@ -613,12 +638,21 @@ impl Repository {
     pub fn bootstrap_git_overlay(path: impl AsRef<Path>) -> Result<Self> {
         let root = path.as_ref();
         if root.join(".heddle").exists() {
-            ensure_git_overlay_exclude(root)?;
-            return Self::open(root);
+            let repo = Self::open(root)?;
+            if repo.capability() == RepositoryCapability::GitOverlay {
+                ensure_git_overlay_exclude(root)?;
+            }
+            return Ok(repo);
         }
 
-        let repo = Self::init(root)?;
+        let repo = Self::init_git_overlay_sidecar(root)?;
         ensure_git_overlay_exclude(root)?;
+        Ok(repo)
+    }
+
+    pub fn init_git_overlay_sidecar(path: impl AsRef<Path>) -> Result<Self> {
+        let root = path.as_ref();
+        let repo = Self::init_with_source_authority(root, RepositorySourceAuthority::GitOverlay)?;
         if let Some(head) = detect_git_head(root)? {
             repo.refs.write_head(&head)?;
         }
@@ -724,13 +758,20 @@ impl Repository {
                     }
 
                     let config_path = shared_galeed_dir.join("config.toml");
-                    let config = RepoConfig::load(&config_path)?;
+                    let source_root = shared_galeed_dir.parent().unwrap_or(dir);
+                    let config = RepoConfig::load_for_repository(&config_path, source_root)?;
                     ensure_supported_repo_format(&config_path, &config)?;
                     let store = Self::build_store(&config, &shared_galeed_dir)?;
                     let local_head_path = heddle_path.join("HEAD");
                     let refs = RefManager::new(&shared_galeed_dir).with_local_head(local_head_path);
-                    let repo =
-                        Self::open_raw(dir.to_path_buf(), shared_galeed_dir, store, config, refs)?;
+                    let repo = Self::open_raw(
+                        dir.to_path_buf(),
+                        shared_galeed_dir,
+                        store,
+                        config,
+                        refs,
+                        RepositoryCapability::NativeHeddle,
+                    )?;
                     repo.run_open_hooks()?;
                     return Ok(repo);
                 }
@@ -738,11 +779,20 @@ impl Repository {
                 if objects_dir.is_dir() {
                     // Main repo mode.
                     let config_path = heddle_path.join("config.toml");
-                    let config = RepoConfig::load(&config_path)?;
+                    let config = RepoConfig::load_for_repository(&config_path, dir)?;
                     ensure_supported_repo_format(&config_path, &config)?;
                     let store = Self::build_store(&config, &heddle_path)?;
                     let refs = RefManager::new(&heddle_path);
-                    let repo = Self::open_raw(dir.to_path_buf(), heddle_path, store, config, refs)?;
+                    let capability =
+                        repository_capability_for_authority(config.repository.source_authority);
+                    let repo = Self::open_raw(
+                        dir.to_path_buf(),
+                        heddle_path,
+                        store,
+                        config,
+                        refs,
+                        capability,
+                    )?;
                     repo.run_open_hooks()?;
                     if repo.capability() == RepositoryCapability::GitOverlay {
                         match detect_git_head_state(dir) {
@@ -853,6 +903,26 @@ impl Repository {
 
     pub fn capability(&self) -> RepositoryCapability {
         self.capability
+    }
+
+    pub fn source_authority(&self) -> RepositorySourceAuthority {
+        self.config.repository.source_authority
+    }
+
+    pub fn transition_source_authority(
+        &self,
+        expected: RepositorySourceAuthority,
+        next: RepositorySourceAuthority,
+    ) -> Result<()> {
+        if self.source_authority() != expected {
+            return Err(HeddleError::Config(format!(
+                "repository source authority changed before transition: expected {expected:?}, found {:?}",
+                self.source_authority()
+            )));
+        }
+        let mut config = self.config.clone();
+        config.repository.source_authority = next;
+        config.save(&self.heddle_dir.join("config.toml"))
     }
 
     pub fn git_overlay_sley_repository(&self) -> Result<Option<SleyRepository>> {
@@ -1101,7 +1171,7 @@ impl Repository {
         // Git-overlay treats Git refs and commits as Git-owned storage that
         // Heddle reads directly. Missing Git->Heddle state mappings are not an
         // everyday "needs adopt" condition; `adopt` is reserved for explicit
-        // import into Heddle state history.
+        // transition to native source authority.
         Ok(None)
     }
 
@@ -2686,13 +2756,22 @@ fn parse_objectstore_pointer(content: &str) -> Option<PathBuf> {
     None
 }
 
-fn has_git_metadata(path: &Path) -> bool {
+pub(crate) fn has_git_metadata(path: &Path) -> bool {
     let dot_git = path.join(".git");
     if !(dot_git.is_dir() || dot_git.is_file()) {
         return false;
     }
 
     SleyRepository::discover(path).is_ok()
+}
+
+fn repository_capability_for_authority(
+    source_authority: RepositorySourceAuthority,
+) -> RepositoryCapability {
+    match source_authority {
+        RepositorySourceAuthority::Native => RepositoryCapability::NativeHeddle,
+        RepositorySourceAuthority::GitOverlay => RepositoryCapability::GitOverlay,
+    }
 }
 
 /// If `start_path` lies inside a *managed virtualized thread root*
@@ -2876,14 +2955,6 @@ fn git_remote_tracking_next_action(
         (0, _) => "heddle pull".to_string(),
         (_, 0) => "heddle push".to_string(),
         _ => "heddle pull".to_string(),
-    }
-}
-
-fn repository_capability_for_root(root: &Path) -> RepositoryCapability {
-    if has_git_metadata(root) {
-        RepositoryCapability::GitOverlay
-    } else {
-        RepositoryCapability::NativeHeddle
     }
 }
 

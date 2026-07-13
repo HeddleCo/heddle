@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 use heddle_core::{AdoptPlanError, AdoptPlanOptions, plan_adopt};
-use repo::{Repository, RepositoryCapability};
+use repo::{Repository, RepositoryCapability, RepositorySourceAuthority};
 use serde::Serialize;
 use sley::Repository as SleyRepository;
 
@@ -104,6 +104,12 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
     let import_ms = import_start.elapsed().as_millis();
     progress.begin_ref_write();
     progress.finish();
+    repo.transition_source_authority(
+        RepositorySourceAuthority::GitOverlay,
+        RepositorySourceAuthority::Native,
+    )?;
+    drop(repo);
+    let repo = Repository::open(&git_root)?;
     let verification_start = std::time::Instant::now();
     let (trust, verification_profile) = if profile_enabled() {
         let (trust, profile) = build_repository_verification_state_profiled(&repo);
@@ -312,17 +318,17 @@ fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {
 
     if output.initialized {
         println!(
-            "{} imported the requested Git history into Heddle state history",
+            "{} adopted the Git repository into Heddle-native source storage",
             style::ok_marker()
         );
     } else if output.already_in_sync {
         println!(
-            "{} Git history is already imported into Heddle state history",
+            "{} adopted the already-imported Git history into Heddle-native source storage",
             style::ok_marker()
         );
     } else {
         println!(
-            "{} imported Git history into Heddle state history",
+            "{} adopted Git history into Heddle-native source storage",
             style::ok_marker()
         );
     }
@@ -339,6 +345,10 @@ fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {
         output.refs.join(", ")
     };
     println!("  {}", style::field("Imported refs", &scope));
+    println!(
+        "  {}",
+        style::field("Git Projection", "retained for explicit import/export/sync")
+    );
     println!(
         "  {}",
         style::field(

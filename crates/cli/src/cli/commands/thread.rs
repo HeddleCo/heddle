@@ -353,7 +353,7 @@ pub(crate) fn suppress_thread_actions_while_trust_blocked(
         if trust.status == "needs_import"
             && summary
                 .recommended_action
-                .starts_with("heddle adopt --ref ")
+                .starts_with("heddle import git --ref ")
         {
             summary.recommended_action_template =
                 recommended_action_template(&summary.recommended_action);

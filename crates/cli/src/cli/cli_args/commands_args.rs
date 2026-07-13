@@ -45,17 +45,17 @@ pub struct InitArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
-  heddle adopt                                # import all local Git refs into Heddle state history
-  heddle adopt --ref main                     # import one branch or tag
-  heddle adopt ../repo --ref main --ref v1.0  # import selected refs in another repo
+  heddle adopt                                # adopt all local Git refs into native Heddle storage
+  heddle adopt --ref main                     # adopt one branch or tag
+  heddle adopt ../repo --ref main --ref v1.0  # adopt selected refs in another repo
 
-Adoption imports Git refs into Heddle state history without modifying existing Git worktree changes or changing Git Overlay authority. Normal Git Overlay setup uses `heddle init` instead.
+Adoption imports Git refs, makes Heddle the source authority, and retains `.git` for explicit Git Projection. Normal Git Overlay setup uses `heddle init` instead.
 ")]
 pub struct AdoptArgs {
-    /// Git repository to import into Heddle state history (default: current directory).
+    /// Git repository to adopt into native Heddle storage (default: current directory).
     pub path: Option<std::path::PathBuf>,
 
-    /// Git branch or tag to import. Repeat to import selected refs; omit to import all refs.
+    /// Git branch or tag to adopt. Repeat for selected refs; omit to adopt all refs.
     #[arg(long = "ref", value_name = "REF")]
     pub refs: Vec<String>,
 }

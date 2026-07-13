@@ -207,7 +207,7 @@ fn open_accepts_supported_repository_format() {
     let config_path = temp_dir.path().join(".heddle/config.toml");
     fs::write(
         &config_path,
-        format!("[repository]\nversion = {SUPPORTED_REPO_FORMAT}\n"),
+        format!("[repository]\nversion = {SUPPORTED_REPO_FORMAT}\nsource_authority = \"native\"\n"),
     )
     .unwrap();
 
@@ -234,6 +234,20 @@ fn open_bootstraps_plain_git_sidecar_for_mutators() {
         crate::RepositoryCapability::GitOverlay,
         "bootstrapped plain Git should be git-overlay"
     );
+}
+
+#[test]
+fn explicit_native_authority_survives_alongside_git_metadata() {
+    let temp_dir = TempDir::new().unwrap();
+    sley::Repository::init(temp_dir.path()).unwrap();
+
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    assert_eq!(repo.capability(), RepositoryCapability::NativeHeddle);
+    drop(repo);
+
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    assert_eq!(reopened.capability(), RepositoryCapability::NativeHeddle);
+    assert!(temp_dir.path().join(".git").is_dir());
 }
 
 #[test]
@@ -1720,7 +1734,7 @@ fn test_open_preserves_explicit_detached_head_in_git_overlay() {
     let temp_dir = TempDir::new().unwrap();
     sley::Repository::init(temp_dir.path()).expect("init real git repository");
 
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = Repository::bootstrap_git_overlay(temp_dir.path()).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
 
     fs::write(temp_dir.path().join("a.txt"), "version 1").unwrap();
@@ -1755,7 +1769,7 @@ fn git_overlay_head_state_matches_symref_semantics() {
     let temp_dir = TempDir::new().unwrap();
     let git_dir = temp_dir.path().join(".git");
     sley::Repository::init_bare(&git_dir).expect("init bare .git");
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = Repository::bootstrap_git_overlay(temp_dir.path()).unwrap();
 
     std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
     assert_eq!(
@@ -1798,7 +1812,7 @@ fn git_overlay_worktree_status_is_none_when_embedded_git_is_bare() {
     let temp_dir = TempDir::new().unwrap();
     let git_dir = temp_dir.path().join(".git");
     sley::Repository::init_bare(&git_dir).expect("init bare .git");
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = Repository::bootstrap_git_overlay(temp_dir.path()).unwrap();
     assert_eq!(
         repo.capability(),
         RepositoryCapability::GitOverlay,
@@ -2379,7 +2393,7 @@ fn dir_only_ignore_covers_node_modules_symlink_git_overlay() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     sley::Repository::init(root).expect("init real git repository");
-    let repo = Repository::init_default(root).unwrap();
+    let repo = Repository::bootstrap_git_overlay(root).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
 
     let real_deps = root.join("real_deps");
@@ -2417,7 +2431,7 @@ fn midsession_ignore_broadening_masks_untracked_without_unlink_git_overlay() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     sley::Repository::init(root).expect("init real git repository");
-    let repo = Repository::init_default(root).unwrap();
+    let repo = Repository::bootstrap_git_overlay(root).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
 
     let node_modules = root.join("node_modules");
@@ -2526,14 +2540,14 @@ fn managed_checkout_path_uses_source_repo_name_from_custom_checkout() {
 /// `.heddle/threads/<encoded>/<repo-name>` is a boundary-delimited worktree. Its own
 /// `.heddle` pointer is the discovery boundary (git's analogue is the
 /// linked-worktree `.git` file): `Repository::open` from inside it must root at
-/// the checkout — capability derived from the checkout's OWN `.git` (absent →
-/// NativeHeddle), HEAD resolved to the THREAD — and must NEVER climb to the
+/// the checkout — native checkout capability, HEAD resolved to the THREAD — and
+/// must NEVER climb to the
 /// git-overlay parent and adopt the parent's `GitOverlay` capability or branch.
 #[test]
 fn open_solid_checkout_roots_at_boundary_not_git_overlay_parent() {
     let temp_dir = TempDir::new().unwrap();
     sley::Repository::init(temp_dir.path()).expect("init real git repository");
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = Repository::bootstrap_git_overlay(temp_dir.path()).unwrap();
     assert_eq!(
         repo.capability(),
         RepositoryCapability::GitOverlay,
@@ -2557,8 +2571,7 @@ fn open_solid_checkout_roots_at_boundary_not_git_overlay_parent() {
 
     let opened = Repository::open(&checkout).expect("open solid checkout");
 
-    // Capability roots at the checkout's own boundary (no `.git` AT the
-    // checkout → NativeHeddle), NOT the ancestor git-overlay parent.
+    // Capability roots at the checkout's own boundary, not the Git Overlay parent.
     assert_eq!(
         opened.capability(),
         RepositoryCapability::NativeHeddle,

@@ -700,8 +700,8 @@ Reconciliation examples:
 
 For an existing Git checkout, start with `heddle status`; `heddle init` creates
 the sidecar while Git commits stay in Git storage. Use `heddle adopt` only when
-you explicitly want to import Git refs into Heddle state history; the repository
-remains Git Overlay.
+you explicitly want to import Git refs and move source authority to Heddle-native
+storage. The retained `.git` is then an explicit Git Projection adapter.
 "#;
 
 const THREADS_TOPIC: &str = "Threads — Heddle's unit of in-progress work.\n\
@@ -939,7 +939,7 @@ State-specific recovery:\n\
 \n\
     Worktree has unsaved edits: heddle commit -m \"...\"\n\
     Captured in Heddle but not Git: heddle checkpoint -m \"...\"\n\
-    Import Git refs into Heddle state history: heddle adopt --ref <branch>\n";
+    Adopt Git refs into Heddle-native source storage: heddle adopt --ref <branch>\n";
 
 const GIT_PROJECTION_TOPIC: &str = "Git Projection — use Heddle with existing Git repos without a hidden mirror.\n\
 \n\

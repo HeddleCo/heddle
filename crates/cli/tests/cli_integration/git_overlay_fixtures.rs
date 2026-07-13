@@ -18,7 +18,7 @@ pub(crate) struct GitOverlayFixture {
 }
 
 impl GitOverlayFixture {
-    pub(crate) fn adopted_main() -> Self {
+    pub(crate) fn imported_main() -> Self {
         let temp = TempDir::new().expect("create git-overlay fixture tempdir");
         let work = temp.path().join("work");
         std::fs::create_dir_all(&work).expect("create git-overlay worktree");
@@ -28,7 +28,8 @@ impl GitOverlayFixture {
         std::fs::write(work.join("README.md"), "base\n").expect("seed README");
         git_hermetic(&["add", "README.md"], &work);
         git_hermetic(&["commit", "-m", "base"], &work);
-        heddle(&["adopt", "--ref", "main"], Some(&work)).expect("adopt main");
+        heddle(&["init"], Some(&work)).expect("initialize Git Overlay");
+        heddle(&["import", "git", "--ref", "main"], Some(&work)).expect("import main");
         Self {
             temp,
             work,

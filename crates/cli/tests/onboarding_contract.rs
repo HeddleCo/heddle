@@ -122,6 +122,37 @@ fn initialized_git_overlay_keeps_git_as_the_source_store() {
     assert!(status["recommended_action"].is_null());
 }
 
+#[test]
+fn adopt_moves_authority_to_native_and_retains_git_projection() {
+    let repo = TempDir::new().unwrap();
+    let config = repo.path().join("user/config.toml");
+    init_git(repo.path());
+    commit_git(repo.path());
+
+    let adopted = json(&heddle(
+        repo.path(),
+        &config,
+        &["adopt", "--output", "json"],
+    ));
+    assert_eq!(adopted["verification"]["repository_mode"], "native-heddle");
+
+    let status = json(&heddle(
+        repo.path(),
+        &config,
+        &["status", "--output", "json"],
+    ));
+    assert_eq!(status["repository_capability"], "native-heddle");
+    assert_eq!(status["storage_model"], "heddle-native");
+    assert!(repo.path().join(".git").is_dir());
+
+    let imported = json(&heddle(
+        repo.path(),
+        &config,
+        &["import", "git", "--ref", "main", "--output", "json"],
+    ));
+    assert_eq!(imported["output_kind"], "import_git");
+}
+
 #[cfg(unix)]
 #[test]
 fn read_only_principal_config_refuses_before_repository_creation() {
@@ -151,6 +182,37 @@ fn read_only_principal_config_refuses_before_repository_creation() {
 
     fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o755)).unwrap();
     fs::set_permissions(&config, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(!output.status.success());
+    assert_eq!(fs::read_to_string(&config).unwrap(), "");
+    assert!(!repo.join(".heddle").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn repository_creation_failure_does_not_publish_principal_config() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = TempDir::new().unwrap();
+    let repo = root.path().join("readonly-repo");
+    let config = root.path().join("user/config.toml");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(&config, "").unwrap();
+    fs::set_permissions(&repo, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let output = heddle(
+        &repo,
+        &config,
+        &[
+            "init",
+            "--principal-name",
+            "No Partial Write",
+            "--principal-email",
+            "atomic@example.com",
+        ],
+    );
+
+    fs::set_permissions(&repo, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(!output.status.success());
     assert_eq!(fs::read_to_string(&config).unwrap(), "");
     assert!(!repo.join(".heddle").exists());

@@ -103,11 +103,12 @@ pub use repository::{
     OperationScope, OutputFormat, PackFilesInspection, PartialFetchInspection,
     PullPlannerCacheInspection, RedactConfig, RefCountsInspection, RefSummaryIndexInspection,
     RepoConfig, Repository, RepositoryCapability, RepositoryMaintenanceRunReport,
-    RepositoryOperationStatus, RepositoryPerformanceInspectionReport, ResignOutcome,
-    SUGGESTION_WINDOW, SnapshotExecution, SnapshotProfile, SpoolFacet, ThreadCaptureOutcome,
-    TreeBuildProfile, TrustedKey, UntrackedSet, UntrackedSubtree, WarmCanonicalStoreStats,
-    WorktreeCompareProfile, WorktreeIndexInspection, WorktreeStatusDetailed, compute_rewrite_pct,
-    find_merge_base, is_major_rewrite, is_synthetic_root,
+    RepositoryOperationStatus, RepositoryPerformanceInspectionReport, RepositorySourceAuthority,
+    ResignOutcome, SUGGESTION_WINDOW, SnapshotExecution, SnapshotProfile, SpoolFacet,
+    ThreadCaptureOutcome, TreeBuildProfile, TrustedKey, UntrackedSet, UntrackedSubtree,
+    WarmCanonicalStoreStats, WorktreeCompareProfile, WorktreeIndexInspection,
+    WorktreeStatusDetailed, compute_rewrite_pct, find_merge_base, is_major_rewrite,
+    is_synthetic_root,
 };
 #[cfg(feature = "git-overlay")]
 pub use repository::{GitOverlayBranchTip, GitOverlayOutOfBandCommits};

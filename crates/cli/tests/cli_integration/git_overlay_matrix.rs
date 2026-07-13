@@ -87,7 +87,8 @@ fn git_commit_all(path: &std::path::Path, message: &str) {
 }
 
 fn heddle_adopt(path: &std::path::Path) {
-    heddle(&["adopt"], Some(path)).unwrap();
+    heddle(&["init"], Some(path)).unwrap();
+    heddle(&["import", "git"], Some(path)).unwrap();
 }
 
 fn setup_diverged_imported_git_ref(path: &std::path::Path) {
@@ -1350,7 +1351,7 @@ fn git_overlay_matrix_adopt_initializes_imports_and_verifies() {
 
 #[test]
 fn git_overlay_matrix_verify_reads_git_tags_created_after_adoption() {
-    let fixture = GitOverlayFixture::adopted_main();
+    let fixture = GitOverlayFixture::imported_main();
 
     fixture.git(&["tag", "v2.0.0"]);
 
@@ -1429,7 +1430,7 @@ fn git_overlay_matrix_selective_branch_adopt_surfaces_remaining_tag_import() {
 
 #[test]
 fn git_overlay_matrix_new_branch_at_adopted_tip_verifies_without_setup_loop() {
-    let fixture = GitOverlayFixture::adopted_main();
+    let fixture = GitOverlayFixture::imported_main();
 
     let adopted = json(fixture.path(), &["show", "HEAD", "--output", "json"]);
     let adopted_change = adopted["change_id"]
@@ -1483,7 +1484,7 @@ fn git_overlay_matrix_new_branch_at_adopted_tip_verifies_without_setup_loop() {
 
 #[test]
 fn git_overlay_matrix_commit_after_adopt_ref_checkpoints_without_import_loop() {
-    let fixture = GitOverlayFixture::adopted_main();
+    let fixture = GitOverlayFixture::imported_main();
     std::fs::write(fixture.path().join("README.md"), "changed\n").unwrap();
 
     let commit = json(
@@ -1533,7 +1534,7 @@ fn git_overlay_matrix_ready_is_clean_after_direct_backed_init() {
 #[test]
 fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actionable() {
     let fixture =
-        GitOverlayFixture::adopted_main().with_ready_materialized_thread("feature/ready-verify");
+        GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/ready-verify");
     let thread_path = fixture.ready_thread_path().to_path_buf();
 
     let ready = json(
@@ -6972,7 +6973,7 @@ fn git_overlay_matrix_ship_push_failure_reports_partial_local_ship() {
 
 #[test]
 fn git_overlay_matrix_land_no_push_syncs_remote_behind_before_landing() {
-    let fixture = GitOverlayFixture::adopted_main()
+    let fixture = GitOverlayFixture::imported_main()
         .with_bare_origin()
         .with_remote_behind()
         .with_ready_materialized_thread("isolated");
@@ -7038,7 +7039,7 @@ fn git_overlay_matrix_land_no_push_syncs_remote_behind_before_landing() {
 #[test]
 fn git_overlay_matrix_ship_refuses_index_lock_before_mutation() {
     let fixture =
-        GitOverlayFixture::adopted_main().with_ready_materialized_thread("feature/index-lock");
+        GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/index-lock");
     let before_state =
         json(fixture.path(), &["--output", "json", "status"])["current_state"].clone();
     let before_git = fixture.git_stdout(&["rev-parse", "HEAD"]);

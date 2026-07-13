@@ -264,10 +264,10 @@ fn git_repair_direction_required_advice(ref_name: &str) -> RecoveryAdvice {
 
 fn git_repair_missing_heddle_thread_advice(ref_name: &str) -> RecoveryAdvice {
     use heddle_core::status::next_action::{
-        canonical_adopt_ref_command, canonical_git_repair_ref_command,
+        canonical_git_import_ref_command, canonical_git_repair_ref_command,
     };
 
-    let import_command = canonical_adopt_ref_command(ref_name);
+    let import_command = canonical_git_import_ref_command(ref_name);
     let reconcile_git_command = canonical_git_repair_ref_command("git", ref_name);
     RecoveryAdvice::safety_refusal(
         "git_repair_missing_heddle_thread",

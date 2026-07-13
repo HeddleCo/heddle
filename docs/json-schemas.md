@@ -132,8 +132,8 @@ metadata only; it does not import Git history or write Git-tracked files.
     "left Git-tracked files untouched"
   ],
   "message": "Initialized Heddle data in /repo/.heddle for Git-overlay workflows",
-  "next_action": "heddle adopt --ref main",
-  "recommended_action": "heddle adopt --ref main"
+  "next_action": "heddle commit -m \"...\"",
+  "recommended_action": "heddle commit -m \"...\""
 }
 ```
 
@@ -148,7 +148,7 @@ metadata only; it does not import Git history or write Git-tracked files.
 | `installed_heddleignore`, `principal_configured` | bool | required | Side effects outside `.heddle`, if any. `installed_heddleignore` is currently false; init does not install ignore-policy files. Git-overlay init uses local Git excludes only for Heddle metadata. |
 | `side_effects` | array<string> | required | Human-readable, machine-preserved list of what init changed or intentionally left untouched. |
 | `message` | string | required | Human summary. |
-| `next_action`, `recommended_action` | string \| null | required | Primary verification-guided next command. In a Git repo this is the explicit `heddle adopt --ref <branch>` command. |
+| `next_action`, `recommended_action` | string \| null | required | Primary verification-guided next command. Git Overlay init proceeds directly to the normal save loop. |
 
 Note: the `verification` block is intentionally omitted from mutation
 replies. Run `heddle verify --output json` (or `heddle status --output
@@ -2101,7 +2101,9 @@ the same ready envelope.
 ## `heddle adopt --output json`
 
 One-command Git adoption. Initializes Heddle sidecar data when needed,
-imports the requested Git refs, and returns the post-adoption verification proof.
+imports the requested Git refs, atomically moves Repository Source Authority to
+native Heddle, and returns the post-adoption verification proof. The existing
+`.git` remains available through explicit Git Projection commands.
 
 ### Sample
 
@@ -2125,7 +2127,7 @@ imports the requested Git refs, and returns the post-adoption verification proof
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
-| `adopted`, `initialized`, `already_in_sync` | bool | required | Adoption outcome, whether `.heddle/` was created, and whether import found no new states. |
+| `adopted`, `initialized`, `already_in_sync` | bool | required | Adoption outcome, whether `.heddle/` was created, and whether import found no new states. A successful result has native Heddle source authority. |
 | `path` | string | required | Path to the Heddle sidecar data. |
 | `refs` | array<string> | required | Refs explicitly requested with `--ref`; empty means all local refs were imported. |
 | `commits_imported`, `states_created`, `branches_synced`, `tags_synced` | int | required | Git import counts. |
@@ -2136,10 +2138,9 @@ imports the requested Git refs, and returns the post-adoption verification proof
 
 ## `heddle status --output json`
 
-Canonical surface for Git-overlay state. Recovery actions intentionally
-name `heddle import git ...` for imported Heddle repositories; native
-first-run flows should use the `heddle adopt --ref <branch>` recommendation
-from `status`, `init`, and `verification`.
+Canonical surface for Git Overlay and native Heddle state. Plain Git first-run
+flows recommend `heddle init`; Git Overlay reconciliation uses explicit
+`heddle import git ...`; `heddle adopt` is the explicit authority transition.
 
 `verification` is the public proof block. Legacy `git_overlay_import_hint`
 and `git_overlay_health` sidecars are internal render data, not public JSON
@@ -2542,7 +2543,7 @@ for the field-level definition. Notable invariants:
 
 - `current` is `null` when on detached HEAD.
 - `threads` is empty when the repo has no threads.
-- `available_git_refs` contains Git refs that Heddle can adopt but has
+- `available_git_refs` contains Git refs that Heddle can import but has
   not yet modeled as active/imported threads.
 - `repository_label` is the human-facing identity; `repository_context`
   is present when the command is run inside a managed child checkout.

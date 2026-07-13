@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use heddle_core::{
-    parse_reflog_line, short_oid, status::next_action::canonical_adopt_ref_command,
+    parse_reflog_line, short_oid, status::next_action::canonical_git_import_ref_command,
     summarize_paths, timeline_branch_reason as core_timeline_branch_reason,
     timeline_cursor_reason as core_timeline_cursor_reason, timeline_label as core_timeline_label,
     timeline_recovery_status as core_timeline_recovery_status,
@@ -432,7 +432,7 @@ fn render_plain_git_log(cli: &Cli, probe: &PlainGitVerificationProbe, oneline: b
         if let Some(branch) = &probe.git_branch {
             println!(
                 "Then: {}",
-                style::bold(&canonical_adopt_ref_command(branch))
+                style::bold(&canonical_git_import_ref_command(branch))
             );
         }
     }
@@ -845,7 +845,7 @@ fn write_reflog_full<W: std::io::Write>(out: &mut W, output: &ReflogOutput) -> s
     writeln!(out, "Reflog: {} entrie(s)", output.entries.len())?;
     if output.entries.is_empty() {
         if let Some(line) = format_next_step_dim(
-            "make a checkpoint, fetch, pull, push, or run `heddle adopt`",
+            "make a checkpoint, fetch, pull, push, or run `heddle import git`",
             0,
         ) {
             writeln!(out, "{line}")?;

@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use objects::fs_atomic::write_file_atomic_secret;
+use objects::fs_atomic::{StagedAtomicWrite, stage_file_atomic_secret};
 use repo::{FsMonitorMode, FsMonitorSettings, OutputFormat, WorktreeStatusOptions};
 use serde::{Deserialize, Serialize};
 use wire::AuthToken;
@@ -35,6 +35,18 @@ pub struct UserConfig {
     pub harness: UserHarnessConfig,
     #[serde(default)]
     pub land: UserLandConfig,
+}
+
+pub struct StagedUserConfig {
+    path: PathBuf,
+    write: StagedAtomicWrite,
+}
+
+impl StagedUserConfig {
+    pub fn publish(self) -> anyhow::Result<PathBuf> {
+        self.write.publish()?;
+        Ok(self.path)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -356,19 +368,27 @@ impl UserConfig {
     }
 
     pub fn save_default(&self) -> anyhow::Result<PathBuf> {
+        self.stage_default()?.publish()
+    }
+
+    pub fn stage_default(&self) -> anyhow::Result<StagedUserConfig> {
         let path = Self::default_path()
             .ok_or_else(|| anyhow::anyhow!("unable to determine user config path"))?;
-        self.save(&path)?;
-        Ok(path)
+        self.stage(&path)
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let contents = toml::to_string_pretty(self)?;
-        write_file_atomic_secret(path, contents.as_bytes())?;
+        self.stage(path)?.publish()?;
         Ok(())
+    }
+
+    pub fn stage(&self, path: &Path) -> anyhow::Result<StagedUserConfig> {
+        let contents = toml::to_string_pretty(self)?;
+        let write = stage_file_atomic_secret(path, contents.as_bytes())?;
+        Ok(StagedUserConfig {
+            path: path.to_path_buf(),
+            write,
+        })
     }
 
     pub fn set_principal(&mut self, name: impl Into<String>, email: impl Into<String>) {

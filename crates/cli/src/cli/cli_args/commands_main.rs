@@ -35,11 +35,11 @@ pub enum Commands {
     /// Initialize Heddle in a directory or existing Git checkout.
     Init(InitArgs),
 
-    /// Import Git refs into Heddle state history.
+    /// Adopt Git history into Heddle-native source authority.
     ///
     /// Git Overlay is the normal existing-Git mode: Git keeps source objects,
     /// refs, index, and worktree state while Heddle stores metadata in
-    /// `.heddle`. `adopt` adds Heddle state history without changing that authority.
+    /// `.heddle`. `adopt` imports history and moves source authority to Heddle.
     Adopt(AdoptArgs),
 
     /// Curated, progressive-disclosure help.

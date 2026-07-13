@@ -30,7 +30,7 @@ In a plain Git repo, observe-only commands do not create `.heddle/`. `heddle sta
 - whether Heddle has been initialized
 - the exact next command to initialize Git Overlay
 
-Run the exact command printed by `heddle status`. In an existing Git checkout, that is `heddle init`: it creates the `.heddle` sidecar while Git remains authoritative for commits, trees, refs, index, and worktree state. Heddle stores captures, threads, provenance, discussions, and Git projection metadata in `.heddle`. `heddle adopt` imports selected Git refs into Heddle state history and projection metadata; the repository remains Git Overlay. It is not required for normal Git Overlay use. Use `heddle import git`, `heddle export git`, `heddle sync git`, and `heddle fsck --repair git` for other explicit Git projection work; they operate on the checkout's real `.git` and do not create a hidden local mirror.
+Run the exact command printed by `heddle status`. In an existing Git checkout, that is `heddle init`: it creates the `.heddle` sidecar while Git remains authoritative for commits, trees, refs, index, and worktree state. Heddle stores captures, threads, provenance, discussions, and Git projection metadata in `.heddle`. `heddle adopt` imports selected Git refs and makes Heddle the source authority. The retained `.git` remains available only through explicit Git Projection commands. Adoption is not required for normal Git Overlay use.
 
 Heddle's CLI follows five operating principles — verification, disposability, composability, restraint, honesty — documented in [docs/PRINCIPLES.md](docs/PRINCIPLES.md).
 
@@ -100,7 +100,7 @@ heddle init --principal-name "Ada Lovelace" --principal-email ada@example.com
 heddle commit -m "start project"
 ```
 
-In a Git checkout, `heddle init` creates the Heddle sidecar and leaves source storage in the checkout's real `.git`; `heddle commit` records the Heddle state and matching Git checkpoint. Use `heddle adopt` only when explicitly importing selected Git refs into Heddle state history; it does not change Git Overlay authority. `heddle status` always prints the next useful command when there is an obvious one.
+In a Git checkout, `heddle init` creates the Heddle sidecar and leaves source storage in the checkout's real `.git`; `heddle commit` records the Heddle state and matching Git checkpoint. Use `heddle adopt` when you explicitly want to import Git history and move source authority to Heddle-native storage. The existing `.git` is retained as an explicit projection adapter. `heddle status` always prints the next useful command when there is an obvious one.
 
 ### The verb-by-verb tour
 
@@ -183,7 +183,7 @@ in the command catalog; use each command's `op_id_behavior` field.
 Heddle uses three local config scopes:
 
 - `UserConfig` (`~/.config/heddle/config.toml`) — user identity, agent defaults, output preferences, hosted-client credentials
-- `RepoConfig` (`.heddle/config.toml`) — repository-local behavior, ignore defaults, storage coordinates, remote aliases, repository format version
+- `RepoConfig` (`.heddle/config.toml`) — repository source authority, local behavior, ignore defaults, storage coordinates, remote aliases, repository format version
 - `WorktreeState` — per-checkout runtime state (current session, segment) tracked separately from repo config
 
 Set `[land] squash = false` in user config to make `heddle land` preserve per-State Git export by default. The command-line `--no-squash` flag provides the same opt-out for one land operation.

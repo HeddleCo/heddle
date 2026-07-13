@@ -42,9 +42,9 @@ pub use verdict::{
 };
 
 use self::next_action::{
-    NextActionInput, canonical_adopt_ref_command, canonical_git_import_ref_command,
-    canonical_git_repair_ref_preview_command, contextual_thread_action, effective_next_action,
-    heddle_action, non_empty_action, remote_tracking_next_action, remote_tracking_status,
+    NextActionInput, canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
+    contextual_thread_action, effective_next_action, heddle_action, non_empty_action,
+    remote_tracking_next_action, remote_tracking_status,
 };
 use crate::{
     ActionTemplate, ExecutionContext, HeddleReport, MachineOutputKind, OutputDiscriminator,
@@ -559,7 +559,7 @@ pub fn build_repository_verification_health_with_worktree_status(
                     "Git branch '{}' advanced outside Heddle{}; import the new Git tip to restore the mapping",
                     tip.branch, out_of_band_clause
                 ),
-                recovery_commands: vec![canonical_adopt_ref_command(&tip.branch)],
+                recovery_commands: vec![canonical_git_import_ref_command(&tip.branch)],
                 checks,
             };
         }
@@ -908,9 +908,9 @@ fn tag_mapping_recovery_commands(check: &RepositoryVerificationCheck) -> Vec<Str
         })
         .unwrap_or_default();
     if tags.len() == 1 {
-        vec![format!("heddle adopt --ref {}", tags[0])]
+        vec![canonical_git_import_ref_command(&tags[0])]
     } else {
-        vec!["heddle adopt".to_string()]
+        vec!["heddle import git".to_string()]
     }
 }
 
@@ -2860,8 +2860,11 @@ fn fast_short_repo_kind(workdir: &Path) -> Result<FastShortRepoKind> {
     if !config_path.is_file() {
         return Ok(FastShortRepoKind::Fallback);
     }
-    RepoConfig::load(&config_path)?;
-    Ok(FastShortRepoKind::GitOverlay)
+    let config = RepoConfig::load_for_repository(&config_path, workdir)?;
+    Ok(match config.repository.source_authority {
+        repo::RepositorySourceAuthority::GitOverlay => FastShortRepoKind::GitOverlay,
+        repo::RepositorySourceAuthority::Native => FastShortRepoKind::Fallback,
+    })
 }
 
 fn fast_sley_changes(git: &SleyRepository) -> Result<ChangesInfo> {

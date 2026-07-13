@@ -2,7 +2,7 @@
 //! Show command.
 
 use anyhow::Result;
-use heddle_core::status::next_action::canonical_adopt_ref_command;
+use heddle_core::status::next_action::canonical_git_import_ref_command;
 use repo::{Repository, format_confidence};
 use serde::Serialize;
 
@@ -188,11 +188,11 @@ fn render_plain_git_show(
             print_next_step(&probe.trust.recommended_action);
         }
         if let Some(branch) = &probe.git_branch
-            && probe.trust.recommended_action != canonical_adopt_ref_command(branch)
+            && probe.trust.recommended_action != canonical_git_import_ref_command(branch)
         {
             println!(
                 "Then: {}",
-                style::bold(&canonical_adopt_ref_command(branch))
+                style::bold(&canonical_git_import_ref_command(branch))
             );
         }
     }
