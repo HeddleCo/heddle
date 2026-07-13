@@ -8,6 +8,7 @@ mod action_id;
 mod action_operation;
 mod action_struct;
 mod blob;
+pub mod collaboration;
 mod diff;
 mod discussion;
 mod hash;
@@ -39,6 +40,7 @@ pub use action_id::ActionId;
 pub use action_operation::Operation;
 pub use action_struct::Action;
 pub use blob::Blob;
+pub use collaboration::*;
 pub use diff::{DiffKind, FileChange, FileChangeSet};
 pub use discussion::{
     Discussion, DiscussionError, DiscussionId, DiscussionResolution, DiscussionTurn,

@@ -18,6 +18,8 @@ pub(crate) fn test_state_id() -> objects::object::StateId {
 }
 
 pub mod atomic;
+mod collaboration_migration;
+mod collaboration_store;
 pub mod daemon;
 #[cfg(feature = "tree-sitter-symbols")]
 mod discussion_anchor_travel;
@@ -82,6 +84,15 @@ pub mod worktree_walk;
 
 // Re-export commonly used types from underlying crates.
 pub use ephemeral_thread::{CollapsedThread, collapse_expired_ephemeral_threads};
+pub use collaboration_migration::{
+    LegacyDiscussionMigrationBlocker, LegacyDiscussionMigrationItem,
+    LegacyDiscussionMigrationPlan, LegacyDiscussionMigrationReport,
+    apply_legacy_discussion_migration, plan_legacy_discussion_migration,
+};
+pub use collaboration_store::{
+    CollaborationIntegrityReport, CollaborationStore, CollaborationWriteDisposition,
+    CollaborationWriteOutcome,
+};
 pub use fsmonitor::{ChangeMonitorReport, run_local_monitor_helper};
 pub use git_ref_name::{
     GitRefContentNamespace, GitRefKind, GitRefName, GitRefNamespace, ParsedGitRef,
