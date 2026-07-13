@@ -248,7 +248,7 @@ export type FeedItem = Message<"heddle.v1.FeedItem"> & {
   repoPath: string;
 
   /**
-   * change_id, session_id, etc.
+   * state_id, session_id, etc.
    *
    * @generated from field: string resource_id = 7;
    */

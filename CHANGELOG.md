@@ -13,6 +13,13 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+### Changed
+
+- **gRPC contract cleanup before 0.23.** Removed 29 unimplemented RPCs and
+  their exclusive messages before extracting the contract to `HeddleCo/api`.
+  The generated Rust and TypeScript surfaces now expose 15 services and 147
+  RPCs with explicit effect and deduplication contracts.
+
 ## 0.8.0 - 2026-07-03
 
 ### Added

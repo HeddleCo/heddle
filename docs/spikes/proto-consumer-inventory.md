@@ -27,39 +27,18 @@ recorded as uncertain rather than treated as proof that a capability is dead.
 These services and the shared messages reachable from them stay in the extracted
 contract.
 
-## Remove: clear dead or duplicate evidence
+## Removed before 0.23
 
-The recovery declaration surface duplicated one generic command with three
-per-kind commands. Cross-repository search found no handler or client use beyond
-generated code and planning documents. This pre-1.0 cleanup keeps only
-`DeclareRecoveryMethod`, whose typed oneof is the method kind, and removes
-`DeclareHardwareKeyRecovery`, `DeclareSocialGuardians`, `DeclarePaperCode`, and
-their request envelopes. The redundant `kind` field is reserved by tag and name
-so contradictory enum/oneof states cannot be represented.
+The pre-0.23 contract removes surfaces with no production handler or consumer:
+`ImportService`, `SearchService`, `TreeEditService`, multi-repository event
+subscription, hosted spool settings, subject and handle resolvers, child-edge
+mutation/listing, governance and membership history, proof and handle escrow,
+billing subscription recording, and account recovery. Their exclusive messages
+are removed with them. Generated Rust and TypeScript APIs therefore cannot imply
+capabilities the product does not provide.
 
-No other service or RPC had enough cross-repository evidence to delete safely.
-Pre-1.0 status is not, by itself, evidence that an unimplemented capability has
-no owner or plan.
-
-## Uncertain: retain pending producer cutover
-
-- Entire services: `ImportService`, `SearchService`, and `TreeEditService`.
-- `RepoEventService.SubscribeRepoEventsMulti`.
-- Hosted spool settings and unified visibility: `GetSpool`,
-  `SetSpoolVisibility`, and `UpdateSpoolSettings`.
-- Hosted subject/handle, child-spool, monorepo, governance/membership history,
-  proof, and handle-escrow additions.
-- Auth subscription and the remaining generic recovery flow not present in the
-  inspected Weft handler implementation.
-- Hosted review verdict/check/progress additions beyond the three methods in the
-  inspected Weft `StateReviewService` implementation. Their local Heddle
-  implementation is real; hosted coverage is pending.
-
-These members were added by recent Heddle changes that cite concrete Weft issues,
-including the import, search, multi-repo event, review-progress, proof/escrow, and
-spool-settings work. They remain because the checked-out Weft `origin/main`
-predates those Heddle contract changes; deleting them would guess against named
-cross-repository work.
+`ResolveMonorepo`, single-repository `SubscribeRepoEvents`, the implemented
+StateReview surface, and shared identity/authentication fields remain.
 
 ## Cutover action
 

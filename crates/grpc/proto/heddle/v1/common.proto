@@ -53,37 +53,6 @@ enum StateStatus {
 // never neither. The `target` oneof is the wire-level form of that
 // "exactly one of" guarantee. Server-side `classify_grant_target`
 // translates it to a `GrantTarget` enum without runtime branching.
-// Lifecycle phases of a git-provider import job (weft#489). Mirrors the
-// `import_jobs` status column. Defined here (not import.proto) so both the
-// import stream and hosted.proto's `ImportJobSummary` can reuse it without a
-// circular file import (import.proto already imports hosted.proto for
-// SpoolVisibility, so hosted.proto cannot import import.proto back).
-enum ImportPhase {
-  IMPORT_PHASE_UNSPECIFIED = 0;
-  IMPORT_PHASE_QUEUED = 1;
-  IMPORT_PHASE_CLONING = 2;
-  IMPORT_PHASE_MIRRORING = 3;
-  IMPORT_PHASE_METADATA = 4;
-  IMPORT_PHASE_STARS = 5;
-  IMPORT_PHASE_DONE = 6;
-  IMPORT_PHASE_FAILED = 7;
-}
-
-// Terminal failure classification for an import job (weft#489/#490). Set at
-// `fail()` time from the durable row, NOT regexed from the error string at
-// stream time. `SOURCE_NOT_ALLOWED` stays deliberately generic (no SSRF
-// oracle); `AUTH_FAILED` is only for the credentialed modes.
-enum ImportErrorCode {
-  IMPORT_ERROR_UNSPECIFIED = 0;
-  IMPORT_ERROR_INVALID_SOURCE = 1;      // malformed URL / full_name
-  IMPORT_ERROR_SOURCE_NOT_ALLOWED = 2;  // SSRF-blocked (generic on purpose)
-  IMPORT_ERROR_AUTH_FAILED = 3;         // token/installation rejected by provider
-  IMPORT_ERROR_NOT_FOUND = 4;           // repo 404 / private without creds
-  IMPORT_ERROR_TOO_LARGE = 5;           // byte/object cap hit
-  IMPORT_ERROR_TIMED_OUT = 6;
-  IMPORT_ERROR_INTERNAL = 7;
-}
-
 message GrantTargetRef {
   oneof target {
     string namespace_path = 1;

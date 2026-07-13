@@ -846,7 +846,7 @@ export type CheckMergeEligibilityResponse = Message<"heddle.v1.CheckMergeEligibi
   unmet: UnmetRequirement[];
 
   /**
-   * Approvals the gate considered valid (matching change_id, not
+   * Approvals the gate considered valid (matching state_id, not
    * expired, not self-approval when forbidden, etc.).
    *
    * @generated from field: repeated heddle.v1.ThreadApproval valid_approvals = 3;

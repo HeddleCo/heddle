@@ -38,29 +38,6 @@ service HostedUserService {
     option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
   }
 
-  // ── Unified spool settings (any spool: namespace or repo) ────────
-  // One settings-READ + two settings-WRITEs keyed on `full_path`, so the
-  // Settings/Overview/Repos pages get a single surface across namespaces AND
-  // repos (incl. CLI-adopted). Unification-aligned: `SpoolSummary.kind` is a
-  // UX label only, never structural, so these are ONE spool surface, not split
-  // namespace/repo RPCs. Handlers land in weft (a follow-up); this is the
-  // contract only (weft#472).
-  //
-  // Read the full settings + summary metadata for any spool in one call.
-  rpc GetSpool(GetSpoolRequest) returns (HostedSpool) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
-  }
-  // Write a spool's visibility (separate storage column). Mirrors
-  // SetNamespaceVisibility but keyed on `full_path` so it applies to repos too.
-  rpc SetSpoolVisibility(SetSpoolVisibilityRequest) returns (HostedSpool) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
-  }
-  // Write a spool's general settings (description, etc.). Gives repos a
-  // description-write path (UpdateRepository stays rename-only). The server
-  // enforces which fields are settable.
-  rpc UpdateSpoolSettings(UpdateSpoolSettingsRequest) returns (HostedSpool) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
-  }
   rpc CreateGrant(CreateGrantRequest) returns (HostedGrant) {
     option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
   }
@@ -74,27 +51,6 @@ service HostedUserService {
     option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
   }
 
-  // Resolve opaque subjects (from grants/annotations) to human display
-  // info. Today only WhoAmI exists (current session); this is the batch
-  // subject-resolution surface the grant/member UIs need so they can render
-  // a name + handle instead of the raw subject. Backend impl lives in weft
-  // (a follow-up); this is the contract only.
-  rpc ResolveSubjects(ResolveSubjectsRequest) returns (ResolveSubjectsResponse) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
-  }
-
-  // Resolve a bare handle name (canonical text or bare name) to its
-  // principal, so the frontend can route `/gh:<name>` / `/<name>` /
-  // `/u:<subject>` URLs. The 404-vs-410 distinction is backed by the
-  // tombstone DB invariant: a never-claimed name → gRPC NotFound (→ 404);
-  // a tombstoned/renamed-away name → response with `tombstoned = true`
-  // (→ 410 Gone), the principal MAY carry the canonical `/u:<subject>`
-  // redirect target when available; an active name → the principal. The
-  // subject must NOT appear except as that `/u:` redirect target. Backend
-  // impl lives in weft (a follow-up); this is the contract only (weft#467).
-  rpc ResolveHandle(ResolveHandleRequest) returns (ResolveHandleResponse) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
-  }
 
   // ── Thread merge approvals ───────────────────────────────────────
   rpc ApproveThread(ApproveThreadRequest) returns (ThreadApproval) {
@@ -198,87 +154,11 @@ service HostedUserService {
     option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
   }
 
-  // --- Spool child edges + monorepo resolution + facet history ---
-  // (Spool epic P8a, weft#358). ADDITIVE: exposes the P4-P7 spool
-  // capabilities. Handlers land in weft P8b against weft's registry methods
-  // (children::{attach_child_tx,detach_child_tx,list_children,resolve_monorepo}
-  // and governance/membership {current_*,*_history}); the messages below mirror
-  // those return types so P8b maps 1:1.
-
-  // Attach a child spool under `parent_path` at `mount_name`, anchored at the
-  // child's current content head. Mutates only the parent's children edge-set
-  // (refs/spool/children/edges), never the parent's Content facet. Mirrors
-  // weft `children::attach_child_tx` -> ChildEdge.
-  rpc AttachChild(AttachChildRequest) returns (ChildEdge) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
-  }
-  // Detach the child mounted at `mount_name` under `parent_path`. Mirrors weft
-  // `children::detach_child_tx` (bool removed).
-  rpc DetachChild(DetachChildRequest) returns (DetachChildResponse) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
-  }
-  // List the child edges of `parent_path`, each resolved with its anchored
-  // state + moving-anchored-ff status. Read-only; moves no edge. Mirrors weft
-  // `children::list_children` -> Vec<ChildEdge>.
-  rpc ListChildren(ListChildrenRequest) returns (ListChildrenResponse) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
-  }
   // Recursively resolve the monorepo rooted at `root_path` into the caller's
   // coherent visible slice (per-child visibility, cycle guard, depth bound).
   // Mirrors weft `children::resolve_monorepo` -> MonorepoNode.
   rpc ResolveMonorepo(ResolveMonorepoRequest) returns (MonorepoNode) {
     option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
-  }
-  // Walk `spool_path`'s governance facet history newest-first (first-parent).
-  // Mirrors weft `governance::governance_history` -> Vec<GovernanceHistoryEntry>.
-  rpc GetGovernanceHistory(GetGovernanceHistoryRequest) returns (GetGovernanceHistoryResponse) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
-  }
-  // Walk `spool_path`'s membership facet history newest-first (first-parent).
-  // Mirrors weft `membership::membership_history` -> Vec<MembershipHistoryEntry>.
-  rpc GetMembershipHistory(GetMembershipHistoryRequest) returns (GetMembershipHistoryResponse) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
-  }
-
-  // ── Git-native identity proofs (Prove; wraps weft's F1a engine) ──
-  // A caller proves control of a repo on an external host by publishing a
-  // marker line to a well-known path, then submitting the challenge for
-  // verification. Handlers land in weft (a follow-up); this is the contract.
-  //
-  // Start a proof: the server returns the exact marker line + well-known path
-  // the caller must publish to `repo` on `host`.
-  rpc RequestProofChallenge(RequestProofChallengeRequest) returns (RequestProofChallengeResponse) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_TRANSIENT_WRITE deduplication: RPC_DEDUPLICATION_NONE };
-  }
-  // Submit a started challenge for verification; the server fetches the marker
-  // and returns the resulting status.
-  rpc SubmitProof(SubmitProofRequest) returns (SubmitProofResponse) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
-  }
-  // List the caller's own proofs.
-  rpc ListProofs(ListProofsRequest) returns (ListProofsResponse) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
-  }
-
-  // ── Handle / escrow (wraps weft's F3a engine) ───────────────────
-  // Availability + right-of-first-refusal escrow + self-claim for native
-  // handles. Handlers land in weft (a follow-up); this is the contract.
-  //
-  // Report a native handle's availability + whether it is held for a verified
-  // owner.
-  rpc GetHandleStatus(GetHandleStatusRequest) returns (GetHandleStatusResponse) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
-  }
-  // Start the 30-day right-of-first-refusal on a held name.
-  rpc RequestHeldName(RequestHeldNameRequest) returns (RequestHeldNameResponse) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
-  }
-  // An existing verified owner self-claims their held native name (the
-  // existing-user native-claim path the escrow engine's `held_check_in_txn`
-  // co-holder branch was built for; weft#456 subject-canonicalization is a
-  // handler-side dep, not a proto concern).
-  rpc ClaimHandle(ClaimHandleRequest) returns (ClaimHandleResponse) {
-    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
   }
 }
 
@@ -487,65 +367,6 @@ message SpoolSummary {
   google.protobuf.Timestamp last_activity_at = 5;
 }
 
-// ── Unified spool settings (weft#472) ────────────────────────────────────────
-// One read + two writes for any spool (namespace or repo), keyed on
-// `full_path`. Reuse the existing SpoolSettings / SpoolVisibility / SpoolSummary
-// shapes — do not fork them. Handlers land in weft (a follow-up).
-
-// The unified settings-read result: SpoolSummary-style metadata plus the FULL
-// SpoolSettings, so Settings + Overview + Repos render from one call. `kind` is
-// a UX label only (like SpoolSummary), never structural; `is_repo` is the
-// capability flag.
-message HostedSpool {
-  string spool_id = 1;
-  string full_path = 2;
-  string kind = 3; // UX label only: "namespace" | "repository" — NEVER structural
-  bool is_repo = 4; // capability: content-bearing spool (pushable/pullable)
-  // Unset when the serving registry has no activity data (mirrors
-  // SpoolSummary.last_activity_at).
-  google.protobuf.Timestamp last_activity_at = 5;
-  // The full spool settings (visibility, description, write_policy,
-  // default_state_visibility, …). Reuses the existing SpoolSettings message.
-  SpoolSettings settings = 6;
-  // The most recent import job targeting this spool (weft#490). Absent = the
-  // spool was never an import target. Lets the repo/overview page render
-  // "importing…" / "failed — retry" straight from the GetSpool cold-load, no
-  // second RPC and no StreamImportProgress subscription until the user watches.
-  ImportJobSummary latest_import_job = 7;
-}
-
-// Cold-load summary of a spool's most recent import job (weft#490). Populated
-// by the GetSpool handler from the latest `import_jobs` row for the spool,
-// gated to the same audience that can already read the spool.
-message ImportJobSummary {
-  string job_id = 1;
-  ImportPhase phase = 2;           // reuses the common.proto enum
-  ImportErrorCode error_code = 3;  // set when phase = FAILED; reuses common.proto
-  string error_message = 4;        // sanitized
-  google.protobuf.Timestamp updated_at = 5;
-}
-
-message GetSpoolRequest {
-  string full_path = 1;
-}
-
-// Unified visibility write (works for repos too). Mirrors
-// SetNamespaceVisibilityRequest but keyed on `full_path`.
-message SetSpoolVisibilityRequest {
-  string full_path = 1;
-  SpoolVisibility visibility = 2; // reuses the existing enum
-  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
-}
-
-// General settings write for any spool (description, etc.). Carries the whole
-// SpoolSettings for forward-compat; the server enforces which fields are
-// settable (e.g. description). Reuses the existing SpoolSettings message.
-message UpdateSpoolSettingsRequest {
-  string full_path = 1;
-  SpoolSettings settings = 2;
-  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
-}
-
 message Bookmark {
   string id = 1;
   // "repo" | "namespace" for the current web UI. Kept as a string so
@@ -698,98 +519,10 @@ message ListGrantsResponse {
   repeated HostedGrant grants = 1;
 }
 
-// ── Subject resolution ──────────────────────────────────────────────────────
-// Batch subject→display-name resolution. The grant/member UIs hold opaque
-// subjects (from HostedGrant.subject / MemberEntry.Grant.subject) and today
-// render them raw; this lets a consumer enrich a whole grant/member list in a
-// single round trip. Backend impl is a weft follow-up.
-message ResolveSubjectsRequest {
-  // Opaque subjects, e.g. "user:<uuid>" / "ops-alice".
-  repeated string subjects = 1;
-}
-
-message ResolveSubjectsResponse {
-  repeated ResolvedPrincipal principals = 1;
-}
-
-message ResolvedPrincipal {
-  // Echo of the requested subject (the join key for the caller).
-  string subject = 1;
-  // Human display name; empty when unresolved.
-  string display_name = 2;
-  // Username / handle; empty when unresolved.
-  string handle = 3;
-  // False when the subject couldn't be resolved (display_name + handle empty).
-  bool resolved = 4;
-
-  // ---- Handle system (F0a foundation, weft#438) ----------------------------
-  // ADDITIVE. Defined here in F0a; POPULATED by the weft resolve handler in
-  // F0b. Until F0b lands these carry proto3 defaults (empty / false), so a
-  // consumer that reads them before F0b sees the same "unset" it would for any
-  // new field. Every display surface renders from these fields via the single
-  // resolveSubjects choke point.
-
-  // The primary handle's canonical textual form — the single token that is
-  // BOTH the authoritative text AND the URL path segment: `gh:torvalds`
-  // (GitHub), `gitlab.example.com:torvalds` (host-qualified GitLab), or the
-  // bare native name `torvalds`. Empty when unresolved.
-  string primary_handle = 5;
-  // Handle kind for the primary handle: "native" | "github" | "gitlab".
-  // Mirrors the weft `handles.kind` column. Empty when unresolved.
-  string kind = 6;
-  // True when the primary handle is provider-verified (OAuth-verified, or a
-  // future git proof). Native self-asserted handles are false.
-  bool verified = 7;
-  // Short subject-derived discriminator for an UNVERIFIED native handle,
-  // rendered Signal-style as `torvalds·a3f9` in trust-sensitive contexts.
-  // Empty for verified identities (they render bare). F0b computes it.
-  string discriminator = 8;
-}
-
-// ── Handle resolution (URL routing, weft#467) ────────────────────────────────
-// Resolve a bare handle name to its principal for `/gh:<name>` / `/<name>` /
-// `/u:<subject>` routing. Never-claimed → gRPC NotFound (frontend 404);
-// tombstoned/renamed-away → `tombstoned = true` (frontend 410 Gone).
-message ResolveHandleRequest {
-  // Canonical text or bare name, e.g. "gh:torvalds" / "torvalds".
-  string name = 1;
-}
-
-message ResolveHandleResponse {
-  // The resolved principal (reuses ResolvedPrincipal). On a tombstoned name
-  // this MAY carry the canonical `/u:<subject>` redirect target when known;
-  // otherwise the subject must not appear here.
-  ResolvedPrincipal principal = 1;
-  // True ⇒ the name existed but was renamed away → frontend serves 410 Gone.
-  bool tombstoned = 2;
-}
-
 // ============================================================================
-// Spool child edges + monorepo resolution + facet history (Spool epic P8a,
-// weft#358). ADDITIVE. Message shapes mirror weft's registry return types so
-// the P8b handler phase maps 1:1. State/change ids are `bytes` (16-byte
-// ChangeId), matching the package-wide wire convention.
+// Monorepo resolution keeps the child-edge status needed to describe the
+// resolved tree without exposing edge mutation or listing RPCs.
 // ============================================================================
-
-// Who committed a facet change (audit trail). Mirrors heddle's
-// `objects::Attribution { principal, agent: Option<Agent> }` — a human
-// principal plus an optional AI agent that performed the change on their
-// behalf.
-message SpoolPrincipal {
-  string name = 1;
-  string email = 2;
-}
-
-message SpoolAgent {
-  string provider = 1;
-  string model = 2;
-}
-
-message SpoolAttribution {
-  SpoolPrincipal principal = 1;
-  // Present when an AI agent performed the change on the principal's behalf.
-  optional SpoolAgent agent = 2;
-}
 
 // Ff/divergence status of a child edge vs the child's latest content state
 // (moving-anchored-ff). Mirrors weft `children::ChildEdgeStatus`.
@@ -805,49 +538,6 @@ enum ChildEdgeStatus {
   CHILD_EDGE_STATUS_DIVERGED = 3;
   // The child has no content head yet (nothing to advance toward).
   CHILD_EDGE_STATUS_NO_CHILD_HEAD = 4;
-}
-
-// One resolved child edge. Mirrors weft `children::ChildEdge`.
-message ChildEdge {
-  string parent_spool_id = 1;
-  string child_spool_id = 2;
-  string mount_name = 3;
-  // The child content state-id this edge is currently anchored to (16-byte
-  // ChangeId).
-  bytes anchored_state_id = 4;
-  // The child's latest content-facet head, if any (absent = child has no
-  // content head yet).
-  optional bytes child_head = 5;
-  // Moving-anchored-ff status of the anchor vs the child head.
-  ChildEdgeStatus status = 6;
-}
-
-message AttachChildRequest {
-  // The parent spool the child is mounted under.
-  string parent_path = 1;
-  // The child spool to attach.
-  string child_path = 2;
-  // The mount name of the child inside the parent (the SPOOLLINK entry name).
-  string mount_name = 3;
-}
-
-message DetachChildRequest {
-  string parent_path = 1;
-  string mount_name = 2;
-}
-
-message DetachChildResponse {
-  // True if an edge was present and removed; false if no such mount existed.
-  // Mirrors weft `children::detach_child_tx` -> bool.
-  bool removed = 1;
-}
-
-message ListChildrenRequest {
-  string parent_path = 1;
-}
-
-message ListChildrenResponse {
-  repeated ChildEdge children = 1;
 }
 
 // Why a child edge in a resolved monorepo was NOT descended into. A resolved
@@ -907,179 +597,4 @@ message ResolveMonorepoRequest {
   string root_path = 1;
   // Optional recursion depth bound; server clamps to MONOREPO_MAX_DEPTH.
   optional uint32 max_depth = 2;
-}
-
-// One entry in a spool's governance-facet history — a governance commit and
-// the document it captured. Newest-first. Mirrors weft
-// `governance::GovernanceHistoryEntry`.
-message GovernanceHistoryEntry {
-  // The governance-facet state id.
-  bytes state_id = 1;
-  // Access-gating visibility (`public`/`private`) as of this state.
-  string visibility = 2;
-  // The full non-visibility governance knobs (write_policy, child_policy,
-  // bootstrap_*, initial_tooling, description, ...), captured verbatim as a
-  // JSON string (weft `GovernanceDocument.settings: serde_json::Value`).
-  string settings_json = 3;
-  // Who committed this governance change (audit trail).
-  SpoolAttribution attribution = 4;
-  // When the governance change was committed.
-  google.protobuf.Timestamp committed_at = 5;
-}
-
-message GetGovernanceHistoryRequest {
-  string spool_path = 1;
-  // Max entries to walk (server default when unset/0).
-  optional uint32 limit = 2;
-}
-
-message GetGovernanceHistoryResponse {
-  repeated GovernanceHistoryEntry entries = 1;
-}
-
-// One grant record captured in a membership document — a `(subject, role)`
-// pair keyed on the immutable `subject_user_id` UUID. Mirrors weft
-// `membership::MembershipGrant`.
-message MembershipGrant {
-  // The immutable `users.id` UUID this grant is keyed on (the security key).
-  string subject_user_id = 1;
-  // The handle as it was at commit time (display/lookup only, not a key).
-  string subject = 2;
-  // The role held, as the on-wire lowercase token
-  // (`reader`/`developer`/`maintainer`/`admin`/`owner`).
-  string role = 3;
-}
-
-// One entry in a spool's membership-facet history — a membership commit and
-// the document (full grant set) it captured. Newest-first. Mirrors weft
-// `membership::MembershipHistoryEntry`.
-message MembershipHistoryEntry {
-  // The membership-facet state id.
-  bytes state_id = 1;
-  // Every grant held on the spool as of this state (weft
-  // `MembershipDocument.grants`).
-  repeated MembershipGrant grants = 2;
-  // Who committed this membership change (audit trail).
-  SpoolAttribution attribution = 3;
-  // When the membership change was committed.
-  google.protobuf.Timestamp committed_at = 4;
-}
-
-message GetMembershipHistoryRequest {
-  string spool_path = 1;
-  // Max entries to walk (server default when unset/0).
-  optional uint32 limit = 2;
-}
-
-message GetMembershipHistoryResponse {
-  repeated MembershipHistoryEntry entries = 1;
-}
-
-// ============================================================================
-// Git-native identity proofs (Prove; wraps weft's F1a engine). ADDITIVE.
-// A caller proves control of an external-host repo by publishing a marker line
-// to a well-known path, then submitting the challenge for verification.
-// ============================================================================
-
-// Verification state of a git-native proof. Namespaced per the file's enum
-// convention.
-enum ProofStatus {
-  PROOF_STATUS_UNSPECIFIED = 0;
-  // The challenge has been requested but not yet successfully verified.
-  PROOF_STATUS_PENDING = 1;
-  // The marker line was found and verified.
-  PROOF_STATUS_VERIFIED = 2;
-  // Verification ran but failed (marker missing/mismatched).
-  PROOF_STATUS_FAILED = 3;
-}
-
-message RequestProofChallengeRequest {
-  // The external host the repo lives on, e.g. "github.com".
-  string host = 1;
-  // The repo the caller will publish the proof to.
-  string repo = 2;
-}
-
-message RequestProofChallengeResponse {
-  // Opaque id for the started challenge; echoed back on SubmitProof.
-  string challenge_id = 1;
-  // The exact line to publish, e.g. `heddle-proof: <subject> <challenge>`.
-  string marker_line = 2;
-  // The path to publish the marker at, e.g. `.well-known/heddle`.
-  string well_known_path = 3;
-}
-
-message SubmitProofRequest {
-  string challenge_id = 1;
-}
-
-message SubmitProofResponse {
-  ProofStatus status = 1;
-  // Human-readable detail (failure reason, or a confirmation note).
-  string detail = 2;
-}
-
-message ListProofsRequest {}
-
-// One of the caller's own proofs.
-message ProofSummary {
-  string host = 1;
-  string repo = 2;
-  ProofStatus status = 3;
-  // When the proof was verified; unset while pending/failed.
-  google.protobuf.Timestamp verified_at = 4;
-}
-
-message ListProofsResponse {
-  repeated ProofSummary proofs = 1;
-}
-
-// ============================================================================
-// Handle / escrow (wraps weft's F3a engine). ADDITIVE. Availability lookup +
-// right-of-first-refusal escrow + verified-owner self-claim for native handles.
-// ============================================================================
-
-// Availability of a native handle. Namespaced per the file's enum convention.
-enum HandleAvailability {
-  HANDLE_AVAILABILITY_UNSPECIFIED = 0;
-  // Free to claim.
-  HANDLE_AVAILABILITY_AVAILABLE = 1;
-  // Held in escrow for a verified owner (right-of-first-refusal window).
-  HANDLE_AVAILABILITY_HELD = 2;
-  // Already claimed by another account.
-  HANDLE_AVAILABILITY_TAKEN = 3;
-  // Reserved (system/policy).
-  HANDLE_AVAILABILITY_RESERVED = 4;
-  // Withheld because it is confusable with an existing handle.
-  HANDLE_AVAILABILITY_CONFUSABLE = 5;
-}
-
-message GetHandleStatusRequest {
-  string name = 1;
-}
-
-message GetHandleStatusResponse {
-  HandleAvailability availability = 1;
-  // True when the name is held in escrow for a verified owner (co-holder).
-  bool held_for_verified_owner = 2;
-}
-
-message RequestHeldNameRequest {
-  string name = 1;
-}
-
-message RequestHeldNameResponse {
-  // Deadline of the 30-day right-of-first-refusal window.
-  google.protobuf.Timestamp rfr_deadline = 1;
-}
-
-message ClaimHandleRequest {
-  string name = 1;
-}
-
-message ClaimHandleResponse {
-  // True when the claim succeeded.
-  bool claimed = 1;
-  // The canonical form of the claimed handle.
-  string canonical_handle = 2;
 }
