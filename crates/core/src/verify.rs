@@ -8,13 +8,10 @@ use std::{
 };
 
 use ::objects::{HeddleError, error::Result, worktree::WorktreeStatus};
-use repo::{
-    Repository, Thread, ThreadManager, describe_thread_advice,
-    git_worktree_status::GitWorktreeEntryState, refresh_thread_freshness,
-};
+use repo::{Repository, Thread, ThreadManager, describe_thread_advice, refresh_thread_freshness};
 use schemars::JsonSchema;
 use serde::{Serialize, Serializer};
-use sley::{BString as GitBString, Index, Repository as SleyRepository};
+use sley::{Repository as SleyRepository, ShortStatusOptions, StatusUntrackedMode, StreamControl};
 
 use crate::{
     ExecutionContext, HeddleReport, MachineOutputKind, OutputDiscriminator, ReportContract,
@@ -363,7 +360,7 @@ pub fn build_plain_git_verification_probe_with_machine_contract(
     let git_branch = plain_git_current_branch(&git_repo);
     let git_branches = plain_git_local_branches(&git_repo);
     let git_tags = plain_git_local_tags(&git_repo);
-    let changes = plain_git_worktree_status(&root, &git_repo)?;
+    let changes = plain_git_worktree_status(&git_repo)?;
 
     let default_remote = git_default_remote_name_from_repo(&git_repo);
     let setup_action = "heddle init".to_string();
@@ -536,66 +533,35 @@ fn plain_git_local_tags(git_repo: &SleyRepository) -> Vec<String> {
     names
 }
 
-fn plain_git_worktree_status(root: &Path, git_repo: &SleyRepository) -> Result<WorktreeStatus> {
-    let index = plain_git_index_or_empty(git_repo).map_err(|error| {
-        HeddleError::Config(format!(
-            "failed to inspect Git index at '{}': {error}",
-            root.display()
-        ))
-    })?;
-    let head_index = plain_git_head_index_or_empty(git_repo).map_err(|error| {
-        HeddleError::Config(format!(
-            "failed to inspect Git HEAD tree at '{}': {error}",
-            root.display()
-        ))
-    })?;
-
-    let mut head_entries = BTreeMap::new();
-    for entry in &head_index.entries {
-        head_entries.insert(plain_git_path(&entry.path), (entry.oid, entry.mode));
-    }
-    let mut index_entries = BTreeMap::new();
-    for entry in &index.entries {
-        index_entries.insert(plain_git_path(&entry.path), (entry.oid, entry.mode));
-    }
-
+fn plain_git_worktree_status(git_repo: &SleyRepository) -> Result<WorktreeStatus> {
     let mut added = BTreeSet::new();
     let mut modified = BTreeSet::new();
     let mut deleted = BTreeSet::new();
-
-    for (path, (oid, mode)) in &index_entries {
-        match head_entries.get(path) {
-            None => {
-                added.insert(PathBuf::from(path));
-            }
-            Some((head_oid, head_mode)) if (head_oid, head_mode) != (oid, mode) => {
-                modified.insert(PathBuf::from(path));
-            }
-            Some(_) => {}
-        }
-    }
-    for path in head_entries.keys() {
-        if !index_entries.contains_key(path) {
-            deleted.insert(PathBuf::from(path));
-        }
-    }
-
-    for (path, (oid, mode)) in &index_entries {
-        match repo::git_worktree_status::git_worktree_entry_state(root, path, *oid, *mode, None)? {
-            GitWorktreeEntryState::Clean => {}
-            GitWorktreeEntryState::Deleted => {
-                deleted.insert(PathBuf::from(path));
-            }
-            GitWorktreeEntryState::Modified => {
-                modified.insert(PathBuf::from(path));
-            }
-        }
-    }
-
-    let tracked_paths: BTreeSet<&str> = index_entries.keys().map(String::as_str).collect();
-    for path in plain_git_untracked_paths(root, &tracked_paths)? {
-        added.insert(PathBuf::from(path));
-    }
+    git_repo
+        .stream_short_status_with_options(
+            ShortStatusOptions {
+                untracked_mode: StatusUntrackedMode::All,
+                ..ShortStatusOptions::default()
+            },
+            |entry| {
+                let path = PathBuf::from(String::from_utf8_lossy(entry.path).into_owned());
+                if entry.index == b'?' && entry.worktree == b'?' {
+                    added.insert(path);
+                } else if entry.index == b'D' || entry.worktree == b'D' {
+                    deleted.insert(path);
+                } else if entry.index == b'A'
+                    || entry.index == b'R'
+                    || entry.index == b'C'
+                    || entry.head_oid.is_none()
+                {
+                    added.insert(path);
+                } else {
+                    modified.insert(path);
+                }
+                Ok(StreamControl::Continue)
+            },
+        )
+        .map_err(|error| HeddleError::Config(error.to_string()))?;
 
     for path in &added {
         modified.remove(path);
@@ -609,87 +575,6 @@ fn plain_git_worktree_status(root: &Path, git_repo: &SleyRepository) -> Result<W
         added: added.into_iter().collect(),
         deleted: deleted.into_iter().collect(),
     })
-}
-
-fn plain_git_untracked_paths(root: &Path, tracked_paths: &BTreeSet<&str>) -> Result<Vec<String>> {
-    let mut paths = Vec::new();
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .filter_entry(|entry| !plain_git_excluded_walk_entry(entry.path()))
-        .build();
-    for entry in walker {
-        let entry = entry.map_err(|error| HeddleError::Config(error.to_string()))?;
-        let file_type = entry.file_type();
-        if !file_type.is_some_and(|file_type| file_type.is_file() || file_type.is_symlink()) {
-            continue;
-        }
-        let path = plain_git_repo_relative_path(root, entry.path())?;
-        if !tracked_paths.contains(path.as_str()) {
-            paths.push(path);
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
-}
-
-fn plain_git_excluded_walk_entry(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name == ".git" || name == ".heddle")
-}
-
-fn plain_git_repo_relative_path(root: &Path, path: &Path) -> Result<String> {
-    let relative = path.strip_prefix(root).map_err(|error| {
-        HeddleError::Config(format!(
-            "failed to relativize Git worktree path '{}': {}",
-            path.display(),
-            error
-        ))
-    })?;
-    Ok(path_to_plain_git_path(relative))
-}
-
-fn path_to_plain_git_path(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn plain_git_empty_index() -> Index {
-    Index {
-        version: 2,
-        entries: Vec::new(),
-        extensions: Vec::new(),
-        checksum: None,
-    }
-}
-
-fn plain_git_index_or_empty(
-    git_repo: &SleyRepository,
-) -> std::result::Result<Index, sley::GitError> {
-    git_repo
-        .open_index()
-        .map(|index| index.unwrap_or_else(plain_git_empty_index))
-}
-
-fn plain_git_head_index_or_empty(
-    git_repo: &SleyRepository,
-) -> std::result::Result<Index, sley::GitError> {
-    let head = git_repo.head()?;
-    let Some(oid) = head.oid else {
-        return Ok(plain_git_empty_index());
-    };
-    let commit = git_repo.read_commit(&oid)?;
-    git_repo.index_from_tree(&commit.tree)
-}
-
-fn plain_git_path(path: &GitBString) -> String {
-    String::from_utf8_lossy(path.as_bytes()).into_owned()
 }
 
 pub fn build_repository_verification_state(
