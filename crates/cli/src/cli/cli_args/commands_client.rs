@@ -38,6 +38,37 @@ pub enum AuthCommands {
         server: Option<String>,
     },
 
+    /// Derive a scoped, short-lived agent token offline
+    DeriveAgent {
+        /// Server whose stored credential is the parent.
+        #[arg(long)]
+        server: String,
+
+        /// Delegation name recorded in the Biscuit chain.
+        #[arg(long)]
+        agent_id: Option<String>,
+
+        /// Child lifetime in seconds (clamped by the parent expiry).
+        #[arg(long = "ttl", default_value_t = 3600)]
+        ttl_secs: u64,
+
+        /// Forward-compatible resource scope (`repo:org/name`, `namespace:org`, or a bare repo path).
+        #[arg(long = "scope")]
+        scopes: Vec<String>,
+
+        /// Narrow the safe operation set (repeatable, using gRPC method names such as `Push`).
+        #[arg(long = "allow")]
+        allowed_operations: Vec<String>,
+
+        /// Write `token` and `metadata.json` files to this directory without exporting the device key.
+        #[arg(long, value_name = "DIR", conflicts_with = "stdout")]
+        out: Option<std::path::PathBuf>,
+
+        /// Print only the child token instead of installing it (security note goes to stderr).
+        #[arg(long, conflicts_with = "out")]
+        stdout: bool,
+    },
+
     /// Create a service token for CI/scripts, scoped to a namespace
     CreateServiceToken {
         /// Display name for the service account (e.g. "github-ci-main")
@@ -73,6 +104,23 @@ impl From<AuthCommands> for heddle_client::AuthCommand {
             },
             AuthCommands::Logout { server } => heddle_client::AuthCommand::Logout { server },
             AuthCommands::Status { server } => heddle_client::AuthCommand::Status { server },
+            AuthCommands::DeriveAgent {
+                server,
+                agent_id,
+                ttl_secs,
+                scopes,
+                allowed_operations,
+                out,
+                stdout,
+            } => heddle_client::AuthCommand::DeriveAgent {
+                server,
+                agent_id,
+                ttl_secs,
+                scopes,
+                allowed_operations,
+                out,
+                stdout,
+            },
             AuthCommands::CreateServiceToken {
                 name,
                 namespace,
@@ -163,5 +211,45 @@ mod tests {
         );
         Cli::try_parse_from(["heddle", "auth", "login"])
             .expect("interactive login may resolve the configured default server");
+    }
+
+    #[test]
+    fn derive_agent_parses_repeatable_scopes_and_operation_narrowing() {
+        let cli = Cli::try_parse_from([
+            "heddle",
+            "auth",
+            "derive-agent",
+            "--server",
+            "grpc.heddle.test",
+            "--ttl",
+            "900",
+            "--scope",
+            "repo:acme/api",
+            "--scope",
+            "namespace:acme",
+            "--allow",
+            "Push",
+            "--allow",
+            "GetState",
+        ])
+        .expect("derive-agent flags parse");
+
+        let Commands::Auth {
+            command:
+                AuthCommands::DeriveAgent {
+                    server,
+                    ttl_secs,
+                    scopes,
+                    allowed_operations,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected auth derive-agent");
+        };
+        assert_eq!(server, "grpc.heddle.test");
+        assert_eq!(ttl_secs, 900);
+        assert_eq!(scopes, ["repo:acme/api", "namespace:acme"]);
+        assert_eq!(allowed_operations, ["Push", "GetState"]);
     }
 }

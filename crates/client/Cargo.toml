@@ -30,6 +30,7 @@ tokio-tungstenite.workspace = true
 toml.workspace = true
 tonic.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 # Workspace heddle crates — sibling paths plus crates.io versions so
 # downstream consumers (closed weft, third parties) pull the published
