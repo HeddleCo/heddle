@@ -12408,6 +12408,9 @@
           ],
           "type": "string"
         },
+        "proof_key_available": {
+          "type": "boolean"
+        },
         "recommended_action": {
           "type": [
             "string",
@@ -12427,7 +12430,8 @@
       "required": [
         "output_kind",
         "server",
-        "authenticated"
+        "authenticated",
+        "proof_key_available"
       ],
       "title": "AuthStatusSchema",
       "type": "object"

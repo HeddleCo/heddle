@@ -660,6 +660,7 @@ pub struct AuthStatusSchema {
     pub output_kind: String,
     pub server: String,
     pub authenticated: bool,
+    pub proof_key_available: bool,
     pub subject: Option<String>,
     pub credential_id: Option<String>,
     pub expires_at: Option<String>,

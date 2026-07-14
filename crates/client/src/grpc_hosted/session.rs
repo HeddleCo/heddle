@@ -164,4 +164,152 @@ mod tests {
              same async block (found {rotate_offset} chars later)",
         );
     }
+
+    #[tokio::test]
+    async fn headless_install_supplies_a_verifiable_hosted_proof() {
+        use base64::Engine as _;
+        use biscuit_auth::{Biscuit, KeyPair};
+        use crypto::{Ed25519Signer, Signer};
+        use tonic::{Request, metadata::MetadataValue, transport::Endpoint};
+
+        use super::{HostedAuthMode, HostedSession};
+        use crate::{auth_cmd, credentials, grpc_hosted::HostedGrpcClient};
+
+        let _guard = credentials::lock_test_env();
+        let home = tempfile::TempDir::new().expect("temp Heddle home");
+        let previous_home = std::env::var_os("HEDDLE_HOME");
+        unsafe { std::env::set_var("HEDDLE_HOME", home.path()) };
+
+        let result = std::panic::catch_unwind(|| {
+            let signer = Ed25519Signer::generate().expect("device key");
+            let private_key_pem = signer.to_pem().expect("device PEM");
+            let key_path = home.path().join("bootstrap-key.pem");
+            std::fs::write(&key_path, &private_key_pem).expect("write bootstrap key");
+
+            let subject = "headless-agent";
+            let credential_id = "cred-headless";
+            let expires_at = chrono::Utc::now() + chrono::Duration::days(30);
+            let user_fact = format!("user(\"{subject}\")");
+            let credential_fact = format!("credential_id(\"{credential_id}\")");
+            let expiry_fact = format!("expires_at({})", expires_at.to_rfc3339());
+            let pop_fact = format!("device_pop_key(\"{}\")", hex::encode(signer.public_key()));
+            let token = Biscuit::builder()
+                .fact(user_fact.as_str())
+                .expect("user fact")
+                .fact(credential_fact.as_str())
+                .expect("credential fact")
+                .fact(expiry_fact.as_str())
+                .expect("expiry fact")
+                .fact(pop_fact.as_str())
+                .expect("PoP key fact")
+                .build(&KeyPair::new())
+                .expect("mint fixture biscuit")
+                .to_base64()
+                .expect("encode fixture biscuit");
+            let server = "127.0.0.1:8421";
+
+            auth_cmd::install_headless_credential(server, &token, &key_path)
+                .expect("headless credential install");
+
+            let stored = credentials::get_server_credential(server)
+                .expect("read credentials")
+                .expect("stored credential");
+            assert_eq!(stored.subject, subject);
+            assert_eq!(stored.credential_id.as_deref(), Some(credential_id));
+            assert_eq!(
+                stored.private_key_pem.as_deref(),
+                Some(private_key_pem.as_str())
+            );
+            assert!(stored.expires_at.is_some());
+            let credential_file = std::fs::read_to_string(credentials::credentials_path())
+                .expect("read installed credential file");
+            assert!(credential_file.contains("private_key_pem ="));
+            assert!(!credential_file.contains("\nprivate_key ="));
+
+            let identity = repo::identity::load_device(&repo::identity::device_identity_path())
+                .expect("load device identity")
+                .expect("linked device identity");
+            assert_eq!(identity.public_key, hex::encode(signer.public_key()));
+            assert_eq!(identity.server, server);
+
+            let session = HostedSession::build(
+                &cli_shared::UserConfig::default(),
+                Some(server.to_string()),
+                HostedAuthMode::CredentialFallback,
+            )
+            .expect("build hosted session from installed credential");
+            let config = session.config;
+            let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+            let client = HostedGrpcClient {
+                inner: grpc::heddle::v1::repo_sync_service_client::RepoSyncServiceClient::new(
+                    channel.clone(),
+                )
+                .max_decoding_message_size(wire::MAX_PULL_DECODE_MESSAGE_SIZE),
+                user: grpc::heddle::v1::hosted_user_service_client::HostedUserServiceClient::new(
+                    channel.clone(),
+                ),
+                auth: grpc::heddle::v1::auth_service_client::AuthServiceClient::new(
+                    channel.clone(),
+                ),
+                content: grpc::heddle::v1::content_service_client::ContentServiceClient::new(
+                    channel,
+                ),
+                token_header: Some(
+                    MetadataValue::try_from(format!(
+                        "Bearer {}",
+                        config.token.as_ref().expect("session token").id
+                    ))
+                    .expect("bearer metadata"),
+                ),
+                transport: crate::grpc_hosted::helpers::HostedTransportPolicy::from_client_config(
+                    &config,
+                ),
+                auth_proof_key_pem: config.auth_proof_key_pem,
+                server_key: config.server_key,
+                on_human_signature: None,
+            };
+            let method = "/heddle.v1.RepoSyncService/Push";
+            let mut request = Request::new(());
+            client
+                .apply_auth(&mut request, method)
+                .expect("attach hosted auth");
+
+            let metadata = request.metadata();
+            let proof_ts = metadata
+                .get(crypto::pop::HDR_PROOF_TS)
+                .and_then(|value| value.to_str().ok())
+                .expect("proof timestamp");
+            let nonce = metadata
+                .get(crypto::pop::HDR_PROOF_NONCE)
+                .and_then(|value| value.to_str().ok())
+                .expect("proof nonce");
+            let proof = metadata
+                .get(crypto::pop::HDR_PROOF)
+                .and_then(|value| value.to_str().ok())
+                .expect("proof signature");
+            let signature = base64::engine::general_purpose::STANDARD
+                .decode(proof)
+                .expect("decode proof signature");
+            crypto::pop::verify_pop(
+                signer.public_key(),
+                &token,
+                proof_ts,
+                "POST",
+                method,
+                nonce,
+                &signature,
+            )
+            .expect("proof verifies against installed device key");
+        });
+
+        unsafe {
+            match previous_home {
+                Some(path) => std::env::set_var("HEDDLE_HOME", path),
+                None => std::env::remove_var("HEDDLE_HOME"),
+            }
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
 }
