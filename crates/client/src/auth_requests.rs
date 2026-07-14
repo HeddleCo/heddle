@@ -3,8 +3,10 @@
 #[derive(Clone, Debug)]
 pub enum AuthCommand {
     Login {
-        server: String,
+        server: Option<String>,
         open_browser: bool,
+        token: Option<String>,
+        key_file: Option<std::path::PathBuf>,
     },
     Logout {
         server: Option<String>,

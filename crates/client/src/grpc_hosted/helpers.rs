@@ -162,14 +162,22 @@ pub(super) fn descriptor_id_from_info(info: &ObjectInfo) -> (String, String) {
 }
 
 pub(super) fn status_to_protocol_error(status: Status) -> ProtocolError {
+    let message = if status.message().contains("missing x-heddle-proof-ts") {
+        format!(
+            "{}; credential missing device proof key — re-login / re-install the credential with its matching private key",
+            status.message()
+        )
+    } else {
+        status.message().to_string()
+    };
     match status.code() {
         tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => {
-            ProtocolError::AuthorizationFailed(status.message().to_string())
+            ProtocolError::AuthorizationFailed(message)
         }
-        tonic::Code::NotFound => ProtocolError::ObjectNotFound(status.message().to_string()),
-        tonic::Code::AlreadyExists => ProtocolError::AlreadyExists(status.message().to_string()),
-        tonic::Code::InvalidArgument => ProtocolError::InvalidState(status.message().to_string()),
-        _ => ProtocolError::Remote(status.message().to_string()),
+        tonic::Code::NotFound => ProtocolError::ObjectNotFound(message),
+        tonic::Code::AlreadyExists => ProtocolError::AlreadyExists(message),
+        tonic::Code::InvalidArgument => ProtocolError::InvalidState(message),
+        _ => ProtocolError::Remote(message),
     }
 }
 
@@ -228,5 +236,21 @@ pub(super) fn hosted_role_proto_to_string(role: i32) -> String {
         HostedRole::Admin => "admin".into(),
         HostedRole::Owner => "owner".into(),
         HostedRole::Unspecified => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_proof_timestamp_error_explains_how_to_recover() {
+        let error = status_to_protocol_error(Status::unauthenticated(
+            "missing x-heddle-proof-ts metadata",
+        ));
+        let message = error.to_string();
+
+        assert!(message.contains("credential missing device proof key"));
+        assert!(message.contains("re-login / re-install"));
     }
 }

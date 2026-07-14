@@ -45,7 +45,11 @@ pub struct ServerCredential {
     pub device_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "private_key",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub private_key_pem: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
