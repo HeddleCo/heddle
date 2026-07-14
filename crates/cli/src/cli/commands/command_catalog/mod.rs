@@ -761,6 +761,13 @@ const CONFIG_MUTATION_NO_OP_ID: CommandContract = CommandContract {
     ..CONFIG_MUTATION
 };
 
+const CONFIG_MUTATION_TEXT: CommandContract = CommandContract {
+    supports_json: false,
+    supports_op_id: false,
+    json_kind: "none",
+    ..CONFIG_MUTATION
+};
+
 const NETWORK_CONFIG_MUTATION_TEXT: CommandContract = CommandContract {
     supports_json: false,
     supports_op_id: false,
@@ -1439,6 +1446,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ),
             "client",
         ),
+    ),
+    entry(
+        &["auth", "derive-agent"],
+        feature_gated(CONFIG_MUTATION_TEXT, "client"),
     ),
     entry(
         &["auth", "create-service-token"],
@@ -4505,6 +4516,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             AuthCommands::Login { .. } => vec!["auth", "login"],
             AuthCommands::Logout { .. } => vec!["auth", "logout"],
             AuthCommands::Status { .. } => vec!["auth", "status"],
+            AuthCommands::DeriveAgent { .. } => vec!["auth", "derive-agent"],
             AuthCommands::CreateServiceToken { .. } => vec!["auth", "create-service-token"],
         },
         Commands::Context { command } => match command {
