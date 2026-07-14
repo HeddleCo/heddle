@@ -16,9 +16,10 @@ use chrono::{DateTime, Utc};
 /// Operations that an agent attenuation can never authorize, even when a
 /// caller constructs [`AgentAttenuation`] directly without an allowlist.
 ///
-/// The credential-issuing methods are the G4 laundering fence: an attenuated
-/// token must not mint a fresh credential that omits its TTL and operation
-/// checks. Repository/namespace deletion is also outside the W1 agent surface.
+/// Credential-issuing and destructive methods excluded from the W1 agent
+/// operation surface. This floor limits use of the attenuated token, but it
+/// cannot constrain device-key-authenticated `MintBiscuit`; closing that G4
+/// laundering path requires W2 delegated PoP.
 pub const AGENT_OPERATION_DENY_FLOOR: &[&str] = &[
     "CreateServiceAccount",
     "IssueServiceAccountCredential",
@@ -182,8 +183,8 @@ fn build_attenuation_block(
         )
         .context("expiry check")?;
     // This independent check is deliberately present even when the caller
-    // supplies no operation allowlist. It is the non-optional G4/destructive
-    // operation floor for every token produced by this primitive.
+    // supplies no operation allowlist. It is the non-optional credential-
+    // issuing/destructive operation floor for every token from this primitive.
     for denied in AGENT_OPERATION_DENY_FLOOR {
         block = block
             .check(format!("check if operation($op), $op != {}", biscuit_string(denied)).as_str())
@@ -441,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn server_accepts_allowed_operation_and_rejects_g4_and_delete_floor() {
+    fn server_accepts_allowed_operation_and_rejects_credential_issuance_and_delete_floor() {
         let (parent, root) = fresh_parent_token();
         let child = attenuate_for_agent(
             &parent,

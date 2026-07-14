@@ -9,7 +9,7 @@
 
 use std::net::SocketAddr;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use cli_shared::{ClientConfig, UserConfig};
 use wire::{AuthToken, ProtocolError};
 
@@ -41,14 +41,15 @@ pub struct HostedSession {
 impl HostedSession {
     /// Resolve auth + build the validated client config for a hosted session.
     /// Owns credential-store fallback (per `mode`), server-key attachment, and
-    /// proof-key attachment — the assembly the command modules used to
+    /// proof-key attachment from either a credential or the matching shared
+    /// same-host device identity — the assembly the command modules used to
     /// hand-roll.
     pub fn build(
         user_config: &UserConfig,
         server_key: Option<String>,
         mode: HostedAuthMode,
     ) -> Result<Self> {
-        let (token, credential_proof_key) = match mode {
+        let (token, mut credential_proof_key) = match mode {
             HostedAuthMode::ConfigToken => (user_config.remote_token()?, None),
             HostedAuthMode::CredentialFallback => {
                 let mut token = user_config.remote_token()?;
@@ -73,6 +74,13 @@ impl HostedSession {
                 (token, credential_proof_key)
             }
         };
+
+        if credential_proof_key.is_none()
+            && let Some(ref key) = server_key
+            && let Some(token) = token.as_ref()
+        {
+            credential_proof_key = shared_device_proof_key(key, &token.id)?;
+        }
 
         let mut config = user_config.heddle_client_config(token)?;
         if let Some(key) = server_key {
@@ -107,6 +115,59 @@ impl HostedSession {
         client.auto_rotate_if_needed().await;
         Ok(client)
     }
+}
+
+fn shared_device_proof_key(server_key: &str, token: &str) -> Result<Option<String>> {
+    let identity = repo::identity::load_device(&repo::identity::device_identity_path())
+        .context("loading this host's shared device identity")?;
+    let Some(identity) = identity else {
+        return Ok(None);
+    };
+    if !server_keys_match(&identity.server, server_key)
+        || !token_proof_key_matches(token, &identity.public_key)
+    {
+        return Ok(None);
+    }
+    Ok(Some(identity.private_key_pem))
+}
+
+fn token_proof_key_matches(token: &str, expected_public_key_hex: &str) -> bool {
+    use biscuit_auth::builder::{BlockBuilder, Term};
+
+    let Ok(biscuit) = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes()) else {
+        return false;
+    };
+    let Ok(authority_source) = biscuit.print_block_source(0) else {
+        return false;
+    };
+    let Ok(authority) = BlockBuilder::new().code(&authority_source) else {
+        return false;
+    };
+    let mut proof_keys = authority.facts.iter().filter_map(|fact| {
+        if fact.predicate.name != "device_pop_key" || fact.predicate.terms.len() != 1 {
+            return None;
+        }
+        match &fact.predicate.terms[0] {
+            Term::Str(value) => Some(value),
+            _ => None,
+        }
+    });
+    let Some(proof_key) = proof_keys.next() else {
+        return false;
+    };
+    proof_keys.next().is_none() && proof_key.eq_ignore_ascii_case(expected_public_key_hex)
+}
+
+fn server_keys_match(left: &str, right: &str) -> bool {
+    fn without_scheme(value: &str) -> &str {
+        value
+            .strip_prefix("http://")
+            .or_else(|| value.strip_prefix("https://"))
+            .or_else(|| value.strip_prefix("heddle://"))
+            .unwrap_or(value)
+    }
+
+    without_scheme(left) == without_scheme(right)
 }
 
 impl HostedGrpcClient {
@@ -166,7 +227,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn derived_child_supplies_a_verifiable_inherited_hosted_proof() {
+    async fn token_only_derived_child_uses_shared_same_host_device_proof() {
         use base64::Engine as _;
         use biscuit_auth::{Biscuit, KeyPair};
         use crypto::{Ed25519Signer, Signer};
@@ -178,6 +239,7 @@ mod tests {
         let _guard = credentials::lock_test_env();
         let home = tempfile::TempDir::new().expect("temp Heddle home");
         let previous_home = std::env::var_os("HEDDLE_HOME");
+        let previous_remote_token = std::env::var_os("HEDDLE_REMOTE_TOKEN");
         unsafe { std::env::set_var("HEDDLE_HOME", home.path()) };
 
         let result = std::panic::catch_unwind(|| {
@@ -242,24 +304,21 @@ mod tests {
                     declared_scopes: vec![("repo".to_string(), "acme/heddle".to_string())],
                 },
             )
-            .expect("derive child credential");
-            auth_cmd::install_headless_credential(server, &child_token, &key_path)
-                .expect("install derived child bundle");
-            let installed_child = credentials::get_server_credential(server)
-                .expect("load derived child")
-                .expect("installed derived child");
-            assert!(
-                installed_child.credential_id.is_none(),
-                "installing an attenuated bundle must disable caveat-shedding renewal"
-            );
+            .expect("derive child token");
+            unsafe { std::env::set_var("HEDDLE_REMOTE_TOKEN", &child_token) };
 
             let session = HostedSession::build(
                 &cli_shared::UserConfig::default(),
                 Some(server.to_string()),
-                HostedAuthMode::CredentialFallback,
+                HostedAuthMode::ConfigToken,
             )
-            .expect("build hosted session from installed credential");
+            .expect("build hosted session from token-only same-host handoff");
             let config = session.config;
+            assert_eq!(
+                config.auth_proof_key_pem.as_deref(),
+                Some(private_key_pem.as_str()),
+                "token-only handoff must resolve the proof key from the shared device identity"
+            );
             let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
             let client = HostedGrpcClient {
                 inner: grpc::heddle::v1::repo_sync_service_client::RepoSyncServiceClient::new(
@@ -320,13 +379,17 @@ mod tests {
                 nonce,
                 &signature,
             )
-            .expect("derived-token proof verifies against inherited device key");
+            .expect("derived-token proof verifies against the shared same-host device key");
         });
 
         unsafe {
             match previous_home {
                 Some(path) => std::env::set_var("HEDDLE_HOME", path),
                 None => std::env::remove_var("HEDDLE_HOME"),
+            }
+            match previous_remote_token {
+                Some(token) => std::env::set_var("HEDDLE_REMOTE_TOKEN", token),
+                None => std::env::remove_var("HEDDLE_REMOTE_TOKEN"),
             }
         }
         if let Err(payload) = result {

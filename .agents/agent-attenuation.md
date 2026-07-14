@@ -51,17 +51,27 @@ repository reads, context operations, discussions, and `WhoAmI`. Repeating
 `--allow` selects a subset; it cannot opt into an unsafe method. Every derived
 block independently rejects `CreateServiceAccount`,
 `IssueServiceAccountCredential`, `DeleteRepository`, and `DeleteNamespace`.
-Those checks are the non-optional G4 laundering and destructive-operation
-floor, including for callers of the Rust helper.
+Those checks are the non-optional credential-issuing and destructive-operation
+floor, including for callers of the Rust helper. They restrict use of the
+derived token; they do not constrain device-key-authenticated `MintBiscuit`.
 
 By default the child replaces the active stored credential for `--server`, so
 the next push/pull and any further derivation use that child. Use `--stdout` to
 emit only the token without installing it, or `--out <DIR>` to write 0600
-`token` and `device-key.pem` files for another process on the same host.
+`token` and `metadata.json` files. The metadata records the server, subject,
+effective expiry, and declared scopes. Neither export contains a private key.
 
-W1 reuses the parent's device key for hosted proof-of-possession. Do not copy
-the bundle to another host or give it to an untrusted process; delegated PoP
-with a distinct child key is W2.
+The derived token is strictly weaker than its parent: its operation fence and
+TTL are enforced server-side. Declared resource scopes await W3 enforcement.
+Hosted writes also require the matching device key from this host's shared
+identity store, so a token-only export is not a portable credential.
+
+W1 does not fully close G4 credential laundering. A process with the parent
+device root key can authenticate `MintBiscuit` independently of the attenuated
+token and obtain a fresh authority token. Do not treat a W1 derived token as a
+cross-trust-boundary security control. W2 delegated PoP gives each child its own
+block-bound key without handing over the parent device root key and closes that
+remaining path.
 
 ## API: `cli::auth`
 
@@ -160,7 +170,8 @@ let attenuated = time_bounded(
 ```
 
 No operation or resource allowlist — the agent inherits the parent except for
-the non-optional G4/delete deny floor, and only for the next 12 hours.
+the non-optional credential-issuance/delete floor, and only for the next 12
+hours.
 
 ### 3. Multi-repo writer
 
@@ -173,7 +184,7 @@ let attenuated = attenuate_for_agent(
         agent_id: "agent-cross-repo".to_string(),
         expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
         // No operation allowlist → inherits the parent except for the
-        // non-optional G4/delete deny floor.
+        // non-optional credential-issuance/delete floor.
         allowed_operations: None,
         // But only on these two repos.
         allowed_resources: Some(vec![
@@ -237,6 +248,10 @@ boundary is:
   `MintBiscuit + KeypairProof`.
 
 ## What you can't do
+
+The statements in this section describe attenuation of the token itself. They
+do not apply to a holder of the W1 parent device root key, which remains able to
+authenticate `MintBiscuit` until W2 delegated PoP separates child proofs.
 
 - **Widen authority.** A child block can only emit *additional*
   checks. There is no way to add rights the parent didn't have.

@@ -65,6 +65,16 @@ struct ServiceTokenOutput {
     expires_in_days: u32,
 }
 
+#[derive(Serialize)]
+struct AgentTokenExportMetadata<'a> {
+    server: &'a str,
+    subject: &'a str,
+    expires_at: String,
+    scopes: Vec<String>,
+}
+
+const DERIVED_TOKEN_SECURITY_NOTE: &str = "Derived token is operation/TTL-limited and enforced server-side; declared scopes await W3 enforcement. It uses this host's device key for hosted-write proofs (same-host only); it is not a portable credential -- cross-host delegation lands in W2.";
+
 const SERVICE_TOKEN_TTL_DAYS: u32 = 30;
 const SERVICE_TOKEN_TTL_SECS: i64 = SERVICE_TOKEN_TTL_DAYS as i64 * 24 * 3600;
 const ISSUE_SA_PROOF_DOMAIN: &[u8] = b"heddle-sa-credential-issue-v1";
@@ -134,8 +144,8 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
     }
 }
 
-/// Derive an offline child Biscuit and either install it as the active
-/// credential for `server`, write a same-host bundle, or emit the token.
+/// Derive an offline child Biscuit and either install it as the active token,
+/// write a token-only export, or emit the token.
 fn cmd_auth_derive_agent(
     server: &str,
     agent_id: Option<String>,
@@ -202,21 +212,29 @@ fn cmd_auth_derive_agent(
 
     if stdout {
         println!("{child_token}");
+        eprintln!("{DERIVED_TOKEN_SECURITY_NOTE}");
         return Ok(());
     }
     if let Some(out) = out {
-        write_agent_bundle(out, &child_token, private_key_pem)?;
-        println!("Agent credential {agent_id} written to {}.", out.display());
-        println!(
-            "The inherited device key is for same-host use only; cross-host delegation is W2."
-        );
+        let export_metadata = AgentTokenExportMetadata {
+            server,
+            subject: &metadata.subject,
+            expires_at: expires_at.to_rfc3339(),
+            scopes: declared_scopes
+                .iter()
+                .map(|(kind, path)| format!("{kind}:{path}"))
+                .collect(),
+        };
+        write_agent_bundle(out, &child_token, &export_metadata)?;
+        println!("Agent token {agent_id} written to {}.", out.display());
+        println!("{DERIVED_TOKEN_SECURITY_NOTE}");
         return Ok(());
     }
 
-    // Derived credentials must not auto-rotate through MintBiscuit: renewal
-    // would produce a fresh authority token without this block's caveats.
-    // Keeping credential_id unset disables the client's rotation path while
-    // preserving the authority block and server-side revocation bindings.
+    // The installed derived token must not auto-rotate through MintBiscuit:
+    // renewal would produce a fresh authority token without this block's
+    // caveats. Keeping credential_id unset disables the client's rotation path
+    // while preserving the authority block and server-side revocation bindings.
     credentials::store_server_credential(
         server,
         ServerCredential {
@@ -229,7 +247,7 @@ fn cmd_auth_derive_agent(
         },
     )?;
 
-    println!("Derived and installed agent credential {agent_id} for {server}.");
+    println!("Derived and installed agent token {agent_id} for {server}.");
     println!("Expires: {expires_at}");
     println!("Allowed operations: {}", allowed_operations.join(", "));
     if declared_scopes.is_empty() {
@@ -244,7 +262,7 @@ fn cmd_auth_derive_agent(
                 .join(", ")
         );
     }
-    println!("PoP: inherited parent device key (same-host W1 mode)");
+    println!("{DERIVED_TOKEN_SECURITY_NOTE}");
     Ok(())
 }
 
@@ -362,20 +380,33 @@ fn scope_is_within(child: &(String, String), parent: &(String, String)) -> bool 
     }
 }
 
-fn write_agent_bundle(directory: &Path, token: &str, private_key_pem: &str) -> Result<()> {
+fn write_agent_bundle(
+    directory: &Path,
+    token: &str,
+    metadata: &AgentTokenExportMetadata<'_>,
+) -> Result<()> {
     objects::fs_atomic::create_private_dir_all(directory).with_context(|| {
         format!(
-            "creating agent credential directory {}",
+            "creating agent token export directory {}",
             directory.display()
         )
     })?;
+    let legacy_key_path = directory.join("device-key.pem");
+    match std::fs::remove_file(&legacy_key_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("removing legacy key {}", legacy_key_path.display()));
+        }
+    }
     objects::fs_atomic::write_file_atomic_secret(&directory.join("token"), token.as_bytes())
         .with_context(|| format!("writing agent token under {}", directory.display()))?;
-    objects::fs_atomic::write_file_atomic_secret(
-        &directory.join("device-key.pem"),
-        private_key_pem.as_bytes(),
-    )
-    .with_context(|| format!("writing inherited device key under {}", directory.display()))?;
+    let mut metadata_json =
+        serde_json::to_vec_pretty(metadata).context("serializing agent token metadata")?;
+    metadata_json.push(b'\n');
+    objects::fs_atomic::write_file_atomic_secret(&directory.join("metadata.json"), &metadata_json)
+        .with_context(|| format!("writing agent token metadata under {}", directory.display()))?;
     Ok(())
 }
 
@@ -1820,7 +1851,7 @@ mod tests {
             assert_eq!(installed.device_id.as_deref(), Some("device-root"));
             assert!(
                 installed.credential_id.is_none(),
-                "derived credentials must not auto-rotate into an unattenuated token"
+                "derived tokens must not auto-rotate into an unattenuated token"
             );
             let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(installed.token.as_bytes())
                 .expect("parse installed child");
@@ -1864,6 +1895,73 @@ mod tests {
             )
             .expect_err("subagent scope widening must be rejected");
             assert!(error.to_string().contains("would widen"));
+        });
+    }
+
+    #[test]
+    fn derive_agent_export_contains_token_and_metadata_but_no_device_key() {
+        with_isolated_home(|| {
+            let server = "grpc.S";
+            let (parent, private_key_pem) = stored_device_parent();
+            credentials::store_server_credential(server, parent).expect("store parent");
+            let export_dir = repo::identity::heddle_home_dir().join("agent-export");
+            objects::fs_atomic::create_private_dir_all(&export_dir)
+                .expect("create legacy export directory");
+            objects::fs_atomic::write_file_atomic_secret(
+                &export_dir.join("device-key.pem"),
+                private_key_pem.as_bytes(),
+            )
+            .expect("seed legacy exported device key");
+
+            cmd_auth_derive_agent(
+                server,
+                Some("agent-export".to_string()),
+                3600,
+                vec!["repo:acme/heddle".to_string()],
+                vec!["Push".to_string()],
+                Some(&export_dir),
+                false,
+            )
+            .expect("derive token-only export");
+
+            let mut entries = std::fs::read_dir(&export_dir)
+                .expect("read export directory")
+                .map(|entry| {
+                    entry
+                        .expect("export entry")
+                        .file_name()
+                        .into_string()
+                        .expect("UTF-8 export name")
+                })
+                .collect::<Vec<_>>();
+            entries.sort();
+            assert_eq!(entries, ["metadata.json", "token"]);
+
+            let token = std::fs::read(export_dir.join("token")).expect("read exported token");
+            let metadata =
+                std::fs::read(export_dir.join("metadata.json")).expect("read export metadata");
+            let export_bytes = [token.as_slice(), metadata.as_slice()].concat();
+            assert!(
+                !export_bytes
+                    .windows(private_key_pem.len())
+                    .any(|window| window == private_key_pem.as_bytes()),
+                "portable export must not contain the device private key"
+            );
+            assert!(
+                !export_bytes
+                    .windows(b"-----BEGIN PRIVATE KEY-----".len())
+                    .any(|window| window == b"-----BEGIN PRIVATE KEY-----"),
+                "portable export must not contain a PEM private-key header"
+            );
+
+            let metadata: serde_json::Value =
+                serde_json::from_slice(&metadata).expect("parse export metadata");
+            assert_eq!(metadata["server"], server);
+            assert_eq!(metadata["subject"], "alice");
+            assert_eq!(metadata["scopes"], serde_json::json!(["repo:acme/heddle"]));
+            assert!(metadata["expires_at"].as_str().is_some());
+            biscuit_auth::UnverifiedBiscuit::from_base64(&token)
+                .expect("exported token is a Biscuit");
         });
     }
 

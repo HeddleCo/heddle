@@ -38,7 +38,7 @@ pub enum AuthCommands {
         server: Option<String>,
     },
 
-    /// Derive a scoped, short-lived agent credential offline
+    /// Derive a scoped, short-lived agent token offline
     DeriveAgent {
         /// Server whose stored credential is the parent.
         #[arg(long)]
@@ -60,11 +60,11 @@ pub enum AuthCommands {
         #[arg(long = "allow")]
         allowed_operations: Vec<String>,
 
-        /// Write `token` and inherited `device-key.pem` files to this directory instead of installing.
+        /// Write `token` and `metadata.json` files to this directory without exporting the device key.
         #[arg(long, value_name = "DIR", conflicts_with = "stdout")]
         out: Option<std::path::PathBuf>,
 
-        /// Print only the child token instead of installing it.
+        /// Print only the child token instead of installing it (security note goes to stderr).
         #[arg(long, conflicts_with = "out")]
         stdout: bool,
     },
