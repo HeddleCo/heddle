@@ -69,7 +69,11 @@ Every child block carries one `pop_delegation(parent_revocation_id,
 child_public_key, signature)` fact. The parent signs a versioned payload over
 the preceding block's raw revocation id and the new 32-byte key. Weft verifies
 those transitions in block-id order and accepts request proofs only from the
-leaf key, so sub-derivation rotates again without exposing any ancestor key.
+leaf key in coordinated, pending PR
+[weft#577](https://github.com/HeddleCo/weft/pull/577). This client half is
+pending in [heddle#1022](https://github.com/HeddleCo/heddle/pull/1022); the two
+PRs must merge together. Once they do, sub-derivation rotates again without
+exposing any ancestor key.
 
 ## API: `heddle_client::auth`
 

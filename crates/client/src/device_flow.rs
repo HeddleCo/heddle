@@ -3,14 +3,13 @@
 //! Spawning a sub-agent in Heddle doesn't require a server round trip:
 //! the parent process appends an attenuation block to its own Biscuit and
 //! binds a fresh child proof key to that block. The agent receives the
-//! resulting bytes plus only its child private key. The verifier enforces
-//! every block's checks and key transition on every request.
+//! resulting bytes plus only its child private key. The coordinated, pending
+//! Weft PR HeddleCo/weft#577 enforces every block's checks and key transition;
+//! this client half is HeddleCo/heddle#1022 and must merge with it.
 //!
 //! See `.agents/agent-attenuation.md` for cookbook recipes (read-only
 //! agent, single-repo agent, time-bounded inspector, sub-sub-agent
 //! chain).
-
-use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -173,9 +172,12 @@ pub fn attenuate_for_agent(
 
 /// Versioned byte domain shared with weft's delegated-PoP verifier. The
 /// payload is exactly `domain || raw parent revocation id || raw child key`.
-pub const POP_DELEGATION_DOMAIN: &[u8] = b"heddle-pop-delegation-v1\0";
+pub(crate) const POP_DELEGATION_DOMAIN: &[u8] = b"heddle-pop-delegation-v1\0";
 
-pub fn pop_delegation_payload(parent_revocation_id: &[u8], child_public_key: &[u8]) -> Vec<u8> {
+pub(crate) fn pop_delegation_payload(
+    parent_revocation_id: &[u8],
+    child_public_key: &[u8],
+) -> Vec<u8> {
     [
         POP_DELEGATION_DOMAIN,
         parent_revocation_id,
@@ -186,9 +188,9 @@ pub fn pop_delegation_payload(parent_revocation_id: &[u8], child_public_key: &[u
 
 /// Resolve and verify the leaf PoP key of a root or delegated token without
 /// trusting its server signature. Callers use this only after obtaining the
-/// token from their local credential store; the server performs the same walk
-/// after full Biscuit verification.
-pub fn effective_pop_public_key_hex(token_b64: &str) -> Result<String> {
+/// token from their local credential store. The coordinated, pending server
+/// PR HeddleCo/weft#577 performs the same walk after full Biscuit verification.
+pub(crate) fn effective_pop_public_key_hex(token_b64: &str) -> Result<String> {
     use biscuit_auth::builder::{BlockBuilder, Term};
 
     let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token_b64.as_bytes())
@@ -199,6 +201,13 @@ pub fn effective_pop_public_key_hex(token_b64: &str) -> Result<String> {
     let authority = BlockBuilder::new()
         .code(&authority_source)
         .context("parse Biscuit authority block")?;
+    if authority
+        .facts
+        .iter()
+        .any(|fact| fact.predicate.name == "pop_delegation")
+    {
+        bail!("pop_delegation is valid only in post-authority blocks");
+    }
     let authority_keys = authority
         .facts
         .iter()
@@ -218,12 +227,6 @@ pub fn effective_pop_public_key_hex(token_b64: &str) -> Result<String> {
     let mut effective_key = decode_fixed_hex(authority_key_hex, 32, "device_pop_key")?;
 
     let revocation_ids = biscuit.revocation_identifiers();
-    let ordered_parent_ids = revocation_ids
-        .iter()
-        .take(revocation_ids.len().saturating_sub(1))
-        .map(|id| id.to_vec())
-        .collect::<Vec<_>>();
-    let mut by_parent = HashMap::new();
     for index in 1..biscuit.block_count() {
         let source = biscuit
             .print_block_source(index)
@@ -231,34 +234,30 @@ pub fn effective_pop_public_key_hex(token_b64: &str) -> Result<String> {
         let block = BlockBuilder::new()
             .code(&source)
             .with_context(|| format!("parse Biscuit attenuation block {index}"))?;
-        for fact in &block.facts {
-            if fact.predicate.name != "pop_delegation" {
-                continue;
-            }
-            let [Term::Str(parent), Term::Str(child), Term::Str(signature)] =
-                fact.predicate.terms.as_slice()
-            else {
-                bail!("attenuation block {index} has malformed pop_delegation fact");
-            };
-            let parent = hex::decode(parent).context("pop_delegation parent is not hex")?;
-            if !ordered_parent_ids
-                .iter()
-                .any(|candidate| candidate == &parent)
-            {
-                bail!("pop_delegation references an id outside the token's parent chain");
-            }
-            let child = decode_fixed_hex(child, 32, "pop_delegation child public key")?;
-            let signature = decode_fixed_hex(signature, 64, "pop_delegation signature")?;
-            if by_parent.insert(parent, (child, signature)).is_some() {
-                bail!("token contains duplicate pop_delegation parent references");
-            }
-        }
-    }
-
-    for parent in ordered_parent_ids {
-        let Some((child, signature)) = by_parent.remove(&parent) else {
-            continue;
+        let delegations = block
+            .facts
+            .iter()
+            .filter(|fact| fact.predicate.name == "pop_delegation")
+            .collect::<Vec<_>>();
+        let [delegation] = delegations.as_slice() else {
+            bail!("attenuation block {index} must contain exactly one pop_delegation fact");
         };
+        let [Term::Str(parent), Term::Str(child), Term::Str(signature)] =
+            delegation.predicate.terms.as_slice()
+        else {
+            bail!("attenuation block {index} has malformed pop_delegation fact");
+        };
+        let parent = hex::decode(parent).context("pop_delegation parent is not hex")?;
+        let expected_parent = revocation_ids
+            .get(index - 1)
+            .with_context(|| format!("attenuation block {index} has no preceding block"))?;
+        if parent.as_slice() != *expected_parent {
+            bail!(
+                "attenuation block {index} pop_delegation must reference its immediately preceding block"
+            );
+        }
+        let child = decode_fixed_hex(child, 32, "pop_delegation child public key")?;
+        let signature = decode_fixed_hex(signature, 64, "pop_delegation signature")?;
         Ed25519Signer::verify_with_public_key(
             &pop_delegation_payload(&parent, &child),
             &effective_key,
@@ -519,6 +518,30 @@ mod tests {
             child
         );
         assert_eq!(payload.len(), POP_DELEGATION_DOMAIN.len() + 64 + 32);
+    }
+
+    #[test]
+    fn effective_pop_key_rejects_a_delegationless_attenuation_block() {
+        let signer = Ed25519Signer::generate().expect("root PoP key");
+        let token = Biscuit::builder()
+            .fact(r#"user("alice")"#)
+            .expect("user fact")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
+            .expect("root PoP fact")
+            .build(&KeyPair::new())
+            .expect("build root")
+            .append(
+                biscuit_auth::builder::BlockBuilder::new()
+                    .fact(r#"agent("raw-child")"#)
+                    .expect("raw attenuation fact"),
+            )
+            .expect("append raw attenuation")
+            .to_base64()
+            .expect("encode raw attenuation");
+
+        let error = effective_pop_public_key_hex(&token)
+            .expect_err("a child block without a key transition must fail closed");
+        assert!(error.to_string().contains("exactly one pop_delegation"));
     }
 
     /// Exercise the same Biscuit chain verification and request-fact shape as

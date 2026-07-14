@@ -454,6 +454,7 @@ fn write_agent_bundle(
 
 struct HeadlessTokenMetadata {
     subject: String,
+    is_derived: bool,
     credential_id: Option<String>,
     expires_at: Option<String>,
     proof_public_key_hex: String,
@@ -494,8 +495,10 @@ pub(crate) fn install_headless_credential(
         expires_at: metadata.expires_at,
     };
     credentials::store_server_credential(server, credential)?;
-    repo::identity::link_device_key(signer.public_key(), &private_key_pem, server)
-        .with_context(|| format!("registering device identity for {server}"))?;
+    if !metadata.is_derived {
+        repo::identity::link_device_key(signer.public_key(), &private_key_pem, server)
+            .with_context(|| format!("registering device identity for {server}"))?;
+    }
 
     Ok(metadata.subject)
 }
@@ -598,6 +601,7 @@ fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetadata> {
 
     Ok(HeadlessTokenMetadata {
         subject,
+        is_derived: block_count > 1,
         credential_id,
         expires_at,
         proof_public_key_hex,

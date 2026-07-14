@@ -298,6 +298,33 @@ mod tests {
                 child_signer.public_key(),
             )
             .expect("derive child token");
+
+            let child_private_key_pem = child_signer.to_pem().expect("child PEM");
+            let child_key_path = home.path().join("child-key.pem");
+            std::fs::write(&child_key_path, &child_private_key_pem)
+                .expect("write child key for install");
+            auth_cmd::install_headless_credential(server, &child_token, &child_key_path)
+                .expect("install derived child credential");
+
+            let stored_child = credentials::get_server_credential(server)
+                .expect("read installed child credential")
+                .expect("installed child credential");
+            assert_eq!(
+                stored_child.private_key_pem.as_deref(),
+                Some(child_private_key_pem.as_str()),
+                "the per-server child credential must retain its matching child key"
+            );
+            let preserved_identity =
+                repo::identity::load_device(&repo::identity::device_identity_path())
+                    .expect("reload shared device identity")
+                    .expect("shared root identity remains installed");
+            assert_eq!(
+                preserved_identity.public_key,
+                hex::encode(signer.public_key()),
+                "installing a derived child must not replace the host-wide root identity"
+            );
+            assert_eq!(preserved_identity.private_key_pem, private_key_pem);
+
             unsafe { std::env::set_var("HEDDLE_REMOTE_TOKEN", &child_token) };
 
             let session = HostedSession::build(
