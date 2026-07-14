@@ -40,7 +40,7 @@ daemon = { path = "../daemon", package = "heddle-daemon", version = "0.10" }
 # text auto-merge. Always-on: the merge driver and rebase replay both call
 # into it unconditionally.
 merge = { path = "../merge", package = "heddle-merge", version = "0.10" }
-api = { git = "https://github.com/HeddleCo/api", rev = "9bdc068b3b91a0cbfc3e0f6ec15287360fc632db", package = "heddle-api", version = "=0.1.0", features = ["client"] }
+api = { git = "https://github.com/HeddleCo/api", rev = "f32adc1f3f8ddeae80a7818289efb89bd3dc44a6", package = "heddle-api", version = "=0.1.0", features = ["client"] }
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.10" }
 heddle-core = { path = "../core", version = "0.10", default-features = false }
 heddle-format = { path = "../format", version = "0.10" }

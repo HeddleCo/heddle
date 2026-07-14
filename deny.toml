@@ -155,7 +155,7 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Git deps must be explicitly listed. Empty list means "crates.io only" — if
-# you add a `git = "..."` dependency, add the remote here with a comment
-# explaining why crates.io isn't sufficient.
-allow-git = []
+# Temporary exact-revision API dependency while `heddle-api` 0.1.0 awaits its
+# crates.io publication. Consumer manifests pin the commit; remove this entry
+# when they move to the registry package.
+allow-git = ["https://github.com/HeddleCo/api"]
