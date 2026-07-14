@@ -1824,7 +1824,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_agent_installs_inherited_pop_child_and_supports_narrower_subderivation() {
+    fn derive_agent_installs_fresh_pop_child_and_supports_narrower_subderivation() {
         with_isolated_home(|| {
             let server = "grpc.S";
             let (parent, private_key_pem) = stored_device_parent();
@@ -1843,12 +1843,20 @@ mod tests {
             let installed = credentials::get_server_credential(server)
                 .expect("load installed child")
                 .expect("installed child");
-            assert_eq!(
-                installed.private_key_pem.as_deref(),
-                Some(private_key_pem.as_str()),
-                "W1 child inherits the parent PoP key"
+            let installed_private_key = installed
+                .private_key_pem
+                .as_deref()
+                .expect("derived child stores its own PoP key");
+            assert_ne!(
+                installed_private_key, private_key_pem,
+                "the parent device private key must never be handed to a derived child"
             );
-            assert_eq!(installed.device_id.as_deref(), Some("device-root"));
+            let installed_signer =
+                Ed25519Signer::from_pem(installed_private_key).expect("parse child PoP key");
+            assert!(
+                installed.device_id.is_none(),
+                "a derived PoP key is not the registered root device key"
+            );
             assert!(
                 installed.credential_id.is_none(),
                 "derived tokens must not auto-rotate into an unattenuated token"
@@ -1861,6 +1869,13 @@ mod tests {
                     .print_block_source(1)
                     .expect("child block")
                     .contains("agent_scope(\"repo\", \"acme/heddle\")")
+            );
+            assert!(
+                parsed
+                    .print_block_source(1)
+                    .expect("child block")
+                    .contains(&hex::encode(installed_signer.public_key())),
+                "the child attenuation block must bind the child's PoP public key"
             );
 
             cmd_auth_derive_agent(
@@ -1876,12 +1891,29 @@ mod tests {
             let subagent = credentials::get_server_credential(server)
                 .expect("load subagent")
                 .expect("installed subagent");
+            let subagent_private_key = subagent
+                .private_key_pem
+                .as_deref()
+                .expect("subagent stores its own PoP key");
+            assert_ne!(
+                subagent_private_key, installed_private_key,
+                "each delegation hop must generate a fresh private key"
+            );
+            let subagent_signer =
+                Ed25519Signer::from_pem(subagent_private_key).expect("parse subagent PoP key");
             let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(subagent.token.as_bytes())
                 .expect("parse subagent");
             assert_eq!(
                 parsed.block_count(),
                 3,
                 "delegation tree adds one block per hop"
+            );
+            assert!(
+                parsed
+                    .print_block_source(2)
+                    .expect("subagent block")
+                    .contains(&hex::encode(subagent_signer.public_key())),
+                "the subagent attenuation block must bind the subagent's PoP public key"
             );
 
             let error = cmd_auth_derive_agent(
@@ -1899,7 +1931,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_agent_export_contains_token_and_metadata_but_no_device_key() {
+    fn derive_agent_export_contains_token_metadata_and_a_fresh_child_key() {
         with_isolated_home(|| {
             let server = "grpc.S";
             let (parent, private_key_pem) = stored_device_parent();
@@ -1922,7 +1954,7 @@ mod tests {
                 Some(&export_dir),
                 false,
             )
-            .expect("derive token-only export");
+            .expect("derive portable child credential");
 
             let mut entries = std::fs::read_dir(&export_dir)
                 .expect("read export directory")
@@ -1935,24 +1967,19 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             entries.sort();
-            assert_eq!(entries, ["metadata.json", "token"]);
+            assert_eq!(entries, ["device-key.pem", "metadata.json", "token"]);
 
             let token = std::fs::read(export_dir.join("token")).expect("read exported token");
+            let child_private_key = std::fs::read_to_string(export_dir.join("device-key.pem"))
+                .expect("read exported child key");
             let metadata =
                 std::fs::read(export_dir.join("metadata.json")).expect("read export metadata");
-            let export_bytes = [token.as_slice(), metadata.as_slice()].concat();
-            assert!(
-                !export_bytes
-                    .windows(private_key_pem.len())
-                    .any(|window| window == private_key_pem.as_bytes()),
-                "portable export must not contain the device private key"
+            assert_ne!(
+                child_private_key, private_key_pem,
+                "portable export must contain a fresh child key, never the parent device key"
             );
-            assert!(
-                !export_bytes
-                    .windows(b"-----BEGIN PRIVATE KEY-----".len())
-                    .any(|window| window == b"-----BEGIN PRIVATE KEY-----"),
-                "portable export must not contain a PEM private-key header"
-            );
+            let child_signer =
+                Ed25519Signer::from_pem(&child_private_key).expect("parse exported child key");
 
             let metadata: serde_json::Value =
                 serde_json::from_slice(&metadata).expect("parse export metadata");
@@ -1960,8 +1987,15 @@ mod tests {
             assert_eq!(metadata["subject"], "alice");
             assert_eq!(metadata["scopes"], serde_json::json!(["repo:acme/heddle"]));
             assert!(metadata["expires_at"].as_str().is_some());
-            biscuit_auth::UnverifiedBiscuit::from_base64(&token)
+            let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(&token)
                 .expect("exported token is a Biscuit");
+            assert!(
+                parsed
+                    .print_block_source(1)
+                    .expect("exported child block")
+                    .contains(&hex::encode(child_signer.public_key())),
+                "the exported token must bind the key exported beside it"
+            );
         });
     }
 
