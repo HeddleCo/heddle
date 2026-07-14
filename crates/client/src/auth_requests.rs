@@ -14,6 +14,15 @@ pub enum AuthCommand {
     Status {
         server: Option<String>,
     },
+    DeriveAgent {
+        server: String,
+        agent_id: Option<String>,
+        ttl_secs: u64,
+        scopes: Vec<String>,
+        allowed_operations: Vec<String>,
+        out: Option<std::path::PathBuf>,
+        stdout: bool,
+    },
     CreateServiceToken {
         name: String,
         namespace: String,

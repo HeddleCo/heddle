@@ -1791,6 +1791,7 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tonic",
  "tracing",
+ "uuid",
  "weft-client-shim",
 ]
 

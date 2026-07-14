@@ -166,7 +166,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn headless_install_supplies_a_verifiable_hosted_proof() {
+    async fn derived_child_supplies_a_verifiable_inherited_hosted_proof() {
         use base64::Engine as _;
         use biscuit_auth::{Biscuit, KeyPair};
         use crypto::{Ed25519Signer, Signer};
@@ -232,6 +232,27 @@ mod tests {
             assert_eq!(identity.public_key, hex::encode(signer.public_key()));
             assert_eq!(identity.server, server);
 
+            let child_token = crate::device_flow::attenuate_for_agent(
+                &token,
+                crate::device_flow::AgentAttenuation {
+                    agent_id: "agent-push".to_string(),
+                    expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                    allowed_operations: Some(vec!["Push".to_string()]),
+                    allowed_resources: None,
+                    declared_scopes: vec![("repo".to_string(), "acme/heddle".to_string())],
+                },
+            )
+            .expect("derive child credential");
+            auth_cmd::install_headless_credential(server, &child_token, &key_path)
+                .expect("install derived child bundle");
+            let installed_child = credentials::get_server_credential(server)
+                .expect("load derived child")
+                .expect("installed derived child");
+            assert!(
+                installed_child.credential_id.is_none(),
+                "installing an attenuated bundle must disable caveat-shedding renewal"
+            );
+
             let session = HostedSession::build(
                 &cli_shared::UserConfig::default(),
                 Some(server.to_string()),
@@ -292,14 +313,14 @@ mod tests {
                 .expect("decode proof signature");
             crypto::pop::verify_pop(
                 signer.public_key(),
-                &token,
+                &child_token,
                 proof_ts,
                 "POST",
                 method,
                 nonce,
                 &signature,
             )
-            .expect("proof verifies against installed device key");
+            .expect("derived-token proof verifies against inherited device key");
         });
 
         unsafe {

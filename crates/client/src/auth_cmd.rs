@@ -1,6 +1,6 @@
 //! `heddle auth` command implementations.
 
-use std::path::Path;
+use std::{collections::BTreeSet, path::Path};
 
 use anyhow::{Context, Result, bail};
 use crypto::{Ed25519Signer, Signer};
@@ -19,6 +19,7 @@ use tonic::{
 };
 use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
+use crate::device_flow::{AgentAttenuation, SAFE_AGENT_OPERATIONS, attenuate_for_agent};
 use crate::{auth_requests::AuthCommand, credentials, credentials::ServerCredential};
 
 /// Top-level dispatch for `heddle auth <subcommand>`. `_ctx` is
@@ -96,6 +97,23 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
         },
         AuthCommand::Logout { server } => cmd_auth_logout(ctx, server.as_deref()),
         AuthCommand::Status { server } => cmd_auth_status(ctx, server.as_deref()),
+        AuthCommand::DeriveAgent {
+            server,
+            agent_id,
+            ttl_secs,
+            scopes,
+            allowed_operations,
+            out,
+            stdout,
+        } => cmd_auth_derive_agent(
+            &server,
+            agent_id,
+            ttl_secs,
+            scopes,
+            allowed_operations,
+            out.as_deref(),
+            stdout,
+        ),
         AuthCommand::CreateServiceToken {
             name,
             namespace,
@@ -114,6 +132,251 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             .await
         }
     }
+}
+
+/// Derive an offline child Biscuit and either install it as the active
+/// credential for `server`, write a same-host bundle, or emit the token.
+fn cmd_auth_derive_agent(
+    server: &str,
+    agent_id: Option<String>,
+    ttl_secs: u64,
+    scopes: Vec<String>,
+    requested_operations: Vec<String>,
+    out: Option<&Path>,
+    stdout: bool,
+) -> Result<()> {
+    if ttl_secs == 0 {
+        bail!("--ttl must be greater than zero seconds");
+    }
+    let ttl_secs = i64::try_from(ttl_secs).context("--ttl is too large")?;
+    let parent = credentials::get_server_credential(server)?
+        .ok_or_else(|| anyhow::anyhow!(HostedRecoveryAdvice::auth_required(server)))?;
+    let private_key_pem = parent.private_key_pem.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "stored credential for {server} has no device proof key; run `heddle auth login --server {server}` first"
+        )
+    })?;
+    let signer = Ed25519Signer::from_pem(private_key_pem)
+        .map_err(|error| anyhow::anyhow!("stored device proof key is invalid: {error}"))?;
+    let metadata = headless_token_metadata(&parent.token)?;
+    if !metadata
+        .proof_public_key_hex
+        .eq_ignore_ascii_case(&hex::encode(signer.public_key()))
+    {
+        bail!("stored device proof key does not match the parent Biscuit");
+    }
+
+    let now = chrono::Utc::now();
+    let requested_expiry = now
+        .checked_add_signed(chrono::Duration::seconds(ttl_secs))
+        .ok_or_else(|| anyhow::anyhow!("--ttl produces an unsupported expiry"))?;
+    let expires_at = match parent.expires_at.as_deref() {
+        Some(value) => {
+            let parent_expiry = chrono::DateTime::parse_from_rfc3339(value)
+                .with_context(|| format!("stored parent expiry is invalid: {value}"))?
+                .with_timezone(&chrono::Utc);
+            if parent_expiry <= now {
+                bail!("stored parent credential expired at {parent_expiry}");
+            }
+            requested_expiry.min(parent_expiry)
+        }
+        None => requested_expiry,
+    };
+
+    let agent_id = agent_id.unwrap_or_else(|| format!("agent-{}", uuid::Uuid::new_v4()));
+    let allowed_operations = select_agent_operations(requested_operations)?;
+    let declared_scopes = parse_agent_scopes(scopes)?;
+    validate_scope_narrowing(&parent.token, &declared_scopes)?;
+    let child_token = attenuate_for_agent(
+        &parent.token,
+        AgentAttenuation {
+            agent_id: agent_id.clone(),
+            expires_at,
+            allowed_operations: Some(allowed_operations.clone()),
+            // W3 will enforce the declarations below. Adding a resource check
+            // in W1 would reject every request against today's servers.
+            allowed_resources: None,
+            declared_scopes: declared_scopes.clone(),
+        },
+    )?;
+
+    if stdout {
+        println!("{child_token}");
+        return Ok(());
+    }
+    if let Some(out) = out {
+        write_agent_bundle(out, &child_token, private_key_pem)?;
+        println!("Agent credential {agent_id} written to {}.", out.display());
+        println!(
+            "The inherited device key is for same-host use only; cross-host delegation is W2."
+        );
+        return Ok(());
+    }
+
+    // Derived credentials must not auto-rotate through MintBiscuit: renewal
+    // would produce a fresh authority token without this block's caveats.
+    // Keeping credential_id unset disables the client's rotation path while
+    // preserving the authority block and server-side revocation bindings.
+    credentials::store_server_credential(
+        server,
+        ServerCredential {
+            token: child_token,
+            subject: parent.subject,
+            device_id: parent.device_id,
+            credential_id: None,
+            private_key_pem: Some(private_key_pem.to_string()),
+            expires_at: Some(expires_at.to_rfc3339()),
+        },
+    )?;
+
+    println!("Derived and installed agent credential {agent_id} for {server}.");
+    println!("Expires: {expires_at}");
+    println!("Allowed operations: {}", allowed_operations.join(", "));
+    if declared_scopes.is_empty() {
+        println!("Scopes: none declared");
+    } else {
+        println!(
+            "Scopes: {} (recorded now; server enforcement begins with W3)",
+            declared_scopes
+                .iter()
+                .map(|(kind, path)| format!("{kind}:{path}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    println!("PoP: inherited parent device key (same-host W1 mode)");
+    Ok(())
+}
+
+fn select_agent_operations(requested: Vec<String>) -> Result<Vec<String>> {
+    if requested.is_empty() {
+        return Ok(SAFE_AGENT_OPERATIONS
+            .iter()
+            .map(|operation| (*operation).to_string())
+            .collect());
+    }
+    let safe = SAFE_AGENT_OPERATIONS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut selected = BTreeSet::new();
+    for operation in requested {
+        if !safe.contains(operation.as_str()) {
+            bail!(
+                "operation {operation:?} is outside the safe agent operation ceiling; --allow can only narrow the default set"
+            );
+        }
+        selected.insert(operation);
+    }
+    Ok(selected.into_iter().collect())
+}
+
+fn parse_agent_scopes(scopes: Vec<String>) -> Result<Vec<(String, String)>> {
+    let mut parsed = BTreeSet::new();
+    for scope in scopes {
+        let (kind, path) = match scope.split_once(':') {
+            Some(("repo", path)) => ("repo", path),
+            Some(("namespace" | "ns", path)) => ("namespace", path),
+            Some((kind, _)) => bail!(
+                "unsupported scope kind {kind:?}; use repo:<path>, namespace:<path>, or a bare repo path"
+            ),
+            None => ("repo", scope.as_str()),
+        };
+        let path = path.trim_matches('/');
+        if path.is_empty() {
+            bail!("--scope path must not be empty");
+        }
+        parsed.insert((kind.to_string(), path.to_string()));
+    }
+    Ok(parsed.into_iter().collect())
+}
+
+fn validate_scope_narrowing(parent_token: &str, child: &[(String, String)]) -> Result<()> {
+    if child.is_empty() {
+        // Omitting a scope adds no new declaration; all ancestor declarations
+        // remain in the immutable chain for W3 to enforce.
+        return Ok(());
+    }
+    for ancestor in agent_scope_blocks(parent_token)? {
+        if ancestor.is_empty() {
+            continue;
+        }
+        for child_scope in child {
+            if !ancestor
+                .iter()
+                .any(|parent_scope| scope_is_within(child_scope, parent_scope))
+            {
+                bail!(
+                    "scope {}:{} would widen an ancestor agent scope; sub-derivation may only narrow",
+                    child_scope.0,
+                    child_scope.1
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn agent_scope_blocks(token: &str) -> Result<Vec<Vec<(String, String)>>> {
+    use biscuit_auth::builder::{BlockBuilder, Term};
+
+    let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
+        .context("parsing parent Biscuit scopes")?;
+    let mut blocks = Vec::new();
+    for index in 1..biscuit.block_count() {
+        let source = biscuit
+            .print_block_source(index)
+            .with_context(|| format!("reading Biscuit attenuation block {index}"))?;
+        let block = BlockBuilder::new()
+            .code(&source)
+            .with_context(|| format!("parsing Biscuit attenuation block {index}"))?;
+        let scopes = block
+            .facts
+            .iter()
+            .filter_map(|fact| {
+                if fact.predicate.name != "agent_scope" || fact.predicate.terms.len() != 2 {
+                    return None;
+                }
+                match (&fact.predicate.terms[0], &fact.predicate.terms[1]) {
+                    (Term::Str(kind), Term::Str(path)) => Some((kind.clone(), path.clone())),
+                    _ => None,
+                }
+            })
+            .collect();
+        blocks.push(scopes);
+    }
+    Ok(blocks)
+}
+
+fn scope_is_within(child: &(String, String), parent: &(String, String)) -> bool {
+    let path_is_within = child.1 == parent.1
+        || child
+            .1
+            .strip_prefix(&parent.1)
+            .is_some_and(|suffix| suffix.starts_with('/'));
+    match (parent.0.as_str(), child.0.as_str()) {
+        ("repo", "repo") => path_is_within,
+        ("namespace", "namespace") => path_is_within,
+        ("namespace", "repo") => child.1 != parent.1 && path_is_within,
+        _ => false,
+    }
+}
+
+fn write_agent_bundle(directory: &Path, token: &str, private_key_pem: &str) -> Result<()> {
+    objects::fs_atomic::create_private_dir_all(directory).with_context(|| {
+        format!(
+            "creating agent credential directory {}",
+            directory.display()
+        )
+    })?;
+    objects::fs_atomic::write_file_atomic_secret(&directory.join("token"), token.as_bytes())
+        .with_context(|| format!("writing agent token under {}", directory.display()))?;
+    objects::fs_atomic::write_file_atomic_secret(
+        &directory.join("device-key.pem"),
+        private_key_pem.as_bytes(),
+    )
+    .with_context(|| format!("writing inherited device key under {}", directory.display()))?;
+    Ok(())
 }
 
 struct HeadlessTokenMetadata {
@@ -169,6 +432,7 @@ fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetadata> {
 
     let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
         .context("parsing --token as a Biscuit")?;
+    let block_count = biscuit.block_count();
     let authority_source = biscuit
         .print_block_source(0)
         .context("reading Biscuit authority block")?;
@@ -196,7 +460,15 @@ fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetadata> {
     let subject = string_fact("user")?
         .filter(|subject| !subject.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("Biscuit authority block is missing user(subject)"))?;
-    let credential_id = string_fact("credential_id")?;
+    // An attenuated token must never use keypair renewal: MintBiscuit would
+    // return a new authority token without the appended caveats. The
+    // authority credential id remains cryptographically intact in the token,
+    // but is intentionally omitted from the local child credential metadata.
+    let credential_id = if block_count > 1 {
+        None
+    } else {
+        string_fact("credential_id")?
+    };
     let proof_public_key_hex = string_fact("device_pop_key")?.ok_or_else(|| {
         anyhow::anyhow!(
             "Biscuit is not device-bound: authority block is missing device_pop_key(key)"
@@ -214,7 +486,7 @@ fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetadata> {
             _ => None,
         }
     });
-    let expires_at = expiries
+    let authority_expires_at = expiries
         .next()
         .map(|seconds| {
             i64::try_from(seconds)
@@ -227,6 +499,35 @@ fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetadata> {
     if expiries.next().is_some() {
         bail!("Biscuit authority block contains multiple expires_at facts");
     }
+
+    let mut effective_expiry = authority_expires_at
+        .as_deref()
+        .map(chrono::DateTime::parse_from_rfc3339)
+        .transpose()
+        .context("parsing Biscuit authority expiry")?
+        .map(|value| value.with_timezone(&chrono::Utc));
+    for index in 1..block_count {
+        let source = biscuit
+            .print_block_source(index)
+            .with_context(|| format!("reading Biscuit attenuation block {index}"))?;
+        let block = BlockBuilder::new()
+            .code(&source)
+            .with_context(|| format!("parsing Biscuit attenuation block {index}"))?;
+        for fact in &block.facts {
+            if fact.predicate.name != "agent_expires_at" || fact.predicate.terms.len() != 1 {
+                continue;
+            }
+            let Term::Date(seconds) = fact.predicate.terms[0] else {
+                bail!("Biscuit attenuation block {index} has invalid agent_expires_at fact");
+            };
+            let seconds = i64::try_from(seconds)
+                .with_context(|| format!("attenuation block {index} expiry is too large"))?;
+            let value = chrono::DateTime::from_timestamp(seconds, 0)
+                .ok_or_else(|| anyhow::anyhow!("attenuation block {index} expiry is invalid"))?;
+            effective_expiry = Some(effective_expiry.map_or(value, |current| current.min(value)));
+        }
+    }
+    let expires_at = effective_expiry.map(|value| value.to_rfc3339());
 
     Ok(HeadlessTokenMetadata {
         subject,
@@ -1456,6 +1757,131 @@ mod tests {
             credential_id: None,
             private_key_pem: None,
             expires_at: None,
+        }
+    }
+
+    fn stored_device_parent() -> (ServerCredential, String) {
+        let signer = Ed25519Signer::generate().expect("device key");
+        let private_key_pem = signer.to_pem().expect("device PEM");
+        let expires_at = chrono::Utc::now() + chrono::Duration::hours(2);
+        let token = biscuit_auth::Biscuit::builder()
+            .fact(r#"user("alice")"#)
+            .expect("user fact")
+            .fact(r#"credential_id("root-credential")"#)
+            .expect("credential fact")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
+            .expect("device PoP fact")
+            .fact(format!("expires_at({})", expires_at.to_rfc3339()).as_str())
+            .expect("expiry fact")
+            .check(format!("check if time($now), $now < {}", expires_at.to_rfc3339()).as_str())
+            .expect("expiry check")
+            .build(&biscuit_auth::KeyPair::new())
+            .expect("build parent")
+            .to_base64()
+            .expect("encode parent");
+        (
+            ServerCredential {
+                token,
+                subject: "alice".to_string(),
+                device_id: Some("device-root".to_string()),
+                credential_id: Some("root-credential".to_string()),
+                private_key_pem: Some(private_key_pem.clone()),
+                expires_at: Some(expires_at.to_rfc3339()),
+            },
+            private_key_pem,
+        )
+    }
+
+    #[test]
+    fn derive_agent_installs_inherited_pop_child_and_supports_narrower_subderivation() {
+        with_isolated_home(|| {
+            let server = "grpc.S";
+            let (parent, private_key_pem) = stored_device_parent();
+            credentials::store_server_credential(server, parent).expect("store parent");
+
+            cmd_auth_derive_agent(
+                server,
+                Some("agent-parent".to_string()),
+                3600,
+                vec!["repo:acme/heddle".to_string()],
+                vec!["Push".to_string()],
+                None,
+                false,
+            )
+            .expect("derive and install parent agent");
+            let installed = credentials::get_server_credential(server)
+                .expect("load installed child")
+                .expect("installed child");
+            assert_eq!(
+                installed.private_key_pem.as_deref(),
+                Some(private_key_pem.as_str()),
+                "W1 child inherits the parent PoP key"
+            );
+            assert_eq!(installed.device_id.as_deref(), Some("device-root"));
+            assert!(
+                installed.credential_id.is_none(),
+                "derived credentials must not auto-rotate into an unattenuated token"
+            );
+            let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(installed.token.as_bytes())
+                .expect("parse installed child");
+            assert_eq!(parsed.block_count(), 2);
+            assert!(
+                parsed
+                    .print_block_source(1)
+                    .expect("child block")
+                    .contains("agent_scope(\"repo\", \"acme/heddle\")")
+            );
+
+            cmd_auth_derive_agent(
+                server,
+                Some("agent-child".to_string()),
+                600,
+                vec!["repo:acme/heddle/subtree".to_string()],
+                vec!["Push".to_string()],
+                None,
+                false,
+            )
+            .expect("derive narrower subagent");
+            let subagent = credentials::get_server_credential(server)
+                .expect("load subagent")
+                .expect("installed subagent");
+            let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(subagent.token.as_bytes())
+                .expect("parse subagent");
+            assert_eq!(
+                parsed.block_count(),
+                3,
+                "delegation tree adds one block per hop"
+            );
+
+            let error = cmd_auth_derive_agent(
+                server,
+                Some("agent-widening".to_string()),
+                300,
+                vec!["repo:acme".to_string()],
+                vec!["Push".to_string()],
+                None,
+                false,
+            )
+            .expect_err("subagent scope widening must be rejected");
+            assert!(error.to_string().contains("would widen"));
+        });
+    }
+
+    #[test]
+    fn derive_agent_allow_flag_cannot_select_unsafe_operations() {
+        for operation in [
+            "CreateServiceAccount",
+            "IssueServiceAccountCredential",
+            "DeleteRepository",
+            "DeleteNamespace",
+        ] {
+            let error = select_agent_operations(vec![operation.to_string()])
+                .expect_err("unsafe operation must be outside CLI ceiling");
+            assert!(
+                error
+                    .to_string()
+                    .contains("outside the safe agent operation ceiling")
+            );
         }
     }
 
