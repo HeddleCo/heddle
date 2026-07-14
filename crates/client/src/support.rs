@@ -9,7 +9,7 @@ use cli_shared::{
 };
 use grpc::heddle::api::v1alpha1::{
     HostedRole, SupportAccessGrant as ProtoSupportAccessGrant,
-    grant_target_ref::Target as GrantTargetKind,
+    grant_target_ref::Target as GrantTargetKind, repository_ref::Reference,
 };
 use repo::Repository;
 use serde::Serialize;
@@ -59,7 +59,13 @@ impl From<ProtoSupportAccessGrant> for SupportAccessOutput {
     fn from(g: ProtoSupportAccessGrant) -> Self {
         let (namespace_path, repo_path) = match g.target.and_then(|t| t.target) {
             Some(GrantTargetKind::NamespacePath(p)) => (p, String::new()),
-            Some(GrantTargetKind::RepoPath(p)) => (String::new(), p),
+            Some(GrantTargetKind::RepoPath(p)) => (
+                String::new(),
+                match p.reference {
+                    Some(Reference::CanonicalPath(path)) => path,
+                    _ => String::new(),
+                },
+            ),
             None => (String::new(), String::new()),
         };
         let role = match HostedRole::try_from(g.role).unwrap_or(HostedRole::Unspecified) {

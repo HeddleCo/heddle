@@ -180,6 +180,13 @@ pub(super) fn repository_ref(path: &str) -> Option<RepositoryRef> {
     })
 }
 
+pub(super) fn repository_ref_path(repository: &RepositoryRef) -> Option<&str> {
+    match repository.reference.as_ref() {
+        Some(Reference::CanonicalPath(path)) => Some(path),
+        _ => None,
+    }
+}
+
 pub(super) fn proto_state_id(state_id: StateId) -> Option<ProtoStateId> {
     Some(ProtoStateId {
         value: state_id.as_bytes().to_vec(),
@@ -234,7 +241,10 @@ pub(super) fn to_protocol_grant(grant: HostedGrant) -> wire::HostedGrantInfo {
     use grpc::heddle::api::v1alpha1::grant_target_ref::Target;
     let (namespace_path, repo_path) = match grant.target.and_then(|t| t.target) {
         Some(Target::NamespacePath(p)) if !p.is_empty() => (Some(p), None),
-        Some(Target::RepoPath(p)) if !p.is_empty() => (None, Some(p)),
+        Some(Target::RepoPath(p)) => (
+            None,
+            repository_ref_path(&p).map(ToOwned::to_owned),
+        ),
         _ => (None, None),
     };
     wire::HostedGrantInfo {

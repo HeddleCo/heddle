@@ -240,8 +240,10 @@ impl HostedGrpcClient {
             .map(|entry| {
                 Ok(HostedRefEntry {
                     name: entry.name,
-                    state_id: StateId::try_from_slice(&entry.state_id)
-                        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
+                    state_id: super::helpers::parse_proto_state_id(entry.state_id)?
+                        .ok_or_else(|| {
+                            ProtocolError::InvalidState("ref is missing its state ID".to_string())
+                        })?,
                     is_thread: entry.is_thread,
                     revision_address: entry.revision_address,
                 })
@@ -1698,10 +1700,11 @@ fn to_proto_thread_metadata(metadata: &SyncedThreadMetadata) -> ThreadMetadata {
                 .ok()
                 .and_then(super::helpers::proto_state_id)
         }),
-        merged_state: metadata
-            .merged_state
-            .as_deref()
-            .map(state_id_string_to_bytes),
+        merged_state: metadata.merged_state.as_deref().and_then(|state| {
+            StateId::parse(state)
+                .ok()
+                .and_then(super::helpers::proto_state_id)
+        }),
         changed_paths: metadata.changed_paths.clone(),
         impact_categories: metadata
             .impact_categories

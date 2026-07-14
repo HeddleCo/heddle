@@ -586,7 +586,9 @@ fn build_target_ref(
             target: Some(GrantTargetKind::NamespacePath(ns.to_string())),
         })),
         (None, Some(rp)) => Ok(Some(GrantTargetRef {
-            target: Some(GrantTargetKind::RepoPath(rp.to_string())),
+            target: Some(GrantTargetKind::RepoPath(
+                super::helpers::repository_ref(rp).expect("non-empty repository path"),
+            )),
         })),
         _ => Err(ProtocolError::InvalidState(
             "exactly one of namespace_path or repo_path must be set".into(),

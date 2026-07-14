@@ -108,8 +108,8 @@ impl MonorepoClonePlan {
         // must still exist for the monorepo layout to be coherent.
         let content_state = node
             .content_state
-            .as_deref()
-            .and_then(|bytes| StateId::try_from_slice(bytes).ok());
+            .as_ref()
+            .and_then(|state| StateId::try_from_slice(&state.value).ok());
         self.ops.push(MonorepoCloneOp {
             spool_id: node.spool_id.clone(),
             content_state,
@@ -164,7 +164,7 @@ mod tests {
     fn leaf(spool_id: &str, content: u8) -> MonorepoNode {
         MonorepoNode {
             spool_id: spool_id.to_string(),
-            content_state: Some(cid_bytes(content)),
+            content_state: proto_cid(content),
             edges: vec![],
         }
     }
@@ -180,7 +180,7 @@ mod tests {
             mount_name: mount.to_string(),
             child_spool_id: child_id.to_string(),
             anchored_state_id: proto_cid(anchor),
-            child_head: Some(cid_bytes(anchor)),
+            child_head: proto_cid(anchor),
             status: ChildEdgeStatus::UpToDate as i32,
             subtree: Some(subtree),
             skipped: None,
@@ -210,12 +210,12 @@ mod tests {
         let grandchild = leaf("acme/grandchild", 3);
         let child_a = MonorepoNode {
             spool_id: "acme/child-a".to_string(),
-            content_state: Some(cid_bytes(2)),
+            content_state: proto_cid(2),
             edges: vec![descended_edge("vendor", "acme/grandchild", 3, grandchild)],
         };
         MonorepoNode {
             spool_id: "acme/root".to_string(),
-            content_state: Some(cid_bytes(1)),
+            content_state: proto_cid(1),
             edges: vec![
                 descended_edge("libs", "acme/child-a", 2, child_a),
                 skipped_edge("secret", "acme/child-b", 9, EdgeSkip::Unreadable),
@@ -308,7 +308,7 @@ mod tests {
         ] {
             let root = MonorepoNode {
                 spool_id: "root".to_string(),
-                content_state: Some(cid_bytes(1)),
+                content_state: proto_cid(1),
                 edges: vec![skipped_edge("m", "child", 2, reason)],
             };
             let plan = MonorepoClonePlan::from_resolved(&root);
