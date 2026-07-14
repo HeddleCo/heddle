@@ -446,6 +446,7 @@ export interface AuthStatusSchema {
   credential_id?: string | null;
   expires_at?: string | null;
   output_kind: "auth_status";
+  proof_key_available: boolean;
   recommended_action?: string | null;
   server: string;
   subject?: string | null;
