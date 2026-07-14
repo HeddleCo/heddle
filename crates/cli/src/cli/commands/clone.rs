@@ -1825,10 +1825,7 @@ fn monorepo_node_facts_from_resolved(
             MonorepoEdgeFacts {
                 mount_name: edge.mount_name.clone(),
                 child_spool_id: edge.child_spool_id.clone(),
-                child: edge
-                    .subtree
-                    .as_ref()
-                    .map(|subtree| monorepo_node_facts_from_resolved(subtree)),
+                child: edge.subtree.as_ref().map(monorepo_node_facts_from_resolved),
                 skip_reason,
             }
         })

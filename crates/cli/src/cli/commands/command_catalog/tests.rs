@@ -128,6 +128,18 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["auth", "status"], &["auth", "status"]),
     #[cfg(feature = "client")]
     sample(
+        &["auth", "derive-agent"],
+        &[
+            "auth",
+            "derive-agent",
+            "--server",
+            "grpc.heddle.test",
+            "--scope",
+            "repo:acme/heddle",
+        ],
+    ),
+    #[cfg(feature = "client")]
+    sample(
         &["auth", "create-service-token"],
         &[
             "auth",
