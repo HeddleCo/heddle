@@ -15,7 +15,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file heddle/v1/import.proto.
  */
 export const file_heddle_v1_import: GenFile = /*@__PURE__*/
-  fileDesc("ChZoZWRkbGUvdjEvaW1wb3J0LnByb3RvEgloZWRkbGUudjEiVwoPR2l0SHViQXBwU291cmNlEhcKD2luc3RhbGxhdGlvbl9pZBgBIAEoAxIYChBwcm92aWRlcl9yZXBvX2lkGAIgASgDEhEKCWZ1bGxfbmFtZRgDIAEoCSJVChNQcm92aWRlclRva2VuU291cmNlEisKCHByb3ZpZGVyGAEgASgOMhkuaGVkZGxlLnYxLkltcG9ydFByb3ZpZGVyEhEKCWZ1bGxfbmFtZRgCIAEoCSIeCg9QdWJsaWNVcmxTb3VyY2USCwoDdXJsGAEgASgJIpkDChZDcmVhdGVJbXBvcnRKb2JSZXF1ZXN0EhcKD2luc3RhbGxhdGlvbl9pZBgBIAEoAxIYChBwcm92aWRlcl9yZXBvX2lkGAIgASgDEhEKCWZ1bGxfbmFtZRgDIAEoCRI4ChRyZXF1ZXN0ZWRfdmlzaWJpbGl0eRgEIAEoDjIaLmhlZGRsZS52MS5TcG9vbFZpc2liaWxpdHkSGQoRYWRvcHRfb25fY29tcGxldGUYBSABKAgSMAoKZ2l0aHViX2FwcBgGIAEoCzIaLmhlZGRsZS52MS5HaXRIdWJBcHBTb3VyY2VIABI4Cg5wcm92aWRlcl90b2tlbhgHIAEoCzIeLmhlZGRsZS52MS5Qcm92aWRlclRva2VuU291cmNlSAASMAoKcHVibGljX3VybBgIIAEoCzIaLmhlZGRsZS52MS5QdWJsaWNVcmxTb3VyY2VIABIZChF0YXJnZXRfc3Bvb2xfcGF0aBgJIAEoCRIhChNjbGllbnRfb3BlcmF0aW9uX2lkGAogASgJQgSQtRgBQggKBnNvdXJjZSIpChdDcmVhdGVJbXBvcnRKb2JSZXNwb25zZRIOCgZqb2JfaWQYASABKAkiLgobU3RyZWFtSW1wb3J0UHJvZ3Jlc3NSZXF1ZXN0Eg8KB2pvYl9pZHMYASADKAkiewoNSW1wb3J0T3V0Y29tZRIKCgJvaxgBIAEoCBIXCg9zcG9vbF9mdWxsX3BhdGgYAiABKAkSLgoKZXJyb3JfY29kZRgDIAEoDjIaLmhlZGRsZS52MS5JbXBvcnRFcnJvckNvZGUSFQoNZXJyb3JfbWVzc2FnZRgEIAEoCSLXAQoTSW1wb3J0UHJvZ3Jlc3NFdmVudBIOCgZqb2JfaWQYASABKAkSCwoDc2VxGAIgASgEEiUKBXBoYXNlGAMgASgOMhYuaGVkZGxlLnYxLkltcG9ydFBoYXNlEg8KB21lc3NhZ2UYBCABKAkSFgoOYnl0ZXNfcmVjZWl2ZWQYBSABKAQSFwoPb2JqZWN0c19pbmRleGVkGAYgASgEEg8KB2F0dGVtcHQYByABKA0SKQoHb3V0Y29tZRgIIAEoCzIYLmhlZGRsZS52MS5JbXBvcnRPdXRjb21lKmkKDkltcG9ydFByb3ZpZGVyEh8KG0lNUE9SVF9QUk9WSURFUl9VTlNQRUNJRklFRBAAEhoKFklNUE9SVF9QUk9WSURFUl9HSVRIVUIQARIaChZJTVBPUlRfUFJPVklERVJfR0lUTEFCEAIy3wEKDUltcG9ydFNlcnZpY2USYgoPQ3JlYXRlSW1wb3J0Sm9iEiEuaGVkZGxlLnYxLkNyZWF0ZUltcG9ydEpvYlJlcXVlc3QaIi5oZWRkbGUudjEuQ3JlYXRlSW1wb3J0Sm9iUmVzcG9uc2UiCIq1GAQIAxACEmoKFFN0cmVhbUltcG9ydFByb2dyZXNzEiYuaGVkZGxlLnYxLlN0cmVhbUltcG9ydFByb2dyZXNzUmVxdWVzdBoeLmhlZGRsZS52MS5JbXBvcnRQcm9ncmVzc0V2ZW50IgiKtRgECAEQATABYgZwcm90bzM", [file_heddle_v1_options, file_heddle_v1_hosted, file_heddle_v1_common]);
+  fileDesc("ChZoZWRkbGUvdjEvaW1wb3J0LnByb3RvEgloZWRkbGUudjEiVwoPR2l0SHViQXBwU291cmNlEhcKD2luc3RhbGxhdGlvbl9pZBgBIAEoAxIYChBwcm92aWRlcl9yZXBvX2lkGAIgASgDEhEKCWZ1bGxfbmFtZRgDIAEoCSJVChNQcm92aWRlclRva2VuU291cmNlEisKCHByb3ZpZGVyGAEgASgOMhkuaGVkZGxlLnYxLkltcG9ydFByb3ZpZGVyEhEKCWZ1bGxfbmFtZRgCIAEoCSIeCg9QdWJsaWNVcmxTb3VyY2USCwoDdXJsGAEgASgJIpkDChZDcmVhdGVJbXBvcnRKb2JSZXF1ZXN0EhcKD2luc3RhbGxhdGlvbl9pZBgBIAEoAxIYChBwcm92aWRlcl9yZXBvX2lkGAIgASgDEhEKCWZ1bGxfbmFtZRgDIAEoCRI4ChRyZXF1ZXN0ZWRfdmlzaWJpbGl0eRgEIAEoDjIaLmhlZGRsZS52MS5TcG9vbFZpc2liaWxpdHkSGQoRYWRvcHRfb25fY29tcGxldGUYBSABKAgSMAoKZ2l0aHViX2FwcBgGIAEoCzIaLmhlZGRsZS52MS5HaXRIdWJBcHBTb3VyY2VIABI4Cg5wcm92aWRlcl90b2tlbhgHIAEoCzIeLmhlZGRsZS52MS5Qcm92aWRlclRva2VuU291cmNlSAASMAoKcHVibGljX3VybBgIIAEoCzIaLmhlZGRsZS52MS5QdWJsaWNVcmxTb3VyY2VIABIZChF0YXJnZXRfc3Bvb2xfcGF0aBgJIAEoCRIhChNjbGllbnRfb3BlcmF0aW9uX2lkGAogASgJQgSQtRgBQggKBnNvdXJjZSIpChdDcmVhdGVJbXBvcnRKb2JSZXNwb25zZRIOCgZqb2JfaWQYASABKAkiLgobU3RyZWFtSW1wb3J0UHJvZ3Jlc3NSZXF1ZXN0Eg8KB2pvYl9pZHMYASADKAkiiwEKDUltcG9ydE91dGNvbWUSCgoCb2sYASABKAgSFwoPc3Bvb2xfZnVsbF9wYXRoGAIgASgJEi4KCmVycm9yX2NvZGUYAyABKA4yGi5oZWRkbGUudjEuSW1wb3J0RXJyb3JDb2RlEhUKDWVycm9yX21lc3NhZ2UYBCABKAkSDgoGbmF0aXZlGAUgASgIIp4CChNJbXBvcnRQcm9ncmVzc0V2ZW50Eg4KBmpvYl9pZBgBIAEoCRILCgNzZXEYAiABKAQSJQoFcGhhc2UYAyABKA4yFi5oZWRkbGUudjEuSW1wb3J0UGhhc2USDwoHbWVzc2FnZRgEIAEoCRIWCg5ieXRlc19yZWNlaXZlZBgFIAEoBBIXCg9vYmplY3RzX2luZGV4ZWQYBiABKAQSDwoHYXR0ZW1wdBgHIAEoDRIpCgdvdXRjb21lGAggASgLMhguaGVkZGxlLnYxLkltcG9ydE91dGNvbWUSFwoPYWRvcHRlZF9jb21taXRzGAkgASgEEhUKDXRvdGFsX2NvbW1pdHMYCiABKAQSFQoNdG90YWxfb2JqZWN0cxgLIAEoBCppCg5JbXBvcnRQcm92aWRlchIfChtJTVBPUlRfUFJPVklERVJfVU5TUEVDSUZJRUQQABIaChZJTVBPUlRfUFJPVklERVJfR0lUSFVCEAESGgoWSU1QT1JUX1BST1ZJREVSX0dJVExBQhACMt8BCg1JbXBvcnRTZXJ2aWNlEmIKD0NyZWF0ZUltcG9ydEpvYhIhLmhlZGRsZS52MS5DcmVhdGVJbXBvcnRKb2JSZXF1ZXN0GiIuaGVkZGxlLnYxLkNyZWF0ZUltcG9ydEpvYlJlc3BvbnNlIgiKtRgECAMQAhJqChRTdHJlYW1JbXBvcnRQcm9ncmVzcxImLmhlZGRsZS52MS5TdHJlYW1JbXBvcnRQcm9ncmVzc1JlcXVlc3QaHi5oZWRkbGUudjEuSW1wb3J0UHJvZ3Jlc3NFdmVudCIIirUYBAgBEAEwAWIGcHJvdG8z", [file_heddle_v1_options, file_heddle_v1_hosted, file_heddle_v1_common]);
 
 /**
  * Existing GitHub-App mode, now shaped as a nested source. Mirrors the legacy
@@ -262,6 +262,13 @@ export type ImportOutcome = Message<"heddle.v1.ImportOutcome"> & {
    * @generated from field: string error_message = 4;
    */
   errorMessage: string;
+
+  /**
+   * true when adoption completed
+   *
+   * @generated from field: bool native = 5;
+   */
+  native: boolean;
 };
 
 /**
@@ -274,8 +281,8 @@ export const ImportOutcomeSchema: GenMessage<ImportOutcome> = /*@__PURE__*/
 /**
  * An idempotent state snapshot for one import job (weft#489). NOT a delta — a
  * reattaching client gets the current state (with its stored `seq`), then
- * tails. No `percent`: smart-HTTP has no up-front total, so the contract is
- * phase + bytes + human message.
+ * tails. Totals are zero until known, so clients can fall back to phase + bytes
+ * + human message when determinate progress is unavailable.
  *
  * @generated from message heddle.v1.ImportProgressEvent
  */
@@ -331,6 +338,27 @@ export type ImportProgressEvent = Message<"heddle.v1.ImportProgressEvent"> & {
    * @generated from field: heddle.v1.ImportOutcome outcome = 8;
    */
   outcome?: ImportOutcome | undefined;
+
+  /**
+   * hydrated commits so far during ADOPTING
+   *
+   * @generated from field: uint64 adopted_commits = 9;
+   */
+  adoptedCommits: bigint;
+
+  /**
+   * commits expected during ADOPTING (0 = unknown)
+   *
+   * @generated from field: uint64 total_commits = 10;
+   */
+  totalCommits: bigint;
+
+  /**
+   * total objects expected (0 = unknown)
+   *
+   * @generated from field: uint64 total_objects = 11;
+   */
+  totalObjects: bigint;
 };
 
 /**
