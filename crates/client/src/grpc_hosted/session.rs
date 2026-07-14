@@ -170,6 +170,13 @@ mod tests {
         use base64::Engine as _;
         use biscuit_auth::{Biscuit, KeyPair};
         use crypto::{Ed25519Signer, Signer};
+        use grpc::heddle::api::v1alpha1::{
+            identity_service_client::IdentityServiceClient,
+            registry_service_client::RegistryServiceClient,
+            repo_sync_service_client::RepoSyncServiceClient,
+            repository_service_client::RepositoryServiceClient,
+            workflow_service_client::WorkflowServiceClient,
+        };
         use tonic::{Request, metadata::MetadataValue, transport::Endpoint};
 
         use super::{HostedAuthMode, HostedSession};
@@ -241,19 +248,12 @@ mod tests {
             let config = session.config;
             let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
             let client = HostedGrpcClient {
-                inner: grpc::heddle::v1::repo_sync_service_client::RepoSyncServiceClient::new(
-                    channel.clone(),
-                )
-                .max_decoding_message_size(wire::MAX_PULL_DECODE_MESSAGE_SIZE),
-                user: grpc::heddle::v1::hosted_user_service_client::HostedUserServiceClient::new(
-                    channel.clone(),
-                ),
-                auth: grpc::heddle::v1::auth_service_client::AuthServiceClient::new(
-                    channel.clone(),
-                ),
-                content: grpc::heddle::v1::content_service_client::ContentServiceClient::new(
-                    channel,
-                ),
+                inner: RepoSyncServiceClient::new(channel.clone())
+                    .max_decoding_message_size(wire::MAX_PULL_DECODE_MESSAGE_SIZE),
+                user: RegistryServiceClient::new(channel.clone()),
+                auth: IdentityServiceClient::new(channel.clone()),
+                content: RepositoryServiceClient::new(channel.clone()),
+                workflow: WorkflowServiceClient::new(channel),
                 token_header: Some(
                     MetadataValue::try_from(format!(
                         "Bearer {}",
@@ -268,7 +268,7 @@ mod tests {
                 server_key: config.server_key,
                 on_human_signature: None,
             };
-            let method = "/heddle.v1.RepoSyncService/Push";
+            let method = "/heddle.api.v1alpha1.RepoSyncService/Push";
             let mut request = Request::new(());
             client
                 .apply_auth(&mut request, method)
