@@ -1806,6 +1806,7 @@ the same ready envelope.
   "output_kind": "auth_status",
   "server": "grpc.heddle.sh",
   "authenticated": true,
+  "proof_key_available": true,
   "subject": "did:key:z6Mk...",
   "credential_id": "cred-123",
   "expires_at": "2026-06-27T00:00:00Z",

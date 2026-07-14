@@ -1,5 +1,7 @@
 //! `heddle auth` command implementations.
 
+use std::path::Path;
+
 use anyhow::{Context, Result, bail};
 use crypto::{Ed25519Signer, Signer};
 use grpc::heddle::api::v1alpha1::{
@@ -40,6 +42,7 @@ struct AuthStatusOutput {
     output_kind: &'static str,
     server: String,
     authenticated: bool,
+    proof_key_available: bool,
     subject: Option<String>,
     credential_id: Option<String>,
     expires_at: Option<String>,
@@ -72,7 +75,25 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
         AuthCommand::Login {
             server,
             open_browser,
-        } => cmd_auth_login(&server, open_browser).await,
+            token,
+            key_file,
+        } => match (token, key_file) {
+            (Some(token), Some(key_file)) => {
+                let server = server.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--server is required with --token/--key-file so a headless install cannot target the wrong server"
+                    )
+                })?;
+                let subject = install_headless_credential(server, &token, &key_file)?;
+                println!("Authenticated as {subject}. Credentials saved.");
+                Ok(())
+            }
+            (None, None) => {
+                let server = resolve_server(server.as_deref())?;
+                cmd_auth_login(&server, open_browser).await
+            }
+            _ => bail!("--token and --key-file must be provided together"),
+        },
         AuthCommand::Logout { server } => cmd_auth_logout(ctx, server.as_deref()),
         AuthCommand::Status { server } => cmd_auth_status(ctx, server.as_deref()),
         AuthCommand::CreateServiceToken {
@@ -93,6 +114,126 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             .await
         }
     }
+}
+
+struct HeadlessTokenMetadata {
+    subject: String,
+    credential_id: Option<String>,
+    expires_at: Option<String>,
+    proof_public_key_hex: String,
+}
+
+/// Install an operator-provisioned, device-bound credential without a browser.
+pub(crate) fn install_headless_credential(
+    server: &str,
+    token: &str,
+    key_file: &Path,
+) -> Result<String> {
+    let token = token.trim();
+    if token.is_empty() {
+        bail!("--token must not be empty");
+    }
+
+    let private_key_pem = std::fs::read_to_string(key_file)
+        .with_context(|| format!("reading device private key from {}", key_file.display()))?;
+    let signer = Ed25519Signer::from_pem(&private_key_pem)
+        .map_err(|error| anyhow::anyhow!("invalid Ed25519 device private key: {error}"))?;
+    let metadata = headless_token_metadata(token)?;
+    let public_key_hex = hex::encode(signer.public_key());
+    if !metadata
+        .proof_public_key_hex
+        .eq_ignore_ascii_case(&public_key_hex)
+    {
+        bail!(
+            "device private key does not match the token's device proof key; install the matching bootstrap key"
+        );
+    }
+
+    let credential = ServerCredential {
+        token: token.to_string(),
+        subject: metadata.subject.clone(),
+        device_id: None,
+        credential_id: metadata.credential_id,
+        private_key_pem: Some(private_key_pem.clone()),
+        expires_at: metadata.expires_at,
+    };
+    credentials::store_server_credential(server, credential)?;
+    repo::identity::link_device_key(signer.public_key(), &private_key_pem, server)
+        .with_context(|| format!("registering device identity for {server}"))?;
+
+    Ok(metadata.subject)
+}
+
+fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetadata> {
+    use biscuit_auth::builder::{BlockBuilder, Term};
+
+    let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
+        .context("parsing --token as a Biscuit")?;
+    let authority_source = biscuit
+        .print_block_source(0)
+        .context("reading Biscuit authority block")?;
+    let authority = BlockBuilder::new()
+        .code(&authority_source)
+        .context("parsing Biscuit authority facts")?;
+
+    let string_fact = |name: &str| -> Result<Option<String>> {
+        let mut values = authority.facts.iter().filter_map(|fact| {
+            if fact.predicate.name != name || fact.predicate.terms.len() != 1 {
+                return None;
+            }
+            match &fact.predicate.terms[0] {
+                Term::Str(value) => Some(value.clone()),
+                _ => None,
+            }
+        });
+        let value = values.next();
+        if values.next().is_some() {
+            bail!("Biscuit authority block contains multiple {name} facts");
+        }
+        Ok(value)
+    };
+
+    let subject = string_fact("user")?
+        .filter(|subject| !subject.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Biscuit authority block is missing user(subject)"))?;
+    let credential_id = string_fact("credential_id")?;
+    let proof_public_key_hex = string_fact("device_pop_key")?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Biscuit is not device-bound: authority block is missing device_pop_key(key)"
+        )
+    })?;
+    hex::decode(&proof_public_key_hex)
+        .context("Biscuit device_pop_key is not valid hexadecimal")?;
+
+    let mut expiries = authority.facts.iter().filter_map(|fact| {
+        if fact.predicate.name != "expires_at" || fact.predicate.terms.len() != 1 {
+            return None;
+        }
+        match fact.predicate.terms[0] {
+            Term::Date(seconds) => Some(seconds),
+            _ => None,
+        }
+    });
+    let expires_at = expiries
+        .next()
+        .map(|seconds| {
+            i64::try_from(seconds)
+                .ok()
+                .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+                .map(|expires_at| expires_at.to_rfc3339())
+                .ok_or_else(|| anyhow::anyhow!("Biscuit expires_at is outside the supported range"))
+        })
+        .transpose()?;
+    if expiries.next().is_some() {
+        bail!("Biscuit authority block contains multiple expires_at facts");
+    }
+
+    Ok(HeadlessTokenMetadata {
+        subject,
+        credential_id,
+        expires_at,
+        proof_public_key_hex,
+    })
 }
 
 /// Authenticate via device authorization flow.
@@ -246,50 +387,70 @@ fn cmd_auth_logout(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
 /// Show current authentication status.
 fn cmd_auth_status(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
     let server = resolve_server(server)?;
-    match credentials::get_server_credential(&server)? {
-        Some(cred) => {
-            if ctx.should_output_json(None) {
-                let output = AuthStatusOutput {
-                    output_kind: "auth_status",
-                    server,
-                    authenticated: true,
-                    subject: Some(cred.subject),
-                    credential_id: cred.credential_id,
-                    expires_at: cred.expires_at,
-                    recommended_action: None,
-                };
-                println!("{}", serde_json::to_string(&output)?);
-            } else {
-                println!("Server:        {server}");
-                println!("Subject:       {}", cred.subject);
-                if let Some(ref cred_id) = cred.credential_id {
-                    println!("Credential:    {cred_id}");
-                }
-                if let Some(ref expires) = cred.expires_at {
-                    println!("Expires:       {expires}");
-                }
+    let output = auth_status_output(&server, credentials::get_server_credential(&server)?);
+    if ctx.should_output_json(None) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else if output.authenticated {
+        println!("Server:        {server}");
+        println!(
+            "Subject:       {}",
+            output.subject.as_deref().unwrap_or_default()
+        );
+        if let Some(ref cred_id) = output.credential_id {
+            println!("Credential:    {cred_id}");
+        }
+        if let Some(ref expires) = output.expires_at {
+            println!("Expires:       {expires}");
+        }
+        if output.proof_key_available {
+            println!("Hosted writes: ready (device proof key available)");
+        } else {
+            println!(
+                "Hosted writes: unavailable — credential missing device proof key; re-login / re-install"
+            );
+            if let Some(ref action) = output.recommended_action {
+                println!("Run `{action}` to repair the credential.");
             }
         }
-        None => {
-            let recommended_action = format!("heddle auth login --server {server}");
-            if ctx.should_output_json(None) {
-                let output = AuthStatusOutput {
-                    output_kind: "auth_status",
-                    server,
-                    authenticated: false,
-                    subject: None,
-                    credential_id: None,
-                    expires_at: None,
-                    recommended_action: Some(recommended_action),
-                };
-                println!("{}", serde_json::to_string(&output)?);
-            } else {
-                println!("Not authenticated with {server}.");
-                println!("Run `{recommended_action}` to authenticate.");
-            }
+    } else {
+        println!("Not authenticated with {server}.");
+        if let Some(ref action) = output.recommended_action {
+            println!("Run `{action}` to authenticate.");
         }
     }
     Ok(())
+}
+
+fn auth_status_output(server: &str, credential: Option<ServerCredential>) -> AuthStatusOutput {
+    match credential {
+        Some(credential) => {
+            let proof_key_available = credential
+                .private_key_pem
+                .as_deref()
+                .is_some_and(|pem| Ed25519Signer::from_pem(pem).is_ok());
+            AuthStatusOutput {
+                output_kind: "auth_status",
+                server: server.to_string(),
+                authenticated: true,
+                proof_key_available,
+                subject: Some(credential.subject),
+                credential_id: credential.credential_id,
+                expires_at: credential.expires_at,
+                recommended_action: (!proof_key_available)
+                    .then(|| format!("heddle auth login --server {server}")),
+            }
+        }
+        None => AuthStatusOutput {
+            output_kind: "auth_status",
+            server: server.to_string(),
+            authenticated: false,
+            proof_key_available: false,
+            subject: None,
+            credential_id: None,
+            expires_at: None,
+            recommended_action: Some(format!("heddle auth login --server {server}")),
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,6 +1457,37 @@ mod tests {
             private_key_pem: None,
             expires_at: None,
         }
+    }
+
+    #[test]
+    fn auth_status_qualifies_a_credential_without_a_proof_key() {
+        let output = auth_status_output("grpc.S", Some(sample_credential()));
+
+        assert!(output.authenticated);
+        assert!(!output.proof_key_available);
+        assert!(
+            output
+                .recommended_action
+                .as_deref()
+                .is_some_and(|action| action.contains("auth login --server grpc.S"))
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_login_requires_an_explicit_server() {
+        let error = cmd_auth(
+            &TextCtx,
+            AuthCommand::Login {
+                server: None,
+                open_browser: false,
+                token: Some("token".to_string()),
+                key_file: Some(std::path::PathBuf::from("device.pem")),
+            },
+        )
+        .await
+        .expect_err("headless install without --server must fail closed");
+
+        assert!(error.to_string().contains("--server is required"));
     }
 
     /// On a successful logout, both the credential and the matching device

@@ -45,7 +45,11 @@ pub struct ServerCredential {
     pub device_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "private_key",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub private_key_pem: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
@@ -269,6 +273,27 @@ mod tests {
         });
 
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn legacy_private_key_loads_and_saves_as_private_key_pem() {
+        let legacy = r#"
+[servers."heddle.example:8421"]
+token = "token-123"
+subject = "dev"
+private_key = "legacy-pem"
+"#;
+
+        let store: CredentialStore = toml::from_str(legacy).expect("load legacy credential");
+        let credential = store
+            .servers
+            .get("heddle.example:8421")
+            .expect("legacy credential");
+        assert_eq!(credential.private_key_pem.as_deref(), Some("legacy-pem"));
+
+        let canonical = toml::to_string_pretty(&store).expect("serialize canonical credential");
+        assert!(canonical.contains("private_key_pem = \"legacy-pem\""));
+        assert!(!canonical.contains("\nprivate_key ="));
     }
 
     #[cfg(unix)]
