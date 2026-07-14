@@ -271,6 +271,27 @@ mod tests {
         let _ = fs::remove_dir_all(home);
     }
 
+    #[test]
+    fn legacy_private_key_loads_and_saves_as_private_key_pem() {
+        let legacy = r#"
+[servers."heddle.example:8421"]
+token = "token-123"
+subject = "dev"
+private_key = "legacy-pem"
+"#;
+
+        let store: CredentialStore = toml::from_str(legacy).expect("load legacy credential");
+        let credential = store
+            .servers
+            .get("heddle.example:8421")
+            .expect("legacy credential");
+        assert_eq!(credential.private_key_pem.as_deref(), Some("legacy-pem"));
+
+        let canonical = toml::to_string_pretty(&store).expect("serialize canonical credential");
+        assert!(canonical.contains("private_key_pem = \"legacy-pem\""));
+        assert!(!canonical.contains("\nprivate_key ="));
+    }
+
     #[cfg(unix)]
     #[test]
     fn save_credentials_writes_credential_file_0600() {
