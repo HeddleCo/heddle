@@ -1815,8 +1815,8 @@ fn monorepo_node_facts_from_resolved(
 
     let content_state = node
         .content_state
-        .as_deref()
-        .and_then(|bytes| StateId::try_from_slice(bytes).ok());
+        .as_ref()
+        .and_then(|state_id| StateId::try_from_slice(&state_id.value).ok());
     let edges = node
         .edges
         .iter()

@@ -15,6 +15,7 @@
 #![cfg(feature = "client")]
 
 use anyhow::{Context, Result, anyhow};
+use api::heddle::api::v1alpha1::{RepositoryRef, StateId as ApiStateId, repository_ref::Reference};
 use heddle_core::approval_plan::{
     EligibilitySummary, approval_recorded_message, approval_revoked_message,
     approvals_empty_message, approvals_header, eligibility_allowed_message,
@@ -55,6 +56,20 @@ struct ApprovalOutput {
 
 fn ts_secs(ts: &Option<prost_types::Timestamp>) -> u64 {
     timestamp_secs_u64(ts.as_ref().map(|t| t.seconds))
+}
+
+fn repository_ref_string(repository: Option<RepositoryRef>) -> String {
+    match repository.and_then(|repository| repository.reference) {
+        Some(Reference::HostedId(id) | Reference::CanonicalPath(id)) => id,
+        None => String::new(),
+    }
+}
+
+fn api_state_id_string(state_id: &Option<ApiStateId>) -> String {
+    state_id
+        .as_ref()
+        .map(|state_id| state_id_bytes_to_string(&state_id.value))
+        .unwrap_or_default()
 }
 
 #[derive(Serialize)]
@@ -149,10 +164,10 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
     if should_output_json(cli, Some(repo.config())) {
         let out = ApprovalOutput {
             id: approval.id,
-            repo_path: approval.repo_path,
+            repo_path: repository_ref_string(approval.repo_path),
             source_thread: approval.source_thread,
             target_thread: approval.target_thread,
-            source_state: state_id_bytes_to_string(&approval.source_state),
+            source_state: api_state_id_string(&approval.source_state),
             approver_user_id: approval.approver_user_id,
             note: approval.note,
             approved_at: ts_secs(&approval.approved_at),
@@ -188,10 +203,10 @@ pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Resul
             .into_iter()
             .map(|a| ApprovalOutput {
                 id: a.id,
-                repo_path: a.repo_path,
+                repo_path: repository_ref_string(a.repo_path),
                 source_thread: a.source_thread,
                 target_thread: a.target_thread,
-                source_state: state_id_bytes_to_string(&a.source_state),
+                source_state: api_state_id_string(&a.source_state),
                 approver_user_id: a.approver_user_id,
                 note: a.note,
                 approved_at: ts_secs(&a.approved_at),
@@ -209,7 +224,7 @@ pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Resul
         for a in approvals {
             let approved_secs = ts_secs(&a.approved_at);
             let when = format_unix_secs_display(approved_secs);
-            let state_str = state_id_bytes_to_string(&a.source_state);
+            let state_str = api_state_id_string(&a.source_state);
             print!(
                 "  {id}  approver={user}  state={state}  approved_at={when}",
                 id = a.id,
@@ -279,10 +294,10 @@ pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Re
         .into_iter()
         .map(|a| ApprovalOutput {
             id: a.id,
-            repo_path: a.repo_path,
+            repo_path: repository_ref_string(a.repo_path),
             source_thread: a.source_thread,
             target_thread: a.target_thread,
-            source_state: state_id_bytes_to_string(&a.source_state),
+            source_state: api_state_id_string(&a.source_state),
             approver_user_id: a.approver_user_id,
             note: a.note,
             approved_at: ts_secs(&a.approved_at),
