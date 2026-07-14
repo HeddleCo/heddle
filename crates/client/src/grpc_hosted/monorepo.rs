@@ -27,7 +27,7 @@
 
 use std::path::{Path, PathBuf};
 
-use grpc::heddle::v1::{EdgeSkip, MonorepoNode};
+use grpc::heddle::api::v1alpha1::{EdgeSkip, MonorepoNode};
 use objects::object::StateId;
 
 /// A single per-spool clone operation the planner emits. The CLI reuses the
@@ -142,7 +142,7 @@ impl MonorepoClonePlan {
 
 #[cfg(test)]
 mod tests {
-    use grpc::heddle::v1::{ChildEdgeStatus, MonorepoEdge};
+    use grpc::heddle::api::v1alpha1::{ChildEdgeStatus, MonorepoEdge, StateId as ProtoStateId};
 
     use super::*;
 
@@ -152,6 +152,12 @@ mod tests {
 
     fn cid_bytes(seed: u8) -> Vec<u8> {
         cid(seed).as_bytes().to_vec()
+    }
+
+    fn proto_cid(seed: u8) -> Option<ProtoStateId> {
+        Some(ProtoStateId {
+            value: cid_bytes(seed),
+        })
     }
 
     /// Build a leaf node (content head, no children).
@@ -173,7 +179,7 @@ mod tests {
         MonorepoEdge {
             mount_name: mount.to_string(),
             child_spool_id: child_id.to_string(),
-            anchored_state_id: cid_bytes(anchor),
+            anchored_state_id: proto_cid(anchor),
             child_head: Some(cid_bytes(anchor)),
             status: ChildEdgeStatus::UpToDate as i32,
             subtree: Some(subtree),
@@ -186,7 +192,7 @@ mod tests {
         MonorepoEdge {
             mount_name: mount.to_string(),
             child_spool_id: child_id.to_string(),
-            anchored_state_id: cid_bytes(anchor),
+            anchored_state_id: proto_cid(anchor),
             child_head: None,
             status: ChildEdgeStatus::Unspecified as i32,
             subtree: None,

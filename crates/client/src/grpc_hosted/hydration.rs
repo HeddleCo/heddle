@@ -522,10 +522,12 @@ mod tests {
     };
 
     use cli_shared::ClientConfig;
-    use grpc::heddle::v1::{
-        auth_service_client::AuthServiceClient, content_service_client::ContentServiceClient,
-        hosted_user_service_client::HostedUserServiceClient,
+    use grpc::heddle::api::v1alpha1::{
+        identity_service_client::IdentityServiceClient,
+        registry_service_client::RegistryServiceClient,
         repo_sync_service_client::RepoSyncServiceClient,
+        repository_service_client::RepositoryServiceClient,
+        workflow_service_client::WorkflowServiceClient,
     };
     use objects::object::{Blob, StateId, ThreadName};
     use repo::Repository;
@@ -547,9 +549,10 @@ mod tests {
         let transport = HostedTransportPolicy::from_client_config(&config);
         HostedGrpcClient {
             inner: RepoSyncServiceClient::new(channel.clone()),
-            user: HostedUserServiceClient::new(channel.clone()),
-            auth: AuthServiceClient::new(channel.clone()),
-            content: ContentServiceClient::new(channel),
+            user: RegistryServiceClient::new(channel.clone()),
+            auth: IdentityServiceClient::new(channel.clone()),
+            content: RepositoryServiceClient::new(channel.clone()),
+            workflow: WorkflowServiceClient::new(channel),
             token_header: None,
             transport,
             auth_proof_key_pem: None,

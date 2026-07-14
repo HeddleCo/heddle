@@ -11,11 +11,12 @@ mod user;
 
 use cli_shared::{ClientConfig, cleartext_connect_allowed, cleartext_refused_message};
 use crypto::{Ed25519Signer, Signer};
-use grpc::heddle::v1::{
-    KeypairProof, MintBiscuitRequest, auth_service_client::AuthServiceClient,
-    content_service_client::ContentServiceClient,
-    hosted_user_service_client::HostedUserServiceClient, mint_biscuit_request::Proof,
+use grpc::heddle::api::v1alpha1::{
+    KeypairProof, MintBiscuitRequest, identity_service_client::IdentityServiceClient,
+    mint_biscuit_request::Proof, registry_service_client::RegistryServiceClient,
     repo_sync_service_client::RepoSyncServiceClient,
+    repository_service_client::RepositoryServiceClient,
+    workflow_service_client::WorkflowServiceClient,
 };
 use objects::{object::MarkerName, store::ObjectStore};
 use repo::Repository;
@@ -30,9 +31,10 @@ use crate::credentials;
 
 pub struct HostedGrpcClient {
     pub(super) inner: RepoSyncServiceClient<Channel>,
-    pub(super) user: HostedUserServiceClient<Channel>,
-    pub(super) auth: AuthServiceClient<Channel>,
-    pub(super) content: ContentServiceClient<Channel>,
+    pub(super) user: RegistryServiceClient<Channel>,
+    pub(super) auth: IdentityServiceClient<Channel>,
+    pub(super) content: RepositoryServiceClient<Channel>,
+    pub(super) workflow: WorkflowServiceClient<Channel>,
     pub(super) token_header: Option<MetadataValue<tonic::metadata::Ascii>>,
     transport: helpers::HostedTransportPolicy,
     pub(super) auth_proof_key_pem: Option<String>,
@@ -41,7 +43,7 @@ pub struct HostedGrpcClient {
     /// update `~/.heddle/credentials.toml` transparently.
     server_key: Option<String>,
     /// App-registered WebAuthn signer invoked when a `human`-tier RPC is
-    /// rejected with `x-weft-sig-required: human`. `None` => human-tier RPCs
+    /// rejected with `x-heddle-sig-required: human`. `None` => human-tier RPCs
     /// surface a typed error rather than looping. See
     /// [`request_signing::HumanSignatureCallback`].
     on_human_signature: Option<request_signing::HumanSignatureCallback>,
@@ -93,9 +95,10 @@ impl HostedGrpcClient {
             // defense-in-depth, but this is the load-bearing guard.
             inner: RepoSyncServiceClient::new(channel.clone())
                 .max_decoding_message_size(wire::MAX_PULL_DECODE_MESSAGE_SIZE),
-            user: HostedUserServiceClient::new(channel.clone()),
-            auth: AuthServiceClient::new(channel.clone()),
-            content: ContentServiceClient::new(channel),
+            user: RegistryServiceClient::new(channel.clone()),
+            auth: IdentityServiceClient::new(channel.clone()),
+            content: RepositoryServiceClient::new(channel.clone()),
+            workflow: WorkflowServiceClient::new(channel.clone()),
             token_header,
             transport,
             auth_proof_key_pem: config.auth_proof_key_pem.clone(),
@@ -106,7 +109,7 @@ impl HostedGrpcClient {
 
     /// Register the app's WebAuthn signer for the destructive (`human`) tier.
     ///
-    /// Invoked when a signed RPC is rejected with `x-weft-sig-required: human`;
+    /// Invoked when a signed RPC is rejected with `x-heddle-sig-required: human`;
     /// the callback produces a [`request_signing::WebAuthnAssertion`] over the
     /// same action and the call is retried once. With no callback registered, a
     /// human-tier rejection surfaces a typed error (no loop). The CLI wires a
@@ -492,9 +495,10 @@ mod tests {
         HostedGrpcClient {
             inner: RepoSyncServiceClient::new(channel.clone())
                 .max_decoding_message_size(wire::MAX_PULL_DECODE_MESSAGE_SIZE),
-            user: HostedUserServiceClient::new(channel.clone()),
-            auth: AuthServiceClient::new(channel.clone()),
-            content: ContentServiceClient::new(channel),
+            user: RegistryServiceClient::new(channel.clone()),
+            auth: IdentityServiceClient::new(channel.clone()),
+            content: RepositoryServiceClient::new(channel.clone()),
+            workflow: WorkflowServiceClient::new(channel.clone()),
             token_header: Some(
                 MetadataValue::try_from(format!("Bearer {token}")).expect("valid bearer header"),
             ),
@@ -510,7 +514,7 @@ mod tests {
         let signer = Ed25519Signer::generate().expect("generate signer");
         let pem = signer.to_pem().expect("export signer pem");
         let token = "test-token";
-        let path = "/heddle.v1.AuthService/WhoAmI";
+        let path = "/heddle.api.v1alpha1.IdentityService/WhoAmI";
         let client = test_client(pem, token);
         let mut request = Request::new(());
 

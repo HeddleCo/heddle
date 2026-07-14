@@ -1,4 +1,4 @@
-use grpc::heddle::v1::{
+use grpc::heddle::api::v1alpha1::{
     ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, CheckMergeEligibilityRequest,
     CheckMergeEligibilityResponse, CreateGrantRequest, CreateInvitationRequest,
     CreateRepositoryRequest, DeleteGrantRequest, DeleteNamespaceRequest, DeleteRepositoryRequest,
@@ -22,7 +22,7 @@ use super::{
 /// Dispatch an authenticated unary RPC on `self.user`: wrap the message in a
 /// `tonic::Request`, stamp bearer auth AND the Tier-1 PoP request signature via
 /// `apply_signed_auth`, await the call, and — if the server rejects with
-/// `x-weft-sig-required: human` — invoke the app-registered human-signature
+/// `x-heddle-sig-required: human` — invoke the app-registered human-signature
 /// callback over the SAME action and retry ONCE. Maps a transport `Status` to a
 /// `ProtocolError` and unwraps the response.
 ///
@@ -45,7 +45,7 @@ macro_rules! signed_call {
                 // The human assertion must cover the SAME action (ts + nonce +
                 // body-hash) the challenge was derived from, so we reuse the
                 // original `sig_ctx` rather than re-signing with a fresh nonce.
-                // `attach_human` re-stamps `x-weft-sig-ts`/`-nonce-bin` from that
+                // `attach_human` re-stamps `x-heddle-sig-ts`/`-nonce-bin` from that
                 // context; we only need bearer auth (not a fresh PoP) on retry.
                 let ctx = $self.require_human_sig_context(sig_ctx)?;
                 // The server may include a deep-link (weft#338) on the rejection pointing at a
@@ -71,7 +71,7 @@ macro_rules! signed_call {
 /// Dispatch an authenticated unary RPC on `self.user`: wrap the message in a
 /// `tonic::Request`, stamp bearer auth AND the Tier-1 PoP request signature via
 /// `apply_signed_auth`, await the call, and — if the server rejects with
-/// `x-weft-sig-required: human` — invoke the app-registered human-signature
+/// `x-heddle-sig-required: human` — invoke the app-registered human-signature
 /// callback over the SAME action and retry ONCE. Maps a transport `Status` to a
 /// `ProtocolError` and unwraps the response.
 ///
@@ -87,14 +87,26 @@ macro_rules! authed_call {
             $self,
             user,
             $rpc,
-            concat!("/heddle.v1.HostedUserService/", $grpc_method),
+            concat!("/heddle.api.v1alpha1.RegistryService/", $grpc_method),
             $msg
         )
     }};
 }
 
-fn default_spool_settings_request() -> grpc::heddle::v1::SpoolSettings {
-    use grpc::heddle::v1::{
+macro_rules! workflow_call {
+    ($self:ident, $rpc:ident, $grpc_method:literal, $msg:expr) => {{
+        signed_call!(
+            $self,
+            workflow,
+            $rpc,
+            concat!("/heddle.api.v1alpha1.WorkflowService/", $grpc_method),
+            $msg
+        )
+    }};
+}
+
+fn default_spool_settings_request() -> grpc::heddle::api::v1alpha1::SpoolSettings {
+    use grpc::heddle::api::v1alpha1::{
         SpoolBootstrapKind, SpoolBootstrapSyncDirection, SpoolChildPolicy, SpoolHoldLifecycle,
         SpoolInitialTooling, SpoolSettings, SpoolStateVisibility, SpoolSyncBehavior,
         SpoolVisibility, SpoolWritePolicy,
@@ -174,7 +186,7 @@ impl HostedGrpcClient {
             self,
             create_namespace,
             "CreateNamespace",
-            grpc::heddle::v1::CreateNamespaceRequest {
+            grpc::heddle::api::v1alpha1::CreateNamespaceRequest {
                 kind: parse_namespace_kind_arg(kind)? as i32,
                 slug: slug.to_string(),
                 parent_path: parent_path.unwrap_or_default().to_string(),
@@ -389,17 +401,17 @@ impl HostedGrpcClient {
         source_state: &str,
         note: Option<&str>,
     ) -> Result<ThreadApproval, ProtocolError> {
-        Ok(authed_call!(
+        Ok(workflow_call!(
             self,
             approve_thread,
             "ApproveThread",
             ApproveThreadRequest {
-                repo_path: repo_path.to_string(),
+                repo_path: super::helpers::repository_ref(repo_path),
                 source_thread: source_thread.to_string(),
                 target_thread: target_thread.to_string(),
                 source_state: objects::object::StateId::parse(source_state)
-                    .map(|id| id.as_bytes().to_vec())
-                    .unwrap_or_default(),
+                    .ok()
+                    .and_then(super::helpers::proto_state_id),
                 note: note.unwrap_or_default().to_string(),
                 client_operation_id: String::new(),
             }
@@ -407,7 +419,7 @@ impl HostedGrpcClient {
     }
 
     pub async fn revoke_approval(&mut self, id: &str) -> Result<(), ProtocolError> {
-        authed_call!(
+        workflow_call!(
             self,
             revoke_approval,
             "RevokeApproval",
@@ -425,12 +437,12 @@ impl HostedGrpcClient {
         source_thread: &str,
         target_thread: &str,
     ) -> Result<Vec<ThreadApproval>, ProtocolError> {
-        Ok(authed_call!(
+        Ok(workflow_call!(
             self,
             list_thread_approvals,
             "ListThreadApprovals",
             ListThreadApprovalsRequest {
-                repo_path: repo_path.to_string(),
+                repo_path: super::helpers::repository_ref(repo_path),
                 source_thread: source_thread.to_string(),
                 target_thread: target_thread.to_string(),
             }
@@ -453,17 +465,17 @@ impl HostedGrpcClient {
         changed_paths: Vec<String>,
         author_user_id: Option<&str>,
     ) -> Result<CheckMergeEligibilityResponse, ProtocolError> {
-        Ok(authed_call!(
+        Ok(workflow_call!(
             self,
             check_merge_eligibility,
             "CheckMergeEligibility",
             CheckMergeEligibilityRequest {
-                repo_path: repo_path.to_string(),
+                repo_path: super::helpers::repository_ref(repo_path),
                 source_thread: source_thread.to_string(),
                 target_thread: target_thread.to_string(),
                 source_state: objects::object::StateId::parse(source_state)
-                    .map(|id| id.as_bytes().to_vec())
-                    .unwrap_or_default(),
+                    .ok()
+                    .and_then(super::helpers::proto_state_id),
                 gated_action: gated_action.to_string(),
                 changed_paths,
                 author_user_id: author_user_id.unwrap_or_default().to_string(),
@@ -585,8 +597,10 @@ fn build_target_ref(
 /// Parse a CLI-supplied namespace kind string ("user" / "namespace" /
 /// "team", with "org" accepted as an alias for "namespace") into the
 /// proto `NamespaceKind` enum.
-fn parse_namespace_kind_arg(value: &str) -> Result<grpc::heddle::v1::NamespaceKind, ProtocolError> {
-    use grpc::heddle::v1::NamespaceKind;
+fn parse_namespace_kind_arg(
+    value: &str,
+) -> Result<grpc::heddle::api::v1alpha1::NamespaceKind, ProtocolError> {
+    use grpc::heddle::api::v1alpha1::NamespaceKind;
     match value.trim().to_ascii_lowercase().as_str() {
         "user" => Ok(NamespaceKind::User),
         "namespace" | "org" => Ok(NamespaceKind::Org),
@@ -598,8 +612,10 @@ fn parse_namespace_kind_arg(value: &str) -> Result<grpc::heddle::v1::NamespaceKi
 }
 
 /// Parse a CLI-supplied role name into the proto `HostedRole` enum.
-fn parse_hosted_role_arg(value: &str) -> Result<grpc::heddle::v1::HostedRole, ProtocolError> {
-    use grpc::heddle::v1::HostedRole;
+fn parse_hosted_role_arg(
+    value: &str,
+) -> Result<grpc::heddle::api::v1alpha1::HostedRole, ProtocolError> {
+    use grpc::heddle::api::v1alpha1::HostedRole;
     match value.trim().to_ascii_lowercase().as_str() {
         "reader" => Ok(HostedRole::Reader),
         "developer" => Ok(HostedRole::Developer),
@@ -614,7 +630,7 @@ fn parse_hosted_role_arg(value: &str) -> Result<grpc::heddle::v1::HostedRole, Pr
 
 #[cfg(test)]
 mod spool_request_shape_tests {
-    use grpc::heddle::v1::ResolveMonorepoRequest;
+    use grpc::heddle::api::v1alpha1::ResolveMonorepoRequest;
 
     #[test]
     fn resolve_monorepo_request_threads_optional_max_depth() {

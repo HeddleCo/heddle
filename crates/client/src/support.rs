@@ -7,7 +7,7 @@ use cli_shared::{
     UserConfig,
     remote::{RemoteTarget, resolve_remote_with_key},
 };
-use grpc::heddle::v1::{
+use grpc::heddle::api::v1alpha1::{
     HostedRole, SupportAccessGrant as ProtoSupportAccessGrant,
     grant_target_ref::Target as GrantTargetKind,
 };

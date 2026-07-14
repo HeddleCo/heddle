@@ -2,11 +2,11 @@
 
 use anyhow::{Context, Result, bail};
 use crypto::{Ed25519Signer, Signer};
-use grpc::heddle::v1::{
+use grpc::heddle::api::v1alpha1::{
     CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, DeviceAuthProof,
     DeviceAuthorizationResponse, ExchangeDeviceAuthorizationRequest,
     IssueServiceAccountCredentialRequest, MintBiscuitRequest, WaitForDeviceAuthorizationRequest,
-    auth_service_client::AuthServiceClient, mint_biscuit_request::Proof,
+    identity_service_client::IdentityServiceClient, mint_biscuit_request::Proof,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -106,7 +106,7 @@ async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to export private key: {e}"))?;
 
     // 2. Connect to the auth service.
-    let mut auth_client: AuthServiceClient<Channel> = connect_auth_client(server).await?;
+    let mut auth_client: IdentityServiceClient<Channel> = connect_auth_client(server).await?;
 
     // 3. Create device authorization.
     let hostname = std::env::var("HOSTNAME")
@@ -340,7 +340,7 @@ async fn cmd_create_service_token(
         .map_err(|e| anyhow::anyhow!("invalid token format: {e}"))?;
 
     let mut auth_client =
-        AuthServiceClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
+        IdentityServiceClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
             req.metadata_mut().insert("authorization", bearer.clone());
             Ok(req)
         });
@@ -639,9 +639,9 @@ expected one of 1/0, true/false, yes/no, or on/off"
     }
 }
 
-/// Connect an unauthenticated `AuthServiceClient` to the given server.
-async fn connect_auth_client(server: &str) -> Result<AuthServiceClient<Channel>> {
-    Ok(AuthServiceClient::new(connect_channel(server).await?))
+/// Connect an unauthenticated `IdentityServiceClient` to the given server.
+async fn connect_auth_client(server: &str) -> Result<IdentityServiceClient<Channel>> {
+    Ok(IdentityServiceClient::new(connect_channel(server).await?))
 }
 
 fn infer_server_uri(server: &str) -> String {
@@ -675,7 +675,7 @@ fn infer_server_uri(server: &str) -> String {
 /// Poll `MintBiscuit(DeviceAuthProof)` until the device code is approved or
 /// the authorization expires.
 async fn poll_for_approval(
-    client: &mut AuthServiceClient<Channel>,
+    client: &mut IdentityServiceClient<Channel>,
     device_code: &str,
     public_key: &[u8],
     signer: &Ed25519Signer,
@@ -751,7 +751,7 @@ async fn poll_for_approval(
 }
 
 async fn mint_biscuit_with_device_auth(
-    client: &mut AuthServiceClient<Channel>,
+    client: &mut IdentityServiceClient<Channel>,
     device_code: &str,
     public_key: &[u8],
     signature: Vec<u8>,
@@ -774,7 +774,7 @@ async fn mint_biscuit_with_device_auth(
 }
 
 async fn exchange_device_authorization(
-    client: &mut AuthServiceClient<Channel>,
+    client: &mut IdentityServiceClient<Channel>,
     device_code: &str,
     public_key: &[u8],
     proof: Vec<u8>,
