@@ -56,32 +56,33 @@ floor, including for callers of the Rust helper. They restrict use of the
 derived token; they do not constrain device-key-authenticated `MintBiscuit`.
 
 By default the child replaces the active stored credential for `--server`, so
-the next push/pull and any further derivation use that child. Use `--stdout` to
-emit only the token without installing it, or `--out <DIR>` to write 0600
-`token` and `metadata.json` files. The metadata records the server, subject,
-effective expiry, and declared scopes. Neither export contains a private key.
+the next push/pull and any further derivation use that child and its fresh PoP
+key. Use `--out <DIR>` to write a portable 0600 bundle containing `token`,
+`device-key.pem` (the child key), and `metadata.json`. The parent device key is
+never written into the child credential or bundle. Token-only `--stdout`
+export is intentionally unsupported because the resulting bearer could not
+satisfy its request-proof binding.
 
 The derived token is strictly weaker than its parent: its operation fence and
 TTL are enforced server-side. Declared resource scopes await W3 enforcement.
-Hosted writes also require the matching device key from this host's shared
-identity store, so a token-only export is not a portable credential.
+Every child block carries one `pop_delegation(parent_revocation_id,
+child_public_key, signature)` fact. The parent signs a versioned payload over
+the preceding block's raw revocation id and the new 32-byte key. Weft verifies
+those transitions in block-id order and accepts request proofs only from the
+leaf key, so sub-derivation rotates again without exposing any ancestor key.
 
-W1 does not fully close G4 credential laundering. A process with the parent
-device root key can authenticate `MintBiscuit` independently of the attenuated
-token and obtain a fresh authority token. Do not treat a W1 derived token as a
-cross-trust-boundary security control. W2 delegated PoP gives each child its own
-block-bound key without handing over the parent device root key and closes that
-remaining path.
+## API: `heddle_client::auth`
 
-## API: `cli::auth`
-
-The CLI surface is small: one struct, one main function, two
+The Rust surface is small: one struct, one main function, two
 convenience constructors.
 
 ```rust
-use cli::auth::{
+use heddle_client::auth::{
     AgentAttenuation, attenuate_for_agent, time_bounded, read_only_repo_agent,
 };
+
+// `parent_signer` is the private key matching the parent token's effective
+// PoP key. Generate a fresh `child_signer` for every attenuation hop.
 
 // Simplest: time-bounded sub-agent that inherits everything else
 // from the parent.
@@ -89,6 +90,8 @@ let attenuated = time_bounded(
     &parent_token_b64,
     "agent-doc-pr-42",
     chrono::Utc::now() + chrono::Duration::hours(4),
+    &parent_signer,
+    child_signer.public_key(),
 )?;
 
 // Read-only sub-agent on a single repo.
@@ -97,6 +100,8 @@ let attenuated = read_only_repo_agent(
     "agent-explorer",
     "org/acme/heddle",
     /* duration_hours = */ 2,
+    &parent_signer,
+    child_signer.public_key(),
 )?;
 
 // Custom: build the AgentAttenuation field-by-field.
@@ -115,23 +120,24 @@ let attenuated = attenuate_for_agent(
         ]),
         declared_scopes: Vec::new(),
     },
+    &parent_signer,
+    child_signer.public_key(),
 )?;
 ```
 
 ## Restriction semantics
 
-Every restriction emits a Biscuit `check if ...` clause. The
-verifier runs each check against the world (which contains the
-parent's facts plus whatever the verifier injects per-request:
-`time(now)`, `operation($name)`, `resource($kind, $path)` when
-applicable). A check that finds no binding is a hard reject — that's
-the secure default.
+Every restriction emits a Biscuit `check if ...` clause. The verifier runs each
+check against the world. Current servers inject `time(now)` and
+`operation($name)` per request. W3 plans to add `resource($kind, $path)`; until
+then, any `allowed_resources` check finds no binding and rejects every request.
+A check that finds no binding is a hard reject — that's the secure default.
 
 | Restriction | Datalog form | Default behaviour when no fact present |
 |---|---|---|
 | `expires_at` | `check if time($now), $now < <ts>` | Verifier always injects `time`, so always evaluated |
 | `allowed_operations: Some([...])` | `check if operation($op), $op == "X" \|\| ...` | Reject (no operation fact → check fails closed) |
-| `allowed_resources: Some([...])` | `check if resource($k, $p), (...path matches...)` | Reject (no resource fact → check fails closed) |
+| `allowed_resources: Some([...])` | `check if resource($k, $p), (...path matches...)` | Reject every request until W3 injects resource facts |
 | `declared_scopes` | `agent_scope($kind, $path)` facts | Inert until W3 server enforcement |
 | hard deny floor | one `operation($op), $op != …` check per forbidden method | Reject (the floor is always emitted) |
 
@@ -150,14 +156,17 @@ let attenuated = read_only_repo_agent(
     "agent-pr-review",
     "org/acme/heddle",
     4,  // hours
+    &parent_signer,
+    child_signer.public_key(),
 )?;
 // Hand `attenuated` to the agent.
 ```
 
 The `read_only_repo_agent` constructor allowlists the read RPCs
 (`GetState`, `GetTree`, `GetBlob`, `GetCompare`, `GetDiff`,
-`ListRefs`, `ListStates`, `ListContext`) and pins the resource list
-to the repo path. Any write RPC fails with `PermissionDenied`.
+`ListRefs`, `ListStates`, `ListContext`) and adds a resource check for
+the repo path. The operation fence is active today; the resource-scoped recipe
+remains fail-closed until W3 injects resource facts.
 
 ### 2. Time-bounded background agent
 
@@ -166,6 +175,8 @@ let attenuated = time_bounded(
     &parent,
     "agent-overnight-build",
     chrono::Utc::now() + chrono::Duration::hours(12),
+    &parent_signer,
+    child_signer.public_key(),
 )?;
 ```
 
@@ -176,7 +187,7 @@ hours.
 ### 3. Multi-repo writer
 
 ```rust
-use cli::auth::{AgentAttenuation, attenuate_for_agent};
+use heddle_client::auth::{AgentAttenuation, attenuate_for_agent};
 
 let attenuated = attenuate_for_agent(
     &parent,
@@ -193,14 +204,25 @@ let attenuated = attenuate_for_agent(
         ]),
         declared_scopes: Vec::new(),
     },
+    &parent_signer,
+    child_signer.public_key(),
 )?;
 ```
+
+This resource-scoped recipe remains fail-closed until W3 injects resource facts.
 
 ### 4. Sub-sub-agent (further attenuation)
 
 ```rust
 // Parent attenuates for the agent.
-let agent_token = read_only_repo_agent(&parent, "agent-1", "org/acme/heddle", 8)?;
+let agent_token = read_only_repo_agent(
+    &parent,
+    "agent-1",
+    "org/acme/heddle",
+    8,
+    &root_signer,
+    agent_signer.public_key(),
+)?;
 
 // Inside the agent process, attenuate further for a sub-agent.
 let sub_agent_token = attenuate_for_agent(
@@ -216,6 +238,8 @@ let sub_agent_token = attenuate_for_agent(
         ]),
         declared_scopes: Vec::new(),
     },
+    &agent_signer,
+    subagent_signer.public_key(),
 )?;
 ```
 
@@ -249,9 +273,9 @@ boundary is:
 
 ## What you can't do
 
-The statements in this section describe attenuation of the token itself. They
-do not apply to a holder of the W1 parent device root key, which remains able to
-authenticate `MintBiscuit` until W2 delegated PoP separates child proofs.
+The statements in this section describe the attenuated token and its delegated
+leaf proof key. The derive path never copies an ancestor private key into the
+child credential.
 
 - **Widen authority.** A child block can only emit *additional*
   checks. There is no way to add rights the parent didn't have.

@@ -132,30 +132,8 @@ fn shared_device_proof_key(server_key: &str, token: &str) -> Result<Option<Strin
 }
 
 fn token_proof_key_matches(token: &str, expected_public_key_hex: &str) -> bool {
-    use biscuit_auth::builder::{BlockBuilder, Term};
-
-    let Ok(biscuit) = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes()) else {
-        return false;
-    };
-    let Ok(authority_source) = biscuit.print_block_source(0) else {
-        return false;
-    };
-    let Ok(authority) = BlockBuilder::new().code(&authority_source) else {
-        return false;
-    };
-    let mut proof_keys = authority.facts.iter().filter_map(|fact| {
-        if fact.predicate.name != "device_pop_key" || fact.predicate.terms.len() != 1 {
-            return None;
-        }
-        match &fact.predicate.terms[0] {
-            Term::Str(value) => Some(value),
-            _ => None,
-        }
-    });
-    let Some(proof_key) = proof_keys.next() else {
-        return false;
-    };
-    proof_keys.next().is_none() && proof_key.eq_ignore_ascii_case(expected_public_key_hex)
+    crate::device_flow::effective_pop_public_key_hex(token)
+        .is_ok_and(|proof_key| proof_key.eq_ignore_ascii_case(expected_public_key_hex))
 }
 
 fn server_keys_match(left: &str, right: &str) -> bool {
@@ -227,8 +205,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_only_derived_child_uses_shared_same_host_device_proof() {
-        use base64::Engine as _;
+    async fn token_only_derived_child_does_not_fall_back_to_the_parent_device_key() {
         use biscuit_auth::{Biscuit, KeyPair};
         use crypto::{Ed25519Signer, Signer};
         use tonic::{Request, metadata::MetadataValue, transport::Endpoint};
@@ -294,6 +271,20 @@ mod tests {
             assert_eq!(identity.public_key, hex::encode(signer.public_key()));
             assert_eq!(identity.server, server);
 
+            unsafe { std::env::set_var("HEDDLE_REMOTE_TOKEN", &token) };
+            let root_session = HostedSession::build(
+                &cli_shared::UserConfig::default(),
+                Some(server.to_string()),
+                HostedAuthMode::ConfigToken,
+            )
+            .expect("build root same-host session");
+            assert_eq!(
+                root_session.config.auth_proof_key_pem.as_deref(),
+                Some(private_key_pem.as_str()),
+                "a root token still resolves its matching same-host device key"
+            );
+
+            let child_signer = Ed25519Signer::generate().expect("child PoP key");
             let child_token = crate::device_flow::attenuate_for_agent(
                 &token,
                 crate::device_flow::AgentAttenuation {
@@ -303,6 +294,8 @@ mod tests {
                     allowed_resources: None,
                     declared_scopes: vec![("repo".to_string(), "acme/heddle".to_string())],
                 },
+                &signer,
+                child_signer.public_key(),
             )
             .expect("derive child token");
             unsafe { std::env::set_var("HEDDLE_REMOTE_TOKEN", &child_token) };
@@ -314,10 +307,9 @@ mod tests {
             )
             .expect("build hosted session from token-only same-host handoff");
             let config = session.config;
-            assert_eq!(
-                config.auth_proof_key_pem.as_deref(),
-                Some(private_key_pem.as_str()),
-                "token-only handoff must resolve the proof key from the shared device identity"
+            assert!(
+                config.auth_proof_key_pem.is_none(),
+                "a token-only child must not silently sign with its ancestor device key"
             );
             let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
             let client = HostedGrpcClient {
@@ -355,31 +347,9 @@ mod tests {
                 .expect("attach hosted auth");
 
             let metadata = request.metadata();
-            let proof_ts = metadata
-                .get(crypto::pop::HDR_PROOF_TS)
-                .and_then(|value| value.to_str().ok())
-                .expect("proof timestamp");
-            let nonce = metadata
-                .get(crypto::pop::HDR_PROOF_NONCE)
-                .and_then(|value| value.to_str().ok())
-                .expect("proof nonce");
-            let proof = metadata
-                .get(crypto::pop::HDR_PROOF)
-                .and_then(|value| value.to_str().ok())
-                .expect("proof signature");
-            let signature = base64::engine::general_purpose::STANDARD
-                .decode(proof)
-                .expect("decode proof signature");
-            crypto::pop::verify_pop(
-                signer.public_key(),
-                &child_token,
-                proof_ts,
-                "POST",
-                method,
-                nonce,
-                &signature,
-            )
-            .expect("derived-token proof verifies against the shared same-host device key");
+            assert!(metadata.get(crypto::pop::HDR_PROOF_TS).is_none());
+            assert!(metadata.get(crypto::pop::HDR_PROOF_NONCE).is_none());
+            assert!(metadata.get(crypto::pop::HDR_PROOF).is_none());
         });
 
         unsafe {
