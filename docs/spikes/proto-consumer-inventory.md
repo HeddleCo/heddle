@@ -5,8 +5,9 @@ on 2026-07-13. Weft handler and registration evidence was checked at
 `eb1155d8c941171817d9b15ab2a73f948e0aca47`.
 
 This is historical migration input, not current package or service guidance.
-ADR 0048 and the migration manifest in `HeddleCo/api` are authoritative for the
-retained `heddle.api.v1alpha1` surface.
+The migration manifest in `HeddleCo/api` is not authoritative for the retained
+surface until its dropped-method classifications are re-audited. ADR 0048
+records the known discrepancies and the coordinated-cutover checklist.
 
 This inventory records implementation evidence for the contract Heddle builds
 and publishes. It is not a compatibility promise.

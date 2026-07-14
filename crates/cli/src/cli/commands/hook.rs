@@ -56,9 +56,8 @@ pub fn cmd_hook(cli: &Cli, command: HookCommands) -> Result<()> {
         }
 
         HookCommands::Events { event } => {
-            // W2/A15: print the static event catalog. Hardcoded names + a
-            // brief description; the full JSON schemas live on the W2
-            // gRPC service `HookService::GetHookEventSchema`.
+            // Print the static local event catalog. Hook events are private
+            // Heddle behavior, not part of the shared v1alpha1 API.
             let catalog: &[(&str, &str)] = &[
                 (
                     "pre_capture",

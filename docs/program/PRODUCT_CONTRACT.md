@@ -14,7 +14,7 @@ Heddle is a **local-first, agent-native version control system** shipped as the 
 | Human developers | CLI: `status`, `adopt`, `commit`, `start`, `land`, `verify`, `diff`, `log` |
 | Coding agents / harnesses | Machine-readable JSON (`--output json` / auto), command catalog, op-id replay, harness integrations |
 | Embedders (library) | `heddle-core` facade: typed ops returning `*Report` / `Result`, no process control or render |
-| Hosted products | `heddle-client` adapts to the public `heddle-api` contract owned by `HeddleCo/api`; Weft and Tapestry are separate consumers |
+| Hosted products | The v1alpha1 cutover target is the public `heddle-api` contract owned by `HeddleCo/api`; Heddle, Weft, and Tapestry remain separately gated consumers |
 
 Embedding target (ADR 0040):
 
@@ -61,7 +61,7 @@ delivery (CLI / future daemon / tests)
 | ContentHash (BLAKE3) | Content-addressed equality |
 | ChangeId (`hd-…` physical) | Stable handle for a specific state, not rewrite lineage |
 | Public JSON schemas | Field-stable; alpha may break names when model improves (documented) |
-| Hosted protobuf `heddle.api.v1alpha1` | Net-new public contract owned by `HeddleCo/api`; consumers exact-pin `0.x` SDK releases |
+| Hosted protobuf `heddle.api.v1alpha1` | Net-new public-contract candidate owned by `HeddleCo/api`; the blocked coordinated cutover is tracked in ADR 0048 |
 | Text CLI | User-facing; not byte-stable |
 
 ## Public surfaces

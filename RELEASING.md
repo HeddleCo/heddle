@@ -443,9 +443,15 @@ The Heddle-owned OSS workspace crates publish to
 crates.io automatically on every push to `main` via
 `.github/workflows/publish-crates.yml`. The normal flow is:
 
-The public protobuf contract and its `heddle-api` Rust package are released
+The public protobuf contract and its `heddle-api` Rust package must be released
 independently from `HeddleCo/api`; they are not part of this workspace's
 publication pipeline.
+
+The v1alpha1 cutover must not merge while Heddle still relies on an unpublished
+git-pinned `heddle-api` 0.1.0 candidate. Publish the corrected API package and
+replace the temporary pin before the next Heddle release-plz publication. The
+full cross-repository release gate is tracked in
+[ADR 0048](docs/adr/0048-net-new-public-api-contract.md#coordinated-cutover-checklist).
 
 1. `release-plz` (configured in `release-plz.toml`) opens a PR that
    bumps Cargo.toml versions and updates `CHANGELOG.md`.

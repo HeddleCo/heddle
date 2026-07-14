@@ -190,8 +190,8 @@ pub(super) fn repository_ref(path: &str) -> Option<RepositoryRef> {
 
 pub(super) fn repository_ref_path(repository: &RepositoryRef) -> Option<&str> {
     match repository.reference.as_ref() {
-        Some(Reference::CanonicalPath(path)) => Some(path),
-        _ => None,
+        Some(Reference::HostedId(id) | Reference::CanonicalPath(id)) => Some(id),
+        None => None,
     }
 }
 
@@ -278,6 +278,35 @@ pub(super) fn hosted_role_proto_to_string(role: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grant_repository_targets_preserve_both_reference_variants() {
+        use grpc::heddle::api::v1alpha1::grant_target_ref::Target;
+        use grpc::heddle::api::v1alpha1::{GrantTargetRef, HostedRole};
+
+        for reference in [
+            Reference::HostedId("repo_123".to_string()),
+            Reference::CanonicalPath("acme/widgets".to_string()),
+        ] {
+            let expected = match &reference {
+                Reference::HostedId(value) | Reference::CanonicalPath(value) => value.clone(),
+            };
+            let grant = HostedGrant {
+                subject: "principal:alice".to_string(),
+                role: HostedRole::Developer as i32,
+                target: Some(GrantTargetRef {
+                    target: Some(Target::RepoPath(RepositoryRef {
+                        reference: Some(reference),
+                    })),
+                }),
+            };
+
+            let mapped = to_protocol_grant(grant);
+
+            assert_eq!(mapped.repo_path.as_deref(), Some(expected.as_str()));
+            assert_eq!(mapped.namespace_path, None);
+        }
+    }
 
     #[test]
     fn missing_proof_timestamp_error_explains_how_to_recover() {

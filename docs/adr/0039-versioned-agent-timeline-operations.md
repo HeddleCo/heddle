@@ -12,7 +12,7 @@ The public contract reserves two explicitly `PLANNED` interfaces.
 `AgentGatewayService` defines resumable daemon-to-Weft timeline ingest and
 command delivery. `AgentService` defines Tapestry-facing run queries, watches,
 policy, permissions, and intervention. Neither interface is registered by Weft
-or live in Tapestry for API 0.1.0. OpenCode is the first intended
+or live in Tapestry for the API 0.1.0 candidate. OpenCode is the first intended
 full-intervention adapter; Codex and Claude Code remain capability-negotiated
 and observe-only until honest control adapters exist. Local timeline objects and
 commands may ship independently of those hosted interfaces.

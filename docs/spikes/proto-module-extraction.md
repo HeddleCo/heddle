@@ -1,9 +1,10 @@
 # Spike: extract the gRPC contract into a dedicated API repository
 
 Status: superseded by ADR 0048. This document is the pre-cutover extraction
-spike and is retained as historical evidence. The implemented direction is a
-net-new `heddle.api.v1alpha1` contract in `HeddleCo/api`, not an unchanged
-relocation of `heddle.v1`.
+spike and is retained as historical evidence. The accepted candidate direction
+is a net-new `heddle.api.v1alpha1` contract in `HeddleCo/api`, not an unchanged
+relocation of `heddle.v1`; the coordinated implementation remains blocked by
+ADR 0048's checklist.
 
 ## Why now
 

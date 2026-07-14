@@ -101,12 +101,13 @@ they tune the 1.0 targets the next sections propose against it.
     `DiscussionsBlob`, `RiskSignalBlob`, `RedactionsBlob`,
     `ReviewSignaturesBlob`, `FileProvenance`, `StructuredConflict`
     (`crates/objects/src/object/*.rs`).
-- **Hosted API.** The public `heddle.api.v1alpha1` protobuf source,
-  descriptors, policy, and generated SDKs are owned by
-  [`HeddleCo/api`](https://github.com/HeddleCo/api). Heddle consumes the
-  exact-pinned `heddle-api` Rust package and does not own a schema copy. Ten
-  domain services are shipped in 0.1.0; `AgentGatewayService` and
-  `AgentService` are explicitly planned and unregistered.
+- **Hosted API candidate.** The `heddle.api.v1alpha1` protobuf source,
+  descriptors, policy, and generated SDK sources are owned by
+  [`HeddleCo/api`](https://github.com/HeddleCo/api). The Heddle cutover branch
+  consumes an exact git-pinned `heddle-api` candidate and removes its schema
+  copy. The contract correction, Weft/Tapestry cutovers, and package publication
+  remain blocked by [ADR 0048](adr/0048-net-new-public-api-contract.md); service
+  maturity labels in the candidate descriptor do not prove a live deployment.
 - **Content-addressing primitives.** `ContentHash` is a 32-byte
   BLAKE3 digest
   ([`crates/objects/src/object/hash.rs:13`](../crates/objects/src/object/hash.rs));
@@ -500,13 +501,15 @@ exercised by the test suite and runs in O(oplog size).>
 
 ### 3.6 Hosted API protocol
 
-The gRPC services are published from `HeddleCo/api` under
+The target gRPC services are generated from `HeddleCo/api` under
 `heddle.api.v1alpha1`. This alpha package is intentionally incompatible with
-the retired `heddle.v1` package; there is no dual registration or compatibility
-shim. Before 1.0, consumers exact-pin SDK versions. Breaking changes increment
-the minor version and require a checked-in report plus coordinated consumer
-release candidates. At 1.0 the package advances to `heddle.api.v1`; later
-incompatible generations use a new package rather than changing `v1`.
+the still-live `heddle.v1` package and is planned for a coordinated hard
+cutover without a compatibility shim. It is not yet the deployed Weft/Tapestry
+contract. The cutover requires consumers to exact-pin pre-1.0 SDK versions.
+Breaking changes increment the minor version and require a checked-in report
+plus coordinated consumer release candidates. At 1.0 the package advances to
+`heddle.api.v1`; later incompatible generations use a new package rather than
+changing `v1`. ADR 0048 records the current blockers and cutover checklist.
 
 **1.0 commitment.**
 

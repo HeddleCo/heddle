@@ -38,7 +38,7 @@ The three personas are NOT the only people who use heddle. They're chosen becaus
 
 ## Persona 3 — "Agent"
 
-**Who:** a headless invocation of heddle from an automated system. Could be Claude operating heddle as a tool, CI, or a hosted adapter using the public Heddle API.
+**Who:** a headless invocation of heddle from an automated system. Could be Claude operating heddle as a tool, CI, or a future hosted adapter targeting the public Heddle API.
 
 **What surface they stress:**
 

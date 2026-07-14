@@ -161,7 +161,7 @@ Operational metadata that defines an agent's delegated work and execution policy
 _Avoid_: discussion task, collaboration assignment
 
 **Agent Timeline**:
-A Heddle-native record stream for an agent run's tool-call activity, cursor movement, branches, and captures. Foundation objects and local storage are in place; richer cursor views, capture automation, and hosted projection are still planned. The public `AgentGatewayService` and `AgentService` contracts are also planned and are not registered as live API services in 0.1.0. Agent timelines are adjacent repository metadata that explain agent execution without becoming source history states.
+A Heddle-native record stream for an agent run's tool-call activity, cursor movement, branches, and captures. Foundation objects and local storage are in place; richer cursor views, capture automation, and hosted projection are still planned. The public `AgentGatewayService` and `AgentService` contracts are also planned and are not registered as live API services in the 0.1.0 candidate. Agent timelines are adjacent repository metadata that explain agent execution without becoming source history states.
 _Avoid_: raw transcript, runner log, chat history
 
 **Timeline Operation**:

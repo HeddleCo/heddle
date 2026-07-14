@@ -245,10 +245,13 @@ specs/                      # Quint formal specifications
 tests/                      # integration and property tests
 ```
 
-The shared hosted protobuf contract and generated SDKs are owned by the public
-[`HeddleCo/api`](https://github.com/HeddleCo/api) repository. Rust consumers use
-`heddle-api`; TypeScript consumers use `@heddleco/api`. Heddle keeps native CLI
-and daemon behavior internal when it does not require a cross-product contract.
+The net-new hosted protobuf contract and generated SDK sources are owned by the
+public [`HeddleCo/api`](https://github.com/HeddleCo/api) repository. The target
+packages are `heddle-api` and `@heddleco/api`, but their coordinated Heddle,
+Weft, and Tapestry cutover is still blocked; see
+[ADR 0048](docs/adr/0048-net-new-public-api-contract.md). Heddle keeps native
+CLI and daemon behavior internal when it does not require a cross-product
+contract.
 
 Architecture and runtime details are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
