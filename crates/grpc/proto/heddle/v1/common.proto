@@ -53,11 +53,11 @@ enum StateStatus {
 // never neither. The `target` oneof is the wire-level form of that
 // "exactly one of" guarantee. Server-side `classify_grant_target`
 // translates it to a `GrantTarget` enum without runtime branching.
-// Lifecycle phases of a git-provider import job (weft#489). Mirrors the
-// `import_jobs` status column. Defined here (not import.proto) so both the
-// import stream and hosted.proto's `ImportJobSummary` can reuse it without a
-// circular file import (import.proto already imports hosted.proto for
-// SpoolVisibility, so hosted.proto cannot import import.proto back).
+// Lifecycle phases surfaced for a git-provider import and its automatic
+// adoption (weft#489/#391). Defined here (not import.proto) so both the import
+// stream and hosted.proto's `ImportJobSummary` can reuse it without a circular
+// file import (import.proto already imports hosted.proto for SpoolVisibility,
+// so hosted.proto cannot import import.proto back).
 enum ImportPhase {
   IMPORT_PHASE_UNSPECIFIED = 0;
   IMPORT_PHASE_QUEUED = 1;
@@ -67,6 +67,8 @@ enum ImportPhase {
   IMPORT_PHASE_STARS = 5;
   IMPORT_PHASE_DONE = 6;
   IMPORT_PHASE_FAILED = 7;
+  IMPORT_PHASE_ADOPTING = 8;
+  IMPORT_PHASE_NATIVE = 9;
 }
 
 // Terminal failure classification for an import job (weft#489/#490). Set at

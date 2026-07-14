@@ -104,12 +104,13 @@ message ImportOutcome {
   string spool_full_path = 2;         // where the repo landed (ok = true)
   ImportErrorCode error_code = 3;     // reuses the common.proto enum
   string error_message = 4;           // sanitized, human-readable
+  bool native = 5;                    // true when adoption completed
 }
 
 // An idempotent state snapshot for one import job (weft#489). NOT a delta — a
 // reattaching client gets the current state (with its stored `seq`), then
-// tails. No `percent`: smart-HTTP has no up-front total, so the contract is
-// phase + bytes + human message.
+// tails. Totals are zero until known, so clients can fall back to phase + bytes
+// + human message when determinate progress is unavailable.
 message ImportProgressEvent {
   string job_id = 1;
   uint64 seq = 2;              // per-job monotonic; reattach dedup/ordering
@@ -119,4 +120,7 @@ message ImportProgressEvent {
   uint64 objects_indexed = 6;
   uint32 attempt = 7;          // >1 ⇒ lease was reclaimed and the job restarted
   ImportOutcome outcome = 8;   // set ONLY on the terminal event
+  uint64 adopted_commits = 9;  // hydrated commits so far during ADOPTING
+  uint64 total_commits = 10;   // commits expected during ADOPTING (0 = unknown)
+  uint64 total_objects = 11;   // total objects expected (0 = unknown)
 }

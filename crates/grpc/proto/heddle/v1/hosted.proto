@@ -523,6 +523,7 @@ message ImportJobSummary {
   ImportErrorCode error_code = 3;  // set when phase = FAILED; reuses common.proto
   string error_message = 4;        // sanitized
   google.protobuf.Timestamp updated_at = 5;
+  google.protobuf.Timestamp last_synced_at = 6; // latest successful import/sync
 }
 
 message GetSpoolRequest {
