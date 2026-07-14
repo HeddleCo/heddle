@@ -1,8 +1,14 @@
 ---
-status: accepted
+status: superseded
+superseded-by: ADR 0048
 ---
 
 # API Contract Ownership and Governance
+
+This decision described an intermediate `heddle.v1` relocation through SDK
+0.23 and 0.24. That sequence was not used. ADR 0048 supersedes it with the
+net-new `heddle.api.v1alpha1` contract and coordinated hard cutover. The text
+below is retained as historical decision context.
 
 The shared `heddle.v1` protobuf contract will move from the Heddle product
 repository to a neutral `HeddleCo/api` repository. That repository owns schema

@@ -14,7 +14,7 @@ Heddle is a **local-first, agent-native version control system** shipped as the 
 | Human developers | CLI: `status`, `adopt`, `commit`, `start`, `land`, `verify`, `diff`, `log` |
 | Coding agents / harnesses | Machine-readable JSON (`--output json` / auto), command catalog, op-id replay, harness integrations |
 | Embedders (library) | `heddle-core` facade: typed ops returning `*Report` / `Result`, no process control or render |
-| Hosted products | gRPC protos (`heddle-grpc`), `heddle-client`, wire protocol — consumers in weft/tapestry |
+| Hosted products | `heddle-client` adapts to the public `heddle-api` contract owned by `HeddleCo/api`; Weft and Tapestry are separate consumers |
 
 Embedding target (ADR 0040):
 
@@ -61,7 +61,7 @@ delivery (CLI / future daemon / tests)
 | ContentHash (BLAKE3) | Content-addressed equality |
 | ChangeId (`hd-…` physical) | Stable handle for a specific state, not rewrite lineage |
 | Public JSON schemas | Field-stable; alpha may break names when model improves (documented) |
-| Wire/gRPC `heddle.v1` | Hosted contract; versioned package, not yet frozen at 1.0 |
+| Hosted protobuf `heddle.api.v1alpha1` | Net-new public contract owned by `HeddleCo/api`; consumers exact-pin `0.x` SDK releases |
 | Text CLI | User-facing; not byte-stable |
 
 ## Public surfaces
@@ -71,7 +71,7 @@ delivery (CLI / future daemon / tests)
 | CLI binary `heddle` | `crates/cli` — parse, env/TTY, auth boundary, dispatch, render, exit codes |
 | Library facade | `crates/core` (`heddle-core`) — `ExecutionContext`, status/verify/diff/merge/save/query/fsck/thread_shaping |
 | Domain | `repo`, `objects`, `refs`, `oplog`, `merge`, `semantic`, `ingest`, `git-projection`, `format`, `crypto`, … |
-| Protocol | `wire`, `grpc` protos, `client`, `daemon` (local UDS services) |
+| Protocol | native `wire`, hosted `client` adapters, and private daemon IPC; the shared protobuf source lives only in `HeddleCo/api` |
 | Persistence | `.heddle/` object store, refs, oplog, config; Git Overlay uses real `.git` via Sley |
 | Extensions | Harness integrations, mount (FUSE/ProjFS/FSKit), optional semantic languages |
 

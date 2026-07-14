@@ -10,17 +10,16 @@
 use ::state_review::{
     PathSymbol, ReadingOrderPartition, SymbolKind, build_review_payload_partition,
 };
-use crypto::verify_payload_signature;
-use grpc::heddle::v1::{
-    AnchoredDiscussion, GetReviewPayloadRequest, GetReviewProgressRequest,
-    GetReviewProgressResponse, ListSignaturesRequest, ListSignaturesResponse, MergeRequirement,
-    PathSymbolRef as ProtoPathSymbolRef, ReadingOrderPartition as ProtoReadingOrderPartition,
-    RecordCheckAckRequest, RecordCheckAckResponse, RecordVerdictRequest, RecordVerdictResponse,
-    ReviewPayload, ReviewScope as ProtoReviewScope, ReviewSignature as ProtoReviewSignature,
-    ReviewSummary, RiskSignal as ProtoRiskSignal, SignStateRequest, SignStateResponse,
+use api::heddle::api::v1alpha1::{
+    AnchoredDiscussion, GetReviewPayloadRequest, ListSignaturesRequest, ListSignaturesResponse,
+    MergeRequirement, PathSymbolRef as ProtoPathSymbolRef,
+    ReadingOrderPartition as ProtoReadingOrderPartition, ReviewPayload,
+    ReviewScope as ProtoReviewScope, ReviewSignature as ProtoReviewSignature, ReviewSummary,
+    RiskSignal as ProtoRiskSignal, SignStateRequest, SignStateResponse,
     SignalAnchor as ProtoSignalAnchor, SigningFooter,
     state_review_service_server::StateReviewService,
 };
+use crypto::verify_payload_signature;
 use objects::{
     lock::RepositoryLockExt,
     object::{
@@ -242,9 +241,9 @@ impl StateReviewService for LocalStateReviewService {
             merge_requirements: Vec::<MergeRequirement>::new(),
             signing_footer: Some(SigningFooter {
                 available_kinds: vec![
-                    grpc::heddle::v1::ReviewKind::Read as i32,
-                    grpc::heddle::v1::ReviewKind::AgentPreview as i32,
-                    grpc::heddle::v1::ReviewKind::AgentCoReview as i32,
+                    api::heddle::api::v1alpha1::ReviewKind::Read as i32,
+                    api::heddle::api::v1alpha1::ReviewKind::AgentPreview as i32,
+                    api::heddle::api::v1alpha1::ReviewKind::AgentCoReview as i32,
                 ],
             }),
         };
@@ -321,37 +320,6 @@ impl StateReviewService for LocalStateReviewService {
 
         Ok(Response::new(ListSignaturesResponse { signatures }))
     }
-
-    // The verdict (weft#481) and review-progress (weft#482) RPCs are defined
-    // on the wire in heddle-grpc 0.19 but implemented server-side in weft
-    // (the verdict blob append + the `review_check_acks` table). Local mode
-    // does not back these; the handlers land with the weft impl.
-    async fn record_verdict(
-        &self,
-        _request: Request<RecordVerdictRequest>,
-    ) -> Result<Response<RecordVerdictResponse>, Status> {
-        Err(Status::unimplemented(
-            "RecordVerdict is not available in local mode (weft#481)",
-        ))
-    }
-
-    async fn record_check_ack(
-        &self,
-        _request: Request<RecordCheckAckRequest>,
-    ) -> Result<Response<RecordCheckAckResponse>, Status> {
-        Err(Status::unimplemented(
-            "RecordCheckAck is not available in local mode (weft#482)",
-        ))
-    }
-
-    async fn get_review_progress(
-        &self,
-        _request: Request<GetReviewProgressRequest>,
-    ) -> Result<Response<GetReviewProgressResponse>, Status> {
-        Err(Status::unimplemented(
-            "GetReviewProgress is not available in local mode (weft#482)",
-        ))
-    }
 }
 
 /// Body of [`LocalStateReviewService::sign_state`]. Lifted out of the trait
@@ -361,13 +329,13 @@ async fn execute_sign_state(
     req: SignStateRequest,
 ) -> Result<SignStateResponse, Status> {
     // 1. Validate the kind.
-    let kind = match grpc::heddle::v1::ReviewKind::try_from(req.kind)
+    let kind = match api::heddle::api::v1alpha1::ReviewKind::try_from(req.kind)
         .map_err(|_| Status::invalid_argument(format!("unknown review kind tag {}", req.kind)))?
     {
-        grpc::heddle::v1::ReviewKind::Read => ReviewKind::Read,
-        grpc::heddle::v1::ReviewKind::AgentPreview => ReviewKind::AgentPreview,
-        grpc::heddle::v1::ReviewKind::AgentCoReview => ReviewKind::AgentCoReview,
-        grpc::heddle::v1::ReviewKind::Unspecified => {
+        api::heddle::api::v1alpha1::ReviewKind::Read => ReviewKind::Read,
+        api::heddle::api::v1alpha1::ReviewKind::AgentPreview => ReviewKind::AgentPreview,
+        api::heddle::api::v1alpha1::ReviewKind::AgentCoReview => ReviewKind::AgentCoReview,
+        api::heddle::api::v1alpha1::ReviewKind::Unspecified => {
             return Err(Status::invalid_argument("review kind is required"));
         }
     };
@@ -532,13 +500,24 @@ fn attachment_hash(
     Ok(Some(hash))
 }
 
-fn parse_state_id(s: &[u8]) -> Result<StateId, Status> {
-    StateId::try_from_slice(s)
+fn parse_state_id(
+    state_id: &Option<api::heddle::api::v1alpha1::StateId>,
+) -> Result<StateId, Status> {
+    let bytes = state_id
+        .as_ref()
+        .ok_or_else(|| Status::invalid_argument("state_id is required"))?;
+    StateId::try_from_slice(&bytes.value)
         .map_err(|err| Status::invalid_argument(format!("invalid state_id: {err}")))
 }
 
+fn api_state_id(state_id: &StateId) -> api::heddle::api::v1alpha1::StateId {
+    api::heddle::api::v1alpha1::StateId {
+        value: state_id.as_bytes().to_vec(),
+    }
+}
+
 fn proto_scope_to_object(scope: &ProtoReviewScope) -> Result<ReviewScope, Status> {
-    use grpc::heddle::v1::review_scope::Scope;
+    use api::heddle::api::v1alpha1::review_scope::Scope;
     match scope.scope.as_ref() {
         None | Some(Scope::WholeChange(_)) => Ok(ReviewScope::WholeChange),
         Some(Scope::Symbols(list)) => {
@@ -558,7 +537,7 @@ fn proto_scope_to_object(scope: &ProtoReviewScope) -> Result<ReviewScope, Status
 }
 
 fn object_scope_to_proto(scope: &ReviewScope) -> ProtoReviewScope {
-    use grpc::heddle::v1::review_scope::{Scope, SymbolList, WholeChange};
+    use api::heddle::api::v1alpha1::review_scope::{Scope, SymbolList, WholeChange};
     let inner = match scope {
         ReviewScope::WholeChange => Scope::WholeChange(WholeChange {}),
         ReviewScope::Symbols(symbols) => Scope::Symbols(SymbolList {
@@ -591,16 +570,16 @@ fn review_signature_to_proto(sig: ReviewSignature, signature_id: String) -> Prot
         signature: hex::decode(&sig.signature).unwrap_or_default(),
         // Legacy positive signatures predate the verdict surface (weft#481):
         // VERDICT_UNSPECIFIED (treated as SIGN) with no decline reason.
-        verdict: grpc::heddle::v1::Verdict::Unspecified as i32,
+        verdict: api::heddle::api::v1alpha1::Verdict::Unspecified as i32,
         reason: String::new(),
     }
 }
 
-fn review_kind_to_proto(kind: ReviewKind) -> grpc::heddle::v1::ReviewKind {
+fn review_kind_to_proto(kind: ReviewKind) -> api::heddle::api::v1alpha1::ReviewKind {
     match kind {
-        ReviewKind::Read => grpc::heddle::v1::ReviewKind::Read,
-        ReviewKind::AgentPreview => grpc::heddle::v1::ReviewKind::AgentPreview,
-        ReviewKind::AgentCoReview => grpc::heddle::v1::ReviewKind::AgentCoReview,
+        ReviewKind::Read => api::heddle::api::v1alpha1::ReviewKind::Read,
+        ReviewKind::AgentPreview => api::heddle::api::v1alpha1::ReviewKind::AgentPreview,
+        ReviewKind::AgentCoReview => api::heddle::api::v1alpha1::ReviewKind::AgentCoReview,
     }
 }
 
@@ -759,7 +738,7 @@ fn discussion_to_anchored_proto(d: &Discussion) -> AnchoredDiscussion {
             file: d.anchor.file.clone(),
             symbol: d.anchor.symbol.clone(),
         }),
-        opened_against_state: d.opened_against_state.as_bytes().to_vec(),
+        opened_against_state: Some(api_state_id(&d.opened_against_state)),
         opened_at: Some(prost_types::Timestamp {
             seconds: d.opened_at,
             nanos: 0,
@@ -767,7 +746,7 @@ fn discussion_to_anchored_proto(d: &Discussion) -> AnchoredDiscussion {
         turns: d
             .turns
             .iter()
-            .map(|t| grpc::heddle::v1::DiscussionTurn {
+            .map(|t| api::heddle::api::v1alpha1::DiscussionTurn {
                 author_name: t.author.name.clone(),
                 author_email: t.author.email.clone(),
                 body: t.body.clone(),
@@ -786,8 +765,8 @@ fn discussion_to_anchored_proto(d: &Discussion) -> AnchoredDiscussion {
 
 fn discussion_resolution_to_proto(
     resolution: &DiscussionResolution,
-) -> grpc::heddle::v1::DiscussionResolution {
-    use grpc::heddle::v1::discussion_resolution::{
+) -> api::heddle::api::v1alpha1::DiscussionResolution {
+    use api::heddle::api::v1alpha1::discussion_resolution::{
         Dismissed, Open, ResolvedByEdit, ResolvedIntoAnnotation, State,
     };
     let state = match resolution {
@@ -798,13 +777,13 @@ fn discussion_resolution_to_proto(
             })
         }
         DiscussionResolution::ResolvedByEdit { state_id } => State::ByEdit(ResolvedByEdit {
-            state_id: state_id.as_bytes().to_vec(),
+            state_id: Some(api_state_id(state_id)),
         }),
         DiscussionResolution::Dismissed { reason } => State::Dismissed(Dismissed {
             reason: reason.clone(),
         }),
     };
-    grpc::heddle::v1::DiscussionResolution { state: Some(state) }
+    api::heddle::api::v1alpha1::DiscussionResolution { state: Some(state) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,8 +989,8 @@ fn line_count(content: &[u8]) -> u32 {
 mod tests {
     use std::sync::Arc;
 
+    use api::heddle::api::v1alpha1::ReviewScope as ProtoReviewScope;
     use crypto::Signer as _;
-    use grpc::heddle::v1::ReviewScope as ProtoReviewScope;
     use repo::{Repository, operation_dedup::OperationDedupStore};
     use tempfile::TempDir;
 
@@ -1049,11 +1028,11 @@ mod tests {
         let signed_at = chrono::Utc::now().timestamp();
         let payload = signing_payload(*state_id, ReviewKind::Read, &scope, signed_at, None);
         let signature = signer.sign(&payload).expect("sign payload");
-        use grpc::heddle::v1::review_scope::{Scope, WholeChange};
+        use api::heddle::api::v1alpha1::review_scope::{Scope, WholeChange};
         SignStateRequest {
-            repo_path: String::new(),
-            state_id: state_id.as_bytes().to_vec(),
-            kind: grpc::heddle::v1::ReviewKind::Read as i32,
+            repo_path: None,
+            state_id: Some(api_state_id(state_id)),
+            kind: api::heddle::api::v1alpha1::ReviewKind::Read as i32,
             scope: Some(ProtoReviewScope {
                 scope: Some(Scope::WholeChange(WholeChange {})),
             }),
@@ -1080,25 +1059,28 @@ mod tests {
             .await
             .expect("sign_state");
         assert!(!resp.get_ref().signature_id.is_empty());
-        assert_eq!(resp.get_ref().state_id, state_id.as_bytes().to_vec());
+        assert_eq!(resp.get_ref().state_id, Some(api_state_id(&state_id)));
 
         let listing = svc
             .list_signatures(Request::new(ListSignaturesRequest {
-                repo_path: String::new(),
-                state_id: state_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&state_id)),
             }))
             .await
             .expect("list_signatures");
         let sigs = &listing.get_ref().signatures;
         assert_eq!(sigs.len(), 1, "expected one signature, got {sigs:?}");
-        assert_eq!(sigs[0].kind, grpc::heddle::v1::ReviewKind::Read as i32);
+        assert_eq!(
+            sigs[0].kind,
+            api::heddle::api::v1alpha1::ReviewKind::Read as i32
+        );
         assert_eq!(sigs[0].algorithm, "ed25519");
         assert_eq!(sigs[0].actor_name, "Alice Tester");
         assert_eq!(sigs[0].actor_email, "alice@example.com");
         let scope_case = sigs[0].scope.as_ref().and_then(|s| s.scope.as_ref());
         assert!(matches!(
             scope_case,
-            Some(grpc::heddle::v1::review_scope::Scope::WholeChange(_))
+            Some(api::heddle::api::v1alpha1::review_scope::Scope::WholeChange(_))
         ));
     }
 
@@ -1128,8 +1110,8 @@ mod tests {
 
         let listing = svc
             .list_signatures(Request::new(ListSignaturesRequest {
-                repo_path: String::new(),
-                state_id: state_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&state_id)),
             }))
             .await
             .expect("list_signatures");
@@ -1208,8 +1190,8 @@ mod tests {
 
         let listing = svc
             .list_signatures(Request::new(ListSignaturesRequest {
-                repo_path: String::new(),
-                state_id: state_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&state_id)),
             }))
             .await
             .expect("list_signatures");
@@ -1252,8 +1234,8 @@ mod tests {
 
         let listing = svc
             .list_signatures(Request::new(ListSignaturesRequest {
-                repo_path: String::new(),
-                state_id: state_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&state_id)),
             }))
             .await
             .expect("list_signatures");
@@ -1287,8 +1269,8 @@ mod tests {
 
         let resp_first = svc
             .get_review_payload(Request::new(GetReviewPayloadRequest {
-                repo_path: String::new(),
-                state_id: first.state_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&first.state_id)),
                 include_all_signals: false,
             }))
             .await
@@ -1332,8 +1314,8 @@ mod tests {
 
         let resp_second = svc
             .get_review_payload(Request::new(GetReviewPayloadRequest {
-                repo_path: String::new(),
-                state_id: second.state_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&second.state_id)),
                 include_all_signals: false,
             }))
             .await
@@ -1420,8 +1402,8 @@ mod tests {
 
         let resp = svc
             .get_review_payload(Request::new(GetReviewPayloadRequest {
-                repo_path: String::new(),
-                state_id: changed_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&changed_id)),
                 include_all_signals: false,
             }))
             .await
@@ -1489,8 +1471,8 @@ mod tests {
         // but no Status::Internal error from the gRPC layer.
         let resp = svc
             .get_review_payload(Request::new(GetReviewPayloadRequest {
-                repo_path: String::new(),
-                state_id: missing_tree_state_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&missing_tree_state_id)),
                 include_all_signals: false,
             }))
             .await

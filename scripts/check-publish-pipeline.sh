@@ -298,9 +298,8 @@ fi
 
 # --- Internal-consumer / publishable-version compat ----------------------
 #
-# Why this check exists: heddle#63 r2 bumped the heddle-grpc source crate
-# to 0.3.0 but left three internal workspace consumers (cli, daemon,
-# client) pinned at `version = "0.2"`. Local `cargo build` was happy
+# Why this check exists: an earlier source-crate bump left internal workspace
+# consumers pinned to an incompatible version. Local `cargo build` was happy
 # (path deps override version reqs in-workspace), but the push-to-main
 # publish workflow tried `cargo publish` — which strips path deps and
 # resolves consumers against crates.io — and failed loud with
@@ -344,6 +343,10 @@ import os
 import re
 tomllib = importlib.import_module(os.environ["TOML_MODULE"])
 
+with open("Cargo.toml", "rb") as f:
+    workspace_toml = tomllib.load(f)
+workspace_version = workspace_toml.get("workspace", {}).get("package", {}).get("version")
+
 crates = []
 for cm in sorted(glob.glob("crates/*/Cargo.toml")):
     with open(cm, "rb") as f:
@@ -358,6 +361,8 @@ for cm, toml in crates:
     pkg = toml.get("package", {})
     name = pkg.get("name")
     version = pkg.get("version")
+    if isinstance(version, dict) and version.get("workspace") is True:
+        version = workspace_version
     if not name or not isinstance(version, str):
         continue
     by_name[name] = version

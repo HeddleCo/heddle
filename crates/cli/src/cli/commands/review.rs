@@ -4,12 +4,11 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use daemon::grpc_local_impl::{GrpcLocalService, LocalSignalService, LocalStateReviewService};
-use grpc::heddle::v1::{
-    GetRepoSignalHealthRequest, GetReviewPayloadRequest, ListSignaturesRequest, PathSymbolRef,
-    ReviewScope as ProtoReviewScope, SignStateRequest, signal_service_server::SignalService,
-    state_review_service_server::StateReviewService,
+use api::heddle::api::v1alpha1::{
+    GetReviewPayloadRequest, ListSignaturesRequest, PathSymbolRef, ReviewScope as ProtoReviewScope,
+    SignStateRequest, state_review_service_server::StateReviewService,
 };
+use daemon::grpc_local_impl::{GrpcLocalService, LocalStateReviewService, get_repo_signal_health};
 use repo::{HistoryQuery, operation_dedup::OperationDedupStore};
 use serde::Serialize;
 
@@ -87,8 +86,8 @@ async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
     let state_id = resolve_state(cli, args.state.as_deref())?;
     let payload_resp = svc
         .get_review_payload(tonic::Request::new(GetReviewPayloadRequest {
-            repo_path: String::new(),
-            state_id: state_id.clone(),
+            repo_path: None,
+            state_id: Some(api_state_id(&state_id)?),
             include_all_signals: args.all_signals,
         }))
         .await
@@ -96,14 +95,14 @@ async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
         .into_inner();
     let signatures_resp = svc
         .list_signatures(tonic::Request::new(ListSignaturesRequest {
-            repo_path: String::new(),
-            state_id: state_id.clone(),
+            repo_path: None,
+            state_id: Some(api_state_id(&state_id)?),
         }))
         .await
         .map_err(status_to_anyhow)?
         .into_inner();
 
-    use grpc::heddle::v1::ReviewKind;
+    use api::heddle::api::v1alpha1::ReviewKind;
     let summary = payload_resp.summary.unwrap_or_default();
     let signatures: Vec<SignatureView> = signatures_resp
         .signatures
@@ -113,10 +112,10 @@ async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
             let is_agent = matches!(kind, ReviewKind::AgentPreview | ReviewKind::AgentCoReview);
             let (scope_kind, scope_symbols) = match s.scope.as_ref().and_then(|x| x.scope.as_ref())
             {
-                Some(grpc::heddle::v1::review_scope::Scope::WholeChange(_)) => {
+                Some(api::heddle::api::v1alpha1::review_scope::Scope::WholeChange(_)) => {
                     ("whole_change".to_string(), Vec::new())
                 }
-                Some(grpc::heddle::v1::review_scope::Scope::Symbols(list)) => (
+                Some(api::heddle::api::v1alpha1::review_scope::Scope::Symbols(list)) => (
                     "symbols".to_string(),
                     list.symbols
                         .iter()
@@ -140,7 +139,7 @@ async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
 
     let output = ReviewShowOutput {
         output_kind: "review_show",
-        state_id: bytes_to_state_id_string(&payload_resp.state_id),
+        state_id: api_state_id_string(payload_resp.state_id.as_ref()),
         headline: summary.headline,
         agent_narrative: opt_string(payload_resp.agent_narrative),
         files_changed: summary.files_changed,
@@ -249,7 +248,7 @@ fn render_text(out: &ReviewShowOutput, all_signals: bool) {
 }
 
 async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
-    use grpc::heddle::v1::review_scope::{Scope, SymbolList, WholeChange};
+    use api::heddle::api::v1alpha1::review_scope::{Scope, SymbolList, WholeChange};
     let svc = open_state_review_service(cli)?;
     let state_id_bytes = resolve_state_id_bytes(&cli.open_repo()?, &args.state)?;
     let scope_inner = if args.symbols.is_empty() {
@@ -274,8 +273,8 @@ async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
         scope: Some(scope_inner),
     };
     let req = SignStateRequest {
-        repo_path: String::new(),
-        state_id: state_id_bytes,
+        repo_path: None,
+        state_id: Some(api_state_id(&state_id_bytes)?),
         kind: args.kind.as_proto() as i32,
         scope: Some(scope),
         justification: args.justification.clone().unwrap_or_default(),
@@ -296,7 +295,7 @@ async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
         .map_err(status_to_anyhow)?
         .into_inner();
     if should_output_json(cli, None) {
-        let state_str = bytes_to_state_id_string(&resp.state_id);
+        let state_str = api_state_id_string(resp.state_id.as_ref());
         let out = serde_json::json!({
             "output_kind": "review_sign",
             "signature_id": resp.signature_id,
@@ -306,7 +305,7 @@ async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
     } else {
         println!(
             "signed state {} as {} (signature_id {})",
-            bytes_to_state_id_string(&resp.state_id),
+            api_state_id_string(resp.state_id.as_ref()),
             args.kind.as_wire(),
             resp.signature_id
         );
@@ -344,8 +343,8 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
         let state_id_str = state.state_id.to_string_full();
         let signatures = svc
             .list_signatures(tonic::Request::new(ListSignaturesRequest {
-                repo_path: String::new(),
-                state_id: state_id_bytes,
+                repo_path: None,
+                state_id: Some(api_state_id(&state_id_bytes)?),
             }))
             .await
             .map_err(status_to_anyhow)?
@@ -359,8 +358,8 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
             };
             let kind_match = match args.kind.as_deref() {
                 Some(k) => {
-                    let parsed = grpc::heddle::v1::ReviewKind::try_from(s.kind)
-                        .unwrap_or(grpc::heddle::v1::ReviewKind::Unspecified);
+                    let parsed = api::heddle::api::v1alpha1::ReviewKind::try_from(s.kind)
+                        .unwrap_or(api::heddle::api::v1alpha1::ReviewKind::Unspecified);
                     review_kind_to_str(parsed) == k
                 }
                 None => true,
@@ -427,15 +426,9 @@ struct NextStateView {
 }
 
 async fn run_health(cli: &Cli, args: &ReviewHealthArgs) -> Result<()> {
-    let svc = open_signal_service(cli)?;
-    let resp = svc
-        .get_repo_signal_health(tonic::Request::new(GetRepoSignalHealthRequest {
-            repo_path: String::new(),
-            window_states: args.window.unwrap_or(0),
-        }))
-        .await
-        .map_err(status_to_anyhow)?
-        .into_inner();
+    let repo = cli.open_repo()?;
+    let resp = get_repo_signal_health(&repo, args.window.unwrap_or(0))
+        .context("compute repository signal health")?;
     if should_output_json(cli, None) {
         let entries: Vec<_> = resp
             .entries
@@ -475,14 +468,7 @@ fn open_state_review_service(cli: &Cli) -> Result<LocalStateReviewService> {
     Ok(LocalStateReviewService::new(inner))
 }
 
-fn open_signal_service(cli: &Cli) -> Result<LocalSignalService> {
-    let repo = cli.open_repo()?;
-    let dedup = OperationDedupStore::open(repo.heddle_dir()).context("open dedup store")?;
-    let inner = GrpcLocalService::new(Arc::new(repo), Arc::new(dedup));
-    Ok(LocalSignalService::new(inner))
-}
-
-fn signal_view(s: &grpc::heddle::v1::RiskSignal) -> SignalView {
+fn signal_view(s: &api::heddle::api::v1alpha1::RiskSignal) -> SignalView {
     let anchor = s.anchor.clone().unwrap_or_default();
     SignalView {
         kind: s.kind.clone(),
@@ -494,8 +480,8 @@ fn signal_view(s: &grpc::heddle::v1::RiskSignal) -> SignalView {
     }
 }
 
-fn discussion_view(d: &grpc::heddle::v1::AnchoredDiscussion) -> DiscussionView {
-    use grpc::heddle::v1::discussion_resolution::State;
+fn discussion_view(d: &api::heddle::api::v1alpha1::AnchoredDiscussion) -> DiscussionView {
+    use api::heddle::api::v1alpha1::discussion_resolution::State;
     let anchor = d.anchor.clone().unwrap_or_default();
     let status = match d.resolution.as_ref().and_then(|r| r.state.as_ref()) {
         Some(State::Open(_)) | None => "open",
@@ -553,17 +539,22 @@ fn review_mine_only_principal_required_advice() -> RecoveryAdvice {
 }
 
 /// Render a 32-byte StateId from the wire as its display form.
-fn bytes_to_state_id_string(bytes: &[u8]) -> String {
-    if bytes.is_empty() {
+fn api_state_id(bytes: &[u8]) -> Result<api::heddle::api::v1alpha1::StateId> {
+    api::heddle::api::v1alpha1::StateId::from_bytes(bytes)
+        .map_err(|error| anyhow!("invalid state id: {error}"))
+}
+
+fn api_state_id_string(state_id: Option<&api::heddle::api::v1alpha1::StateId>) -> String {
+    let Some(state_id) = state_id else {
         return String::new();
-    }
-    objects::object::StateId::try_from_slice(bytes)
+    };
+    objects::object::StateId::try_from_slice(&state_id.value)
         .map(|id| id.to_string_full())
         .unwrap_or_default()
 }
 
-fn review_kind_to_str(kind: grpc::heddle::v1::ReviewKind) -> &'static str {
-    use grpc::heddle::v1::ReviewKind;
+fn review_kind_to_str(kind: api::heddle::api::v1alpha1::ReviewKind) -> &'static str {
+    use api::heddle::api::v1alpha1::ReviewKind;
     match kind {
         ReviewKind::Read => "read",
         ReviewKind::AgentPreview => "agent_preview",
@@ -641,7 +632,7 @@ mod tests {
     /// catch-all) but produce garbage downstream.
     #[test]
     fn review_kind_to_str_covers_known_variants() {
-        use grpc::heddle::v1::ReviewKind;
+        use api::heddle::api::v1alpha1::ReviewKind;
         assert_eq!(review_kind_to_str(ReviewKind::Read), "read");
         assert_eq!(
             review_kind_to_str(ReviewKind::AgentPreview),

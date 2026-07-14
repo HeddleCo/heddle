@@ -240,10 +240,9 @@ impl HostedGrpcClient {
             .map(|entry| {
                 Ok(HostedRefEntry {
                     name: entry.name,
-                    state_id: super::helpers::parse_proto_state_id(entry.state_id)?
-                        .ok_or_else(|| {
-                            ProtocolError::InvalidState("ref is missing its state ID".to_string())
-                        })?,
+                    state_id: super::helpers::parse_proto_state_id(entry.state_id)?.ok_or_else(
+                        || ProtocolError::InvalidState("ref is missing its state ID".to_string()),
+                    )?,
                     is_thread: entry.is_thread,
                     revision_address: entry.revision_address,
                 })
@@ -1317,7 +1316,7 @@ fn redaction_push_message(
     Ok(PushClientFrame {
         frame: Some(push_client_frame::Frame::Redaction(RedactionTransfer {
             blob_hash: hex,
-            redactions_blob: bytes.into(),
+            redactions_blob: bytes,
         })),
         client_operation_id: String::new(),
     })
@@ -1412,7 +1411,7 @@ fn state_visibility_push_message(
         frame: Some(push_client_frame::Frame::StateVisibility(
             StateVisibilityTransfer {
                 state_id: super::helpers::proto_state_id(state),
-                state_visibility_blob: bytes.into(),
+                state_visibility_blob: bytes,
             },
         )),
         client_operation_id: String::new(),
@@ -2190,8 +2189,8 @@ impl GitPackPushMessageWriter {
                     chunk_index: self.chunk_index,
                     is_final_chunk,
                     pack_size: self.pack_size,
-                    pack_chunk: chunk.into(),
-                    pack_id: self.pack_id.clone().into(),
+                    pack_chunk: chunk,
+                    pack_id: self.pack_id.clone(),
                 },
             )))
             .map_err(|_| {
@@ -2948,7 +2947,7 @@ async fn send_pack_chunk(
     tx.send(PushClientFrame {
         frame: Some(push_client_frame::Frame::Pack(PackChunk {
             stream_kind: stream_kind as i32,
-            data: data.into(),
+            data,
             transfer: Some(transport.transfer_checkpoint_with_mode(
                 transfer_id,
                 transport_mode,
@@ -3429,7 +3428,10 @@ mod tests {
 
         let main = by_name["refs/heads/main"];
         assert_eq!(main.kind, GrpcGitRefKind::Branch as i32);
-        assert_eq!(proto_oid_bytes(&main.target_oid), Some(main_commit.as_bytes()));
+        assert_eq!(
+            proto_oid_bytes(&main.target_oid),
+            Some(main_commit.as_bytes())
+        );
         assert!(main.peeled_oid.is_none(), "commit refs are not peeled");
 
         let feature = by_name["refs/heads/feature"];
@@ -3441,7 +3443,10 @@ mod tests {
 
         let tag_update = by_name["refs/tags/v1"];
         assert_eq!(tag_update.kind, GrpcGitRefKind::Tag as i32);
-        assert_eq!(proto_oid_bytes(&tag_update.target_oid), Some(tag_oid.as_bytes()));
+        assert_eq!(
+            proto_oid_bytes(&tag_update.target_oid),
+            Some(tag_oid.as_bytes())
+        );
         assert_eq!(
             proto_oid_bytes(&tag_update.peeled_oid),
             Some(tagged_commit.as_bytes()),
@@ -3586,7 +3591,10 @@ mod tests {
             GrpcGitRefKind::Other as i32,
             "refs/pull/* classifies as Other",
         );
-        assert_eq!(proto_oid_bytes(&pull.target_oid), Some(pr_commit.as_bytes()));
+        assert_eq!(
+            proto_oid_bytes(&pull.target_oid),
+            Some(pr_commit.as_bytes())
+        );
         assert!(
             pull.checkpoint.is_none(),
             "mirror ref updates are checkpoint-less",
@@ -3865,8 +3873,8 @@ mod tests {
                         chunk_index: chunk_index as u32,
                         is_final_chunk: next_offset == pack.pack.len() as u64,
                         pack_size: pack.pack.len() as u64,
-                        pack_chunk: chunk.to_vec().into(),
-                        pack_id: pack.checksum.as_bytes().to_vec().into(),
+                        pack_chunk: chunk.to_vec(),
+                        pack_id: pack.checksum.as_bytes().to_vec(),
                     },
                 )
                 .expect("receive chunk");
@@ -3895,8 +3903,8 @@ mod tests {
                 chunk_index: 0,
                 is_final_chunk: true,
                 pack_size: 0,
-                pack_chunk: Vec::new().into(),
-                pack_id: Vec::new().into(),
+                pack_chunk: Vec::new(),
+                pack_id: Vec::new(),
             })),
         };
         let err = accept_git_lane_pull_transfer(&repo, &mut git_repo, &mut state, transfer)
@@ -4101,7 +4109,9 @@ mod tests {
                         frame: Some(pull_client_frame::Frame::Open(_)),
                     }))
                 ) {
-                    let _ = tx.send(Err(Status::invalid_argument("expected signed pull open"))).await;
+                    let _ = tx
+                        .send(Err(Status::invalid_argument("expected signed pull open")))
+                        .await;
                     return;
                 }
                 match inbound.message().await {
@@ -4159,7 +4169,7 @@ mod tests {
                     frame: Some(pull_server_frame::Frame::StateVisibility(
                         StateVisibilityTransfer {
                             state_id: proto_state_id(state),
-                            state_visibility_blob: state_visibility_blob.into(),
+                            state_visibility_blob,
                         },
                     )),
                 };
@@ -4484,7 +4494,9 @@ mod tests {
                         frame: Some(pull_client_frame::Frame::Open(_)),
                     }))
                 ) {
-                    let _ = tx.send(Err(Status::invalid_argument("expected signed pull open"))).await;
+                    let _ = tx
+                        .send(Err(Status::invalid_argument("expected signed pull open")))
+                        .await;
                     return;
                 }
                 match inbound.message().await {
@@ -4563,7 +4575,7 @@ mod tests {
                     frame: Some(pull_server_frame::Frame::StateVisibility(
                         StateVisibilityTransfer {
                             state_id: proto_state_id(state),
-                            state_visibility_blob: state_visibility_blob.into(),
+                            state_visibility_blob,
                         },
                     )),
                 };
@@ -4614,7 +4626,7 @@ mod tests {
             messages.push(PullServerFrame {
                 frame: Some(pull_server_frame::Frame::Pack(PackChunk {
                     stream_kind: PackStreamKind::Pack as i32,
-                    data: bundle.pack_data[start..start + len].to_vec().into(),
+                    data: bundle.pack_data[start..start + len].to_vec(),
                     transfer: Some(TransferCheckpoint {
                         transfer_id: transfer_id.to_string(),
                         transport_mode: TransportMode::NativePack as i32,
@@ -4639,7 +4651,7 @@ mod tests {
             messages.push(PullServerFrame {
                 frame: Some(pull_server_frame::Frame::Pack(PackChunk {
                     stream_kind: PackStreamKind::Index as i32,
-                    data: bundle.index_data[start..start + len].to_vec().into(),
+                    data: bundle.index_data[start..start + len].to_vec(),
                     transfer: Some(TransferCheckpoint {
                         transfer_id: transfer_id.to_string(),
                         transport_mode: TransportMode::NativePack as i32,
@@ -4914,7 +4926,10 @@ mod tests {
             panic!("expected state visibility transfer");
         };
         assert_eq!(
-            transfer.state_id.as_ref().map(|state| state.value.as_slice()),
+            transfer
+                .state_id
+                .as_ref()
+                .map(|state| state.value.as_slice()),
             Some(state.as_bytes().as_slice())
         );
         assert_eq!(transfer.state_visibility_blob, expected_bytes);
@@ -5198,7 +5213,9 @@ mod tests {
                         frame: Some(pull_client_frame::Frame::Open(_)),
                     }))
                 ) {
-                    let _ = tx.send(Err(Status::invalid_argument("expected signed pull open"))).await;
+                    let _ = tx
+                        .send(Err(Status::invalid_argument("expected signed pull open")))
+                        .await;
                     return;
                 }
                 let exclude = match inbound.message().await {

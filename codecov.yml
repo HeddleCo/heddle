@@ -32,10 +32,6 @@ coverage:
       # ratcheted to (just under) current main — see the coverage doc for
       # the goal-vs-floor split and how to request a bump.
       #
-      # `crates/grpc` is intentionally absent: its surface is tonic-
-      # generated code emitted to `OUT_DIR`, which never appears under
-      # `crates/grpc/` in lcov, so there are no lines to gate. Its 60%
-      # goal is tracked in the doc, not enforced here.
       objects:
         target: 80%
         threshold: 0%

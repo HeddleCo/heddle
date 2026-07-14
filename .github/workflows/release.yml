@@ -9,7 +9,6 @@ name: Release binaries
 #              └──► build-macos-cask (macOS CLI + DMG) ───┤
 #                                                    ├─► sign + checksum
 #                                                    ├─► release (aggregates, publishes, posts SHA256SUMS)
-#                                                    ├─► publish-grpc-client (stable only)
 #                                                    └─► publish-manifests (stable only)
 #
 # validate-tag is the single trust gate for the pipeline. It refuses to
@@ -551,100 +550,6 @@ jobs:
             dist/Heddle-*.dmg.pem
             dist/SHA256SUMS
 
-  publish-grpc-client:
-    name: publish TypeScript gRPC client
-    needs: [validate-tag, release]
-    if: needs.validate-tag.outputs.kind == 'stable'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          # Publish the package from the exact commit that produced the
-          # release assets. The package version itself tracks heddle-grpc,
-          # not the release tag; generate:check verifies that sync below.
-          ref: ${{ needs.validate-tag.outputs.tag_sha }}
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: clients/grpc/package-lock.json
-
-      - name: Install TypeScript client dependencies
-        working-directory: clients/grpc
-        run: npm ci
-
-      - name: Check generated gRPC client
-        run: cargo run --locked -p heddle-devtools -- grpc-ts --check
-
-      - name: Verify npm version tracks heddle-grpc
-        working-directory: clients/grpc
-        shell: bash
-        run: |
-          set -euo pipefail
-          package_version="$(node -p "require('./package.json').version")"
-          grpc_version="$(python3 -c 'import tomllib; print(tomllib.load(open("../../crates/grpc/Cargo.toml", "rb"))["package"]["version"])')"
-          if [[ "$package_version" != "$grpc_version" ]]; then
-            echo "::error::clients/grpc/package.json version (${package_version}) must match crates/grpc/Cargo.toml (${grpc_version})"
-            exit 1
-          fi
-          echo "ok: @heddleco/grpc ${package_version} tracks heddle-grpc ${grpc_version}"
-
-      - name: Typecheck generated gRPC client package
-        working-directory: clients/grpc
-        run: npm run typecheck
-
-      - name: Publish generated gRPC client to GitHub Packages
-        working-directory: clients/grpc
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          package_name="$(node -p "require('./package.json').name")"
-          version="$(node -p "require('./package.json').version")"
-          registry="https://npm.pkg.github.com"
-          printf '%s\n' \
-            "${package_name%%/*}:registry=${registry}" \
-            "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" \
-            > .npmrc
-
-          remote_dist="$(mktemp)"
-          remote_err="$(mktemp)"
-          if npm view "${package_name}@${version}" dist --json --registry="${registry}" >"${remote_dist}" 2>"${remote_err}"; then
-            local_pack="$(mktemp)"
-            npm pack --dry-run --json >"${local_pack}"
-
-            local_integrity="$(node -e 'const fs = require("fs"); const [entry] = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(entry?.integrity ?? "");' "${local_pack}")"
-            local_shasum="$(node -e 'const fs = require("fs"); const [entry] = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(entry?.shasum ?? "");' "${local_pack}")"
-            remote_integrity="$(node -e 'const fs = require("fs"); const text = fs.readFileSync(process.argv[1], "utf8").trim(); if (!text || text === "undefined" || text === "null") process.exit(0); const dist = JSON.parse(text); process.stdout.write(dist?.integrity ?? "");' "${remote_dist}")"
-            remote_shasum="$(node -e 'const fs = require("fs"); const text = fs.readFileSync(process.argv[1], "utf8").trim(); if (!text || text === "undefined" || text === "null") process.exit(0); const dist = JSON.parse(text); process.stdout.write(dist?.shasum ?? "");' "${remote_dist}")"
-
-            if [[ -n "$remote_integrity" && "$local_integrity" == "$remote_integrity" ]]; then
-              echo "::notice::${package_name}@${version} is already published with identical integrity; skipping"
-              exit 0
-            fi
-            if [[ -n "$remote_shasum" && "$local_shasum" == "$remote_shasum" ]]; then
-              echo "::notice::${package_name}@${version} is already published with identical shasum; skipping"
-              exit 0
-            fi
-
-            echo "::error::${package_name}@${version} already exists on GitHub Packages but the packed client differs; bump crates/grpc/Cargo.toml before changing generated client output"
-            exit 1
-          fi
-
-          if ! grep -Eiq '(E404|404|not[[:space:]-]?found)' "${remote_err}"; then
-            cat "${remote_err}" >&2
-            exit 1
-          fi
-
-          npm publish --registry="${registry}"
 
   publish-manifests:
     name: publish package manifests

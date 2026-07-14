@@ -11,27 +11,17 @@
 //! Each service has its own file. The shared scaffolding (the
 //! [`GrpcLocalService`] struct, idempotency helpers) lives here.
 
-mod discussion;
-mod hook;
-mod hook_events;
-mod operation_log_query;
 mod signal;
 mod state_review;
-mod timeline;
 
 use std::sync::Arc;
 
-pub use discussion::LocalDiscussionService;
-pub use hook::LocalHookService;
-pub use hook_events::{EmitWaiter, HookEventBroadcaster, HookResponse};
-pub use operation_log_query::LocalOperationLogQueryService;
 use repo::{
     Repository,
     operation_dedup::{OperationDedupStore, reserve_operation_id_eager},
 };
-pub use signal::LocalSignalService;
+pub use signal::{SignalHealthEntry, SignalHealthReport, get_repo_signal_health};
 pub use state_review::LocalStateReviewService;
-pub use timeline::LocalTimelineService;
 
 /// Shared state for the local gRPC services. Handlers borrow the repository
 /// for the duration of a single RPC; the dedup store is consulted on every
@@ -40,21 +30,11 @@ pub use timeline::LocalTimelineService;
 pub struct GrpcLocalService {
     pub(super) repo: Arc<Repository>,
     pub(super) dedup: Arc<OperationDedupStore>,
-    /// In-process hook-event broker. Lives here so every
-    /// handler — `subscribe_hook_events` (subscribe side) and
-    /// `respond_to_hook` (reply side) — meets on the same broker
-    /// instance. The capture/merge code paths will eventually borrow
-    /// this through [`Self::hook_events`] to fire events.
-    pub(super) hook_events: HookEventBroadcaster,
 }
 
 impl GrpcLocalService {
     pub fn new(repo: Arc<Repository>, dedup: Arc<OperationDedupStore>) -> Self {
-        Self {
-            repo,
-            dedup,
-            hook_events: HookEventBroadcaster::new(),
-        }
+        Self { repo, dedup }
     }
 
     pub fn repo(&self) -> &Repository {
@@ -63,14 +43,6 @@ impl GrpcLocalService {
 
     pub fn dedup(&self) -> &OperationDedupStore {
         &self.dedup
-    }
-
-    /// Borrow the in-process hook event broker. The capture/merge
-    /// emit sites use this to fire events; the `SubscribeHookEvents`
-    /// and `RespondToHook` handlers in `hook.rs` use it to wire
-    /// streams and responses to the same correlator id.
-    pub fn hook_events(&self) -> &HookEventBroadcaster {
-        &self.hook_events
     }
 }
 
@@ -170,7 +142,11 @@ mod tests {
 
     use std::{sync::Arc, time::Duration};
 
-    use grpc::heddle::v1::UpdateRefResponse;
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct UpdateRefResponse {
+        #[prost(string, tag = "1")]
+        old_value: String,
+    }
     use objects::object::OperationId;
     use repo::{Repository, operation_dedup::OperationDedupStore};
     use tempfile::TempDir;
@@ -186,14 +162,9 @@ mod tests {
     }
 
     /// A distinguishable prost response payload for the idempotency-flow
-    /// tests: the carried marker rides in `old_value` so a replayed decode
-    /// can be asserted against the originally-recorded value.
     fn marker_response(marker: &str) -> UpdateRefResponse {
         UpdateRefResponse {
-            success: true,
             old_value: marker.to_string(),
-            error: String::new(),
-            old_revision_address: marker.to_string(),
         }
     }
 

@@ -1,6 +1,6 @@
 # release-plz config for the Heddle OSS workspace.
 #
-# Synchronises per-crate semver across the 17 OSS crates. release-plz
+# Synchronises per-crate semver across the OSS crates. release-plz
 # walks the workspace dependency graph and publishes in topological
 # order, opening release PRs that bump versions and update changelogs.
 
@@ -45,10 +45,6 @@ release = true
 
 [[package]]
 name = "heddle-wire"
-release = true
-
-[[package]]
-name = "heddle-grpc"
 release = true
 
 [[package]]

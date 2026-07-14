@@ -15,6 +15,11 @@
 > (CONTRIBUTING.md) so the contribution path can be documented
 > accurately.
 >
+> **Contract note:** RPC, package, and `crates/grpc` references below describe
+> the pre-cutover implementation inspected by this spike. New shared API work
+> belongs in `HeddleCo/api` under `heddle.api.v1alpha1`; ADR 0048 and its
+> migration manifest supersede the old package guidance.
+>
 > All paths under `crates/weft-server/...` and `crates/grpc/...` in
 > this document refer to the sibling **weft** and **heddle** repos
 > respectively. This file lives in heddle because the consumer

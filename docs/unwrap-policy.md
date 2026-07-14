@@ -26,7 +26,6 @@ Counts below are unique primary clippy diagnostics from `cargo clippy --workspac
 | heddle-daemon | 183 | 95 | 8 |
 | heddle-devtools | 32 | 12 | 0 |
 | heddle-format | 25 | 5 | 1 |
-| heddle-grpc | 0 | 0 | 0 |
 | heddle-ingest | 478 | 79 | 3 |
 | heddle-merge | 8 | 2 | 19 |
 | heddle-mount | 373 | 337 | 11 |

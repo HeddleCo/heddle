@@ -4,6 +4,10 @@ Status: pre-extraction snapshot verified against Heddle and Weft `origin/main`
 on 2026-07-13. Weft handler and registration evidence was checked at
 `eb1155d8c941171817d9b15ab2a73f948e0aca47`.
 
+This is historical migration input, not current package or service guidance.
+ADR 0048 and the migration manifest in `HeddleCo/api` are authoritative for the
+retained `heddle.api.v1alpha1` surface.
+
 This inventory records implementation evidence for the contract Heddle builds
 and publishes. It is not a compatibility promise.
 

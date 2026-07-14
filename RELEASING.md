@@ -439,9 +439,13 @@ the same PR.
 
 ## Automated crates.io publishing
 
-`heddle-grpc` and the rest of the OSS workspace crates publish to
+The Heddle-owned OSS workspace crates publish to
 crates.io automatically on every push to `main` via
 `.github/workflows/publish-crates.yml`. The normal flow is:
+
+The public protobuf contract and its `heddle-api` Rust package are released
+independently from `HeddleCo/api`; they are not part of this workspace's
+publication pipeline.
 
 1. `release-plz` (configured in `release-plz.toml`) opens a PR that
    bumps Cargo.toml versions and updates `CHANGELOG.md`.
@@ -484,9 +488,7 @@ Auto-discovery (`cargo metadata --workspace`) is deliberately avoided:
 an implicit `publish = true` (or absence of `publish = false`) in a
 new Cargo.toml is invisible at PR review time, and accidentally
 flipping it would silently expand the public surface. Currently
-**all 17 workspace crates are publishable** (none declare
-`publish = false`); the explicit list keeps that scope visible in
-diff.
+the explicit list keeps the publication scope visible in diff.
 
 ### Token wiring
 
@@ -542,7 +544,7 @@ two-pass shape as `check-release-pipeline.sh`:
 gh run watch --repo HeddleCo/heddle --workflow publish-crates.yml
 
 # Once green, confirm the crate is queryable:
-curl -s https://crates.io/api/v1/crates/heddle-grpc | jq '.crate.max_stable_version'
+curl -s https://crates.io/api/v1/crates/heddle-wire | jq '.crate.max_stable_version'
 ```
 
 The workflow's "Published to crates.io" summary table is the

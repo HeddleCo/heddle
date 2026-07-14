@@ -87,7 +87,6 @@ env:
     heddle-wire
     heddle-repo
     heddle-cli-shared
-    heddle-grpc
     weft-client-shim
     heddle-client
     heddle-ingest

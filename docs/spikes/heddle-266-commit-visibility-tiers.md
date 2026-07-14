@@ -8,6 +8,9 @@
 > guard) is **required but not yet implemented in this repo**, so the synthetic-ref
 > namespace is protected on heddle's own boundaries today but is not fully protected
 > against raw `git push` to a writable mirror until that gate ships (§5.4, §10).
+> Proto paths and message shapes cited below are pre-cutover grounding. Shared
+> contract changes now belong to `HeddleCo/api`; ADR 0048 is authoritative for
+> package and ownership guidance.
 >
 > Tracks HeddleCo/heddle#266. External motivation: the "VCS for the agent era"
 > argument that *partial openness* — ship a security fix without publishing the

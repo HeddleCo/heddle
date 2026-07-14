@@ -20,7 +20,6 @@ OSS_CRATES=(
   crates/crypto
   crates/semantic
   crates/wire
-  crates/grpc
   crates/ingest
   crates/mount
   crates/daemon

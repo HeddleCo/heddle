@@ -241,10 +241,7 @@ pub(super) fn to_protocol_grant(grant: HostedGrant) -> wire::HostedGrantInfo {
     use grpc::heddle::api::v1alpha1::grant_target_ref::Target;
     let (namespace_path, repo_path) = match grant.target.and_then(|t| t.target) {
         Some(Target::NamespacePath(p)) if !p.is_empty() => (Some(p), None),
-        Some(Target::RepoPath(p)) => (
-            None,
-            repository_ref_path(&p).map(ToOwned::to_owned),
-        ),
+        Some(Target::RepoPath(p)) => (None, repository_ref_path(&p).map(ToOwned::to_owned)),
         _ => (None, None),
     };
     wire::HostedGrantInfo {
