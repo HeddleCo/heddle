@@ -114,6 +114,7 @@ pub(super) struct SignedRequestContext {
     pub canonical: Vec<u8>,
     pub ts_millis: i64,
     pub nonce: [u8; NONCE_LEN],
+    pub signing_identity: String,
 }
 
 /// Sign an outgoing unary request with the device Ed25519 key and attach the
@@ -125,13 +126,13 @@ pub(super) struct SignedRequestContext {
 pub(super) fn attach_pop<T>(
     request: &mut Request<T>,
     signer: &Ed25519Signer,
+    signing_identity: &str,
     path: &str,
     message_bytes: &[u8],
 ) -> Result<SignedRequestContext, ProtocolError> {
     let ts_millis = now_millis()?;
     let nonce = fresh_nonce();
-    let signing_identity = hex::encode(signer.public_key());
-    let canonical = canonical_bytes(&signing_identity, path, ts_millis, &nonce, message_bytes);
+    let canonical = canonical_bytes(signing_identity, path, ts_millis, &nonce, message_bytes);
 
     let signature = signer
         .sign(&canonical)
@@ -142,12 +143,13 @@ pub(super) fn attach_pop<T>(
     md.insert(HDR_SIG_TS, ascii(ts_millis.to_string())?);
     md.insert_bin(HDR_SIG_BIN, BinaryMetadataValue::from_bytes(&signature));
     md.insert_bin(HDR_SIG_NONCE_BIN, BinaryMetadataValue::from_bytes(&nonce));
-    md.insert(HDR_SIG_IDENTITY, ascii(&signing_identity)?);
+    md.insert(HDR_SIG_IDENTITY, ascii(signing_identity)?);
 
     Ok(SignedRequestContext {
         canonical,
         ts_millis,
         nonce,
+        signing_identity: signing_identity.to_string(),
     })
 }
 
@@ -156,7 +158,9 @@ pub(super) fn attach_pop<T>(
 /// handled by the transport).
 #[derive(Clone, Debug)]
 pub struct WebAuthnAssertion {
-    /// The credential id (rides in `x-heddle-sig-key-bin` for the human tier).
+    /// The authenticator credential id returned to the callback. The shared
+    /// signing header contract binds the stable principal and has no separate
+    /// credential-id header.
     pub credential_id: Vec<u8>,
     /// The assertion signature (`x-heddle-sig-bin`).
     pub signature: Vec<u8>,
@@ -215,10 +219,7 @@ pub(super) fn attach_human<T>(
         HDR_SIG_NONCE_BIN,
         BinaryMetadataValue::from_bytes(&ctx.nonce),
     );
-    md.insert(
-        HDR_SIG_IDENTITY,
-        ascii(hex::encode(&assertion.credential_id))?,
-    );
+    md.insert(HDR_SIG_IDENTITY, ascii(&ctx.signing_identity)?);
     md.insert_bin(
         HDR_SIG_BIN,
         BinaryMetadataValue::from_bytes(&assertion.signature),
@@ -330,9 +331,11 @@ mod tests {
         let pubkey = signer.public_key().to_vec();
         let path = "/heddle.api.v1alpha1.RegistryService/DeleteSpool";
         let message_bytes = b"\x0a\x03abc"; // arbitrary encoded body
+        let identity = "principal:alice";
 
         let mut request = Request::new(());
-        let ctx = attach_pop(&mut request, &signer, path, message_bytes).expect("attach pop");
+        let ctx =
+            attach_pop(&mut request, &signer, identity, path, message_bytes).expect("attach pop");
 
         let md = request.metadata();
         assert_eq!(
@@ -347,8 +350,12 @@ mod tests {
 
         // Recompute the canonical bytes exactly as the server would (framed
         // body) and verify the attached signature against the device pubkey.
-        let identity = hex::encode(&pubkey);
-        let canonical = canonical_bytes(&identity, path, ctx.ts_millis, &ctx.nonce, message_bytes);
+        assert_eq!(
+            md.get(HDR_SIG_IDENTITY).and_then(|v| v.to_str().ok()),
+            Some(identity),
+            "the signing identity is the stable authenticated principal, not the device key"
+        );
+        let canonical = canonical_bytes(identity, path, ctx.ts_millis, &ctx.nonce, message_bytes);
         assert_eq!(canonical, ctx.canonical);
 
         let sig_b64 = md
@@ -362,7 +369,7 @@ mod tests {
         assert_eq!(
             md.get(HDR_SIG_IDENTITY)
                 .and_then(|value| value.to_str().ok()),
-            Some(identity.as_str())
+            Some(identity)
         );
 
         // nonce header is >= 16 bytes.
@@ -414,7 +421,8 @@ mod tests {
     fn attach_human_sets_webauthn_headers() {
         let signer = Ed25519Signer::generate().expect("gen");
         let mut request = Request::new(());
-        let ctx = attach_pop(&mut request, &signer, "/x/Y", b"body").expect("pop");
+        let ctx =
+            attach_pop(&mut request, &signer, "principal:alice", "/x/Y", b"body").expect("pop");
 
         let assertion = WebAuthnAssertion {
             credential_id: vec![1, 2, 3],
@@ -432,7 +440,7 @@ mod tests {
         assert_eq!(
             md.get(HDR_SIG_IDENTITY)
                 .and_then(|value| value.to_str().ok()),
-            Some("010203")
+            Some("principal:alice")
         );
         assert!(md.get_bin(HDR_SIG_WEBAUTHN_CLIENT_DATA_BIN).is_some());
         assert!(md.get_bin(HDR_SIG_WEBAUTHN_AUTH_DATA_BIN).is_some());

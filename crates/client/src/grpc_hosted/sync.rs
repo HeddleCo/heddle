@@ -181,10 +181,10 @@ impl HostedGrpcClient {
                 "hosted sync requires a stable device signing identity".to_string(),
             )
         })?;
-        let identity = format!("ed25519:{}", hex::encode(signer.public_key()));
+        let identity = self.stable_signing_identity()?;
         let capability_context = Vec::new();
         let canonical = grpc::signing::stream_open_bytes(
-            &identity,
+            identity,
             stream_id,
             route,
             repository,
@@ -314,13 +314,19 @@ impl HostedGrpcClient {
         local_state: StateId,
         target_thread: &str,
         force: bool,
+        client_operation_id: String,
     ) -> Result<PushComplete, ProtocolError> {
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.RepoSyncService/Push",
+            client_operation_id,
+        );
         self.push_with_revision(
             repo,
             repo_path,
             local_state,
             target_thread,
             force,
+            operation_id,
             RevisionAddress::heddle(local_state).to_string(),
             None,
             &Progress::null(),
@@ -342,6 +348,7 @@ impl HostedGrpcClient {
     /// `progress` drives the live push line (packing → uploading bytes →
     /// writing N refs); pass [`Progress::null`] for machine-readable / non-TTY
     /// callers.
+    #[allow(clippy::too_many_arguments)]
     pub async fn push_git_overlay_mirror(
         &mut self,
         repo: &Repository,
@@ -350,7 +357,12 @@ impl HostedGrpcClient {
         target_thread: &str,
         force: bool,
         progress: &Progress,
+        client_operation_id: String,
     ) -> Result<PushComplete, ProtocolError> {
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.RepoSyncService/Push",
+            client_operation_id,
+        );
         progress.set_phase("packing refs");
         let remote_ref_expectations = self.git_mirror_ref_expectations(repo_path).await?;
         let git_lane = build_git_mirror_push_plan(
@@ -365,6 +377,7 @@ impl HostedGrpcClient {
             local_state,
             target_thread,
             force,
+            operation_id,
             local_revision_address,
             Some(git_lane),
             progress,
@@ -396,6 +409,7 @@ impl HostedGrpcClient {
         local_state: StateId,
         target_thread: &str,
         force: bool,
+        operation_id: ClientOperationId,
         local_revision_address: String,
         git_lane: Option<GitLanePushPlan>,
         progress: &Progress,
@@ -424,10 +438,6 @@ impl HostedGrpcClient {
             .as_ref()
             .map_or(object_plan.stats.total_objects, std::vec::Vec::len);
         let transfer_id = push_transfer_id(repo_path, local_state, target_thread);
-        let operation_id = ClientOperationId::for_required_method(
-            "heddle.api.v1alpha1.RepoSyncService/Push",
-            transfer_id.clone(),
-        )?;
         let transport_mode = preferred_transport_mode(&self.transport, object_count);
         let thread_metadata = load_thread_metadata(repo, target_thread, local_state)?;
         let request_message = PushClientFrame {
@@ -539,7 +549,10 @@ impl HostedGrpcClient {
                 &tx,
                 repo,
                 &wanted_plan.partitions.packable_objects,
-                &transfer_id,
+                PushWireIdentities {
+                    transfer_id: &transfer_id,
+                    client_operation_id: operation_id.as_str(),
+                },
                 self.transport.chunk_size.max(1),
                 &self.transport,
                 ready_transport_mode,
@@ -2774,11 +2787,17 @@ fn proto_git_oid_bytes(bytes: &[u8]) -> Option<ProtoGitObjectId> {
     })
 }
 
+#[derive(Clone, Copy)]
+struct PushWireIdentities<'a> {
+    transfer_id: &'a str,
+    client_operation_id: &'a str,
+}
+
 async fn send_native_pack_streaming_messages(
     tx: &mpsc::Sender<PushClientFrame>,
     repo: &Repository,
     objects: &[ObjectInfo],
-    transfer_id: &str,
+    identities: PushWireIdentities<'_>,
     chunk_size: usize,
     transport: &super::helpers::HostedTransportPolicy,
     transport_mode: TransportMode,
@@ -2820,7 +2839,7 @@ async fn send_native_pack_streaming_messages(
                     &mut pack_reader,
                     false,
                     PackStreamKind::Pack,
-                    transfer_id,
+                    identities,
                     transport,
                     transport_mode,
                 )
@@ -2839,7 +2858,7 @@ async fn send_native_pack_streaming_messages(
         &mut pack_reader,
         true,
         PackStreamKind::Pack,
-        transfer_id,
+        identities,
         transport,
         transport_mode,
     )
@@ -2848,7 +2867,7 @@ async fn send_native_pack_streaming_messages(
         tx,
         &bundle.index_path,
         PackStreamKind::Index,
-        transfer_id,
+        identities,
         chunk_size,
         transport,
         transport_mode,
@@ -2904,7 +2923,7 @@ async fn drain_growing_native_pack_stream(
     reader: &mut wire::GrowingPackChunkReader,
     final_stream: bool,
     stream_kind: PackStreamKind,
-    transfer_id: &str,
+    identities: PushWireIdentities<'_>,
     transport: &super::helpers::HostedTransportPolicy,
     transport_mode: TransportMode,
 ) -> Result<(), ProtocolError> {
@@ -2915,7 +2934,7 @@ async fn drain_growing_native_pack_stream(
             tx,
             stream_kind,
             data,
-            transfer_id,
+            identities,
             transport,
             transport_mode,
             chunk_index,
@@ -2931,7 +2950,7 @@ async fn send_native_pack_file_stream(
     tx: &mpsc::Sender<PushClientFrame>,
     path: &std::path::Path,
     stream_kind: PackStreamKind,
-    transfer_id: &str,
+    identities: PushWireIdentities<'_>,
     chunk_size: usize,
     transport: &super::helpers::HostedTransportPolicy,
     transport_mode: TransportMode,
@@ -2942,7 +2961,7 @@ async fn send_native_pack_file_stream(
             tx,
             stream_kind,
             data,
-            transfer_id,
+            identities,
             transport,
             transport_mode,
             chunk_index,
@@ -2959,7 +2978,7 @@ async fn send_pack_chunk(
     tx: &mpsc::Sender<PushClientFrame>,
     stream_kind: PackStreamKind,
     data: Vec<u8>,
-    transfer_id: &str,
+    identities: PushWireIdentities<'_>,
     transport: &super::helpers::HostedTransportPolicy,
     transport_mode: TransportMode,
     chunk_index: u32,
@@ -2972,7 +2991,7 @@ async fn send_pack_chunk(
             stream_kind: stream_kind as i32,
             data,
             transfer: Some(transport.transfer_checkpoint_with_mode(
-                transfer_id,
+                identities.transfer_id,
                 transport_mode,
                 chunk_index,
                 offset,
@@ -2981,7 +3000,7 @@ async fn send_pack_chunk(
             chunk_length,
             is_final_chunk,
         })),
-        client_operation_id: transfer_id.to_string(),
+        client_operation_id: identities.client_operation_id.to_string(),
     })
     .await
     .map_err(|_| ProtocolError::InvalidState("push stream closed unexpectedly".to_string()))
@@ -3036,7 +3055,9 @@ mod tests {
 
     fn signed_test_config() -> ClientConfig {
         let signer = crypto::Ed25519Signer::generate().expect("generate test signing identity");
-        ClientConfig::default().with_auth_proof_key_pem(signer.to_pem().expect("export test key"))
+        ClientConfig::default()
+            .with_auth_proof_key_pem(signer.to_pem().expect("export test key"))
+            .with_authenticated_principal("principal:alice")
     }
 
     /// An unseeded repo with no thread heads — the shape `heddle clone`
@@ -3093,6 +3114,78 @@ mod tests {
                 "keying path must stay byte-identical to the throwaway-encode path",
             );
         }
+    }
+
+    #[test]
+    fn push_operation_identity_is_not_the_resumable_transfer_identity() {
+        let transfer_id = push_transfer_id(
+            "acme/widgets",
+            StateId::from_bytes([5; 32]),
+            "feature/retry",
+        );
+        let operation_id =
+            ClientOperationId::caller_or_fresh("heddle.api.v1alpha1.RepoSyncService/Push", "");
+        let next_operation_id =
+            ClientOperationId::caller_or_fresh("heddle.api.v1alpha1.RepoSyncService/Push", "");
+
+        assert_ne!(operation_id.as_str(), transfer_id);
+        assert_ne!(operation_id, next_operation_id);
+    }
+
+    #[tokio::test]
+    async fn push_and_pull_opening_proofs_are_bound_to_the_authenticated_principal() {
+        use crypto::Signer as _;
+
+        let config = signed_test_config();
+        let signer = crypto::Ed25519Signer::from_pem(
+            config
+                .auth_proof_key_pem
+                .as_deref()
+                .expect("test proof key"),
+        )
+        .expect("test signer");
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let client = HostedGrpcClient::from_channel(channel, &config).expect("test client");
+        for (stream_id, route) in [
+            (
+                "push-transfer-1",
+                "/heddle.api.v1alpha1.RepoSyncService/Push",
+            ),
+            (
+                "pull-transfer-1",
+                "/heddle.api.v1alpha1.RepoSyncService/Pull",
+            ),
+        ] {
+            let proof = client
+                .stream_opening_proof(stream_id, route, "acme/widgets", "")
+                .expect("opening proof");
+            let canonical = grpc::signing::stream_open_bytes(
+                "principal:alice",
+                &proof.stream_id,
+                &proof.route,
+                "acme/widgets",
+                &proof.resume_cursor,
+                &proof.capability_context,
+            );
+
+            crypto::verify_payload_signature(
+                &canonical,
+                "ed25519",
+                signer.public_key(),
+                &proof.signature,
+            )
+            .expect("stream proof must verify under the contract principal identity");
+        }
+
+        let implementation = include_str!("sync.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("sync implementation section");
+        assert_eq!(
+            implementation.matches("self.stream_opening_proof(").count(),
+            2,
+            "Push and Pull must both route their opening frame through the shared proof chokepoint"
+        );
     }
 
     #[test]

@@ -33,11 +33,20 @@ use super::{
 /// and cloned for the potential human retry (all hosted request protos derive
 /// `Clone`). The macro is the one chokepoint for the auth/sign/retry sequence;
 /// it must be invoked inside an `async fn` returning `Result<_, ProtocolError>`.
-macro_rules! signed_call {
-    ($self:ident, $client:ident, $rpc:ident, $path:expr, $msg:expr) => {{
+fn clone_request_for_retry<T: Clone>(request: &Request<T>) -> Request<T> {
+    let mut retry = Request::new(request.get_ref().clone());
+    *retry.metadata_mut() = request.metadata().clone();
+    retry
+}
+
+/// Shared signed-call boundary for callers that already carry custom request
+/// metadata. The untouched body and metadata template is retained before PoP
+/// headers are applied, then reused for the one permitted human-tier retry.
+macro_rules! signed_request_call {
+    ($self:ident, $client:ident, $rpc:ident, $path:expr, $request:expr) => {{
         let path = $path;
-        let message = $msg;
-        let mut request = Request::new(message.clone());
+        let mut request = $request;
+        let retry_template = clone_request_for_retry(&request);
         let sig_ctx = $self.apply_signed_auth(&mut request, path)?;
         match $self.$client.$rpc(request).await {
             Ok(response) => response.into_inner(),
@@ -55,7 +64,7 @@ macro_rules! signed_call {
                 let action_url =
                     $crate::grpc_hosted::request_signing::action_url_from_status(&status);
                 let assertion = $self.request_human_signature(path, &ctx, action_url)?;
-                let mut retry = Request::new(message);
+                let mut retry = retry_template;
                 $self.apply_auth(&mut retry, path)?;
                 $crate::grpc_hosted::request_signing::attach_human(&mut retry, &ctx, &assertion)?;
                 $self
@@ -68,6 +77,10 @@ macro_rules! signed_call {
             Err(status) => return Err(status_to_protocol_error(status)),
         }
     }};
+}
+
+macro_rules! signed_call {
+    ($self:ident, $client:ident, $rpc:ident, $path:expr, $msg:expr) => {{ signed_request_call!($self, $client, $rpc, $path, Request::new($msg)) }};
 }
 
 /// Dispatch an authenticated unary RPC on `self.user`: wrap the message in a
@@ -148,23 +161,13 @@ impl HostedGrpcClient {
         &mut self,
         request: Request<IssueServiceAccountCredentialRequest>,
     ) -> Result<IssuedCredentialResponse, ProtocolError> {
-        let request = self.prepare_issue_service_account_credential_request(request)?;
-        self.auth
-            .issue_service_account_credential(request)
-            .await
-            .map_err(status_to_protocol_error)
-            .map(|response| response.into_inner())
-    }
-
-    pub(super) fn prepare_issue_service_account_credential_request(
-        &self,
-        mut request: Request<IssueServiceAccountCredentialRequest>,
-    ) -> Result<Request<IssueServiceAccountCredentialRequest>, ProtocolError> {
-        self.apply_signed_auth(
-            &mut request,
+        Ok(signed_request_call!(
+            self,
+            auth,
+            issue_service_account_credential,
             "/heddle.api.v1alpha1.IdentityService/IssueServiceAccountCredential",
-        )?;
-        Ok(request)
+            request
+        ))
     }
 
     pub async fn begin_login(
@@ -458,9 +461,12 @@ impl HostedGrpcClient {
         target_thread: &str,
         source_state: &str,
         note: Option<&str>,
+        client_operation_id: String,
     ) -> Result<ThreadApproval, ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.WorkflowService/ApproveThread");
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.WorkflowService/ApproveThread",
+            client_operation_id,
+        );
         Ok(workflow_call!(
             self,
             approve_thread,
@@ -478,9 +484,15 @@ impl HostedGrpcClient {
         ))
     }
 
-    pub async fn revoke_approval(&mut self, id: &str) -> Result<(), ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.WorkflowService/RevokeApproval");
+    pub async fn revoke_approval(
+        &mut self,
+        id: &str,
+        client_operation_id: String,
+    ) -> Result<(), ProtocolError> {
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.WorkflowService/RevokeApproval",
+            client_operation_id,
+        );
         workflow_call!(
             self,
             revoke_approval,
@@ -703,12 +715,50 @@ fn parse_hosted_role_arg(
 #[cfg(test)]
 mod request_shape_tests {
     use grpc::heddle::api::v1alpha1::{
-        ClaimHandleRequest, GetHandleStatusRequest, HandlePrincipal, RequestHeldNameRequest,
-        ResolveHandleRequest, ResolveMonorepoRequest,
-        identity_service_client::IdentityServiceClient,
+        ClaimHandleRequest, GetHandleStatusRequest, HandlePrincipal,
+        IssueServiceAccountCredentialRequest, RequestHeldNameRequest, ResolveHandleRequest,
+        ResolveMonorepoRequest, identity_service_client::IdentityServiceClient,
     };
     use prost::Message;
-    use tonic::transport::Channel;
+    use tonic::{Request, transport::Channel};
+
+    use super::clone_request_for_retry;
+
+    #[test]
+    fn credential_issue_retry_preserves_custom_proof_and_operation_id() {
+        let mut original = Request::new(IssueServiceAccountCredentialRequest {
+            service_account_id: "sa-1".to_string(),
+            public_key: vec![7; 32],
+            scope: "repo:acme/*".to_string(),
+            ttl_secs: None,
+            client_operation_id: "stable-op-1".to_string(),
+        });
+        original
+            .metadata_mut()
+            .insert("x-heddle-issue-sa-proof-ts", "1700000000".parse().unwrap());
+        original.metadata_mut().insert_bin(
+            "x-heddle-issue-sa-proof-sig-bin",
+            tonic::metadata::MetadataValue::from_bytes(b"service-account-proof"),
+        );
+
+        let retry = clone_request_for_retry(&original);
+
+        assert_eq!(retry.get_ref(), original.get_ref());
+        assert_eq!(retry.get_ref().client_operation_id, "stable-op-1");
+        assert_eq!(
+            retry
+                .metadata()
+                .get("x-heddle-issue-sa-proof-ts")
+                .and_then(|value| value.to_str().ok()),
+            Some("1700000000")
+        );
+        assert!(
+            retry
+                .metadata()
+                .get_bin("x-heddle-issue-sa-proof-sig-bin")
+                .is_some()
+        );
+    }
 
     #[test]
     fn resolve_monorepo_request_threads_optional_max_depth() {
@@ -828,5 +878,29 @@ mod request_shape_tests {
             }),
             "HandlePrincipal must reserve legacy subject tag 1"
         );
+    }
+
+    #[test]
+    fn workflow_mutations_and_credential_issue_use_shared_retry_chokepoints() {
+        let source = include_str!("user.rs");
+        let approve = source
+            .split("pub async fn approve_thread")
+            .nth(1)
+            .and_then(|tail| tail.split("pub async fn revoke_approval").next())
+            .expect("approve_thread source");
+        let revoke = source
+            .split("pub async fn revoke_approval")
+            .nth(1)
+            .and_then(|tail| tail.split("pub async fn list_thread_approvals").next())
+            .expect("revoke_approval source");
+        let issue = source
+            .split("pub(crate) async fn issue_service_account_credential")
+            .nth(1)
+            .and_then(|tail| tail.split("pub async fn begin_login").next())
+            .expect("credential issue source");
+
+        assert!(approve.contains("caller_or_fresh"));
+        assert!(revoke.contains("caller_or_fresh"));
+        assert!(issue.contains("signed_request_call!"));
     }
 }

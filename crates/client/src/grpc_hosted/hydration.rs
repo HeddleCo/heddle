@@ -556,6 +556,7 @@ mod tests {
             token_header: None,
             transport,
             auth_proof_key_pem: None,
+            authenticated_principal: None,
             server_key: None,
             on_human_signature: None,
         }

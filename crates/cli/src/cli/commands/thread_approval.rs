@@ -26,6 +26,7 @@ use heddle_core::approval_plan::{
 use objects::object::ThreadName;
 use repo::Repository;
 use serde::Serialize;
+use weft_client_shim::CliContext as _;
 
 use super::RecoveryAdvice;
 use crate::{
@@ -158,6 +159,7 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
             &args.target,
             &source_state,
             args.note.as_deref(),
+            cli.operation_id_wire(),
         )
         .await?;
 
@@ -247,7 +249,9 @@ pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Resul
 pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArgs) -> Result<()> {
     let repo = cli.open_repo()?;
     let (mut client, _repo_path) = open_heddle_client(&repo, &args.remote).await?;
-    client.revoke_approval(&args.id).await?;
+    client
+        .revoke_approval(&args.id, cli.operation_id_wire())
+        .await?;
     if should_output_json(cli, Some(repo.config())) {
         let output = ApprovalRevokeOutput {
             output_kind: "thread_revoke_approval",
@@ -345,4 +349,21 @@ pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Re
         return Err(anyhow!(crate::exit::OutcomeExit::data_err()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn workflow_mutations_forward_the_cli_operation_id() {
+        let source = include_str!("thread_approval.rs");
+        let implementation = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("implementation section");
+        assert_eq!(
+            implementation.matches("cli.operation_id_wire()").count(),
+            2,
+            "approve and revoke must both forward the caller's --op-id"
+        );
+    }
 }

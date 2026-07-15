@@ -39,6 +39,8 @@ use sley::{
     remote::{PackGenerationProgress, ProgressSink as SleyProgressSink},
 };
 #[cfg(feature = "client")]
+use weft_client_shim::CliContext as _;
+#[cfg(feature = "client")]
 use wire::ProtocolError;
 
 #[cfg(feature = "client")]
@@ -1250,6 +1252,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         options.track_name,
         options.force,
         &progress,
+        options.cli.operation_id_wire(),
     )
     .await?;
     clear_line(&progress);
@@ -1315,14 +1318,30 @@ async fn push_network_one_thread(
     track_name: &str,
     force: bool,
     progress: &objects::Progress,
+    client_operation_id: String,
 ) -> Result<wire::PushComplete> {
     if repo.capability() == RepositoryCapability::GitOverlay {
         Ok(client
-            .push_git_overlay_mirror(repo, repo_path, *state_id, track_name, force, progress)
+            .push_git_overlay_mirror(
+                repo,
+                repo_path,
+                *state_id,
+                track_name,
+                force,
+                progress,
+                client_operation_id,
+            )
             .await?)
     } else {
         Ok(client
-            .push(repo, repo_path, *state_id, track_name, force)
+            .push(
+                repo,
+                repo_path,
+                *state_id,
+                track_name,
+                force,
+                client_operation_id,
+            )
             .await?)
     }
 }
@@ -1347,6 +1366,12 @@ async fn push_network_all_threads(
     let progress = objects::Progress::null();
 
     for thread in &threads {
+        let root_operation_id = options.cli.operation_id_wire();
+        let thread_operation_id = if root_operation_id.is_empty() {
+            String::new()
+        } else {
+            format!("{root_operation_id}:push:{}", thread.name)
+        };
         let outcome = push_network_one_thread(
             repo,
             client,
@@ -1355,6 +1380,7 @@ async fn push_network_all_threads(
             &thread.name,
             options.force,
             &progress,
+            thread_operation_id,
         )
         .await;
         match outcome {

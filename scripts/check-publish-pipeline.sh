@@ -132,6 +132,118 @@ else
   fi
 fi
 
+# Temporary external git dependencies cannot survive `cargo publish`: Cargo
+# packages the manifest without the git source and resolves the declared
+# version from crates.io. Until that external crate exists in the registry,
+# every direct git-pinned consumer must be excluded consistently at all three
+# release boundaries: Cargo, the explicit workflow list, and release-plz.
+if ! command -v python3 >/dev/null 2>&1; then
+  err "python3 not available; git-pinned publish exclusion check skipped"
+else
+  git_pin_report=$(python3 - "$WF" <<'PY'
+import glob
+import re
+import sys
+import tomllib
+from pathlib import Path
+
+workflow_path = Path(sys.argv[1])
+workflow = workflow_path.read_text()
+release = tomllib.loads(Path("release-plz.toml").read_text())
+release_by_name = {
+    package.get("name"): package
+    for package in release.get("package", [])
+    if isinstance(package, dict) and package.get("name")
+}
+
+match = re.search(
+    r"(?ms)^  PUBLISHABLE_CRATES:\s*\|\s*\n(?P<body>(?:    [^\n]*\n)+)",
+    workflow,
+)
+workflow_publishable = set()
+if match:
+    workflow_publishable = {
+        line.strip()
+        for line in match.group("body").splitlines()
+        if line.strip()
+    }
+
+consumers = {}
+for manifest_path in sorted(glob.glob("crates/*/Cargo.toml")):
+    manifest = tomllib.loads(Path(manifest_path).read_text())
+    package = manifest.get("package", {})
+    name = package.get("name")
+    if not name:
+        continue
+    tables = [
+        manifest.get("dependencies", {}),
+        manifest.get("dev-dependencies", {}),
+        manifest.get("build-dependencies", {}),
+    ]
+    for target in (manifest.get("target", {}) or {}).values():
+        if isinstance(target, dict):
+            tables.extend(
+                [
+                    target.get("dependencies", {}),
+                    target.get("dev-dependencies", {}),
+                    target.get("build-dependencies", {}),
+                ]
+            )
+    for dependencies in tables:
+        if not isinstance(dependencies, dict):
+            continue
+        for dependency_name, dependency in dependencies.items():
+            if not isinstance(dependency, dict):
+                continue
+            package_name = dependency.get("package") or dependency_name
+            if package_name == "heddle-api" and dependency.get("git"):
+                consumers[name] = (manifest_path, package)
+
+errors = []
+oks = []
+if not consumers:
+    errors.append("no direct git-pinned heddle-api consumers found; remove or update this temporary gate when the registry dependency lands")
+
+for name, (manifest_path, package) in sorted(consumers.items()):
+    if package.get("publish") is not False:
+        errors.append(f"{manifest_path}: {name} directly git-pins heddle-api but is not publish = false")
+    if name in workflow_publishable:
+        errors.append(f"{name} directly git-pins heddle-api but remains in PUBLISHABLE_CRATES")
+    release_entry = release_by_name.get(name)
+    if not release_entry or release_entry.get("release") is not False:
+        errors.append(f"{name} directly git-pins heddle-api but release-plz does not explicitly set release = false")
+
+if not errors:
+    oks.append(
+        "git-pinned heddle-api consumers are excluded from Cargo, publish-crates.yml, and release-plz: "
+        + ", ".join(sorted(consumers))
+    )
+
+print("OKS:")
+for item in oks:
+    print(item)
+print("ERRORS:")
+for item in errors:
+    print(item)
+PY
+  )
+
+  in_oks=0
+  in_errors=0
+  while IFS= read -r line; do
+    case "$line" in
+      "OKS:") in_oks=1; in_errors=0; continue ;;
+      "ERRORS:") in_oks=0; in_errors=1; continue ;;
+    esac
+    [[ -z "$line" ]] && continue
+    if (( in_oks )); then
+      ok "$line"
+    elif (( in_errors )); then
+      err "$line"
+    fi
+  done <<< "$git_pin_report"
+fi
+
 # --- Strict structural checks ---------------------------------------------
 #
 # The grep-based checks above answer "does the pipeline mention X

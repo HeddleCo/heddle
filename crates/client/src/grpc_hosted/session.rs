@@ -57,12 +57,14 @@ impl HostedSession {
             ))
         })?;
         let proof_key = validated_stored_proof_key(&credential, server_key)?;
+        let authenticated_principal = validated_authenticated_principal(&credential)?;
         let renewable_authority_credential = RenewableAuthorityCredential::from_stored(&credential);
         let token = AuthToken::new(credential.token, "credential-store");
         let mut config = user_config.heddle_client_config(Some(token))?;
         config = config
             .with_server_key(server_key.to_string())
-            .with_auth_proof_key_pem(proof_key);
+            .with_auth_proof_key_pem(proof_key)
+            .with_authenticated_principal(authenticated_principal);
         Ok(Self {
             config,
             renewable_authority_credential,
@@ -79,12 +81,18 @@ impl HostedSession {
         server_key: Option<String>,
         mode: HostedAuthMode,
     ) -> Result<Self> {
-        let (token, mut credential_proof_key, renewable_authority_credential) = match mode {
-            HostedAuthMode::ConfigToken => (user_config.remote_token()?, None, None),
+        let (
+            token,
+            mut credential_proof_key,
+            renewable_authority_credential,
+            stored_credential_subject,
+        ) = match mode {
+            HostedAuthMode::ConfigToken => (user_config.remote_token()?, None, None, None),
             HostedAuthMode::CredentialFallback => {
                 let mut token = user_config.remote_token()?;
                 let mut credential_proof_key = None;
                 let mut renewable_authority_credential = None;
+                let mut stored_credential_subject = None;
                 if token.is_none()
                     && let Some(ref key) = server_key
                 {
@@ -100,11 +108,17 @@ impl HostedSession {
                     if let Some(cred) = credentials::resolve_credential_for_server(key)? {
                         renewable_authority_credential =
                             RenewableAuthorityCredential::from_stored(&cred);
+                        stored_credential_subject = Some(cred.subject.clone());
                         token = Some(AuthToken::new(cred.token, "credential-store"));
                         credential_proof_key = cred.private_key_pem;
                     }
                 }
-                (token, credential_proof_key, renewable_authority_credential)
+                (
+                    token,
+                    credential_proof_key,
+                    renewable_authority_credential,
+                    stored_credential_subject,
+                )
             }
         };
 
@@ -123,6 +137,24 @@ impl HostedSession {
             && config.auth_proof_key_pem.is_none()
         {
             config = config.with_auth_proof_key_pem(pem);
+        }
+        if config.auth_proof_key_pem.is_some() {
+            let token = config.token.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "hosted request signing has a proof key but no authenticated bearer token"
+                )
+            })?;
+            let subject = crate::device_flow::authenticated_subject(&token.id)
+                .context("reading the hosted bearer token's authenticated principal")?;
+            if stored_credential_subject
+                .as_deref()
+                .is_some_and(|stored| stored != subject.as_str())
+            {
+                anyhow::bail!(
+                    "stored credential subject does not match the bearer token's authenticated principal"
+                );
+            }
+            config = config.with_authenticated_principal(format!("principal:{subject}"));
         }
         Ok(Self {
             config,
@@ -166,6 +198,17 @@ impl HostedSession {
             .await;
         Ok(client)
     }
+}
+
+fn validated_authenticated_principal(credential: &credentials::ServerCredential) -> Result<String> {
+    let subject = crate::device_flow::authenticated_subject(&credential.token)
+        .context("reading the stored credential's authenticated principal")?;
+    if subject != credential.subject {
+        anyhow::bail!(
+            "stored credential subject does not match the bearer token's authenticated principal"
+        );
+    }
+    Ok(format!("principal:{subject}"))
 }
 
 fn validated_stored_proof_key(
@@ -259,7 +302,7 @@ mod tests {
     use biscuit_auth::{Biscuit, KeyPair};
     use crypto::{Ed25519Signer, Signer};
 
-    use super::validated_stored_proof_key;
+    use super::{validated_authenticated_principal, validated_stored_proof_key};
     use crate::credentials;
 
     fn proof_bound_credential(signer: &Ed25519Signer) -> credentials::ServerCredential {
@@ -306,6 +349,18 @@ mod tests {
         let pem =
             validated_stored_proof_key(&credential, "grpc.example").expect("matching proof key");
         assert_eq!(pem, credential.private_key_pem.unwrap());
+    }
+
+    #[test]
+    fn stored_session_rejects_a_subject_that_disagrees_with_its_biscuit() {
+        let signer = Ed25519Signer::generate().expect("proof signer");
+        let mut credential = proof_bound_credential(&signer);
+        credential.subject = "mallory".to_string();
+
+        let error = validated_authenticated_principal(&credential)
+            .expect_err("stored metadata cannot replace the authenticated token subject");
+
+        assert!(error.to_string().contains("does not match"));
     }
 
     #[test]
@@ -613,6 +668,7 @@ mod tests {
                     &config,
                 ),
                 auth_proof_key_pem: config.auth_proof_key_pem,
+                authenticated_principal: config.authenticated_principal,
                 server_key: config.server_key,
                 on_human_signature: None,
             };

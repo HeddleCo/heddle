@@ -10,7 +10,8 @@ dependencies_update = true
 git_release_enable = true
 publish_allow_dirty = false
 
-# Publishable OSS crates — all release = true.
+# Explicit release policy. Git-pinned API consumers remain release = false
+# until heddle-api is available from the registry.
 [[package]]
 name = "heddle-format"
 release = true
@@ -61,11 +62,15 @@ release = true
 
 [[package]]
 name = "heddle-daemon"
-release = true
+release = false
 
 [[package]]
 name = "heddle-cli"
-release = true
+release = false
+
+[[package]]
+name = "heddle-client"
+release = false
 
 [[package]]
 name = "heddle-cli-shared"

@@ -67,8 +67,9 @@ env:
   # first). Order matters: cargo publish verifies the package against
   # the registry, which requires the crate's deps to already be on
   # crates.io. The list mirrors release-plz.toml's [[package]]
-  # entries. To add a publishable crate, append it here AND add a
-  # `[[package]]` block to release-plz.toml in the matching position.
+  # release = true entries. To add a publishable crate, append it here
+  # AND add a release-enabled `[[package]]` block to release-plz.toml in
+  # the matching position. Direct git-pinned API consumers are excluded.
   #
   # No auto-discovery (cargo metadata --workspace --no-deps): implicit
   # `publish = true` in Cargo.toml is invisible at PR review time, and
@@ -88,13 +89,10 @@ env:
     heddle-repo
     heddle-cli-shared
     weft-client-shim
-    heddle-client
     heddle-ingest
     heddle-git-projection
     heddle-core
-    heddle-daemon
     heddle-mount
-    heddle-cli
     heddle-devtools
 
 jobs:

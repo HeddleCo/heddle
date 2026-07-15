@@ -99,6 +99,7 @@ pub struct HostedGrpcClient {
     pub(super) token_header: Option<MetadataValue<tonic::metadata::Ascii>>,
     transport: helpers::HostedTransportPolicy,
     pub(super) auth_proof_key_pem: Option<String>,
+    authenticated_principal: Option<String>,
     /// The key used to look up this server's credential in the credential
     /// store. When the session also carries an exact renewable-authority
     /// binding, `auto_rotate_if_needed` uses this key to re-read and update
@@ -155,6 +156,11 @@ impl HostedGrpcClient {
             .transpose()
             .map_err(|err| ProtocolError::AuthenticationFailed(err.to_string()))?;
         let transport = helpers::HostedTransportPolicy::from_client_config(config);
+        if config.auth_proof_key_pem.is_some() && config.authenticated_principal.is_none() {
+            return Err(ProtocolError::AuthenticationFailed(
+                "hosted request signing requires an authenticated principal".to_string(),
+            ));
+        }
         Ok(Self {
             // Bound the single-shot, server-controlled sidecar allocation at
             // the gRPC decode boundary: tonic rejects an oversized inbound
@@ -171,6 +177,7 @@ impl HostedGrpcClient {
             token_header,
             transport,
             auth_proof_key_pem: config.auth_proof_key_pem.clone(),
+            authenticated_principal: config.authenticated_principal.clone(),
             server_key: config.server_key.clone(),
             on_human_signature: None,
         })
@@ -205,6 +212,22 @@ impl HostedGrpcClient {
         }
     }
 
+    fn stable_signing_identity(&self) -> Result<&str, ProtocolError> {
+        self.authenticated_principal
+            .as_deref()
+            .filter(|principal| {
+                principal
+                    .strip_prefix("principal:")
+                    .is_some_and(|subject| !subject.trim().is_empty())
+            })
+            .ok_or_else(|| {
+                ProtocolError::AuthenticationFailed(
+                    "hosted request signing requires the bearer token's stable authenticated principal"
+                        .to_string(),
+                )
+            })
+    }
+
     /// Stamp bearer auth (token + `x-heddle-proof`) and, for unary requests,
     /// attach the Tier-1 PoP request signature over the serialized body.
     ///
@@ -223,7 +246,9 @@ impl HostedGrpcClient {
             return Ok(None);
         };
         let message_bytes = request.get_ref().encode_to_vec();
-        let ctx = request_signing::attach_pop(request, &signer, method_path, &message_bytes)?;
+        let identity = self.stable_signing_identity()?;
+        let ctx =
+            request_signing::attach_pop(request, &signer, identity, method_path, &message_bytes)?;
         Ok(Some(ctx))
     }
 
@@ -608,9 +633,25 @@ mod tests {
             ),
             transport: helpers::HostedTransportPolicy::from_client_config(&config),
             auth_proof_key_pem: Some(auth_proof_key_pem),
+            authenticated_principal: Some("principal:alice".to_string()),
             server_key: None,
             on_human_signature: None,
         }
+    }
+
+    #[tokio::test]
+    async fn signed_client_fails_closed_without_an_authenticated_principal() {
+        let signer = Ed25519Signer::generate().expect("proof signer");
+        let config =
+            ClientConfig::default().with_auth_proof_key_pem(signer.to_pem().expect("proof PEM"));
+        let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+
+        let error = match HostedGrpcClient::from_channel(channel, &config) {
+            Ok(_) => panic!("proof signing without a principal must fail closed"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("authenticated principal"));
     }
 
     #[test]
@@ -733,8 +774,11 @@ mod tests {
             tonic::metadata::MetadataValue::from_bytes(b"service-account-proof"),
         );
 
-        let request = client
-            .prepare_issue_service_account_credential_request(request)
+        client
+            .apply_signed_auth(
+                &mut request,
+                "/heddle.api.v1alpha1.IdentityService/IssueServiceAccountCredential",
+            )
             .expect("prepare signed request");
         let metadata = request.metadata();
         assert!(metadata.get("authorization").is_some());

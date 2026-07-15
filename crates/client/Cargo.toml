@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
+publish = false # temporary: direct git-pinned heddle-api dependency is not publishable
 
 [dependencies]
 anyhow.workspace = true
