@@ -26,7 +26,7 @@ pub use shared::{
     decompress_pack_payload, encode_tagged_entry, encode_tagged_entry_parts, has_zstd_magic,
     try_decode_tagged_entry_header, verify_container, write_container_header,
 };
-pub use streaming_builder::StreamingPackBuilder;
+pub use streaming_builder::{StreamingPackBuilder, SyncData};
 
 /// Object type for pack entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -37,12 +37,13 @@ pub enum ObjectType {
     State = 2,
     Action = 3,
     Delta = 4,
+    StateAttachment = 5,
 }
 
 pub(crate) fn pack_container_spec() -> PackContainerSpec {
     PackContainerSpec {
         magic: b"LMPK",
-        version: 2,
+        version: 3,
     }
 }
 
@@ -54,6 +55,7 @@ impl ObjectType {
             2 => Some(ObjectType::State),
             3 => Some(ObjectType::Action),
             4 => Some(ObjectType::Delta),
+            5 => Some(ObjectType::StateAttachment),
             _ => None,
         }
     }

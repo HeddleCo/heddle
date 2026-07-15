@@ -1,0 +1,292 @@
+# Curated correctness / oracle / quality suite for the Heddle improvement program.
+# Source of truth for test selection, exclusions, oracle applicability, and perf eligibility.
+#
+# Classification statuses used by the runner:
+#   pass | fail | skip_prereq | todo_known | timeout | setup_fail | aborted | incomparable
+
+schema_version = 1
+program = "heddle-correctness-architecture-performance"
+default_features_note = "CLI default: git-overlay,native,local,semantic,zstd"
+
+[meta]
+description = "Curated suite for trustworthy baseline and release gates"
+oracle_reference = "Git object identity via Sley; byte-identical round-trip; formal Quint specs"
+
+# ---------------------------------------------------------------------------
+# Gates that are not cargo tests
+# ---------------------------------------------------------------------------
+
+[[jobs]]
+id = "facade-render-free"
+kind = "script"
+command = ["bash", "scripts/check-facade-render-free.sh"]
+oracle = false
+perf_eligible = false
+platforms = ["any"]
+required = true
+notes = "Domain/facade crates must not depend on clap/anstyle/anstream/indicatif/console/termcolor/owo-colors"
+
+[[jobs]]
+id = "fmt-check"
+kind = "script"
+# Workspace rustfmt.toml uses nightly-only options (imports_granularity,
+# group_imports). Stable `cargo fmt` is incomparable and must not be used to
+# rewrite the tree. Prefer rustup nightly when present.
+command = ["bash", "scripts/program/fmt-check.sh"]
+oracle = false
+perf_eligible = false
+platforms = ["any"]
+required = true
+prerequisites = ["rustfmt-nightly"]
+notes = "Formatting gate via nightly rustfmt; skip_prereq if nightly unavailable"
+
+# ---------------------------------------------------------------------------
+# Process / dependency oracles
+# ---------------------------------------------------------------------------
+
+[[jobs]]
+id = "git-process-lint"
+kind = "cargo-test"
+package = "heddle-cli"
+test_target = "git_process_lint"
+oracle = true
+perf_eligible = false
+platforms = ["any"]
+required = true
+notes = "No unreviewed runtime git process spawns; engine is Sley not gix"
+
+# ---------------------------------------------------------------------------
+# Git fidelity oracles
+# ---------------------------------------------------------------------------
+
+[[jobs]]
+id = "roundtrip-fidelity"
+kind = "cargo-test"
+package = "heddle-cli"
+test_target = "roundtrip_fidelity"
+oracle = true
+perf_eligible = false
+platforms = ["any"]
+required = true
+prerequisites = ["git"]
+notes = "Byte-identical adopt/import→export SHAs + git fsck; uses git for fixture build and fsck oracle"
+
+[[jobs]]
+id = "commit-conformance"
+kind = "cargo-test"
+package = "heddle-cli"
+test_target = "commit_conformance"
+oracle = true
+perf_eligible = false
+platforms = ["any"]
+required = true
+prerequisites = ["git"]
+notes = "Commit object corpus conformance"
+
+[[jobs]]
+id = "git-projection-engine"
+kind = "cargo-test"
+package = "heddle-cli"
+test_target = "git_projection_engine_integration"
+oracle = true
+perf_eligible = false
+platforms = ["any"]
+required = true
+prerequisites = ["git"]
+notes = "Projection engine integration including annotated tag SHA preservation"
+
+# ---------------------------------------------------------------------------
+# Core domain packages (non-CLI)
+# ---------------------------------------------------------------------------
+
+[[jobs]]
+id = "lib-objects"
+kind = "cargo-test"
+package = "heddle-objects"
+oracle = false
+perf_eligible = false
+platforms = ["any"]
+required = true
+
+[[jobs]]
+id = "lib-refs"
+kind = "cargo-test"
+package = "heddle-refs"
+oracle = false
+perf_eligible = false
+platforms = ["any"]
+required = true
+
+[[jobs]]
+id = "lib-oplog"
+kind = "cargo-test"
+package = "heddle-oplog"
+oracle = false
+perf_eligible = false
+platforms = ["any"]
+required = true
+
+[[jobs]]
+id = "lib-merge"
+kind = "cargo-test"
+package = "heddle-merge"
+oracle = false
+perf_eligible = false
+platforms = ["any"]
+required = true
+
+[[jobs]]
+id = "lib-format"
+kind = "cargo-test"
+package = "heddle-format"
+oracle = false
+perf_eligible = false
+platforms = ["any"]
+required = true
+
+[[jobs]]
+id = "lib-crypto"
+kind = "cargo-test"
+package = "heddle-crypto"
+oracle = false
+perf_eligible = false
+platforms = ["any"]
+required = true
+
+[[jobs]]
+id = "lib-core"
+kind = "cargo-test"
+package = "heddle-core"
+oracle = false
+perf_eligible = false
+platforms = ["any"]
+required = true
+notes = "Facade unit tests"
+
+[[jobs]]
+id = "lib-repo"
+kind = "cargo-test"
+package = "heddle-repo"
+oracle = false
+perf_eligible = false
+platforms = ["any"]
+required = true
+
+[[jobs]]
+id = "lib-ingest"
+kind = "cargo-test"
+package = "heddle-ingest"
+oracle = false
+perf_eligible = false
+platforms = ["any"]
+required = true
+prerequisites = ["git"]
+
+[[jobs]]
+id = "lib-git-projection"
+kind = "cargo-test"
+package = "heddle-git-projection"
+oracle = true
+perf_eligible = false
+platforms = ["any"]
+required = true
+prerequisites = ["git"]
+
+# ---------------------------------------------------------------------------
+# CLI integration shards (high signal, not entire cli test matrix)
+# ---------------------------------------------------------------------------
+
+[[jobs]]
+id = "cli-core-functionality"
+kind = "cargo-test"
+package = "heddle-cli"
+test_target = "core_functionality"
+oracle = false
+perf_eligible = false
+platforms = ["any"]
+required = true
+
+[[jobs]]
+id = "cli-state-management"
+kind = "cargo-test"
+package = "heddle-cli"
+test_target = "state_management"
+oracle = false
+perf_eligible = false
+platforms = ["any"]
+required = true
+
+[[jobs]]
+id = "formal-specs"
+kind = "cargo-test"
+package = "heddle-cli"
+test_target = "formal_specs"
+oracle = true
+perf_eligible = false
+platforms = ["any"]
+required = true
+notes = "Rust property/regression tests derived from Quint models"
+
+# ---------------------------------------------------------------------------
+# Performance (not default curated; opt-in suite=perf)
+# ---------------------------------------------------------------------------
+
+[[jobs]]
+id = "core-loop-perf-smoke"
+kind = "cargo-test"
+package = "heddle-cli"
+test_target = "cli_integration"
+filter = "core_loop_command_surface_perf_smoke"
+release = true
+ignored = true
+oracle = false
+perf_eligible = true
+platforms = ["any"]
+required = false
+suite = "perf"
+notes = "Equal-work command surface budgets; ignored by default; requires release binary"
+
+[[jobs]]
+id = "bench-scripts-smoke"
+kind = "script"
+command = ["bash", "scripts/program/smoke-bench-scripts.sh"]
+oracle = false
+perf_eligible = false
+platforms = ["any"]
+required = true
+suite = "perf"
+notes = "Compile/run smoke for paired-bench.py + core_loop_absolute.py --self-test (real summarizer/printer). No heddle binary required. Catches future-import and None-format regressions without duplicating logic."
+[[jobs]]
+id = "core-loop-absolute-bench"
+kind = "script"
+command = ["bash", "scripts/program/core-loop-bench.sh", "--trials", "3", "--warmup", "1"]
+oracle = false
+perf_eligible = true
+platforms = ["any"]
+required = false
+suite = "perf"
+notes = "Fixed equal-work fixture + absolute multi-op timings; writes artifacts/perf/*-core-loop-absolute.json. Measurement calibration only — not a Git win claim. Requires executable target/release/heddle (cargo build --release -p heddle-cli --locked); job fails loudly if binary missing. p95/p99 null when trials<30; use --cert for tail stats."
+
+# ---------------------------------------------------------------------------
+# Explicit exclusions (not run as curated; justification required)
+# ---------------------------------------------------------------------------
+
+[[exclusions]]
+id = "full-cli-integration-matrix"
+reason = "Too large for every local baseline; shards selected above; full matrix remains CI responsibility"
+replacement = "cli-core-functionality + state-management + oracles"
+
+[[exclusions]]
+id = "realworld-git-stress"
+reason = "Stress/shape coverage; not equal-work oracle; some cases ignored/large"
+replacement = "roundtrip-fidelity + commit-conformance"
+
+[[exclusions]]
+id = "mount-fuse-benches"
+reason = "Platform/prereq heavy; manual benchmark workflow owns"
+replacement = "suite=perf / manually dispatch benchmarks.yml"
+
+[[exclusions]]
+id = "coverage-llvm-cov"
+reason = "Weekly instrumented job; not part of hot baseline"
+replacement = "scheduled rust-tests coverage job"

@@ -1,6 +1,8 @@
 //! `heddle auth` command implementations.
 
-use anyhow::{Result, bail};
+use std::{collections::BTreeSet, path::Path};
+
+use anyhow::{Context, Result, bail};
 use crypto::{Ed25519Signer, Signer};
 use grpc::heddle::v1::{
     CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, DeviceAuthProof,
@@ -17,6 +19,7 @@ use tonic::{
 };
 use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
+use crate::device_flow::{AgentAttenuation, SAFE_AGENT_OPERATIONS, attenuate_for_agent};
 use crate::{auth_requests::AuthCommand, credentials, credentials::ServerCredential};
 
 /// Top-level dispatch for `heddle auth <subcommand>`. `_ctx` is
@@ -40,6 +43,7 @@ struct AuthStatusOutput {
     output_kind: &'static str,
     server: String,
     authenticated: bool,
+    proof_key_available: bool,
     subject: Option<String>,
     credential_id: Option<String>,
     expires_at: Option<String>,
@@ -53,9 +57,23 @@ struct ServiceTokenOutput {
     namespace: String,
     scope: String,
     token: String,
-    private_key_pem: String,
+    /// Absolute path of the private-key PEM file written with mode 0600.
+    private_key_path: String,
+    /// Only populated when `--show-secrets` is passed; omitted from JSON otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    private_key_pem: Option<String>,
     expires_in_days: u32,
 }
+
+#[derive(Serialize)]
+struct AgentTokenExportMetadata<'a> {
+    server: &'a str,
+    subject: &'a str,
+    expires_at: String,
+    scopes: Vec<String>,
+}
+
+const DERIVED_TOKEN_SECURITY_NOTE: &str = "Derived token is operation/TTL-limited and enforced server-side; declared scopes await W3 enforcement. It uses this host's device key for hosted-write proofs (same-host only); it is not a portable credential -- cross-host delegation lands in W2.";
 
 const SERVICE_TOKEN_TTL_DAYS: u32 = 30;
 const SERVICE_TOKEN_TTL_SECS: i64 = SERVICE_TOKEN_TTL_DAYS as i64 * 24 * 3600;
@@ -65,19 +83,493 @@ const ISSUE_SA_PROOF_SIG_HEADER: &str = "x-heddle-issue-sa-proof-sig-bin";
 
 pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> {
     match command {
-        AuthCommand::Login { server, no_browser } => cmd_auth_login(&server, no_browser).await,
+        AuthCommand::Login {
+            server,
+            open_browser,
+            token,
+            key_file,
+        } => match (token, key_file) {
+            (Some(token), Some(key_file)) => {
+                let server = server.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--server is required with --token/--key-file so a headless install cannot target the wrong server"
+                    )
+                })?;
+                let subject = install_headless_credential(server, &token, &key_file)?;
+                println!("Authenticated as {subject}. Credentials saved.");
+                Ok(())
+            }
+            (None, None) => {
+                let server = resolve_server(server.as_deref())?;
+                cmd_auth_login(&server, open_browser).await
+            }
+            _ => bail!("--token and --key-file must be provided together"),
+        },
         AuthCommand::Logout { server } => cmd_auth_logout(ctx, server.as_deref()),
         AuthCommand::Status { server } => cmd_auth_status(ctx, server.as_deref()),
+        AuthCommand::DeriveAgent {
+            server,
+            agent_id,
+            ttl_secs,
+            scopes,
+            allowed_operations,
+            out,
+            stdout,
+        } => cmd_auth_derive_agent(
+            &server,
+            agent_id,
+            ttl_secs,
+            scopes,
+            allowed_operations,
+            out.as_deref(),
+            stdout,
+        ),
         AuthCommand::CreateServiceToken {
             name,
             namespace,
             server,
-        } => cmd_create_service_token(ctx, server.as_deref(), name, namespace).await,
+            key_out,
+            show_secrets,
+        } => {
+            cmd_create_service_token(
+                ctx,
+                server.as_deref(),
+                name,
+                namespace,
+                key_out,
+                show_secrets,
+            )
+            .await
+        }
     }
 }
 
+/// Derive an offline child Biscuit and either install it as the active token,
+/// write a token-only export, or emit the token.
+fn cmd_auth_derive_agent(
+    server: &str,
+    agent_id: Option<String>,
+    ttl_secs: u64,
+    scopes: Vec<String>,
+    requested_operations: Vec<String>,
+    out: Option<&Path>,
+    stdout: bool,
+) -> Result<()> {
+    if ttl_secs == 0 {
+        bail!("--ttl must be greater than zero seconds");
+    }
+    let ttl_secs = i64::try_from(ttl_secs).context("--ttl is too large")?;
+    let parent = credentials::get_server_credential(server)?
+        .ok_or_else(|| anyhow::anyhow!(HostedRecoveryAdvice::auth_required(server)))?;
+    let private_key_pem = parent.private_key_pem.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "stored credential for {server} has no device proof key; run `heddle auth login --server {server}` first"
+        )
+    })?;
+    let signer = Ed25519Signer::from_pem(private_key_pem)
+        .map_err(|error| anyhow::anyhow!("stored device proof key is invalid: {error}"))?;
+    let metadata = headless_token_metadata(&parent.token)?;
+    if !metadata
+        .proof_public_key_hex
+        .eq_ignore_ascii_case(&hex::encode(signer.public_key()))
+    {
+        bail!("stored device proof key does not match the parent Biscuit");
+    }
+
+    let now = chrono::Utc::now();
+    let requested_expiry = now
+        .checked_add_signed(chrono::Duration::seconds(ttl_secs))
+        .ok_or_else(|| anyhow::anyhow!("--ttl produces an unsupported expiry"))?;
+    let expires_at = match parent.expires_at.as_deref() {
+        Some(value) => {
+            let parent_expiry = chrono::DateTime::parse_from_rfc3339(value)
+                .with_context(|| format!("stored parent expiry is invalid: {value}"))?
+                .with_timezone(&chrono::Utc);
+            if parent_expiry <= now {
+                bail!("stored parent credential expired at {parent_expiry}");
+            }
+            requested_expiry.min(parent_expiry)
+        }
+        None => requested_expiry,
+    };
+
+    let agent_id = agent_id.unwrap_or_else(|| format!("agent-{}", uuid::Uuid::new_v4()));
+    let allowed_operations = select_agent_operations(requested_operations)?;
+    let declared_scopes = parse_agent_scopes(scopes)?;
+    validate_scope_narrowing(&parent.token, &declared_scopes)?;
+    let child_token = attenuate_for_agent(
+        &parent.token,
+        AgentAttenuation {
+            agent_id: agent_id.clone(),
+            expires_at,
+            allowed_operations: Some(allowed_operations.clone()),
+            // W3 will enforce the declarations below. Adding a resource check
+            // in W1 would reject every request against today's servers.
+            allowed_resources: None,
+            declared_scopes: declared_scopes.clone(),
+        },
+    )?;
+
+    if stdout {
+        println!("{child_token}");
+        eprintln!("{DERIVED_TOKEN_SECURITY_NOTE}");
+        return Ok(());
+    }
+    if let Some(out) = out {
+        let export_metadata = AgentTokenExportMetadata {
+            server,
+            subject: &metadata.subject,
+            expires_at: expires_at.to_rfc3339(),
+            scopes: declared_scopes
+                .iter()
+                .map(|(kind, path)| format!("{kind}:{path}"))
+                .collect(),
+        };
+        write_agent_bundle(out, &child_token, &export_metadata)?;
+        println!("Agent token {agent_id} written to {}.", out.display());
+        println!("{DERIVED_TOKEN_SECURITY_NOTE}");
+        return Ok(());
+    }
+
+    // The installed derived token must not auto-rotate through MintBiscuit:
+    // renewal would produce a fresh authority token without this block's
+    // caveats. Keeping credential_id unset disables the client's rotation path
+    // while preserving the authority block and server-side revocation bindings.
+    credentials::store_server_credential(
+        server,
+        ServerCredential {
+            token: child_token,
+            subject: parent.subject,
+            device_id: parent.device_id,
+            credential_id: None,
+            private_key_pem: Some(private_key_pem.to_string()),
+            expires_at: Some(expires_at.to_rfc3339()),
+        },
+    )?;
+
+    println!("Derived and installed agent token {agent_id} for {server}.");
+    println!("Expires: {expires_at}");
+    println!("Allowed operations: {}", allowed_operations.join(", "));
+    if declared_scopes.is_empty() {
+        println!("Scopes: none declared");
+    } else {
+        println!(
+            "Scopes: {} (recorded now; server enforcement begins with W3)",
+            declared_scopes
+                .iter()
+                .map(|(kind, path)| format!("{kind}:{path}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    println!("{DERIVED_TOKEN_SECURITY_NOTE}");
+    Ok(())
+}
+
+fn select_agent_operations(requested: Vec<String>) -> Result<Vec<String>> {
+    if requested.is_empty() {
+        return Ok(SAFE_AGENT_OPERATIONS
+            .iter()
+            .map(|operation| (*operation).to_string())
+            .collect());
+    }
+    let safe = SAFE_AGENT_OPERATIONS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut selected = BTreeSet::new();
+    for operation in requested {
+        if !safe.contains(operation.as_str()) {
+            bail!(
+                "operation {operation:?} is outside the safe agent operation ceiling; --allow can only narrow the default set"
+            );
+        }
+        selected.insert(operation);
+    }
+    Ok(selected.into_iter().collect())
+}
+
+fn parse_agent_scopes(scopes: Vec<String>) -> Result<Vec<(String, String)>> {
+    let mut parsed = BTreeSet::new();
+    for scope in scopes {
+        let (kind, path) = match scope.split_once(':') {
+            Some(("repo", path)) => ("repo", path),
+            Some(("namespace" | "ns", path)) => ("namespace", path),
+            Some((kind, _)) => bail!(
+                "unsupported scope kind {kind:?}; use repo:<path>, namespace:<path>, or a bare repo path"
+            ),
+            None => ("repo", scope.as_str()),
+        };
+        let path = path.trim_matches('/');
+        if path.is_empty() {
+            bail!("--scope path must not be empty");
+        }
+        parsed.insert((kind.to_string(), path.to_string()));
+    }
+    Ok(parsed.into_iter().collect())
+}
+
+fn validate_scope_narrowing(parent_token: &str, child: &[(String, String)]) -> Result<()> {
+    if child.is_empty() {
+        // Omitting a scope adds no new declaration; all ancestor declarations
+        // remain in the immutable chain for W3 to enforce.
+        return Ok(());
+    }
+    for ancestor in agent_scope_blocks(parent_token)? {
+        if ancestor.is_empty() {
+            continue;
+        }
+        for child_scope in child {
+            if !ancestor
+                .iter()
+                .any(|parent_scope| scope_is_within(child_scope, parent_scope))
+            {
+                bail!(
+                    "scope {}:{} would widen an ancestor agent scope; sub-derivation may only narrow",
+                    child_scope.0,
+                    child_scope.1
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn agent_scope_blocks(token: &str) -> Result<Vec<Vec<(String, String)>>> {
+    use biscuit_auth::builder::{BlockBuilder, Term};
+
+    let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
+        .context("parsing parent Biscuit scopes")?;
+    let mut blocks = Vec::new();
+    for index in 1..biscuit.block_count() {
+        let source = biscuit
+            .print_block_source(index)
+            .with_context(|| format!("reading Biscuit attenuation block {index}"))?;
+        let block = BlockBuilder::new()
+            .code(&source)
+            .with_context(|| format!("parsing Biscuit attenuation block {index}"))?;
+        let scopes = block
+            .facts
+            .iter()
+            .filter_map(|fact| {
+                if fact.predicate.name != "agent_scope" || fact.predicate.terms.len() != 2 {
+                    return None;
+                }
+                match (&fact.predicate.terms[0], &fact.predicate.terms[1]) {
+                    (Term::Str(kind), Term::Str(path)) => Some((kind.clone(), path.clone())),
+                    _ => None,
+                }
+            })
+            .collect();
+        blocks.push(scopes);
+    }
+    Ok(blocks)
+}
+
+fn scope_is_within(child: &(String, String), parent: &(String, String)) -> bool {
+    let path_is_within = child.1 == parent.1
+        || child
+            .1
+            .strip_prefix(&parent.1)
+            .is_some_and(|suffix| suffix.starts_with('/'));
+    match (parent.0.as_str(), child.0.as_str()) {
+        ("repo", "repo") => path_is_within,
+        ("namespace", "namespace") => path_is_within,
+        ("namespace", "repo") => child.1 != parent.1 && path_is_within,
+        _ => false,
+    }
+}
+
+fn write_agent_bundle(
+    directory: &Path,
+    token: &str,
+    metadata: &AgentTokenExportMetadata<'_>,
+) -> Result<()> {
+    objects::fs_atomic::create_private_dir_all(directory).with_context(|| {
+        format!(
+            "creating agent token export directory {}",
+            directory.display()
+        )
+    })?;
+    let legacy_key_path = directory.join("device-key.pem");
+    match std::fs::remove_file(&legacy_key_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("removing legacy key {}", legacy_key_path.display()));
+        }
+    }
+    objects::fs_atomic::write_file_atomic_secret(&directory.join("token"), token.as_bytes())
+        .with_context(|| format!("writing agent token under {}", directory.display()))?;
+    let mut metadata_json =
+        serde_json::to_vec_pretty(metadata).context("serializing agent token metadata")?;
+    metadata_json.push(b'\n');
+    objects::fs_atomic::write_file_atomic_secret(&directory.join("metadata.json"), &metadata_json)
+        .with_context(|| format!("writing agent token metadata under {}", directory.display()))?;
+    Ok(())
+}
+
+struct HeadlessTokenMetadata {
+    subject: String,
+    credential_id: Option<String>,
+    expires_at: Option<String>,
+    proof_public_key_hex: String,
+}
+
+/// Install an operator-provisioned, device-bound credential without a browser.
+pub(crate) fn install_headless_credential(
+    server: &str,
+    token: &str,
+    key_file: &Path,
+) -> Result<String> {
+    let token = token.trim();
+    if token.is_empty() {
+        bail!("--token must not be empty");
+    }
+
+    let private_key_pem = std::fs::read_to_string(key_file)
+        .with_context(|| format!("reading device private key from {}", key_file.display()))?;
+    let signer = Ed25519Signer::from_pem(&private_key_pem)
+        .map_err(|error| anyhow::anyhow!("invalid Ed25519 device private key: {error}"))?;
+    let metadata = headless_token_metadata(token)?;
+    let public_key_hex = hex::encode(signer.public_key());
+    if !metadata
+        .proof_public_key_hex
+        .eq_ignore_ascii_case(&public_key_hex)
+    {
+        bail!(
+            "device private key does not match the token's device proof key; install the matching bootstrap key"
+        );
+    }
+
+    let credential = ServerCredential {
+        token: token.to_string(),
+        subject: metadata.subject.clone(),
+        device_id: None,
+        credential_id: metadata.credential_id,
+        private_key_pem: Some(private_key_pem.clone()),
+        expires_at: metadata.expires_at,
+    };
+    credentials::store_server_credential(server, credential)?;
+    repo::identity::link_device_key(signer.public_key(), &private_key_pem, server)
+        .with_context(|| format!("registering device identity for {server}"))?;
+
+    Ok(metadata.subject)
+}
+
+fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetadata> {
+    use biscuit_auth::builder::{BlockBuilder, Term};
+
+    let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
+        .context("parsing --token as a Biscuit")?;
+    let block_count = biscuit.block_count();
+    let authority_source = biscuit
+        .print_block_source(0)
+        .context("reading Biscuit authority block")?;
+    let authority = BlockBuilder::new()
+        .code(&authority_source)
+        .context("parsing Biscuit authority facts")?;
+
+    let string_fact = |name: &str| -> Result<Option<String>> {
+        let mut values = authority.facts.iter().filter_map(|fact| {
+            if fact.predicate.name != name || fact.predicate.terms.len() != 1 {
+                return None;
+            }
+            match &fact.predicate.terms[0] {
+                Term::Str(value) => Some(value.clone()),
+                _ => None,
+            }
+        });
+        let value = values.next();
+        if values.next().is_some() {
+            bail!("Biscuit authority block contains multiple {name} facts");
+        }
+        Ok(value)
+    };
+
+    let subject = string_fact("user")?
+        .filter(|subject| !subject.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Biscuit authority block is missing user(subject)"))?;
+    // An attenuated token must never use keypair renewal: MintBiscuit would
+    // return a new authority token without the appended caveats. The
+    // authority credential id remains cryptographically intact in the token,
+    // but is intentionally omitted from the local child credential metadata.
+    let credential_id = if block_count > 1 {
+        None
+    } else {
+        string_fact("credential_id")?
+    };
+    let proof_public_key_hex = string_fact("device_pop_key")?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Biscuit is not device-bound: authority block is missing device_pop_key(key)"
+        )
+    })?;
+    hex::decode(&proof_public_key_hex)
+        .context("Biscuit device_pop_key is not valid hexadecimal")?;
+
+    let mut expiries = authority.facts.iter().filter_map(|fact| {
+        if fact.predicate.name != "expires_at" || fact.predicate.terms.len() != 1 {
+            return None;
+        }
+        match fact.predicate.terms[0] {
+            Term::Date(seconds) => Some(seconds),
+            _ => None,
+        }
+    });
+    let authority_expires_at = expiries
+        .next()
+        .map(|seconds| {
+            i64::try_from(seconds)
+                .ok()
+                .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+                .map(|expires_at| expires_at.to_rfc3339())
+                .ok_or_else(|| anyhow::anyhow!("Biscuit expires_at is outside the supported range"))
+        })
+        .transpose()?;
+    if expiries.next().is_some() {
+        bail!("Biscuit authority block contains multiple expires_at facts");
+    }
+
+    let mut effective_expiry = authority_expires_at
+        .as_deref()
+        .map(chrono::DateTime::parse_from_rfc3339)
+        .transpose()
+        .context("parsing Biscuit authority expiry")?
+        .map(|value| value.with_timezone(&chrono::Utc));
+    for index in 1..block_count {
+        let source = biscuit
+            .print_block_source(index)
+            .with_context(|| format!("reading Biscuit attenuation block {index}"))?;
+        let block = BlockBuilder::new()
+            .code(&source)
+            .with_context(|| format!("parsing Biscuit attenuation block {index}"))?;
+        for fact in &block.facts {
+            if fact.predicate.name != "agent_expires_at" || fact.predicate.terms.len() != 1 {
+                continue;
+            }
+            let Term::Date(seconds) = fact.predicate.terms[0] else {
+                bail!("Biscuit attenuation block {index} has invalid agent_expires_at fact");
+            };
+            let seconds = i64::try_from(seconds)
+                .with_context(|| format!("attenuation block {index} expiry is too large"))?;
+            let value = chrono::DateTime::from_timestamp(seconds, 0)
+                .ok_or_else(|| anyhow::anyhow!("attenuation block {index} expiry is invalid"))?;
+            effective_expiry = Some(effective_expiry.map_or(value, |current| current.min(value)));
+        }
+    }
+    let expires_at = effective_expiry.map(|value| value.to_rfc3339());
+
+    Ok(HeadlessTokenMetadata {
+        subject,
+        credential_id,
+        expires_at,
+        proof_public_key_hex,
+    })
+}
+
 /// Authenticate via device authorization flow.
-async fn cmd_auth_login(server: &str, no_browser: bool) -> Result<()> {
+async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
     // 1. Generate Ed25519 keypair for device binding.
     let signer = Ed25519Signer::generate()
         .map_err(|e| anyhow::anyhow!("failed to generate keypair: {e}"))?;
@@ -119,11 +611,23 @@ async fn cmd_auth_login(server: &str, no_browser: bool) -> Result<()> {
     println!("Enter code: {user_code}");
     println!();
 
-    // 5. Attempt to open browser.
-    if !no_browser {
-        let url = format!("{verification_uri}?code={user_code}");
-        if let Err(_e) = open_url(&url) {
-            eprintln!("Could not open browser automatically. Please open the URL above.");
+    // 5. Attempt to open browser. The verification URI is server-controlled,
+    // so validate scheme/host (and reject shell metacharacters) before
+    // spawning a browser helper — especially on Windows where `cmd /C start`
+    // would otherwise interpret the URL.
+    if open_browser {
+        let encoded_code = percent_encode_query_component(user_code);
+        let url = format!("{verification_uri}?code={encoded_code}");
+        match validate_browser_url(&url) {
+            Ok(()) => {
+                if let Err(_e) = open_url(&url) {
+                    eprintln!("Could not open browser automatically. Please open the URL above.");
+                }
+            }
+            Err(err) => {
+                eprintln!("Refusing to open browser URL: {err}");
+                eprintln!("Please open the URL printed above in your browser.");
+            }
         }
     }
 
@@ -215,50 +719,70 @@ fn cmd_auth_logout(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
 /// Show current authentication status.
 fn cmd_auth_status(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
     let server = resolve_server(server)?;
-    match credentials::get_server_credential(&server)? {
-        Some(cred) => {
-            if ctx.should_output_json(None) {
-                let output = AuthStatusOutput {
-                    output_kind: "auth_status",
-                    server,
-                    authenticated: true,
-                    subject: Some(cred.subject),
-                    credential_id: cred.credential_id,
-                    expires_at: cred.expires_at,
-                    recommended_action: None,
-                };
-                println!("{}", serde_json::to_string(&output)?);
-            } else {
-                println!("Server:        {server}");
-                println!("Subject:       {}", cred.subject);
-                if let Some(ref cred_id) = cred.credential_id {
-                    println!("Credential:    {cred_id}");
-                }
-                if let Some(ref expires) = cred.expires_at {
-                    println!("Expires:       {expires}");
-                }
+    let output = auth_status_output(&server, credentials::get_server_credential(&server)?);
+    if ctx.should_output_json(None) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else if output.authenticated {
+        println!("Server:        {server}");
+        println!(
+            "Subject:       {}",
+            output.subject.as_deref().unwrap_or_default()
+        );
+        if let Some(ref cred_id) = output.credential_id {
+            println!("Credential:    {cred_id}");
+        }
+        if let Some(ref expires) = output.expires_at {
+            println!("Expires:       {expires}");
+        }
+        if output.proof_key_available {
+            println!("Hosted writes: ready (device proof key available)");
+        } else {
+            println!(
+                "Hosted writes: unavailable — credential missing device proof key; re-login / re-install"
+            );
+            if let Some(ref action) = output.recommended_action {
+                println!("Run `{action}` to repair the credential.");
             }
         }
-        None => {
-            let recommended_action = format!("heddle auth login --server {server}");
-            if ctx.should_output_json(None) {
-                let output = AuthStatusOutput {
-                    output_kind: "auth_status",
-                    server,
-                    authenticated: false,
-                    subject: None,
-                    credential_id: None,
-                    expires_at: None,
-                    recommended_action: Some(recommended_action),
-                };
-                println!("{}", serde_json::to_string(&output)?);
-            } else {
-                println!("Not authenticated with {server}.");
-                println!("Run `{recommended_action}` to authenticate.");
-            }
+    } else {
+        println!("Not authenticated with {server}.");
+        if let Some(ref action) = output.recommended_action {
+            println!("Run `{action}` to authenticate.");
         }
     }
     Ok(())
+}
+
+fn auth_status_output(server: &str, credential: Option<ServerCredential>) -> AuthStatusOutput {
+    match credential {
+        Some(credential) => {
+            let proof_key_available = credential
+                .private_key_pem
+                .as_deref()
+                .is_some_and(|pem| Ed25519Signer::from_pem(pem).is_ok());
+            AuthStatusOutput {
+                output_kind: "auth_status",
+                server: server.to_string(),
+                authenticated: true,
+                proof_key_available,
+                subject: Some(credential.subject),
+                credential_id: credential.credential_id,
+                expires_at: credential.expires_at,
+                recommended_action: (!proof_key_available)
+                    .then(|| format!("heddle auth login --server {server}")),
+            }
+        }
+        None => AuthStatusOutput {
+            output_kind: "auth_status",
+            server: server.to_string(),
+            authenticated: false,
+            proof_key_available: false,
+            subject: None,
+            credential_id: None,
+            expires_at: None,
+            recommended_action: Some(format!("heddle auth login --server {server}")),
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +795,8 @@ async fn cmd_create_service_token(
     server: Option<&str>,
     name: String,
     namespace: String,
+    key_out: Option<String>,
+    show_secrets: bool,
 ) -> Result<()> {
     let server = resolve_server(server)?;
     let scope = format!("repo:{namespace}/*");
@@ -286,6 +812,18 @@ async fn cmd_create_service_token(
     let private_key_pem = signer
         .to_pem()
         .map_err(|e| anyhow::anyhow!("failed to export service-account private key: {e}"))?;
+
+    // Always persist the private key to a 0600 file; never dump PEM to stdout
+    // by default (shell history / CI logs). `--show-secrets` opts into printing
+    // the PEM (and including it in JSON).
+    let key_path = resolve_service_account_key_path(&name, key_out.as_deref())?;
+    if let Some(parent) = key_path.parent() {
+        objects::fs_atomic::create_private_dir_all(parent)
+            .with_context(|| format!("creating private key directory {}", parent.display()))?;
+    }
+    objects::fs_atomic::write_file_atomic_secret(&key_path, private_key_pem.as_bytes())
+        .with_context(|| format!("writing private key to {}", key_path.display()))?;
+    let key_path_display = key_path.display().to_string();
 
     let channel = connect_channel(&server).await?;
 
@@ -352,7 +890,8 @@ async fn cmd_create_service_token(
             namespace,
             scope,
             token: issued.token,
-            private_key_pem,
+            private_key_path: key_path_display,
+            private_key_pem: show_secrets.then_some(private_key_pem),
             expires_in_days: SERVICE_TOKEN_TTL_DAYS,
         };
         println!("{}", serde_json::to_string(&output)?);
@@ -362,15 +901,50 @@ async fn cmd_create_service_token(
         println!();
         println!("Token: {}", issued.token);
         println!();
-        println!("Private key PEM:");
-        println!("{private_key_pem}");
-        println!("This token is proof-of-possession bound to the private key above.");
+        println!("Private key written to: {key_path_display}");
+        if show_secrets {
+            println!();
+            println!("Private key PEM:");
+            println!("{private_key_pem}");
+        }
+        println!("This token is proof-of-possession bound to the private key file above.");
         println!("Set the token as HEDDLE_REMOTE_TOKEN in your CI environment.");
-        println!("Configure remote.auth_proof_key_pem_path to a file containing the private key.");
+        println!(
+            "Configure remote.auth_proof_key_pem_path to {key_path_display} (or copy the key securely)."
+        );
         println!("This token is scoped to the {namespace} namespace.");
     }
 
     Ok(())
+}
+
+/// Resolve where to write the service-account private key.
+///
+/// Prefers an explicit `--key-out` path; otherwise writes under
+/// `<heddle_home>/service-accounts/<sanitized-name>.pem`.
+fn resolve_service_account_key_path(
+    name: &str,
+    key_out: Option<&str>,
+) -> Result<std::path::PathBuf> {
+    if let Some(path) = key_out {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    let mut safe: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        safe = "service-account".to_string();
+    }
+    Ok(repo::identity::heddle_home_dir()
+        .join("service-accounts")
+        .join(format!("{safe}.pem")))
 }
 
 fn issue_service_account_credential_request(
@@ -465,12 +1039,97 @@ fn resolve_server(explicit: Option<&str>) -> Result<String> {
 /// Connect a raw gRPC channel to the given server.
 async fn connect_channel(server: &str) -> Result<Channel> {
     let uri = infer_server_uri(server);
+    // F2: the auth-login / service-token connect path sends the device key and
+    // receives the bearer biscuit. Refuse cleartext (`http://`) to a
+    // non-loopback address unless the operator explicitly opts in, mirroring
+    // the remote paths' `cleartext_connect_allowed` gate. Loopback stays free.
+    enforce_auth_cleartext_gate(&uri)?;
     let endpoint = Endpoint::from_shared(uri.clone())
         .map_err(|e| anyhow::anyhow!("invalid server address '{server}': {e}"))?;
     endpoint
         .connect()
         .await
         .map_err(|e| anyhow::anyhow!("failed to connect to {server}: {e}"))
+}
+
+/// Refuse a cleartext (`http://`) auth connection to a non-loopback address
+/// unless the operator has opted in via `HEDDLE_REMOTE_INSECURE`.
+///
+/// This routes the auth-login / service-token connect path through the same
+/// `cleartext_connect_allowed` semantics the remote paths use: TLS is always
+/// allowed, cleartext to loopback is allowed, cleartext to a non-loopback
+/// address is rejected unless the insecure opt-in is set. Fail-closed: an
+/// `http://` URI whose host is not a parseable loopback IP literal is treated
+/// as non-loopback and refused without the opt-in.
+fn enforce_auth_cleartext_gate(uri: &str) -> Result<()> {
+    // Only cleartext connections are gated; `https://` is always permitted.
+    let Some(rest) = uri.strip_prefix("http://") else {
+        return Ok(());
+    };
+
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    // Drop userinfo if present, then split host[:port].
+    let hostport = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(inner) = hostport.strip_prefix('[') {
+        // IPv6 literal: [::1]:port
+        inner.split(']').next().unwrap_or(inner)
+    } else {
+        hostport
+            .rsplit_once(':')
+            .map(|(host, _port)| host)
+            .unwrap_or(hostport)
+    };
+
+    // `localhost` resolves to loopback but is not an `IpAddr`; treat it as
+    // allowed. Any host that does not parse as a loopback IP literal is
+    // fail-closed non-loopback.
+    if host.eq_ignore_ascii_case("localhost") {
+        return Ok(());
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if cli_shared::is_loopback_ip(ip) {
+            return Ok(());
+        }
+        // Non-loopback cleartext: honor the insecure opt-in and reuse the
+        // remote gate's error message verbatim.
+        let allow_insecure = auth_cleartext_insecure_opt_in()?;
+        let addr = std::net::SocketAddr::new(ip, 0);
+        if cli_shared::cleartext_connect_allowed(addr, false, allow_insecure) {
+            return Ok(());
+        }
+        bail!(cli_shared::cleartext_refused_message(addr));
+    }
+
+    // Non-IP-literal cleartext host (e.g. `localhost`-alias or bare name that
+    // `infer_server_uri` chose `http://` for): fail-closed unless opted in.
+    if auth_cleartext_insecure_opt_in()? {
+        return Ok(());
+    }
+    bail!(
+        "refusing cleartext connection to non-loopback host {host:?}; \
+enable TLS or set HEDDLE_REMOTE_INSECURE=1 for intentional cleartext"
+    );
+}
+
+/// Whether the operator opted in to non-loopback cleartext for the auth path.
+///
+/// There is no `--insecure` flag on the auth subcommands, so this honors the
+/// same `HEDDLE_REMOTE_INSECURE` environment opt-in the remote paths accept.
+fn auth_cleartext_insecure_opt_in() -> Result<bool> {
+    match std::env::var("HEDDLE_REMOTE_INSECURE") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" | "" => Ok(false),
+            other => bail!(
+                "invalid HEDDLE_REMOTE_INSECURE value {other:?}; \
+expected one of 1/0, true/false, yes/no, or on/off"
+            ),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(err @ std::env::VarError::NotUnicode(_)) => {
+            bail!("failed to read HEDDLE_REMOTE_INSECURE: {err}")
+        }
+    }
 }
 
 /// Connect an unauthenticated `AuthServiceClient` to the given server.
@@ -670,8 +1329,115 @@ struct AccessToken {
     credential_id: String,
 }
 
-/// Best-effort browser open.
+/// Validate a URL before handing it to a browser helper.
+///
+/// Accepts only `https://` URLs, or `http://` when the host is loopback
+/// (`localhost`, `127.0.0.1`, `::1`). Rejects empty strings, control
+/// characters, and shell metacharacters that are unsafe for Windows
+/// `cmd /C start` even when passed as separate argv elements (including `%`
+/// env-var expansion and `<`/`>` redirection).
+///
+/// Validation is the primary control; Windows still uses the safer
+/// `start "" <url>` form after this check passes.
+pub(crate) fn validate_browser_url(url: &str) -> Result<()> {
+    if url.is_empty() {
+        bail!("browser URL is empty");
+    }
+    for ch in url.chars() {
+        // Fail-closed: reject control chars and every shell/`cmd` metacharacter
+        // unsafe for `cmd /C start`. `%` enables env-var expansion (`%VAR%`),
+        // and `<`/`>` enable redirection — a hostile auth server could use any
+        // of these to inject via the Windows browser launcher.
+        if ch.is_control()
+            || matches!(
+                ch,
+                '"' | '\'' | '|' | '&' | '^' | '`' | '%' | '<' | '>' | ' ' | '\n' | '\r' | '\t'
+            )
+        {
+            bail!("browser URL contains forbidden character {ch:?}");
+        }
+    }
+
+    let Some((scheme, rest)) = url.split_once("://") else {
+        bail!("browser URL must include a scheme (https://…)");
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "https" && scheme != "http" {
+        bail!("browser URL scheme must be https (or http for localhost only)");
+    }
+    if rest.is_empty() {
+        bail!("browser URL is missing a host");
+    }
+
+    // Authority ends at the first path/query/fragment delimiter.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if authority.is_empty() {
+        bail!("browser URL is missing a host");
+    }
+    // Drop userinfo if present.
+    let hostport = authority.rsplit('@').next().unwrap_or(authority);
+    let host = extract_url_host(hostport);
+    if host.is_empty() {
+        bail!("browser URL is missing a host");
+    }
+    // Spaces already rejected above; also refuse empty host labels.
+    if host.chars().any(|ch| ch.is_whitespace()) {
+        bail!("browser URL host must not contain whitespace");
+    }
+
+    if scheme == "http" && !is_loopback_browser_host(host) {
+        bail!("http browser URLs are only allowed for localhost/127.0.0.1/::1");
+    }
+    Ok(())
+}
+
+fn extract_url_host(hostport: &str) -> &str {
+    if let Some(inner) = hostport.strip_prefix('[') {
+        // IPv6 literal: [::1]:port
+        return inner.split(']').next().unwrap_or(inner);
+    }
+    hostport
+        .rsplit_once(':')
+        .map(|(host, _port)| host)
+        .unwrap_or(hostport)
+}
+
+fn is_loopback_browser_host(host: &str) -> bool {
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+/// Percent-encode a query component using the unreserved set (RFC 3986).
+fn percent_encode_query_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
+/// Best-effort browser open. Caller MUST pass a URL that already passed
+/// [`validate_browser_url`]. On Windows, validation is the primary control
+/// against command injection via `cmd /C start`.
 fn open_url(url: &str) -> Result<()> {
+    // Defense in depth: refuse to open unvalidated URLs even if a caller
+    // forgets the pre-check.
+    validate_browser_url(url)?;
+
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open").arg(url).spawn()?;
@@ -682,8 +1448,10 @@ fn open_url(url: &str) -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
+        // Empty title argument prevents `start` from treating a quoted URL
+        // as a window title. Only invoked after validate_browser_url.
         std::process::Command::new("cmd")
-            .args(["/C", "start", url])
+            .args(["/C", "start", "", url])
             .spawn()?;
     }
     Ok(())
@@ -692,6 +1460,121 @@ fn open_url(url: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_browser_url_accepts_https() {
+        validate_browser_url("https://auth.heddle.sh/device").expect("https ok");
+        validate_browser_url("https://auth.heddle.sh/device?code=ABCD-1234").expect("https+query");
+    }
+
+    #[test]
+    fn validate_browser_url_accepts_loopback_http() {
+        validate_browser_url("http://127.0.0.1:8421/path").expect("loopback http");
+        validate_browser_url("http://localhost:8421/device").expect("localhost http");
+        validate_browser_url("http://[::1]:8421/path").expect("ipv6 loopback http");
+    }
+
+    #[test]
+    fn validate_browser_url_rejects_injection_and_dangerous_schemes() {
+        assert!(
+            validate_browser_url("https://x.com & calc").is_err(),
+            "shell metacharacters must be rejected"
+        );
+        assert!(validate_browser_url("file:///etc/passwd").is_err());
+        assert!(validate_browser_url("javascript:alert(1)").is_err());
+        assert!(validate_browser_url("").is_err());
+        assert!(validate_browser_url("http://example.com/device").is_err());
+        assert!(validate_browser_url("https://evil.com\"&calc").is_err());
+    }
+
+    #[test]
+    fn validate_browser_url_rejects_percent_and_redirection() {
+        // `%` enables Windows env-var expansion (`%VAR%`) via `cmd /C start`.
+        assert!(
+            validate_browser_url("https://evil.com/%USERPROFILE%").is_err(),
+            "percent (env-var expansion) must be rejected"
+        );
+        // `<` / `>` enable redirection.
+        assert!(
+            validate_browser_url("https://evil.com/a<b").is_err(),
+            "< (redirection) must be rejected"
+        );
+        assert!(
+            validate_browser_url("https://evil.com/a>b").is_err(),
+            "> (redirection) must be rejected"
+        );
+        // A crafted device/auth URL combining them must not slip through.
+        assert!(validate_browser_url("https://evil.com/?x=%TEMP%>out").is_err());
+    }
+
+    /// Serializes tests that mutate `HEDDLE_REMOTE_INSECURE`.
+    static INSECURE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_insecure_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = INSECURE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("HEDDLE_REMOTE_INSECURE").ok();
+        match value {
+            Some(v) => unsafe { std::env::set_var("HEDDLE_REMOTE_INSECURE", v) },
+            None => unsafe { std::env::remove_var("HEDDLE_REMOTE_INSECURE") },
+        }
+        let out = f();
+        match prev {
+            Some(v) => unsafe { std::env::set_var("HEDDLE_REMOTE_INSECURE", v) },
+            None => unsafe { std::env::remove_var("HEDDLE_REMOTE_INSECURE") },
+        }
+        out
+    }
+
+    #[test]
+    fn cleartext_gate_allows_https_and_loopback() {
+        with_insecure_env(None, || {
+            enforce_auth_cleartext_gate("https://grpc.heddle.sh").expect("https always allowed");
+            enforce_auth_cleartext_gate("http://127.0.0.1:8421").expect("loopback v4 allowed");
+            enforce_auth_cleartext_gate("http://[::1]:8421").expect("loopback v6 allowed");
+            enforce_auth_cleartext_gate("http://localhost:8421").expect("localhost allowed");
+        });
+    }
+
+    #[test]
+    fn cleartext_gate_rejects_nonloopback_without_insecure() {
+        with_insecure_env(None, || {
+            let err = enforce_auth_cleartext_gate("http://192.168.1.44:8421")
+                .expect_err("non-loopback cleartext must be refused");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("refusing cleartext connection to non-loopback"),
+                "unexpected message: {msg}"
+            );
+            // Fail-closed: a bare non-loopback host that inferred http:// is also
+            // refused.
+            assert!(enforce_auth_cleartext_gate("http://server.internal:8421").is_err());
+        });
+    }
+
+    #[test]
+    fn cleartext_gate_allows_nonloopback_with_insecure_opt_in() {
+        with_insecure_env(Some("1"), || {
+            enforce_auth_cleartext_gate("http://192.168.1.44:8421")
+                .expect("insecure opt-in permits non-loopback cleartext");
+        });
+    }
+
+    #[test]
+    fn cleartext_gate_rejects_invalid_insecure_value() {
+        with_insecure_env(Some("maybe"), || {
+            assert!(
+                enforce_auth_cleartext_gate("http://192.168.1.44:8421").is_err(),
+                "an ambiguous opt-in value must fail closed"
+            );
+        });
+    }
+
+    #[test]
+    fn percent_encode_query_component_encodes_reserved() {
+        assert_eq!(percent_encode_query_component("ABCD-1234"), "ABCD-1234");
+        assert_eq!(percent_encode_query_component("a b"), "a%20b");
+        assert_eq!(percent_encode_query_component("x&y"), "x%26y");
+    }
 
     #[test]
     fn infers_http_for_plain_ip_targets() {
@@ -906,6 +1789,229 @@ mod tests {
             private_key_pem: None,
             expires_at: None,
         }
+    }
+
+    fn stored_device_parent() -> (ServerCredential, String) {
+        let signer = Ed25519Signer::generate().expect("device key");
+        let private_key_pem = signer.to_pem().expect("device PEM");
+        let expires_at = chrono::Utc::now() + chrono::Duration::hours(2);
+        let token = biscuit_auth::Biscuit::builder()
+            .fact(r#"user("alice")"#)
+            .expect("user fact")
+            .fact(r#"credential_id("root-credential")"#)
+            .expect("credential fact")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
+            .expect("device PoP fact")
+            .fact(format!("expires_at({})", expires_at.to_rfc3339()).as_str())
+            .expect("expiry fact")
+            .check(format!("check if time($now), $now < {}", expires_at.to_rfc3339()).as_str())
+            .expect("expiry check")
+            .build(&biscuit_auth::KeyPair::new())
+            .expect("build parent")
+            .to_base64()
+            .expect("encode parent");
+        (
+            ServerCredential {
+                token,
+                subject: "alice".to_string(),
+                device_id: Some("device-root".to_string()),
+                credential_id: Some("root-credential".to_string()),
+                private_key_pem: Some(private_key_pem.clone()),
+                expires_at: Some(expires_at.to_rfc3339()),
+            },
+            private_key_pem,
+        )
+    }
+
+    #[test]
+    fn derive_agent_installs_inherited_pop_child_and_supports_narrower_subderivation() {
+        with_isolated_home(|| {
+            let server = "grpc.S";
+            let (parent, private_key_pem) = stored_device_parent();
+            credentials::store_server_credential(server, parent).expect("store parent");
+
+            cmd_auth_derive_agent(
+                server,
+                Some("agent-parent".to_string()),
+                3600,
+                vec!["repo:acme/heddle".to_string()],
+                vec!["Push".to_string()],
+                None,
+                false,
+            )
+            .expect("derive and install parent agent");
+            let installed = credentials::get_server_credential(server)
+                .expect("load installed child")
+                .expect("installed child");
+            assert_eq!(
+                installed.private_key_pem.as_deref(),
+                Some(private_key_pem.as_str()),
+                "W1 child inherits the parent PoP key"
+            );
+            assert_eq!(installed.device_id.as_deref(), Some("device-root"));
+            assert!(
+                installed.credential_id.is_none(),
+                "derived tokens must not auto-rotate into an unattenuated token"
+            );
+            let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(installed.token.as_bytes())
+                .expect("parse installed child");
+            assert_eq!(parsed.block_count(), 2);
+            assert!(
+                parsed
+                    .print_block_source(1)
+                    .expect("child block")
+                    .contains("agent_scope(\"repo\", \"acme/heddle\")")
+            );
+
+            cmd_auth_derive_agent(
+                server,
+                Some("agent-child".to_string()),
+                600,
+                vec!["repo:acme/heddle/subtree".to_string()],
+                vec!["Push".to_string()],
+                None,
+                false,
+            )
+            .expect("derive narrower subagent");
+            let subagent = credentials::get_server_credential(server)
+                .expect("load subagent")
+                .expect("installed subagent");
+            let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(subagent.token.as_bytes())
+                .expect("parse subagent");
+            assert_eq!(
+                parsed.block_count(),
+                3,
+                "delegation tree adds one block per hop"
+            );
+
+            let error = cmd_auth_derive_agent(
+                server,
+                Some("agent-widening".to_string()),
+                300,
+                vec!["repo:acme".to_string()],
+                vec!["Push".to_string()],
+                None,
+                false,
+            )
+            .expect_err("subagent scope widening must be rejected");
+            assert!(error.to_string().contains("would widen"));
+        });
+    }
+
+    #[test]
+    fn derive_agent_export_contains_token_and_metadata_but_no_device_key() {
+        with_isolated_home(|| {
+            let server = "grpc.S";
+            let (parent, private_key_pem) = stored_device_parent();
+            credentials::store_server_credential(server, parent).expect("store parent");
+            let export_dir = repo::identity::heddle_home_dir().join("agent-export");
+            objects::fs_atomic::create_private_dir_all(&export_dir)
+                .expect("create legacy export directory");
+            objects::fs_atomic::write_file_atomic_secret(
+                &export_dir.join("device-key.pem"),
+                private_key_pem.as_bytes(),
+            )
+            .expect("seed legacy exported device key");
+
+            cmd_auth_derive_agent(
+                server,
+                Some("agent-export".to_string()),
+                3600,
+                vec!["repo:acme/heddle".to_string()],
+                vec!["Push".to_string()],
+                Some(&export_dir),
+                false,
+            )
+            .expect("derive token-only export");
+
+            let mut entries = std::fs::read_dir(&export_dir)
+                .expect("read export directory")
+                .map(|entry| {
+                    entry
+                        .expect("export entry")
+                        .file_name()
+                        .into_string()
+                        .expect("UTF-8 export name")
+                })
+                .collect::<Vec<_>>();
+            entries.sort();
+            assert_eq!(entries, ["metadata.json", "token"]);
+
+            let token = std::fs::read(export_dir.join("token")).expect("read exported token");
+            let metadata =
+                std::fs::read(export_dir.join("metadata.json")).expect("read export metadata");
+            let export_bytes = [token.as_slice(), metadata.as_slice()].concat();
+            assert!(
+                !export_bytes
+                    .windows(private_key_pem.len())
+                    .any(|window| window == private_key_pem.as_bytes()),
+                "portable export must not contain the device private key"
+            );
+            assert!(
+                !export_bytes
+                    .windows(b"-----BEGIN PRIVATE KEY-----".len())
+                    .any(|window| window == b"-----BEGIN PRIVATE KEY-----"),
+                "portable export must not contain a PEM private-key header"
+            );
+
+            let metadata: serde_json::Value =
+                serde_json::from_slice(&metadata).expect("parse export metadata");
+            assert_eq!(metadata["server"], server);
+            assert_eq!(metadata["subject"], "alice");
+            assert_eq!(metadata["scopes"], serde_json::json!(["repo:acme/heddle"]));
+            assert!(metadata["expires_at"].as_str().is_some());
+            biscuit_auth::UnverifiedBiscuit::from_base64(&token)
+                .expect("exported token is a Biscuit");
+        });
+    }
+
+    #[test]
+    fn derive_agent_allow_flag_cannot_select_unsafe_operations() {
+        for operation in [
+            "CreateServiceAccount",
+            "IssueServiceAccountCredential",
+            "DeleteRepository",
+            "DeleteNamespace",
+        ] {
+            let error = select_agent_operations(vec![operation.to_string()])
+                .expect_err("unsafe operation must be outside CLI ceiling");
+            assert!(
+                error
+                    .to_string()
+                    .contains("outside the safe agent operation ceiling")
+            );
+        }
+    }
+
+    #[test]
+    fn auth_status_qualifies_a_credential_without_a_proof_key() {
+        let output = auth_status_output("grpc.S", Some(sample_credential()));
+
+        assert!(output.authenticated);
+        assert!(!output.proof_key_available);
+        assert!(
+            output
+                .recommended_action
+                .as_deref()
+                .is_some_and(|action| action.contains("auth login --server grpc.S"))
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_login_requires_an_explicit_server() {
+        let error = cmd_auth(
+            &TextCtx,
+            AuthCommand::Login {
+                server: None,
+                open_browser: false,
+                token: Some("token".to_string()),
+                key_file: Some(std::path::PathBuf::from("device.pem")),
+            },
+        )
+        .await
+        .expect_err("headless install without --server must fail closed");
+
+        assert!(error.to_string().contains("--server is required"));
     }
 
     /// On a successful logout, both the credential and the matching device

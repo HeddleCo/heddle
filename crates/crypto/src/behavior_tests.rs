@@ -7,8 +7,8 @@ use objects::{
 use tempfile::TempDir;
 
 use crate::{
-    Ed25519Signer, P256Signer, Signer, SignerError, StateSignatureError, StateSigningExt,
-    load_signer, verify_payload_signature,
+    Ed25519Signer, P256Signer, Signer, SignerError, StateSignatureError, load_signer,
+    state_signature_from_signer, verify_payload_signature, verify_state_signature_bytes,
 };
 
 fn assert_verifies_with_dispatch(signer: &dyn Signer, payload: &[u8]) {
@@ -245,23 +245,14 @@ fn invalid_seed_public_keys_and_signature_shapes_are_rejected() {
 #[test]
 fn state_signing_verifies_signed_state_and_rejects_tamper_or_unsigned_state() {
     let signer = Ed25519Signer::generate().expect("generate signer");
-    let mut state = sample_state();
-
-    let err = state
-        .verify_signature()
-        .expect_err("unsigned state must not verify");
-    assert!(
-        matches!(err, StateSignatureError::InvalidSignature(message) if message.contains("no signature"))
-    );
-
-    state.sign(&signer).expect("sign state");
-    state
-        .verify_signature()
+    let state = sample_state();
+    let signature =
+        state_signature_from_signer(&state.compute_hash(), &signer).expect("sign state");
+    verify_state_signature_bytes(&signature, &state.compute_hash())
         .expect("freshly signed state verifies");
 
     let tampered = state.with_intent("tampered after signing");
-    let err = tampered
-        .verify_signature()
+    let err = verify_state_signature_bytes(&signature, &tampered.compute_hash())
         .expect_err("tampered state must not verify");
     assert!(matches!(
         err,

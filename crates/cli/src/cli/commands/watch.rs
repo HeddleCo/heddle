@@ -43,9 +43,14 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
+use heddle_core::watch_plan::{
+    DEFAULT_POLL_INTERVAL_MS, MAX_TAIL_WINDOW, WatchFilterPlanError, WatchNotifyClass,
+    WatchSincePlanError, is_relevant_watch_event, plan_watch_filter, plan_watch_since_cutoff,
+    watch_passes_filter,
+};
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use objects::{object::ChangeId, store::ObjectStore};
+use objects::{object::StateId, store::ObjectStore};
 use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord};
 use repo::Repository;
 use serde::Serialize;
@@ -53,24 +58,13 @@ use serde::Serialize;
 use super::{advice::RecoveryAdvice, command_runtime_contract};
 use crate::cli::{
     Cli, JsonOutputMode, WatchArgs, json_output_mode_for_kind,
-    style::{accent, change_id as style_change_id, confidence as style_confidence, dim, warn},
+    style::{accent, confidence as style_confidence, dim, state_id as style_state_id, warn},
 };
-
-/// Reasonable default debounce — `notify` can fire several modify
-/// events for one atomic rewrite, so we coalesce within this window.
-const DEFAULT_POLL_INTERVAL_MS: u64 = 200;
 
 /// Truncation budget for intent text in columnar mode. Long intents
 /// get an ellipsis suffix; the column stays predictable so eyes can
 /// track confidence values without horizontal scanning.
 const INTENT_DISPLAY_WIDTH: usize = 50;
-
-/// Hard cap on the in-process recent-entries window. Keeps memory
-/// bounded on very long-running watch sessions; if the oplog has
-/// more than this many entries, only the tail is replayed —
-/// chronological correctness past this window isn't a `watch`
-/// concern (use `heddle log` for full history).
-const MAX_TAIL_WINDOW: usize = 100_000;
 
 /// Entry kinds the user can pass to `--filter`. Names match the `kind` field
 /// emitted in JSON mode (which is `OpRecord::verb()`) so a `--filter snapshot`
@@ -191,22 +185,16 @@ fn json_mode(cli: &Cli, _args: &WatchArgs) -> bool {
 /// Empty string => no filter. Unknown kinds raise — easier to fix a
 /// typo at boot than to wonder why nothing prints.
 fn parse_filter(spec: Option<&str>) -> Result<Option<Vec<String>>> {
-    let Some(raw) = spec else {
-        return Ok(None);
-    };
-    let kinds: Vec<String> = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-    if kinds.is_empty() {
-        return Ok(None);
-    }
     let valid = valid_filter_kinds();
-    for kind in &kinds {
-        if !valid.contains(&kind.as_str()) {
-            return Err(anyhow!(RecoveryAdvice::invalid_usage(
+    plan_watch_filter(spec, &valid).map_err(|err| match err {
+        WatchFilterPlanError::EmptyToken => anyhow!(RecoveryAdvice::invalid_usage(
+            "watch_filter_invalid",
+            "empty event kind token in --filter",
+            "Use a comma-separated list of non-empty kinds, or omit `--filter`.",
+            "heddle watch --filter snapshot,merge",
+        )),
+        WatchFilterPlanError::UnknownKind { kind, valid } => {
+            anyhow!(RecoveryAdvice::invalid_usage(
                 "watch_filter_invalid",
                 format!(
                     "unknown event kind in --filter: {kind:?} (valid: {})",
@@ -214,10 +202,9 @@ fn parse_filter(spec: Option<&str>) -> Result<Option<Vec<String>>> {
                 ),
                 "Use one of the valid watch event kinds, or omit `--filter`.",
                 "heddle watch --filter snapshot",
-            )));
+            ))
         }
-    }
-    Ok(Some(kinds))
+    })
 }
 
 /// Parse a duration like `30s` / `5m` / `1h` / `2d` into a UTC
@@ -225,35 +212,26 @@ fn parse_filter(spec: Option<&str>) -> Result<Option<Vec<String>>> {
 /// --since`); intentionally *not* a full ISO-8601 timestamp parser —
 /// keep the operator UX simple.
 fn parse_since(spec: &str) -> Result<DateTime<Utc>> {
-    let trimmed = spec.trim();
-    if trimmed.is_empty() {
-        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+    plan_watch_since_cutoff(spec, Utc::now()).map_err(|err| match err {
+        WatchSincePlanError::Empty => anyhow!(RecoveryAdvice::invalid_usage(
             "watch_since_empty",
             "--since cannot be empty",
             "Use a duration like `30s`, `5m`, `1h`, or `2d`, or omit `--since`.",
             "heddle watch --since 5m",
-        )));
-    }
-    let (num_part, unit) = trimmed.split_at(
-        trimmed
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(trimmed.len()),
-    );
-    let n: i64 = num_part
-        .parse()
-        .with_context(|| format!("--since: expected leading digits in {spec:?}"))?;
-    let delta = match unit {
-        "s" | "" => ChronoDuration::seconds(n),
-        "m" => ChronoDuration::minutes(n),
-        "h" => ChronoDuration::hours(n),
-        "d" => ChronoDuration::days(n),
-        other => {
-            return Err(anyhow!(
-                "--since: unknown unit {other:?} (use s, m, h, or d)"
-            ));
-        }
-    };
-    Ok(Utc::now() - delta)
+        )),
+        WatchSincePlanError::InvalidNumber { spec } => anyhow!(RecoveryAdvice::invalid_usage(
+            "watch_since_invalid_number",
+            format!("--since: expected leading digits in {spec:?}"),
+            "Use a duration like `30s`, `5m`, `1h`, or `2d`.",
+            "heddle watch --since 5m",
+        )),
+        WatchSincePlanError::UnknownUnit { unit } => anyhow!(RecoveryAdvice::invalid_usage(
+            "watch_since_unknown_unit",
+            format!("--since: unknown unit {unit:?} (use s, m, h, or d)"),
+            "Use a duration like `30s`, `5m`, `1h`, or `2d`.",
+            "heddle watch --since 5m",
+        )),
+    })
 }
 
 /// Install a Ctrl-C handler that flips an atomic flag the tail loop
@@ -368,15 +346,15 @@ fn drain_and_emit_pending(
     Ok(!entries.is_empty())
 }
 
-/// Returns `true` for the notify event kinds that indicate the
-/// oplog file (or its parent dir) just got rewritten. Atomic
-/// `write_file_atomic` produces `Create` (the temp file) and
-/// `Modify::Name(...)` (the rename) — both are relevant.
+/// Map `notify` event kinds onto the pure watch relevance classifier.
 fn is_relevant_event(kind: &EventKind) -> bool {
-    matches!(
-        kind,
-        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-    )
+    let class = match kind {
+        EventKind::Modify(_) => WatchNotifyClass::Modify,
+        EventKind::Create(_) => WatchNotifyClass::Create,
+        EventKind::Remove(_) => WatchNotifyClass::Remove,
+        _ => WatchNotifyClass::Other,
+    };
+    is_relevant_watch_event(class)
 }
 
 /// Read the oplog and return all entries with `id > watermark`,
@@ -420,7 +398,7 @@ fn drain_pending(
 fn annotate_entry(entry: OpEntry, repo: &Repository) -> EmittedEntry {
     let kind = kind_for(&entry.operation);
     let thread = thread_for(&entry.operation, &kind);
-    let change = primary_change_id(&entry.operation);
+    let change = primary_state_id(&entry.operation);
     let (intent, confidence, actor) = match &change {
         Some(id) => state_lookup(repo, id),
         None => (None, None, None),
@@ -429,7 +407,7 @@ fn annotate_entry(entry: OpEntry, repo: &Repository) -> EmittedEntry {
         entry,
         kind,
         thread,
-        change_id: change,
+        state_id: change,
         intent,
         confidence,
         actor,
@@ -443,9 +421,9 @@ fn annotate_entry(entry: OpEntry, repo: &Repository) -> EmittedEntry {
 ///    legitimately may not be locally present.
 fn state_lookup(
     repo: &Repository,
-    change_id: &ChangeId,
+    state_id: &StateId,
 ) -> (Option<String>, Option<f32>, Option<ActorInfo>) {
-    let Ok(Some(state)) = repo.store().get_state(change_id) else {
+    let Ok(Some(state)) = repo.store().get_state(state_id) else {
         return (None, None, None);
     };
     let actor = state.attribution.agent.as_ref().map(|agent| ActorInfo {
@@ -495,9 +473,9 @@ fn thread_for(op: &OpRecord, _kind: &str) -> Option<String> {
 }
 
 /// Pick the change-id that best identifies this op for state lookup
-/// and for the `change_id` column. For Snapshot/Goto/ThreadUpdate
+/// and for the `state_id` column. For Snapshot/Goto/ThreadUpdate
 /// this is the new state; for ThreadCreate it's the seeded state.
-fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
+fn primary_state_id(op: &OpRecord) -> Option<StateId> {
     match op {
         OpRecord::Snapshot { new_state, .. } => Some(*new_state),
         OpRecord::Goto { target, .. } => Some(*target),
@@ -534,7 +512,7 @@ struct EmittedEntry {
     entry: OpEntry,
     kind: String,
     thread: Option<String>,
-    change_id: Option<ChangeId>,
+    state_id: Option<StateId>,
     intent: Option<String>,
     confidence: Option<f32>,
     actor: Option<ActorInfo>,
@@ -557,7 +535,7 @@ struct WatchLineJson<'a> {
     ts: String,
     thread: Option<&'a str>,
     kind: &'a str,
-    change_id: Option<String>,
+    state_id: Option<String>,
     intent: Option<&'a str>,
     confidence: Option<f32>,
     actor: Option<&'a ActorInfo>,
@@ -587,19 +565,11 @@ impl Renderer {
     }
 
     fn passes_filter(&self, entry: &EmittedEntry) -> bool {
-        let Some(allowed) = &self.filter else {
-            return true;
-        };
         // `merge` is a UX alias the operator can pass — it matches
         // ThreadUpdate (the wire-level kind for both ordinary
-        // captures-on-thread and merges into a target). When the
-        // operator wants only "true merges", they can post-filter
-        // on `change_id` distinct-ness; that nuance is out of
-        // scope for the CLI flag.
-        let kind = entry.kind.as_str();
-        allowed
-            .iter()
-            .any(|k| k == kind || (k == "merge" && kind == "thread_update"))
+        // captures-on-thread and merges into a target). Matching
+        // lives in `heddle_core::watch_plan`.
+        watch_passes_filter(self.filter.as_deref(), entry.kind.as_str())
     }
 
     fn render_json(&self, e: &EmittedEntry) -> String {
@@ -607,7 +577,7 @@ impl Renderer {
             ts: e.entry.timestamp.to_rfc3339_opts(SecondsFormat::Secs, true),
             thread: e.thread.as_deref(),
             kind: e.kind.as_str(),
-            change_id: e.change_id.as_ref().map(|id| id.to_string_full()),
+            state_id: e.state_id.as_ref().map(|id| id.to_string_full()),
             intent: e.intent.as_deref(),
             confidence: e.confidence,
             actor: e.actor.as_ref(),
@@ -623,7 +593,7 @@ impl Renderer {
 
     /// Columnar text mode. Widths are tuned for an 80-col terminal:
     /// `HH:MM:SS` (8) + 2sp + thread (28) + 2sp + kind (15) + 2sp +
-    /// change_id (15) + 2sp + intent (50) + 2sp + confidence (10) ≈
+    /// state_id (15) + 2sp + intent (50) + 2sp + confidence (10) ≈
     /// 132 chars worst-case. Most rows are well under that because
     /// `dim()` wraps the timestamp/change-id in escapes that don't
     /// add visible width.
@@ -637,10 +607,10 @@ impl Renderer {
         let kind_pad = pad_right(kind_plain, 15);
         let kind_field = kind_styled + &" ".repeat(kind_pad.len() - kind_plain.len());
         let change = e
-            .change_id
+            .state_id
             .map(|id| id.short())
             .unwrap_or_else(|| "-".to_string());
-        let change_field = pad_right(&style_change_id(&change), 15 + ansi_overhead(&change));
+        let change_field = pad_right(&style_state_id(&change), 15 + ansi_overhead(&change));
         let intent = truncate(e.intent.as_deref().unwrap_or(""), INTENT_DISPLAY_WIDTH);
         let intent_padded = pad_right(&intent, INTENT_DISPLAY_WIDTH);
         let confidence_field = match e.confidence {
@@ -722,14 +692,14 @@ fn visible_width(s: &str) -> usize {
 /// Used to compensate when we want a `pad_right` target that already
 /// accounts for the escape overhead — see `render_text`.
 fn ansi_overhead(plain: &str) -> usize {
-    let styled = style_change_id(plain);
+    let styled = style_state_id(plain);
     styled.len() - plain.len()
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use objects::object::ChangeId;
+    use objects::object::StateId;
     use oplog::{OpEntry, OpRecord};
     use tempfile::TempDir;
 
@@ -816,8 +786,8 @@ mod tests {
     #[test]
     fn drain_pending_emits_only_above_watermark() {
         let (_tmp, heddle_dir) = synthetic_repo();
-        let cid_a = ChangeId::generate();
-        let cid_b = ChangeId::generate();
+        let cid_a = StateId::from_bytes([79; 32]);
+        let cid_b = StateId::from_bytes([80; 32]);
         let ids = write_entries(
             &heddle_dir,
             vec![
@@ -856,7 +826,7 @@ mod tests {
             json: true,
             filter: Some(vec!["snapshot".into()]),
         };
-        let snap_id = ChangeId::generate();
+        let snap_id = StateId::from_bytes([81; 32]);
         let snap = EmittedEntry {
             entry: make_entry(
                 1,
@@ -869,7 +839,7 @@ mod tests {
             ),
             kind: "snapshot".into(),
             thread: None,
-            change_id: None,
+            state_id: None,
             intent: None,
             confidence: None,
             actor: None,
@@ -879,13 +849,13 @@ mod tests {
                 2,
                 OpRecord::ThreadCreate {
                     name: "x".into(),
-                    state: ChangeId::generate(),
+                    state: StateId::from_bytes([82; 32]),
                     manager_snapshot: None,
                 },
             ),
             kind: "thread_create".into(),
             thread: Some("x".into()),
-            change_id: None,
+            state_id: None,
             intent: None,
             confidence: None,
             actor: None,
@@ -900,7 +870,7 @@ mod tests {
             json: true,
             filter: None,
         };
-        let cid = ChangeId::generate();
+        let cid = StateId::from_bytes([83; 32]);
         let entry = EmittedEntry {
             entry: make_entry(
                 7,
@@ -913,7 +883,7 @@ mod tests {
             ),
             kind: "snapshot".into(),
             thread: Some("modulo-race/approach-anthropic".into()),
-            change_id: Some(cid),
+            state_id: Some(cid),
             intent: Some("feat(modulo): error-returning impl".into()),
             confidence: Some(0.92),
             actor: Some(ActorInfo {
@@ -928,7 +898,7 @@ mod tests {
         assert_eq!(value["confidence"], 0.92);
         assert_eq!(value["actor"]["provider"], "anthropic");
         assert_eq!(value["id"], 7);
-        assert!(value["change_id"].is_string());
+        assert!(value["state_id"].is_string());
         assert!(value["ts"].as_str().unwrap().ends_with('Z'));
     }
 
@@ -946,7 +916,7 @@ mod tests {
             json: false,
             filter: None,
         };
-        let cid = ChangeId::generate();
+        let cid = StateId::from_bytes([84; 32]);
         let entry = EmittedEntry {
             entry: make_entry(
                 1,
@@ -959,7 +929,7 @@ mod tests {
             ),
             kind: "snapshot".into(),
             thread: Some("modulo-race/approach-anthropic".into()),
-            change_id: Some(cid),
+            state_id: Some(cid),
             intent: Some("feat(modulo): error-returning impl".into()),
             confidence: Some(0.92),
             actor: None,
@@ -975,12 +945,12 @@ mod tests {
     }
 
     #[test]
-    fn primary_change_id_covers_all_variants() {
+    fn primary_state_id_covers_all_variants() {
         // Smoke test: every OpRecord variant resolves to *some*
-        // change-id so the change_id column is never blank for a
+        // change-id so the state_id column is never blank for a
         // real op. (Goto/Fork/Collapse have no thread but they do
         // have an associated state.)
-        let cid = ChangeId::generate();
+        let cid = StateId::from_bytes([85; 32]);
         for op in [
             OpRecord::Snapshot {
                 new_state: cid,
@@ -1029,7 +999,7 @@ mod tests {
                 state: cid,
             },
         ] {
-            assert!(primary_change_id(&op).is_some());
+            assert!(primary_state_id(&op).is_some());
         }
     }
 }

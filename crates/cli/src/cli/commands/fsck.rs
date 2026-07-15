@@ -3,36 +3,45 @@
 
 use anyhow::{Result, anyhow};
 use heddle_core::{FsckOptions, FsckRepair, fsck};
+use repo::RepositorySourceAuthority;
 
 use super::advice::RecoveryAdvice;
-use crate::cli::{Cli, FsckRepairTarget, execution_context_from_cli, render, should_output_json};
+use crate::cli::{Cli, execution_context_from_cli, render, should_output_json};
 
-#[allow(clippy::too_many_arguments)]
-pub fn cmd_fsck(
+pub fn cmd_fsck(cli: &Cli, full: bool, thorough: bool, git_projection: bool) -> Result<()> {
+    let ctx = execution_context_from_cli(cli)?;
+    run_fsck(cli, &ctx, full, thorough, git_projection, None)
+}
+
+pub fn cmd_fsck_repair_git(
     cli: &Cli,
-    full: bool,
-    thorough: bool,
-    git_projection: bool,
-    repair: Option<FsckRepairTarget>,
     ref_name: Option<String>,
     prefer: Option<String>,
     preview: bool,
 ) -> Result<()> {
     let ctx = execution_context_from_cli(cli)?;
-    let repairs = match repair {
-        Some(FsckRepairTarget::Git) => repair_git(ctx.require_repo()?, ref_name, prefer, preview)?,
-        None => Vec::new(),
-    };
+    let repairs = repair_git(ctx.require_repo()?, ref_name, prefer, preview)?;
+    run_fsck(cli, &ctx, false, false, true, Some(repairs))
+}
+
+fn run_fsck(
+    cli: &Cli,
+    ctx: &heddle_core::ExecutionContext,
+    full: bool,
+    thorough: bool,
+    git_projection: bool,
+    repairs: Option<Vec<FsckRepair>>,
+) -> Result<()> {
     let mut report = fsck(
-        &ctx,
+        ctx,
         FsckOptions {
             full,
             thorough,
-            git_projection: git_projection || repair.is_some(),
+            git_projection,
         },
     )?;
 
-    if repair.is_some() {
+    if let Some(repairs) = repairs {
         report.repair_target = Some("git".to_string());
         report.repaired = repairs.iter().any(|repair| repair.repaired);
         report.repairs = repairs;
@@ -58,10 +67,25 @@ fn repair_git(
     prefer: Option<String>,
     preview: bool,
 ) -> Result<Vec<FsckRepair>> {
-    if let Some(ref_name) = ref_name {
-        return repair_git_ref(repo, &ref_name, prefer, preview);
+    let required_direction = match repo.source_authority() {
+        RepositorySourceAuthority::GitOverlay => "git",
+        RepositorySourceAuthority::Native => "heddle",
+    };
+    let requested_direction = prefer.as_deref().unwrap_or(required_direction);
+    if requested_direction != required_direction {
+        return Err(anyhow!(git_repair_authority_mismatch_advice(
+            repo.source_authority(),
+            requested_direction,
+            ref_name.as_deref(),
+        )));
     }
-    if prefer.is_some() || preview {
+    if let Some(ref_name) = ref_name {
+        return repair_git_ref(repo, &ref_name, required_direction, preview);
+    }
+    if repo.source_authority() == RepositorySourceAuthority::Native {
+        return Err(anyhow!(git_repair_native_ref_required_advice()));
+    }
+    if preview {
         return Err(anyhow!(git_repair_ref_required_advice()));
     }
     repair_git_metadata(repo)
@@ -69,7 +93,7 @@ fn repair_git(
 
 #[cfg(feature = "git-overlay")]
 fn repair_git_metadata(repo: &repo::Repository) -> Result<Vec<FsckRepair>> {
-    use crate::git_projection_engine::GitProjection;
+    use heddle_git_projection::GitProjection;
 
     let mut bridge = GitProjection::new(repo);
     if !bridge.mirror_path().exists() && sley::Repository::discover(repo.root()).is_err() {
@@ -106,7 +130,7 @@ fn repair_git_metadata(repo: &repo::Repository) -> Result<Vec<FsckRepair>> {
 
     let before_seed = bridge.mapping.iter().count();
     let git_repo = bridge.open_git_repo()?;
-    bridge.seed_ingest_identity_mappings_from_mirror(&git_repo)?;
+    bridge.seed_ingest_identity_mappings_from_repo(&git_repo)?;
     let seeded = bridge.mapping.iter().count().saturating_sub(before_seed);
     if seeded > 0 {
         bridge.save_mapping_to_disk()?;
@@ -133,48 +157,26 @@ fn repair_git_metadata(repo: &repo::Repository) -> Result<Vec<FsckRepair>> {
 fn repair_git_ref(
     repo: &repo::Repository,
     ref_name: &str,
-    prefer: Option<String>,
+    prefer: &str,
     preview: bool,
 ) -> Result<Vec<FsckRepair>> {
-    use heddle_core::status::next_action::{
-        canonical_git_import_ref_command, canonical_git_repair_ref_command,
-        canonical_git_repair_ref_preview_command,
-    };
+    use heddle_git_projection::git_ingest::import_git_history;
     use ingest::ImportOptions;
     use objects::object::ThreadName;
     use refs::Head;
 
-    use crate::git_projection_engine::git_ingest::import_git_history;
-
-    let heddle_preview = canonical_git_repair_ref_preview_command(Some("heddle"), ref_name);
-    let git_preview = canonical_git_repair_ref_preview_command(Some("git"), ref_name);
-
-    let recovery_commands = match prefer.as_deref() {
-        Some("git") => vec![canonical_git_import_ref_command(ref_name)],
-        Some("heddle") => vec![canonical_git_repair_ref_command("heddle", ref_name)],
-        None if preview => vec![heddle_preview.clone(), git_preview.clone()],
-        None => return Err(anyhow!(git_repair_direction_required_advice(ref_name))),
-        _ => unreachable!("clap restricts --prefer values"),
-    };
-
     if preview {
-        return Ok(recovery_commands
-            .into_iter()
-            .map(|command| FsckRepair {
-                name: "git_projection_ref_reconcile_preview".to_string(),
-                repaired: false,
-                detail: command,
-                count: 0,
-            })
-            .collect());
+        return Ok(vec![FsckRepair {
+            name: "git_projection_ref_reconcile_preview".to_string(),
+            repaired: false,
+            detail: git_repair_ref_command(prefer, ref_name, false),
+            count: 0,
+        }]);
     }
 
-    let prefer = prefer
-        .as_deref()
-        .ok_or_else(|| git_repair_direction_required_advice(ref_name))?;
     match prefer {
         "git" => {
-            let mut bridge = crate::git_projection_engine::GitProjection::new(repo);
+            let mut bridge = heddle_git_projection::GitProjection::new(repo);
             let stats = import_git_history(
                 &mut bridge,
                 Some(repo.root()),
@@ -205,9 +207,9 @@ fn repair_git_ref(
                 .ok_or_else(|| git_repair_missing_heddle_thread_advice(ref_name))?;
             repo.goto_without_record(&state)?;
             repo.refs().write_head(&Head::Attached { thread: tn })?;
-            let mut bridge = crate::git_projection_engine::GitProjection::new(repo);
+            let mut bridge = heddle_git_projection::GitProjection::new(repo);
             match bridge.write_through_current_checkout()? {
-                crate::git_projection_engine::WriteThroughOutcome::Wrote(git_oid) => {
+                heddle_git_projection::WriteThroughOutcome::Wrote(git_oid) => {
                     Ok(vec![FsckRepair {
                         name: "git_projection_ref_prefer_heddle".to_string(),
                         repaired: true,
@@ -218,7 +220,7 @@ fn repair_git_ref(
                         count: 1,
                     }])
                 }
-                crate::git_projection_engine::WriteThroughOutcome::Skipped(reason) => Err(anyhow!(
+                heddle_git_projection::WriteThroughOutcome::Skipped(reason) => Err(anyhow!(
                     git_repair_write_through_skipped_advice(ref_name, reason.to_string(),)
                 )),
             }
@@ -231,66 +233,83 @@ fn git_repair_ref_required_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "git_repair_ref_required",
         "Git ref repair needs a ref name",
-        "Run `heddle fsck --repair git --ref <branch> --preview` to inspect ref repair choices.",
-        "--prefer or --preview was supplied without --ref",
+        "Run `heddle fsck repair git --ref <branch> --preview` to inspect the authority-valid repair.",
+        "--preview was supplied without --ref",
         "repairing a Git projection ref without a ref name could mutate the wrong branch",
         "Git refs, Heddle refs, index, remotes, and worktree files were left unchanged",
-        "heddle fsck --repair git --ref <branch> --preview",
-        vec!["heddle fsck --repair git --ref <branch> --preview".to_string()],
+        "heddle fsck repair git --ref <branch> --preview",
+        vec!["heddle fsck repair git --ref <branch> --preview".to_string()],
     )
 }
 
-fn git_repair_direction_required_advice(ref_name: &str) -> RecoveryAdvice {
-    use heddle_core::status::next_action::canonical_git_repair_ref_preview_command;
-
-    let preview_command = canonical_git_repair_ref_preview_command(None, ref_name);
+fn git_repair_native_ref_required_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
-        "git_repair_direction_required",
-        format!("Refusing to repair '{ref_name}': choose a local side before applying"),
-        format!(
-            "Run `{preview_command}` to inspect both local repair choices, then rerun with `--prefer heddle` or `--prefer git`."
-        ),
-        "no --prefer side was supplied for a non-preview Git repair",
-        "applying repair without a side would need to choose whether Heddle or the local Git branch is authoritative",
+        "git_repair_native_ref_required",
+        "Native Git projection repair needs a ref name",
+        "Run `heddle fsck repair git --ref <branch> --preview` to inspect the Heddle-to-Git projection repair.",
+        "the native repository has no projection ref target",
+        "repairing every retained Git ref could overwrite unrelated adapter state",
         "Git refs, Heddle refs, index, remotes, and worktree files were left unchanged",
-        preview_command.clone(),
-        vec![
-            preview_command,
-            canonical_git_repair_ref_preview_command(Some("heddle"), ref_name),
-            canonical_git_repair_ref_preview_command(Some("git"), ref_name),
-        ],
+        "heddle fsck repair git --ref <branch> --preview",
+        vec!["heddle fsck repair git --ref <branch> --preview".to_string()],
     )
+}
+
+fn git_repair_authority_mismatch_advice(
+    authority: RepositorySourceAuthority,
+    requested: &str,
+    ref_name: Option<&str>,
+) -> RecoveryAdvice {
+    match authority {
+        RepositorySourceAuthority::GitOverlay => RecoveryAdvice::safety_refusal(
+            "git_repair_requires_adoption",
+            "Git owns source history in this repository",
+            "Run `heddle adopt` before repairing Git from Heddle-native state.",
+            format!("--prefer {requested} conflicts with git-overlay source authority"),
+            "writing Heddle state through to Git would override the authoritative Git checkout",
+            "Git refs, Heddle refs, index, remotes, and worktree files were left unchanged",
+            "heddle adopt",
+            vec!["heddle adopt".to_string()],
+        ),
+        RepositorySourceAuthority::Native => {
+            let import = ref_name.map_or_else(
+                || "heddle import git".to_string(),
+                heddle_core::status::next_action::canonical_git_import_ref_command,
+            );
+            RecoveryAdvice::safety_refusal(
+                "git_repair_requires_import",
+                "Heddle owns source history in this repository",
+                format!(
+                    "Use `{import}` to import Git data explicitly instead of treating the retained adapter as authoritative."
+                ),
+                format!("--prefer {requested} conflicts with native source authority"),
+                "importing retained Git adapter state during repair would override Heddle-native history",
+                "Git refs, Heddle refs, index, remotes, and worktree files were left unchanged",
+                import.clone(),
+                vec![import],
+            )
+        }
+    }
 }
 
 fn git_repair_missing_heddle_thread_advice(ref_name: &str) -> RecoveryAdvice {
-    use heddle_core::status::next_action::{
-        canonical_adopt_ref_command, canonical_git_repair_ref_command,
-    };
+    use heddle_core::status::next_action::canonical_git_import_ref_command;
 
-    let import_command = canonical_adopt_ref_command(ref_name);
-    let reconcile_git_command = canonical_git_repair_ref_command("git", ref_name);
+    let import_command = canonical_git_import_ref_command(ref_name);
     RecoveryAdvice::safety_refusal(
         "git_repair_missing_heddle_thread",
         format!("Cannot prefer Heddle for '{ref_name}': no matching Heddle thread exists"),
-        format!(
-            "Import the Git ref with `{import_command}`, or repair by preferring Git with `{reconcile_git_command}`."
-        ),
+        format!("Import the Git ref explicitly with `{import_command}`."),
         format!("Heddle has no thread named '{ref_name}'"),
         "preferring Heddle would need to move Git to a Heddle state that does not exist",
         "Git refs, Heddle refs, and the worktree were left unchanged",
         import_command.clone(),
-        vec![
-            import_command,
-            reconcile_git_command,
-            "heddle thread list".to_string(),
-        ],
+        vec![import_command, "heddle thread list".to_string()],
     )
 }
 
 fn git_repair_write_through_skipped_advice(ref_name: &str, reason: String) -> RecoveryAdvice {
-    use heddle_core::status::next_action::canonical_git_repair_ref_preview_command;
-
-    let preview_command = canonical_git_repair_ref_preview_command(Some("heddle"), ref_name);
+    let preview_command = git_repair_ref_command("heddle", ref_name, true);
     RecoveryAdvice::safety_refusal(
         "git_repair_write_through_skipped",
         format!("Could not repair '{ref_name}' by preferring Heddle: {reason}"),
@@ -310,9 +329,19 @@ fn repair_git(
     _prefer: Option<String>,
     _preview: bool,
 ) -> Result<Vec<FsckRepair>> {
-    Err(anyhow!(
-        "fsck --repair git requires the git-overlay feature"
-    ))
+    Err(anyhow!("fsck repair git requires the git-overlay feature"))
+}
+
+fn git_repair_ref_command(prefer: &str, ref_name: &str, preview: bool) -> String {
+    let mut command = format!(
+        "heddle fsck repair git --prefer {} --ref {}",
+        repo::shell_quote(prefer),
+        repo::shell_quote(ref_name)
+    );
+    if preview {
+        command.push_str(" --preview");
+    }
+    command
 }
 
 fn fsck_integrity_error_advice(error_count: usize) -> RecoveryAdvice {
@@ -326,4 +355,75 @@ fn fsck_integrity_error_advice(error_count: usize) -> RecoveryAdvice {
         "heddle fsck --full",
         vec!["heddle fsck --full".to_string()],
     )
+}
+
+#[cfg(all(test, feature = "git-overlay"))]
+mod tests {
+    use repo::Repository;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn native_rejects_git_as_repair_authority_before_mutation() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let head_before = repo.head().unwrap();
+
+        let error = repair_git(
+            &repo,
+            Some("main".to_string()),
+            Some("git".to_string()),
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error
+                .downcast_ref::<RecoveryAdvice>()
+                .map(|advice| advice.kind),
+            Some("git_repair_requires_import")
+        );
+        assert_eq!(repo.head().unwrap(), head_before);
+    }
+
+    #[test]
+    fn git_overlay_rejects_heddle_as_repair_authority_before_mutation() {
+        let temp = TempDir::new().unwrap();
+        sley::Repository::init(temp.path()).unwrap();
+        let repo = Repository::init_git_overlay_sidecar(temp.path()).unwrap();
+        let head_before = repo.head().unwrap();
+
+        let error = repair_git(
+            &repo,
+            Some("main".to_string()),
+            Some("heddle".to_string()),
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error
+                .downcast_ref::<RecoveryAdvice>()
+                .map(|advice| advice.kind),
+            Some("git_repair_requires_adoption")
+        );
+        assert_eq!(repo.head().unwrap(), head_before);
+    }
+
+    #[test]
+    fn preview_defaults_to_the_repository_authority_direction() {
+        let native_dir = TempDir::new().unwrap();
+        let native = Repository::init_default(native_dir.path()).unwrap();
+        let native_preview = repair_git(&native, Some("main".to_string()), None, true).unwrap();
+        assert_eq!(native_preview.len(), 1);
+        assert!(native_preview[0].detail.contains("--prefer heddle"));
+
+        let overlay_dir = TempDir::new().unwrap();
+        sley::Repository::init(overlay_dir.path()).unwrap();
+        let overlay = Repository::init_git_overlay_sidecar(overlay_dir.path()).unwrap();
+        let overlay_preview = repair_git(&overlay, Some("main".to_string()), None, true).unwrap();
+        assert_eq!(overlay_preview.len(), 1);
+        assert!(overlay_preview[0].detail.contains("--prefer git"));
+    }
 }

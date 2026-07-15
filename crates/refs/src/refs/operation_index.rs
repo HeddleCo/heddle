@@ -30,12 +30,12 @@ use std::{
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use objects::{
     error::{HeddleError, Result},
-    fs_atomic::write_file_atomic,
-    object::{ChangeId, OperationId},
+    fs_atomic::{create_dir_all_durable, write_file_atomic},
+    object::{OperationId, StateId},
 };
 use serde::{Deserialize, Serialize};
 
-const INDEX_FORMAT_VERSION: u8 = 1;
+const INDEX_FORMAT_VERSION: u8 = 2;
 const INDEX_DIR_NAME: &str = "operation_index";
 
 /// One indexed operation. Mirrors enough of `oplog::OpEntry` to satisfy the
@@ -65,7 +65,7 @@ pub struct IndexedOperation {
     /// Encoded as their snake-case wire string (e.g. `"novelty"`).
     pub signal_kinds: Vec<String>,
     /// Resulting state, when the op produced one.
-    pub change_id: Option<ChangeId>,
+    pub state_id: Option<StateId>,
 }
 
 impl IndexedOperation {
@@ -288,7 +288,7 @@ impl OperationLogIndex {
 
     fn save_bucket(&self, bucket: &DayBucket) -> Result<()> {
         if !self.root.exists() {
-            fs::create_dir_all(&self.root).map_err(HeddleError::from)?;
+            create_dir_all_durable(&self.root).map_err(HeddleError::from)?;
         }
         let date = NaiveDate::parse_from_str(&bucket.date, "%Y-%m-%d").map_err(|err| {
             HeddleError::InvalidObject(format!("invalid bucket date '{}': {err}", bucket.date))
@@ -338,7 +338,7 @@ mod tests {
             thread: Some("main".into()),
             symbols: vec![symbol.to_string()],
             signal_kinds: vec![],
-            change_id: Some(ChangeId::from_bytes([1; 16])),
+            state_id: Some(StateId::from_bytes([1; 32])),
         }
     }
 

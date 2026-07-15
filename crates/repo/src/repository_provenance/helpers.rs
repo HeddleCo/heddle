@@ -36,7 +36,7 @@ pub(super) fn synthesize_file_provenance_from_blob(
         blob.hash(),
         &lines,
         Origin {
-            state_id: state.change_id,
+            state_id: state.id(),
             attribution: state.attribution.clone(),
             created_at: state.created_at,
             authored_at: state.authored_at,

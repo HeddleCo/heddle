@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use objects::{
-    object::{
-        Attribution, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, State,
-        ThreadName, Tree, TreeEntry,
-    },
+    object::{Blob, ThreadName, Tree, TreeEntry},
     store::{ObjectStore, ShallowInfo},
     util::{gitlink_placeholder_bytes, symlink_target_bytes},
 };
 use oplog::{OpLog, OpLogBackend, OpRecord};
 use refs::{Head, RefManager};
-use serde::Serialize;
 use serde_json::json;
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 use tempfile::TempDir;
@@ -22,13 +21,85 @@ use super::{
 };
 use crate::{
     ChangedPathFilters, HeddleError, HistoryQuery, RepoConfig, Repository, RepositoryCapability,
-    ThreadFreshness, ThreadManager, WorktreeIndex,
+    RepositorySourceAuthority, ThreadFreshness, ThreadManager, WorktreeIndex,
 };
 
 fn create_test_repo() -> (TempDir, Repository) {
     let temp_dir = TempDir::new().unwrap();
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     (temp_dir, repo)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TreeEntrySnapshot {
+    Directory,
+    File(Vec<u8>),
+    Symlink(PathBuf),
+}
+
+fn snapshot_directory(root: &Path) -> Vec<(PathBuf, TreeEntrySnapshot)> {
+    fn visit(root: &Path, directory: &Path, snapshot: &mut Vec<(PathBuf, TreeEntrySnapshot)>) {
+        let mut entries = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+
+        for path in entries {
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            let file_type = fs::symlink_metadata(&path).unwrap().file_type();
+            if file_type.is_dir() {
+                snapshot.push((relative, TreeEntrySnapshot::Directory));
+                visit(root, &path, snapshot);
+            } else if file_type.is_file() {
+                snapshot.push((relative, TreeEntrySnapshot::File(fs::read(path).unwrap())));
+            } else if file_type.is_symlink() {
+                snapshot.push((
+                    relative,
+                    TreeEntrySnapshot::Symlink(fs::read_link(path).unwrap()),
+                ));
+            } else {
+                panic!(
+                    "unsupported filesystem entry in repository snapshot: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    let mut snapshot = Vec::new();
+    visit(root, root, &mut snapshot);
+    snapshot
+}
+
+fn decode_hex_fixture(source: &str) -> Vec<u8> {
+    let compact = source
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect::<Vec<_>>();
+    assert_eq!(compact.len() % 2, 0, "hex fixture must contain byte pairs");
+    compact
+        .chunks_exact(2)
+        .map(|pair| {
+            let digits = std::str::from_utf8(pair).unwrap();
+            u8::from_str_radix(digits, 16).unwrap()
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn init_creates_heddle_dir_with_mode_0700() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init(temp_dir.path()).unwrap();
+    let mode = fs::metadata(repo.heddle_dir())
+        .expect("heddle dir metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, ".heddle must be owner-only, got {mode:o}");
 }
 
 fn open_test_repo_with_store<S: ObjectStore>(
@@ -52,41 +123,6 @@ fn gitlink_target_for_tests() -> GitObjectId {
         GitObjectFormat::Sha1,
         "1234567890abcdef1234567890abcdef12345678",
     )
-    .unwrap()
-}
-
-fn loose_tree_path(repo: &Repository, hash: ContentHash) -> std::path::PathBuf {
-    let hex = hash.to_hex();
-    let (prefix, rest) = hex.split_at(2);
-    repo.heddle_dir()
-        .join("objects")
-        .join("trees")
-        .join(prefix)
-        .join(rest)
-}
-
-#[derive(Serialize)]
-struct LegacyTreeV1ForOpenTest {
-    entries: Vec<LegacyTreeEntryV1ForOpenTest>,
-}
-
-#[derive(Serialize)]
-struct LegacyTreeEntryV1ForOpenTest {
-    name: String,
-    mode: FileMode,
-    entry_type: EntryType,
-    hash: ContentHash,
-}
-
-fn legacy_tree_v1_bytes_for_open_test(name: &str, hash: ContentHash) -> Vec<u8> {
-    rmp_serde::to_vec(&LegacyTreeV1ForOpenTest {
-        entries: vec![LegacyTreeEntryV1ForOpenTest {
-            name: name.to_string(),
-            mode: FileMode::Normal,
-            entry_type: EntryType::Blob,
-            hash,
-        }],
-    })
     .unwrap()
 }
 
@@ -192,7 +228,7 @@ fn open_accepts_supported_repository_format() {
     let config_path = temp_dir.path().join(".heddle/config.toml");
     fs::write(
         &config_path,
-        format!("[repository]\nversion = {SUPPORTED_REPO_FORMAT}\n"),
+        format!("[repository]\nversion = {SUPPORTED_REPO_FORMAT}\nsource_authority = \"native\"\n"),
     )
     .unwrap();
 
@@ -200,40 +236,105 @@ fn open_accepts_supported_repository_format() {
 }
 
 #[test]
-fn open_fails_when_required_migration_fails() {
+fn open_refuses_v2_as_migration_required_without_rewriting_fixture() {
+    let temp_dir = TempDir::new().unwrap();
+    Repository::init_default(temp_dir.path()).unwrap();
+
+    let config_path = temp_dir.path().join(".heddle/config.toml");
+    let fixture = include_str!("../tests/fixtures/repository-v2/config.toml");
+    fs::write(&config_path, fixture).unwrap();
+
+    let error = match Repository::open(temp_dir.path()) {
+        Ok(_) => panic!("v2 repository format must require migration"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        HeddleError::RepositoryFormatMigrationRequired {
+            found: 2,
+            required: SUPPORTED_REPO_FORMAT,
+            ..
+        }
+    ));
+    assert_eq!(fs::read_to_string(config_path).unwrap(), fixture);
+}
+
+#[test]
+fn open_refuses_legacy_oplog_before_mutating_repository() {
     let temp_dir = TempDir::new().unwrap();
     let repo = Repository::init_default(temp_dir.path()).unwrap();
-    let ledger = repo.heddle_dir().join("state/schema_versions.toml");
-    if ledger.exists() {
-        fs::remove_file(&ledger).unwrap();
-    }
+    assert_eq!(repo.config().repository.version, SUPPORTED_REPO_FORMAT);
 
-    let config_path = repo.heddle_dir().join("config.toml");
-    fs::write(&config_path, "[repository]\nversion = 1\n").unwrap();
-
-    let bad_tree_hash = ContentHash::compute(b"bad legacy tree bytes");
-    let bad_tree_path = loose_tree_path(&repo, bad_tree_hash);
-    fs::create_dir_all(bad_tree_path.parent().unwrap()).unwrap();
-    fs::write(&bad_tree_path, b"not a msgpack tree").unwrap();
+    let heddle_dir = repo.heddle_dir().to_path_buf();
+    let oplog_path = heddle_dir.join("oplog/oplog.bin");
     drop(repo);
 
-    let err = match Repository::open(temp_dir.path()) {
-        Ok(_) => panic!("migration failure must block open"),
-        Err(err) => err,
+    let legacy_oplog = decode_hex_fixture(include_str!(
+        "../tests/fixtures/issue-449-legacy-pre-atomic/oplog.bin.hex"
+    ));
+    assert_eq!(legacy_oplog.len(), 704, "historical fixture length changed");
+    assert_eq!(&legacy_oplog[..12], b"LMOPLOG\0\x02\0\0\0");
+    fs::write(&oplog_path, legacy_oplog).unwrap();
+    let before = snapshot_directory(&heddle_dir);
+
+    let error = match Repository::open(temp_dir.path()) {
+        Ok(_) => panic!("legacy oplog must block repository open"),
+        Err(error) => error,
     };
-    let message = err.to_string();
-    assert!(
-        message.contains("0003_canonicalize_tree_entries"),
-        "open error should name the failing migration: {message}"
+
+    assert!(matches!(
+        error,
+        HeddleError::StorageFormatMigrationRequired {
+            ref storage,
+            found: 2,
+            required: 4,
+        } if storage == "packed oplog container"
+    ));
+    assert_eq!(
+        snapshot_directory(&heddle_dir),
+        before,
+        "refusing a legacy oplog must not mutate any .heddle entry"
     );
+}
+
+/// Mutating commands historically bootstrap plain Git via `Repository::open`.
+/// Observe-only CLI paths (status/verify/doctor) must not call open until a
+/// `.heddle` sidecar already exists — see `verify_execution_context_from_cli`.
+#[test]
+fn open_bootstraps_plain_git_sidecar_for_mutators() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    let repo = Repository::open(root).expect("open should bootstrap plain Git for mutators");
     assert!(
-        message.contains("failed to decode legacy V1 tree"),
-        "open error should keep the underlying migration failure: {message}"
+        root.join(".heddle").is_dir(),
+        "open should create the Heddle sidecar for mutators"
+    );
+    assert_eq!(
+        repo.capability(),
+        crate::RepositoryCapability::GitOverlay,
+        "bootstrapped plain Git should be git-overlay"
     );
 }
 
 #[test]
-fn open_migrates_v1_tree_bytes_before_strict_tree_reads() {
+fn explicit_native_authority_survives_alongside_git_metadata() {
+    let temp_dir = TempDir::new().unwrap();
+    sley::Repository::init(temp_dir.path()).unwrap();
+
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    assert_eq!(repo.capability(), RepositoryCapability::NativeHeddle);
+    drop(repo);
+
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    assert_eq!(reopened.capability(), RepositoryCapability::NativeHeddle);
+    assert!(temp_dir.path().join(".git").is_dir());
+}
+
+#[test]
+fn open_refuses_v1_before_reading_legacy_objects() {
     let temp_dir = TempDir::new().unwrap();
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     let ledger = repo.heddle_dir().join("state/schema_versions.toml");
@@ -244,52 +345,20 @@ fn open_migrates_v1_tree_bytes_before_strict_tree_reads() {
     let config_path = repo.heddle_dir().join("config.toml");
     fs::write(&config_path, "[repository]\nversion = 1\n").unwrap();
 
-    let blob_hash = repo
-        .store()
-        .put_blob(&Blob::from("legacy tree body"))
-        .unwrap();
-    let current_tree = Tree::from_entries(vec![
-        TreeEntry::file("legacy.txt", blob_hash, false).expect("legacy tree entry"),
-    ]);
-    let tree_hash = current_tree.hash();
-    let legacy_tree_bytes = legacy_tree_v1_bytes_for_open_test("legacy.txt", blob_hash);
-    let legacy_tree_path = loose_tree_path(&repo, tree_hash);
-    fs::create_dir_all(legacy_tree_path.parent().unwrap()).unwrap();
-    fs::write(&legacy_tree_path, &legacy_tree_bytes).unwrap();
-
-    assert!(
-        repo.store().get_tree(&tree_hash).is_err(),
-        "strict runtime reader must reject V1 bytes before open migration"
-    );
-
-    let state = State::new_snapshot(
-        tree_hash,
-        Vec::new(),
-        Attribution::human(Principal::new("Migration Tester", "migration@example.test")),
-    );
-    let state_id = state.change_id;
-    repo.store().put_state(&state).unwrap();
-    repo.refs()
-        .set_thread(&ThreadName::new("main"), &state_id)
-        .unwrap();
     drop(repo);
 
-    let opened = Repository::open(temp_dir.path()).expect("normal open runs pending migrations");
-    let migrated = opened
-        .store()
-        .get_tree(&tree_hash)
-        .expect("strict reader succeeds after open migration")
-        .expect("migrated tree exists");
-    assert_eq!(
-        migrated.get("legacy.txt").and_then(TreeEntry::blob_hash),
-        Some(blob_hash)
-    );
-    assert_eq!(
-        opened.refs().get_thread(&ThreadName::new("main")).unwrap(),
-        Some(state_id)
-    );
-    let config = RepoConfig::load(&config_path).unwrap();
-    assert_eq!(config.repository.version, SUPPORTED_REPO_FORMAT);
+    let err = match Repository::open(temp_dir.path()) {
+        Ok(_) => panic!("legacy repository format must block open"),
+        Err(err) => err,
+    };
+    assert!(matches!(
+        err,
+        HeddleError::RepositoryFormatMigrationRequired {
+            found: 1,
+            required: SUPPORTED_REPO_FORMAT,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -304,7 +373,7 @@ fn test_init_fails_if_exists() {
 #[test]
 fn test_set_shallow_updates_memory_and_persists() {
     let (temp_dir, repo) = create_test_repo();
-    let state_id = ChangeId::generate();
+    let state_id = crate::test_state_id();
 
     repo.set_shallow(&state_id, &[]).unwrap();
 
@@ -342,7 +411,7 @@ fn test_snapshot_creates_state() {
     assert_eq!(state.parents, vec![initial_head]);
 
     let head = repo.head().unwrap();
-    assert_eq!(head, Some(state.change_id));
+    assert_eq!(head, Some(state.id()));
 }
 
 #[test]
@@ -425,7 +494,7 @@ fn snapshot_packs_blobs_and_leaves_no_loose_blob_files() {
     // The state itself must be reachable through the ref the
     // snapshot returned — no orphaned commit.
     let head = repo.head().unwrap();
-    assert_eq!(head, Some(state.change_id));
+    assert_eq!(head, Some(state.id()));
 }
 
 #[test]
@@ -453,7 +522,7 @@ fn snapshot_preserves_unchanged_materialized_gitlink_placeholder() {
     let recaptured = repo
         .snapshot(Some("recapture unchanged gitlink".to_string()), None)
         .unwrap();
-    assert_eq!(recaptured.parents, vec![baseline.change_id]);
+    assert_eq!(recaptured.parents, vec![baseline.id()]);
     let recaptured_tree = repo
         .store()
         .get_tree(&recaptured.tree)
@@ -576,16 +645,16 @@ fn snapshot_failure_leaves_ref_unchanged() {
     // Stage an unresolved merge — `snapshot()` checks for one up
     // front and returns `HeddleError::Conflict` before any writes —
     // then assert the head is identical to its pre-call value.
-    use objects::object::ChangeId;
+    use objects::object::StateId;
 
     let (temp_dir, repo) = create_test_repo();
     fs::write(temp_dir.path().join("a.txt"), "a").unwrap();
     let baseline = repo.snapshot(None, None).unwrap();
 
-    let theirs = ChangeId::from_bytes([0xff; 16]);
+    let theirs = StateId::from_bytes([0xff; 32]);
     repo.merge_state_manager()
         .start(
-            baseline.change_id,
+            baseline.id(),
             theirs,
             None,
             vec!["unresolved.txt".to_string()],
@@ -599,7 +668,7 @@ fn snapshot_failure_leaves_ref_unchanged() {
     // Head must still point at the baseline state — not at any
     // half-written successor.
     let head_after = repo.head().unwrap();
-    assert_eq!(head_after, Some(baseline.change_id));
+    assert_eq!(head_after, Some(baseline.id()));
 
     // Clean up so the harness's drop doesn't trip on a stale merge.
     repo.merge_state_manager().abort().unwrap();
@@ -623,7 +692,7 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
     );
     assert_eq!(
         repo.head().unwrap(),
-        Some(baseline.change_id),
+        Some(baseline.id()),
         "a pre-commit crash must leave the previous capture visible"
     );
 
@@ -647,7 +716,7 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
         .find(|entry| {
             matches!(
                 entry.operation,
-                OpRecord::Snapshot { new_state, .. } if new_state == captured.change_id
+                OpRecord::Snapshot { new_state, .. } if new_state == captured.id()
             )
         })
         .map(|entry| entry.batch_id)
@@ -684,7 +753,7 @@ fn test_snapshot_with_parent() {
     fs::write(temp_dir.path().join("b.txt"), "b").unwrap();
     let state2 = repo.snapshot(Some("Second".to_string()), None).unwrap();
 
-    assert_eq!(state2.parents, vec![state1.change_id]);
+    assert_eq!(state2.parents, vec![state1.id()]);
 }
 
 #[test]
@@ -743,7 +812,7 @@ fn test_goto_restores_state() {
     assert!(blob1.is_some(), "blob for a.txt v1 should exist");
     assert_eq!(blob1.unwrap().content_str(), Some("version 1"));
 
-    repo.goto(&state1.change_id).unwrap();
+    repo.goto(&state1.id()).unwrap();
 
     assert!(file_path.exists(), "a.txt should exist after goto");
     let content = fs::read_to_string(&file_path).unwrap();
@@ -764,7 +833,7 @@ fn test_goto_clears_non_empty_directories() {
 
     fs::write(temp_dir.path().join("new_file.txt"), "new").unwrap();
 
-    repo.goto_discard_local(&state1.change_id).unwrap();
+    repo.goto_discard_local(&state1.id()).unwrap();
 
     assert!(!temp_dir.path().join("new_file.txt").exists());
     assert!(temp_dir.path().join("subdir").exists());
@@ -1370,7 +1439,7 @@ fn test_query_history_since_with_path_filter_bounds_walk_first() {
     let query = HistoryQuery::new(repo.head().unwrap())
         .with_limit(10)
         .with_changed_paths(ChangedPathFilters::try_from_paths(["src.rs"]).unwrap())
-        .with_stop_at(Some(s2.change_id));
+        .with_stop_at(Some(s2.id()));
 
     let history = repo.query_history(&query).unwrap();
     let intents: Vec<_> = history
@@ -1384,9 +1453,9 @@ fn test_query_history_since_with_path_filter_bounds_walk_first() {
     // Sanity: confirm the bounded state itself is excluded (it would
     // have been filtered anyway, but the bound is exclusive by
     // contract).
-    assert!(!history.iter().any(|s| s.change_id == s2.change_id));
+    assert!(!history.iter().any(|s| s.id() == s2.id()));
     // And confirm `s1` is excluded — that's the regression.
-    assert!(!history.iter().any(|s| s.change_id == s1.change_id));
+    assert!(!history.iter().any(|s| s.id() == s1.id()));
 }
 
 /// Same shape as the path-filter regression but for `--agent`. Bound
@@ -1427,7 +1496,7 @@ fn test_query_history_since_with_agent_filter_bounds_walk_first() {
     let query = HistoryQuery::new(repo.head().unwrap())
         .with_limit(10)
         .with_agent_filter(Some("claude".to_string()))
-        .with_stop_at(Some(s2.change_id));
+        .with_stop_at(Some(s2.id()));
 
     let history = repo.query_history(&query).unwrap();
     let intents: Vec<_> = history
@@ -1436,7 +1505,7 @@ fn test_query_history_since_with_agent_filter_bounds_walk_first() {
         .collect();
 
     assert_eq!(intents, vec!["new claude"]);
-    assert!(!history.iter().any(|s| s.change_id == s1.change_id));
+    assert!(!history.iter().any(|s| s.id() == s1.id()));
 }
 
 #[test]
@@ -1502,10 +1571,7 @@ fn test_maintenance_run_prunes_and_rebuilds_pull_planner_sidecars() {
     let (temp_dir, repo) = create_test_repo();
 
     fs::write(temp_dir.path().join("README.md"), "alpha").unwrap();
-    let state = repo
-        .snapshot(Some("alpha".to_string()), None)
-        .unwrap()
-        .change_id;
+    let state = repo.snapshot(Some("alpha".to_string()), None).unwrap().id();
 
     let pull_root = temp_dir
         .path()
@@ -1544,7 +1610,7 @@ fn test_maintenance_run_prunes_and_rebuilds_pull_planner_sidecars() {
     )
     .unwrap();
     fs::write(plans_dir.join("corrupt-entry.json"), b"corrupt").unwrap();
-    let stale_state = ChangeId::generate();
+    let stale_state = crate::test_state_id();
     fs::write(
         plans_dir.join(format!(
             "{}--depth-full--exclude-af1349b9f5f9a1a6--full.json",
@@ -1612,12 +1678,12 @@ fn test_fast_forward_attached_preserves_head_and_advances_thread() {
         })
         .unwrap();
 
-    repo.fast_forward_attached(&state2.change_id).unwrap();
+    repo.fast_forward_attached(&state2.id()).unwrap();
 
     // Thread ref must advance to the target.
     assert_eq!(
         repo.refs().get_thread(&ThreadName::new("main")).unwrap(),
-        Some(state2.change_id),
+        Some(state2.id()),
         "main ref must advance to fast-forward target"
     );
     // HEAD must remain attached to "main".
@@ -1635,7 +1701,7 @@ fn test_fast_forward_attached_preserves_head_and_advances_thread() {
     if let Some(meta) = manager.find_by_thread("main").unwrap() {
         assert_eq!(
             meta.current_state.as_deref(),
-            Some(state2.change_id.short().as_str())
+            Some(state2.id().short().as_str())
         );
         assert!(matches!(meta.freshness, ThreadFreshness::Current));
     }
@@ -1654,17 +1720,17 @@ fn test_fast_forward_attached_when_detached_stays_detached() {
     let state2 = repo.snapshot(Some("Forward".to_string()), None).unwrap();
 
     // Detach HEAD at state1.
-    repo.goto(&state1.change_id).unwrap();
+    repo.goto(&state1.id()).unwrap();
     assert!(matches!(
         repo.refs().read_head().unwrap(),
         Head::Detached { .. }
     ));
 
-    repo.fast_forward_attached(&state2.change_id).unwrap();
+    repo.fast_forward_attached(&state2.id()).unwrap();
 
     let head = repo.refs().read_head().unwrap();
     match head {
-        Head::Detached { state } => assert_eq!(state, state2.change_id),
+        Head::Detached { state } => assert_eq!(state, state2.id()),
         Head::Attached { thread } => panic!(
             "fast_forward_attached must not re-attach a previously-detached HEAD; got Attached({thread})"
         ),
@@ -1683,7 +1749,7 @@ fn test_open_preserves_explicit_detached_head_in_git_overlay() {
     let temp_dir = TempDir::new().unwrap();
     sley::Repository::init(temp_dir.path()).expect("init real git repository");
 
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = Repository::bootstrap_git_overlay(temp_dir.path()).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
 
     fs::write(temp_dir.path().join("a.txt"), "version 1").unwrap();
@@ -1691,9 +1757,9 @@ fn test_open_preserves_explicit_detached_head_in_git_overlay() {
     fs::write(temp_dir.path().join("a.txt"), "version 2").unwrap();
     let _state2 = repo.snapshot(Some("v2".to_string()), None).unwrap();
 
-    repo.goto(&state1.change_id).unwrap();
+    repo.goto(&state1.id()).unwrap();
     assert!(
-        matches!(repo.refs().read_head().unwrap(), Head::Detached { state } if state == state1.change_id),
+        matches!(repo.refs().read_head().unwrap(), Head::Detached { state } if state == state1.id()),
         "goto should leave HEAD detached at the target"
     );
     drop(repo);
@@ -1704,11 +1770,11 @@ fn test_open_preserves_explicit_detached_head_in_git_overlay() {
     let reopened = Repository::open(temp_dir.path()).unwrap();
     let head = reopened.refs().read_head().unwrap();
     assert!(
-        matches!(head, Head::Detached { state } if state == state1.change_id),
+        matches!(head, Head::Detached { state } if state == state1.id()),
         "reopen must preserve explicit detached HEAD; got {:?}",
         head
     );
-    assert_eq!(reopened.head().unwrap(), Some(state1.change_id));
+    assert_eq!(reopened.head().unwrap(), Some(state1.id()));
 }
 
 /// Characterization: git overlay HEAD inspection matches attached/detached/unborn
@@ -1718,7 +1784,7 @@ fn git_overlay_head_state_matches_symref_semantics() {
     let temp_dir = TempDir::new().unwrap();
     let git_dir = temp_dir.path().join(".git");
     sley::Repository::init_bare(&git_dir).expect("init bare .git");
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = Repository::bootstrap_git_overlay(temp_dir.path()).unwrap();
 
     std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
     assert_eq!(
@@ -1755,12 +1821,13 @@ fn git_overlay_head_state_matches_symref_semantics() {
 /// `heddle status`. The accessor must instead report "no overlay
 /// status available" (`Ok(None)`) so callers fall back to heddle's own
 /// tree-compare path.
+#[cfg(feature = "git-overlay")]
 #[test]
 fn git_overlay_worktree_status_is_none_when_embedded_git_is_bare() {
     let temp_dir = TempDir::new().unwrap();
     let git_dir = temp_dir.path().join(".git");
     sley::Repository::init_bare(&git_dir).expect("init bare .git");
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = Repository::bootstrap_git_overlay(temp_dir.path()).unwrap();
     assert_eq!(
         repo.capability(),
         RepositoryCapability::GitOverlay,
@@ -2333,7 +2400,7 @@ fn midsession_ignore_broadening_masks_untracked_without_unlink_native() {
 /// surfaced this ran on a Git repo, so `ready` consumed
 /// `git_overlay_worktree_status`. A `node_modules` symlink with a
 /// `node_modules/` rule in `.gitignore` must be ignored there too.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "git-overlay"))]
 #[test]
 fn dir_only_ignore_covers_node_modules_symlink_git_overlay() {
     use std::os::unix::fs::symlink;
@@ -2341,7 +2408,7 @@ fn dir_only_ignore_covers_node_modules_symlink_git_overlay() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     sley::Repository::init(root).expect("init real git repository");
-    let repo = Repository::init_default(root).unwrap();
+    let repo = Repository::bootstrap_git_overlay(root).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
 
     let real_deps = root.join("real_deps");
@@ -2373,13 +2440,13 @@ fn dir_only_ignore_covers_node_modules_symlink_git_overlay() {
 /// heddle#303, git-overlay variant of the mid-session-refresh AC.
 /// Broadening `.gitignore` to `node_modules` mid-session must mask a
 /// previously-seen untracked tree on the next status, no `unlink`.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "git-overlay"))]
 #[test]
 fn midsession_ignore_broadening_masks_untracked_without_unlink_git_overlay() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     sley::Repository::init(root).expect("init real git repository");
-    let repo = Repository::init_default(root).unwrap();
+    let repo = Repository::bootstrap_git_overlay(root).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
 
     let node_modules = root.join("node_modules");
@@ -2484,18 +2551,11 @@ fn managed_checkout_path_uses_source_repo_name_from_custom_checkout() {
     );
 }
 
-/// heddle#572 r3 Finding #5: a solid/materialized thread checkout under
-/// `.heddle/threads/<encoded>/<repo-name>` is a boundary-delimited worktree. Its own
-/// `.heddle` pointer is the discovery boundary (git's analogue is the
-/// linked-worktree `.git` file): `Repository::open` from inside it must root at
-/// the checkout — capability derived from the checkout's OWN `.git` (absent →
-/// NativeHeddle), HEAD resolved to the THREAD — and must NEVER climb to the
-/// git-overlay parent and adopt the parent's `GitOverlay` capability or branch.
 #[test]
-fn open_solid_checkout_roots_at_boundary_not_git_overlay_parent() {
+fn open_solid_checkout_without_git_uses_native_checkout_authority() {
     let temp_dir = TempDir::new().unwrap();
     sley::Repository::init(temp_dir.path()).expect("init real git repository");
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = Repository::bootstrap_git_overlay(temp_dir.path()).unwrap();
     assert_eq!(
         repo.capability(),
         RepositoryCapability::GitOverlay,
@@ -2503,15 +2563,16 @@ fn open_solid_checkout_roots_at_boundary_not_git_overlay_parent() {
     );
     let heddle = repo.heddle_dir().to_path_buf();
 
-    // Mimic write_isolated_checkout for a solid thread `feature`: a checkout
-    // root under `.heddle/threads/feature/<repo-name>` carrying its OWN `.heddle`
-    // pointer + per-checkout HEAD (`ref: feature`), but no `.git` of its own.
+    // Mimic write_isolated_checkout for a solid thread `feature`.
     let checkout = repo.managed_checkout_path("feature");
     let co_heddle = checkout.join(".heddle");
     fs::create_dir_all(&co_heddle).unwrap();
     fs::write(
         co_heddle.join("objectstore"),
-        format!("objectstore: {}\n", heddle.display()),
+        format!(
+            "objectstore: {}\nsource-authority: native\n",
+            heddle.display()
+        ),
     )
     .unwrap();
     fs::create_dir_all(co_heddle.join("state")).unwrap();
@@ -2519,24 +2580,89 @@ fn open_solid_checkout_roots_at_boundary_not_git_overlay_parent() {
 
     let opened = Repository::open(&checkout).expect("open solid checkout");
 
-    // Capability roots at the checkout's own boundary (no `.git` AT the
-    // checkout → NativeHeddle), NOT the ancestor git-overlay parent.
     assert_eq!(
         opened.capability(),
         RepositoryCapability::NativeHeddle,
-        "capability must root at the checkout boundary, not the parent .git"
+        "a native checkout pointer uses Heddle worktree semantics"
+    );
+    assert_eq!(
+        opened.source_authority(),
+        RepositorySourceAuthority::Native,
+        "the checkout must not route source mutations into the parent Git worktree"
+    );
+    let reopened_parent = Repository::open(temp_dir.path()).expect("reopen parent repository");
+    assert_eq!(
+        reopened_parent.source_authority(),
+        RepositorySourceAuthority::GitOverlay,
+        "the checkout-local authority must not change the parent repository"
     );
     assert_eq!(
         opened.root(),
         checkout.canonicalize().unwrap().as_path(),
         "open must root AT the checkout"
     );
-    // HEAD is the thread's own, never the parent branch.
     assert!(
         matches!(opened.head_ref().unwrap(), Head::Attached { thread } if thread.as_str() == "feature"),
         "HEAD must resolve to the thread, not the parent branch"
     );
-    // The git-overlay branch probe stays inert — the parent branch never leaks.
-    assert_eq!(opened.git_overlay_current_branch().unwrap(), None);
     assert_eq!(opened.current_lane().unwrap().as_deref(), Some("feature"));
+}
+
+#[test]
+fn worktree_pointer_authority_controls_checkout_capability() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init(temp_dir.path()).unwrap();
+    let checkout = temp_dir.path().join("git-backed-worktree");
+    let checkout_heddle = checkout.join(".heddle");
+    fs::create_dir_all(checkout_heddle.join("state")).unwrap();
+    fs::write(
+        checkout_heddle.join("objectstore"),
+        format!(
+            "objectstore: {}\nsource-authority: git-overlay\n",
+            repo.heddle_dir().display()
+        ),
+    )
+    .unwrap();
+    fs::write(checkout_heddle.join("HEAD"), "ref: main\n").unwrap();
+
+    let opened = Repository::open(&checkout).unwrap();
+    assert_eq!(opened.capability(), RepositoryCapability::GitOverlay);
+    assert_eq!(
+        opened.source_authority(),
+        RepositorySourceAuthority::GitOverlay
+    );
+}
+
+#[test]
+fn source_authority_transition_compares_against_disk() {
+    let temp_dir = TempDir::new().unwrap();
+    sley::Repository::init(temp_dir.path()).expect("init real git repository");
+    let first = Repository::bootstrap_git_overlay(temp_dir.path()).unwrap();
+    let stale = Repository::open(temp_dir.path()).unwrap();
+
+    first
+        .transition_source_authority(
+            RepositorySourceAuthority::GitOverlay,
+            RepositorySourceAuthority::Native,
+        )
+        .unwrap();
+
+    let error = stale
+        .transition_source_authority(
+            RepositorySourceAuthority::GitOverlay,
+            RepositorySourceAuthority::Native,
+        )
+        .expect_err("a stale handle must not repeat the authority transition");
+    assert!(
+        error
+            .to_string()
+            .contains("expected GitOverlay, found Native")
+    );
+
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    assert_eq!(
+        reopened.source_authority(),
+        RepositorySourceAuthority::Native
+    );
+    assert_eq!(reopened.capability(), RepositoryCapability::NativeHeddle);
 }

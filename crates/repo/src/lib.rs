@@ -7,7 +7,19 @@ compile_error!(
      See crates/repo/Cargo.toml."
 );
 
+#[cfg(test)]
+pub(crate) fn test_state_id() -> objects::object::StateId {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let mut bytes = [0; 32];
+    bytes[..8].copy_from_slice(&NEXT.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+    objects::object::StateId::from_bytes(bytes)
+}
+
 pub mod atomic;
+mod collaboration_migration;
+mod collaboration_store;
 pub mod daemon;
 #[cfg(feature = "tree-sitter-symbols")]
 mod discussion_anchor_travel;
@@ -49,6 +61,7 @@ mod stat_signature;
 #[cfg(feature = "tree-sitter-symbols")]
 pub use semantic::symbol_resolver;
 mod stack_snapshot;
+mod state_attachments;
 mod thread_advice;
 pub mod thread_manifest;
 mod thread_model;
@@ -70,6 +83,15 @@ mod worktree_status_options;
 pub mod worktree_walk;
 
 // Re-export commonly used types from underlying crates.
+pub use collaboration_migration::{
+    LegacyDiscussionMigrationBlocker, LegacyDiscussionMigrationItem, LegacyDiscussionMigrationPlan,
+    LegacyDiscussionMigrationReport, apply_legacy_discussion_migration,
+    migrate_legacy_discussions_once, plan_legacy_discussion_migration,
+};
+pub use collaboration_store::{
+    CollaborationIntegrityReport, CollaborationStore, CollaborationWriteDisposition,
+    CollaborationWriteOutcome,
+};
 pub use ephemeral_thread::{CollapsedThread, collapse_expired_ephemeral_threads};
 pub use fsmonitor::{ChangeMonitorReport, run_local_monitor_helper};
 pub use git_ref_name::{
@@ -89,7 +111,9 @@ pub use objects::{
     },
     store::{
         AgentUsageSummary, FsStore, ObjectStore, ShallowInfo,
-        agent_registry::{AgentEntry, AgentRegistry, AgentStatus, generate_agent_id},
+        actor_presence::{
+            ActorPresence, ActorPresenceStatus, ActorPresenceStore, generate_actor_session_id,
+        },
     },
 };
 #[cfg(feature = "async-source")]
@@ -97,19 +121,21 @@ pub use repository::query_history_async;
 pub use repository::{
     BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters,
     CheckoutMaterialization, CommitGraphIndex, CommitGraphInspection, ContextSuggestion,
-    ContextSuggestionTier, DiffKind, GitCheckpointRecord, GitImportGuidance, GitOverlayBranchTip,
-    GitOverlayOutOfBandCommits, GitOverlayShortStatus, GitRemoteTrackingStatus,
-    HIGH_SUGGESTION_THRESHOLD, HistoryQuery,
-    HostedConfig, MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD, MissingBlob,
-    OperationKind, OperationScope, OutputFormat, PackFilesInspection, PartialFetchInspection,
-    PullPlannerCacheInspection, RedactConfig, RefCountsInspection, RefSummaryIndexInspection,
-    RepoConfig, Repository, RepositoryCapability, RepositoryMaintenanceRunReport,
-    RepositoryOperationStatus, RepositoryPerformanceInspectionReport, ResignOutcome,
-    SUGGESTION_WINDOW, SnapshotExecution, SnapshotProfile, SpoolFacet, ThreadCaptureOutcome,
-    TreeBuildProfile, TrustedKey, UntrackedSet, UntrackedSubtree, WarmCanonicalStoreStats,
-    WorktreeCompareProfile, WorktreeIndexInspection, WorktreeStatusDetailed, compute_rewrite_pct,
-    find_merge_base, is_major_rewrite, is_synthetic_root,
+    ContextSuggestionTier, DiffKind, GitCheckpointIntent, GitCheckpointIntentPhase,
+    GitCheckpointRecord, GitImportGuidance, GitRemoteTrackingStatus, HIGH_SUGGESTION_THRESHOLD,
+    HistoryQuery, HostedConfig, MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD,
+    MissingBlob, OperationKind, OperationScope, OutputFormat, PackFilesInspection,
+    PartialFetchInspection, PullPlannerCacheInspection, RedactConfig, RefCountsInspection,
+    RefSummaryIndexInspection, RepoConfig, Repository, RepositoryCapability,
+    RepositoryMaintenanceRunReport, RepositoryOperationStatus,
+    RepositoryPerformanceInspectionReport, RepositorySourceAuthority, SUGGESTION_WINDOW,
+    SnapshotExecution, SnapshotProfile, SpoolFacet, ThreadCaptureOutcome, TreeBuildProfile,
+    TrustedKey, UntrackedSet, UntrackedSubtree, WarmCanonicalStoreStats, WorktreeCompareProfile,
+    WorktreeIndexInspection, WorktreeStatusDetailed, compute_rewrite_pct, find_merge_base,
+    is_major_rewrite, is_synthetic_root,
 };
+#[cfg(feature = "git-overlay")]
+pub use repository::{GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitOverlayShortStatus};
 #[cfg(feature = "async-source")]
 pub use repository::{find_merge_base_async, is_ancestor_async};
 pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
@@ -128,7 +154,8 @@ pub use snapshot_metadata::{
 pub use stack_snapshot::{
     REPOSITORY_SNAPSHOT_SCHEMA_VERSION, RepositorySnapshot, StackNextAction, ThreadSnapshot,
 };
-pub use stash::{StashEntry, StashManager};
+pub use stash::{StashEntry, StashId, StashManager};
+pub use state_attachments::StateAttachmentKind;
 pub use thread_advice::{
     RecommendedAction, ThreadAdvice, describe_thread_advice, describe_thread_advice_with_initial,
     shell_quote, thread_flag,

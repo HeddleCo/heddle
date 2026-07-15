@@ -2,9 +2,8 @@
 //! End-to-end guards for the silent-corruption class of bug behind
 //! heddle#93 — non-merge CLI paths used `get_tree(...)?.unwrap_or_default()`
 //! at every subtree-load site, so a missing tree was indistinguishable
-//! from an empty one and presentation paths (`status`, `ready`, `stash
-//! show`) silently rendered "no content" while mutation paths (`revert`,
-//! `cherry-pick`, `goto`) silently operated against an empty baseline.
+//! from an empty one and presentation paths (`status`, `ready`) silently
+//! rendered "no content" while `revert` operated against an empty baseline.
 //!
 //! Mirrors `merge_store_integrity.rs` (the heddle#90 lock for the merge
 //! engine). Each test introduces targeted corruption (deletes the loose
@@ -15,10 +14,7 @@
 
 use std::{fs, path::Path};
 
-use objects::{
-    object::{ContentHash, ThreadName},
-    store::ObjectStore,
-};
+use objects::{object::ThreadName, store::ObjectStore};
 use repo::Repository;
 use tempfile::TempDir;
 
@@ -179,130 +175,4 @@ fn test_revert_missing_parent_tree_fails_loud_not_silent_empty() {
          pre-#93 it silently computed an inverse diff against an empty baseline",
     );
     assert_missing_tree_error(&err, &parent_tree_hex);
-}
-
-/// `heddle stash apply` (driven via `heddle stash pop`) — mutation
-/// path that loads a stash's tree to write its files back to the
-/// worktree. Pre-#93 a missing stash tree silently became
-/// `Tree::default()`, so apply ran a zero-entry loop and reported
-/// success without restoring anything.
-#[test]
-fn test_stash_pop_missing_tree_fails_loud_not_silent_noop() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    fs::write(temp.path().join("a.txt"), "baseline\n").unwrap();
-    heddle(&["capture", "-m", "baseline"], Some(temp.path())).unwrap();
-
-    // Dirty the worktree so `stash push` has something to stash.
-    fs::write(temp.path().join("a.txt"), "dirty\n").unwrap();
-    fs::write(temp.path().join("b.txt"), "new file\n").unwrap();
-    heddle(&["stash", "push"], Some(temp.path())).unwrap();
-
-    // Find the stash entry's tree hash by reading the stash manifest
-    // directly. Stashes live under `.heddle/stash/` — the manifest
-    // contains the tree hash hex string.
-    let stash_tree_hex = {
-        let repo = Repository::open(temp.path()).unwrap();
-        let stash = repo
-            .stash_manager()
-            .top()
-            .unwrap()
-            .expect("stash must exist after push");
-        // tree_hash is stored as the hex string already.
-        ContentHash::from_hex(&stash.tree_hash)
-            .expect("stash tree hash must be valid hex")
-            .to_hex()
-    };
-    assert!(
-        delete_loose_tree(temp.path(), &stash_tree_hex),
-        "test setup: expected to find loose tree at stash hash {stash_tree_hex}",
-    );
-
-    let err = heddle(&["stash", "pop"], Some(temp.path())).expect_err(
-        "stash pop against a corrupt stash tree must fail loud; \
-         pre-#93 it silently completed with no entries applied",
-    );
-    assert_missing_tree_error(&err, &stash_tree_hex);
-}
-
-/// `heddle clean --force` — destructive mutation path that loads the
-/// current state's tree to distinguish tracked from untracked files.
-/// Pre-#93 a missing tree silently became `Tree::default()`, so the
-/// detailed-status comparison reported every tracked file as
-/// `untracked` and `clean --force` deleted them all — a corrupt repo
-/// silently became an empty worktree. The highest-stakes site in the
-/// Rule-7 sweep; this test pins the loud-failure contract.
-#[test]
-fn test_clean_force_missing_tree_fails_loud_not_wipe_tracked_files() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
-    heddle(&["capture", "-m", "initial"], Some(temp.path())).unwrap();
-
-    let tree_hex = current_state_tree_hex(temp.path());
-    assert!(
-        delete_loose_tree(temp.path(), &tree_hex),
-        "test setup: expected to find loose tree at hash {tree_hex} to delete",
-    );
-
-    let err = heddle(&["clean", "--force"], Some(temp.path())).expect_err(
-        "clean --force against a corrupt baseline tree must fail loud; \
-         pre-#93 it silently deleted every tracked file in the worktree",
-    );
-    assert_missing_tree_error(&err, &tree_hex);
-
-    // Belt-and-suspenders: the tracked file must still exist on disk.
-    // If the migration regressed, clean would have already deleted it.
-    assert!(
-        temp.path().join("tracked.txt").exists(),
-        "failed clean must not partially delete: tracked.txt should still exist",
-    );
-}
-
-/// `heddle switch <state>` — mutation path that loads the *current*
-/// state's tree to verify the worktree is clean before switching.
-/// Pre-#93 a missing current tree silently became `Tree::default()`,
-/// so the cleanliness check compared the worktree to an empty baseline
-/// and bailed with "uncommitted changes" — masking the corruption with
-/// a confusing-but-plausible error rather than a fail-loud diagnostic.
-#[test]
-fn test_goto_missing_current_tree_fails_loud_not_silent_dirty() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    fs::write(temp.path().join("a.txt"), "first\n").unwrap();
-    heddle(&["capture", "-m", "first"], Some(temp.path())).unwrap();
-    fs::write(temp.path().join("a.txt"), "second\n").unwrap();
-    heddle(&["capture", "-m", "second"], Some(temp.path())).unwrap();
-
-    // Tamper with the current (second) state's tree — `goto` reads it
-    // to verify worktree cleanliness when force is false. Capture the
-    // first state's change_id at the same time so we have a real goto
-    // target (heddle has no `main~1` rev-parse syntax).
-    let (current_tree_hex, first_state_id) = {
-        let repo = Repository::open(temp.path()).unwrap();
-        let tip = repo
-            .refs()
-            .get_thread(&ThreadName::new("main"))
-            .unwrap()
-            .unwrap();
-        let second_state = repo.store().get_state(&tip).unwrap().unwrap();
-        let parent_id = second_state
-            .first_parent()
-            .copied()
-            .expect("second state must have a parent");
-        (second_state.tree.to_hex(), parent_id.to_string())
-    };
-    assert!(
-        delete_loose_tree(temp.path(), &current_tree_hex),
-        "test setup: expected to find loose tree at current hash {current_tree_hex}",
-    );
-
-    // Try to goto the first state — the cleanliness check on the
-    // current tree must fail loud, not bail with a misleading
-    // "uncommitted changes" message.
-    let err = heddle(&["switch", &first_state_id], Some(temp.path())).expect_err(
-        "goto against a corrupt current tree must fail loud; \
-         pre-#93 it silently treated the worktree as dirty against an empty baseline",
-    );
-    assert_missing_tree_error(&err, &current_tree_hex);
 }

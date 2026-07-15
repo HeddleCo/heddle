@@ -9,17 +9,25 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 mod asserter;
+mod audit_grpc_contract;
 mod check_atomic_ledger_encapsulation;
 mod check_no_silent_default_tree_load;
 mod check_oprecord_exhaustiveness;
 mod check_snapshot_atomicity;
+mod check_verification_owner;
 mod fuse_dispatch_bench;
 
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("grpc-ts" | "web-proto") => run_grpc_ts(args.collect()),
-        Some("audit-idempotency") => run_audit_idempotency(),
+        Some("audit-grpc-contract") => {
+            let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .context("failed to locate workspace root")?;
+            audit_grpc_contract::run(workspace_root)
+        }
         Some("audit-coverage") => run_audit_coverage(args.collect()),
         Some("check-no-silent-default-tree-load") => {
             check_no_silent_default_tree_load::run(args.collect())
@@ -29,6 +37,7 @@ fn main() -> Result<()> {
             check_atomic_ledger_encapsulation::run(args.collect())
         }
         Some("check-oprecord-exhaustiveness") => check_oprecord_exhaustiveness::run(args.collect()),
+        Some("check-verification-owner") => check_verification_owner::run(args.collect()),
         Some("fuse-dispatch-bench") => fuse_dispatch_bench::run(args.collect()),
         Some(command) => bail!("unknown command '{command}'"),
         None => bail!("expected a command (for example: grpc-ts)"),
@@ -374,334 +383,6 @@ end_of_record
     }
 }
 
-/// Audit-idempotency check: fail when any state-changing RPC's request
-/// message lacks `string client_operation_id = 15`. The proto schema
-/// reserves tag 15 for this; this audit is what keeps the convention
-/// from rotting.
-///
-/// Rules the audit applies:
-///   1. State-changing RPCs are detected by RPC name prefix
-///      (`Update*`, `Push`, `Pull`, `Mint*`, `Issue*`, `Revoke*`,
-///      `Rotate*`, `Sign*`, `Begin*` for transactions, `Commit*`,
-///      `Abort*`, `Create*`, `Delete*`, `Add*`, `Remove*`,
-///      `Approve*`, `Register*`, `Deregister*`, `Resolve*` plus
-///      every `Finish*` outside the auth-flow allow-list).
-///   2. The auth-flow allow-list (`BeginWebAuthn*`, `BeginDeviceAuth`,
-///      `BeginOAuth*`, `GetInvitationSummary`, etc.) is the explicit
-///      escape hatch — Begin* RPCs that start a flow rather than
-///      mutate persistent state.
-///   3. For every state-changing RPC, the request message must
-///      declare a field literally `string client_operation_id = 15;`.
-///
-/// Exits with code 1 (via `bail`) when any rule fires; exit 0 means
-/// every state-changing RPC carries the field at the expected tag.
-fn run_audit_idempotency() -> Result<()> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .context("failed to locate workspace root")?;
-    let proto_root = workspace_root.join("crates/grpc/proto");
-    let proto_path = proto_root.join("heddle/v1/service.proto");
-    let source = read_proto_source_tree(&proto_path, &proto_root)?;
-
-    let rpcs = extract_rpcs(&source);
-    let messages = extract_messages(&source);
-
-    let mut missing: Vec<String> = Vec::new();
-    let mut audited = 0usize;
-    for rpc in &rpcs {
-        if !is_state_changing(&rpc.name) {
-            continue;
-        }
-        audited += 1;
-        // Stream-envelope unwrap: when the request message is a
-        // single `oneof body { ... Request first = 1; ... }` envelope
-        // (Push/Pull style) the actual operation lives on the inner
-        // `Request` variant. Follow into that type and audit it
-        // instead — the envelope itself never carries the op-id.
-        let target_message = stream_envelope_target(&rpc.request_message, &messages)
-            .unwrap_or_else(|| rpc.request_message.clone());
-        let body = messages.get(&target_message);
-        let body = match body {
-            Some(b) => b,
-            None => {
-                missing.push(format!(
-                    "{}::{} -> request message {} not found in proto",
-                    rpc.service, rpc.name, target_message
-                ));
-                continue;
-            }
-        };
-        if !body.contains("string client_operation_id = 15;") {
-            missing.push(format!(
-                "{}::{} -> {} is missing `string client_operation_id = 15;`",
-                rpc.service, rpc.name, target_message
-            ));
-        }
-    }
-
-    if !missing.is_empty() {
-        eprintln!(
-            "audit-idempotency: {} state-changing RPC(s) missing client_operation_id = 15:",
-            missing.len()
-        );
-        for m in &missing {
-            eprintln!("  {m}");
-        }
-        bail!("audit-idempotency failed");
-    }
-
-    println!(
-        "audit-idempotency: {} state-changing RPC(s) carry `client_operation_id = 15`.",
-        audited
-    );
-    Ok(())
-}
-
-fn read_proto_source_tree(entrypoint: &Path, proto_root: &Path) -> Result<String> {
-    fn visit(
-        path: &Path,
-        proto_root: &Path,
-        seen: &mut BTreeSet<PathBuf>,
-        out: &mut String,
-    ) -> Result<()> {
-        if !seen.insert(path.to_path_buf()) {
-            return Ok(());
-        }
-
-        let source =
-            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        out.push_str("\n// ---- ");
-        out.push_str(&path.display().to_string());
-        out.push_str(" ----\n");
-        out.push_str(&source);
-        out.push('\n');
-
-        for import in proto_imports(&source) {
-            let imported = proto_root.join(import);
-            if imported.exists() {
-                visit(&imported, proto_root, seen, out)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    let mut seen = BTreeSet::new();
-    let mut out = String::new();
-    visit(entrypoint, proto_root, &mut seen, &mut out)?;
-    Ok(out)
-}
-
-fn proto_imports(source: &str) -> Vec<String> {
-    let mut imports = Vec::new();
-    for line in source.lines() {
-        let trimmed = line.trim();
-        let Some(rest) = trimmed
-            .strip_prefix("import public ")
-            .or_else(|| trimmed.strip_prefix("import "))
-        else {
-            continue;
-        };
-        let spec = rest.trim().trim_end_matches(';').trim();
-        if let Some(after_quote) = spec.strip_prefix('"')
-            && let Some((path, _)) = after_quote.split_once('"')
-        {
-            imports.push(path.to_string());
-        }
-    }
-    imports
-}
-
-#[derive(Debug)]
-struct ProtoRpc {
-    service: String,
-    name: String,
-    request_message: String,
-}
-
-/// Tokenize service / rpc declarations. The proto syntax is regular
-/// enough that a small line-walker beats pulling in a real parser.
-fn extract_rpcs(source: &str) -> Vec<ProtoRpc> {
-    let mut out = Vec::new();
-    let mut current_service: Option<String> = None;
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("service ") {
-            current_service = rest
-                .split_whitespace()
-                .next()
-                .map(|s| s.trim_end_matches('{').to_string());
-            continue;
-        }
-        if trimmed == "}" {
-            current_service = None;
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("rpc ")
-            && let Some(service) = &current_service
-        {
-            // Shape: `rpc <Name>(<Req>) returns (<Resp>);`
-            // Stream-typed RPCs (`stream Foo`) need the `stream` token
-            // stripped before the message name.
-            let after_name = rest
-                .split_once('(')
-                .map(|(name, after)| (name.trim(), after));
-            let Some((name, after_paren)) = after_name else {
-                continue;
-            };
-            let req = after_paren
-                .split_once(')')
-                .map(|(req, _)| req.trim().trim_start_matches("stream").trim());
-            let Some(req) = req else { continue };
-            out.push(ProtoRpc {
-                service: service.clone(),
-                name: name.to_string(),
-                request_message: req.to_string(),
-            });
-        }
-    }
-    out
-}
-
-/// Pull the body of every `message X { ... }` block keyed by name.
-/// Only top-level messages — nested ones inside a service or another
-/// message are ignored, which is fine because the idempotency field
-/// always lives at the top level of the request message.
-fn extract_messages(source: &str) -> std::collections::HashMap<String, String> {
-    let mut out = std::collections::HashMap::new();
-    let bytes = source.as_bytes();
-    let needle = "message ";
-    let mut cursor = 0usize;
-    while let Some(rel) = source[cursor..].find(needle) {
-        let start = cursor + rel;
-        // Word-boundary check: skip when preceded by an identifier
-        // char (e.g. inside a doc comment text like "the message Foo").
-        if start > 0 {
-            let prev = bytes[start - 1];
-            if prev.is_ascii_alphanumeric() || prev == b'_' {
-                cursor = start + needle.len();
-                continue;
-            }
-        }
-        let after = start + needle.len();
-        let name_end = after
-            + source[after..]
-                .find(|c: char| c.is_whitespace() || c == '{')
-                .unwrap_or(0);
-        let name = source[after..name_end].trim();
-        let Some(brace_open) = source[name_end..].find('{') else {
-            cursor = name_end;
-            continue;
-        };
-        let brace_open = name_end + brace_open;
-        let brace_close = match_close_brace(bytes, brace_open).unwrap_or(bytes.len());
-        let body = &source[brace_open..brace_close.min(bytes.len())];
-        out.insert(name.to_string(), body.to_string());
-        cursor = brace_close;
-    }
-    out
-}
-
-/// Detect the "stream envelope" pattern — a message whose body is a
-/// single `oneof body { ... }` block whose first variant is named
-/// `request` and points at a request-shaped message. When matched,
-/// returns the inner request type so the audit can check the op-id
-/// field there. Used by `Push`/`Pull` and any future streaming RPCs
-/// that follow the same envelope layout.
-fn stream_envelope_target(
-    name: &str,
-    messages: &std::collections::HashMap<String, String>,
-) -> Option<String> {
-    let body = messages.get(name)?;
-    // Quick filter: the envelope body has exactly one `oneof body {`
-    // and (effectively) no other field declarations outside it.
-    if !body.contains("oneof body") {
-        return None;
-    }
-    // The convention is `<RequestType> request = 1;` as the first
-    // variant. Look for that line shape.
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if let Some(after) = trimmed.strip_suffix(" request = 1;") {
-            return Some(after.trim().to_string());
-        }
-    }
-    None
-}
-
-fn match_close_brace(bytes: &[u8], open: usize) -> Option<usize> {
-    let mut depth: i32 = 0;
-    let mut i = open;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Decide whether an RPC is state-changing. The state-changing test is
-/// a name-prefix heuristic plus an explicit auth-flow allow-list — the
-/// proto comment block reserves tag 15 for these.
-fn is_state_changing(name: &str) -> bool {
-    // Auth-flow `Begin*` RPCs start a challenge; the persistent state
-    // change happens in the matching `Finish*` / `Complete*`. Same for
-    // `GetInvitationSummary` (read-only public lookup).
-    const AUTH_FLOW_BEGIN_ALLOW: &[&str] = &[
-        "BeginWebAuthnRegistration",
-        "BeginWebAuthnAuthentication",
-        "BeginDeviceAuthorization",
-        "BeginOAuthLogin",
-        "BeginOAuthLink",
-        "BeginInvitationFlow",
-    ];
-    if AUTH_FLOW_BEGIN_ALLOW.contains(&name) {
-        return false;
-    }
-    // Mutating prefixes — order matters only because `Update`/`Create`
-    // are common substrings of read-shaped names. Every prefix below
-    // is anchored at the start of the RPC name.
-    const PREFIXES: &[&str] = &[
-        "Update",
-        "Push",
-        "Pull",
-        "Mint",
-        "Issue",
-        "Revoke",
-        "Rotate",
-        "Sign",
-        "Begin", // any non-allow-listed Begin* is state-changing (transactions etc.)
-        "Commit",
-        "Abort",
-        "Create",
-        "Delete",
-        "Add",
-        "Remove",
-        "Approve",
-        "Register",
-        "Deregister",
-        "ResolveDiscussion",
-        "RespondToHook",
-        "OpenDiscussion",
-        "AppendTurn",
-        "Finish",
-        "Complete",
-        "Cancel",
-        "Set", // Set* RPCs (SetThreadPolicy etc.) mutate
-    ];
-    PREFIXES.iter().any(|p| name.starts_with(p))
-}
-
 fn run_grpc_ts(args: Vec<String>) -> Result<()> {
     let mut check = false;
     for arg in args {
@@ -717,15 +398,17 @@ fn run_grpc_ts(args: Vec<String>) -> Result<()> {
         .and_then(|path| path.parent())
         .context("failed to locate workspace root")?;
     // Canonical proto source — same path the `heddle-grpc` build
-    // script and the `audit-idempotency` lint read from. Keeping a
+    // script and the descriptor audit read from. Keeping a
     // single source eliminates the drift class that landed stale
     // mirrors under `proto/` (see heddle#71).
     let proto_dir = workspace_root.join("crates/grpc/proto");
     let proto_files = collect_grpc_proto_files(&proto_dir)?;
     let client_dir = workspace_root.join("clients/grpc");
     let output_root = client_dir.join("src/gen");
+    let root_index = client_dir.join("src/index.ts");
     let package_json = client_dir.join("package.json");
     let grpc_version = grpc_crate_version(workspace_root)?;
+    let expected_root_index = render_ts_root_index(&proto_dir, &proto_files)?;
 
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
     let es_plugin = resolve_plugin_path(&client_dir, "PROTOC_GEN_ES", "protoc-gen-es")?;
@@ -734,6 +417,7 @@ fn run_grpc_ts(args: Vec<String>) -> Result<()> {
         let temp = tempfile::tempdir().context("failed to create temp directory")?;
         generate_grpc_ts_client(&protoc, &es_plugin, &proto_dir, &proto_files, temp.path())?;
         assert_tree_matches(temp.path(), &output_root)?;
+        assert_file_contents(&root_index, &expected_root_index)?;
         assert_package_json_version(&package_json, &grpc_version)?;
         println!(
             "gRPC TypeScript client is up to date at {}",
@@ -751,12 +435,73 @@ fn run_grpc_ts(args: Vec<String>) -> Result<()> {
         })?;
     }
     generate_grpc_ts_client(&protoc, &es_plugin, &proto_dir, &proto_files, &output_root)?;
+    fs::write(&root_index, expected_root_index)
+        .with_context(|| format!("failed to write '{}'", root_index.display()))?;
     sync_package_json_version(&package_json, &grpc_version)?;
     println!(
         "generated {} from heddle-grpc {}",
         output_root.display(),
         grpc_version
     );
+    Ok(())
+}
+
+fn proto_namespace(file_stem: &str) -> String {
+    file_stem
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .concat()
+}
+
+fn render_ts_root_index(proto_dir: &Path, proto_files: &[PathBuf]) -> Result<String> {
+    let mut namespaces = Vec::new();
+    let mut service_namespaces = Vec::new();
+    for relative in proto_files {
+        let stem = relative
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .with_context(|| format!("invalid proto filename '{}'", relative.display()))?;
+        let namespace = proto_namespace(stem);
+        let import_path = format!("./gen/heddle/v1/{stem}_pb.js");
+        namespaces.push(format!("export * as {namespace} from \"{import_path}\";"));
+
+        let source_path = proto_dir.join(relative);
+        let source = fs::read_to_string(&source_path)
+            .with_context(|| format!("failed to read '{}'", source_path.display()))?;
+        if source
+            .lines()
+            .any(|line| line.trim_start().starts_with("service "))
+        {
+            service_namespaces.push(format!(
+                "export * as {namespace}Connect from \"{import_path}\";"
+            ));
+        }
+    }
+
+    Ok(format!(
+        "{}\n\n{}\n",
+        namespaces.join("\n"),
+        service_namespaces.join("\n")
+    ))
+}
+
+fn assert_file_contents(path: &Path, expected: &str) -> Result<()> {
+    let actual =
+        fs::read_to_string(path).with_context(|| format!("failed to read '{}'", path.display()))?;
+    if actual != expected {
+        bail!(
+            "{} is out of sync with the canonical proto inventory. Run `npm run --prefix clients/grpc generate`.",
+            path.display()
+        );
+    }
     Ok(())
 }
 
@@ -769,6 +514,12 @@ fn collect_grpc_proto_files(proto_dir: &Path) -> Result<Vec<PathBuf>> {
         let path = entry
             .with_context(|| format!("failed to read entry under '{}'", source_dir.display()))?
             .path();
+        if path.is_dir() {
+            bail!(
+                "nested protobuf directory '{}' violates the flat heddle.v1 contract",
+                path.display()
+            );
+        }
         if path.extension().is_some_and(|ext| ext == "proto") {
             files.push(
                 path.strip_prefix(proto_dir)
@@ -982,6 +733,8 @@ fn sync_package_json_version(package_json: &Path, expected: &str) -> Result<()> 
 mod tests_proto_single_source {
     use std::path::PathBuf;
 
+    use super::{collect_grpc_proto_files, render_ts_root_index};
+
     fn workspace_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1018,5 +771,35 @@ mod tests_proto_single_source {
                 canonical.display()
             );
         }
+    }
+
+    #[test]
+    fn canonical_entrypoint_imports_every_schema_file() {
+        let proto_root = workspace_root().join("crates/grpc/proto");
+        let files = collect_grpc_proto_files(&proto_root).expect("collect canonical schemas");
+        let entrypoint = std::fs::read_to_string(proto_root.join("heddle/v1/service.proto"))
+            .expect("read service.proto");
+
+        for file in files {
+            if file.ends_with("service.proto") {
+                continue;
+            }
+            let import = format!("import public \"{}\";", file.display());
+            assert!(
+                entrypoint.contains(&import),
+                "canonical entrypoint is missing {import}"
+            );
+        }
+    }
+
+    #[test]
+    fn typescript_root_exports_match_proto_inventory() {
+        let root = workspace_root();
+        let proto_root = root.join("crates/grpc/proto");
+        let files = collect_grpc_proto_files(&proto_root).expect("collect canonical schemas");
+        let expected = render_ts_root_index(&proto_root, &files).expect("render root exports");
+        let actual = std::fs::read_to_string(root.join("clients/grpc/src/index.ts"))
+            .expect("read checked-in root exports");
+        assert_eq!(actual, expected);
     }
 }

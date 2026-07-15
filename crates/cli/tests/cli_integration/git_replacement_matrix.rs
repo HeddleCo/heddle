@@ -60,6 +60,14 @@ fn assert_clean_json_without_git(args: &[&str], cwd: &std::path::Path) -> Value 
     inject_post_verification_without_git(cwd, value)
 }
 
+fn init_and_import_git_overlay_without_git(cwd: &std::path::Path, ref_name: &str) -> Value {
+    assert_clean_json_without_git(&["--output", "json", "init"], cwd);
+    assert_clean_json_without_git(
+        &["--output", "json", "import", "git", "--ref", ref_name],
+        cwd,
+    )
+}
+
 /// Mutation `--output json` replies no longer embed `verification`
 /// (the verification-claim gate still consults it in-memory, but it
 /// is omitted from the wire). This helper grafts the proof back onto
@@ -127,37 +135,6 @@ fn configure_repo_local_git_identity(path: &std::path::Path) {
     }
     contents.push_str("[user]\n\tname = Heddle Test\n\temail = heddle@example.com\n");
     std::fs::write(config, contents).expect("write repo-local git identity");
-}
-
-fn git_ok(args: &[&str], cwd: &std::path::Path) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("spawn git");
-    assert!(
-        output.status.success(),
-        "git {:?} failed\nstdout: {}\nstderr: {}",
-        args,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn git_stdout(args: &[&str], cwd: &std::path::Path) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("spawn git");
-    assert!(
-        output.status.success(),
-        "git {:?} failed\nstdout: {}\nstderr: {}",
-        args,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 fn seed_bare_git_repo(path: &std::path::Path) -> ObjectId {
@@ -376,9 +353,8 @@ fn git_replacement_matrix_raw_git_operation_handoff_without_git_on_path() {
     let tree = git_tree_with_file(&git, "tracked.txt", b"tracked\n");
     let commit = git_commit_with_tree(&git, Some("refs/heads/main"), tree, "seed", &[]);
 
-    let adopt =
-        assert_clean_json_without_git(&["--output", "json", "adopt", "--ref", "main"], temp.path());
-    assert_ne!(adopt["verification"]["status"], "needs_import");
+    let import = init_and_import_git_overlay_without_git(temp.path(), "main");
+    assert_ne!(import["verification"]["status"], "needs_import");
 
     std::fs::write(
         temp.path().join(".git").join("MERGE_HEAD"),
@@ -439,12 +415,12 @@ fn git_replacement_matrix_native_repo_read_commands_without_git_on_path() {
         ],
         temp.path(),
     );
-    let first_id = first["change_id"]
+    let first_id = first["state_id"]
         .as_str()
         .expect("first capture id")
         .to_string();
     assert!(
-        first_id.starts_with("hd-"),
+        first_id.starts_with("hs-"),
         "native capture should produce Heddle state ids: {first}"
     );
 
@@ -478,7 +454,7 @@ fn git_replacement_matrix_native_repo_read_commands_without_git_on_path() {
         ],
         temp.path(),
     );
-    let second_id = second["change_id"]
+    let second_id = second["state_id"]
         .as_str()
         .expect("second capture id")
         .to_string();
@@ -490,14 +466,14 @@ fn git_replacement_matrix_native_repo_read_commands_without_git_on_path() {
         "{state_show}"
     );
     assert_eq!(
-        state_show["change_id"], second_id,
+        state_show["state_id"], second_id,
         "show HEAD should inspect the latest native Heddle state: {state_show}"
     );
 
     let state_inspect =
         assert_clean_json_without_git(&["--output", "json", "show", &first_id], temp.path());
     assert_eq!(
-        state_inspect["change_id"], first_id,
+        state_inspect["state_id"], first_id,
         "show <state> should route to native state show without git: {state_inspect}"
     );
 
@@ -574,18 +550,16 @@ fn git_replacement_matrix_everyday_save_read_machine_streams_without_git_on_path
         temp.path(),
     );
     assert!(
-        capture["change_id"]
+        capture["state_id"]
             .as_str()
             .unwrap_or("")
-            .starts_with("hd-")
+            .starts_with("hs-")
     );
 
-    let checkpoint = assert_clean_json_without_git(
-        &["--output", "json", "checkpoint", "-m", "checkpoint"],
-        temp.path(),
-    );
-    assert_eq!(checkpoint["capability"], "git-overlay");
-    assert!(checkpoint["git_commit"].as_str().unwrap_or("").len() >= 7);
+    let commit =
+        assert_clean_json_without_git(&["--output", "json", "commit", "-m", "seed"], temp.path());
+    assert_eq!(commit["output_kind"], "commit");
+    assert!(commit["git_commit"].as_str().unwrap_or("").len() >= 7);
 
     for args in [
         &["--output", "json", "log"][..],
@@ -620,6 +594,62 @@ fn git_replacement_matrix_everyday_save_read_machine_streams_without_git_on_path
 }
 
 #[test]
+fn git_overlay_undo_recover_stays_coherent_without_git_on_path() {
+    let temp = TempDir::new().unwrap();
+    SleyRepository::init(temp.path()).expect("init git worktree");
+    configure_repo_local_git_identity(temp.path());
+    assert_clean_json_without_git(&["--output", "json", "init"], temp.path());
+
+    std::fs::write(temp.path().join("notes.md"), "base\n").unwrap();
+    assert_clean_json_without_git(&["--output", "json", "capture", "-m", "base"], temp.path());
+    assert_clean_json_without_git(&["--output", "json", "commit", "-m", "base"], temp.path());
+
+    std::fs::write(temp.path().join("notes.md"), "recover this\n").unwrap();
+    assert_clean_json_without_git(
+        &["--output", "json", "capture", "-m", "recoverable"],
+        temp.path(),
+    );
+    assert_clean_json_without_git(
+        &["--output", "json", "commit", "-m", "recoverable"],
+        temp.path(),
+    );
+    assert_clean_json_without_git(&["--output", "json", "undo"], temp.path());
+
+    std::fs::write(temp.path().join("notes.md"), "different direction\n").unwrap();
+    assert_clean_json_without_git(
+        &["--output", "json", "capture", "-m", "diverge"],
+        temp.path(),
+    );
+    assert_clean_json_without_git(
+        &["--output", "json", "commit", "-m", "diverge"],
+        temp.path(),
+    );
+    let git_head_before_recovery = git_head_oid(temp.path());
+
+    let recovered =
+        assert_clean_json_without_git(&["--output", "json", "undo", "--recover"], temp.path());
+    assert_eq!(recovered["output_kind"], "undo_recover");
+    assert_eq!(git_head_oid(temp.path()), git_head_before_recovery);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
+        "recover this\n"
+    );
+    assert_eq!(recovered["verification"]["worktree_state"], "dirty");
+
+    assert_clean_json_without_git(
+        &["--output", "json", "capture", "-m", "recovered work"],
+        temp.path(),
+    );
+    let committed = assert_clean_json_without_git(
+        &["--output", "json", "commit", "-m", "recovered work"],
+        temp.path(),
+    );
+    assert_eq!(committed["output_kind"], "commit");
+    assert_ne!(git_head_oid(temp.path()), git_head_before_recovery);
+    assert_eq!(committed["verification"]["worktree_state"], "clean");
+}
+
+#[test]
 fn git_replacement_matrix_clone_status_capture_push_without_git_on_path() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
@@ -650,6 +680,7 @@ fn git_replacement_matrix_clone_status_capture_push_without_git_on_path() {
 
     std::fs::write(work.join("story.txt"), "written by heddle\n").unwrap();
     heddle_without_git(&["capture", "-m", "heddle change"], &work).unwrap();
+    heddle_without_git(&["commit", "-m", "heddle change"], &work).unwrap();
     heddle_without_git(&["push"], &work).unwrap();
 
     let origin_repo = open_git(&origin).expect("open pushed origin");
@@ -784,7 +815,7 @@ fn git_replacement_matrix_git_import_export_sync_reconcile_without_git_on_path()
             "--output",
             "json",
             "fsck",
-            "--repair",
+            "repair",
             "git",
             "--ref",
             "main",
@@ -797,8 +828,8 @@ fn git_replacement_matrix_git_import_export_sync_reconcile_without_git_on_path()
     assert_eq!(reconcile["repaired"], false);
     assert_eq!(
         reconcile["repairs"].as_array().map(Vec::len),
-        Some(2),
-        "fsck git repair preview should report both local repair choices: {reconcile}"
+        Some(1),
+        "fsck git repair preview should report the authority-valid repair: {reconcile}"
     );
 
     let verify = assert_clean_json_without_git(&["--output", "json", "verify"], &work);
@@ -809,7 +840,7 @@ fn git_replacement_matrix_git_import_export_sync_reconcile_without_git_on_path()
 }
 
 #[test]
-fn git_replacement_matrix_commit_undo_rewinds_checkpoint_without_git_on_path() {
+fn git_replacement_matrix_commit_undo_leaves_capture_ready_to_recommit_without_git_on_path() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
@@ -828,6 +859,10 @@ fn git_replacement_matrix_commit_undo_rewinds_checkpoint_without_git_on_path() {
 
     let base = git_head_oid(&work);
     std::fs::write(work.join("story.txt"), "undo without git\n").unwrap();
+    assert_clean_json_without_git(
+        &["--output", "json", "capture", "-m", "undo without git"],
+        &work,
+    );
     let commit = assert_clean_json_without_git(
         &["--output", "json", "commit", "-m", "undo without git"],
         &work,
@@ -835,18 +870,6 @@ fn git_replacement_matrix_commit_undo_rewinds_checkpoint_without_git_on_path() {
     assert_eq!(commit["output_kind"], "commit");
     let after = git_head_oid(&work);
     assert_ne!(after, base, "commit should advance the checkout Git ref");
-
-    let undo_list = assert_clean_json_without_git(
-        &["--output", "json", "undo", "--list", "--depth", "1"],
-        &work,
-    );
-    let operations = undo_list["batches"][0]["operations"].as_array().unwrap();
-    assert!(
-        operations.iter().any(|operation| operation["description"]
-            .as_str()
-            .is_some_and(|description| description.starts_with("git checkpoint "))),
-        "undo list should expose the Git checkpoint inside the logical commit batch: {undo_list}"
-    );
 
     let undo = assert_clean_json_without_git(&["--output", "json", "undo"], &work);
     assert_eq!(undo["action"], "undo");
@@ -856,342 +879,15 @@ fn git_replacement_matrix_commit_undo_rewinds_checkpoint_without_git_on_path() {
         "undo should rewind the visible Git checkout without invoking git"
     );
 
-    let mirror = open_git(work.join(".heddle/git")).expect("open legacy Bridge Mirror");
-    let mirror_tip = find_reference(&mirror, "refs/heads/main")
-        .expect("mirror main exists")
-        .peel_to_id()
-        .expect("peel mirror main")
-        .to_string();
-    assert_eq!(
-        mirror_tip, base,
-        "undo should rewind the legacy Bridge Mirror branch without invoking git"
-    );
-
     let status = assert_clean_json_without_git(&["--output", "json", "status"], &work);
-    assert_eq!(status["verification"]["status"], "clean");
-    assert!(
-        status["changes"]["modified"].as_array().unwrap().is_empty()
-            && status["changes"]["added"].as_array().unwrap().is_empty()
-            && status["changes"]["deleted"].as_array().unwrap().is_empty(),
-        "undo after commit should leave the worktree clean: {status}"
-    );
-}
-
-/// heddle#305 (git-overlay): `commit` then `undo` hard-resets the legacy Bridge Mirror
-/// to the parent — no revert commit recorded as Git history — while preserving
-/// the pre-undo state in heddle's thread history via the internal
-/// `undo-recovery` handle (heddle#305 r2: a heddle-internal ref, not a user
-/// marker), so the absorbed worktree edits are never silently discarded. The
-/// durability lives in heddle's store, not in Git history.
-#[test]
-fn git_replacement_matrix_undo_preserves_recovery_marker_for_absorbed_edit() {
-    let temp = TempDir::new().unwrap();
-    let origin = temp.path().join("origin.git");
-    let work = temp.path().join("work");
-    seed_bare_git_repo(&origin);
-
-    heddle_without_git(
-        &[
-            "clone",
-            origin.to_str().expect("origin path should be utf8"),
-            work.to_str().expect("work path should be utf8"),
-        ],
-        temp.path(),
-    )
-    .unwrap();
-    configure_repo_local_git_identity(&work);
-
-    let base = git_head_oid(&work);
-
-    // An edit that lived only in the worktree, then absorbed by `commit`.
-    std::fs::write(work.join("story.txt"), "FRICTION ONE\nFRICTION TWO\n").unwrap();
-    let commit =
-        assert_clean_json_without_git(&["--output", "json", "commit", "-m", "friction"], &work);
-    assert_eq!(commit["output_kind"], "commit");
-    let friction_state = commit["change_id"]
-        .as_str()
-        .expect("commit emits the absorbed heddle change-id")
-        .to_string();
-    let friction_commit = git_head_oid(&work);
-    assert_ne!(
-        friction_commit, base,
-        "commit advances the checkout Git ref"
-    );
-
-    let undo = assert_clean_json_without_git(&["--output", "json", "undo"], &work);
-    assert_eq!(undo["action"], "undo");
-
-    // legacy Bridge Mirror is hard-reset to the parent — not a revert commit on top.
     assert_eq!(
-        git_head_oid(&work),
-        base,
-        "undo must hard-reset the visible Git checkout to the parent"
+        status["recommended_action"], "heddle commit -m \"...\"",
+        "the captured Heddle state should remain ready to republish: {status}"
     );
-    let log = String::from_utf8(
-        std::process::Command::new("git")
-            .args(["log", "--oneline"])
-            .current_dir(&work)
-            .output()
-            .expect("git log")
-            .stdout,
-    )
-    .unwrap();
-    assert!(
-        !log.contains("friction"),
-        "undo must not record itself as Git history (no revert/friction commit remains): {log}"
-    );
-
-    // The pre-undo state is preserved in heddle's thread history via the
-    // internal recovery handle, even though Git was hard-reset. heddle#305 r2:
-    // it must NOT leak into the user marker namespace.
-    let markers =
-        assert_clean_json_without_git(&["--output", "json", "thread", "marker", "list"], &work);
-    assert!(
-        markers["markers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|m| m["name"] != "undo-recovery"),
-        "recovery bookkeeping must not appear as a user marker"
-    );
-    assert_eq!(undo["recovery_marker"], ".undo-recovery");
-    assert_eq!(
-        undo["recovery_state"], friction_state,
-        "recovery handle must pin the pre-undo (friction) heddle state"
-    );
-
-    // And `redo` round-trips the absorbed content back into the worktree.
-    let redo = assert_clean_json_without_git(&["--output", "json", "undo", "--redo"], &work);
-    assert_eq!(redo["action"], "redo");
     assert_eq!(
         std::fs::read_to_string(work.join("story.txt")).unwrap(),
-        "FRICTION ONE\nFRICTION TWO\n",
-        "redo must restore the absorbed worktree edits"
-    );
-    assert_eq!(
-        git_head_oid(&work),
-        friction_commit,
-        "redo must restore the Git checkpoint together with the heddle state"
-    );
-}
-
-#[test]
-fn git_replacement_matrix_commit_staged_index_without_git_on_path() {
-    let temp = TempDir::new().unwrap();
-    git_ok(&["init", "--initial-branch", "main"], temp.path());
-    configure_repo_local_git_identity(temp.path());
-    std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
-    git_ok(&["add", "file.txt"], temp.path());
-    git_ok(&["commit", "-m", "seed"], temp.path());
-
-    assert_clean_json_without_git(&["--output", "json", "adopt", "--ref", "main"], temp.path());
-
-    std::fs::write(temp.path().join("file.txt"), "staged\n").unwrap();
-    git_ok(&["add", "file.txt"], temp.path());
-    std::fs::write(temp.path().join("file.txt"), "staged\nunstaged\n").unwrap();
-    std::fs::write(temp.path().join("scratch.txt"), "left behind\n").unwrap();
-
-    let status = assert_clean_json_without_git(&["--output", "json", "status"], temp.path());
-    assert_eq!(status["git_index"]["commit_mode"], "staged_index");
-    assert_eq!(status["git_index"]["has_staged_changes"], true);
-    assert_eq!(
-        status["git_index"]["staged_paths"],
-        serde_json::json!(["file.txt"])
-    );
-    assert_eq!(
-        status["git_index"]["unstaged_paths"],
-        serde_json::json!(["file.txt"])
-    );
-    assert_eq!(
-        status["git_index"]["untracked_paths"],
-        serde_json::json!(["scratch.txt"])
-    );
-    assert_eq!(
-        status["git_index"]["will_commit"],
-        serde_json::json!(["file.txt"])
-    );
-    assert_eq!(
-        status["git_index"]["preserved_after_commit"],
-        serde_json::json!(["unstaged: file.txt", "untracked: scratch.txt"]),
-        "status should predict exactly what plain `heddle commit` will leave behind: {status}"
-    );
-
-    let commit = assert_clean_json_without_git(
-        &["--output", "json", "commit", "-m", "staged without git"],
-        temp.path(),
-    );
-    assert_eq!(commit["output_kind"], "commit");
-    assert_eq!(commit["git_index"]["commit_mode"], "staged_index");
-    assert_eq!(
-        commit["git_index"]["will_commit"],
-        serde_json::json!(["file.txt"])
-    );
-    assert_eq!(
-        commit["git_index"]["preserved_after_commit"],
-        serde_json::json!(["unstaged: file.txt", "untracked: scratch.txt"]),
-        "commit should repeat the same no-git index plan predicted by status: {commit}"
-    );
-    assert!(
-        commit["summary"]
-            .as_str()
-            .is_some_and(|summary| summary.contains("left 2 unstaged/untracked")),
-        "staged commit should disclose preserved extra work: {commit}"
-    );
-    assert_eq!(
-        git_stdout(&["show", "HEAD:file.txt"], temp.path()),
-        "staged",
-        "commit should write the staged index tree without invoking git from Heddle"
-    );
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("file.txt")).unwrap(),
-        "staged\nunstaged\n"
-    );
-    assert!(temp.path().join("scratch.txt").exists());
-}
-
-/// `git rm --cached path` stages a deletion without changing the
-/// worktree, so `compare_worktree_cached_with_options` reports clean
-/// even though the Git index has real intent. `heddle commit -m ...`
-/// must consult the staged-index plan instead of short-circuiting on
-/// the clean worktree and either reporting "nothing to commit" or
-/// writing a generic checkpoint.
-#[test]
-fn git_replacement_matrix_commit_staged_removal_with_clean_worktree_without_git_on_path() {
-    let temp = TempDir::new().unwrap();
-    git_ok(&["init", "--initial-branch", "main"], temp.path());
-    configure_repo_local_git_identity(temp.path());
-    std::fs::write(temp.path().join("file.txt"), "keep\n").unwrap();
-    git_ok(&["add", "file.txt"], temp.path());
-    git_ok(&["commit", "-m", "seed"], temp.path());
-
-    assert_clean_json_without_git(&["--output", "json", "adopt", "--ref", "main"], temp.path());
-
-    git_ok(&["rm", "--cached", "file.txt"], temp.path());
-
-    let status = assert_clean_json_without_git(&["--output", "json", "status"], temp.path());
-    assert_eq!(status["git_index"]["commit_mode"], "staged_index");
-    assert_eq!(
-        status["git_index"]["staged_paths"],
-        serde_json::json!(["file.txt"]),
-        "staged removal must surface in the staged-index plan: {status}"
-    );
-
-    let commit = assert_clean_json_without_git(
-        &["--output", "json", "commit", "-m", "drop staged"],
-        temp.path(),
-    );
-    assert_eq!(
-        commit["output_kind"], "commit",
-        "clean-worktree+staged-removal must reach commit_staged_index, not the nothing-to-commit \
-         or generic-checkpoint branch: {commit}"
-    );
-    assert_eq!(commit["git_index"]["commit_mode"], "staged_index");
-    assert_eq!(
-        commit["git_index"]["staged_paths"],
-        serde_json::json!(["file.txt"])
-    );
-    assert_eq!(
-        commit["git_index"]["will_commit"],
-        serde_json::json!(["file.txt"])
-    );
-
-    assert_eq!(
-        git_stdout(&["ls-tree", "HEAD", "file.txt"], temp.path()),
-        "",
-        "HEAD tree should no longer contain the removed path"
-    );
-    assert!(
-        temp.path().join("file.txt").exists(),
-        "git rm --cached must leave the worktree copy in place"
-    );
-}
-
-#[test]
-fn git_replacement_matrix_merge_git_commit_pushes_checkpoint_without_git_on_path() {
-    let temp = TempDir::new().unwrap();
-    let origin = temp.path().join("origin.git");
-    let work = temp.path().join("work");
-    seed_bare_git_repo(&origin);
-
-    heddle_without_git(
-        &[
-            "clone",
-            origin.to_str().expect("origin path should be utf8"),
-            work.to_str().expect("work path should be utf8"),
-        ],
-        temp.path(),
-    )
-    .unwrap();
-    configure_repo_local_git_identity(&work);
-
-    assert_clean_json_without_git(
-        &["--output", "json", "thread", "create", "feature/no-git"],
-        &work,
-    );
-    assert_clean_json_without_git(&["--output", "json", "switch", "feature/no-git"], &work);
-    std::fs::write(work.join("feature.txt"), "merged without git\n").unwrap();
-    assert_clean_json_without_git(
-        &["--output", "json", "commit", "-m", "feature without git"],
-        &work,
-    );
-    assert_clean_json_without_git(&["--output", "json", "switch", "main"], &work);
-
-    let merge = assert_clean_json_without_git(
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature/no-git",
-            "-m",
-            "merge without git",
-            "--git-commit",
-        ],
-        &work,
-    );
-    assert_eq!(merge["status"], "completed");
-    let merge_sha = merge["git_commit"]["sha"]
-        .as_str()
-        .expect("merge should report a Git checkpoint")
-        .to_string();
-    assert_eq!(git_head_oid(&work), merge_sha);
-
-    let git_repo = open_git(&work).expect("open checkout git repo");
-    let head = git_repo
-        .find_commit(
-            merge_sha
-                .parse::<ObjectId>()
-                .expect("merge sha should parse"),
-        )
-        .expect("merge checkpoint should exist");
-    let message = head.message_raw_sloppy().to_string();
-    assert!(
-        message.starts_with("merge without git\n"),
-        "checkpoint should preserve the user merge message: {message}"
-    );
-    assert!(
-        head.tree()
-            .expect("checkpoint tree")
-            .lookup_entry_by_path("feature.txt")
-            .expect("tree lookup")
-            .is_some(),
-        "checkpoint tree should come from the landed Heddle merge state"
-    );
-
-    heddle_without_git(&["push"], &work).unwrap();
-    let origin_repo = open_git(&origin).expect("open origin");
-    let origin_tip = find_reference(&origin_repo, "refs/heads/main")
-        .expect("origin main exists")
-        .peel_to_id()
-        .expect("peel origin main")
-        .to_string();
-    assert_eq!(
-        origin_tip, merge_sha,
-        "push should send the native merge checkpoint instead of synthesizing a replacement commit"
-    );
-    assert_eq!(
-        git_head_oid(&work),
-        merge_sha,
-        "push must not rewrite the local checkpoint commit"
+        "undo without git\n",
+        "undoing Git publication must preserve the captured work"
     );
 }
 
@@ -1217,15 +913,26 @@ fn git_replacement_matrix_branch_like_thread_refresh_without_git_on_path() {
         &["--output", "json", "thread", "create", "feature/refresh"],
         &work,
     );
-    assert_clean_json_without_git(&["--output", "json", "switch", "feature/refresh"], &work);
+    assert_clean_json_without_git(
+        &["--output", "json", "thread", "switch", "feature/refresh"],
+        &work,
+    );
     std::fs::write(work.join("feature.txt"), "feature refresh\n").unwrap();
+    assert_clean_json_without_git(
+        &["--output", "json", "capture", "-m", "feature refresh"],
+        &work,
+    );
     assert_clean_json_without_git(
         &["--output", "json", "commit", "-m", "feature refresh"],
         &work,
     );
 
-    assert_clean_json_without_git(&["--output", "json", "switch", "main"], &work);
+    assert_clean_json_without_git(&["--output", "json", "thread", "switch", "main"], &work);
     std::fs::write(work.join("main.txt"), "main refresh\n").unwrap();
+    assert_clean_json_without_git(
+        &["--output", "json", "capture", "-m", "main refresh"],
+        &work,
+    );
     assert_clean_json_without_git(&["--output", "json", "commit", "-m", "main refresh"], &work);
 
     let blocked = heddle_output_without_git(
@@ -1247,14 +954,20 @@ fn git_replacement_matrix_branch_like_thread_refresh_without_git_on_path() {
     let envelope: Value =
         serde_json::from_str(blocked_stderr).expect("refresh refusal should emit JSON advice");
     assert_eq!(envelope["kind"], "thread_refresh_requires_checkout");
-    assert_eq!(envelope["primary_command"], "heddle switch feature/refresh");
+    assert_eq!(
+        envelope["primary_command"],
+        "heddle thread switch feature/refresh"
+    );
     assert_json_recovery_advice_fields(&envelope, "branch-like thread refresh refusal");
     assert_eq!(
         envelope["primary_command_template"]["argv_template"],
-        heddle_argv_json(["switch", "feature/refresh"])
+        heddle_argv_json(["thread", "switch", "feature/refresh"])
     );
 
-    assert_clean_json_without_git(&["--output", "json", "switch", "feature/refresh"], &work);
+    assert_clean_json_without_git(
+        &["--output", "json", "thread", "switch", "feature/refresh"],
+        &work,
+    );
     let refreshed = assert_clean_json_without_git(
         &["--output", "json", "thread", "refresh", "feature/refresh"],
         &work,
@@ -1266,9 +979,8 @@ fn git_replacement_matrix_branch_like_thread_refresh_without_git_on_path() {
         "{refreshed}"
     );
     let verify = assert_verify_failed_json_without_git(&["--output", "json", "verify"], &work);
-    assert_eq!(verify["status"], "needs_checkpoint", "{verify}");
     assert_eq!(
-        verify["recommended_action"], "heddle checkpoint -m \"...\"",
+        verify["recommended_action"], "heddle commit -m \"...\"",
         "{verify}"
     );
 }
@@ -1344,7 +1056,7 @@ fn git_replacement_matrix_remote_list_surfaces_all_git_overlay_remotes() {
 }
 
 #[test]
-fn git_replacement_matrix_checkpoint_writes_through_to_git_branch_and_index_without_git_on_path() {
+fn git_replacement_matrix_commit_writes_through_to_git_branch_and_index_without_git_on_path() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
@@ -1362,7 +1074,7 @@ fn git_replacement_matrix_checkpoint_writes_through_to_git_branch_and_index_with
     configure_repo_local_git_identity(&work);
     std::fs::write(work.join("story.txt"), "captured by heddle\n").unwrap();
     heddle_without_git(&["capture", "-m", "write through"], &work).unwrap();
-    heddle_without_git(&["checkpoint", "-m", "commit captured work"], &work).unwrap();
+    heddle_without_git(&["commit", "-m", "commit captured work"], &work).unwrap();
 
     let git_repo = open_git(&work).expect("open checkout git repo");
     let new_tip = find_reference(&git_repo, "refs/heads/main")
@@ -1371,17 +1083,22 @@ fn git_replacement_matrix_checkpoint_writes_through_to_git_branch_and_index_with
         .expect("peel main");
     assert_ne!(
         new_tip, original_tip,
-        "checkpoint should advance the real Git branch ref"
+        "commit should advance the real Git branch ref"
     );
     assert!(
         work.join(".git").join("index").exists(),
-        "checkpoint should rebuild the real Git index"
+        "commit should rebuild the real Git index"
     );
-    let tree = git_repo
+    let tip = git_repo
         .find_commit(new_tip)
-        .expect("tip should be a commit")
-        .tree()
-        .expect("tip should have a tree");
+        .expect("tip should be a commit");
+    assert!(
+        tip.message_raw_sloppy()
+            .to_string()
+            .starts_with("commit captured work\n"),
+        "Git commit should preserve the requested message"
+    );
+    let tree = tip.tree().expect("tip should have a tree");
     assert!(
         tree.lookup_entry_by_path("story.txt")
             .expect("tree lookup")
@@ -1394,11 +1111,11 @@ fn git_replacement_matrix_checkpoint_writes_through_to_git_branch_and_index_with
     assert_eq!(parsed["git_checkpoint"]["git_commit"], new_tip.to_string());
     assert_ne!(
         parsed["thread_health"], "blocked",
-        "clean checkpointed work should not remain blocked: {status}"
+        "clean committed work should not remain blocked: {status}"
     );
     assert_ne!(
         parsed["recommended_action"], "heddle thread promote main",
-        "promotion can stay visible, but should not be the primary next action after checkpoint: {status}"
+        "promotion can stay visible, but should not be the primary next action after commit: {status}"
     );
 }
 
@@ -1422,11 +1139,7 @@ fn git_replacement_matrix_fsck_git_projection_validates_mapping_notes_and_checko
     configure_repo_local_git_identity(&work);
     std::fs::write(work.join("story.txt"), "git projection fsck\n").unwrap();
     heddle_without_git(&["capture", "-m", "git projection fsck"], &work).unwrap();
-    heddle_without_git(
-        &["checkpoint", "-m", "git projection fsck checkpoint"],
-        &work,
-    )
-    .unwrap();
+    heddle_without_git(&["commit", "-m", "git projection fsck"], &work).unwrap();
 
     let fsck = heddle_without_git(&["fsck", "--git", "--output", "json"], &work).unwrap();
     let parsed: Value = serde_json::from_str(&fsck).expect("fsck output should parse");
@@ -1480,7 +1193,7 @@ fn git_replacement_matrix_log_reflog_reads_checkout_logs_without_git_on_path() {
 }
 
 #[test]
-fn git_replacement_matrix_checkpoint_reports_locked_index_without_git_on_path() {
+fn git_replacement_matrix_commit_reports_locked_index_without_git_on_path() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
@@ -1504,11 +1217,11 @@ fn git_replacement_matrix_checkpoint_reports_locked_index_without_git_on_path() 
     )
     .unwrap();
 
-    let err = heddle_without_git(&["checkpoint", "-m", "locked index"], &work)
-        .expect_err("checkpoint should reject a locked Git index");
+    let err = heddle_without_git(&["commit", "-m", "locked index"], &work)
+        .expect_err("commit should reject a locked Git index");
     assert!(
         err.contains("Git index is already locked"),
-        "checkpoint should name the precise write-through skip reason: {err}"
+        "commit should name the precise write-through skip reason: {err}"
     );
 }
 
@@ -1539,16 +1252,7 @@ fn git_replacement_matrix_pull_adopts_remote_branch_without_git_on_path() {
     );
     assert_ne!(advanced_tip, original_tip);
 
-    let pull = heddle_without_git(
-        &[
-            "pull",
-            origin.to_str().expect("origin path should be utf8"),
-            "--output",
-            "text",
-        ],
-        &work,
-    )
-    .unwrap();
+    let pull = heddle_without_git(&["pull", "origin", "--output", "text"], &work).unwrap();
     assert!(
         pull.contains("pulled from")
             && pull.contains("Branch:")
@@ -1559,20 +1263,15 @@ fn git_replacement_matrix_pull_adopts_remote_branch_without_git_on_path() {
         "pull text should explain remote movement without requiring git on PATH: {pull}"
     );
 
-    let mirror = open_git(work.join(".heddle/git")).expect("open legacy Bridge Mirror");
-    let mirror_tip = find_reference(&mirror, "refs/heads/main")
-        .expect("mirror main exists")
-        .peel_to_id()
-        .expect("peel mirror main");
     assert_eq!(
-        mirror_tip, advanced_tip,
-        "heddle pull should advance the native legacy Bridge Mirror without using git on PATH"
+        git_head_oid(&work),
+        advanced_tip.to_string(),
+        "heddle pull should advance the authoritative Git checkout through Sley"
     );
 }
 
 #[test]
-fn git_replacement_matrix_fetch_does_not_dirty_checkout_and_pull_materializes_without_git_on_path()
-{
+fn git_replacement_matrix_pull_materializes_without_git_on_path() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
@@ -1607,37 +1306,12 @@ fn git_replacement_matrix_fetch_does_not_dirty_checkout_and_pull_materializes_wi
     );
     assert_ne!(advanced_tip, original_tip);
 
-    heddle_without_git(
-        &[
-            "fetch",
-            origin.to_str().expect("origin path should be utf8"),
-        ],
-        &work,
-    )
-    .unwrap();
-    let fetched_status = heddle_without_git(&["status", "--output", "json"], &work).unwrap();
-    let fetched_status: Value = serde_json::from_str(&fetched_status).unwrap();
-    assert_eq!(
-        fetched_status["changes"]["modified"]
-            .as_array()
-            .unwrap()
-            .len(),
-        0
-    );
     assert_eq!(
         std::fs::read_to_string(work.join("shared.txt")).unwrap(),
         "base\n"
     );
 
-    let pull_json = assert_clean_json_without_git(
-        &[
-            "--output",
-            "json",
-            "pull",
-            origin.to_str().expect("origin path should be utf8"),
-        ],
-        &work,
-    );
+    let pull_json = assert_clean_json_without_git(&["--output", "json", "pull", "origin"], &work);
     assert_eq!(pull_json["branch"], "main");
     assert_eq!(pull_json["old_git_head"], original_tip.to_string());
     assert_eq!(pull_json["new_git_head"], advanced_tip.to_string());
@@ -1663,87 +1337,6 @@ fn git_replacement_matrix_fetch_does_not_dirty_checkout_and_pull_materializes_wi
 }
 
 #[test]
-fn git_replacement_matrix_fetch_discovers_new_remote_branch_without_git_on_path() {
-    let temp = TempDir::new().unwrap();
-    let origin = temp.path().join("origin.git");
-    let work = temp.path().join("work");
-    let origin_repo = SleyRepository::init_bare(&origin).expect("init bare git repo");
-    let base_tree = git_tree_with_file(&origin_repo, "shared.txt", b"base\n");
-    let original_tip = git_commit_with_tree(
-        &origin_repo,
-        Some("refs/heads/main"),
-        base_tree,
-        "seed",
-        &[],
-    );
-    git_set_reference(&origin_repo, "HEAD", original_tip);
-
-    heddle_without_git(
-        &[
-            "clone",
-            origin.to_str().expect("origin path should be utf8"),
-            work.to_str().expect("work path should be utf8"),
-        ],
-        temp.path(),
-    )
-    .unwrap();
-
-    let topic_tree = git_tree_with_file(&origin_repo, "topic.txt", b"remote topic\n");
-    let topic_tip = git_commit_with_tree(
-        &origin_repo,
-        Some("refs/heads/topic-remote"),
-        topic_tree,
-        "topic remote",
-        &[original_tip],
-    );
-
-    heddle_without_git(
-        &[
-            "fetch",
-            origin.to_str().expect("origin path should be utf8"),
-        ],
-        &work,
-    )
-    .unwrap();
-
-    let checkout = open_git(&work).expect("open checkout git repo");
-    let checkout_topic = find_reference(&checkout, "refs/remotes/origin/topic-remote")
-        .expect("fetch should discover checkout remote-tracking branch")
-        .peel_to_id()
-        .expect("peel checkout remote-tracking branch");
-    assert_eq!(checkout_topic, topic_tip);
-
-    let mirror = open_git(work.join(".heddle/git")).expect("open legacy Bridge Mirror");
-    let mirror_topic = find_reference(&mirror, "refs/remotes/origin/topic-remote")
-        .expect("fetch should mirror remote-tracking branch")
-        .peel_to_id()
-        .expect("peel mirror remote-tracking branch");
-    assert_eq!(mirror_topic, topic_tip);
-
-    let import = assert_clean_json_without_git(
-        &[
-            "--output",
-            "json",
-            "import",
-            "git",
-            "--ref",
-            "origin/topic-remote",
-        ],
-        &work,
-    );
-    assert_eq!(import["branches_synced"], 1, "{import}");
-    let threads = assert_clean_json_without_git(&["--output", "json", "thread", "list"], &work);
-    assert!(
-        threads["threads"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|thread| thread["name"] == "origin/topic-remote"),
-        "imported remote branch should be visible as a Heddle thread: {threads}"
-    );
-}
-
-#[test]
 fn git_replacement_matrix_https_push_uses_native_transport_without_git_on_path() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
@@ -1762,6 +1355,7 @@ fn git_replacement_matrix_https_push_uses_native_transport_without_git_on_path()
     configure_repo_local_git_identity(&work);
     std::fs::write(work.join("story.txt"), "https push attempt\n").unwrap();
     heddle_without_git(&["capture", "-m", "attempt https push"], &work).unwrap();
+    heddle_without_git(&["commit", "-m", "attempt https push"], &work).unwrap();
 
     let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
         Ok(listener) => listener,

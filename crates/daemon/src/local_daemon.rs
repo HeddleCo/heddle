@@ -36,7 +36,7 @@ use std::{
 
 use grpc::{
     DiscussionServiceServer, HookServiceServer, OperationLogQueryServiceServer,
-    SignalServiceServer, StateReviewServiceServer, TimelineServiceServer, TransactionServiceServer,
+    SignalServiceServer, StateReviewServiceServer, TimelineServiceServer,
 };
 use objects::error::{HeddleError, Result};
 use repo::{Repository, operation_dedup::OperationDedupStore};
@@ -46,7 +46,7 @@ use tonic::transport::Server;
 
 use crate::grpc_local_impl::{
     GrpcLocalService, LocalDiscussionService, LocalHookService, LocalOperationLogQueryService,
-    LocalSignalService, LocalStateReviewService, LocalTimelineService, LocalTransactionService,
+    LocalSignalService, LocalStateReviewService, LocalTimelineService,
 };
 
 const PRIVATE_SOCKET_UMASK: libc::mode_t = 0o177;
@@ -242,9 +242,39 @@ fn process_uid_matches_self(pid: i32) -> bool {
     metadata.uid() == unsafe { libc::geteuid() }
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Compare the target process's real UID to this process's euid via
+/// `proc_pidinfo(PROC_PIDTBSDINFO)` (libproc). Returns `false` if the
+/// process cannot be inspected — refuse rather than SIGTERM a process
+/// we cannot attribute.
+#[cfg(target_os = "macos")]
+fn process_uid_matches_self(pid: i32) -> bool {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    // SAFETY: `info` is a valid, zeroed `proc_bsdinfo` and `size` matches
+    // the PROC_PIDTBSDINFO buffer contract from libproc.
+    let ret = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if ret <= 0 || ret < size {
+        return false;
+    }
+    // SAFETY: geteuid() never fails.
+    info.pbi_uid == unsafe { libc::geteuid() }
+}
+
+/// Platforms without a reliable process-UID API refuse the match.
+/// Combined with `process_exe_path` returning `None` on these targets,
+/// `is_heddle_process` already fails closed; do not claim a UID match
+/// we cannot verify.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn process_uid_matches_self(_pid: i32) -> bool {
-    true
+    false
 }
 
 fn process_exe_matches_current(pid: i32) -> bool {
@@ -333,54 +363,6 @@ pub async fn serve(
         ))
     })?;
 
-    // Crash recovery for the transaction sentinel directory. Runs before
-    // any service starts handling RPCs so an in-flight transaction from a
-    // prior `kill -9` cannot race with a brand-new `begin_transaction`.
-    // See [`crate::transaction_replay`] for the state machine.
-    //
-    // Log level reflects the failure shape, not just "did anything
-    // happen": clean recoveries are operator-informational (info), but
-    // when `scan_error` or `failed_oplog_appends` is set the pass either
-    // never ran or permanently lost an audit-trail entry (error), and
-    // every other non-clean tail — failed sentinel rewrites, undeletable
-    // orphan tmps, unparseable sentinels, unreadable directory entries
-    // — needs operator attention even though the next startup may
-    // retry (warn). The original info-level branch implied "recovered
-    // prior in-flight state" even when scan/write errors meant recovery
-    // had stalled, which gave operators false assurance during triage.
-    let report = crate::transaction_replay::replay_active_transactions(&repo);
-    if report.has_hard_failures() {
-        tracing::error!(
-            recovered_txns = report.recovered_transaction_ids.len(),
-            orphan_tmps = report.orphan_temp_files_removed,
-            unparseable = report.unparseable_sentinels.len(),
-            failed_sentinel_writes = report.failed_sentinel_writes.len(),
-            failed_orphan_deletes = report.failed_orphan_deletes.len(),
-            failed_oplog_appends = report.failed_oplog_appends.len(),
-            unreadable_entries = report.unreadable_entries,
-            scan_error = report.scan_error.as_deref().unwrap_or(""),
-            "local-daemon: transaction replay hit hard failures; \
-             scan may not have run or audit-trail entries were lost"
-        );
-    } else if report.has_recoverable_failures() {
-        tracing::warn!(
-            recovered_txns = report.recovered_transaction_ids.len(),
-            orphan_tmps = report.orphan_temp_files_removed,
-            unparseable = report.unparseable_sentinels.len(),
-            failed_sentinel_writes = report.failed_sentinel_writes.len(),
-            failed_orphan_deletes = report.failed_orphan_deletes.len(),
-            unreadable_entries = report.unreadable_entries,
-            "local-daemon: transaction replay left recoverable failures on disk; \
-             next startup will retry, but operator inspection is recommended"
-        );
-    } else if !report.is_clean() {
-        tracing::info!(
-            recovered_txns = report.recovered_transaction_ids.len(),
-            orphan_tmps = report.orphan_temp_files_removed,
-            "local-daemon: transaction replay recovered prior in-flight state"
-        );
-    }
-
     let dedup = Arc::new(OperationDedupStore::open(repo.heddle_dir())?);
     let inner = GrpcLocalService::new(Arc::new(repo), dedup);
 
@@ -390,7 +372,6 @@ pub async fn serve(
     let query =
         OperationLogQueryServiceServer::new(LocalOperationLogQueryService::new(inner.clone()));
     let timeline = TimelineServiceServer::new(LocalTimelineService::new(inner.clone()));
-    let transaction = TransactionServiceServer::new(LocalTransactionService::new(inner.clone()));
     let hook = HookServiceServer::new(LocalHookService::new(inner));
 
     // Per-connection SO_PEERCRED gate. Mode 0600 already keeps other users
@@ -406,7 +387,6 @@ pub async fn serve(
         .add_service(signal)
         .add_service(query)
         .add_service(timeline)
-        .add_service(transaction)
         .add_service(hook)
         .serve_with_incoming_shutdown(incoming, shutdown)
         .await

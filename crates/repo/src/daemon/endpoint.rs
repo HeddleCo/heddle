@@ -66,6 +66,15 @@ pub fn remove_endpoint(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
+/// Remove an endpoint only when it still advertises the expected owner.
+/// Callers must serialize endpoint writers across this check and unlink.
+pub fn remove_endpoint_if_owned(path: &Path, expected: &EndpointState) -> bool {
+    if load_endpoint(path).ok().as_ref() != Some(expected) {
+        return false;
+    }
+    fs::remove_file(path).is_ok()
+}
+
 /// Best-effort liveness probe for a helper PID. Returns `true` when
 /// the PID is alive, `false` when it definitely isn't, and `true`
 /// when we genuinely cannot tell (no PID recorded → behave as if the
@@ -147,6 +156,29 @@ mod tests {
         // an error to the caller.
         remove_endpoint(&path);
         remove_endpoint(&path);
+    }
+
+    #[test]
+    fn owned_removal_preserves_a_replacement_endpoint() {
+        let tmp = TempDir::new().unwrap();
+        let path = endpoint_path_for(tmp.path(), "replacement");
+        let old = EndpointState {
+            version: 1,
+            host: "127.0.0.1".to_string(),
+            port: 8001,
+            pid: Some(100),
+        };
+        let replacement = EndpointState {
+            port: 8002,
+            pid: Some(200),
+            ..old.clone()
+        };
+        persist_endpoint(&path, &replacement).unwrap();
+
+        assert!(!remove_endpoint_if_owned(&path, &old));
+        assert_eq!(load_endpoint(&path).unwrap(), replacement);
+        assert!(remove_endpoint_if_owned(&path, &replacement));
+        assert!(!path.exists());
     }
 
     /// PID 1 is `init`/launchd — always alive on every Unix host. Use

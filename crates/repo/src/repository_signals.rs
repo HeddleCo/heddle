@@ -5,8 +5,8 @@
 //! sits at the module boundary rather than scattered across `repository.rs`.
 //! The actual signal modules live in `crates/state_review/`; this layer
 //! mediates between `Repository`'s already-built `State` and the registry,
-//! persisting any fired signals as a `RiskSignalBlob` and returning the
-//! attached hash for `state.with_risk_signals(...)`.
+//! persisting any fired signals as a `RiskSignalBlob` for attachment after
+//! the immutable state is stored.
 //!
 //! Errors are intentionally swallowed (with a `tracing::warn`) — capture must
 //! never fail because of a signal hiccup.
@@ -32,8 +32,7 @@ use crate::{Repository, Result, repository::ReviewSignalsToml};
 impl Repository {
     /// Run the signal registry against a freshly-built `(prior, new)`
     /// pair, encode any fired signals as a `RiskSignalBlob`, and return
-    /// the persisted hash so the snapshot path can chain
-    /// `state.with_risk_signals(...)` before `put_state`.
+    /// the persisted hash so the snapshot path can attach it to the state.
     ///
     /// `Ok(None)` covers the two should-skip cases:
     /// - Registry fired no signals (avoid an empty blob — keeps the on-disk
@@ -141,8 +140,13 @@ mod tests {
             .snapshot_with_attribution(Some(intent.to_string()), None, attribution)
             .unwrap();
 
-        let hash = state
-            .risk_signals
+        let hash = repo
+            .latest_state_attachment(&state.id(), crate::StateAttachmentKind::RiskSignals)
+            .unwrap()
+            .and_then(|attachment| match attachment.body {
+                objects::object::StateAttachmentBody::RiskSignals(hash) => Some(hash),
+                _ => None,
+            })
             .expect("snapshot should attach risk_signals when a self-flag fires");
         let blob = repo
             .store()
@@ -172,9 +176,9 @@ mod tests {
             .unwrap();
 
         assert!(
-            state.risk_signals.is_none(),
-            "no signals fire on a quiet capture; expected None, got {:?}",
-            state.risk_signals
+            repo.latest_state_attachment(&state.id(), crate::StateAttachmentKind::RiskSignals)
+                .unwrap()
+                .is_none()
         );
     }
 }

@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "heddle/v1/common.proto";
@@ -32,8 +34,7 @@ message CreateApprovalGroupRequest {
   string repo_path = 1;
   string name = 2;
   string description = 3;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message ListApprovalGroupsRequest {
@@ -53,22 +54,19 @@ message ApprovalGroupMembers {
 
 message DeleteApprovalGroupRequest {
   string id = 1;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message AddApprovalGroupMemberRequest {
   string group_id = 1;
   string namespace_path = 2;
   HostedRole required_role = 3;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message RemoveApprovalGroupMemberRequest {
   string id = 1;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 // ── Thread policies (branch protection) ─────────────────────────────
@@ -119,8 +117,7 @@ message CreateThreadPolicyRequest {
   bool forbid_author_approval = 7;
   bool stale_on_update = 8;
   google.protobuf.Duration approval_ttl_secs = 9; // 0 = no expiry
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message ListThreadPoliciesRequest {
@@ -139,8 +136,7 @@ message PolicyGroupRequirements {
 
 message DeleteThreadPolicyRequest {
   string id = 1;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message AddPolicyGroupRequirementRequest {
@@ -148,21 +144,19 @@ message AddPolicyGroupRequirementRequest {
   string group_id = 2;
   uint32 required_approvals = 3;
   repeated string only_if_paths_match = 4;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message RemovePolicyGroupRequirementRequest {
   string id = 1;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 // ── Thread merge approvals ──────────────────────────────────────────
 //
 // An approval is a record that a particular user signed off on a
 // particular (source_thread → target_thread) merge at a specific
-// `source_state` (the change_id at the source's head). The merge
+// `source_state` (the state_id at the source's head). The merge
 // gate consumes these rows and matches them against every policy
 // whose target glob matches `target_thread`.
 
@@ -189,14 +183,12 @@ message ApproveThreadRequest {
   string target_thread = 3;
   bytes source_state = 4;
   string note = 5;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message RevokeApprovalRequest {
   string id = 1;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message ListThreadApprovalsRequest {
@@ -235,7 +227,7 @@ message CheckMergeEligibilityResponse {
   // Each unmet requirement, with a human-readable reason. Empty
   // when `allowed = true`.
   repeated UnmetRequirement unmet = 2;
-  // Approvals the gate considered valid (matching change_id, not
+  // Approvals the gate considered valid (matching state_id, not
   // expired, not self-approval when forbidden, etc.).
   repeated ThreadApproval valid_approvals = 3;
 }

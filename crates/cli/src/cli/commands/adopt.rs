@@ -4,7 +4,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
-use repo::{Repository, RepositoryCapability};
+use heddle_core::{AdoptPlanError, AdoptPlanOptions, plan_adopt};
+use objects::lock::RepositoryLockExt;
+use repo::{Repository, RepositoryCapability, RepositorySourceAuthority};
 use serde::Serialize;
 use sley::Repository as SleyRepository;
 
@@ -40,10 +42,6 @@ struct AdoptOutput {
     already_in_sync: bool,
     recommended_action: Option<String>,
     recommended_action_template: Option<ActionTemplate>,
-    // Adopt is a one-time bootstrap, not a per-mutation hot path, so it
-    // keeps the verification block (PR B's serialize-skip applies only to
-    // recurring mutations). Agents adopting a repo need to know whether
-    // the post-adoption state is verified or still requires follow-up.
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
@@ -58,11 +56,25 @@ struct AdoptImportStats {
 }
 
 pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
-    let start = resolve_path(cli, args.path.as_deref())?;
+    // Pure path preflight: positional / --repo / cwd resolution and conflict
+    // policy. Git discovery, bootstrap, and import stay CLI-owned.
+    let cwd = std::env::current_dir()
+        .map_err(|error| anyhow!("Failed to determine current directory: {error}"))?;
+    let plan = plan_adopt(&AdoptPlanOptions {
+        path: args.path.clone(),
+        repo_flag: cli.repo.clone(),
+        cwd,
+        refs: args.refs.clone(),
+    })
+    .map_err(adopt_plan_error_to_anyhow)?;
+    let start = plan
+        .start_path
+        .canonicalize()
+        .unwrap_or(plan.start_path.clone());
     let git_root = git_worktree_root(&start)?;
     let initialized = !git_root.join(".heddle").exists();
     if initialized {
-        preflight_importable_git_history(&git_root, &args.refs)?;
+        preflight_importable_git_history(&git_root, &plan.refs)?;
     }
 
     let repo = if initialized {
@@ -76,19 +88,31 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
         );
     }
 
-    let scope = if args.refs.is_empty() {
+    let _adopt_lock = repo
+        .locker()
+        .write()
+        .map_err(|error| anyhow!("failed to lock repository for adoption: {error}"))?;
+
+    let scope = if plan.import_all_refs {
         "all local branches and tags".to_string()
     } else {
-        format!("{} ref(s): {}", args.refs.len(), args.refs.join(", "))
+        format!("{} ref(s): {}", plan.refs.len(), plan.refs.join(", "))
     };
     let source_label = repo.root().display().to_string();
     let mut progress = ImportProgress::start(cli, &repo, &scope, &source_label);
     progress.begin_commit_import();
     let import_start = std::time::Instant::now();
-    let stats = import_git_history_for_adopt(&repo, &args.refs, &mut progress)?;
+    let stats = import_git_history_for_adopt(&repo, &plan.refs, &mut progress)?;
     let import_ms = import_start.elapsed().as_millis();
     progress.begin_ref_write();
     progress.finish();
+    objects::fault_inject::maybe_panic_at("adopt_after_import_before_authority_flip");
+    repo.transition_source_authority(
+        RepositorySourceAuthority::GitOverlay,
+        RepositorySourceAuthority::Native,
+    )?;
+    drop(repo);
+    let repo = Repository::open(&git_root)?;
     let verification_start = std::time::Instant::now();
     let (trust, verification_profile) = if profile_enabled() {
         let (trust, profile) = build_repository_verification_state_profiled(&repo);
@@ -129,7 +153,7 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
         adopted: true,
         initialized,
         path: heddle_data_path,
-        refs: args.refs,
+        refs: plan.refs,
         commits_imported: stats.commits_imported,
         states_created: stats.states_created,
         branches_synced: stats.branches_synced,
@@ -141,6 +165,17 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
         trust,
     };
     render_adopt(&output, should_output_json(cli, Some(repo.config())))
+}
+
+fn adopt_plan_error_to_anyhow(err: AdoptPlanError) -> anyhow::Error {
+    match err {
+        AdoptPlanError::PathConflict { positional, repo } => {
+            anyhow!(RecoveryAdvice::adopt_path_conflict(
+                &positional.display().to_string(),
+                &repo.display().to_string(),
+            ))
+        }
+    }
 }
 
 fn import_git_history_for_adopt(
@@ -162,7 +197,9 @@ fn import_ingest_for_adopt(
     progress: &mut ImportProgress,
 ) -> Result<AdoptImportStats> {
     progress.checking_notes();
-    crate::git_projection_engine::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(repo.root());
+    heddle_git_projection::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(
+        repo.root(),
+    );
     progress.ordering_commits();
     use ingest::{ImportOptions, import_git_into_scoped_with_options_and_progress};
 
@@ -266,35 +303,6 @@ fn no_git_commits_to_adopt_advice(git_root: &Path, missing_refs: Vec<String>) ->
     )
 }
 
-fn resolve_path(cli: &Cli, positional: Option<&Path>) -> Result<PathBuf> {
-    let path = match (positional, cli.repo.as_deref()) {
-        (Some(positional), Some(repo_path)) => {
-            if absolute_path(positional)? != absolute_path(repo_path)? {
-                bail!(RecoveryAdvice::adopt_path_conflict(
-                    &positional.display().to_string(),
-                    &repo_path.display().to_string(),
-                ));
-            }
-            positional.to_path_buf()
-        }
-        (Some(positional), None) => positional.to_path_buf(),
-        (None, Some(repo_path)) => repo_path.to_path_buf(),
-        (None, None) => std::env::current_dir()
-            .map_err(|error| anyhow!("Failed to determine current directory: {error}"))?,
-    };
-    Ok(path.canonicalize().unwrap_or(path))
-}
-
-fn absolute_path(path: &Path) -> Result<PathBuf> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        Ok(std::env::current_dir()
-            .map_err(|error| anyhow!("Failed to determine current directory: {error}"))?
-            .join(path))
-    }
-}
-
 fn git_worktree_root(start: &Path) -> Result<PathBuf> {
     let git = SleyRepository::discover(start).map_err(|error| {
         anyhow!(RecoveryAdvice::adopt_requires_git_worktree(Some(format!(
@@ -315,16 +323,19 @@ fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {
 
     if output.initialized {
         println!(
-            "{} Heddle imported the requested Git history",
+            "{} adopted the Git repository into Heddle-native source storage",
             style::ok_marker()
         );
     } else if output.already_in_sync {
         println!(
-            "{} Heddle already adopted this Git repo; history is in sync",
+            "{} adopted the already-imported Git history into Heddle-native source storage",
             style::ok_marker()
         );
     } else {
-        println!("{} imported Git history into Heddle", style::ok_marker());
+        println!(
+            "{} adopted Git history into Heddle-native source storage",
+            style::ok_marker()
+        );
     }
     println!(
         "  {}",
@@ -339,6 +350,10 @@ fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {
         output.refs.join(", ")
     };
     println!("  {}", style::field("Imported refs", &scope));
+    println!(
+        "  {}",
+        style::field("Git Projection", "retained for explicit import/export/sync")
+    );
     println!(
         "  {}",
         style::field(

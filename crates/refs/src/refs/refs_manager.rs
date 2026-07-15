@@ -4,27 +4,28 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::SystemTime,
 };
 
 use objects::{
     error::{HeddleError, Result},
-    object::{ChangeId, MarkerName, ThreadName},
+    object::{MarkerName, StateId, ThreadName},
 };
 
 use super::{
     Head, RefExpectation, RefUpdate,
     backend::CoreRefBackend,
-    format_change_id_text,
+    format_state_id_text,
     packed_refs::PackedRefs,
     reconcile::{LoadRequest, Loaded, RefClass, RefCommitter, RefReconciler},
     ref_backend::RefBackend,
     refs_storage::RefsLock,
     resolve_refspec,
 };
-use crate::fs_atomic::sync_directory;
+use crate::fs_atomic::{create_dir_all_durable, sync_directory};
 
 /// Sentinel meaning "no batch has been reconciled yet" — distinct from a real
 /// `head_id` so the first read after a reconciler is injected always reconciles.
@@ -43,8 +44,8 @@ const RECONCILE_WATERMARK_LOCAL: &str = "RECONCILE_WATERMARK_LOCAL";
 const RECONCILE_WATERMARK_SHARED: &str = "RECONCILE_WATERMARK_SHARED";
 
 /// Well-known refspec that resolves the heddle-internal pre-undo recovery
-/// pointer (so `heddle goto .undo-recovery` works). It is UNSHADOWABLE by any
-/// user marker or thread, in BOTH directions (heddle#305 r3):
+/// pointer used by `heddle undo --recover`. It is UNSHADOWABLE by any user
+/// marker or thread, in BOTH directions (heddle#305 r3):
 ///
 /// - **Write side:** the leading `.` is rejected by [`validate_ref_name`], so a
 ///   user can never `marker create` / `thread` a ref with this name. The
@@ -59,6 +60,16 @@ const RECONCILE_WATERMARK_SHARED: &str = "RECONCILE_WATERMARK_SHARED";
 ///
 /// [`validate_ref_name`]: super::name::validate_ref_name
 pub const UNDO_RECOVERY_HANDLE: &str = ".undo-recovery";
+
+/// Process-local packed-refs snapshot keyed by on-disk identity.
+///
+/// Avoids re-`read_to_string` + parse on every cold `get_thread` /
+/// `get_marker` when the file has not changed. Invalidated on write and
+/// revalidated via `(mtime, len)` when another process rewrites the file.
+struct CachedPackedRefs {
+    stamp: Option<(SystemTime, u64)>,
+    packed: PackedRefs,
+}
 
 /// Manager for references (threads, markers, HEAD).
 pub struct RefManager {
@@ -78,6 +89,8 @@ pub struct RefManager {
     /// Watermark of fully-materialized **shared**-class batches (thread, marker,
     /// remote-thread) — global across lanes.
     cached_shared_generation: AtomicU64,
+    /// In-process packed-refs cache (see [`CachedPackedRefs`]).
+    packed_refs_cache: Mutex<Option<CachedPackedRefs>>,
 }
 
 impl RefManager {
@@ -89,6 +102,7 @@ impl RefManager {
             committer: None,
             cached_local_generation: AtomicU64::new(WATERMARK_UNSET),
             cached_shared_generation: AtomicU64::new(WATERMARK_UNSET),
+            packed_refs_cache: Mutex::new(None),
         }
     }
 
@@ -317,7 +331,7 @@ impl RefManager {
 
     /// THE read chokepoint (heddle#330 §2.2): the sole path for a **logical
     /// read** to obtain ref data. The raw loaders
-    /// (`read_change_id_at`/`read_head_state`/`try_read_ref_summary_index`/
+    /// (`read_state_id_at`/`read_head_state`/`try_read_ref_summary_index`/
     /// `*_from_storage`/`PackedRefs::load`) are reached from a logical read only
     /// from inside here — the maintenance path `pack_refs` is the one allowlisted
     /// non-logical caller. With no reconciler this is the plain raw load.
@@ -562,7 +576,7 @@ impl RefManager {
             }
         }
         if let Some(state) = &outcome.undo_recovery {
-            let current = self.read_change_id_at(
+            let current = self.read_state_id_at(
                 &self.undo_recovery_path(),
                 "undo recovery",
                 UNDO_RECOVERY_HANDLE,
@@ -582,7 +596,7 @@ impl RefManager {
             LoadRequest::Head => Loaded::Head(self.read_head_state()?.head),
             LoadRequest::Thread(name) => Loaded::Point(self.raw_get_thread(name)?),
             LoadRequest::Marker(name) => Loaded::Point(self.raw_get_marker(name)?),
-            LoadRequest::UndoRecovery => Loaded::Point(self.read_change_id_at(
+            LoadRequest::UndoRecovery => Loaded::Point(self.read_state_id_at(
                 &self.undo_recovery_path(),
                 "undo recovery",
                 UNDO_RECOVERY_HANDLE,
@@ -599,25 +613,64 @@ impl RefManager {
         })
     }
 
-    fn raw_get_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
+    fn raw_get_thread(&self, name: &ThreadName) -> Result<Option<StateId>> {
         let path = self.thread_path(name)?;
-        if let Some(id) = self.read_change_id_at(&path, "thread", name)? {
+        if let Some(id) = self.read_state_id_at(&path, "thread", name)? {
             return Ok(Some(id));
         }
-        Ok(PackedRefs::load(&self.packed_refs_path())?.get_thread(name))
+        Ok(self.load_packed_refs_cached()?.get_thread(name))
     }
 
-    fn raw_get_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
+    fn raw_get_marker(&self, name: &MarkerName) -> Result<Option<StateId>> {
         let path = self.marker_path(name)?;
-        if let Some(id) = self.read_change_id_at(&path, "marker", name)? {
+        if let Some(id) = self.read_state_id_at(&path, "marker", name)? {
             return Ok(Some(id));
         }
-        Ok(PackedRefs::load(&self.packed_refs_path())?.get_marker(name))
+        Ok(self.load_packed_refs_cached()?.get_marker(name))
     }
 
-    fn raw_get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>> {
+    /// On-disk identity for the packed-refs file: `(mtime, len)`, or `None`
+    /// when the file is absent. Used to detect external rewrites without
+    /// re-reading the body on every lookup.
+    fn packed_refs_stamp(path: &Path) -> Option<(SystemTime, u64)> {
+        let meta = std::fs::metadata(path).ok()?;
+        let modified = meta.modified().ok()?;
+        Some((modified, meta.len()))
+    }
+
+    /// Load packed-refs with a process-local cache. Safe under concurrent
+    /// readers in this process; writers call [`invalidate_packed_refs_cache`]
+    /// after mutating the file.
+    pub(super) fn load_packed_refs_cached(&self) -> Result<PackedRefs> {
+        let path = self.packed_refs_path();
+        let stamp = Self::packed_refs_stamp(&path);
+        let mut guard = self.packed_refs_cache.lock().map_err(|_| {
+            HeddleError::Config("Failed to acquire packed-refs cache lock".to_string())
+        })?;
+        if let Some(cached) = guard.as_ref()
+            && cached.stamp == stamp
+        {
+            return Ok(cached.packed.clone());
+        }
+        let packed = PackedRefs::load(&path)?;
+        *guard = Some(CachedPackedRefs {
+            stamp,
+            packed: packed.clone(),
+        });
+        Ok(packed)
+    }
+
+    /// Drop the process-local packed-refs cache after a write so the next
+    /// read reloads from disk.
+    pub(super) fn invalidate_packed_refs_cache(&self) {
+        if let Ok(mut guard) = self.packed_refs_cache.lock() {
+            *guard = None;
+        }
+    }
+
+    fn raw_get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<StateId>> {
         let path = self.remote_thread_path(remote, thread)?;
-        self.read_change_id_at(&path, "remote thread", &format!("{}/{}", remote, thread))
+        self.read_state_id_at(&path, "remote thread", &format!("{}/{}", remote, thread))
     }
 
     fn raw_list_threads(&self) -> Result<Vec<ThreadName>> {
@@ -649,9 +702,9 @@ impl RefManager {
     }
 
     pub fn init(&self) -> Result<()> {
-        std::fs::create_dir_all(self.threads_dir())?;
-        std::fs::create_dir_all(self.markers_dir())?;
-        std::fs::create_dir_all(self.remotes_dir())?;
+        create_dir_all_durable(&self.threads_dir())?;
+        create_dir_all_durable(&self.markers_dir())?;
+        create_dir_all_durable(&self.remotes_dir())?;
         Ok(())
     }
 
@@ -694,26 +747,26 @@ impl RefManager {
     /// undo-recovery) through reconciliation. All four share the same
     /// `Loaded::Point` shape; the catch-all is unreachable because the load
     /// request and the returned variant are paired by construction.
-    fn reconciled_point(&self, request: LoadRequest) -> Result<Option<ChangeId>> {
+    fn reconciled_point(&self, request: LoadRequest) -> Result<Option<StateId>> {
         match self.reconciled_load(request)? {
             Loaded::Point(id) => Ok(id),
             _ => unreachable!("point request yields Point"),
         }
     }
 
-    pub fn get_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
+    pub fn get_thread(&self, name: &ThreadName) -> Result<Option<StateId>> {
         self.reconciled_point(LoadRequest::Thread(name.clone()))
     }
 
-    pub fn set_thread(&self, name: &ThreadName, state: &ChangeId) -> Result<()> {
+    pub fn set_thread(&self, name: &ThreadName, state: &StateId) -> Result<()> {
         self.set_thread_cas(name, RefExpectation::Any, state)
     }
 
     pub fn set_thread_cas(
         &self,
         name: &ThreadName,
-        expected: RefExpectation<ChangeId>,
-        state: &ChangeId,
+        expected: RefExpectation<StateId>,
+        state: &StateId,
     ) -> Result<()> {
         self.update_refs(&[RefUpdate::Thread {
             name: name.clone(),
@@ -722,7 +775,7 @@ impl RefManager {
         }])
     }
 
-    pub fn delete_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
+    pub fn delete_thread(&self, name: &ThreadName) -> Result<Option<StateId>> {
         let state = self.get_thread(name)?;
         if state.is_some() {
             self.update_refs(&[RefUpdate::Thread {
@@ -737,7 +790,7 @@ impl RefManager {
     pub fn delete_thread_cas(
         &self,
         name: &ThreadName,
-        expected: RefExpectation<ChangeId>,
+        expected: RefExpectation<StateId>,
     ) -> Result<()> {
         self.update_refs(&[RefUpdate::Thread {
             name: name.clone(),
@@ -753,19 +806,19 @@ impl RefManager {
         }
     }
 
-    pub fn get_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
+    pub fn get_marker(&self, name: &MarkerName) -> Result<Option<StateId>> {
         self.reconciled_point(LoadRequest::Marker(name.clone()))
     }
 
-    pub fn create_marker(&self, name: &MarkerName, state: &ChangeId) -> Result<()> {
+    pub fn create_marker(&self, name: &MarkerName, state: &StateId) -> Result<()> {
         self.set_marker_cas(name, RefExpectation::Missing, state)
     }
 
     pub fn set_marker_cas(
         &self,
         name: &MarkerName,
-        expected: RefExpectation<ChangeId>,
-        state: &ChangeId,
+        expected: RefExpectation<StateId>,
+        state: &StateId,
     ) -> Result<()> {
         self.update_refs(&[RefUpdate::Marker {
             name: name.clone(),
@@ -774,7 +827,7 @@ impl RefManager {
         }])
     }
 
-    pub fn delete_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
+    pub fn delete_marker(&self, name: &MarkerName) -> Result<Option<StateId>> {
         let state = self.get_marker(name)?;
         if state.is_some() {
             self.delete_marker_cas(name, RefExpectation::Any)?;
@@ -785,7 +838,7 @@ impl RefManager {
     pub fn delete_marker_cas(
         &self,
         name: &MarkerName,
-        expected: RefExpectation<ChangeId>,
+        expected: RefExpectation<StateId>,
     ) -> Result<()> {
         self.update_refs(&[RefUpdate::Marker {
             name: name.clone(),
@@ -806,7 +859,7 @@ impl RefManager {
     /// user-writable marker namespace so `marker create/delete` — and their
     /// undo inverses — can never collide with it. See
     /// [`UNDO_RECOVERY_HANDLE`] for the resolution handle.
-    pub fn set_undo_recovery(&self, state: &ChangeId) -> Result<()> {
+    pub fn set_undo_recovery(&self, state: &StateId) -> Result<()> {
         self.set_undo_recovery_raw(state)
     }
 
@@ -816,17 +869,17 @@ impl RefManager {
     /// `commit_and_publish` path); routing it through
     /// [`write_chokepoint`](Self::write_chokepoint) keeps it from bypassing
     /// reconciliation (heddle#354 r7).
-    fn set_undo_recovery_raw(&self, state: &ChangeId) -> Result<()> {
+    fn set_undo_recovery_raw(&self, state: &StateId) -> Result<()> {
         self.write_chokepoint(|lock| self.set_undo_recovery_locked(state, lock))
     }
 
     /// The lock-free core of [`set_undo_recovery_raw`](Self::set_undo_recovery_raw):
     /// the caller already holds the refs lock (e.g. the reconciler's
     /// materialization runs the whole fold + re-publish under one lock).
-    fn set_undo_recovery_locked(&self, state: &ChangeId, _lock: &RefsLock) -> Result<()> {
+    fn set_undo_recovery_locked(&self, state: &StateId, _lock: &RefsLock) -> Result<()> {
         self.write_string(
             &self.undo_recovery_path(),
-            &super::format_change_id_text(state),
+            &super::format_state_id_text(state),
         )
     }
 
@@ -853,11 +906,11 @@ impl RefManager {
 
     /// Read the heddle-internal pre-undo recovery pointer, if one has been
     /// recorded. Returns `None` when no undo has run in this repo.
-    pub fn get_undo_recovery(&self) -> Result<Option<ChangeId>> {
+    pub fn get_undo_recovery(&self) -> Result<Option<StateId>> {
         self.reconciled_point(LoadRequest::UndoRecovery)
     }
 
-    pub fn get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>> {
+    pub fn get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<StateId>> {
         self.reconciled_point(LoadRequest::RemoteThread {
             remote: remote.to_string(),
             thread: thread.clone(),
@@ -868,7 +921,7 @@ impl RefManager {
         &self,
         remote: &str,
         thread: &ThreadName,
-        state: &ChangeId,
+        state: &StateId,
     ) -> Result<()> {
         self.set_remote_thread_raw(remote, thread, state)
     }
@@ -880,7 +933,7 @@ impl RefManager {
         &self,
         remote: &str,
         thread: &ThreadName,
-        state: &ChangeId,
+        state: &StateId,
     ) -> Result<()> {
         self.write_chokepoint(|lock| self.set_remote_thread_locked(remote, thread, state, lock))
     }
@@ -891,18 +944,18 @@ impl RefManager {
         &self,
         remote: &str,
         thread: &ThreadName,
-        state: &ChangeId,
+        state: &StateId,
         lock: &RefsLock,
     ) -> Result<()> {
         let path = self.remote_thread_path(remote, thread)?;
-        let content = format_change_id_text(state);
+        let content = format_state_id_text(state);
         let parent = path.parent().ok_or_else(|| {
             HeddleError::Config(format!(
                 "invalid remote thread path for {}/{}",
                 remote, thread
             ))
         })?;
-        std::fs::create_dir_all(parent)?;
+        create_dir_all_durable(parent)?;
         self.write_string(&path, &content)?;
         if self.rebuild_ref_summary_index_with_lock(lock).is_err() {
             self.invalidate_ref_summary_index();
@@ -914,7 +967,7 @@ impl RefManager {
         &self,
         remote: &str,
         thread: &ThreadName,
-    ) -> Result<Option<ChangeId>> {
+    ) -> Result<Option<StateId>> {
         self.delete_remote_thread_raw(remote, thread)
     }
 
@@ -925,7 +978,7 @@ impl RefManager {
         &self,
         remote: &str,
         thread: &ThreadName,
-    ) -> Result<Option<ChangeId>> {
+    ) -> Result<Option<StateId>> {
         self.write_chokepoint(|lock| self.delete_remote_thread_locked(remote, thread, lock))
     }
 
@@ -936,7 +989,7 @@ impl RefManager {
         remote: &str,
         thread: &ThreadName,
         lock: &RefsLock,
-    ) -> Result<Option<ChangeId>> {
+    ) -> Result<Option<StateId>> {
         let state = self.raw_get_remote_thread(remote, thread)?;
         if state.is_some() {
             let path = self.remote_thread_path(remote, thread)?;
@@ -981,7 +1034,7 @@ impl RefManager {
         self.write_chokepoint(|lock| self.update_refs_with_lock(updates, lock))
     }
 
-    pub fn resolve(&self, refspec: &str) -> Result<Option<ChangeId>> {
+    pub fn resolve(&self, refspec: &str) -> Result<Option<StateId>> {
         resolve_refspec(
             refspec,
             || self.read_head(),
@@ -994,24 +1047,25 @@ impl RefManager {
     pub fn pack_refs(&self) -> Result<()> {
         let lock = self.lock_refs()?;
         let packed_path = self.packed_refs_path();
-        let mut packed = PackedRefs::load(&packed_path)?;
+        let mut packed = self.load_packed_refs_cached()?;
 
         let threads = self.list_threads_from_storage()?;
         for name in &threads {
             let path = self.thread_path(name)?;
-            if let Some(id) = self.read_change_id_at(&path, "thread", name)? {
+            if let Some(id) = self.read_state_id_at(&path, "thread", name)? {
                 packed.set_thread(name, id);
             }
         }
         let markers = self.list_markers_from_storage()?;
         for name in &markers {
             let path = self.marker_path(name)?;
-            if let Some(id) = self.read_change_id_at(&path, "marker", name)? {
+            if let Some(id) = self.read_state_id_at(&path, "marker", name)? {
                 packed.set_marker(name, id);
             }
         }
         if !packed.is_empty() {
             packed.save(&packed_path)?;
+            self.invalidate_packed_refs_cache();
             let packed_parent = packed_path
                 .parent()
                 .ok_or_else(|| HeddleError::Config("invalid packed-refs path".to_string()))?;
@@ -1049,54 +1103,54 @@ impl CoreRefBackend for RefManager {
     fn write_head_cas(&self, expected: RefExpectation<Head>, head: &Head) -> Result<()> {
         RefManager::write_head_cas(self, expected, head)
     }
-    async fn get_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
+    async fn get_thread(&self, name: &ThreadName) -> Result<Option<StateId>> {
         RefManager::get_thread(self, name)
     }
-    fn set_thread(&self, name: &ThreadName, state: &ChangeId) -> Result<()> {
+    fn set_thread(&self, name: &ThreadName, state: &StateId) -> Result<()> {
         RefManager::set_thread(self, name, state)
     }
     fn set_thread_cas(
         &self,
         name: &ThreadName,
-        expected: RefExpectation<ChangeId>,
-        state: &ChangeId,
+        expected: RefExpectation<StateId>,
+        state: &StateId,
     ) -> Result<()> {
         RefManager::set_thread_cas(self, name, expected, state)
     }
-    fn delete_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
+    fn delete_thread(&self, name: &ThreadName) -> Result<Option<StateId>> {
         RefManager::delete_thread(self, name)
     }
     fn delete_thread_cas(
         &self,
         name: &ThreadName,
-        expected: RefExpectation<ChangeId>,
+        expected: RefExpectation<StateId>,
     ) -> Result<()> {
         RefManager::delete_thread_cas(self, name, expected)
     }
     fn list_threads(&self) -> Result<Vec<ThreadName>> {
         RefManager::list_threads(self)
     }
-    async fn get_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
+    async fn get_marker(&self, name: &MarkerName) -> Result<Option<StateId>> {
         RefManager::get_marker(self, name)
     }
-    async fn create_marker(&self, name: &MarkerName, state: &ChangeId) -> Result<()> {
+    async fn create_marker(&self, name: &MarkerName, state: &StateId) -> Result<()> {
         RefManager::create_marker(self, name, state)
     }
     fn set_marker_cas(
         &self,
         name: &MarkerName,
-        expected: RefExpectation<ChangeId>,
-        state: &ChangeId,
+        expected: RefExpectation<StateId>,
+        state: &StateId,
     ) -> Result<()> {
         RefManager::set_marker_cas(self, name, expected, state)
     }
-    fn delete_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
+    fn delete_marker(&self, name: &MarkerName) -> Result<Option<StateId>> {
         RefManager::delete_marker(self, name)
     }
     fn delete_marker_cas(
         &self,
         name: &MarkerName,
-        expected: RefExpectation<ChangeId>,
+        expected: RefExpectation<StateId>,
     ) -> Result<()> {
         RefManager::delete_marker_cas(self, name, expected)
     }
@@ -1106,19 +1160,19 @@ impl CoreRefBackend for RefManager {
     fn update_refs(&self, updates: &[RefUpdate]) -> Result<()> {
         RefManager::update_refs(self, updates)
     }
-    async fn resolve(&self, refspec: &str) -> Result<Option<ChangeId>> {
+    async fn resolve(&self, refspec: &str) -> Result<Option<StateId>> {
         RefManager::resolve(self, refspec)
     }
 }
 
 impl RefBackend for RefManager {
-    fn get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>> {
+    fn get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<StateId>> {
         RefManager::get_remote_thread(self, remote, thread)
     }
-    fn set_remote_thread(&self, remote: &str, thread: &ThreadName, state: &ChangeId) -> Result<()> {
+    fn set_remote_thread(&self, remote: &str, thread: &ThreadName, state: &StateId) -> Result<()> {
         RefManager::set_remote_thread(self, remote, thread, state)
     }
-    fn delete_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>> {
+    fn delete_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<StateId>> {
         RefManager::delete_remote_thread(self, remote, thread)
     }
     fn list_remotes(&self) -> Result<Vec<String>> {

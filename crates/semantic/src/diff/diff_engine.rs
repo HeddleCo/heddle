@@ -11,9 +11,9 @@ use objects::object::{DiffKind, FileChangeSet};
 use super::{
     diff_options::SemanticDiffOptions,
     diff_support::{
-        apply_renames, build_file_level_changes, detect_renames, fallback_file_changes,
-        function_and_import_changes, load_manifest, suppress_redundant_file_modified, EngineOutput,
-        LoadedChange, ParsedChangeSet,
+        EngineOutput, LoadedChange, ParsedChangeSet, apply_renames, build_file_level_changes,
+        detect_renames, fallback_file_changes, function_and_import_changes, load_manifest,
+        suppress_redundant_file_modified,
     },
     diff_types::{
         SemanticCheckOnlyResult, SemanticCheckStatus, SemanticDiffResult, SemanticFallbackReason,

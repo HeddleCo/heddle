@@ -6,7 +6,7 @@ use std::path::Path;
 
 use objects::object::{ChangeImportance, ModificationKind};
 
-use super::analysis_similarity::{compute_similarity, SimilarityMethod};
+use super::analysis_similarity::{SimilarityMethod, compute_similarity};
 use crate::parser::{Language, ParsedFile};
 
 /// Classification result: kind, importance, and confidence.

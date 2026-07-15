@@ -107,21 +107,21 @@ fn virtualized_thread_round_trip() {
 //
 // These tests exercise three rungs of the resolver:
 //   1. another thread's HEAD ("alpha") — ref-name path
-//   2. a short change ID prefix          — `resolve_short_change_id` path
+//   2. a short change ID prefix          — `resolve_short_state_id` path
 //   3. `HEAD~1`                          — `parse_head_steps` path
 //
 // All three should serve the *resolved* state through the FUSE projection,
 // not the main repo's HEAD and not S1 leaked from the original setup_repo.
 // ---------------------------------------------------------------------------
 
-/// Helper: capture a snapshot in `cwd` and return the short change_id.
+/// Helper: capture a snapshot in `cwd` and return the short state_id.
 fn capture_short(cwd: &std::path::Path, msg: &str) -> String {
     let out =
         heddle(&["--output", "json", "capture", "-m", msg], Some(cwd)).expect("snapshot succeeded");
     let v: Value = serde_json::from_str(&out).expect("snapshot --output json is valid JSON");
-    v.get("change_id")
+    v.get("state_id")
         .and_then(Value::as_str)
-        .expect("snapshot output exposes change_id")
+        .expect("snapshot output exposes state_id")
         .to_string()
 }
 
@@ -209,7 +209,7 @@ fn virtualized_from_other_thread_head_serves_that_threads_tip() {
 
 #[test]
 #[ignore = "requires Linux + FUSE + heddle built with --features mount"]
-fn virtualized_from_short_change_id_serves_that_state() {
+fn virtualized_from_short_state_id_serves_that_state() {
     // S1: setup_repo's initial snapshot. greet.txt = "S1".
     let main = setup_repo("greet.txt", "S1");
     // The short ID for S1 is on disk after init — pull it from the log.
@@ -221,9 +221,9 @@ fn virtualized_from_short_change_id_serves_that_state() {
         .expect("log main"),
     )
     .unwrap();
-    let s1_short = log["states"][0]["change_id"]
+    let s1_short = log["states"][0]["state_id"]
         .as_str()
-        .expect("log exposes change_id")
+        .expect("log exposes state_id")
         .to_string();
 
     // S2: shift HEAD past S1 so the test would notice if --from were

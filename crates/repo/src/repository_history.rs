@@ -9,7 +9,7 @@ use std::{
 #[cfg(feature = "async-source")]
 use objects::{object::diff_trees_visit_async, store::AsyncObjectSource};
 use objects::{
-    object::{ChangeId, ContentHash, State, Tree, diff_trees_visit},
+    object::{ContentHash, State, StateId, Tree, diff_trees_visit},
     store::ObjectSource,
 };
 use tracing::{instrument, trace};
@@ -87,7 +87,7 @@ impl ChangedPathFilters {
 /// A reusable first-parent history query.
 #[derive(Clone, Debug, Default)]
 pub struct HistoryQuery {
-    start: Option<ChangeId>,
+    start: Option<StateId>,
     limit: usize,
     agent_model_substring: Option<String>,
     changed_paths: ChangedPathFilters,
@@ -98,12 +98,12 @@ pub struct HistoryQuery {
     /// `--since` whose state is filtered out by `--path` would silently
     /// degrade to "no bound", and matches older than the bound would
     /// leak into the result.)
-    stop_at: Option<ChangeId>,
+    stop_at: Option<StateId>,
 }
 
 impl HistoryQuery {
     /// Create a new history query.
-    pub fn new(start: Option<ChangeId>) -> Self {
+    pub fn new(start: Option<StateId>) -> Self {
         Self {
             start,
             limit: 20,
@@ -135,7 +135,7 @@ impl HistoryQuery {
     /// during the first-parent walk *before* filters, so the bound is
     /// honored even when `--since` resolves to a state that wouldn't
     /// otherwise survive the active filter set.
-    pub fn with_stop_at(mut self, stop_at: Option<ChangeId>) -> Self {
+    pub fn with_stop_at(mut self, stop_at: Option<StateId>) -> Self {
         self.stop_at = stop_at;
         self
     }
@@ -259,7 +259,7 @@ where
     .map_err(|error| HeddleError::InvalidObject(format!("tree diff failed: {error}")))?;
     let matched = flow.is_break();
     trace!(
-        state = %state.change_id,
+        state = %state.id(),
         matched,
         "evaluated changed-path filters"
     );
@@ -430,7 +430,7 @@ mod tests {
     #[cfg(feature = "async-source")]
     use objects::{
         object::{
-            Attribution, Blob, ChangeId, ContentHash, EntryType, Principal, State, Tree, TreeEntry,
+            Attribution, Blob, ContentHash, EntryType, Principal, State, StateId, Tree, TreeEntry,
         },
         store::{AsyncObjectSource, InMemoryStore, ObjectStore},
     };
@@ -477,17 +477,14 @@ mod tests {
         fs::write(temp_dir.path().join("README.md"), "more docs\n").unwrap();
         let head = repo.snapshot(Some("head".to_string()), None).unwrap();
 
-        let query = HistoryQuery::new(Some(head.change_id))
+        let query = HistoryQuery::new(Some(head.id()))
             .with_limit(10)
             .with_changed_paths(ChangedPathFilters::try_from_paths(["src"]).unwrap());
-        let expected = vec![src.change_id, base.change_id];
+        let expected = vec![src.id(), base.id()];
 
         let warmed = repo.query_history(&query).unwrap();
         assert_eq!(
-            warmed
-                .iter()
-                .map(|state| state.change_id)
-                .collect::<Vec<_>>(),
+            warmed.iter().map(|state| state.id()).collect::<Vec<_>>(),
             expected
         );
 
@@ -505,7 +502,7 @@ mod tests {
         assert_eq!(
             without_cache
                 .iter()
-                .map(|state| state.change_id)
+                .map(|state| state.id())
                 .collect::<Vec<_>>(),
             expected
         );
@@ -520,18 +517,18 @@ mod tests {
         let base = put_state(&store, base_tree, vec![]);
 
         let docs_tree = root_tree(&store, "one\n", Some("docs\n"));
-        let docs = put_state(&store, docs_tree, vec![base.change_id]);
+        let docs = put_state(&store, docs_tree, vec![base.id()]);
 
         let src_tree = root_tree(&store, "two\n", Some("docs\n"));
-        let src = put_state(&store, src_tree, vec![docs.change_id]);
+        let src = put_state(&store, src_tree, vec![docs.id()]);
 
         let side_tree = root_tree(&store, "side\n", None);
-        let side = put_state(&store, side_tree, vec![base.change_id]);
+        let side = put_state(&store, side_tree, vec![base.id()]);
 
         let head_tree = root_tree(&store, "two\n", Some("more docs\n"));
-        let head = put_state(&store, head_tree, vec![src.change_id, side.change_id]);
+        let head = put_state(&store, head_tree, vec![src.id(), side.id()]);
 
-        let query = HistoryQuery::new(Some(head.change_id))
+        let query = HistoryQuery::new(Some(head.id()))
             .with_limit(10)
             .with_changed_paths(ChangedPathFilters::try_from_paths(["src"]).unwrap());
 
@@ -543,9 +540,9 @@ mod tests {
         assert_eq!(
             async_result
                 .iter()
-                .map(|state| state.change_id)
+                .map(|state| state.id())
                 .collect::<Vec<_>>(),
-            vec![src.change_id, base.change_id]
+            vec![src.id(), base.id()]
         );
     }
 
@@ -560,7 +557,7 @@ mod tests {
 
         async fn get_state(
             &self,
-            id: &objects::object::ChangeId,
+            id: &objects::object::StateId,
         ) -> objects::error::Result<Option<State>> {
             ObjectStore::get_state(self.0, id)
         }
@@ -617,7 +614,7 @@ mod tests {
     }
 
     #[cfg(feature = "async-source")]
-    fn put_state(store: &InMemoryStore, tree: ContentHash, parents: Vec<ChangeId>) -> State {
+    fn put_state(store: &InMemoryStore, tree: ContentHash, parents: Vec<StateId>) -> State {
         let state = State::new(
             tree,
             parents,

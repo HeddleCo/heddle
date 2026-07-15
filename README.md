@@ -15,7 +15,7 @@ Heddle is an agent-native version control CLI written in Rust. It keeps its own 
 cargo install heddle-cli
 cd /path/to/your/git/repo
 heddle status              # inspect Git safely; Heddle prints the exact next command
-heddle adopt --ref main    # initialize Heddle metadata and map the branch
+heddle init                # add Heddle metadata; Git remains the source store
 heddle verify
 ```
 
@@ -28,9 +28,11 @@ In a plain Git repo, observe-only commands do not create `.heddle/`. `heddle sta
 - the current Git branch
 - dirty worktree/index state
 - whether Heddle has been initialized
-- the exact next command to adopt the repo
+- the exact next command to initialize Git Overlay
 
-Run the exact command printed by `heddle status`. In a plain Git repo with commits, that is usually `heddle adopt --ref <branch>`: it creates Heddle sidecar data if needed and imports the selected Git branch into Heddle's mapping. Use `heddle init` when you only want the observe-only sidecar bootstrap, such as an unborn Git repo or an explicit no-import setup. In Git-overlay mode, Git commits, trees, branches, tags, packs, index, and worktree state stay in the checkout's real `.git`; Heddle stores captures, threads, provenance, discussions, and Git projection metadata in `.heddle`. Use `heddle import git`, `heddle export git`, `heddle sync git`, and `heddle fsck --repair git` for explicit Git projection work; they operate on the checkout's real `.git` and do not create a hidden local mirror.
+Run the exact command printed by `heddle status`. In an existing Git checkout, that is `heddle init`: it creates the `.heddle` sidecar while the real `.git` remains authoritative for commits, trees, refs, packs, index, and worktree state. Heddle stores captures, threads, provenance, discussions, and source mappings in `.heddle`. Its embedded Sley engine powers the thin Git surface — `clone`, `commit`, `pull`, `push`, and `remote` — directly against `.git`. Heddle never requires the `git` executable. A retained `.heddle/git` Bridge Mirror is an internal projection cache used by explicit projection and maintenance paths, including undo recovery; it is never the authoritative Git store and remains scheduled for retirement.
+
+`heddle adopt` atomically imports selected Git refs, makes Heddle the source authority, and enables the full Native Heddle feature set. The retained `.git` is then an explicit Git Projection adapter. Adoption is not required for normal Git Overlay use.
 
 Heddle's CLI follows five operating principles — verification, disposability, composability, restraint, honesty — documented in [docs/PRINCIPLES.md](docs/PRINCIPLES.md).
 
@@ -44,10 +46,10 @@ Heddle's CLI follows five operating principles — verification, disposability, 
 - Explicit principal and agent attribution
 - Provenance-backed local blame with rewrite preservation across snapshot, collapse, and merge flows
 - Semantic diff and compare
-- Semantic merge by default: `heddle merge` uses AST-item-level merge within a file when built with the default `semantic` feature (first-class Rust/Python/JS/TS; Go/C/C++/Java opt-in); `--no-semantic` opts out to hunk-only merge; does not auto-rewrite cross-file imports or call-sites
+- Semantic integration by default: `ready`, `land`, and `sync` use AST-item-level merge within a file when built with the default `semantic` feature (first-class Rust/Python/JS/TS; Go/C/C++/Java opt-in); the engine does not auto-rewrite cross-file imports or call-sites
 - Automatic state signing: device-local ed25519 identity minted on first use signs every authored state — provenance with no manual key setup
 - Git overlay: direct `.git` integration, explicit native adoption, import, export, sync
-- Byte-identical Git round-trip, CI-enforced: adopt→export reproduces identical commit/tree/blob/tag SHAs with a `git fsck`-clean result, gated per-PR by 10 deterministic fixtures
+- Byte-identical Git round-trip, CI-enforced: adopt→export reproduces identical commit/tree/blob/tag SHAs and a valid Git object graph, gated per-PR by 10 deterministic fixtures
 - Multi-agent worktrees and agent registry
 
 ### Foundation in place
@@ -75,52 +77,61 @@ The default feature set is `git-overlay`, `native`, `local`, `semantic`, `zstd`.
 
 ### From source
 
+Obtain a source checkout from the release archive or with any Git-compatible
+client, then install it locally:
+
 ```bash
-git clone https://github.com/HeddleCo/heddle
 cd heddle
 cargo install --path crates/cli
 ```
+
+The client used to obtain the source is optional; Heddle itself does not invoke
+or require it.
 
 Prerequisites: Rust 1.85+, `cargo`, `rustfmt`, `clippy`.
 
 ## Getting Started
 
-New to Heddle? In an existing Git checkout, start with `heddle status` and run the exact `adopt` command it prints:
+New to Heddle? In an existing Git checkout, start with `heddle status` and initialize the Git Overlay sidecar:
 
 ```bash
 heddle status
-heddle adopt --ref main
-heddle commit -m "start project"
+heddle init
+heddle capture -m "start project"
+heddle commit
+heddle push
 ```
 
-For a new or unborn repo, initialize once, set attribution if needed, then use `heddle commit` as the everyday save boundary:
+For a new or unborn repo, initialize once, set attribution if needed, then use `heddle capture` as the Heddle save boundary:
 
 ```bash
 heddle init --principal-name "Ada Lovelace" --principal-email ada@example.com
-heddle commit -m "start project"
+heddle capture -m "start project"
 ```
 
-In a Git checkout, `heddle adopt` creates a Heddle sidecar if needed and maps the selected Git history into Heddle. `heddle init` is the explicit no-import sidecar bootstrap. Git history remains in the checkout's real `.git`; `heddle commit` records the Heddle state and the matching Git checkpoint. `heddle status` always prints the next useful command when there is an obvious one.
+In a Git checkout, `heddle init` creates the Heddle sidecar and leaves source storage in the checkout's real `.git`. `heddle capture` records Heddle metadata and provenance in `.heddle`; `heddle commit`, `pull`, `push`, and `remote` delegate through Sley to `.git`. `heddle commit` commits the complete captured tree, replaces the Git index with that tree, and does not run Git `pre-commit` or `commit-msg` hooks. Use `heddle adopt` when you want an atomic transition to Heddle-native source authority and its full feature set.
 
 ### The verb-by-verb tour
 
 ```bash
-# In an ordinary Git repo: inspect, adopt the current branch, and verify
+# In an ordinary Git repo: inspect, initialize Git Overlay, and verify
 heddle status
-heddle adopt --ref main
+heddle init
 heddle verify
 
-# Save work as one verified Heddle change plus a matching Git commit
-heddle commit -m "add user authentication"
+# Save Heddle provenance, then commit Git-owned source history
+heddle capture -m "add user authentication"
+heddle commit
 
 # Start isolated work and prove it is ready
 heddle start feature/auth --path ../feature-auth
 cd ../feature-auth
-heddle commit -m "add auth validation"
+heddle capture -m "add auth validation"
 heddle ready
 
-# Land and push
-heddle land --thread feature/auth --push
+# Land locally, then publish with the source authority
+heddle land --thread feature/auth
+heddle push
 
 # Inspect history and provenance
 heddle log
@@ -150,13 +161,13 @@ History commands render up to three distinct identifiers. They are not interchan
 
 - **`hd-…` change id** (e.g. `hd-wgqnj47xyh40`) — the **physical ChangeId**, minted fresh for each state. It is the handle for *this specific state*: pass it to commands that take a change as an argument — `heddle show <id>`, `heddle query --attribution` reports it per line, and `heddle log <id>` selects by it (resolution matches the physical id of a recorded state). Prefixes are accepted, so a short `hd-…` is enough as long as it is unambiguous. It is **not** a lineage handle that survives rewrites: amending or rebasing produces a *new* state with a *new* `hd-…`, so an `hd-…` captured before a rebase still resolves to the pre-rebase state, not the rewritten one. Heddle does track a separate stable *logical* ChangeId that is carried forward across a rewrite, but it is internal — it is not rendered in output and is not accepted as a command argument, so the displayed `hd-…` is the only id you can pass, and it identifies one state rather than a lineage.
 - **`(……)` content hash** (e.g. `(61408ef9)`, shown beside the change id by `heddle log --verbose` and `heddle show`) — the short form of the **ContentHash**, a BLAKE3 digest of the state's contents. It is *not* a Git commit sha. Because it is content-addressed, it changes whenever the state's content changes, so it pins an exact snapshot but is not a stable handle to "the change". Use it for integrity/equality checks, not as a command argument.
-- **Git checkpoint sha** (shown on the `Git checkpoint:` line under `heddle log --verbose` / `heddle show`) — the actual Git commit that binds the state into Git history. This is the handle for plain-Git tooling (`git show`, `git log`); heddle commands take the `hd-…` change id instead.
+- **Git checkpoint sha** (shown on the `Git checkpoint:` line under `heddle log --verbose` / `heddle show`) — the actual Git commit that binds the state into Git history. This is the handle for any Git-compatible client; Heddle commands take the `hd-…` change id instead.
 
-Rule of thumb: hand `hd-…` change ids to heddle, and the checkpoint sha to Git.
+Rule of thumb: hand `hd-…` change ids to Heddle, and the checkpoint sha to a Git-compatible client.
 
 ## Agent-friendly output
 
-Heddle is designed for programmatic use by agents and automation. Most read-shaped commands take `--output json`; `--output auto` — the default — renders text on a TTY and JSON when stdout is piped:
+Heddle is designed for programmatic use by agents and automation. Text is always the default, including when stdout is piped. Pass `--output json` for the full machine contract or `--output json-compact` for the smaller decision surface:
 
 ```bash
 heddle status --output json
@@ -183,7 +194,7 @@ in the command catalog; use each command's `op_id_behavior` field.
 Heddle uses three local config scopes:
 
 - `UserConfig` (`~/.config/heddle/config.toml`) — user identity, agent defaults, output preferences, hosted-client credentials
-- `RepoConfig` (`.heddle/config.toml`) — repository-local behavior, ignore defaults, storage coordinates, remote aliases, repository format version
+- `RepoConfig` (`.heddle/config.toml`) — repository source authority, local behavior, ignore defaults, storage coordinates, remote aliases, repository format version
 - `WorktreeState` — per-checkout runtime state (current session, segment) tracked separately from repo config
 
 Set `[land] squash = false` in user config to make `heddle land` preserve per-State Git export by default. The command-line `--no-squash` flag provides the same opt-out for one land operation.

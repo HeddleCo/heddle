@@ -5,6 +5,7 @@ package heddle.v1;
 // Schema entrypoint. Service and message definitions live in the
 // concern-specific files imported below.
 import public "heddle/v1/common.proto";
+import public "heddle/v1/options.proto";
 import public "heddle/v1/sync.proto";
 import public "heddle/v1/hosted.proto";
 import public "heddle/v1/auth.proto";
@@ -22,4 +23,5 @@ import public "heddle/v1/timeline.proto";
 import public "heddle/v1/transactions.proto";
 import public "heddle/v1/hooks.proto";
 import public "heddle/v1/support.proto";
-import public "heddle/v1/tree_edit.proto";
+import public "heddle/v1/search.proto";
+import public "heddle/v1/import.proto";

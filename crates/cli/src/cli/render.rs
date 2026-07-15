@@ -152,7 +152,7 @@ fn paths_equal(left: &std::path::Path, right: &std::path::Path) -> bool {
 /// Format a truncated one-line preview of an ordered string list for
 /// inclusion in a status / advice / blocker message. Used by every
 /// verb that would otherwise dump a 50+ item csv onto a single line:
-/// branch lists in `status`/`log`/`show`/`diagnose`, heavy-impact path
+/// branch lists in `status`/`log`/`show`/`doctor`, heavy-impact path
 /// lists in `status`/`snapshot`/`thread`/`merge`, and the
 /// `Heavy-impact change:` blocker built in `repo::thread_advice`.
 ///

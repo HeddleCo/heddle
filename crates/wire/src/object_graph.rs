@@ -2,7 +2,10 @@
 use std::collections::{HashSet, VecDeque};
 
 use objects::{
-    object::{ChangeId, ContentHash, State, TreeEntryTarget},
+    object::{
+        ContentHash, State, StateAttachment, StateAttachmentBody, StateAttachmentId, StateId,
+        TreeEntryTarget,
+    },
     store::{ObjectStore, pack::ObjectType as PackObjectType},
 };
 use serde::{Deserialize, Serialize};
@@ -12,7 +15,11 @@ use crate::{ProtocolError, Result};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ObjectId {
     Hash(ContentHash),
-    ChangeId(ChangeId),
+    StateId(StateId),
+    StateAttachment {
+        state: StateId,
+        id: StateAttachmentId,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,11 +56,12 @@ pub enum ObjectType {
     Redaction,
     /// A `StateVisibilityBlob` sidecar — the rmp-encoded record(s)
     /// declaring a non-public audience tier for a specific state. Keyed
-    /// on the wire by `ObjectId::ChangeId` of the *state*, since the
+    /// on the wire by `ObjectId::StateId` of the state, since the
     /// per-state sidecar store is indexed that way. Like `Redaction`, it
     /// is a sidecar record that lives outside the content-addressed pack
     /// and ships via the per-object transfer path, not the pack.
     StateVisibility,
+    StateAttachment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -64,6 +72,7 @@ pub enum ObjectTypeBucket {
     Action,
     Redaction,
     StateVisibility,
+    StateAttachment,
 }
 
 impl ObjectType {
@@ -75,6 +84,7 @@ impl ObjectType {
             ObjectType::Action => "action",
             ObjectType::Redaction => "redaction",
             ObjectType::StateVisibility => "state_visibility",
+            ObjectType::StateAttachment => "state_attachment",
         }
     }
 
@@ -86,6 +96,7 @@ impl ObjectType {
             "action" => Ok(ObjectType::Action),
             "redaction" => Ok(ObjectType::Redaction),
             "state_visibility" => Ok(ObjectType::StateVisibility),
+            "state_attachment" => Ok(ObjectType::StateAttachment),
             _ => Err(ProtocolError::InvalidState(format!(
                 "unknown object type: {value}"
             ))),
@@ -102,6 +113,7 @@ impl ObjectType {
             ObjectType::Tree => Ok(PackObjectType::Tree),
             ObjectType::State => Ok(PackObjectType::State),
             ObjectType::Action => Ok(PackObjectType::Action),
+            ObjectType::StateAttachment => Ok(PackObjectType::StateAttachment),
             ObjectType::Redaction => Err(ProtocolError::InvalidState(
                 "Redaction sidecar records cannot be packed into the content-addressed object pack"
                     .to_string(),
@@ -121,6 +133,7 @@ impl ObjectType {
             ObjectType::Action => ObjectTypeBucket::Action,
             ObjectType::Redaction => ObjectTypeBucket::Redaction,
             ObjectType::StateVisibility => ObjectTypeBucket::StateVisibility,
+            ObjectType::StateAttachment => ObjectTypeBucket::StateAttachment,
         }
     }
 }
@@ -128,19 +141,19 @@ impl ObjectType {
 #[derive(Debug, Clone, Default)]
 pub struct StateClosureOptions {
     pub depth: Option<u32>,
-    pub exclude_states: Vec<ChangeId>,
+    pub exclude_states: Vec<StateId>,
 }
 
 pub fn enumerate_state_closure(
     store: &impl ObjectStore,
-    state_id: ChangeId,
+    state_id: StateId,
 ) -> Result<Vec<ObjectInfo>> {
     enumerate_state_closure_with_options(store, state_id, StateClosureOptions::default())
 }
 
 pub fn enumerate_state_closure_with_options(
     store: &impl ObjectStore,
-    state_id: ChangeId,
+    state_id: StateId,
     options: StateClosureOptions,
 ) -> Result<Vec<ObjectInfo>> {
     let mut out = Vec::new();
@@ -156,14 +169,14 @@ pub fn enumerate_state_closure_with_options(
 
 pub fn enumerate_state_closure_plan(
     store: &impl ObjectStore,
-    state_id: ChangeId,
+    state_id: StateId,
 ) -> Result<Vec<PlannedObject>> {
     enumerate_state_closure_plan_with_options(store, state_id, StateClosureOptions::default())
 }
 
 pub fn enumerate_state_closure_plan_with_options(
     store: &impl ObjectStore,
-    state_id: ChangeId,
+    state_id: StateId,
     options: StateClosureOptions,
 ) -> Result<Vec<PlannedObject>> {
     let mut out = Vec::new();
@@ -179,7 +192,7 @@ pub fn enumerate_state_closure_plan_with_options(
 
 pub fn enumerate_state_closure_transfer_with_options(
     store: &impl ObjectStore,
-    state_id: ChangeId,
+    state_id: StateId,
     options: StateClosureOptions,
     full_descriptor_object_threshold: usize,
 ) -> Result<StateClosureTransferObjects> {
@@ -218,7 +231,7 @@ enum BlobSource {
 #[derive(Debug, Clone, Copy)]
 enum StateClosureEvent<'a> {
     State {
-        id: ChangeId,
+        id: StateId,
         state: &'a State,
     },
     Tree {
@@ -233,10 +246,14 @@ enum StateClosureEvent<'a> {
         blob: ContentHash,
     },
     StateVisibility {
-        state: ChangeId,
+        state: StateId,
+    },
+    StateAttachment {
+        state: StateId,
+        attachment: &'a StateAttachment,
     },
     ExcludedState {
-        id: ChangeId,
+        id: StateId,
     },
     ExcludedHash {
         hash: ContentHash,
@@ -245,15 +262,15 @@ enum StateClosureEvent<'a> {
 
 fn walk_state_closure(
     store: &impl ObjectStore,
-    state_id: ChangeId,
+    state_id: StateId,
     options: StateClosureOptions,
     mut visit: impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
 ) -> Result<()> {
     let (excluded_states, excluded_hashes) = collect_excluded(store, &options.exclude_states)?;
 
-    let mut seen_states: HashSet<ChangeId> = HashSet::new();
+    let mut seen_states: HashSet<StateId> = HashSet::new();
     let mut seen_hashes: HashSet<ContentHash> = HashSet::new();
-    let mut queue: VecDeque<(ChangeId, u32)> = VecDeque::new();
+    let mut queue: VecDeque<(StateId, u32)> = VecDeque::new();
     queue.push_back((state_id, 0));
 
     while let Some((id, depth)) = queue.pop_front() {
@@ -273,6 +290,33 @@ fn walk_state_closure(
         if store.has_state_visibility_for_state(&id)? {
             visit(StateClosureEvent::StateVisibility { state: id })?;
         }
+        for attachment in store.list_state_attachments(&id)? {
+            visit(StateClosureEvent::StateAttachment {
+                state: id,
+                attachment: &attachment,
+            })?;
+            match attachment.body {
+                StateAttachmentBody::Context(root) => walk_tree_closure_filtered(
+                    store,
+                    root,
+                    &excluded_hashes,
+                    &mut seen_hashes,
+                    &mut visit,
+                )?,
+                StateAttachmentBody::RiskSignals(hash)
+                | StateAttachmentBody::ReviewSignatures(hash)
+                | StateAttachmentBody::Discussions(hash)
+                | StateAttachmentBody::StructuredConflicts(hash) => walk_blob_filtered(
+                    store,
+                    hash,
+                    BlobSource::StateMetadata,
+                    &excluded_hashes,
+                    &mut seen_hashes,
+                    &mut visit,
+                )?,
+                StateAttachmentBody::Signature(_) => {}
+            }
+        }
 
         if options.depth.map(|max| depth < max).unwrap_or(true) {
             for parent in &state.parents {
@@ -291,25 +335,6 @@ fn walk_state_closure(
             walk_tree_closure_filtered(
                 store,
                 provenance_root,
-                &excluded_hashes,
-                &mut seen_hashes,
-                &mut visit,
-            )?;
-        }
-        if let Some(context_root) = state.context {
-            walk_tree_closure_filtered(
-                store,
-                context_root,
-                &excluded_hashes,
-                &mut seen_hashes,
-                &mut visit,
-            )?;
-        }
-        for metadata_blob in state_blob_dependencies(&state) {
-            walk_blob_filtered(
-                store,
-                metadata_blob,
-                BlobSource::StateMetadata,
                 &excluded_hashes,
                 &mut seen_hashes,
                 &mut visit,
@@ -395,7 +420,7 @@ fn object_info_from_event(
         StateClosureEvent::State { id, state } => {
             let state_bytes = rmp_serde::to_vec_named(state)?;
             Ok(Some(ObjectInfo {
-                id: ObjectId::ChangeId(id),
+                id: ObjectId::StateId(id),
                 obj_type: ObjectType::State,
                 size: state_bytes.len() as u64,
                 delta_base: None,
@@ -432,11 +457,23 @@ fn object_info_from_event(
         StateClosureEvent::StateVisibility { state } => Ok(store
             .get_state_visibility_bytes_for_state(&state)?
             .map(|bytes| ObjectInfo {
-                id: ObjectId::ChangeId(state),
+                id: ObjectId::StateId(state),
                 obj_type: ObjectType::StateVisibility,
                 size: bytes.len() as u64,
                 delta_base: None,
             })),
+        StateClosureEvent::StateAttachment { state, attachment } => {
+            let bytes = rmp_serde::to_vec_named(attachment)?;
+            Ok(Some(ObjectInfo {
+                id: ObjectId::StateAttachment {
+                    state,
+                    id: attachment.id(),
+                },
+                obj_type: ObjectType::StateAttachment,
+                size: bytes.len() as u64,
+                delta_base: None,
+            }))
+        }
         StateClosureEvent::ExcludedState { id } => {
             let _ = id;
             Ok(None)
@@ -454,7 +491,7 @@ fn planned_object_from_event(
 ) -> Result<Option<PlannedObject>> {
     match event {
         StateClosureEvent::State { id, .. } => Ok(Some(PlannedObject {
-            id: ObjectId::ChangeId(id),
+            id: ObjectId::StateId(id),
             obj_type: ObjectType::State,
         })),
         StateClosureEvent::Tree { hash, .. } => Ok(Some(PlannedObject {
@@ -475,8 +512,15 @@ fn planned_object_from_event(
             obj_type: ObjectType::Redaction,
         })),
         StateClosureEvent::StateVisibility { state } => Ok(Some(PlannedObject {
-            id: ObjectId::ChangeId(state),
+            id: ObjectId::StateId(state),
             obj_type: ObjectType::StateVisibility,
+        })),
+        StateClosureEvent::StateAttachment { state, attachment } => Ok(Some(PlannedObject {
+            id: ObjectId::StateAttachment {
+                state,
+                id: attachment.id(),
+            },
+            obj_type: ObjectType::StateAttachment,
         })),
         StateClosureEvent::ExcludedState { id } => {
             let _ = id;
@@ -539,15 +583,15 @@ fn collect_missing_blobs_recursive(
 
 fn collect_excluded(
     store: &impl ObjectStore,
-    roots: &[ChangeId],
-) -> Result<(HashSet<ChangeId>, HashSet<ContentHash>)> {
+    roots: &[StateId],
+) -> Result<(HashSet<StateId>, HashSet<ContentHash>)> {
     if roots.is_empty() {
         return Ok((HashSet::new(), HashSet::new()));
     }
 
-    let mut excluded_states: HashSet<ChangeId> = HashSet::new();
+    let mut excluded_states: HashSet<StateId> = HashSet::new();
     let mut excluded_hashes: HashSet<ContentHash> = HashSet::new();
-    let mut queue: VecDeque<ChangeId> = VecDeque::new();
+    let mut queue: VecDeque<StateId> = VecDeque::new();
 
     for id in roots {
         queue.push_back(*id);
@@ -571,26 +615,23 @@ fn collect_excluded(
         if let Some(provenance_root) = state.provenance {
             collect_tree_hashes(store, provenance_root, &mut excluded_hashes)?;
         }
-        if let Some(context_root) = state.context {
-            collect_tree_hashes(store, context_root, &mut excluded_hashes)?;
-        }
-        for metadata_blob in state_blob_dependencies(&state) {
-            excluded_hashes.insert(metadata_blob);
+        for attachment in store.list_state_attachments(&id)? {
+            match attachment.body {
+                StateAttachmentBody::Context(root) => {
+                    collect_tree_hashes(store, root, &mut excluded_hashes)?
+                }
+                StateAttachmentBody::RiskSignals(hash)
+                | StateAttachmentBody::ReviewSignatures(hash)
+                | StateAttachmentBody::Discussions(hash)
+                | StateAttachmentBody::StructuredConflicts(hash) => {
+                    excluded_hashes.insert(hash);
+                }
+                StateAttachmentBody::Signature(_) => {}
+            }
         }
     }
 
     Ok((excluded_states, excluded_hashes))
-}
-
-fn state_blob_dependencies(state: &State) -> impl Iterator<Item = ContentHash> + '_ {
-    [
-        state.risk_signals,
-        state.review_signatures,
-        state.discussions,
-        state.structured_conflicts,
-    ]
-    .into_iter()
-    .flatten()
 }
 
 fn collect_tree_hashes(
@@ -627,15 +668,15 @@ fn collect_tree_hashes(
 
 pub fn is_ancestor(
     store: &impl ObjectStore,
-    ancestor: ChangeId,
-    descendant: ChangeId,
+    ancestor: StateId,
+    descendant: StateId,
 ) -> Result<bool> {
     if ancestor == descendant {
         return Ok(true);
     }
 
-    let mut seen: HashSet<ChangeId> = HashSet::new();
-    let mut queue: VecDeque<ChangeId> = VecDeque::new();
+    let mut seen: HashSet<StateId> = HashSet::new();
+    let mut queue: VecDeque<StateId> = VecDeque::new();
     queue.push_back(descendant);
 
     while let Some(id) = queue.pop_front() {
@@ -667,9 +708,10 @@ mod tests {
     use chrono::Utc;
     use objects::{
         object::{
-            Action, ActionId, Attribution, Blob, ChangeId, ContentHash, Discussion,
-            DiscussionResolution, DiscussionTurn, DiscussionsBlob, Principal, Redaction, State,
-            StateVisibility, SymbolAnchor, Tree, TreeEntry, VisibilityTier,
+            Action, ActionId, Attribution, Blob, ContentHash, Discussion, DiscussionResolution,
+            DiscussionTurn, DiscussionsBlob, Principal, Redaction, State, StateAttachment,
+            StateAttachmentBody, StateId, StateVisibility, SymbolAnchor, Tree, TreeEntry,
+            VisibilityTier,
         },
         store::{ObjectStore, Result as StoreResult},
     };
@@ -708,7 +750,7 @@ mod tests {
 
     fn assert_plan_parity(
         repo: &Repository,
-        state_id: ChangeId,
+        state_id: StateId,
         options: StateClosureOptions,
     ) -> HashSet<(ObjectId, ObjectType)> {
         let full =
@@ -776,7 +818,7 @@ mod tests {
             self.inner.has_tree(hash)
         }
 
-        fn get_state(&self, id: &ChangeId) -> StoreResult<Option<State>> {
+        fn get_state(&self, id: &StateId) -> StoreResult<Option<State>> {
             self.state_reads.fetch_add(1, Ordering::SeqCst);
             self.inner.get_state(id)
         }
@@ -785,11 +827,11 @@ mod tests {
             self.inner.put_state(state)
         }
 
-        fn has_state(&self, id: &ChangeId) -> StoreResult<bool> {
+        fn has_state(&self, id: &StateId) -> StoreResult<bool> {
             self.inner.has_state(id)
         }
 
-        fn list_states(&self) -> StoreResult<Vec<ChangeId>> {
+        fn list_states(&self) -> StoreResult<Vec<StateId>> {
             self.inner.list_states()
         }
 
@@ -829,13 +871,13 @@ mod tests {
 
         let full = enumerate_state_closure_with_options(
             repo.store(),
-            state.change_id,
+            state.state_id,
             StateClosureOptions::default(),
         )
         .unwrap();
         let lean = enumerate_state_closure_plan_with_options(
             repo.store(),
-            state.change_id,
+            state.state_id,
             StateClosureOptions::default(),
         )
         .unwrap();
@@ -853,7 +895,7 @@ mod tests {
         assert!(
             full_pairs
                 .iter()
-                .any(|(id, _)| matches!(id, ObjectId::ChangeId(_)))
+                .any(|(id, _)| matches!(id, ObjectId::StateId(_)))
         );
     }
 
@@ -946,20 +988,31 @@ mod tests {
             .expect("put root tree");
         let state = State::new(
             root_tree_hash,
-            vec![excluded_parent.change_id],
+            vec![excluded_parent.state_id],
             test_attribution(),
         )
-        .with_context(context_tree_hash)
-        .with_provenance(provenance_tree_hash)
-        .with_risk_signals(risk_blob)
-        .with_review_signatures(review_blob)
-        .with_discussions(discussions_blob)
-        .with_structured_conflicts(conflicts_blob);
+        .with_provenance(provenance_tree_hash);
         repo.store().put_state(&state).expect("put state");
+        for body in [
+            StateAttachmentBody::Context(context_tree_hash),
+            StateAttachmentBody::RiskSignals(risk_blob),
+            StateAttachmentBody::ReviewSignatures(review_blob),
+            StateAttachmentBody::Discussions(discussions_blob),
+            StateAttachmentBody::StructuredConflicts(conflicts_blob),
+        ] {
+            repo.put_state_attachment(&StateAttachment {
+                state_id: state.id(),
+                body,
+                attribution: state.attribution.clone(),
+                created_at: Utc::now(),
+                supersedes: None,
+            })
+            .unwrap();
+        }
 
         repo.put_redaction(Redaction {
             redacted_blob,
-            state: state.change_id,
+            state: state.state_id,
             path: "secret.txt".to_string(),
             reason: "test leak".to_string(),
             redactor: Principal::new("Tester", "tester@example.test"),
@@ -970,7 +1023,7 @@ mod tests {
         })
         .expect("put redaction");
         repo.put_state_visibility(StateVisibility {
-            state: state.change_id,
+            state: state.state_id,
             tier: VisibilityTier::Restricted {
                 scope_label: "security".to_string(),
             },
@@ -984,22 +1037,21 @@ mod tests {
 
         let options = StateClosureOptions {
             depth: None,
-            exclude_states: vec![excluded_parent.change_id],
+            exclude_states: vec![excluded_parent.state_id],
         };
         let transfer = enumerate_state_closure_transfer_with_options(
             repo.store(),
-            state.change_id,
+            state.state_id,
             options.clone(),
             512,
         )
         .expect("transfer projection");
 
         let full =
-            enumerate_state_closure_with_options(repo.store(), state.change_id, options.clone())
+            enumerate_state_closure_with_options(repo.store(), state.state_id, options.clone())
                 .expect("full closure");
-        let plan =
-            enumerate_state_closure_plan_with_options(repo.store(), state.change_id, options)
-                .expect("plan closure");
+        let plan = enumerate_state_closure_plan_with_options(repo.store(), state.state_id, options)
+            .expect("plan closure");
         assert_eq!(
             transfer
                 .full_objects
@@ -1013,12 +1065,12 @@ mod tests {
         assert_eq!(full_pairs, pairs_from_plan(&plan));
         assert_contains_object(
             &full_pairs,
-            ObjectId::ChangeId(state.change_id),
+            ObjectId::StateId(state.state_id),
             ObjectType::State,
         );
         assert_contains_object(
             &full_pairs,
-            ObjectId::ChangeId(state.change_id),
+            ObjectId::StateId(state.state_id),
             ObjectType::StateVisibility,
         );
         assert_contains_object(&full_pairs, ObjectId::Hash(redacted_blob), ObjectType::Blob);
@@ -1048,7 +1100,7 @@ mod tests {
             assert_contains_object(&full_pairs, ObjectId::Hash(hash), ObjectType::Blob);
         }
         assert!(!full_pairs.contains(&(
-            ObjectId::ChangeId(excluded_parent.change_id),
+            ObjectId::StateId(excluded_parent.state_id),
             ObjectType::State
         )));
         assert!(!full_pairs.contains(&(ObjectId::Hash(excluded_tree_hash), ObjectType::Tree)));
@@ -1075,7 +1127,7 @@ mod tests {
 
         let transfer = enumerate_state_closure_transfer_with_options(
             &store,
-            state.change_id,
+            state.state_id,
             StateClosureOptions::default(),
             512,
         )
@@ -1102,7 +1154,7 @@ mod tests {
 
         let transfer = enumerate_state_closure_transfer_with_options(
             repo.store(),
-            state.change_id,
+            state.state_id,
             StateClosureOptions::default(),
             0,
         )
@@ -1130,41 +1182,39 @@ mod tests {
 
         let depth_zero = assert_plan_parity(
             &repo,
-            tip.change_id,
+            tip.state_id,
             StateClosureOptions {
                 depth: Some(0),
                 exclude_states: Vec::new(),
             },
         );
-        assert!(depth_zero.contains(&(ObjectId::ChangeId(tip.change_id), ObjectType::State)));
-        assert!(!depth_zero.contains(&(ObjectId::ChangeId(middle.change_id), ObjectType::State)));
-        assert!(!depth_zero.contains(&(ObjectId::ChangeId(base.change_id), ObjectType::State)));
+        assert!(depth_zero.contains(&(ObjectId::StateId(tip.state_id), ObjectType::State)));
+        assert!(!depth_zero.contains(&(ObjectId::StateId(middle.state_id), ObjectType::State)));
+        assert!(!depth_zero.contains(&(ObjectId::StateId(base.state_id), ObjectType::State)));
 
         let depth_one = assert_plan_parity(
             &repo,
-            tip.change_id,
+            tip.state_id,
             StateClosureOptions {
                 depth: Some(1),
                 exclude_states: Vec::new(),
             },
         );
-        assert!(depth_one.contains(&(ObjectId::ChangeId(tip.change_id), ObjectType::State)));
-        assert!(depth_one.contains(&(ObjectId::ChangeId(middle.change_id), ObjectType::State)));
-        assert!(!depth_one.contains(&(ObjectId::ChangeId(base.change_id), ObjectType::State)));
+        assert!(depth_one.contains(&(ObjectId::StateId(tip.state_id), ObjectType::State)));
+        assert!(depth_one.contains(&(ObjectId::StateId(middle.state_id), ObjectType::State)));
+        assert!(!depth_one.contains(&(ObjectId::StateId(base.state_id), ObjectType::State)));
 
         let exclude_middle = assert_plan_parity(
             &repo,
-            tip.change_id,
+            tip.state_id,
             StateClosureOptions {
                 depth: None,
-                exclude_states: vec![middle.change_id],
+                exclude_states: vec![middle.state_id],
             },
         );
-        assert!(exclude_middle.contains(&(ObjectId::ChangeId(tip.change_id), ObjectType::State)));
-        assert!(
-            !exclude_middle.contains(&(ObjectId::ChangeId(middle.change_id), ObjectType::State))
-        );
-        assert!(!exclude_middle.contains(&(ObjectId::ChangeId(base.change_id), ObjectType::State)));
+        assert!(exclude_middle.contains(&(ObjectId::StateId(tip.state_id), ObjectType::State)));
+        assert!(!exclude_middle.contains(&(ObjectId::StateId(middle.state_id), ObjectType::State)));
+        assert!(!exclude_middle.contains(&(ObjectId::StateId(base.state_id), ObjectType::State)));
     }
 
     #[test]
@@ -1188,13 +1238,13 @@ mod tests {
 
         let full = enumerate_state_closure_with_options(
             repo.store(),
-            state.change_id,
+            state.state_id,
             StateClosureOptions::default(),
         )
         .unwrap();
         let plan = enumerate_state_closure_plan_with_options(
             repo.store(),
-            state.change_id,
+            state.state_id,
             StateClosureOptions::default(),
         )
         .unwrap();
@@ -1244,13 +1294,13 @@ mod tests {
 
         let full = enumerate_state_closure_with_options(
             repo.store(),
-            state.change_id,
+            state.state_id,
             StateClosureOptions::default(),
         )
         .unwrap();
         let plan = enumerate_state_closure_plan_with_options(
             repo.store(),
-            state.change_id,
+            state.state_id,
             StateClosureOptions::default(),
         )
         .unwrap();
@@ -1327,7 +1377,7 @@ mod tests {
 
         let redaction = Redaction {
             redacted_blob: blob_hash,
-            state: state.change_id,
+            state: state.state_id,
             path: "secret.toml".to_string(),
             reason: "test leak".to_string(),
             redactor: Principal {
@@ -1343,13 +1393,13 @@ mod tests {
 
         let full = enumerate_state_closure_with_options(
             repo.store(),
-            state.change_id,
+            state.state_id,
             StateClosureOptions::default(),
         )
         .unwrap();
         let plan = enumerate_state_closure_plan_with_options(
             repo.store(),
-            state.change_id,
+            state.state_id,
             StateClosureOptions::default(),
         )
         .unwrap();
@@ -1375,7 +1425,7 @@ mod tests {
         let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
 
         repo.put_state_visibility(StateVisibility {
-            state: state.change_id,
+            state: state.state_id,
             tier: VisibilityTier::Restricted {
                 scope_label: "security-embargo".into(),
             },
@@ -1392,13 +1442,13 @@ mod tests {
 
         let full = enumerate_state_closure_with_options(
             repo.store(),
-            state.change_id,
+            state.state_id,
             StateClosureOptions::default(),
         )
         .unwrap();
         let plan = enumerate_state_closure_plan_with_options(
             repo.store(),
-            state.change_id,
+            state.state_id,
             StateClosureOptions::default(),
         )
         .unwrap();
@@ -1406,13 +1456,13 @@ mod tests {
         assert!(
             full.iter()
                 .any(|info| info.obj_type == ObjectType::StateVisibility
-                    && info.id == ObjectId::ChangeId(state.change_id)),
+                    && info.id == ObjectId::StateId(state.state_id)),
             "full closure must include a StateVisibility entry for the visible state"
         );
         assert!(
             plan.iter()
                 .any(|p| p.obj_type == ObjectType::StateVisibility
-                    && p.id == ObjectId::ChangeId(state.change_id)),
+                    && p.id == ObjectId::StateId(state.state_id)),
             "plan closure must include a StateVisibility entry for the visible state"
         );
     }
@@ -1428,7 +1478,7 @@ mod tests {
         let discussion_bytes = DiscussionsBlob::new(vec![Discussion {
             id: "disc-1".to_string(),
             anchor: SymbolAnchor::new("src/lib.rs", "answer"),
-            opened_against_state: state.change_id,
+            opened_against_state: state.state_id,
             opened_at: 1_782_400_000,
             thread_ref: None,
             turns: vec![DiscussionTurn {
@@ -1460,24 +1510,31 @@ mod tests {
             .store()
             .put_blob(&Blob::from_slice(b"structured conflicts"))
             .expect("put conflicts blob");
-        let state_with_metadata = state
-            .with_risk_signals(risk_hash)
-            .with_review_signatures(review_hash)
-            .with_discussions(discussion_hash)
-            .with_structured_conflicts(conflicts_hash);
-        repo.store()
-            .put_state(&state_with_metadata)
-            .expect("put state with metadata");
+        for body in [
+            StateAttachmentBody::RiskSignals(risk_hash),
+            StateAttachmentBody::ReviewSignatures(review_hash),
+            StateAttachmentBody::Discussions(discussion_hash),
+            StateAttachmentBody::StructuredConflicts(conflicts_hash),
+        ] {
+            repo.put_state_attachment(&StateAttachment {
+                state_id: state.id(),
+                body,
+                attribution: state.attribution.clone(),
+                created_at: Utc::now(),
+                supersedes: None,
+            })
+            .unwrap();
+        }
 
         let full = enumerate_state_closure_with_options(
             repo.store(),
-            state_with_metadata.change_id,
+            state.state_id,
             StateClosureOptions::default(),
         )
         .unwrap();
         let plan = enumerate_state_closure_plan_with_options(
             repo.store(),
-            state_with_metadata.change_id,
+            state.state_id,
             StateClosureOptions::default(),
         )
         .unwrap();

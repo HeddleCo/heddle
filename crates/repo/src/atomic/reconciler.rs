@@ -14,7 +14,7 @@ use std::{
 
 use objects::{
     error::Result,
-    object::{ChangeId, MarkerName, ThreadName},
+    object::{MarkerName, StateId, ThreadName},
 };
 use oplog::{OpLog, OpRecord};
 use refs::{
@@ -95,10 +95,10 @@ enum HeadFold {
 #[derive(Default)]
 struct Fold {
     head: HeadFold,
-    threads: BTreeMap<String, Option<ChangeId>>,
-    markers: BTreeMap<String, Option<ChangeId>>,
-    remotes: BTreeMap<(String, String), Option<ChangeId>>,
-    undo_recovery: Option<ChangeId>,
+    threads: BTreeMap<String, Option<StateId>>,
+    markers: BTreeMap<String, Option<StateId>>,
+    remotes: BTreeMap<(String, String), Option<StateId>>,
+    undo_recovery: Option<StateId>,
 }
 
 impl Fold {
@@ -247,8 +247,8 @@ impl Fold {
 /// (`republish` thread/marker/HEAD updates, `remote_updates`, `undo_recovery`).
 type ClassMaterialization = (
     Vec<RefUpdate>,
-    Vec<(String, ThreadName, Option<ChangeId>)>,
-    Option<ChangeId>,
+    Vec<(String, ThreadName, Option<StateId>)>,
+    Option<StateId>,
 );
 
 impl OplogRefReconciler {
@@ -441,7 +441,7 @@ fn reconciled_value(
 /// adopt the folded target — set or delete, present canonical or not (cid
 /// 3329490981). `folded` is `Some(Some(state))` / `Some(None)` (touched:
 /// set/deleted) or `None` (untouched by the lagged batches ⇒ keep canonical).
-fn fill_point(raw: &Loaded, folded: Option<Option<ChangeId>>) -> Loaded {
+fn fill_point(raw: &Loaded, folded: Option<Option<StateId>>) -> Loaded {
     match folded {
         Some(value) => Loaded::Point(value),
         None => raw.clone(),
@@ -465,7 +465,7 @@ fn raw_marker_names(raw: &Loaded) -> Vec<String> {
 /// Apply the fold's committed effect to a raw list: set inserts the name and
 /// delete removes it. The fold only contains records newer than the class
 /// watermark, so its touched refs are authoritative over the canonical view.
-fn merge_list(base: Vec<String>, changes: &BTreeMap<String, Option<ChangeId>>) -> Vec<String> {
+fn merge_list(base: Vec<String>, changes: &BTreeMap<String, Option<StateId>>) -> Vec<String> {
     let mut set: BTreeMap<String, ()> = base.into_iter().map(|n| (n, ())).collect();
     for (name, value) in changes {
         if value.is_some() {

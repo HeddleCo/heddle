@@ -2,7 +2,7 @@
 //! Documented exit-code contract for the swept command subset.
 //!
 //! `docs/exit-codes.md` promises a sysexits-style taxonomy for the swept
-//! commands (`init`, `status`, `verify`, `commit`, `merge`, `push`,
+//! commands (`init`, `status`, `verify`, `commit`, `push`,
 //! `pull`, and the Git import/sync/repair verbs). Agents branch on these
 //! codes without parsing stderr, so a divergence between the documented
 //! code and the runtime exit silently mis-handles a failure path.
@@ -10,7 +10,7 @@
 //! Persona round 3/5 (HeddleCo/heddle#252) caught two such divergences
 //! (`push`/`commit` returning the `IoErr` catch-all instead of the
 //! documented `Config`/`DataErr`) plus the `pull` and
-//! `fsck --repair git` siblings. These tests pin the documented code
+//! `fsck repair git` siblings. These tests pin the documented code
 //! for a reproducible documented condition of each swept command so the
 //! contract can't regress.
 
@@ -98,18 +98,13 @@ fn status_exits_zero_in_initialized_repo() {
 fn verify_exits_zero_when_clean() {
     let repo = init_repo();
     std::fs::write(repo.path().join("f.txt"), "base\n").expect("write f.txt");
-    assert_exit(&["commit", "-m", "base"], repo.path(), 0);
+    assert_exit(&["capture", "-m", "base"], repo.path(), 0);
     assert_exit(&["verify"], repo.path(), 0);
 }
 
 #[test]
-fn commit_with_nothing_staged_is_data_err() {
-    // Documented: `65 DataErr` — well-formed input, semantically rejected.
-    // Was the `74 IoErr` catch-all before HeddleCo/heddle#252.
+fn commit_without_git_overlay_is_data_err() {
     let repo = init_repo();
-    std::fs::write(repo.path().join("f.txt"), "base\n").expect("write f.txt");
-    assert_exit(&["commit", "-m", "base"], repo.path(), 0);
-    // Second commit with a clean worktree: nothing to commit.
     assert_exit(&["commit", "-m", "again"], repo.path(), 65);
 }
 
@@ -128,20 +123,6 @@ fn pull_without_remote_is_config() {
 }
 
 #[test]
-fn merge_preview_exits_zero() {
-    // Documented: `0 ok`. A fast-forwardable thread previews cleanly.
-    let repo = init_repo();
-    std::fs::write(repo.path().join("f.txt"), "base\n").expect("write base");
-    assert_exit(&["commit", "-m", "base"], repo.path(), 0);
-    assert_exit(&["thread", "create", "feature"], repo.path(), 0);
-    assert_exit(&["switch", "feature"], repo.path(), 0);
-    std::fs::write(repo.path().join("f.txt"), "base\nfeat\n").expect("write feat");
-    assert_exit(&["commit", "-m", "feat"], repo.path(), 0);
-    assert_exit(&["switch", "main"], repo.path(), 0);
-    assert_exit(&["merge", "feature", "--preview"], repo.path(), 0);
-}
-
-#[test]
 fn import_git_exits_zero() {
     // Documented: `0 ok`.
     let repo = adopted_git_overlay();
@@ -157,14 +138,13 @@ fn sync_git_exits_zero() {
 }
 
 #[test]
-fn fsck_git_repair_without_side_is_data_err() {
-    // Documented: `65 DataErr` — manual resolution required. The
-    // `reconcile_direction_required` refusal (no `--prefer` side) was the
-    // `74 IoErr` catch-all before HeddleCo/heddle#252.
+fn fsck_git_repair_against_native_authority_is_data_err() {
+    // Documented: `65 DataErr` — the retained Git adapter cannot become
+    // authoritative through a repair command in a native repository.
     let repo = adopted_git_overlay();
     assert_exit(&["import", "git", "--ref", "main"], repo.path(), 0);
     assert_exit(
-        &["fsck", "--repair", "git", "--ref", "main"],
+        &["fsck", "repair", "git", "--prefer", "git", "--ref", "main"],
         repo.path(),
         65,
     );
@@ -216,7 +196,7 @@ fn status_on_corrupted_state_is_data_err_with_recovery_path() {
     // back executable recovery commands in both output modes.
     let repo = init_repo();
     std::fs::write(repo.path().join("f.txt"), "base\n").expect("write f.txt");
-    assert_exit(&["commit", "-m", "base"], repo.path(), 0);
+    assert_exit(&["capture", "-m", "base"], repo.path(), 0);
 
     // Corrupt every stored state object: 0x90 is msgpack FixArray(0),
     // the exact marker from the persona report's dead-end.

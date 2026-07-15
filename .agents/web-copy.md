@@ -202,7 +202,7 @@ Heddle's web copy may speak about the future, but it must do so accurately.
 
 ### High-risk claims to avoid
 
-- `actor spawn` creates isolated filesystems (it does not — use `heddle start --path` for that)
+- agent presence grants write authority (it does not — use `heddle agent reserve` for that)
 - context, agent telemetry, or settings flows are fully persisted when the route is still mock-backed
 - hosted builds, workflows, logs, or artifact surfaces are live today
 - sessions or segments are implemented

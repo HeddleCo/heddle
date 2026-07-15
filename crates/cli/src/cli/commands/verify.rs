@@ -5,8 +5,8 @@ use std::{path::Path, time::Instant};
 
 use anyhow::{Result, anyhow};
 use heddle_core::{
-    MachineContractInput, RepositoryVerificationState, VerificationCheck, VerifyOptions,
-    VerifyReport, verify as core_verify,
+    MachineContractInput, RepositorySetupGuidance, RepositoryVerificationState, VerificationCheck,
+    VerifyOptions, VerifyReport, repository_setup_guidance, verify as core_verify,
 };
 use repo::Repository;
 
@@ -21,19 +21,22 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
     let body_start = Instant::now();
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
-    let ctx = verify_execution_context_from_cli(cli, &start)?;
+    let prepared = verify_execution_context_from_cli(cli, &start)?;
     let output = core_verify(
-        &ctx,
+        &prepared.ctx,
         VerifyOptions::new()
-            .with_start_path(start.clone())
+            .with_start_path(start)
             .with_machine_contract_input(MachineContractInput::from_coverage(
                 super::verification_health::machine_contract_coverage(),
             )),
     )?;
+    // Open cost is paid either in the CLI shell (injected) or inside core
+    // (facade open). Exactly one side owns it; sum keeps profile truthful.
+    let repo_open_ms = prepared.repo_open_ms + output.profile.repo_open_ms;
     if profile_enabled() {
         let fields = [
             ProfileField::millis("plain_git_probe_ms", output.profile.plain_git_probe_ms),
-            ProfileField::millis("repo_open_ms", output.profile.repo_open_ms),
+            ProfileField::millis("repo_open_ms", repo_open_ms),
             ProfileField::millis("verification_ms", output.profile.verification_ms),
             ProfileField::duration("command_body_ms", body_start.elapsed()),
         ];
@@ -50,10 +53,7 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
                 );
                 emit_profile(
                     "verify repo open",
-                    &[ProfileField::millis(
-                        "repo_open_ms",
-                        output.profile.repo_open_ms,
-                    )],
+                    &[ProfileField::millis("repo_open_ms", repo_open_ms)],
                 );
                 emit_profile(
                     "verify repository checks",
@@ -72,16 +72,8 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
             }
         }
     }
-    let repo_config = output
-        .trust
-        .heddle_initialized
-        .then(|| {
-            Repository::open(&start)
-                .ok()
-                .map(|repo| repo.config().clone())
-        })
-        .flatten();
-    let as_json = should_output_json(cli, repo_config.as_ref());
+    // Config comes from the single open above — never re-open for JSON mode.
+    let as_json = should_output_json(cli, prepared.repo_config.as_ref());
     if !output.clean && as_json {
         return Err(anyhow!(verify_failed_advice(&output.trust)));
     }
@@ -92,10 +84,15 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn verify_execution_context_from_cli(
-    cli: &Cli,
-    start: &Path,
-) -> Result<heddle_core::ExecutionContext> {
+struct VerifyExecutionPrep {
+    ctx: heddle_core::ExecutionContext,
+    repo_config: Option<repo::RepoConfig>,
+    /// Wall time spent opening a Heddle repository in this shell (0 when open
+    /// was deferred to core, e.g. plain-Git observe).
+    repo_open_ms: u128,
+}
+
+fn verify_execution_context_from_cli(cli: &Cli, start: &Path) -> Result<VerifyExecutionPrep> {
     let config = UserConfig::load_default()?;
     let verbosity = if cli.quiet {
         heddle_core::Verbosity::Quiet
@@ -115,7 +112,47 @@ fn verify_execution_context_from_cli(
         builder = builder.op_id(op_id.to_string());
     }
 
-    Ok(builder.build())
+    // Open once when a Heddle sidecar is already present so core reuses the
+    // handle and JSON mode can read config without a second open.
+    //
+    // Do NOT call `Repository::open` on plain Git: open auto-bootstraps a
+    // sidecar for mutators, which would make verify mutate and skip the
+    // plain-Git observe probe (observe-only contract).
+    let open_start = Instant::now();
+    let (builder, repo_config, repo_open_ms) = if heddle_sidecar_present(start) {
+        match Repository::open(start) {
+            Ok(repo) => {
+                let repo_open_ms = open_start.elapsed().as_millis();
+                let repo_config = repo.config().clone();
+                (builder.repo(repo), Some(repo_config), repo_open_ms)
+            }
+            Err(_) => (builder, None, 0),
+        }
+    } else {
+        (builder, None, 0)
+    };
+
+    Ok(VerifyExecutionPrep {
+        ctx: builder.build(),
+        repo_config,
+        repo_open_ms,
+    })
+}
+
+/// True when `start` or an ancestor already has a Heddle sidecar (main repo or
+/// worktree pointer). Used to avoid auto-bootstrap on observe-only verify.
+fn heddle_sidecar_present(start: &Path) -> bool {
+    let mut current = Some(start);
+    while let Some(dir) = current {
+        let heddle = dir.join(".heddle");
+        if heddle.is_dir()
+            && (heddle.join("objects").is_dir() || heddle.join("objectstore").is_file())
+        {
+            return true;
+        }
+        current = dir.parent();
+    }
+    false
 }
 
 fn render_verify(output: &VerifyReport, verbose: bool, as_json: bool) -> Result<()> {
@@ -451,86 +488,10 @@ fn render_compact_setup_needed(output: &VerifyReport) -> bool {
     true
 }
 
-fn setup_needed_guidance(output: &VerifyReport) -> Option<VerifySetupGuidance> {
+fn setup_needed_guidance(output: &VerifyReport) -> Option<RepositorySetupGuidance> {
     let blocker = output.trust.checks.iter().find(|check| !check.clean)?;
     if !is_import_setup_blocker(blocker) {
         return None;
     }
     repository_setup_guidance(&output.trust)
-}
-
-#[derive(Debug, Clone)]
-struct VerifySetupGuidance {
-    setup_line: String,
-    effect: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RepositorySetupActionKind {
-    Init,
-    Adopt,
-    GitImport,
-    Other,
-}
-
-fn repository_setup_guidance(trust: &RepositoryVerificationState) -> Option<VerifySetupGuidance> {
-    if !matches!(trust.status.as_str(), "needs_init" | "needs_import") {
-        return None;
-    }
-    let action = trust.recommended_action.trim();
-    if action.is_empty() {
-        return None;
-    }
-    let kind = repository_setup_action_kind(action);
-    let setup_line = match kind {
-        RepositorySetupActionKind::Init => {
-            format!("Git repo detected; initialize Heddle with {action}")
-        }
-        RepositorySetupActionKind::Adopt => {
-            format!("Git repo detected; connect this branch with {action}")
-        }
-        RepositorySetupActionKind::GitImport => {
-            format!("Git history not imported; import it with {action}")
-        }
-        RepositorySetupActionKind::Other => {
-            format!("Run {action} to clear the primary setup blocker")
-        }
-    };
-    let worktree_tail = if trust.worktree_state == "clean" {
-        "and the Git worktree stays clean"
-    } else {
-        "and existing Git worktree changes stay untouched"
-    };
-    let effect = match kind {
-        RepositorySetupActionKind::Init => format!(
-            ".heddle metadata will be created; Git commits stay in Git storage, {worktree_tail}."
-        ),
-        RepositorySetupActionKind::Adopt
-            if trust.repository_mode == "plain-git" && !trust.heddle_initialized =>
-        {
-            format!(".heddle metadata will be created, Git history imported, {worktree_tail}.")
-        }
-        RepositorySetupActionKind::Adopt => {
-            format!(".heddle metadata is present; adoption imports Git history {worktree_tail}.")
-        }
-        RepositorySetupActionKind::GitImport => {
-            format!(".heddle metadata is present; Git history import runs {worktree_tail}.")
-        }
-        RepositorySetupActionKind::Other => {
-            format!("The recommended setup command runs {worktree_tail}.")
-        }
-    };
-    Some(VerifySetupGuidance { setup_line, effect })
-}
-
-fn repository_setup_action_kind(action: &str) -> RepositorySetupActionKind {
-    if action == "heddle init" {
-        RepositorySetupActionKind::Init
-    } else if action.starts_with("heddle adopt") {
-        RepositorySetupActionKind::Adopt
-    } else if action.starts_with("heddle import git") {
-        RepositorySetupActionKind::GitImport
-    } else {
-        RepositorySetupActionKind::Other
-    }
 }

@@ -2,8 +2,9 @@
 // @generated from file heddle/v1/state_review.proto (package heddle.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
-import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import { file_heddle_v1_options } from "./options_pb.js";
 import type { Timestamp } from "@bufbuild/protobuf/wkt";
 import { file_google_protobuf_timestamp } from "@bufbuild/protobuf/wkt";
 import type { ReviewKind } from "./common_pb.js";
@@ -14,7 +15,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file heddle/v1/state_review.proto.
  */
 export const file_heddle_v1_state_review: GenFile = /*@__PURE__*/
-  fileDesc("ChxoZWRkbGUvdjEvc3RhdGVfcmV2aWV3LnByb3RvEgloZWRkbGUudjEiWwoXR2V0UmV2aWV3UGF5bG9hZFJlcXVlc3QSEQoJcmVwb19wYXRoGAEgASgJEhAKCHN0YXRlX2lkGAIgASgMEhsKE2luY2x1ZGVfYWxsX3NpZ25hbHMYAyABKAgirAMKDVJldmlld1BheWxvYWQSEAoIc3RhdGVfaWQYASABKAwSKQoHc3VtbWFyeRgCIAEoCzIYLmhlZGRsZS52MS5SZXZpZXdTdW1tYXJ5EhcKD2FnZW50X25hcnJhdGl2ZRgDIAEoCRIzCglwYXJ0aXRpb24YBCABKAsyIC5oZWRkbGUudjEuUmVhZGluZ09yZGVyUGFydGl0aW9uEjAKEWluX2J1ZGdldF9zaWduYWxzGAUgAygLMhUuaGVkZGxlLnYxLlJpc2tTaWduYWwSKgoLYWxsX3NpZ25hbHMYBiADKAsyFS5oZWRkbGUudjEuUmlza1NpZ25hbBITCgt0aWNrX2J1ZGdldBgHIAEoDRIyCgtkaXNjdXNzaW9ucxgIIAMoCzIdLmhlZGRsZS52MS5BbmNob3JlZERpc2N1c3Npb24SNwoSbWVyZ2VfcmVxdWlyZW1lbnRzGAkgAygLMhsuaGVkZGxlLnYxLk1lcmdlUmVxdWlyZW1lbnQSMAoOc2lnbmluZ19mb290ZXIYCiABKAsyGC5oZWRkbGUudjEuU2lnbmluZ0Zvb3RlciKhAQoNUmV2aWV3U3VtbWFyeRIQCghoZWFkbGluZRgBIAEoCRIVCg1maWxlc19jaGFuZ2VkGAIgASgNEhMKC2FkZGVkX2xpbmVzGAMgASgNEhUKDXJlbW92ZWRfbGluZXMYBCABKA0SHgoWaW5fYnVkZ2V0X3NpZ25hbF9jb3VudBgFIAEoDRIbChNoaWRkZW5fc2lnbmFsX2NvdW50GAYgASgNIqYBChVSZWFkaW5nT3JkZXJQYXJ0aXRpb24SLAoKc3RydWN0dXJhbBgBIAMoCzIYLmhlZGRsZS52MS5QYXRoU3ltYm9sUmVmEi0KC2NvbnNlcXVlbmNlGAIgAygLMhguaGVkZGxlLnYxLlBhdGhTeW1ib2xSZWYSMAoOdGVzdHNfYW5kX2RvY3MYAyADKAsyGC5oZWRkbGUudjEuUGF0aFN5bWJvbFJlZiItCg1QYXRoU3ltYm9sUmVmEgwKBGZpbGUYASABKAkSDgoGc3ltYm9sGAIgASgJIssBCgpSaXNrU2lnbmFsEgwKBGtpbmQYASABKAkSJwoGYW5jaG9yGAIgASgLMhcuaGVkZGxlLnYxLlNpZ25hbEFuY2hvchIOCgZyZWFzb24YAyABKAkSFwoPcHJvZHVjZXJfbW9kdWxlGAQgASgJEhgKEHByb2R1Y2VyX3ZlcnNpb24YBSABKA0SLwoLY29tcHV0ZWRfYXQYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhIKCnZpc2liaWxpdHkYByABKAkiUgoMU2lnbmFsQW5jaG9yEgwKBGZpbGUYASABKAkSDgoGc3ltYm9sGAIgASgJEhIKCnN0YXJ0X2xpbmUYAyABKA0SEAoIZW5kX2xpbmUYBCABKA0ivQIKEkFuY2hvcmVkRGlzY3Vzc2lvbhIKCgJpZBgBIAEoCRIoCgZhbmNob3IYAiABKAsyGC5oZWRkbGUudjEuUGF0aFN5bWJvbFJlZhIcChRvcGVuZWRfYWdhaW5zdF9zdGF0ZRgDIAEoDBItCglvcGVuZWRfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEigKBXR1cm5zGAUgAygLMhkuaGVkZGxlLnYxLkRpc2N1c3Npb25UdXJuEjMKCnJlc29sdXRpb24YBiABKAsyHy5oZWRkbGUudjEuRGlzY3Vzc2lvblJlc29sdXRpb24SHwoXYm9keV9jaGFuZ2VkX3NpbmNlX29wZW4YByABKAgSEAoIb3JwaGFuZWQYCCABKAgSEgoKdmlzaWJpbGl0eRgJIAEoCSJ4Cg5EaXNjdXNzaW9uVHVybhITCgthdXRob3JfbmFtZRgBIAEoCRIUCgxhdXRob3JfZW1haWwYAiABKAkSDAoEYm9keRgDIAEoCRItCglwb3N0ZWRfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIqUDChREaXNjdXNzaW9uUmVzb2x1dGlvbhI0CgRvcGVuGAEgASgLMiQuaGVkZGxlLnYxLkRpc2N1c3Npb25SZXNvbHV0aW9uLk9wZW5IABJRCg9pbnRvX2Fubm90YXRpb24YAiABKAsyNi5oZWRkbGUudjEuRGlzY3Vzc2lvblJlc29sdXRpb24uUmVzb2x2ZWRJbnRvQW5ub3RhdGlvbkgAEkEKB2J5X2VkaXQYAyABKAsyLi5oZWRkbGUudjEuRGlzY3Vzc2lvblJlc29sdXRpb24uUmVzb2x2ZWRCeUVkaXRIABI+CglkaXNtaXNzZWQYBCABKAsyKS5oZWRkbGUudjEuRGlzY3Vzc2lvblJlc29sdXRpb24uRGlzbWlzc2VkSAAaBgoET3BlbhovChZSZXNvbHZlZEludG9Bbm5vdGF0aW9uEhUKDWFubm90YXRpb25faWQYASABKAkaIgoOUmVzb2x2ZWRCeUVkaXQSEAoIc3RhdGVfaWQYASABKAwaGwoJRGlzbWlzc2VkEg4KBnJlYXNvbhgBIAEoCUIHCgVzdGF0ZSI6ChBNZXJnZVJlcXVpcmVtZW50EhMKC2Rlc2NyaXB0aW9uGAEgASgJEhEKCXNhdGlzZmllZBgCIAEoCCI/Cg1TaWduaW5nRm9vdGVyEi4KD2F2YWlsYWJsZV9raW5kcxgBIAMoDjIVLmhlZGRsZS52MS5SZXZpZXdLaW5kIqACChBTaWduU3RhdGVSZXF1ZXN0EhEKCXJlcG9fcGF0aBgBIAEoCRIQCghzdGF0ZV9pZBgCIAEoDBIjCgRraW5kGAMgASgOMhUuaGVkZGxlLnYxLlJldmlld0tpbmQSJQoFc2NvcGUYBCABKAsyFi5oZWRkbGUudjEuUmV2aWV3U2NvcGUSFQoNanVzdGlmaWNhdGlvbhgFIAEoCRIRCglhbGdvcml0aG0YBiABKAkSEgoKcHVibGljX2tleRgHIAEoDBIRCglzaWduYXR1cmUYCCABKAwSLQoJc2lnbmVkX2F0GAkgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIbChNjbGllbnRfb3BlcmF0aW9uX2lkGA8gASgJItABCgtSZXZpZXdTY29wZRI6Cgx3aG9sZV9jaGFuZ2UYASABKAsyIi5oZWRkbGUudjEuUmV2aWV3U2NvcGUuV2hvbGVDaGFuZ2VIABI0CgdzeW1ib2xzGAIgASgLMiEuaGVkZGxlLnYxLlJldmlld1Njb3BlLlN5bWJvbExpc3RIABoNCgtXaG9sZUNoYW5nZRo3CgpTeW1ib2xMaXN0EikKB3N5bWJvbHMYASADKAsyGC5oZWRkbGUudjEuUGF0aFN5bWJvbFJlZkIHCgVzY29wZSI7ChFTaWduU3RhdGVSZXNwb25zZRIUCgxzaWduYXR1cmVfaWQYASABKAkSEAoIc3RhdGVfaWQYAiABKAwiPAoVTGlzdFNpZ25hdHVyZXNSZXF1ZXN0EhEKCXJlcG9fcGF0aBgBIAEoCRIQCghzdGF0ZV9pZBgCIAEoDCJIChZMaXN0U2lnbmF0dXJlc1Jlc3BvbnNlEi4KCnNpZ25hdHVyZXMYASADKAsyGi5oZWRkbGUudjEuUmV2aWV3U2lnbmF0dXJlIpwCCg9SZXZpZXdTaWduYXR1cmUSFAoMc2lnbmF0dXJlX2lkGAEgASgJEhIKCmFjdG9yX25hbWUYAiABKAkSEwoLYWN0b3JfZW1haWwYAyABKAkSIwoEa2luZBgEIAEoDjIVLmhlZGRsZS52MS5SZXZpZXdLaW5kEiUKBXNjb3BlGAUgASgLMhYuaGVkZGxlLnYxLlJldmlld1Njb3BlEhUKDWp1c3RpZmljYXRpb24YBiABKAkSLQoJc2lnbmVkX2F0GAcgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIRCglhbGdvcml0aG0YCCABKAkSEgoKcHVibGljX2tleRgJIAEoDBIRCglzaWduYXR1cmUYCiABKAwyhQIKElN0YXRlUmV2aWV3U2VydmljZRJQChBHZXRSZXZpZXdQYXlsb2FkEiIuaGVkZGxlLnYxLkdldFJldmlld1BheWxvYWRSZXF1ZXN0GhguaGVkZGxlLnYxLlJldmlld1BheWxvYWQSRgoJU2lnblN0YXRlEhsuaGVkZGxlLnYxLlNpZ25TdGF0ZVJlcXVlc3QaHC5oZWRkbGUudjEuU2lnblN0YXRlUmVzcG9uc2USVQoOTGlzdFNpZ25hdHVyZXMSIC5oZWRkbGUudjEuTGlzdFNpZ25hdHVyZXNSZXF1ZXN0GiEuaGVkZGxlLnYxLkxpc3RTaWduYXR1cmVzUmVzcG9uc2ViBnByb3RvMw", [file_google_protobuf_timestamp, file_heddle_v1_common]);
+  fileDesc("ChxoZWRkbGUvdjEvc3RhdGVfcmV2aWV3LnByb3RvEgloZWRkbGUudjEiWwoXR2V0UmV2aWV3UGF5bG9hZFJlcXVlc3QSEQoJcmVwb19wYXRoGAEgASgJEhAKCHN0YXRlX2lkGAIgASgMEhsKE2luY2x1ZGVfYWxsX3NpZ25hbHMYAyABKAgirAMKDVJldmlld1BheWxvYWQSEAoIc3RhdGVfaWQYASABKAwSKQoHc3VtbWFyeRgCIAEoCzIYLmhlZGRsZS52MS5SZXZpZXdTdW1tYXJ5EhcKD2FnZW50X25hcnJhdGl2ZRgDIAEoCRIzCglwYXJ0aXRpb24YBCABKAsyIC5oZWRkbGUudjEuUmVhZGluZ09yZGVyUGFydGl0aW9uEjAKEWluX2J1ZGdldF9zaWduYWxzGAUgAygLMhUuaGVkZGxlLnYxLlJpc2tTaWduYWwSKgoLYWxsX3NpZ25hbHMYBiADKAsyFS5oZWRkbGUudjEuUmlza1NpZ25hbBITCgt0aWNrX2J1ZGdldBgHIAEoDRIyCgtkaXNjdXNzaW9ucxgIIAMoCzIdLmhlZGRsZS52MS5BbmNob3JlZERpc2N1c3Npb24SNwoSbWVyZ2VfcmVxdWlyZW1lbnRzGAkgAygLMhsuaGVkZGxlLnYxLk1lcmdlUmVxdWlyZW1lbnQSMAoOc2lnbmluZ19mb290ZXIYCiABKAsyGC5oZWRkbGUudjEuU2lnbmluZ0Zvb3RlciKhAQoNUmV2aWV3U3VtbWFyeRIQCghoZWFkbGluZRgBIAEoCRIVCg1maWxlc19jaGFuZ2VkGAIgASgNEhMKC2FkZGVkX2xpbmVzGAMgASgNEhUKDXJlbW92ZWRfbGluZXMYBCABKA0SHgoWaW5fYnVkZ2V0X3NpZ25hbF9jb3VudBgFIAEoDRIbChNoaWRkZW5fc2lnbmFsX2NvdW50GAYgASgNIqYBChVSZWFkaW5nT3JkZXJQYXJ0aXRpb24SLAoKc3RydWN0dXJhbBgBIAMoCzIYLmhlZGRsZS52MS5QYXRoU3ltYm9sUmVmEi0KC2NvbnNlcXVlbmNlGAIgAygLMhguaGVkZGxlLnYxLlBhdGhTeW1ib2xSZWYSMAoOdGVzdHNfYW5kX2RvY3MYAyADKAsyGC5oZWRkbGUudjEuUGF0aFN5bWJvbFJlZiItCg1QYXRoU3ltYm9sUmVmEgwKBGZpbGUYASABKAkSDgoGc3ltYm9sGAIgASgJIssBCgpSaXNrU2lnbmFsEgwKBGtpbmQYASABKAkSJwoGYW5jaG9yGAIgASgLMhcuaGVkZGxlLnYxLlNpZ25hbEFuY2hvchIOCgZyZWFzb24YAyABKAkSFwoPcHJvZHVjZXJfbW9kdWxlGAQgASgJEhgKEHByb2R1Y2VyX3ZlcnNpb24YBSABKA0SLwoLY29tcHV0ZWRfYXQYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhIKCnZpc2liaWxpdHkYByABKAkiUgoMU2lnbmFsQW5jaG9yEgwKBGZpbGUYASABKAkSDgoGc3ltYm9sGAIgASgJEhIKCnN0YXJ0X2xpbmUYAyABKA0SEAoIZW5kX2xpbmUYBCABKA0ivQIKEkFuY2hvcmVkRGlzY3Vzc2lvbhIKCgJpZBgBIAEoCRIoCgZhbmNob3IYAiABKAsyGC5oZWRkbGUudjEuUGF0aFN5bWJvbFJlZhIcChRvcGVuZWRfYWdhaW5zdF9zdGF0ZRgDIAEoDBItCglvcGVuZWRfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEigKBXR1cm5zGAUgAygLMhkuaGVkZGxlLnYxLkRpc2N1c3Npb25UdXJuEjMKCnJlc29sdXRpb24YBiABKAsyHy5oZWRkbGUudjEuRGlzY3Vzc2lvblJlc29sdXRpb24SHwoXYm9keV9jaGFuZ2VkX3NpbmNlX29wZW4YByABKAgSEAoIb3JwaGFuZWQYCCABKAgSEgoKdmlzaWJpbGl0eRgJIAEoCSJ4Cg5EaXNjdXNzaW9uVHVybhITCgthdXRob3JfbmFtZRgBIAEoCRIUCgxhdXRob3JfZW1haWwYAiABKAkSDAoEYm9keRgDIAEoCRItCglwb3N0ZWRfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIqUDChREaXNjdXNzaW9uUmVzb2x1dGlvbhI0CgRvcGVuGAEgASgLMiQuaGVkZGxlLnYxLkRpc2N1c3Npb25SZXNvbHV0aW9uLk9wZW5IABJRCg9pbnRvX2Fubm90YXRpb24YAiABKAsyNi5oZWRkbGUudjEuRGlzY3Vzc2lvblJlc29sdXRpb24uUmVzb2x2ZWRJbnRvQW5ub3RhdGlvbkgAEkEKB2J5X2VkaXQYAyABKAsyLi5oZWRkbGUudjEuRGlzY3Vzc2lvblJlc29sdXRpb24uUmVzb2x2ZWRCeUVkaXRIABI+CglkaXNtaXNzZWQYBCABKAsyKS5oZWRkbGUudjEuRGlzY3Vzc2lvblJlc29sdXRpb24uRGlzbWlzc2VkSAAaBgoET3BlbhovChZSZXNvbHZlZEludG9Bbm5vdGF0aW9uEhUKDWFubm90YXRpb25faWQYASABKAkaIgoOUmVzb2x2ZWRCeUVkaXQSEAoIc3RhdGVfaWQYASABKAwaGwoJRGlzbWlzc2VkEg4KBnJlYXNvbhgBIAEoCUIHCgVzdGF0ZSI6ChBNZXJnZVJlcXVpcmVtZW50EhMKC2Rlc2NyaXB0aW9uGAEgASgJEhEKCXNhdGlzZmllZBgCIAEoCCI/Cg1TaWduaW5nRm9vdGVyEi4KD2F2YWlsYWJsZV9raW5kcxgBIAMoDjIVLmhlZGRsZS52MS5SZXZpZXdLaW5kIqYCChBTaWduU3RhdGVSZXF1ZXN0EhEKCXJlcG9fcGF0aBgBIAEoCRIQCghzdGF0ZV9pZBgCIAEoDBIjCgRraW5kGAMgASgOMhUuaGVkZGxlLnYxLlJldmlld0tpbmQSJQoFc2NvcGUYBCABKAsyFi5oZWRkbGUudjEuUmV2aWV3U2NvcGUSFQoNanVzdGlmaWNhdGlvbhgFIAEoCRIRCglhbGdvcml0aG0YBiABKAkSEgoKcHVibGljX2tleRgHIAEoDBIRCglzaWduYXR1cmUYCCABKAwSLQoJc2lnbmVkX2F0GAkgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIhChNjbGllbnRfb3BlcmF0aW9uX2lkGA8gASgJQgSQtRgBItABCgtSZXZpZXdTY29wZRI6Cgx3aG9sZV9jaGFuZ2UYASABKAsyIi5oZWRkbGUudjEuUmV2aWV3U2NvcGUuV2hvbGVDaGFuZ2VIABI0CgdzeW1ib2xzGAIgASgLMiEuaGVkZGxlLnYxLlJldmlld1Njb3BlLlN5bWJvbExpc3RIABoNCgtXaG9sZUNoYW5nZRo3CgpTeW1ib2xMaXN0EikKB3N5bWJvbHMYASADKAsyGC5oZWRkbGUudjEuUGF0aFN5bWJvbFJlZkIHCgVzY29wZSI7ChFTaWduU3RhdGVSZXNwb25zZRIUCgxzaWduYXR1cmVfaWQYASABKAkSEAoIc3RhdGVfaWQYAiABKAwiPAoVTGlzdFNpZ25hdHVyZXNSZXF1ZXN0EhEKCXJlcG9fcGF0aBgBIAEoCRIQCghzdGF0ZV9pZBgCIAEoDCJIChZMaXN0U2lnbmF0dXJlc1Jlc3BvbnNlEi4KCnNpZ25hdHVyZXMYASADKAsyGi5oZWRkbGUudjEuUmV2aWV3U2lnbmF0dXJlItECCg9SZXZpZXdTaWduYXR1cmUSFAoMc2lnbmF0dXJlX2lkGAEgASgJEhIKCmFjdG9yX25hbWUYAiABKAkSEwoLYWN0b3JfZW1haWwYAyABKAkSIwoEa2luZBgEIAEoDjIVLmhlZGRsZS52MS5SZXZpZXdLaW5kEiUKBXNjb3BlGAUgASgLMhYuaGVkZGxlLnYxLlJldmlld1Njb3BlEhUKDWp1c3RpZmljYXRpb24YBiABKAkSLQoJc2lnbmVkX2F0GAcgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIRCglhbGdvcml0aG0YCCABKAkSEgoKcHVibGljX2tleRgJIAEoDBIRCglzaWduYXR1cmUYCiABKAwSIwoHdmVyZGljdBgLIAEoDjISLmhlZGRsZS52MS5WZXJkaWN0Eg4KBnJlYXNvbhgMIAEoCSKjAgoUUmVjb3JkVmVyZGljdFJlcXVlc3QSEQoJcmVwb19wYXRoGAEgASgJEhAKCHN0YXRlX2lkGAIgASgMEiMKB3ZlcmRpY3QYAyABKA4yEi5oZWRkbGUudjEuVmVyZGljdBIlCgVzY29wZRgEIAEoCzIWLmhlZGRsZS52MS5SZXZpZXdTY29wZRIOCgZyZWFzb24YBSABKAkSEQoJYWxnb3JpdGhtGAYgASgJEhIKCnB1YmxpY19rZXkYByABKAwSEQoJc2lnbmF0dXJlGAggASgMEi0KCXNpZ25lZF9hdBgJIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASIQoTY2xpZW50X29wZXJhdGlvbl9pZBgPIAEoCUIEkLUYASI/ChVSZWNvcmRWZXJkaWN0UmVzcG9uc2USFAoMc2lnbmF0dXJlX2lkGAEgASgJEhAKCHN0YXRlX2lkGAIgASgMIu0BCg5SZXZpZXdDaGVja0FjaxISCgphY3Rvcl9uYW1lGAEgASgJEhMKC2FjdG9yX2VtYWlsGAIgASgJEigKCmNoZWNrX2tpbmQYAyABKA4yFC5oZWRkbGUudjEuQ2hlY2tLaW5kEhEKCWNoZWNrX3JlZhgEIAEoCRINCgVhY2tlZBgFIAEoCBIsCghhY2tlZF9hdBgGIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEQoJYWxnb3JpdGhtGAcgASgJEhIKCnB1YmxpY19rZXkYCCABKAwSEQoJc2lnbmF0dXJlGAkgASgMIpMCChVSZWNvcmRDaGVja0Fja1JlcXVlc3QSEQoJcmVwb19wYXRoGAEgASgJEhAKCHN0YXRlX2lkGAIgASgMEigKCmNoZWNrX2tpbmQYAyABKA4yFC5oZWRkbGUudjEuQ2hlY2tLaW5kEhEKCWNoZWNrX3JlZhgEIAEoCRINCgVhY2tlZBgFIAEoCBIRCglhbGdvcml0aG0YBiABKAkSEgoKcHVibGljX2tleRgHIAEoDBIRCglzaWduYXR1cmUYCCABKAwSLAoIYWNrZWRfYXQYCSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEiEKE2NsaWVudF9vcGVyYXRpb25faWQYDyABKAlCBJC1GAEiQAoWUmVjb3JkQ2hlY2tBY2tSZXNwb25zZRImCgNhY2sYASABKAsyGS5oZWRkbGUudjEuUmV2aWV3Q2hlY2tBY2sidgoYR2V0UmV2aWV3UHJvZ3Jlc3NSZXF1ZXN0EhEKCXJlcG9fcGF0aBgBIAEoCRIQCghzdGF0ZV9pZBgCIAEoDBISCgphY3Rvcl9uYW1lGAMgASgJEg0KBWxpbWl0GAQgASgNEhIKCnBhZ2VfdG9rZW4YBSABKAkiXQoZR2V0UmV2aWV3UHJvZ3Jlc3NSZXNwb25zZRInCgRhY2tzGAEgAygLMhkuaGVkZGxlLnYxLlJldmlld0NoZWNrQWNrEhcKD25leHRfcGFnZV90b2tlbhgCIAEoCSpaCgdWZXJkaWN0EhcKE1ZFUkRJQ1RfVU5TUEVDSUZJRUQQABIQCgxWRVJESUNUX1NJR04QARIQCgxWRVJESUNUX0hPTEQQAhISCg5WRVJESUNUX1JFSkVDVBADKmUKCUNoZWNrS2luZBIaChZDSEVDS19LSU5EX1VOU1BFQ0lGSUVEEAASHAoYQ0hFQ0tfS0lORF9GSUxFX1JFVklFV0VEEAESHgoaQ0hFQ0tfS0lORF9SSVNLX1NJR05BTF9BQ0sQAjLMBAoSU3RhdGVSZXZpZXdTZXJ2aWNlEloKEEdldFJldmlld1BheWxvYWQSIi5oZWRkbGUudjEuR2V0UmV2aWV3UGF5bG9hZFJlcXVlc3QaGC5oZWRkbGUudjEuUmV2aWV3UGF5bG9hZCIIirUYBAgBEAESUAoJU2lnblN0YXRlEhsuaGVkZGxlLnYxLlNpZ25TdGF0ZVJlcXVlc3QaHC5oZWRkbGUudjEuU2lnblN0YXRlUmVzcG9uc2UiCIq1GAQIAxACEl8KDkxpc3RTaWduYXR1cmVzEiAuaGVkZGxlLnYxLkxpc3RTaWduYXR1cmVzUmVxdWVzdBohLmhlZGRsZS52MS5MaXN0U2lnbmF0dXJlc1Jlc3BvbnNlIgiKtRgECAEQARJcCg1SZWNvcmRWZXJkaWN0Eh8uaGVkZGxlLnYxLlJlY29yZFZlcmRpY3RSZXF1ZXN0GiAuaGVkZGxlLnYxLlJlY29yZFZlcmRpY3RSZXNwb25zZSIIirUYBAgDEAISXwoOUmVjb3JkQ2hlY2tBY2sSIC5oZWRkbGUudjEuUmVjb3JkQ2hlY2tBY2tSZXF1ZXN0GiEuaGVkZGxlLnYxLlJlY29yZENoZWNrQWNrUmVzcG9uc2UiCIq1GAQIAxACEmgKEUdldFJldmlld1Byb2dyZXNzEiMuaGVkZGxlLnYxLkdldFJldmlld1Byb2dyZXNzUmVxdWVzdBokLmhlZGRsZS52MS5HZXRSZXZpZXdQcm9ncmVzc1Jlc3BvbnNlIgiKtRgECAEQAWIGcHJvdG8z", [file_heddle_v1_options, file_google_protobuf_timestamp, file_heddle_v1_common]);
 
 /**
  * @generated from message heddle.v1.GetReviewPayloadRequest
@@ -777,6 +778,21 @@ export type ReviewSignature = Message<"heddle.v1.ReviewSignature"> & {
    * @generated from field: bytes signature = 10;
    */
   signature: Uint8Array;
+
+  /**
+   * +weft#481: surfaces a recorded verdict through the existing ListSignatures
+   * path. UNSPECIFIED/SIGN for legacy positive sigs; HOLD/REJECT for verdicts.
+   *
+   * @generated from field: heddle.v1.Verdict verdict = 11;
+   */
+  verdict: Verdict;
+
+  /**
+   * +weft#481: the required decline reason (empty for positive signatures).
+   *
+   * @generated from field: string reason = 12;
+   */
+  reason: string;
 };
 
 /**
@@ -785,6 +801,383 @@ export type ReviewSignature = Message<"heddle.v1.ReviewSignature"> & {
  */
 export const ReviewSignatureSchema: GenMessage<ReviewSignature> = /*@__PURE__*/
   messageDesc(file_heddle_v1_state_review, 17);
+
+/**
+ * +weft#481: record a signed reviewer verdict. Mirrors the SignStateRequest
+ * signing model (canonical payload, algorithm, public_key, signature,
+ * signed_at). DECOUPLED from status.
+ *
+ * @generated from message heddle.v1.RecordVerdictRequest
+ */
+export type RecordVerdictRequest = Message<"heddle.v1.RecordVerdictRequest"> & {
+  /**
+   * @generated from field: string repo_path = 1;
+   */
+  repoPath: string;
+
+  /**
+   * @generated from field: bytes state_id = 2;
+   */
+  stateId: Uint8Array;
+
+  /**
+   * @generated from field: heddle.v1.Verdict verdict = 3;
+   */
+  verdict: Verdict;
+
+  /**
+   * @generated from field: heddle.v1.ReviewScope scope = 4;
+   */
+  scope?: ReviewScope | undefined;
+
+  /**
+   * REQUIRED for HOLD/REJECT (server-validated non-empty).
+   *
+   * @generated from field: string reason = 5;
+   */
+  reason: string;
+
+  /**
+   * @generated from field: string algorithm = 6;
+   */
+  algorithm: string;
+
+  /**
+   * @generated from field: bytes public_key = 7;
+   */
+  publicKey: Uint8Array;
+
+  /**
+   * Raw signature bytes over the v2 canonical signing payload (incl. verdict).
+   *
+   * @generated from field: bytes signature = 8;
+   */
+  signature: Uint8Array;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp signed_at = 9;
+   */
+  signedAt?: Timestamp | undefined;
+
+  /**
+   * @generated from field: string client_operation_id = 15;
+   */
+  clientOperationId: string;
+};
+
+/**
+ * Describes the message heddle.v1.RecordVerdictRequest.
+ * Use `create(RecordVerdictRequestSchema)` to create a new message.
+ */
+export const RecordVerdictRequestSchema: GenMessage<RecordVerdictRequest> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_state_review, 18);
+
+/**
+ * @generated from message heddle.v1.RecordVerdictResponse
+ */
+export type RecordVerdictResponse = Message<"heddle.v1.RecordVerdictResponse"> & {
+  /**
+   * The appended attestation's id.
+   *
+   * @generated from field: string signature_id = 1;
+   */
+  signatureId: string;
+
+  /**
+   * Unchanged — the SAME state. A verdict never mints a successor, moves the
+   * tip, or changes status (decoupling). No status field by design.
+   *
+   * @generated from field: bytes state_id = 2;
+   */
+  stateId: Uint8Array;
+};
+
+/**
+ * Describes the message heddle.v1.RecordVerdictResponse.
+ * Use `create(RecordVerdictResponseSchema)` to create a new message.
+ */
+export const RecordVerdictResponseSchema: GenMessage<RecordVerdictResponse> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_state_review, 19);
+
+/**
+ * +weft#482: a signed review-progress ack, keyed by
+ * (state_id, actor, check_kind, check_ref). Acks are auditable attestations
+ * (mirror the SignState signing fields).
+ *
+ * @generated from message heddle.v1.ReviewCheckAck
+ */
+export type ReviewCheckAck = Message<"heddle.v1.ReviewCheckAck"> & {
+  /**
+   * @generated from field: string actor_name = 1;
+   */
+  actorName: string;
+
+  /**
+   * @generated from field: string actor_email = 2;
+   */
+  actorEmail: string;
+
+  /**
+   * @generated from field: heddle.v1.CheckKind check_kind = 3;
+   */
+  checkKind: CheckKind;
+
+  /**
+   * The file path (FILE_REVIEWED) or risk-signal id (RISK_SIGNAL_ACK).
+   *
+   * @generated from field: string check_ref = 4;
+   */
+  checkRef: string;
+
+  /**
+   * @generated from field: bool acked = 5;
+   */
+  acked: boolean;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp acked_at = 6;
+   */
+  ackedAt?: Timestamp | undefined;
+
+  /**
+   * @generated from field: string algorithm = 7;
+   */
+  algorithm: string;
+
+  /**
+   * @generated from field: bytes public_key = 8;
+   */
+  publicKey: Uint8Array;
+
+  /**
+   * @generated from field: bytes signature = 9;
+   */
+  signature: Uint8Array;
+};
+
+/**
+ * Describes the message heddle.v1.ReviewCheckAck.
+ * Use `create(ReviewCheckAckSchema)` to create a new message.
+ */
+export const ReviewCheckAckSchema: GenMessage<ReviewCheckAck> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_state_review, 20);
+
+/**
+ * @generated from message heddle.v1.RecordCheckAckRequest
+ */
+export type RecordCheckAckRequest = Message<"heddle.v1.RecordCheckAckRequest"> & {
+  /**
+   * @generated from field: string repo_path = 1;
+   */
+  repoPath: string;
+
+  /**
+   * @generated from field: bytes state_id = 2;
+   */
+  stateId: Uint8Array;
+
+  /**
+   * @generated from field: heddle.v1.CheckKind check_kind = 3;
+   */
+  checkKind: CheckKind;
+
+  /**
+   * @generated from field: string check_ref = 4;
+   */
+  checkRef: string;
+
+  /**
+   * @generated from field: bool acked = 5;
+   */
+  acked: boolean;
+
+  /**
+   * @generated from field: string algorithm = 6;
+   */
+  algorithm: string;
+
+  /**
+   * @generated from field: bytes public_key = 7;
+   */
+  publicKey: Uint8Array;
+
+  /**
+   * @generated from field: bytes signature = 8;
+   */
+  signature: Uint8Array;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp acked_at = 9;
+   */
+  ackedAt?: Timestamp | undefined;
+
+  /**
+   * @generated from field: string client_operation_id = 15;
+   */
+  clientOperationId: string;
+};
+
+/**
+ * Describes the message heddle.v1.RecordCheckAckRequest.
+ * Use `create(RecordCheckAckRequestSchema)` to create a new message.
+ */
+export const RecordCheckAckRequestSchema: GenMessage<RecordCheckAckRequest> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_state_review, 21);
+
+/**
+ * @generated from message heddle.v1.RecordCheckAckResponse
+ */
+export type RecordCheckAckResponse = Message<"heddle.v1.RecordCheckAckResponse"> & {
+  /**
+   * @generated from field: heddle.v1.ReviewCheckAck ack = 1;
+   */
+  ack?: ReviewCheckAck | undefined;
+};
+
+/**
+ * Describes the message heddle.v1.RecordCheckAckResponse.
+ * Use `create(RecordCheckAckResponseSchema)` to create a new message.
+ */
+export const RecordCheckAckResponseSchema: GenMessage<RecordCheckAckResponse> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_state_review, 22);
+
+/**
+ * @generated from message heddle.v1.GetReviewProgressRequest
+ */
+export type GetReviewProgressRequest = Message<"heddle.v1.GetReviewProgressRequest"> & {
+  /**
+   * @generated from field: string repo_path = 1;
+   */
+  repoPath: string;
+
+  /**
+   * @generated from field: bytes state_id = 2;
+   */
+  stateId: Uint8Array;
+
+  /**
+   * Optional: restrict to a single reviewer's acks. Empty = all users.
+   *
+   * @generated from field: string actor_name = 3;
+   */
+  actorName: string;
+
+  /**
+   * Pagination (table-backed).
+   *
+   * @generated from field: uint32 limit = 4;
+   */
+  limit: number;
+
+  /**
+   * Opaque cursor (row id).
+   *
+   * @generated from field: string page_token = 5;
+   */
+  pageToken: string;
+};
+
+/**
+ * Describes the message heddle.v1.GetReviewProgressRequest.
+ * Use `create(GetReviewProgressRequestSchema)` to create a new message.
+ */
+export const GetReviewProgressRequestSchema: GenMessage<GetReviewProgressRequest> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_state_review, 23);
+
+/**
+ * @generated from message heddle.v1.GetReviewProgressResponse
+ */
+export type GetReviewProgressResponse = Message<"heddle.v1.GetReviewProgressResponse"> & {
+  /**
+   * @generated from field: repeated heddle.v1.ReviewCheckAck acks = 1;
+   */
+  acks: ReviewCheckAck[];
+
+  /**
+   * @generated from field: string next_page_token = 2;
+   */
+  nextPageToken: string;
+};
+
+/**
+ * Describes the message heddle.v1.GetReviewProgressResponse.
+ * Use `create(GetReviewProgressResponseSchema)` to create a new message.
+ */
+export const GetReviewProgressResponseSchema: GenMessage<GetReviewProgressResponse> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_state_review, 24);
+
+/**
+ * Reviewer verdict (weft#481). Opinion-only — orthogonal to `StateStatus`.
+ * A HOLD/REJECT never changes task fate; `RecordVerdict` returns the SAME
+ * state_id. Legacy positive signatures decode as UNSPECIFIED (treat as SIGN).
+ *
+ * @generated from enum heddle.v1.Verdict
+ */
+export enum Verdict {
+  /**
+   * @generated from enum value: VERDICT_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * positive (also reachable via existing SignState)
+   *
+   * @generated from enum value: VERDICT_SIGN = 1;
+   */
+  SIGN = 1,
+
+  /**
+   * "iterate on this change" — non-terminal opinion
+   *
+   * @generated from enum value: VERDICT_HOLD = 2;
+   */
+  HOLD = 2,
+
+  /**
+   * "this attempt declined; rethink the approach" — NOT abort, no status change
+   *
+   * @generated from enum value: VERDICT_REJECT = 3;
+   */
+  REJECT = 3,
+}
+
+/**
+ * Describes the enum heddle.v1.Verdict.
+ */
+export const VerdictSchema: GenEnum<Verdict> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_state_review, 0);
+
+/**
+ * Kind of review-progress check (weft#482).
+ *
+ * @generated from enum heddle.v1.CheckKind
+ */
+export enum CheckKind {
+  /**
+   * @generated from enum value: CHECK_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * per-file checkmark; check_ref = file path
+   *
+   * @generated from enum value: CHECK_KIND_FILE_REVIEWED = 1;
+   */
+  FILE_REVIEWED = 1,
+
+  /**
+   * per-risk-signal ack; check_ref = signal id
+   *
+   * @generated from enum value: CHECK_KIND_RISK_SIGNAL_ACK = 2;
+   */
+  RISK_SIGNAL_ACK = 2,
+}
+
+/**
+ * Describes the enum heddle.v1.CheckKind.
+ */
+export const CheckKindSchema: GenEnum<CheckKind> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_state_review, 1);
 
 /**
  * State review surface. Distinct from the GitHub-PR-focused ReviewService
@@ -817,6 +1210,40 @@ export const StateReviewService: GenService<{
     methodKind: "unary";
     input: typeof ListSignaturesRequestSchema;
     output: typeof ListSignaturesResponseSchema;
+  },
+  /**
+   * +weft#481: record a signed SIGN/HOLD/REJECT reviewer verdict. Fully
+   * DECOUPLED from `StateStatus` — a verdict is reviewer opinion appended to
+   * the content-addressed signature blob and NEVER changes status or mints a
+   * successor. REJECT authz = repo Write parity (same gate as a positive SIGN).
+   *
+   * @generated from rpc heddle.v1.StateReviewService.RecordVerdict
+   */
+  recordVerdict: {
+    methodKind: "unary";
+    input: typeof RecordVerdictRequestSchema;
+    output: typeof RecordVerdictResponseSchema;
+  },
+  /**
+   * +weft#482: server-side review-check progress. `RecordCheckAck` records a
+   * signed per-file / per-risk-signal ack; `GetReviewProgress` returns the
+   * acks (optionally filtered by user) so clients render "N/M reviewed" from
+   * real evidence. Backed by a dedicated table; the wire is storage-invisible.
+   *
+   * @generated from rpc heddle.v1.StateReviewService.RecordCheckAck
+   */
+  recordCheckAck: {
+    methodKind: "unary";
+    input: typeof RecordCheckAckRequestSchema;
+    output: typeof RecordCheckAckResponseSchema;
+  },
+  /**
+   * @generated from rpc heddle.v1.StateReviewService.GetReviewProgress
+   */
+  getReviewProgress: {
+    methodKind: "unary";
+    input: typeof GetReviewProgressRequestSchema;
+    output: typeof GetReviewProgressResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_heddle_v1_state_review, 0);

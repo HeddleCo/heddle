@@ -5,13 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use objects::{
     error::{HeddleError, Result},
-    object::{ChangeId, MarkerName, ThreadName},
+    object::{MarkerName, StateId, ThreadName},
 };
 use serde::Serialize;
 
-use super::{RefManager, packed_refs::PackedRefs, parse_change_id_text, refs_storage::RefsLock};
+use super::{RefManager, packed_refs::PackedRefs, parse_state_id_text, refs_storage::RefsLock};
 
-const REF_SUMMARY_VERSION: &str = "heddle-ref-summary-v1";
+const REF_SUMMARY_VERSION: &str = "heddle-ref-summary-v2";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RefSummaryIndexInspection {
@@ -75,7 +75,7 @@ impl RefSummarySource {
 #[derive(Debug, Clone)]
 struct RefSummaryEntry {
     name: String,
-    change_id: ChangeId,
+    state_id: StateId,
     source: RefSummarySource,
 }
 
@@ -83,16 +83,16 @@ struct RefSummaryEntry {
 /// summary index incrementally instead of rescanning the whole refs dir.
 ///
 /// The plan already knows exactly which thread/marker changed and its new
-/// change-id, so a publish that touches `k` refs costs `O(k)` index edits +
+/// state-id, so a publish that touches `k` refs costs `O(k)` index edits +
 /// one packed-refs load — not an `O(refs)` full-dir rescan. HEAD is not part of
 /// the summary index, so HEAD plans carry no target; remote threads are never
 /// produced by `publish_ref_plans`, so they stay untouched in the index.
 #[derive(Debug, Clone)]
 pub(super) enum SummaryDelta {
-    /// Loose thread set to a new change-id (the loose file now exists on disk).
-    SetThread { name: String, change_id: ChangeId },
-    /// Loose marker set to a new change-id.
-    SetMarker { name: String, change_id: ChangeId },
+    /// Loose thread set to a new state-id (the loose file now exists on disk).
+    SetThread { name: String, state_id: StateId },
+    /// Loose marker set to a new state-id.
+    SetMarker { name: String, state_id: StateId },
     /// Thread removed from both loose and packed storage (delete plans always
     /// carry a packed removal), so the entry leaves the index entirely.
     DeleteThread { name: String },
@@ -103,7 +103,7 @@ pub(super) enum SummaryDelta {
 #[derive(Debug, Clone)]
 struct RemoteThreadSummaryEntry {
     name: String,
-    change_id: ChangeId,
+    state_id: StateId,
 }
 
 #[derive(Debug, Clone)]
@@ -143,26 +143,26 @@ impl RefSummaryIndex {
 
             let fields: Vec<&str> = line.split('\t').collect();
             match fields.as_slice() {
-                ["thread", name, change_id, source] => threads.push(RefSummaryEntry {
+                ["thread", name, state_id, source] => threads.push(RefSummaryEntry {
                     name: (*name).to_string(),
-                    change_id: parse_summary_change_id(change_id)?,
+                    state_id: parse_summary_state_id(state_id)?,
                     source: RefSummarySource::parse(source)?,
                 }),
-                ["marker", name, change_id, source] => markers.push(RefSummaryEntry {
+                ["marker", name, state_id, source] => markers.push(RefSummaryEntry {
                     name: (*name).to_string(),
-                    change_id: parse_summary_change_id(change_id)?,
+                    state_id: parse_summary_state_id(state_id)?,
                     source: RefSummarySource::parse(source)?,
                 }),
                 ["remote", remote] => {
                     remote_names.insert((*remote).to_string());
                     remotes.entry((*remote).to_string()).or_default();
                 }
-                ["remote_thread", remote, name, change_id] => {
+                ["remote_thread", remote, name, state_id] => {
                     remote_names.insert((*remote).to_string());
                     remotes.entry((*remote).to_string()).or_default().push(
                         RemoteThreadSummaryEntry {
                             name: (*name).to_string(),
-                            change_id: parse_summary_change_id(change_id)?,
+                            state_id: parse_summary_state_id(state_id)?,
                         },
                     );
                 }
@@ -197,7 +197,7 @@ impl RefSummaryIndex {
             out.push_str("thread\t");
             out.push_str(&entry.name);
             out.push('\t');
-            out.push_str(&entry.change_id.to_string_full());
+            out.push_str(&entry.state_id.to_string_full());
             out.push('\t');
             out.push_str(entry.source.as_str());
             out.push('\n');
@@ -207,7 +207,7 @@ impl RefSummaryIndex {
             out.push_str("marker\t");
             out.push_str(&entry.name);
             out.push('\t');
-            out.push_str(&entry.change_id.to_string_full());
+            out.push_str(&entry.state_id.to_string_full());
             out.push('\t');
             out.push_str(entry.source.as_str());
             out.push('\n');
@@ -223,7 +223,7 @@ impl RefSummaryIndex {
                 out.push('\t');
                 out.push_str(&thread.name);
                 out.push('\t');
-                out.push_str(&thread.change_id.to_string_full());
+                out.push_str(&thread.state_id.to_string_full());
                 out.push('\n');
             }
         }
@@ -262,21 +262,21 @@ impl RefSummaryIndex {
     /// updates in place), delete removes. Remotes are never touched here.
     fn apply_delta(&mut self, delta: &SummaryDelta, packed: &PackedRefs) {
         match delta {
-            SummaryDelta::SetThread { name, change_id } => {
+            SummaryDelta::SetThread { name, state_id } => {
                 let source = if packed.get_thread(name).is_some() {
                     RefSummarySource::LooseAndPacked
                 } else {
                     RefSummarySource::Loose
                 };
-                upsert_entry(&mut self.threads, name, *change_id, source);
+                upsert_entry(&mut self.threads, name, *state_id, source);
             }
-            SummaryDelta::SetMarker { name, change_id } => {
+            SummaryDelta::SetMarker { name, state_id } => {
                 let source = if packed.get_marker(name).is_some() {
                     RefSummarySource::LooseAndPacked
                 } else {
                     RefSummarySource::Loose
                 };
-                upsert_entry(&mut self.markers, name, *change_id, source);
+                upsert_entry(&mut self.markers, name, *state_id, source);
             }
             SummaryDelta::DeleteThread { name } => {
                 self.threads.retain(|entry| entry.name != *name);
@@ -384,7 +384,7 @@ impl RefManager {
     /// Incrementally fold a publish's loose-ref deltas into the on-disk summary
     /// index instead of rescanning the whole refs dir (the `O(refs²)` cost that
     /// made `heddle adopt` quadratic — the index was rebuilt from a full
-    /// `read_dir` + per-ref `read_change_id_at` on *every* publish over a
+    /// `read_dir` + per-ref `read_state_id_at` on *every* publish over a
     /// directory growing to `N` refs).
     ///
     /// When a current, valid index exists we apply each delta (`O(deltas)` edits
@@ -409,7 +409,7 @@ impl RefManager {
             return Ok(());
         }
 
-        let packed = PackedRefs::load(&self.packed_refs_path())?;
+        let packed = self.load_packed_refs_cached()?;
         for delta in deltas {
             summary.apply_delta(delta, &packed);
         }
@@ -420,7 +420,7 @@ impl RefManager {
 
     pub(super) fn list_threads_from_storage(&self) -> Result<Vec<ThreadName>> {
         let loose = self.scan_loose_threads()?;
-        let packed = PackedRefs::load(&self.packed_refs_path())?;
+        let packed = self.load_packed_refs_cached()?;
         let mut all: Vec<ThreadName> = loose.keys().map(|k| ThreadName::new(k.as_str())).collect();
         for name in packed.list_threads() {
             if !loose.contains_key(&name) {
@@ -433,7 +433,7 @@ impl RefManager {
 
     pub(super) fn list_markers_from_storage(&self) -> Result<Vec<MarkerName>> {
         let loose = self.scan_loose_markers()?;
-        let packed = PackedRefs::load(&self.packed_refs_path())?;
+        let packed = self.load_packed_refs_cached()?;
         let mut all: Vec<MarkerName> = loose.keys().map(|k| MarkerName::new(k.as_str())).collect();
         for name in packed.list_markers() {
             if !loose.contains_key(&name) {
@@ -482,13 +482,13 @@ impl RefManager {
     fn build_ref_summary_index_from_storage(&self) -> Result<RefSummaryIndex> {
         let loose_threads = self.scan_loose_threads()?;
         let loose_markers = self.scan_loose_markers()?;
-        let packed = PackedRefs::load(&self.packed_refs_path())?;
+        let packed = self.load_packed_refs_cached()?;
 
         let mut threads: Vec<RefSummaryEntry> = loose_threads
             .iter()
-            .map(|(name, change_id)| RefSummaryEntry {
+            .map(|(name, state_id)| RefSummaryEntry {
                 name: name.clone(),
-                change_id: *change_id,
+                state_id: *state_id,
                 source: if packed.get_thread(name).is_some() {
                     RefSummarySource::LooseAndPacked
                 } else {
@@ -497,12 +497,12 @@ impl RefManager {
             })
             .collect();
         for name in packed.list_threads() {
-            if let Some(change_id) = packed.get_thread(&name)
+            if let Some(state_id) = packed.get_thread(&name)
                 && !loose_threads.contains_key(&name)
             {
                 threads.push(RefSummaryEntry {
                     name,
-                    change_id,
+                    state_id,
                     source: RefSummarySource::Packed,
                 });
             }
@@ -511,9 +511,9 @@ impl RefManager {
 
         let mut markers: Vec<RefSummaryEntry> = loose_markers
             .iter()
-            .map(|(name, change_id)| RefSummaryEntry {
+            .map(|(name, state_id)| RefSummaryEntry {
                 name: name.clone(),
-                change_id: *change_id,
+                state_id: *state_id,
                 source: if packed.get_marker(name).is_some() {
                     RefSummarySource::LooseAndPacked
                 } else {
@@ -522,12 +522,12 @@ impl RefManager {
             })
             .collect();
         for name in packed.list_markers() {
-            if let Some(change_id) = packed.get_marker(&name)
+            if let Some(state_id) = packed.get_marker(&name)
                 && !loose_markers.contains_key(&name)
             {
                 markers.push(RefSummaryEntry {
                     name,
-                    change_id,
+                    state_id,
                     source: RefSummarySource::Packed,
                 });
             }
@@ -541,9 +541,9 @@ impl RefManager {
                 let threads = self
                     .scan_remote_threads(&name)?
                     .into_iter()
-                    .map(|(thread, change_id)| RemoteThreadSummaryEntry {
+                    .map(|(thread, state_id)| RemoteThreadSummaryEntry {
                         name: thread,
-                        change_id,
+                        state_id,
                     })
                     .collect();
                 Ok(RemoteSummaryEntry { name, threads })
@@ -557,7 +557,7 @@ impl RefManager {
         })
     }
 
-    fn scan_loose_threads(&self) -> Result<BTreeMap<String, ChangeId>> {
+    fn scan_loose_threads(&self) -> Result<BTreeMap<String, StateId>> {
         let mut loose = BTreeMap::new();
         for name in self.list_refs_recursive(&self.threads_dir(), "")? {
             let name_str = name.to_string();
@@ -568,38 +568,38 @@ impl RefManager {
                 continue;
             };
             let tname = ThreadName::new(&decoded);
-            if let Some(change_id) =
-                self.read_change_id_at(&self.thread_path(&tname)?, "thread", &decoded)?
+            if let Some(state_id) =
+                self.read_state_id_at(&self.thread_path(&tname)?, "thread", &decoded)?
             {
-                loose.insert(decoded, change_id);
+                loose.insert(decoded, state_id);
             }
         }
         Ok(loose)
     }
 
-    fn scan_loose_markers(&self) -> Result<BTreeMap<String, ChangeId>> {
+    fn scan_loose_markers(&self) -> Result<BTreeMap<String, StateId>> {
         let mut markers = BTreeMap::new();
         for name in self.list_refs_recursive(&self.markers_dir(), "")? {
             let name_str = name.to_string();
-            if let Some(change_id) =
-                self.read_change_id_at(&self.marker_path(&name_str)?, "marker", &name_str)?
+            if let Some(state_id) =
+                self.read_state_id_at(&self.marker_path(&name_str)?, "marker", &name_str)?
             {
-                markers.insert(name_str, change_id);
+                markers.insert(name_str, state_id);
             }
         }
         Ok(markers)
     }
 
-    fn scan_remote_threads(&self, remote: &str) -> Result<BTreeMap<String, ChangeId>> {
+    fn scan_remote_threads(&self, remote: &str) -> Result<BTreeMap<String, StateId>> {
         let mut threads = BTreeMap::new();
         for name in self.list_remote_threads_from_storage(remote)? {
             let name_str = name.to_string();
-            if let Some(change_id) = self.read_change_id_at(
+            if let Some(state_id) = self.read_state_id_at(
                 &self.remote_thread_path(remote, &name_str)?,
                 "remote thread",
                 &format!("{remote}/{name_str}"),
             )? {
-                threads.insert(name_str, change_id);
+                threads.insert(name_str, state_id);
             }
         }
         Ok(threads)
@@ -611,19 +611,19 @@ impl RefManager {
 fn upsert_entry(
     entries: &mut Vec<RefSummaryEntry>,
     name: &str,
-    change_id: ChangeId,
+    state_id: StateId,
     source: RefSummarySource,
 ) {
     match entries.binary_search_by(|entry| entry.name.as_str().cmp(name)) {
         Ok(idx) => {
-            entries[idx].change_id = change_id;
+            entries[idx].state_id = state_id;
             entries[idx].source = source;
         }
         Err(idx) => entries.insert(
             idx,
             RefSummaryEntry {
                 name: name.to_string(),
-                change_id,
+                state_id,
                 source,
             },
         ),
@@ -634,6 +634,6 @@ fn file_len_or_zero(path: &std::path::Path) -> u64 {
     std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
-fn parse_summary_change_id(contents: &str) -> Result<ChangeId> {
-    parse_change_id_text(contents).map_err(|error| HeddleError::InvalidObject(error.to_string()))
+fn parse_summary_state_id(contents: &str) -> Result<StateId> {
+    parse_state_id_text(contents).map_err(|error| HeddleError::InvalidObject(error.to_string()))
 }

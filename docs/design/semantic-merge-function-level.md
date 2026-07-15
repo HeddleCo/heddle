@@ -1,11 +1,11 @@
 # Semantic merge — function-level resolution
 
-This doc covers what `heddle merge` does by default, when built with the
-`semantic` cargo feature: how it decomposes a parseable source file into
+This doc covers the semantic integration engine used by `heddle ready`,
+`heddle land`, and `heddle sync` when built with the `semantic` cargo feature:
+how it decomposes a parseable source file into
 AST-defined items, merges each item independently against base / ours / theirs,
 and falls back to the hunk-level [`heddle-merge`](../../crates/merge) engine
-when AST decomposition declines. `--no-semantic` opts out to the hunk-only
-strategy.
+when AST decomposition declines.
 
 It builds on the hunk-level merge engine shipped under
 [heddle#79 / PR #84](https://github.com/HeddleCo/heddle/pull/84) (`heddle-merge`)

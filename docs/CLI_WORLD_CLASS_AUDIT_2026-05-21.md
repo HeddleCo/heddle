@@ -1,5 +1,12 @@
 # Heddle CLI World-Class Audit - 2026-05-21
 
+> **Historical snapshot — superseded.** This report records the CLI surface as
+> audited on 2026-05-21, before the source-authority and command-surface
+> contraction. Its command names and release decision are retained as evidence
+> of that audit, not as documentation of the current CLI. Use `heddle help`,
+> `docs/CLI_WORLD_CLASS_RUBRIC.md`, and `docs/json-schemas.md` for the current
+> contract.
+
 Status: release-ready against the current audit evidence. This report records
 current evidence against `docs/CLI_WORLD_CLASS_RUBRIC.md`; everyday commands are
 scored A or better, global CLI behavior is scored A+, and no hard-gate failures

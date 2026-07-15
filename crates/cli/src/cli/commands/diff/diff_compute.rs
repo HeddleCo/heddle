@@ -7,7 +7,7 @@ use heddle_core::{
     plain_git_head_diff,
 };
 use objects::worktree::WorktreeStatus;
-use repo::{Config, Repository};
+use repo::{Config, Repository, RepositoryCapability};
 
 use super::{
     super::verification_health::{
@@ -89,7 +89,7 @@ pub fn cmd_diff(
         && from_is_head_or_default
         && let Some(status) = trust_visible_worktree_status(&repo, &trust)?
     {
-        let report = diff_worktree_status(&status, &options, Some(&repo), true)?;
+        let report = authority_worktree_diff(&repo, &status, &options)?;
         return render_diff_report(
             cli,
             Some(repo.config()),
@@ -102,7 +102,7 @@ pub fn cmd_diff(
     }
     if to.is_none() && from_is_head_or_default && trust.mapping_state == "git_backed" {
         let status = repo.git_overlay_worktree_status()?.unwrap_or_default();
-        let report = diff_worktree_status(&status, &options, Some(&repo), true)?;
+        let report = authority_worktree_diff(&repo, &status, &options)?;
         return render_diff_report(
             cli,
             Some(repo.config()),
@@ -208,4 +208,21 @@ fn clone_worktree_status(status: &WorktreeStatus) -> WorktreeStatus {
         added: status.added.clone(),
         deleted: status.deleted.clone(),
     }
+}
+
+fn authority_worktree_diff(
+    repo: &Repository,
+    status: &WorktreeStatus,
+    options: &DiffOptions,
+) -> Result<DiffReport> {
+    if repo.capability() == RepositoryCapability::GitOverlay {
+        return plain_git_head_diff(
+            &PlainGitDiffProbe {
+                root: repo.root().to_path_buf(),
+                changes: clone_worktree_status(status),
+            },
+            options,
+        );
+    }
+    diff_worktree_status(status, options, Some(repo), true)
 }

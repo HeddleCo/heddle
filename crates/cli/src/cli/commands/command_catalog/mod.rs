@@ -12,23 +12,23 @@ use heddle_core::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
+#[cfg(feature = "client")]
+use crate::cli::AuthCommands;
 #[cfg(feature = "semantic")]
 use crate::cli::SemanticCommands;
 #[cfg(feature = "git-overlay")]
 use crate::cli::cli_args::SyncCommands;
 use crate::cli::{
-    ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
-    HookCommands, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
-    RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
-    StashCommands, ThreadCommands, ThreadMarkerCommands, TimelineCommands, VisibilityCommands,
+    AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands, HookCommands,
+    IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands, RedactCommands,
+    RedactTrustCommands, RemoteCommands, ShellCommands, ThreadCommands, ThreadMarkerCommands,
+    TimelineCommands, VisibilityCommands,
     cli_args::{
-        AgentFanoutCommands, AgentTaskCommands, DiscussCommands, ReviewCommands,
-        TransactionCommands,
+        AgentFanoutCommands, AgentPresenceCommands, AgentProvenanceCommands, AgentTaskCommands,
+        DiscussCommands, ReviewCommands,
     },
     render::shell_quote,
 };
-#[cfg(feature = "client")]
-use crate::cli::{AuthCommands, PresenceCommands, SpoolCommands, SupportCommands};
 #[cfg(feature = "git-overlay")]
 use crate::cli::{ExportCommands, ImportCommands};
 
@@ -58,6 +58,7 @@ pub struct CommandCatalogEntry {
     pub summary: String,
     pub has_subcommands: bool,
     pub supports_json: bool,
+    pub output_modes: Vec<String>,
     pub mutates: bool,
     pub supports_op_id: bool,
     pub persists_op_id: bool,
@@ -80,7 +81,7 @@ pub struct CommandCatalogEntry {
     pub external_command: bool,
     pub requires_git_executable: bool,
     pub destructive_data: bool,
-    pub side_effects: Vec<String>,
+    pub side_effects: Vec<CommandSideEffect>,
     pub side_effect_class: String,
     pub first_run_behavior: String,
     pub json_kind: String,
@@ -93,6 +94,27 @@ pub struct CommandCatalogEntry {
     /// one-line agent-facing reason. Empty for commands not yet swept. See
     /// `docs/exit-codes.md` for the full taxonomy.
     pub exit_codes: Vec<CommandCatalogExitCode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandSideEffect {
+    ObserveOnly,
+    Initialize,
+    ImportGit,
+    WritesHeddleRefs,
+    WritesGitRefs,
+    WritesWorktree,
+    MayWriteWorktree,
+    WritesMetadata,
+    WritesConfig,
+    WritesHooks,
+    NetworkIo,
+    DaemonProcess,
+    ObjectGc,
+    ExternalCommand,
+    DestructiveRequiresForce,
+    DestructiveData,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -274,6 +296,7 @@ struct CommandContract {
     writes_heddle_refs: bool,
     writes_git_refs: bool,
     writes_worktree: bool,
+    writes_metadata: bool,
     writes_config: bool,
     writes_hooks: bool,
     network_io: bool,
@@ -359,18 +382,15 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     // argv because the literal ellipsis would create bad history.
     "heddle capture -m \"...\"",
     "heddle capture -m \"...\" --confidence <confidence>",
-    "heddle checkpoint -m \"...\"",
     "heddle commit -m \"...\"",
-    "heddle commit -m \"...\" --confidence <confidence>",
     "heddle init --principal-name <name> --principal-email <email>",
     "heddle ready -m \"...\"",
     "heddle context get --path <path>",
     "heddle context set --path <path> --scope file -m \"...\"",
-    "heddle session start",
+    "heddle agent provenance begin",
     "heddle start <name> --path <empty-path>",
     "heddle start <name> --path ../<name>",
-    "heddle actor show <session>",
-    "heddle stash push -m \"...\"",
+    "heddle agent presence show <session>",
     "heddle thread show <THREAD>",
     // Remote setup requires filling in a real name and URL after
     // inspecting current configuration.
@@ -386,11 +406,9 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     // Shallow Git import recovery requires choosing a complete checkout.
     "heddle import git --path <full-git-repo>",
     "heddle import git --path <full-git-repo> --ref <ref>",
-    // Detached Git-overlay recovery requires the caller to choose the
-    // branch to reattach before retrying branch-writing operations.
-    "heddle switch <branch>",
-    // Merge recovery placeholders require choosing the source thread.
-    "heddle merge <thread> --git-commit",
+    "heddle thread switch <branch>",
+    "heddle ready --thread <thread>",
+    "heddle land --thread <thread>",
 ];
 
 const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
@@ -414,33 +432,8 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "heddle checkpoint -m \"...\"",
-        &["heddle", "checkpoint", "-m", "<message>"],
-        &["message"],
-        true,
-    ),
-    (
         "heddle commit -m \"...\"",
         &["heddle", "commit", "-m", "<message>"],
-        &["message"],
-        true,
-    ),
-    (
-        "heddle commit -m \"...\" --confidence <confidence>",
-        &[
-            "heddle",
-            "commit",
-            "-m",
-            "<message>",
-            "--confidence",
-            "<confidence>",
-        ],
-        &["message", "confidence"],
-        true,
-    ),
-    (
-        "heddle commit --all -m \"...\"",
-        &["heddle", "commit", "--all", "-m", "<message>"],
         &["message"],
         true,
     ),
@@ -486,11 +479,12 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "heddle session start",
+        "heddle agent provenance begin",
         &[
             "heddle",
-            "session",
-            "start",
+            "agent",
+            "provenance",
+            "begin",
             "--provider",
             "<provider>",
             "--model",
@@ -512,8 +506,8 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "heddle actor show <session>",
-        &["heddle", "actor", "show", "<session>"],
+        "heddle agent presence show <session>",
+        &["heddle", "agent", "presence", "show", "<session>"],
         &["session"],
         true,
     ),
@@ -576,12 +570,6 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         false,
     ),
     (
-        "heddle stash push -m \"...\"",
-        &["heddle", "stash", "push", "-m", "<message>"],
-        &["message"],
-        true,
-    ),
-    (
         "heddle remote add <name> <url>",
         &["heddle", "remote", "add", "<name>", "<url>"],
         &["name", "url"],
@@ -594,8 +582,14 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         false,
     ),
     (
-        "heddle merge <thread> --git-commit",
-        &["heddle", "merge", "<thread>", "--git-commit"],
+        "heddle ready --thread <thread>",
+        &["heddle", "ready", "--thread", "<thread>"],
+        &["thread"],
+        true,
+    ),
+    (
+        "heddle land --thread <thread>",
+        &["heddle", "land", "--thread", "<thread>"],
         &["thread"],
         false,
     ),
@@ -652,8 +646,8 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         false,
     ),
     (
-        "heddle switch <branch>",
-        &["heddle", "switch", "<branch>"],
+        "heddle thread switch <branch>",
+        &["heddle", "thread", "switch", "<branch>"],
         &["branch"],
         false,
     ),
@@ -674,6 +668,7 @@ const READ_JSON: CommandContract = CommandContract {
     writes_heddle_refs: false,
     writes_git_refs: false,
     writes_worktree: false,
+    writes_metadata: false,
     writes_config: false,
     writes_hooks: false,
     network_io: false,
@@ -723,25 +718,62 @@ const READ_JSON_OR_JSONL: CommandContract = CommandContract {
     ..READ_JSON
 };
 
-const MUTATING: CommandContract = CommandContract {
+const MUTATION_BASE: CommandContract = CommandContract {
     mutates: true,
     supports_op_id: true,
     observe_only: false,
-    may_move_ref: true,
-    writes_heddle_refs: true,
     ..READ_JSON
 };
 
-const MUTATING_NO_OP_ID: CommandContract = CommandContract {
-    supports_op_id: false,
-    ..MUTATING
+const REF_MUTATION: CommandContract = CommandContract {
+    may_move_ref: true,
+    writes_heddle_refs: true,
+    ..MUTATION_BASE
 };
 
-const MUTATING_TEXT: CommandContract = CommandContract {
+const METADATA_MUTATION: CommandContract = CommandContract {
+    writes_metadata: true,
+    ..MUTATION_BASE
+};
+
+const REF_AND_METADATA_MUTATION: CommandContract = CommandContract {
+    writes_metadata: true,
+    ..REF_MUTATION
+};
+
+const NETWORK_METADATA_MUTATION: CommandContract = CommandContract {
+    network_io: true,
+    ..METADATA_MUTATION
+};
+
+const METADATA_MUTATION_NO_OP_ID: CommandContract = CommandContract {
+    supports_op_id: false,
+    ..METADATA_MUTATION
+};
+
+const NETWORK_METADATA_MUTATION_NO_OP_ID: CommandContract = CommandContract {
+    network_io: true,
+    ..METADATA_MUTATION_NO_OP_ID
+};
+
+const CONFIG_MUTATION_NO_OP_ID: CommandContract = CommandContract {
+    supports_op_id: false,
+    ..CONFIG_MUTATION
+};
+
+const CONFIG_MUTATION_TEXT: CommandContract = CommandContract {
     supports_json: false,
     supports_op_id: false,
     json_kind: "none",
-    ..MUTATING
+    ..CONFIG_MUTATION
+};
+
+const NETWORK_CONFIG_MUTATION_TEXT: CommandContract = CommandContract {
+    supports_json: false,
+    supports_op_id: false,
+    network_io: true,
+    json_kind: "none",
+    ..CONFIG_MUTATION
 };
 
 const INIT: CommandContract = CommandContract {
@@ -749,10 +781,10 @@ const INIT: CommandContract = CommandContract {
     may_move_ref: false,
     writes_heddle_refs: false,
     writes_config: true,
-    ..MUTATING
+    ..MUTATION_BASE
 };
 
-const CAPTURE: CommandContract = CommandContract { ..MUTATING };
+const CAPTURE: CommandContract = CommandContract { ..REF_MUTATION };
 
 const fn compact_json(contract: CommandContract) -> CommandContract {
     CommandContract {
@@ -771,17 +803,11 @@ const fn operator_envelope(contract: CommandContract) -> CommandContract {
 const WORKTREE_MUTATION: CommandContract = CommandContract {
     may_write_worktree: true,
     writes_worktree: true,
-    ..MUTATING
+    ..REF_MUTATION
 };
 
-const WORKTREE_MUTATION_JSONL: CommandContract = CommandContract {
-    json_kind: "jsonl",
-    ..WORKTREE_MUTATION
-};
-
-const WORKTREE_ONLY_MUTATION: CommandContract = CommandContract {
-    may_move_ref: false,
-    writes_heddle_refs: false,
+const REF_METADATA_WORKTREE_MUTATION: CommandContract = CommandContract {
+    writes_metadata: true,
     ..WORKTREE_MUTATION
 };
 
@@ -791,40 +817,40 @@ const DESTRUCTIVE_WORKTREE_MUTATION: CommandContract = CommandContract {
     ..WORKTREE_MUTATION
 };
 
-const DESTRUCTIVE_WORKTREE_ONLY_MUTATION: CommandContract = CommandContract {
-    destructive_requires_force: true,
-    destructive_data: true,
-    ..WORKTREE_ONLY_MUTATION
-};
-
-const DATA_MUTATION: CommandContract = CommandContract {
-    may_move_ref: false,
-    writes_heddle_refs: false,
-    ..MUTATING
-};
-
 const DESTRUCTIVE_DATA_MUTATION: CommandContract = CommandContract {
     destructive_data: true,
-    ..DATA_MUTATION
+    ..METADATA_MUTATION
+};
+
+const DESTRUCTIVE_REF_MUTATION: CommandContract = CommandContract {
+    destructive_data: true,
+    ..REF_MUTATION
 };
 
 const IMPORTING_MUTATION: CommandContract = CommandContract {
     may_import_git: true,
-    ..MUTATING
+    ..REF_MUTATION
+};
+
+const FSCK_GIT_REPAIR: CommandContract = CommandContract {
+    may_import_git: true,
+    may_write_worktree: true,
+    writes_git_refs: true,
+    writes_worktree: true,
+    writes_metadata: true,
+    ..REF_MUTATION
 };
 
 const ADOPT: CommandContract = CommandContract {
     may_initialize: true,
     may_import_git: true,
     writes_config: true,
-    ..MUTATING
+    ..REF_MUTATION
 };
 
 const CONFIG_MUTATION: CommandContract = CommandContract {
-    may_move_ref: false,
-    writes_heddle_refs: false,
     writes_config: true,
-    ..MUTATING
+    ..MUTATION_BASE
 };
 
 const HOOK_MUTATION: CommandContract = CommandContract {
@@ -832,25 +858,27 @@ const HOOK_MUTATION: CommandContract = CommandContract {
     ..CONFIG_MUTATION
 };
 
+const INTEGRATION_INSTALL_MUTATION: CommandContract = CommandContract {
+    writes_metadata: true,
+    ..HOOK_MUTATION
+};
+
 const DAEMON_MUTATION: CommandContract = CommandContract {
-    may_move_ref: false,
-    writes_heddle_refs: false,
     daemon_process: true,
-    ..MUTATING_NO_OP_ID
+    ..METADATA_MUTATION_NO_OP_ID
 };
 
 const GC_MUTATION: CommandContract = CommandContract {
-    may_move_ref: false,
-    writes_heddle_refs: false,
     object_gc: true,
-    ..MUTATING
+    ..MUTATION_BASE
 };
 
 const EXTERNAL_COMMAND_MUTATION: CommandContract = CommandContract {
-    may_move_ref: false,
-    writes_heddle_refs: false,
     external_command: true,
-    ..MUTATING_TEXT
+    supports_json: false,
+    supports_op_id: false,
+    json_kind: "none",
+    ..MUTATION_BASE
 };
 
 const EXTERNAL_WORKTREE_COMMAND: CommandContract = CommandContract {
@@ -1047,18 +1075,6 @@ const fn exits(
     }
 }
 
-const fn git_projection_alias(
-    contract: CommandContract,
-    canonical_command: &'static str,
-) -> CommandContract {
-    git_projection_action(
-        contract,
-        canonical_command,
-        "direct_command",
-        "Use this native Heddle command for the same operation.",
-    )
-}
-
 const fn git_projection_action(
     contract: CommandContract,
     canonical_command: &'static str,
@@ -1100,7 +1116,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["abort"],
         category(
             json_discriminators(
-                documented_schemas(operator_envelope(compact_json(MUTATING)), &["abort"]),
+                documented_schemas(operator_envelope(compact_json(REF_MUTATION)), &["abort"]),
                 &[json_discriminator(Some("abort"), "output_kind", "abort")],
             ),
             "recovery",
@@ -1121,77 +1137,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 false,
             ),
             210,
-        ),
-    ),
-    entry(&["actor"], surface(GROUP, "automation")),
-    entry(
-        &["actor", "spawn"],
-        surface(
-            json_discriminators(
-                documented_schemas(MUTATING, &["actor spawn"]),
-                &[json_discriminator(
-                    Some("actor spawn"),
-                    "output_kind",
-                    "actor_spawn",
-                )],
-            ),
-            "automation",
-        ),
-    ),
-    entry(
-        &["actor", "list"],
-        surface(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["actor list"]),
-                &[json_discriminator(
-                    Some("actor list"),
-                    "output_kind",
-                    "actor_list",
-                )],
-            ),
-            "automation",
-        ),
-    ),
-    entry(
-        &["actor", "show"],
-        surface(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["actor show"]),
-                &[json_discriminator(
-                    Some("actor show"),
-                    "output_kind",
-                    "actor_show",
-                )],
-            ),
-            "automation",
-        ),
-    ),
-    entry(
-        &["actor", "explain"],
-        surface(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["actor explain"]),
-                &[json_discriminator(
-                    Some("actor explain"),
-                    "output_kind",
-                    "actor_explain",
-                )],
-            ),
-            "automation",
-        ),
-    ),
-    entry(
-        &["actor", "done"],
-        surface(
-            json_discriminators(
-                documented_schemas(MUTATING, &["actor done"]),
-                &[json_discriminator(
-                    Some("actor done"),
-                    "output_kind",
-                    "actor_done",
-                )],
-            ),
-            "automation",
         ),
     ),
     entry(&["agent"], surface(GROUP, "automation")),
@@ -1240,14 +1185,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["agent", "reserve"],
         surface(
-            documented_schemas(MUTATING, &["agent reserve"]),
+            documented_schemas(REF_AND_METADATA_MUTATION, &["agent reserve"]),
             "automation",
         ),
     ),
     entry(
         &["agent", "heartbeat"],
         surface(
-            documented_schemas(MUTATING, &["agent heartbeat"]),
+            documented_schemas(METADATA_MUTATION, &["agent heartbeat"]),
             "automation",
         ),
     ),
@@ -1282,7 +1227,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["agent", "release"],
         surface(
-            documented_schemas(MUTATING, &["agent release"]),
+            documented_schemas(METADATA_MUTATION, &["agent release"]),
             "automation",
         ),
     ),
@@ -1295,7 +1240,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["agent", "task", "create"],
         surface(
             json_discriminators(
-                documented_schemas(MUTATING, &["agent task create"]),
+                documented_schemas(METADATA_MUTATION, &["agent task create"]),
                 &[json_discriminator(
                     Some("agent task create"),
                     "output_kind",
@@ -1337,7 +1282,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["agent", "task", "update"],
         surface(
             json_discriminators(
-                documented_schemas(MUTATING, &["agent task update"]),
+                documented_schemas(METADATA_MUTATION, &["agent task update"]),
                 &[json_discriminator(
                     Some("agent task update"),
                     "output_kind",
@@ -1376,13 +1321,109 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
+    entry(&["agent", "presence"], surface(GROUP, "automation")),
+    entry(
+        &["agent", "presence", "list"],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["agent presence list"]),
+                &[json_discriminator(
+                    Some("agent presence list"),
+                    "output_kind",
+                    "agent_presence_list",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "presence", "show"],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["agent presence show"]),
+                &[json_discriminator(
+                    Some("agent presence show"),
+                    "output_kind",
+                    "agent_presence_show",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "presence", "explain"],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["agent presence explain"]),
+                &[json_discriminator(
+                    Some("agent presence explain"),
+                    "output_kind",
+                    "agent_presence_explain",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "presence", "complete"],
+        surface(
+            json_discriminators(
+                documented_schemas(METADATA_MUTATION, &["agent presence complete"]),
+                &[json_discriminator(
+                    Some("agent presence complete"),
+                    "output_kind",
+                    "agent_presence_complete",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(&["agent", "provenance"], surface(GROUP, "automation")),
+    entry(
+        &["agent", "provenance", "begin"],
+        surface(
+            documented_schemas(METADATA_MUTATION, &["agent provenance begin"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "provenance", "segment"],
+        surface(
+            documented_schemas(METADATA_MUTATION, &["agent provenance segment"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "provenance", "end"],
+        surface(
+            documented_schemas(METADATA_MUTATION, &["agent provenance end"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "provenance", "show"],
+        surface(
+            documented_schemas(READ_JSON, &["agent provenance show"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "provenance", "list"],
+        surface(
+            documented_schemas(READ_JSON, &["agent provenance list"]),
+            "automation",
+        ),
+    ),
     entry(&["auth"], category(feature_gated(GROUP, "client"), "repo")),
-    entry(&["auth", "login"], feature_gated(MUTATING_TEXT, "client")),
+    entry(
+        &["auth", "login"],
+        feature_gated(NETWORK_CONFIG_MUTATION_TEXT, "client"),
+    ),
     entry(
         &["auth", "logout"],
         feature_gated(
             json_discriminators(
-                documented_schemas(MUTATING_NO_OP_ID, &["auth logout"]),
+                documented_schemas(CONFIG_MUTATION_NO_OP_ID, &["auth logout"]),
                 &[json_discriminator(
                     Some("auth logout"),
                     "output_kind",
@@ -1407,10 +1448,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
+        &["auth", "derive-agent"],
+        feature_gated(CONFIG_MUTATION_TEXT, "client"),
+    ),
+    entry(
         &["auth", "create-service-token"],
         feature_gated(
             json_discriminators(
-                documented_schemas(MUTATING_NO_OP_ID, &["auth create-service-token"]),
+                documented_schemas(
+                    NETWORK_METADATA_MUTATION_NO_OP_ID,
+                    &["auth create-service-token"],
+                ),
                 &[json_discriminator(
                     Some("auth create-service-token"),
                     "output_kind",
@@ -1446,7 +1494,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             documented_schemas(
                 CommandContract {
                     writes_git_refs: true,
-                    ..MUTATING
+                    ..REF_MUTATION
                 },
                 &["export git"],
             ),
@@ -1471,7 +1519,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 ),
                 "adopt",
                 "workflow",
-                "Use adopt for the guided Git-to-Heddle conversion workflow.",
+                "Use adopt to initialize Heddle from an existing Git repository and import its history.",
             ),
             &[
                 (0, "ok"),
@@ -1482,114 +1530,113 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["capture"],
-        category(
-            json_discriminators(
-                documented_schemas(compact_json(CAPTURE), &["capture"]),
-                &[json_discriminator(
-                    Some("capture"),
-                    "output_kind",
-                    "capture",
-                )],
-            ),
-            "states",
-        ),
-    ),
-    entry(
-        &["checkpoint"],
-        category(
-            json_discriminators(
-                documented_schemas(
-                    CommandContract {
-                        writes_git_refs: true,
-                        ..CAPTURE
-                    },
-                    &["checkpoint"],
+        front_door(
+            category(
+                json_discriminators(
+                    documented_schemas(compact_json(CAPTURE), &["capture"]),
+                    &[json_discriminator(
+                        Some("capture"),
+                        "output_kind",
+                        "capture",
+                    )],
                 ),
-                &[json_discriminator(
-                    Some("checkpoint"),
-                    "output_kind",
-                    "checkpoint",
-                )],
+                "states",
             ),
-            "states",
-        ),
-    ),
-    entry(
-        &["cherry-pick"],
-        category(
-            json_discriminators(
-                opaque_schemas(WORKTREE_MUTATION, &["cherry-pick"]),
-                &[json_discriminator(
-                    Some("cherry-pick"),
-                    "output_kind",
-                    "cherry_pick",
-                )],
-            ),
-            "states",
-        ),
-    ),
-    entry(
-        &["clean"],
-        category(
-            json_discriminators(
-                documented_schemas(DESTRUCTIVE_WORKTREE_ONLY_MUTATION, &["clean"]),
-                &[json_discriminator(Some("clean"), "output_kind", "clean")],
-            ),
-            "recovery",
+            30,
         ),
     ),
     entry(
         &["clone"],
         front_door(
-            json_discriminators(
-                documented_schemas(
-                    CommandContract {
-                        may_initialize: true,
-                        may_write_worktree: true,
-                        may_move_ref: true,
-                        writes_worktree: true,
-                        network_io: true,
-                        ..MUTATING
-                    },
-                    &["clone"],
-                ),
-                &[
-                    json_discriminator(Some("clone"), "output_kind", "clone"),
-                    // `clone --output json` on a hosted/network remote
-                    // emits a preliminary connection envelope before the
-                    // final clone payload. Both records carry
-                    // `output_kind` so agents that route on the
-                    // discriminator (per heddle#272) can classify each
-                    // line without falling back to text parsing. The
-                    // envelope has no separate schema verb — it's a
-                    // small inline object, not a Serialize struct in
-                    // `schemas`. Source-of-truth value:
-                    // `cli::cli::commands::CLONE_CONNECTION_OUTPUT_KIND`.
-                    json_discriminator_no_schema(
-                        "preliminary connection envelope emitted by hosted clones \
+            surface(
+                json_discriminators(
+                    documented_schemas(
+                        CommandContract {
+                            may_initialize: true,
+                            may_import_git: true,
+                            may_write_worktree: true,
+                            may_move_ref: true,
+                            writes_git_refs: true,
+                            writes_worktree: true,
+                            writes_config: true,
+                            network_io: true,
+                            ..REF_MUTATION
+                        },
+                        &["clone"],
+                    ),
+                    &[
+                        json_discriminator(Some("clone"), "output_kind", "clone"),
+                        // `clone --output json` on a hosted/network remote
+                        // emits a preliminary connection envelope before the
+                        // final clone payload. Both records carry
+                        // `output_kind` so agents that route on the
+                        // discriminator (per heddle#272) can classify each
+                        // line without falling back to text parsing. The
+                        // envelope has no separate schema verb — it's a
+                        // small inline object, not a Serialize struct in
+                        // `schemas`. Source-of-truth value:
+                        // `cli::cli::commands::CLONE_CONNECTION_OUTPUT_KIND`.
+                        json_discriminator_no_schema(
+                            "preliminary connection envelope emitted by hosted clones \
                          before the final clone payload (no separate schema)",
-                        "output_kind",
-                        "clone_connection",
-                    ),
-                    // `clone --recursive --output json` (Spool epic P9) emits a
-                    // monorepo summary instead of the single-spool `clone`
-                    // payload: the placed per-spool ops + the skipped (EdgeSkip)
-                    // child edges. Inline object, no separate schema verb.
-                    // Source: `clone::monorepo_clone_output_json`.
-                    json_discriminator_no_schema(
-                        "monorepo clone summary emitted by `clone --recursive` \
+                            "output_kind",
+                            "clone_connection",
+                        ),
+                        // `clone --recursive --output json` (Spool epic P9) emits a
+                        // monorepo summary instead of the single-spool `clone`
+                        // payload: the placed per-spool ops + the skipped (EdgeSkip)
+                        // child edges. Inline object, no separate schema verb.
+                        // Source: `clone::monorepo_clone_output_json`.
+                        json_discriminator_no_schema(
+                            "monorepo clone summary emitted by `clone --recursive` \
                          (placed spools + skipped child edges; no separate schema)",
-                        "output_kind",
-                        "clone_monorepo",
-                    ),
-                ],
+                            "output_kind",
+                            "clone_monorepo",
+                        ),
+                    ],
+                ),
+                "source_authority",
             ),
             220,
         ),
     ),
     entry(
         &["collapse"],
-        category(opaque_schemas(MUTATING, &["collapse"]), "states"),
+        category(opaque_schemas(REF_MUTATION, &["collapse"]), "states"),
+    ),
+    entry(
+        &["commit"],
+        exits(
+            front_door(
+                advertised_action(
+                    surface(
+                        json_discriminators(
+                            documented_schemas(
+                                CommandContract {
+                                    writes_git_refs: true,
+                                    writes_metadata: true,
+                                    ..REF_MUTATION
+                                },
+                                &["commit"],
+                            ),
+                            &[json_discriminator(Some("commit"), "output_kind", "commit")],
+                        ),
+                        "source_authority",
+                    ),
+                    "heddle commit",
+                    &["heddle", "commit"],
+                    &[],
+                    true,
+                    true,
+                ),
+                28,
+            ),
+            &[
+                (0, "Git checkpoint written or already current"),
+                (65, "repository mode or worktree preflight refused"),
+                (74, "io while writing Git state"),
+            ],
+        ),
     ),
     entry(
         &["expand"],
@@ -1602,40 +1649,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["commit"],
-        exits(
-            front_door(
-                advertised_action(
-                    json_discriminators(
-                        documented_schemas(
-                            CommandContract {
-                                writes_git_refs: true,
-                                ..CAPTURE
-                            },
-                            &["commit"],
-                        ),
-                        &[json_discriminator(Some("commit"), "output_kind", "commit")],
-                    ),
-                    "heddle commit -m <message>",
-                    &["heddle", "commit", "-m", "<message>"],
-                    &["message"],
-                    true,
-                    false,
-                ),
-                30,
-            ),
-            &[
-                (0, "ok"),
-                (65, "dirty worktree refused or unmergeable input"),
-                (74, "io while writing state"),
-            ],
-        ),
-    ),
-    entry(
         &["continue"],
         category(
             json_discriminators(
-                documented_schemas(operator_envelope(compact_json(MUTATING)), &["continue"]),
+                documented_schemas(operator_envelope(compact_json(REF_MUTATION)), &["continue"]),
                 &[json_discriminator(
                     Some("continue"),
                     "output_kind",
@@ -1649,7 +1666,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["context", "set"],
         json_discriminators(
-            opaque_schemas(MUTATING, &["context set"]),
+            opaque_schemas(REF_AND_METADATA_MUTATION, &["context set"]),
             &[json_discriminator(
                 Some("context set"),
                 "output_kind",
@@ -1693,7 +1710,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["context", "edit"],
         json_discriminators(
-            opaque_schemas(MUTATING, &["context edit"]),
+            opaque_schemas(REF_AND_METADATA_MUTATION, &["context edit"]),
             &[json_discriminator(
                 Some("context edit"),
                 "output_kind",
@@ -1704,7 +1721,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["context", "supersede"],
         json_discriminators(
-            opaque_schemas(MUTATING, &["context supersede"]),
+            opaque_schemas(REF_AND_METADATA_MUTATION, &["context supersede"]),
             &[json_discriminator(
                 Some("context supersede"),
                 "output_kind",
@@ -1715,7 +1732,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["context", "rm"],
         json_discriminators(
-            opaque_schemas(MUTATING, &["context rm"]),
+            opaque_schemas(REF_AND_METADATA_MUTATION, &["context rm"]),
             &[json_discriminator(
                 Some("context rm"),
                 "output_kind",
@@ -1762,7 +1779,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["context", "reason", "git"],
         surface(
-            opaque_schemas(DATA_MUTATION, &["context reason git"]),
+            opaque_schemas(METADATA_MUTATION, &["context reason git"]),
             "git_projection",
         ),
     ),
@@ -1800,7 +1817,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["discuss", "open"],
         json_discriminators(
-            documented_schemas(MUTATING, &["discuss open"]),
+            documented_schemas(METADATA_MUTATION, &["discuss open"]),
             &[json_discriminator(
                 Some("discuss open"),
                 "output_kind",
@@ -1811,7 +1828,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["discuss", "append"],
         json_discriminators(
-            documented_schemas(MUTATING, &["discuss append"]),
+            documented_schemas(METADATA_MUTATION, &["discuss append"]),
             &[json_discriminator(
                 Some("discuss append"),
                 "output_kind",
@@ -1822,11 +1839,22 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["discuss", "resolve"],
         json_discriminators(
-            documented_schemas(MUTATING, &["discuss resolve"]),
+            documented_schemas(METADATA_MUTATION, &["discuss resolve"]),
             &[json_discriminator(
                 Some("discuss resolve"),
                 "output_kind",
                 "discuss_resolve",
+            )],
+        ),
+    ),
+    entry(
+        &["discuss", "reopen"],
+        json_discriminators(
+            documented_schemas(METADATA_MUTATION, &["discuss reopen"]),
+            &[json_discriminator(
+                Some("discuss reopen"),
+                "output_kind",
+                "discuss_reopen",
             )],
         ),
     ),
@@ -1857,11 +1885,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         front_door(
             json_discriminators(
                 documented_schemas(READ_JSON, &["doctor"]),
-                &[json_discriminator(
-                    Some("doctor"),
-                    "output_kind",
-                    "diagnose",
-                )],
+                &[json_discriminator(Some("doctor"), "output_kind", "doctor")],
             ),
             120,
         ),
@@ -1889,40 +1913,19 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["fetch"],
-        git_projection_action(
-            json_discriminators(
-                documented_schemas(
-                    CommandContract {
-                        writes_git_refs: true,
-                        network_io: true,
-                        ..MUTATING
-                    },
-                    &["fetch"],
-                ),
-                &[json_discriminator(Some("fetch"), "output_kind", "fetch")],
-            ),
-            "pull",
-            "workflow",
-            "Use pull for the normal remote update workflow; inspect verification output before materializing changes.",
-        ),
-    ),
-    entry(
         &["fsck"],
         category(
+            documented_core_report_schema(READ_JSON, FsckReport::CONTRACT),
+            "recovery",
+        ),
+    ),
+    entry(&["fsck", "repair"], category(GROUP, "recovery")),
+    entry(
+        &["fsck", "repair", "git"],
+        category(
             documented_schemas(
-                documented_core_report_schema(
-                    CommandContract {
-                        mutates: true,
-                        observe_only: false,
-                        supports_op_id: false,
-                        may_move_ref: false,
-                        writes_heddle_refs: false,
-                        ..READ_JSON
-                    },
-                    FsckReport::CONTRACT,
-                ),
-                &["fsck --repair git"],
+                documented_core_report_schema(FSCK_GIT_REPAIR, FsckReport::CONTRACT),
+                &["fsck repair git"],
             ),
             "recovery",
         ),
@@ -1932,7 +1935,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["oplog", "recover"],
         category(
             json_discriminators(
-                opaque_schemas(MUTATING_NO_OP_ID, &["oplog recover"]),
+                opaque_schemas(METADATA_MUTATION_NO_OP_ID, &["oplog recover"]),
                 &[json_discriminator(
                     Some("oplog recover"),
                     "output_kind",
@@ -1941,10 +1944,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ),
             "recovery",
         ),
-    ),
-    entry(
-        &["git-overlay"],
-        category(documented_schemas(READ_JSON, &["git-overlay"]), "repo"),
     ),
     entry(
         &["help"],
@@ -2006,7 +2005,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["integration", "install"],
-        surface(opaque_schemas(MUTATING, &["integration install"]), "admin"),
+        surface(
+            opaque_schemas(INTEGRATION_INSTALL_MUTATION, &["integration install"]),
+            "admin",
+        ),
     ),
     entry(
         &["integration", "doctor"],
@@ -2018,18 +2020,21 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["integration", "uninstall"],
         surface(
-            opaque_schemas(MUTATING, &["integration uninstall"]),
+            opaque_schemas(INTEGRATION_INSTALL_MUTATION, &["integration uninstall"]),
             "admin",
         ),
     ),
     entry(
         &["integration", "upgrade"],
-        surface(opaque_schemas(MUTATING, &["integration upgrade"]), "admin"),
+        surface(
+            opaque_schemas(INTEGRATION_INSTALL_MUTATION, &["integration upgrade"]),
+            "admin",
+        ),
     ),
     entry(
         &["integration", "relay"],
         hidden(surface(
-            opaque_schemas(MUTATING, &["integration relay"]),
+            opaque_schemas(REF_METADATA_WORKTREE_MUTATION, &["integration relay"]),
             "admin",
         )),
     ),
@@ -2050,11 +2055,37 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["maintenance"], surface(GROUP, "admin")),
     entry(
         &["maintenance", "inspect"],
-        surface(opaque_schemas(READ_JSON, &["maintenance inspect"]), "admin"),
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["maintenance inspect"]),
+                &[json_discriminator(
+                    Some("maintenance inspect"),
+                    "output_kind",
+                    "maintenance_inspect",
+                )],
+            ),
+            "admin",
+        ),
     ),
     entry(
-        &["maintenance", "run"],
-        surface(opaque_schemas(MUTATING, &["maintenance run"]), "admin"),
+        &["maintenance", "refresh"],
+        surface(
+            json_discriminators(
+                documented_schemas(
+                    CommandContract {
+                        object_gc: true,
+                        ..METADATA_MUTATION
+                    },
+                    &["maintenance refresh"],
+                ),
+                &[json_discriminator(
+                    Some("maintenance refresh"),
+                    "output_kind",
+                    "maintenance_refresh",
+                )],
+            ),
+            "admin",
+        ),
     ),
     entry(
         &["maintenance", "gc"],
@@ -2071,77 +2102,21 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["maintenance", "index"],
-        surface(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["maintenance index"]),
-                &[json_discriminator(
-                    Some("maintenance index"),
-                    "output_kind",
-                    "index",
-                )],
-            ),
-            "admin",
-        ),
-    ),
-    entry(
-        &["maintenance", "monitor"],
-        surface(opaque_schemas(READ_JSON, &["maintenance monitor"]), "admin"),
-    ),
-    entry(
-        &["merge"],
-        category(
-            exits(
-                surface(
-                    advertised_action(
-                        json_discriminators(
-                            documented_schemas(
-                                compact_json(WORKTREE_MUTATION),
-                                &["merge --preview"],
-                            ),
-                            &[json_discriminator(
-                                Some("merge --preview"),
-                                "output_kind",
-                                "merge",
-                            )],
-                        ),
-                        "heddle merge <thread> --preview",
-                        &["heddle", "merge", "<thread>", "--preview"],
-                        &["thread"],
-                        true,
-                        false,
-                    ),
-                    "native",
-                ),
-                &[
-                    (0, "ok"),
-                    (65, "conflict requires manual resolution"),
-                    (74, "io while writing state"),
-                ],
-            ),
-            "threads",
-        ),
-    ),
-    entry(
-        &["presence"],
-        category(feature_gated(GROUP, "client"), "collab"),
-    ),
-    entry(
-        &["presence", "publish"],
-        feature_gated(MUTATING_TEXT, "client"),
-    ),
-    entry(
         &["pull"],
         exits(
             front_door(
                 json_discriminators(
-                    documented_schemas(
-                        CommandContract {
-                            writes_git_refs: true,
-                            network_io: true,
-                            ..WORKTREE_MUTATION
-                        },
-                        &["pull"],
+                    surface(
+                        documented_schemas(
+                            CommandContract {
+                                may_import_git: true,
+                                writes_git_refs: true,
+                                network_io: true,
+                                ..WORKTREE_MUTATION
+                            },
+                            &["pull"],
+                        ),
+                        "source_authority",
                     ),
                     &[json_discriminator(Some("pull"), "output_kind", "pull")],
                 ),
@@ -2161,13 +2136,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
             front_door(
                 advertised_action(
                     json_discriminators(
-                        documented_schemas(
-                            CommandContract {
-                                writes_git_refs: true,
-                                network_io: true,
-                                ..MUTATING
-                            },
-                            &["push"],
+                        surface(
+                            documented_schemas(
+                                CommandContract {
+                                    writes_git_refs: true,
+                                    writes_config: true,
+                                    network_io: true,
+                                    ..REF_MUTATION
+                                },
+                                &["push"],
+                            ),
+                            "source_authority",
                         ),
                         &[json_discriminator(Some("push"), "output_kind", "push")],
                     ),
@@ -2213,25 +2192,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
             50,
         ),
     ),
-    entry(
-        &["rebase"],
-        category(
-            json_discriminators(
-                opaque_schemas(WORKTREE_MUTATION_JSONL, &["rebase"]),
-                &[json_discriminator(
-                    Some("rebase"),
-                    "output_kind",
-                    "rebase_progress",
-                )],
-            ),
-            "threads",
-        ),
-    ),
     entry(&["redact"], category(GROUP, "recovery")),
     entry(
         &["redact", "apply"],
         json_discriminators(
-            opaque_schemas(DATA_MUTATION, &["redact apply"]),
+            opaque_schemas(METADATA_MUTATION, &["redact apply"]),
             &[json_discriminator(
                 Some("redact apply"),
                 "output_kind",
@@ -2294,7 +2259,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["redact", "trust", "add"],
         json_discriminators(
-            opaque_schemas(DATA_MUTATION, &["redact trust add"]),
+            opaque_schemas(CONFIG_MUTATION, &["redact trust add"]),
             &[json_discriminator(
                 Some("redact trust add"),
                 "output_kind",
@@ -2316,7 +2281,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["redact", "trust", "remove"],
         json_discriminators(
-            opaque_schemas(DATA_MUTATION, &["redact trust remove"]),
+            opaque_schemas(CONFIG_MUTATION, &["redact trust remove"]),
             &[json_discriminator(
                 Some("redact trust remove"),
                 "output_kind",
@@ -2324,67 +2289,85 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
-    entry(&["remote"], category(surface(GROUP, "native"), "repo")),
+    entry(
+        &["remote"],
+        category(surface(GROUP, "source_authority"), "repo"),
+    ),
     entry(
         &["remote", "list"],
-        json_discriminators(
-            documented_schemas(READ_JSON, &["remote list"]),
-            &[json_discriminator(
-                Some("remote list"),
-                "output_kind",
-                "remote_list",
-            )],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["remote list"]),
+                &[json_discriminator(
+                    Some("remote list"),
+                    "output_kind",
+                    "remote_list",
+                )],
+            ),
+            "source_authority",
         ),
     ),
     entry(
         &["remote", "add"],
-        json_discriminators(
-            documented_schemas(CONFIG_MUTATION, &["remote add"]),
-            &[json_discriminator(
-                Some("remote add"),
-                "output_kind",
-                "remote_add",
-            )],
+        surface(
+            json_discriminators(
+                documented_schemas(CONFIG_MUTATION, &["remote add"]),
+                &[json_discriminator(
+                    Some("remote add"),
+                    "output_kind",
+                    "remote_add",
+                )],
+            ),
+            "source_authority",
         ),
     ),
     entry(
         &["remote", "remove"],
-        json_discriminators(
-            documented_schemas(CONFIG_MUTATION, &["remote remove"]),
-            &[json_discriminator(
-                Some("remote remove"),
-                "output_kind",
-                "remote_remove",
-            )],
+        surface(
+            json_discriminators(
+                documented_schemas(CONFIG_MUTATION, &["remote remove"]),
+                &[json_discriminator(
+                    Some("remote remove"),
+                    "output_kind",
+                    "remote_remove",
+                )],
+            ),
+            "source_authority",
         ),
     ),
     entry(
         &["remote", "set-default"],
-        json_discriminators(
-            documented_schemas(CONFIG_MUTATION, &["remote set-default"]),
-            &[json_discriminator(
-                Some("remote set-default"),
-                "output_kind",
-                "remote_set_default",
-            )],
+        surface(
+            json_discriminators(
+                documented_schemas(CONFIG_MUTATION, &["remote set-default"]),
+                &[json_discriminator(
+                    Some("remote set-default"),
+                    "output_kind",
+                    "remote_set_default",
+                )],
+            ),
+            "source_authority",
         ),
     ),
     entry(
         &["remote", "show"],
-        json_discriminators(
-            documented_schemas(READ_JSON, &["remote show"]),
-            &[json_discriminator(
-                Some("remote show"),
-                "output_kind",
-                "remote_show",
-            )],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["remote show"]),
+                &[json_discriminator(
+                    Some("remote show"),
+                    "output_kind",
+                    "remote_show",
+                )],
+            ),
+            "source_authority",
         ),
     ),
     entry(
         &["resolve"],
         front_door(
             json_discriminators(
-                documented_schemas(MUTATING, &["resolve"]),
+                documented_schemas(REF_MUTATION, &["resolve"]),
                 &[json_discriminator(
                     Some("resolve"),
                     "output_kind",
@@ -2423,7 +2406,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["review", "sign"],
         json_discriminators(
-            documented_schemas(MUTATING, &["review sign"]),
+            documented_schemas(METADATA_MUTATION, &["review sign"]),
             &[json_discriminator(
                 Some("review sign"),
                 "output_kind",
@@ -2473,39 +2456,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["semantic", "hot"],
         opaque_schemas(READ_JSON, &["semantic hot"]),
     ),
-    entry(&["session"], surface(GROUP, "automation")),
-    entry(
-        &["session", "start"],
-        surface(
-            documented_schemas(MUTATING, &["session start"]),
-            "automation",
-        ),
-    ),
-    entry(
-        &["session", "segment"],
-        surface(
-            documented_schemas(MUTATING, &["session segment"]),
-            "automation",
-        ),
-    ),
-    entry(
-        &["session", "end"],
-        surface(documented_schemas(MUTATING, &["session end"]), "automation"),
-    ),
-    entry(
-        &["session", "show"],
-        surface(
-            documented_schemas(READ_JSON, &["session show"]),
-            "automation",
-        ),
-    ),
-    entry(
-        &["session", "list"],
-        surface(
-            documented_schemas(READ_JSON, &["session list"]),
-            "automation",
-        ),
-    ),
     entry(&["shell"], category(READ_TEXT, "repo")),
     entry(&["shell", "init"], READ_TEXT),
     entry(&["shell", "completion"], READ_TEXT),
@@ -2519,11 +2469,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     CommandContract {
                         writes_git_refs: true,
                         network_io: true,
-                        ..compact_json(MUTATING)
+                        ..compact_json(REF_MUTATION)
                     },
-                    &["land"],
+                    &["land", "land --threads"],
                 ),
-                &[json_discriminator(Some("land"), "output_kind", "land")],
+                &[
+                    json_discriminator(Some("land"), "output_kind", "land"),
+                    json_discriminator(Some("land --threads"), "output_kind", "land_batch"),
+                ],
             ),
             70,
         ),
@@ -2553,96 +2506,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["stash"],
-        git_projection_action(
-            READ_TEXT,
-            "capture",
-            "conceptual_home",
-            "Use capture, commit, and thread captures for durable Heddle saves.",
-        ),
-    ),
-    entry(
-        &["stash", "push"],
-        git_projection_action(
-            documented_schemas(WORKTREE_ONLY_MUTATION, &["stash push"]),
-            "capture",
-            "workflow",
-            "Use capture for a durable named save point before changing the worktree.",
-        ),
-    ),
-    entry(
-        &["stash", "list"],
-        git_projection_action(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["stash list"]),
-                &[json_discriminator(
-                    Some("stash list"),
-                    "output_kind",
-                    "stash_list",
-                )],
-            ),
-            "thread captures",
-            "conceptual_home",
-            "Use thread captures to inspect durable Heddle save points.",
-        ),
-    ),
-    entry(
-        &["stash", "pop"],
-        git_projection_action(
-            documented_schemas(
-                CommandContract {
-                    destructive_data: true,
-                    ..WORKTREE_ONLY_MUTATION
-                },
-                &["stash pop"],
-            ),
-            "undo",
-            "conceptual_home",
-            "Use undo to reverse the last Heddle operation; stash pop is not a direct semantic match.",
-        ),
-    ),
-    entry(
-        &["stash", "apply"],
-        git_projection_action(
-            documented_schemas(WORKTREE_ONLY_MUTATION, &["stash apply"]),
-            "undo",
-            "conceptual_home",
-            "Use undo to reverse the last Heddle operation; stash apply is not a direct semantic match.",
-        ),
-    ),
-    entry(
-        &["stash", "drop"],
-        git_projection_action(
-            documented_schemas(DESTRUCTIVE_DATA_MUTATION, &["stash drop"]),
-            "thread captures",
-            "conceptual_home",
-            "Use thread captures to inspect and manage durable Heddle save points.",
-        ),
-    ),
-    entry(
-        &["stash", "clear"],
-        git_projection_action(
-            documented_schemas(DESTRUCTIVE_DATA_MUTATION, &["stash clear"]),
-            "thread captures",
-            "conceptual_home",
-            "Use thread captures to inspect and manage durable Heddle save points.",
-        ),
-    ),
-    entry(
-        &["stash", "show"],
-        git_projection_alias(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["stash show"]),
-                &[json_discriminator(
-                    Some("stash show"),
-                    "output_kind",
-                    "stash_show",
-                )],
-            ),
-            "show",
-        ),
-    ),
-    entry(
         &["status"],
         exits(
             front_door(
@@ -2655,92 +2518,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
             &[(0, "ok"), (74, "io reading workspace state")],
         ),
     ),
-    entry(&["spool"], category(feature_gated(GROUP, "client"), "repo")),
-    entry(
-        &["spool", "attach"],
-        category(feature_gated(MUTATING_TEXT, "client"), "repo"),
-    ),
-    entry(
-        &["spool", "detach"],
-        category(feature_gated(MUTATING_TEXT, "client"), "repo"),
-    ),
-    entry(
-        &["spool", "children"],
-        category(feature_gated(READ_TEXT, "client"), "repo"),
-    ),
-    entry(
-        &["spool", "governance"],
-        category(feature_gated(READ_TEXT, "client"), "repo"),
-    ),
-    entry(
-        &["spool", "membership"],
-        category(feature_gated(READ_TEXT, "client"), "repo"),
-    ),
-    entry(
-        &["support"],
-        category(feature_gated(GROUP, "client"), "repo"),
-    ),
-    entry(
-        &["support", "grant"],
-        feature_gated(
-            json_discriminators(
-                documented_schemas(MUTATING_NO_OP_ID, &["support grant"]),
-                &[json_discriminator(
-                    Some("support grant"),
-                    "output_kind",
-                    "support_grant",
-                )],
-            ),
-            "client",
-        ),
-    ),
-    entry(
-        &["support", "list"],
-        feature_gated(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["support list"]),
-                &[json_discriminator(
-                    Some("support list"),
-                    "output_kind",
-                    "support_list",
-                )],
-            ),
-            "client",
-        ),
-    ),
-    entry(
-        &["support", "revoke"],
-        feature_gated(
-            json_discriminators(
-                documented_schemas(MUTATING_NO_OP_ID, &["support revoke"]),
-                &[json_discriminator(
-                    Some("support revoke"),
-                    "output_kind",
-                    "support_revoke",
-                )],
-            ),
-            "client",
-        ),
-    ),
-    entry(
-        &["switch"],
-        git_projection_alias(
-            json_discriminators(
-                documented_schemas(WORKTREE_MUTATION, &["switch"]),
-                &[json_discriminator(
-                    Some("switch"),
-                    "output_kind",
-                    "thread_switch",
-                )],
-            ),
-            "thread switch",
-        ),
-    ),
     entry(
         &["sync"],
         category(
             json_discriminators(
-                documented_schemas(operator_envelope(compact_json(MUTATING)), &["sync"]),
+                documented_schemas(operator_envelope(compact_json(REF_MUTATION)), &["sync"]),
                 &[json_discriminator(Some("sync"), "output_kind", "sync")],
             ),
             "threads",
@@ -2750,7 +2532,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["thread", "create"],
         json_discriminators(
-            documented_schemas(MUTATING, &["thread create"]),
+            documented_schemas(REF_MUTATION, &["thread create"]),
             &[json_discriminator(
                 Some("thread create"),
                 "output_kind",
@@ -2803,7 +2585,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["thread", "rename"],
         json_discriminators(
-            documented_schemas(MUTATING, &["thread rename"]),
+            documented_schemas(REF_MUTATION, &["thread rename"]),
             &[json_discriminator(
                 Some("thread rename"),
                 "output_kind",
@@ -2824,16 +2606,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["thread", "move"],
-        documented_schemas(MUTATING, &["thread move"]),
+        documented_schemas(REF_MUTATION, &["thread move"]),
     ),
     entry(
         &["thread", "absorb"],
-        documented_schemas(MUTATING, &["thread absorb"]),
+        documented_schemas(REF_MUTATION, &["thread absorb"]),
     ),
     entry(
         &["thread", "resolve"],
         json_discriminators(
-            documented_schemas(MUTATING, &["thread resolve"]),
+            documented_schemas(REF_MUTATION, &["thread resolve"]),
             &[json_discriminator(
                 Some("thread resolve"),
                 "output_kind",
@@ -2865,7 +2647,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["thread", "approve"],
-        documented_schemas(MUTATING, &["thread approve"]),
+        documented_schemas(NETWORK_METADATA_MUTATION, &["thread approve"]),
     ),
     entry(
         &["thread", "approvals"],
@@ -2874,7 +2656,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["thread", "revoke-approval"],
         json_discriminators(
-            documented_schemas(MUTATING, &["thread revoke-approval"]),
+            documented_schemas(NETWORK_METADATA_MUTATION, &["thread revoke-approval"]),
             &[json_discriminator(
                 Some("thread revoke-approval"),
                 "output_kind",
@@ -2912,7 +2694,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["thread", "marker", "create"],
         json_discriminators(
-            documented_schemas(MUTATING, &["thread marker create"]),
+            documented_schemas(REF_MUTATION, &["thread marker create"]),
             &[json_discriminator(
                 Some("thread marker create"),
                 "output_kind",
@@ -2923,7 +2705,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["thread", "marker", "delete"],
         json_discriminators(
-            documented_schemas(DESTRUCTIVE_DATA_MUTATION, &["thread marker delete"]),
+            documented_schemas(DESTRUCTIVE_REF_MUTATION, &["thread marker delete"]),
             &[json_discriminator(
                 Some("thread marker delete"),
                 "output_kind",
@@ -2961,7 +2743,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["timeline", "record-start"],
         surface(
             json_discriminators(
-                documented_schemas(MUTATING, &["timeline record-start"]),
+                documented_schemas(METADATA_MUTATION, &["timeline record-start"]),
                 &[json_discriminator(
                     Some("timeline record-start"),
                     "output_kind",
@@ -2975,7 +2757,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["timeline", "record-finish"],
         surface(
             json_discriminators(
-                documented_schemas(MUTATING, &["timeline record-finish"]),
+                documented_schemas(METADATA_MUTATION, &["timeline record-finish"]),
                 &[json_discriminator(
                     Some("timeline record-finish"),
                     "output_kind",
@@ -2989,7 +2771,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["timeline", "fork"],
         surface(
             json_discriminators(
-                documented_schemas(MUTATING, &["timeline fork"]),
+                documented_schemas(METADATA_MUTATION, &["timeline fork"]),
                 &[json_discriminator(
                     Some("timeline fork"),
                     "output_kind",
@@ -3003,7 +2785,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["timeline", "reset"],
         surface(
             json_discriminators(
-                documented_schemas(WORKTREE_MUTATION, &["timeline reset"]),
+                documented_schemas(REF_METADATA_WORKTREE_MUTATION, &["timeline reset"]),
                 &[json_discriminator(
                     Some("timeline reset"),
                     "output_kind",
@@ -3017,7 +2799,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["timeline", "recover"],
         surface(
             json_discriminators(
-                documented_schemas(MUTATING, &["timeline recover"]),
+                documented_schemas(METADATA_MUTATION, &["timeline recover"]),
                 &[json_discriminator(
                     Some("timeline recover"),
                     "output_kind",
@@ -3026,23 +2808,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ),
             "automation",
         ),
-    ),
-    entry(&["transaction"], hidden(GROUP)),
-    entry(
-        &["transaction", "begin"],
-        hidden(opaque_schemas(MUTATING, &["transaction begin"])),
-    ),
-    entry(
-        &["transaction", "commit"],
-        documented_schemas(MUTATING, &["transaction commit"]),
-    ),
-    entry(
-        &["transaction", "abort"],
-        hidden(opaque_schemas(MUTATING, &["transaction abort"])),
-    ),
-    entry(
-        &["transaction", "status"],
-        hidden(opaque_schemas(READ_JSON, &["transaction status"])),
     ),
     entry(
         &["verify"],
@@ -3062,7 +2827,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["visibility", "set"],
         json_discriminators(
-            opaque_schemas(DATA_MUTATION, &["visibility set"]),
+            opaque_schemas(METADATA_MUTATION, &["visibility set"]),
             &[json_discriminator(
                 Some("visibility set"),
                 "output_kind",
@@ -3073,7 +2838,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["visibility", "promote"],
         json_discriminators(
-            opaque_schemas(DATA_MUTATION, &["visibility promote"]),
+            opaque_schemas(METADATA_MUTATION, &["visibility promote"]),
             &[json_discriminator(
                 Some("visibility promote"),
                 "output_kind",
@@ -3114,17 +2879,20 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["undo"],
         front_door(
             json_discriminators(
-                // `undo` keeps its own `--list` history view and owns
-                // redo-mode after the top-level `redo` deletion.
+                // `undo` keeps its own history, redo, and recovery modes.
                 // Every kind the handler can emit must be advertised or an agent
                 // validating responses via `heddle help --output json` rejects
                 // the off-contract record. `undo --list` has its own
                 // `UndoListSchema`.
-                documented_schemas(WORKTREE_MUTATION, &["undo", "undo --list", "undo --redo"]),
+                documented_schemas(
+                    WORKTREE_MUTATION,
+                    &["undo", "undo --list", "undo --redo", "undo --recover"],
+                ),
                 &[
                     json_discriminator(Some("undo"), "output_kind", "undo"),
                     json_discriminator(Some("undo --list"), "output_kind", "undo_list"),
                     json_discriminator(Some("undo --redo"), "output_kind", "redo"),
+                    json_discriminator(Some("undo --recover"), "output_kind", "undo_recover"),
                 ],
             ),
             100,
@@ -3294,6 +3062,7 @@ fn feature_gated_catalog_entry(
         summary: String::new(),
         has_subcommands: false,
         supports_json: contract.supports_json,
+        output_modes: supported_output_modes(contract),
         mutates: contract.mutates,
         supports_op_id: contract.supports_op_id,
         persists_op_id: contract.persists_op_id,
@@ -3316,10 +3085,7 @@ fn feature_gated_catalog_entry(
         external_command: contract.external_command,
         requires_git_executable: contract.requires_git_executable,
         destructive_data: contract.destructive_data,
-        side_effects: side_effects(contract)
-            .iter()
-            .map(|effect| (*effect).to_string())
-            .collect(),
+        side_effects: side_effects(contract),
         side_effect_class: side_effect_class(contract).to_string(),
         first_run_behavior: first_run_behavior(contract).to_string(),
         json_kind: contract.json_kind.to_string(),
@@ -3389,6 +3155,7 @@ fn catalog_entry(
         ),
         has_subcommands: command.get_subcommands().next().is_some(),
         supports_json: contract.supports_json,
+        output_modes: supported_output_modes(contract),
         mutates: contract.mutates,
         supports_op_id: contract.supports_op_id,
         persists_op_id: contract.persists_op_id,
@@ -3411,10 +3178,7 @@ fn catalog_entry(
         external_command: contract.external_command,
         requires_git_executable: contract.requires_git_executable,
         destructive_data: contract.destructive_data,
-        side_effects: side_effects(contract)
-            .iter()
-            .map(|effect| (*effect).to_string())
-            .collect(),
+        side_effects: side_effects(contract),
         side_effect_class: side_effect_class(contract).to_string(),
         first_run_behavior: first_run_behavior(contract).to_string(),
         json_kind: contract.json_kind.to_string(),
@@ -3436,6 +3200,17 @@ fn catalog_entry(
             })
             .collect(),
     }
+}
+
+fn supported_output_modes(contract: CommandContract) -> Vec<String> {
+    let mut modes = vec!["text".to_string()];
+    if contract.supports_json {
+        modes.push("json".to_string());
+    }
+    if contract.supports_json_compact {
+        modes.push("json-compact".to_string());
+    }
+    modes
 }
 
 fn canonical_action(contract: CommandContract) -> Option<CanonicalAction> {
@@ -3647,72 +3422,72 @@ fn side_effect_class(contract: CommandContract) -> &'static str {
         "initialize"
     } else if contract.writes_hooks {
         "hook_mutation"
-    } else if contract.writes_config {
-        "config_mutation"
     } else if contract.network_io {
         "network_mutation"
+    } else if contract.writes_config {
+        "config_mutation"
     } else if contract.daemon_process {
         "daemon_process"
     } else if contract.external_command {
         "external_command"
     } else if contract.writes_heddle_refs || contract.writes_git_refs || contract.may_move_ref {
         "ref_mutation"
-    } else if contract.mutates {
-        "mutation"
+    } else if contract.writes_metadata {
+        "metadata_mutation"
     } else {
         "none"
     }
 }
 
-fn side_effects(contract: CommandContract) -> Vec<&'static str> {
+fn side_effects(contract: CommandContract) -> Vec<CommandSideEffect> {
     if contract.observe_only {
-        return vec!["observe_only"];
+        return vec![CommandSideEffect::ObserveOnly];
     }
 
     let mut effects = Vec::new();
     if contract.may_initialize {
-        effects.push("initialize");
+        effects.push(CommandSideEffect::Initialize);
     }
     if contract.may_import_git {
-        effects.push("import_git");
+        effects.push(CommandSideEffect::ImportGit);
     }
     if contract.writes_heddle_refs {
-        effects.push("writes_heddle_refs");
+        effects.push(CommandSideEffect::WritesHeddleRefs);
     }
     if contract.writes_git_refs {
-        effects.push("writes_git_refs");
+        effects.push(CommandSideEffect::WritesGitRefs);
     }
     if contract.writes_worktree {
-        effects.push("writes_worktree");
+        effects.push(CommandSideEffect::WritesWorktree);
     } else if contract.may_write_worktree {
-        effects.push("may_write_worktree");
+        effects.push(CommandSideEffect::MayWriteWorktree);
+    }
+    if contract.writes_metadata {
+        effects.push(CommandSideEffect::WritesMetadata);
     }
     if contract.writes_config {
-        effects.push("writes_config");
+        effects.push(CommandSideEffect::WritesConfig);
     }
     if contract.writes_hooks {
-        effects.push("writes_hooks");
+        effects.push(CommandSideEffect::WritesHooks);
     }
     if contract.network_io {
-        effects.push("network_io");
+        effects.push(CommandSideEffect::NetworkIo);
     }
     if contract.daemon_process {
-        effects.push("daemon_process");
+        effects.push(CommandSideEffect::DaemonProcess);
     }
     if contract.object_gc {
-        effects.push("object_gc");
+        effects.push(CommandSideEffect::ObjectGc);
     }
     if contract.external_command {
-        effects.push("external_command");
+        effects.push(CommandSideEffect::ExternalCommand);
     }
     if contract.destructive_requires_force {
-        effects.push("destructive_requires_force");
+        effects.push(CommandSideEffect::DestructiveRequiresForce);
     }
     if contract.destructive_data {
-        effects.push("destructive_data");
-    }
-    if effects.is_empty() && contract.mutates {
-        effects.push("mutation");
+        effects.push(CommandSideEffect::DestructiveData);
     }
     effects
 }
@@ -4352,10 +4127,7 @@ fn dynamic_message_recommended_action_template(
     match argv {
         [heddle, command, message_flag, message]
             if heddle == "heddle"
-                && matches!(
-                    command.as_str(),
-                    "capture" | "checkpoint" | "commit" | "ready"
-                )
+                && matches!(command.as_str(), "capture" | "ready")
                 && is_message_flag(message_flag)
                 && is_message_placeholder_arg(message) =>
         {
@@ -4414,7 +4186,7 @@ fn dynamic_message_recommended_action_template(
             confidence,
         ] if heddle == "heddle"
             && repo_flag == "--repo"
-            && matches!(command.as_str(), "capture" | "commit")
+            && command == "capture"
             && is_message_flag(message_flag)
             && is_message_placeholder_arg(message)
             && confidence_flag == "--confidence"
@@ -4433,26 +4205,6 @@ fn dynamic_message_recommended_action_template(
                     confidence.clone(),
                 ],
                 vec!["message".to_string(), placeholder_input_name(confidence)],
-                true,
-            ))
-        }
-        [heddle, stash, push, message_flag, message]
-            if heddle == "heddle"
-                && stash == "stash"
-                && push == "push"
-                && is_message_flag(message_flag)
-                && is_message_placeholder_arg(message) =>
-        {
-            Some(action_template_from_owned(
-                action.to_string(),
-                vec![
-                    "heddle".to_string(),
-                    "stash".to_string(),
-                    "push".to_string(),
-                    "-m".to_string(),
-                    "<message>".to_string(),
-                ],
-                vec!["message".to_string()],
                 true,
             ))
         }
@@ -4536,7 +4288,7 @@ pub(crate) fn validate_recommended_action(action: &str) -> std::result::Result<(
             .map(|_| ())
             .map_err(|err| err.to_string()),
         Some(other) => Err(format!(
-            "recommended action must start with `heddle` or be registered as a placeholder, found `{other}`"
+            "recommended action must start with `heddle`, found `{other}`"
         )),
         None => Ok(()),
     }
@@ -4628,8 +4380,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             Some(DoctorCommands::Docs(_)) => vec!["doctor", "docs"],
             Some(DoctorCommands::Schemas(_)) => vec!["doctor", "schemas"],
         },
-        #[cfg(feature = "git-overlay")]
-        Commands::GitOverlay => vec!["git-overlay"],
         Commands::Schemas { .. } => vec!["schemas"],
         Commands::Start(_) => vec!["start"],
         Commands::Try(_) => vec!["try"],
@@ -4649,27 +4399,19 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Ready(_) => vec!["ready"],
         Commands::Capture(_) => vec!["capture"],
         Commands::Commit(_) => vec!["commit"],
-        Commands::Checkpoint(_) => vec!["checkpoint"],
         Commands::Log(_) => vec!["log"],
         Commands::Show { .. } => vec!["show"],
         Commands::Retro(_) => vec!["retro"],
-        Commands::Clean { .. } => vec!["clean"],
         Commands::Diff(_) => vec!["diff"],
-        Commands::Switch(_) => vec!["switch"],
         Commands::Discuss { command } => match command {
             DiscussCommands::Open(_) => vec!["discuss", "open"],
             DiscussCommands::Append(_) => vec!["discuss", "append"],
             DiscussCommands::Resolve(_) => vec!["discuss", "resolve"],
+            DiscussCommands::Reopen(_) => vec!["discuss", "reopen"],
             DiscussCommands::List(_) => vec!["discuss", "list"],
             DiscussCommands::Show(_) => vec!["discuss", "show"],
         },
         Commands::Query(_) => vec!["query"],
-        Commands::Transaction { command } => match command {
-            TransactionCommands::Begin(_) => vec!["transaction", "begin"],
-            TransactionCommands::Commit(_) => vec!["transaction", "commit"],
-            TransactionCommands::Abort(_) => vec!["transaction", "abort"],
-            TransactionCommands::Status(_) => vec!["transaction", "status"],
-        },
         Commands::Review { command } => match command {
             ReviewCommands::Show(_) => vec!["review", "show"],
             ReviewCommands::Sign(_) => vec!["review", "sign"],
@@ -4745,9 +4487,13 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             ShellCommands::Prompt => vec!["shell", "prompt"],
         },
         Commands::Complete { .. } => vec!["complete"],
-        Commands::Merge(_) => vec!["merge"],
         Commands::Resolve(_) => vec!["resolve"],
-        Commands::Fsck { .. } => vec!["fsck"],
+        Commands::Fsck(args) => match &args.command {
+            None => vec!["fsck"],
+            Some(crate::cli::FsckCommands::Repair { target }) => match target {
+                crate::cli::FsckRepairCommands::Git(_) => vec!["fsck", "repair", "git"],
+            },
+        },
         #[cfg(feature = "git-overlay")]
         Commands::Import { command } => match command {
             ImportCommands::Git { .. } => vec!["import", "git"],
@@ -4759,7 +4505,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Oplog { command } => match command {
             OplogCommands::Recover => vec!["oplog", "recover"],
         },
-        Commands::Fetch { .. } => vec!["fetch"],
         Commands::Push(_) => vec!["push"],
         Commands::Pull(_) => vec!["pull"],
         Commands::Remote { command } => match command {
@@ -4774,6 +4519,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             AuthCommands::Login { .. } => vec!["auth", "login"],
             AuthCommands::Logout { .. } => vec!["auth", "logout"],
             AuthCommands::Status { .. } => vec!["auth", "status"],
+            AuthCommands::DeriveAgent { .. } => vec!["auth", "derive-agent"],
             AuthCommands::CreateServiceToken { .. } => vec!["auth", "create-service-token"],
         },
         Commands::Context { command } => match command {
@@ -4801,29 +4547,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             IntegrationCommands::Uninstall(_) => vec!["integration", "uninstall"],
             IntegrationCommands::Upgrade(_) => vec!["integration", "upgrade"],
             IntegrationCommands::Relay(_) => vec!["integration", "relay"],
-        },
-        Commands::Stash { command } => match command {
-            StashCommands::Push { .. } => vec!["stash", "push"],
-            StashCommands::List => vec!["stash", "list"],
-            StashCommands::Pop => vec!["stash", "pop"],
-            StashCommands::Apply => vec!["stash", "apply"],
-            StashCommands::Drop => vec!["stash", "drop"],
-            StashCommands::Clear => vec!["stash", "clear"],
-            StashCommands::Show => vec!["stash", "show"],
-        },
-        #[cfg(feature = "client")]
-        Commands::Support { command } => match command {
-            SupportCommands::Grant(_) => vec!["support", "grant"],
-            SupportCommands::List(_) => vec!["support", "list"],
-            SupportCommands::Revoke(_) => vec!["support", "revoke"],
-        },
-        #[cfg(feature = "client")]
-        Commands::Spool { command } => match command {
-            SpoolCommands::Attach(_) => vec!["spool", "attach"],
-            SpoolCommands::Detach(_) => vec!["spool", "detach"],
-            SpoolCommands::Children(_) => vec!["spool", "children"],
-            SpoolCommands::Governance(_) => vec!["spool", "governance"],
-            SpoolCommands::Membership(_) => vec!["spool", "membership"],
         },
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => match command {
@@ -4854,40 +4577,31 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 AgentFanoutCommands::Plan(_) => vec!["agent", "fanout", "plan"],
                 AgentFanoutCommands::Start(_) => vec!["agent", "fanout", "start"],
             },
+            AgentCommands::Presence(command) => match command {
+                AgentPresenceCommands::List(_) => vec!["agent", "presence", "list"],
+                AgentPresenceCommands::Show(_) => vec!["agent", "presence", "show"],
+                AgentPresenceCommands::Explain(_) => vec!["agent", "presence", "explain"],
+                AgentPresenceCommands::Complete(_) => vec!["agent", "presence", "complete"],
+            },
+            AgentCommands::Provenance(command) => match command {
+                AgentProvenanceCommands::Begin(_) => vec!["agent", "provenance", "begin"],
+                AgentProvenanceCommands::Segment(_) => vec!["agent", "provenance", "segment"],
+                AgentProvenanceCommands::End(_) => vec!["agent", "provenance", "end"],
+                AgentProvenanceCommands::Show(_) => vec!["agent", "provenance", "show"],
+                AgentProvenanceCommands::List(_) => vec!["agent", "provenance", "list"],
+            },
         },
         Commands::Maintenance { command } => match command {
             MaintenanceCommands::Inspect => vec!["maintenance", "inspect"],
-            MaintenanceCommands::Run => vec!["maintenance", "run"],
+            MaintenanceCommands::Refresh => vec!["maintenance", "refresh"],
             MaintenanceCommands::Gc { .. } => vec!["maintenance", "gc"],
-            MaintenanceCommands::Index { .. } => vec!["maintenance", "index"],
-            MaintenanceCommands::Monitor { .. } => vec!["maintenance", "monitor"],
         },
-        Commands::CherryPick { .. } => vec!["cherry-pick"],
         Commands::Clone(_) => vec!["clone"],
-        Commands::Rebase { .. } => vec!["rebase"],
         Commands::Hook { command } => match command {
             HookCommands::List => vec!["hook", "list"],
             HookCommands::Install { .. } => vec!["hook", "install"],
             HookCommands::Uninstall { .. } => vec!["hook", "uninstall"],
             HookCommands::Events { .. } => vec!["hook", "events"],
-        },
-        Commands::Actor { command } => match command {
-            ActorCommands::Spawn(_) => vec!["actor", "spawn"],
-            ActorCommands::List(_) => vec!["actor", "list"],
-            ActorCommands::Show(_) => vec!["actor", "show"],
-            ActorCommands::Explain(_) => vec!["actor", "explain"],
-            ActorCommands::Done(_) => vec!["actor", "done"],
-        },
-        Commands::Session { command } => match command {
-            SessionCommands::Start(_) => vec!["session", "start"],
-            SessionCommands::Segment(_) => vec!["session", "segment"],
-            SessionCommands::End(_) => vec!["session", "end"],
-            SessionCommands::Show(_) => vec!["session", "show"],
-            SessionCommands::List(_) => vec!["session", "list"],
-        },
-        #[cfg(feature = "client")]
-        Commands::Presence { command } => match command {
-            PresenceCommands::Publish { .. } => vec!["presence", "publish"],
         },
     }
 }

@@ -16,7 +16,7 @@ use objects::{
 };
 
 use super::{RefManager, name::validate_ref_name};
-use crate::fs_atomic::write_file_atomic;
+use crate::fs_atomic::{create_dir_all_durable, write_file_atomic};
 
 const MAX_LOCK_WAIT_SECS: u64 = 10;
 const FLAT_THREADS_DIR_NAME: &str = "__heddle_flat";
@@ -144,7 +144,7 @@ impl RefManager {
         self.read_string(path).map(Some)
     }
     pub(super) fn lock_refs(&self) -> Result<RefsLock> {
-        std::fs::create_dir_all(self.refs_dir())?;
+        create_dir_all_durable(&self.refs_dir())?;
         let path = self.lock_path();
         let file = Self::open_lock_file(&path)?;
         let start_time = Instant::now();
@@ -183,7 +183,7 @@ impl RefManager {
 
     #[cfg(test)]
     fn try_lock_refs_for_test(&self) -> Result<Option<RefsLock>> {
-        std::fs::create_dir_all(self.refs_dir())?;
+        create_dir_all_durable(&self.refs_dir())?;
         let path = self.lock_path();
         let file = Self::open_lock_file(&path)?;
 
@@ -209,7 +209,7 @@ impl RefManager {
         let parent = path
             .parent()
             .ok_or_else(|| std::io::Error::other("invalid ref path"))?;
-        std::fs::create_dir_all(parent)?;
+        create_dir_all_durable(parent)?;
 
         let suffix: u64 = rand::random();
         Ok(path.with_extension(format!("tmp-{}", suffix)))

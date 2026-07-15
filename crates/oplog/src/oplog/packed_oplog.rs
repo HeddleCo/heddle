@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Packed binary oplog.
 //!
-//! The in-memory model is version-agnostic. Format versions are codecs over
-//! that model: v2/v3 and older record schemas are accepted only through the
-//! migration path; normal loads require the latest single-file container with
-//! an EOF index footer.
+//! Repository format v3 accepts only the V4 container with StateId record
+//! schema 4. Earlier containers and record schemas are refused without
+//! mutation; normal loads require the latest single-file container with an EOF
+//! index footer.
 
 use std::{
     cmp::Reverse,
@@ -16,17 +16,19 @@ use std::{
 
 use chrono::{TimeZone, Utc};
 use heddle_schema::op_record::{
-    LATEST_RECORD_SCHEMA_VERSION, OpRecordSchemaVersion, candidate_versions_newest_first,
-    decode_versioned_record, encode_latest_record, schema_version_from_u32,
+    CURRENT_OP_RECORD_SCHEMA_VERSION, decode_current_record, encode_current_record,
+    validate_op_record_schema_version,
 };
 use objects::{
     error::{HeddleError, Result},
-    fs_atomic::{sync_directory, temp_path, write_file_atomic},
+    fs_atomic::{create_dir_all_durable, sync_directory, temp_path, write_file_atomic},
 };
 
 use super::oplog_types::{OpBatch, OpEntry, OpRecord};
 const MAGIC: &[u8; 8] = b"LMOPLOG\0";
 const INDEX_MAGIC: &[u8; 8] = b"LMOPIDX\0";
+const CURRENT_CONTAINER_VERSION: u32 = 4;
+const OPLOG_CONTAINER_STORAGE: &str = "packed oplog container";
 const INDEX_VERSION: u32 = 1;
 const LEGACY_HEADER_LEN: u64 = 8 + 4 + 8 + 8;
 const V4_HEADER_LEN: u64 = 8 + 4 + 4 + 8 + 8;
@@ -36,6 +38,24 @@ const ENTRY_OFFSET_RECORD_LEN: u64 = 16;
 const BATCH_DIR_RECORD_LEN: u64 = 48;
 const TX_DIR_RECORD_LEN: u64 = 32;
 
+fn validate_container_version(version: u32) -> Result<()> {
+    if version < CURRENT_CONTAINER_VERSION {
+        return Err(HeddleError::StorageFormatMigrationRequired {
+            storage: OPLOG_CONTAINER_STORAGE.to_string(),
+            found: version,
+            required: CURRENT_CONTAINER_VERSION,
+        });
+    }
+    if version > CURRENT_CONTAINER_VERSION {
+        return Err(HeddleError::StorageFormatTooNew {
+            storage: OPLOG_CONTAINER_STORAGE.to_string(),
+            found: version,
+            supported: CURRENT_CONTAINER_VERSION,
+        });
+    }
+    Ok(())
+}
+
 /// Version-agnostic materialized oplog data.
 #[derive(Clone)]
 pub(crate) struct OplogData {
@@ -43,123 +63,27 @@ pub(crate) struct OplogData {
     pub(crate) head_id: u64,
 }
 
-mod sealed {
-    pub trait Sealed {}
-}
-
-pub(crate) trait OplogFormat: sealed::Sealed {
-    const VERSION: u8;
-    fn decode(bytes: &[u8]) -> Result<OplogData>;
-}
-
-pub(crate) trait OplogWriteFormat: OplogFormat {
-    fn encode(data: &OplogData, out: &mut Vec<u8>) -> Result<()>;
-}
-
-pub(crate) struct V2;
-pub(crate) struct V3;
-pub(crate) struct V4;
-pub(crate) type Latest = V4;
-
-impl sealed::Sealed for V2 {}
-impl sealed::Sealed for V3 {}
-impl sealed::Sealed for V4 {}
-
-impl OplogFormat for V2 {
-    const VERSION: u8 = 2;
-
-    fn decode(bytes: &[u8]) -> Result<OplogData> {
-        let (header, cursor) = parse_header_with_cursor(bytes)?;
-        if header.version != u32::from(Self::VERSION) {
-            return Err(HeddleError::InvalidObject(format!(
-                "unsupported oplog version {}",
-                header.version
-            )));
-        }
-        let entry_bytes = &bytes[cursor.offset..];
-        let entries = parse_entries_unversioned(entry_bytes, header.entry_count as usize)?;
-        Ok(OplogData {
-            entries,
-            head_id: header.head_id,
-        })
+fn decode_current_container(bytes: &[u8]) -> Result<OplogData> {
+    let (header, cursor) = parse_header_with_cursor(bytes)?;
+    let footer = PackedFooter::parse(bytes, &header)?;
+    if cursor.offset as u64 > footer.entry_data_end {
+        return Err(HeddleError::InvalidObject(
+            "oplog footer points before the entry stream".to_string(),
+        ));
     }
-}
-
-impl OplogFormat for V3 {
-    const VERSION: u8 = 3;
-
-    fn decode(bytes: &[u8]) -> Result<OplogData> {
-        let (header, cursor) = parse_header_with_cursor(bytes)?;
-        if header.version != u32::from(Self::VERSION) {
-            return Err(HeddleError::InvalidObject(format!(
-                "unsupported oplog version {}",
-                header.version
-            )));
-        }
-        let footer = PackedFooter::parse(bytes, &header)?;
-        if cursor.offset as u64 > footer.entry_data_end {
-            return Err(HeddleError::InvalidObject(
-                "oplog footer points before the entry stream".to_string(),
-            ));
-        }
-        let entry_bytes_end = usize::try_from(footer.entry_data_end)
-            .map_err(|_| HeddleError::InvalidObject("oplog entry section too large".to_string()))?;
-        let entry_bytes = &bytes[cursor.offset..entry_bytes_end];
-        let entries = parse_entries_unversioned(entry_bytes, header.entry_count as usize)?;
-        let entry_cursor_offset = encoded_entries_len(entry_bytes, header.entry_count as usize)?;
-        if cursor.offset + entry_cursor_offset != entry_bytes_end {
-            return Err(HeddleError::InvalidObject(
-                "oplog entry/index boundary disagreement".to_string(),
-            ));
-        }
-        Ok(OplogData {
-            entries,
-            head_id: header.head_id,
-        })
+    let entry_bytes_end = usize::try_from(footer.entry_data_end)
+        .map_err(|_| HeddleError::InvalidObject("oplog entry section too large".to_string()))?;
+    let mut entry_cursor = Cursor::new(&bytes[cursor.offset..entry_bytes_end]);
+    let entries = parse_current_entries(&mut entry_cursor, header.entry_count as usize)?;
+    if cursor.offset + entry_cursor.offset != entry_bytes_end {
+        return Err(HeddleError::InvalidObject(
+            "oplog entry/index boundary disagreement".to_string(),
+        ));
     }
-}
-
-impl OplogFormat for V4 {
-    const VERSION: u8 = 4;
-
-    fn decode(bytes: &[u8]) -> Result<OplogData> {
-        let (header, cursor) = parse_header_with_cursor(bytes)?;
-        if header.version != u32::from(Self::VERSION) {
-            return Err(HeddleError::InvalidObject(format!(
-                "unsupported oplog version {}",
-                header.version
-            )));
-        }
-        let schema = header.record_schema_version.ok_or_else(|| {
-            HeddleError::InvalidObject("oplog v4 missing OpRecord schema version".to_string())
-        })?;
-        let footer = PackedFooter::parse(bytes, &header)?;
-        if cursor.offset as u64 > footer.entry_data_end {
-            return Err(HeddleError::InvalidObject(
-                "oplog footer points before the entry stream".to_string(),
-            ));
-        }
-        let entry_bytes_end = usize::try_from(footer.entry_data_end)
-            .map_err(|_| HeddleError::InvalidObject("oplog entry section too large".to_string()))?;
-        let mut entry_cursor = Cursor::new(&bytes[cursor.offset..entry_bytes_end]);
-        let entries =
-            parse_entries_with_schema(&mut entry_cursor, header.entry_count as usize, schema)?;
-        if cursor.offset + entry_cursor.offset != entry_bytes_end {
-            return Err(HeddleError::InvalidObject(
-                "oplog entry/index boundary disagreement".to_string(),
-            ));
-        }
-        Ok(OplogData {
-            entries,
-            head_id: header.head_id,
-        })
-    }
-}
-
-impl OplogWriteFormat for V4 {
-    fn encode(data: &OplogData, out: &mut Vec<u8>) -> Result<()> {
-        encode_data_v4(data, out)
-    }
+    Ok(OplogData {
+        entries,
+        head_id: header.head_id,
+    })
 }
 
 #[derive(Clone)]
@@ -178,8 +102,6 @@ pub(crate) struct PackedOpLogIndex {
 
 #[derive(Clone, Copy, Debug)]
 struct PackedHeader {
-    version: u32,
-    record_schema_version: Option<OpRecordSchemaVersion>,
     entry_count: u64,
     head_id: u64,
     header_len: u64,
@@ -253,72 +175,25 @@ impl PackedOpLog {
         })
     }
 
-    pub(crate) fn ensure_latest(path: &Path) -> Result<()> {
+    pub(crate) fn ensure_current(path: &Path) -> Result<()> {
         if !path.exists() {
             return Ok(());
         }
-        let header = read_header(path)?;
-        match header.version {
-            version
-                if version == u32::from(Latest::VERSION)
-                    && header.record_schema_version == Some(OpRecordSchemaVersion::Current) =>
-            {
-                let _ = PackedOpLogIndex::open_v4(path)?;
-                Ok(())
-            }
-            version
-                if version == u32::from(V2::VERSION)
-                    || version == u32::from(V3::VERSION)
-                    || version == u32::from(Latest::VERSION) =>
-            {
-                let bytes = std::fs::read(path)?;
-                let data = load_for_migration(&bytes)?;
-                let mut out = Vec::new();
-                Latest::encode(&data, &mut out)?;
-                write_file_atomic(path, &out)?;
-                Ok(())
-            }
-            version => Err(HeddleError::InvalidObject(format!(
-                "unsupported oplog version {version}"
-            ))),
-        }
+        let _ = read_header(path)?;
+        let _ = PackedOpLogIndex::open_v4(path)?;
+        Ok(())
     }
 
     /// Read only the `head_id` from the fixed-size current-format header.
     ///
-    /// v2 has the same first 28 bytes, but this fast path deliberately rejects
-    /// it. Callers that own the oplog write lock must migrate v2 before asking
-    /// for a v3 head; callers that do not own the lock route through `OpLog`,
-    /// which performs the locked migration first.
+    /// V2/V3 containers share the legacy header prefix, but repository format
+    /// v3 deliberately refuses them instead of synthesizing StateIds.
     pub(crate) fn read_head_id(path: &Path) -> Result<u64> {
-        let header = read_header(path)?;
-        if header.version != u32::from(Latest::VERSION) {
-            return Err(HeddleError::InvalidObject(format!(
-                "unsupported oplog version {}",
-                header.version
-            )));
-        }
-        if header.record_schema_version != Some(OpRecordSchemaVersion::Current) {
-            let found = header
-                .record_schema_version
-                .map(|version| version.number().to_string())
-                .unwrap_or_else(|| "missing".to_string());
-            return Err(HeddleError::InvalidObject(format!(
-                "unsupported OpRecord schema version {found}"
-            )));
-        }
-        Ok(header.head_id)
+        Ok(read_header(path)?.head_id)
     }
 
-    #[cfg(test)]
-    pub(crate) fn on_disk_version(path: &Path) -> Result<u32> {
-        Ok(read_header(path)?.version)
-    }
-
-    pub(crate) fn is_latest(path: &Path) -> Result<bool> {
-        let header = read_header(path)?;
-        Ok(header.version == u32::from(Latest::VERSION)
-            && header.record_schema_version == Some(OpRecordSchemaVersion::Current))
+    pub(crate) fn validate_header(path: &Path) -> Result<()> {
+        read_header(path).map(|_| ())
     }
 
     /// Cheap O(1) integrity check that the EOF index footer/trailer is present
@@ -332,11 +207,10 @@ impl PackedOpLog {
     /// `header_len + FOOTER_LEN`, or the bytes now sitting at the (new) EOF are
     /// mid-entry-stream garbage rather than the footer magic.
     ///
-    /// This is the load-bearing complement to [`is_latest`](Self::is_latest):
-    /// `is_latest` reads only the header, so it returns `true` for a truncated
-    /// oplog; pairing it with `trailer_ok` lets the format-currency gate keep the
-    /// healthy hot path O(1) (header read + footer read, no entry parse) while
-    /// still routing damaged oplogs into the salvage path.
+    /// This is the load-bearing complement to
+    /// [`validate_header`](Self::validate_header): header validation alone
+    /// succeeds for a truncated oplog; pairing it with `trailer_ok` keeps the
+    /// healthy path O(1) while routing damaged oplogs into salvage.
     ///
     /// Returns `Ok(false)` for any damaged/short/mis-framed trailer (so the
     /// caller can fall through to salvage); only genuine I/O errors propagate.
@@ -366,7 +240,7 @@ impl PackedOpLog {
             head_id: self.head_id,
         };
         let mut bytes = Vec::new();
-        Latest::encode(&data, &mut bytes)?;
+        encode_current_container(&data, &mut bytes)?;
         write_file_atomic(&self.path, &bytes)?;
         Ok(())
     }
@@ -378,7 +252,7 @@ impl PackedOpLog {
             head_id: self.head_id,
         };
         let mut buf = Vec::new();
-        Latest::encode(&data, &mut buf)?;
+        encode_current_container(&data, &mut buf)?;
         Ok(buf)
     }
 
@@ -440,21 +314,6 @@ impl PackedOpLogIndex {
 
     fn open_v4_bytes(path: &Path, bytes: &[u8]) -> Result<Self> {
         let header = parse_header(bytes)?;
-        if header.version != u32::from(Latest::VERSION) {
-            return Err(HeddleError::InvalidObject(format!(
-                "unsupported oplog version {}",
-                header.version
-            )));
-        }
-        if header.record_schema_version != Some(OpRecordSchemaVersion::Current) {
-            let found = header
-                .record_schema_version
-                .map(|version| version.number().to_string())
-                .unwrap_or_else(|| "missing".to_string());
-            return Err(HeddleError::InvalidObject(format!(
-                "unsupported OpRecord schema version {found}"
-            )));
-        }
         let footer = PackedFooter::parse(bytes, &header)?;
         let index = Self {
             path: path.to_path_buf(),
@@ -469,8 +328,6 @@ impl PackedOpLogIndex {
         Self {
             path,
             header: PackedHeader {
-                version: u32::from(Latest::VERSION),
-                record_schema_version: Some(OpRecordSchemaVersion::Current),
                 entry_count: 0,
                 head_id: 0,
                 header_len: V4_HEADER_LEN,
@@ -511,11 +368,7 @@ impl PackedOpLogIndex {
         let mut file = File::open(&self.path)?;
         let mut out = Vec::with_capacity(take);
         for record in offsets.iter().rev().take(take) {
-            out.push(read_entry_at(
-                &mut file,
-                record.entry_offset,
-                self.record_schema()?,
-            )?);
+            out.push(read_entry_at(&mut file, record.entry_offset)?);
         }
         Ok(out)
     }
@@ -526,11 +379,7 @@ impl PackedOpLogIndex {
         let mut file = File::open(&self.path)?;
         let mut out = Vec::with_capacity(offsets.len().saturating_sub(start));
         for record in &offsets[start..] {
-            out.push(read_entry_at(
-                &mut file,
-                record.entry_offset,
-                self.record_schema()?,
-            )?);
+            out.push(read_entry_at(&mut file, record.entry_offset)?);
         }
         Ok(out)
     }
@@ -561,8 +410,11 @@ impl PackedOpLogIndex {
         let mut batches = Vec::new();
 
         for record in batch_dir {
+            #[cfg(test)]
+            BATCH_DIR_RECORDS_VISITED.with(|visits| visits.set(visits.get() + 1));
             if record.newest_entry_id <= since_head_id {
-                continue;
+                // Fsck enforces newest-first order, so every remaining batch is also at/before it.
+                break;
             }
             if let Some(scope) = scope
                 && record.scope_state == ScopeState::None as u8
@@ -587,7 +439,7 @@ impl PackedOpLogIndex {
             }
             let mut entries = Vec::with_capacity(len);
             for offset in &batch_offsets[first..end] {
-                let entry = read_entry_at(&mut file, *offset, self.record_schema()?)?;
+                let entry = read_entry_at(&mut file, *offset)?;
                 if entry.id > since_head_id {
                     entries.push(entry);
                 }
@@ -710,7 +562,7 @@ impl PackedOpLogIndex {
         )?;
 
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent)?;
+        create_dir_all_durable(parent)?;
         let tmp = temp_path(&self.path);
         let write_result = self.write_appended_tmp(
             &tmp,
@@ -745,7 +597,7 @@ impl PackedOpLogIndex {
             .write(true)
             .read(true)
             .open(tmp)?;
-        write_header(&mut out, u32::from(Latest::VERSION), new_count, new_head)?;
+        write_header(&mut out, CURRENT_CONTAINER_VERSION, new_count, new_head)?;
 
         let mut old = File::open(&self.path)?;
         old.seek(SeekFrom::Start(self.header.header_len))?;
@@ -947,7 +799,7 @@ impl PackedOpLogIndex {
             }
             let mut cursor =
                 Cursor::new(&bytes[*offset as usize..self.footer.entry_data_end as usize]);
-            let entry = parse_entry_with_schema(&mut cursor, self.record_schema()?)?;
+            let entry = parse_current_entry(&mut cursor)?;
             match &entry.operation {
                 OpRecord::TransactionCommit { transaction_id, .. } => {
                     if transaction_id.as_bytes() != key {
@@ -987,12 +839,11 @@ impl PackedOpLogIndex {
         }
         Ok(())
     }
+}
 
-    fn record_schema(&self) -> Result<OpRecordSchemaVersion> {
-        self.header.record_schema_version.ok_or_else(|| {
-            HeddleError::InvalidObject("oplog index missing OpRecord schema version".to_string())
-        })
-    }
+#[cfg(test)]
+thread_local! {
+    static BATCH_DIR_RECORDS_VISITED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl PackedFooter {
@@ -1128,35 +979,7 @@ struct BuiltIndexSections {
 }
 
 fn load_latest(bytes: &[u8]) -> Result<OplogData> {
-    let header = parse_header(bytes)?;
-    if header.version != u32::from(Latest::VERSION) {
-        return Err(HeddleError::InvalidObject(format!(
-            "unsupported oplog version {}",
-            header.version
-        )));
-    }
-    if header.record_schema_version != Some(OpRecordSchemaVersion::Current) {
-        let found = header
-            .record_schema_version
-            .map(|version| version.number().to_string())
-            .unwrap_or_else(|| "missing".to_string());
-        return Err(HeddleError::InvalidObject(format!(
-            "unsupported OpRecord schema version {found}"
-        )));
-    }
-    Latest::decode(bytes)
-}
-
-fn load_for_migration(bytes: &[u8]) -> Result<OplogData> {
-    let header = parse_header(bytes)?;
-    match header.version {
-        version if version == u32::from(V2::VERSION) => V2::decode(bytes),
-        version if version == u32::from(V3::VERSION) => V3::decode(bytes),
-        version if version == u32::from(V4::VERSION) => V4::decode(bytes),
-        version => Err(HeddleError::InvalidObject(format!(
-            "unsupported oplog version {version}"
-        ))),
-    }
+    decode_current_container(bytes)
 }
 
 /// How the recovered prefix was located.
@@ -1298,7 +1121,7 @@ fn recover_truncated_latest(
     };
 
     let mut recovered_bytes = Vec::new();
-    Latest::encode(&recovery.data, &mut recovered_bytes)?;
+    encode_current_container(&recovery.data, &mut recovered_bytes)?;
     let corrupt_path = next_corrupt_path(path);
     std::fs::rename(path, &corrupt_path)?;
     write_file_atomic(path, &recovered_bytes)?;
@@ -1315,7 +1138,7 @@ fn recover_truncated_latest(
 ///
 /// Routes through the same [`plan_truncated_latest_recovery`] +
 /// [`recover_truncated_latest`] machinery the silent auto-fallback uses, so the
-/// reported numbers always match what `load()`/`ensure_latest()` would do on
+/// reported numbers always match what `load()`/`ensure_current()` would do on
 /// their own. Returns an `already_healthy` report (no side effects) when the
 /// oplog parses cleanly.
 pub(crate) fn recover_oplog_at(path: &Path) -> Result<OplogRecoveryReport> {
@@ -1338,7 +1161,7 @@ pub(crate) fn recover_oplog_at(path: &Path) -> Result<OplogRecoveryReport> {
     };
 
     let mut recovered_bytes = Vec::new();
-    Latest::encode(&recovery.data, &mut recovered_bytes)?;
+    encode_current_container(&recovery.data, &mut recovered_bytes)?;
     let corrupt_path = next_corrupt_path(path);
     std::fs::rename(path, &corrupt_path)?;
     write_file_atomic(path, &recovered_bytes)?;
@@ -1391,22 +1214,12 @@ fn plan_truncated_latest_recovery(
         }
     };
 
-    if header.version != u32::from(Latest::VERSION)
-        || header.record_schema_version != Some(OpRecordSchemaVersion::Current)
-    {
-        return Ok(None);
-    }
-    let schema = header.record_schema_version.ok_or_else(|| {
-        HeddleError::InvalidObject("oplog v4 missing OpRecord schema version".to_string())
-    })?;
-
     // Footer-guided first: when only the trailing bytes (the index sections or
     // a torn tail after the footer) are damaged but an intact footer survives,
     // its recorded `entry_data_end` frames the complete prefix EXACTLY. That is
     // more precise than re-deriving the boundary forward, so try it before the
     // forward-greedy fallback below.
-    if let Some(recovery) =
-        scan_footer_guided_recovery(bytes, &header, header.header_len as usize, schema)
+    if let Some(recovery) = scan_footer_guided_recovery(bytes, &header, header.header_len as usize)
     {
         return Ok(Some(recovery));
     }
@@ -1415,7 +1228,7 @@ fn plan_truncated_latest_recovery(
     let mut damaged_byte_start = cursor.offset;
     for _ in 0..header.entry_count {
         let entry_start = cursor.offset;
-        match parse_entry_with_schema(&mut cursor, schema) {
+        match parse_current_entry(&mut cursor) {
             Ok(entry) => {
                 damaged_byte_start = cursor.offset;
                 entries.push(entry);
@@ -1456,7 +1269,6 @@ fn scan_footer_guided_recovery(
     bytes: &[u8],
     header: &PackedHeader,
     entries_start: usize,
-    schema: OpRecordSchemaVersion,
 ) -> Option<TruncatedTailRecovery> {
     let footer_len = FOOTER_LEN as usize;
     if bytes.len() < entries_start + footer_len {
@@ -1467,8 +1279,7 @@ fn scan_footer_guided_recovery(
     let mut candidate = max_start;
     loop {
         if bytes[candidate..candidate + INDEX_MAGIC.len()] == *INDEX_MAGIC
-            && let Some(recovery) =
-                try_footer_guided_at(bytes, header, entries_start, schema, candidate)
+            && let Some(recovery) = try_footer_guided_at(bytes, header, entries_start, candidate)
         {
             return Some(recovery);
         }
@@ -1487,7 +1298,6 @@ fn try_footer_guided_at(
     bytes: &[u8],
     header: &PackedHeader,
     entries_start: usize,
-    schema: OpRecordSchemaVersion,
     footer_start: usize,
 ) -> Option<TruncatedTailRecovery> {
     let footer = parse_footer_at(bytes, footer_start).ok()?;
@@ -1507,7 +1317,7 @@ fn try_footer_guided_at(
     let mut cursor = Cursor::new(&bytes[entries_start..entry_data_end]);
     let mut entries = Vec::with_capacity(header.entry_count as usize);
     for _ in 0..header.entry_count {
-        match parse_entry_with_schema(&mut cursor, schema) {
+        match parse_current_entry(&mut cursor) {
             Ok(entry) => entries.push(entry),
             Err(_) => return None,
         }
@@ -1664,11 +1474,11 @@ fn emit_truncated_oplog_recovery_warning(
     );
 }
 
-fn encode_data_v4(data: &OplogData, out: &mut Vec<u8>) -> Result<()> {
+fn encode_current_container(data: &OplogData, out: &mut Vec<u8>) -> Result<()> {
     out.clear();
     write_header_to_vec(
         out,
-        u32::from(Latest::VERSION),
+        CURRENT_CONTAINER_VERSION,
         data.entries.len() as u64,
         data.head_id,
     );
@@ -2073,30 +1883,15 @@ fn parse_header_with_cursor(bytes: &[u8]) -> Result<(PackedHeader, Cursor<'_>)> 
         ));
     }
     let version = cursor.read_u32()?;
-    let (record_schema_version, entry_count, head_id, header_len) =
-        if version >= u32::from(V4::VERSION) {
-            let schema_version = schema_version_from_u32(cursor.read_u32()?)?;
-            (
-                Some(schema_version),
-                cursor.read_u64()?,
-                cursor.read_u64()?,
-                V4_HEADER_LEN,
-            )
-        } else {
-            (
-                None,
-                cursor.read_u64()?,
-                cursor.read_u64()?,
-                LEGACY_HEADER_LEN,
-            )
-        };
+    validate_container_version(version)?;
+    validate_op_record_schema_version(cursor.read_u32()?)?;
+    let entry_count = cursor.read_u64()?;
+    let head_id = cursor.read_u64()?;
     Ok((
         PackedHeader {
-            version,
-            record_schema_version,
             entry_count,
             head_id,
-            header_len,
+            header_len: V4_HEADER_LEN,
         },
         cursor,
     ))
@@ -2104,7 +1899,7 @@ fn parse_header_with_cursor(bytes: &[u8]) -> Result<(PackedHeader, Cursor<'_>)> 
 
 fn read_header(path: &Path) -> Result<PackedHeader> {
     // Read only the largest supported fixed header, never the whole file: this
-    // path backs the O(1) `head_id`/`is_latest` per-read reconciliation checks.
+    // path backs the O(1) `head_id`/`validate_header` reconciliation checks.
     let file = File::open(path)?;
     let mut bytes = Vec::with_capacity(V4_HEADER_LEN as usize);
     file.take(V4_HEADER_LEN).read_to_end(&mut bytes)?;
@@ -2114,97 +1909,15 @@ fn read_header(path: &Path) -> Result<PackedHeader> {
     parse_header(&bytes)
 }
 
-fn parse_entries_with_schema(
-    cursor: &mut Cursor<'_>,
-    entry_count: usize,
-    schema: OpRecordSchemaVersion,
-) -> Result<Vec<OpEntry>> {
+fn parse_current_entries(cursor: &mut Cursor<'_>, entry_count: usize) -> Result<Vec<OpEntry>> {
     let mut entries = Vec::with_capacity(entry_count);
     for _ in 0..entry_count {
-        entries.push(parse_entry_with_schema(cursor, schema)?);
+        entries.push(parse_current_entry(cursor)?);
     }
     Ok(entries)
 }
 
-fn parse_entries_unversioned(bytes: &[u8], entry_count: usize) -> Result<Vec<OpEntry>> {
-    let mut cursor = Cursor::new(bytes);
-    let mut entries = Vec::with_capacity(entry_count);
-    for entry_index in 0..entry_count {
-        let entry_start = cursor.offset;
-        skip_entry(&mut cursor).map_err(|err| {
-            HeddleError::InvalidObject(format!(
-                "failed to frame unversioned oplog entry index {entry_index}: {err}"
-            ))
-        })?;
-        let entry_bytes = &bytes[entry_start..cursor.offset];
-        entries.push(parse_unversioned_entry(entry_bytes, entry_index)?);
-    }
-    if cursor.offset != bytes.len() {
-        return Err(HeddleError::InvalidObject(
-            "unversioned oplog entry stream has trailing bytes".to_string(),
-        ));
-    }
-    Ok(entries)
-}
-
-fn parse_unversioned_entry(bytes: &[u8], entry_index: usize) -> Result<OpEntry> {
-    let mut errors = Vec::new();
-    for schema in candidate_versions_newest_first() {
-        let mut cursor = Cursor::new(bytes);
-        match parse_entry_with_schema(&mut cursor, schema) {
-            Ok(entry) if cursor.offset == bytes.len() => return Ok(entry),
-            Ok(_) => errors.push(format!("{} left trailing entry bytes", schema.name())),
-            Err(err) => errors.push(format!("{}: {err}", schema.name())),
-        }
-    }
-    Err(HeddleError::InvalidObject(format!(
-        "unversioned oplog entry index {entry_index} did not decode under any known OpRecord schema ({})",
-        errors.join("; ")
-    )))
-}
-
-fn encoded_entries_len(bytes: &[u8], entry_count: usize) -> Result<usize> {
-    let mut cursor = Cursor::new(bytes);
-    for _ in 0..entry_count {
-        skip_entry(&mut cursor)?;
-    }
-    Ok(cursor.offset)
-}
-
-fn skip_entry(cursor: &mut Cursor<'_>) -> Result<()> {
-    let _id = cursor.read_u64()?;
-    let _batch_id = cursor.read_u64()?;
-    let _batch_index = cursor.read_u32()?;
-    let _timestamp_secs = cursor.read_i64()?;
-    let _timestamp_ns = cursor.read_u32()?;
-    let _undone = cursor.read_u8()?;
-    let scope_len = cursor.read_u16()? as usize;
-    let _scope = cursor.read_bytes(scope_len)?;
-    let op_data_len = cursor.read_u32()? as usize;
-    let _op_data = cursor.read_bytes(op_data_len)?;
-    let actor_name_len = cursor.read_u16()? as usize;
-    let _actor_name = cursor.read_bytes(actor_name_len)?;
-    let actor_email_len = cursor.read_u16()? as usize;
-    let _actor_email = cursor.read_bytes(actor_email_len)?;
-    let operation_id_tag = cursor.read_u8()?;
-    match operation_id_tag {
-        0 => {}
-        1 => {
-            let _operation_id = cursor.read_array::<16>()?;
-        }
-        other => {
-            return Err(HeddleError::InvalidObject(format!(
-                "invalid operation_id tag byte {other}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn parse_entry_with_schema(
-    cursor: &mut Cursor<'_>,
-    schema: OpRecordSchemaVersion,
-) -> Result<OpEntry> {
+fn parse_current_entry(cursor: &mut Cursor<'_>) -> Result<OpEntry> {
     let id = cursor.read_u64()?;
     let batch_id = cursor.read_u64()?;
     let batch_index = cursor.read_u32()?;
@@ -2225,7 +1938,7 @@ fn parse_entry_with_schema(
 
     let op_data_len = cursor.read_u32()? as usize;
     let op_data = cursor.read_bytes(op_data_len)?;
-    let operation = decode_versioned_record(&op_data, schema)?;
+    let operation = decode_current_record(&op_data)?;
 
     let actor_name_len = cursor.read_u16()? as usize;
     let actor_name = String::from_utf8(cursor.read_bytes(actor_name_len)?)
@@ -2280,7 +1993,7 @@ fn parse_entry_with_schema(
     })
 }
 
-fn read_entry_at(file: &mut File, offset: u64, schema: OpRecordSchemaVersion) -> Result<OpEntry> {
+fn read_entry_at(file: &mut File, offset: u64) -> Result<OpEntry> {
     file.seek(SeekFrom::Start(offset))?;
     let id = read_u64_from_file(file)?;
     let batch_id = read_u64_from_file(file)?;
@@ -2302,7 +2015,7 @@ fn read_entry_at(file: &mut File, offset: u64, schema: OpRecordSchemaVersion) ->
 
     let op_data_len = read_u32_from_file(file)? as usize;
     let op_data = read_vec_from_file(file, op_data_len)?;
-    let operation = decode_versioned_record(&op_data, schema)?;
+    let operation = decode_current_record(&op_data)?;
 
     let actor_name_len = read_u16_from_file(file)? as usize;
     let actor_name = String::from_utf8(read_vec_from_file(file, actor_name_len)?)
@@ -2355,7 +2068,7 @@ fn read_entry_at(file: &mut File, offset: u64, schema: OpRecordSchemaVersion) ->
 }
 
 fn encode_entry(entry: &OpEntry, out: &mut Vec<u8>) -> Result<()> {
-    encode_entry_with(entry, out, encode_latest_record)
+    encode_entry_with(entry, out, encode_current_record)
 }
 
 fn encode_entry_with(
@@ -2397,8 +2110,8 @@ fn encode_entry_with(
 fn write_header<W: Write>(out: &mut W, version: u32, entry_count: u64, head_id: u64) -> Result<()> {
     out.write_all(MAGIC)?;
     out.write_all(&version.to_le_bytes())?;
-    if version == u32::from(Latest::VERSION) {
-        out.write_all(&LATEST_RECORD_SCHEMA_VERSION.to_le_bytes())?;
+    if version == CURRENT_CONTAINER_VERSION {
+        out.write_all(&CURRENT_OP_RECORD_SCHEMA_VERSION.to_le_bytes())?;
     }
     out.write_all(&entry_count.to_le_bytes())?;
     out.write_all(&head_id.to_le_bytes())?;
@@ -2408,8 +2121,8 @@ fn write_header<W: Write>(out: &mut W, version: u32, entry_count: u64, head_id: 
 fn write_header_to_vec(out: &mut Vec<u8>, version: u32, entry_count: u64, head_id: u64) {
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&version.to_le_bytes());
-    if version == u32::from(Latest::VERSION) {
-        out.extend_from_slice(&LATEST_RECORD_SCHEMA_VERSION.to_le_bytes());
+    if version == CURRENT_CONTAINER_VERSION {
+        out.extend_from_slice(&CURRENT_OP_RECORD_SCHEMA_VERSION.to_le_bytes());
     }
     out.extend_from_slice(&entry_count.to_le_bytes());
     out.extend_from_slice(&head_id.to_le_bytes());
@@ -2586,14 +2299,13 @@ impl<'a> Cursor<'a> {
 
 #[cfg(test)]
 mod tests {
-    use heddle_schema::op_record::tests_support::{encode_atomic_no_head, encode_pre_atomic};
-    use objects::object::ChangeId;
+    use sha2::{Digest, Sha256};
     use tempfile::TempDir;
 
     use super::*;
 
     fn make_entry(id: u64, scope: Option<&str>) -> OpEntry {
-        let state = ChangeId::generate();
+        let state = crate::oplog::fresh_state_id();
         OpEntry {
             id,
             timestamp: Utc::now(),
@@ -2619,159 +2331,95 @@ mod tests {
         entry
     }
 
-    fn write_v2(path: &Path, entries: Vec<OpEntry>, head_id: u64) {
+    fn write_legacy_header(path: &Path, version: u32) {
         let mut bytes = Vec::new();
-        write_header_to_vec(
-            &mut bytes,
-            u32::from(V2::VERSION),
-            entries.len() as u64,
-            head_id,
-        );
-        for entry in &entries {
-            encode_entry(entry, &mut bytes).unwrap();
-        }
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&version.to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
         std::fs::write(path, bytes).unwrap();
     }
 
-    fn write_pre_atomic_v2(path: &Path, entries: &[OpEntry], head_id: u64) {
+    fn write_v4_header_with_schema(path: &Path, schema: u32) {
         let mut bytes = Vec::new();
-        write_header_to_vec(
-            &mut bytes,
-            u32::from(V2::VERSION),
-            entries.len() as u64,
-            head_id,
-        );
-        for entry in entries {
-            encode_entry_with(entry, &mut bytes, encode_pre_atomic).unwrap();
-        }
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&CURRENT_CONTAINER_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&schema.to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
         std::fs::write(path, bytes).unwrap();
     }
 
-    fn write_atomic_no_head_v2(path: &Path, entries: &[OpEntry], head_id: u64) {
-        let mut bytes = Vec::new();
-        write_header_to_vec(
-            &mut bytes,
-            u32::from(V2::VERSION),
-            entries.len() as u64,
-            head_id,
-        );
-        for entry in entries {
-            encode_entry_with(entry, &mut bytes, encode_atomic_no_head).unwrap();
+    fn decode_hex_fixture(encoded: &str) -> std::result::Result<Vec<u8>, String> {
+        let compact = encoded.split_whitespace().collect::<String>();
+        if compact.len() % 2 != 0 {
+            return Err(format!(
+                "hex fixture has an odd number of digits: {}",
+                compact.len()
+            ));
         }
-        std::fs::write(path, bytes).unwrap();
+        compact
+            .as_bytes()
+            .chunks(2)
+            .map(|pair| {
+                let digits = std::str::from_utf8(pair)
+                    .map_err(|error| format!("hex fixture is not UTF-8: {error}"))?;
+                u8::from_str_radix(digits, 16)
+                    .map_err(|error| format!("invalid hex fixture byte {digits:?}: {error}"))
+            })
+            .collect()
     }
 
-    fn write_current_v3(path: &Path, entries: &[OpEntry], head_id: u64) {
-        let mut bytes = Vec::new();
-        write_header_to_vec(
-            &mut bytes,
-            u32::from(V3::VERSION),
-            entries.len() as u64,
-            head_id,
-        );
-        let mut entry_offsets = Vec::with_capacity(entries.len());
-        for entry in entries {
-            entry_offsets.push(EntryOffsetRecord {
-                entry_id: entry.id,
-                entry_offset: bytes.len() as u64,
-            });
-            encode_entry(entry, &mut bytes).unwrap();
-        }
-        let entry_data_end = bytes.len() as u64;
-        let batch_index =
-            build_index_sections(entries.iter().cloned().zip(entry_offsets.iter().copied()))
-                .unwrap();
-        write_index_sections_to_vec(
-            &mut bytes,
-            IndexWritePlan {
-                entry_data_end,
-                entry_offsets: &entry_offsets,
-                batch_offsets: &batch_index.batch_offsets,
-                batch_dir: &batch_index.batch_dir,
-                tx_key_bytes: &batch_index.tx_key_bytes,
-                tx_dir: &batch_index.tx_dir,
-                entry_count: entries.len() as u64,
-                head_id,
-            },
-        );
-        std::fs::write(path, bytes).unwrap();
+    fn directory_listing(path: &Path) -> Vec<String> {
+        let mut entries = std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
     }
 
-    #[derive(Clone, Copy)]
-    enum TestEntrySchema {
-        Current,
-        AtomicNoHead,
-        PreAtomic,
-    }
-
-    fn write_mixed_schema_v3(path: &Path, entries: &[(OpEntry, TestEntrySchema)], head_id: u64) {
-        let mut bytes = Vec::new();
-        write_header_to_vec(
-            &mut bytes,
-            u32::from(V3::VERSION),
-            entries.len() as u64,
-            head_id,
-        );
-        let mut entry_offsets = Vec::with_capacity(entries.len());
-        for (entry, schema) in entries {
-            entry_offsets.push(EntryOffsetRecord {
-                entry_id: entry.id,
-                entry_offset: bytes.len() as u64,
-            });
-            match schema {
-                TestEntrySchema::Current => encode_entry(entry, &mut bytes).unwrap(),
-                TestEntrySchema::AtomicNoHead => {
-                    encode_entry_with(entry, &mut bytes, encode_atomic_no_head).unwrap()
-                }
-                TestEntrySchema::PreAtomic => {
-                    encode_entry_with(entry, &mut bytes, encode_pre_atomic).unwrap()
-                }
-            }
-        }
-        let entry_data_end = bytes.len() as u64;
-        let batch_index = build_index_sections(
-            entries
-                .iter()
-                .map(|(entry, _schema)| entry.clone())
-                .zip(entry_offsets.iter().copied()),
-        )
-        .unwrap();
-        write_index_sections_to_vec(
-            &mut bytes,
-            IndexWritePlan {
-                entry_data_end,
-                entry_offsets: &entry_offsets,
-                batch_offsets: &batch_index.batch_offsets,
-                batch_dir: &batch_index.batch_dir,
-                tx_key_bytes: &batch_index.tx_key_bytes,
-                tx_dir: &batch_index.tx_dir,
-                entry_count: entries.len() as u64,
-                head_id,
-            },
-        );
-        std::fs::write(path, bytes).unwrap();
-    }
-
-    fn corrupt_payload_first_byte(path: &Path, entry_index: usize) {
-        let mut bytes = std::fs::read(path).unwrap();
-        let (offsets, _footer) = read_current_entry_offsets(&bytes);
-        let entry_offset = offsets[entry_index].entry_offset as usize;
-        let payload_offset = {
-            let mut cursor = Cursor::new(&bytes[entry_offset..]);
-            let _id = cursor.read_u64().unwrap();
-            let _batch_id = cursor.read_u64().unwrap();
-            let _batch_index = cursor.read_u32().unwrap();
-            let _timestamp_secs = cursor.read_i64().unwrap();
-            let _timestamp_ns = cursor.read_u32().unwrap();
-            let _undone = cursor.read_u8().unwrap();
-            let scope_len = cursor.read_u16().unwrap() as usize;
-            let _scope = cursor.read_bytes(scope_len).unwrap();
-            let op_data_len = cursor.read_u32().unwrap() as usize;
-            assert!(op_data_len > 0);
-            cursor.offset
+    fn refused_without_mutation(path: &Path) -> HeddleError {
+        let parent = path.parent().unwrap();
+        let before = std::fs::read(path).unwrap();
+        let before_listing = directory_listing(parent);
+        let error = PackedOpLog::ensure_current(path).expect_err("legacy oplog must be refused");
+        let repeated = PackedOpLog::ensure_current(path)
+            .expect_err("repeated legacy oplog open must be refused");
+        let load_error = match PackedOpLog::load(path) {
+            Ok(_) => panic!("legacy oplog load must be refused"),
+            Err(error) => error,
         };
-        bytes[entry_offset + payload_offset] = 0xc1;
-        std::fs::write(path, bytes).unwrap();
+
+        assert_eq!(repeated.to_string(), error.to_string());
+        if matches!(
+            &error,
+            HeddleError::StorageFormatMigrationRequired { .. }
+                | HeddleError::StorageFormatTooNew { .. }
+        ) {
+            assert_eq!(load_error.to_string(), error.to_string());
+        }
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        let after_listing = directory_listing(parent);
+        assert_eq!(after_listing, before_listing);
+        let file_name = path.file_name().unwrap().to_string_lossy();
+        assert!(
+            !after_listing
+                .iter()
+                .any(|name| name.starts_with(&format!(".{file_name}.tmp-"))),
+            "refusal must not leave an atomic-write temp file"
+        );
+        assert!(
+            !after_listing
+                .iter()
+                .any(|name| name.starts_with(&format!("{file_name}.corrupt"))),
+            "refusal must not quarantine a non-corrupt legacy oplog"
+        );
+        assert!(
+            !recovery_sidecar_path(path).exists(),
+            "refusal must not create a recovery sidecar"
+        );
+        error
     }
 
     fn read_current_entry_offsets(bytes: &[u8]) -> (Vec<EntryOffsetRecord>, PackedFooter) {
@@ -2786,16 +2434,6 @@ mod tests {
             });
         }
         (offsets, footer)
-    }
-
-    fn load_for_migration_path(path: &Path) -> PackedOpLog {
-        let bytes = std::fs::read(path).unwrap();
-        let data = load_for_migration(&bytes).unwrap();
-        PackedOpLog {
-            entries: data.entries,
-            head_id: data.head_id,
-            path: path.to_path_buf(),
-        }
     }
 
     #[test]
@@ -2844,7 +2482,7 @@ mod tests {
     }
 
     #[test]
-    fn read_head_id_rejects_unsupported_version() {
+    fn read_head_id_rejects_too_new_container_without_mutation() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("oplog.bin");
         let mut log = PackedOpLog::new(path.clone());
@@ -2855,623 +2493,152 @@ mod tests {
         assert_eq!(PackedOpLog::read_head_id(&path).unwrap(), 1);
 
         let mut bytes = std::fs::read(&path).unwrap();
-        bytes[8..12].copy_from_slice(&(u32::from(Latest::VERSION) + 1).to_le_bytes());
+        bytes[8..12].copy_from_slice(&(CURRENT_CONTAINER_VERSION + 1).to_le_bytes());
         std::fs::write(&path, &bytes).unwrap();
 
+        let before = std::fs::read(&path).unwrap();
         let err = PackedOpLog::read_head_id(&path).unwrap_err();
         assert!(
-            matches!(&err, HeddleError::InvalidObject(message) if message.contains("unsupported oplog version")),
-            "fast path must reject an unsupported version, got: {err:?}"
-        );
-        assert!(PackedOpLog::load(&path).is_err());
-    }
-
-    #[test]
-    fn v2_decodes_and_ensure_latest_migrates_to_v4() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("oplog.bin");
-        let entries = vec![make_entry(1, Some("lane")), make_entry(2, Some("lane"))];
-        write_v2(&path, entries.clone(), 2);
-
-        assert!(PackedOpLog::read_head_id(&path).is_err());
-        assert!(PackedOpLog::load(&path).is_err());
-        let loaded = load_for_migration_path(&path);
-        assert_eq!(loaded.entries.len(), 2);
-        assert_eq!(
-            PackedOpLog::on_disk_version(&path).unwrap(),
-            u32::from(V2::VERSION)
-        );
-
-        PackedOpLog::ensure_latest(&path).unwrap();
-        assert_eq!(
-            PackedOpLog::on_disk_version(&path).unwrap(),
-            u32::from(Latest::VERSION)
-        );
-        assert_eq!(
-            read_header(&path).unwrap().record_schema_version,
-            Some(OpRecordSchemaVersion::Current)
-        );
-        assert_eq!(PackedOpLog::read_head_id(&path).unwrap(), 2);
-        assert_eq!(
-            PackedOpLogIndex::open(&path)
-                .unwrap()
-                .last_entry()
-                .unwrap()
-                .unwrap()
-                .id,
-            2
-        );
-    }
-
-    #[test]
-    fn pre_atomic_v2_records_migrate_to_current_schema() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("oplog.bin");
-        let detached_snapshot = ChangeId::generate();
-        let attached_snapshot = ChangeId::generate();
-        let goto_target = ChangeId::generate();
-        let fork_from = ChangeId::generate();
-        let fork_result = ChangeId::generate();
-        let collapse_source = ChangeId::generate();
-        let collapse_result = ChangeId::generate();
-        let thread_state = ChangeId::generate();
-        let marker_state = ChangeId::generate();
-
-        let mut entries = Vec::new();
-        let mut snapshot_detached = make_batch_entry(1, 1, 0, Some("lane"));
-        snapshot_detached.operation = OpRecord::Snapshot {
-            new_state: detached_snapshot,
-            prev_head: None,
-            head: Some(detached_snapshot),
-            thread: None,
-        };
-        entries.push(snapshot_detached);
-
-        let mut snapshot_attached = make_batch_entry(2, 2, 0, Some("lane"));
-        snapshot_attached.operation = OpRecord::Snapshot {
-            new_state: attached_snapshot,
-            prev_head: Some(detached_snapshot),
-            head: None,
-            thread: Some("main".to_string()),
-        };
-        entries.push(snapshot_attached);
-
-        let mut goto = make_batch_entry(3, 3, 0, Some("lane"));
-        goto.operation = OpRecord::Goto {
-            target: goto_target,
-            prev_head: Some(attached_snapshot),
-            head: goto_target,
-        };
-        entries.push(goto);
-
-        let mut fork = make_batch_entry(4, 4, 0, Some("lane"));
-        fork.operation = OpRecord::Fork {
-            from: fork_from,
-            new_state: fork_result,
-            thread: None,
-            head: None,
-        };
-        entries.push(fork);
-
-        let mut collapse = make_batch_entry(5, 5, 0, Some("lane"));
-        collapse.operation = OpRecord::Collapse {
-            sources: vec![collapse_source, fork_result],
-            result: collapse_result,
-            thread: None,
-            pre_thread_state: None,
-        };
-        entries.push(collapse);
-
-        let mut thread_create = make_batch_entry(6, 6, 0, Some("lane"));
-        thread_create.operation = OpRecord::ThreadCreate {
-            name: "main".to_string(),
-            state: thread_state,
-            manager_snapshot: Some(vec![1, 2, 3]),
-        };
-        entries.push(thread_create);
-
-        let mut marker_create = make_batch_entry(7, 7, 0, Some("lane"));
-        marker_create.operation = OpRecord::MarkerCreate {
-            name: "release".to_string(),
-            state: marker_state,
-        };
-        entries.push(marker_create);
-
-        let mut tx_commit = make_batch_entry(8, 7, 1, Some("lane"));
-        tx_commit.operation = OpRecord::TransactionCommit {
-            transaction_id: "tx-pre-atomic".to_string(),
-            op_count: 1,
-        };
-        entries.push(tx_commit);
-
-        write_pre_atomic_v2(&path, &entries, 8);
-        assert!(PackedOpLog::read_head_id(&path).is_err());
-
-        assert!(PackedOpLog::load(&path).is_err());
-        let loaded = load_for_migration_path(&path);
-        assert_eq!(loaded.entries.len(), entries.len());
-        assert!(matches!(
-            &loaded.entries[0].operation,
-            OpRecord::Snapshot { new_state, head: Some(head), thread: None, .. }
-                if *new_state == detached_snapshot && *head == detached_snapshot
-        ));
-        assert!(matches!(
-            &loaded.entries[1].operation,
-            OpRecord::Snapshot { new_state, head: None, thread: Some(thread), .. }
-                if *new_state == attached_snapshot && thread == "main"
-        ));
-        assert!(matches!(
-            &loaded.entries[2].operation,
-            OpRecord::Goto { target, head, .. } if *target == goto_target && *head == goto_target
-        ));
-        assert!(matches!(
-            &loaded.entries[3].operation,
-            OpRecord::Fork { from, new_state, thread: None, head: None }
-                if *from == fork_from && *new_state == fork_result
-        ));
-        assert!(matches!(
-            &loaded.entries[4].operation,
-            OpRecord::Collapse { sources, result, thread: None, pre_thread_state: None }
-                if sources == &vec![collapse_source, fork_result] && *result == collapse_result
-        ));
-
-        PackedOpLog::ensure_latest(&path).unwrap();
-        assert_eq!(PackedOpLog::read_head_id(&path).unwrap(), 8);
-        assert_eq!(
-            read_header(&path).unwrap().record_schema_version,
-            Some(OpRecordSchemaVersion::Current)
-        );
-        let index = PackedOpLogIndex::open(&path).unwrap();
-        assert_eq!(
-            index.transaction_commit("tx-pre-atomic").unwrap(),
-            Some((8, 7))
-        );
-        assert_eq!(
-            index
-                .recent_entries(8)
-                .unwrap()
-                .into_iter()
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>(),
-            vec![8, 7, 6, 5, 4, 3, 2, 1]
-        );
-        PackedOpLog::ensure_latest(&path).unwrap();
-        assert_eq!(PackedOpLog::read_head_id(&path).unwrap(), 8);
-    }
-
-    #[test]
-    fn atomic_no_head_v2_records_preserve_head_remote_and_transaction_mappings() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("oplog.bin");
-        let snapshot_state = ChangeId::generate();
-        let goto_target = ChangeId::generate();
-        let remote_state = ChangeId::generate();
-        let undo_state = ChangeId::generate();
-
-        let mut entries = Vec::new();
-        let mut snapshot = make_batch_entry(1, 1, 0, Some("lane"));
-        snapshot.operation = OpRecord::Snapshot {
-            new_state: snapshot_state,
-            prev_head: None,
-            head: Some(snapshot_state),
-            thread: None,
-        };
-        entries.push(snapshot);
-
-        let mut goto = make_batch_entry(2, 2, 0, Some("lane"));
-        goto.operation = OpRecord::Goto {
-            target: goto_target,
-            prev_head: Some(snapshot_state),
-            head: goto_target,
-        };
-        entries.push(goto);
-
-        let mut remote_update = make_batch_entry(3, 3, 0, Some("lane"));
-        remote_update.operation = OpRecord::RemoteThreadUpdate {
-            remote: "origin".to_string(),
-            thread: "main".to_string(),
-            state: remote_state,
-        };
-        entries.push(remote_update);
-
-        let mut remote_delete = make_batch_entry(4, 4, 0, Some("lane"));
-        remote_delete.operation = OpRecord::RemoteThreadDelete {
-            remote: "origin".to_string(),
-            thread: "old".to_string(),
-            state: remote_state,
-        };
-        entries.push(remote_delete);
-
-        let mut undo_recovery = make_batch_entry(5, 5, 0, Some("lane"));
-        undo_recovery.operation = OpRecord::UndoRecoveryUpdate { state: undo_state };
-        entries.push(undo_recovery);
-
-        let mut tx_commit = make_batch_entry(6, 3, 1, Some("lane"));
-        tx_commit.operation = OpRecord::TransactionCommit {
-            transaction_id: "tx-atomic".to_string(),
-            op_count: 1,
-        };
-        entries.push(tx_commit);
-
-        write_atomic_no_head_v2(&path, &entries, 6);
-
-        assert!(PackedOpLog::load(&path).is_err());
-        let loaded = load_for_migration_path(&path);
-        assert!(matches!(
-            &loaded.entries[0].operation,
-            OpRecord::Snapshot { new_state, head: Some(head), thread: None, .. }
-                if *new_state == snapshot_state && *head == snapshot_state
-        ));
-        assert!(matches!(
-            &loaded.entries[1].operation,
-            OpRecord::Goto { target, head, .. } if *target == goto_target && *head == goto_target
-        ));
-        assert!(matches!(
-            &loaded.entries[2].operation,
-            OpRecord::RemoteThreadUpdate { remote, thread, state }
-                if remote == "origin" && thread == "main" && *state == remote_state
-        ));
-        assert!(matches!(
-            &loaded.entries[3].operation,
-            OpRecord::RemoteThreadDelete { remote, thread, state }
-                if remote == "origin" && thread == "old" && *state == remote_state
-        ));
-        assert!(matches!(
-            &loaded.entries[4].operation,
-            OpRecord::UndoRecoveryUpdate { state } if *state == undo_state
-        ));
-
-        PackedOpLog::ensure_latest(&path).unwrap();
-        let index = PackedOpLogIndex::open(&path).unwrap();
-        assert_eq!(index.transaction_commit("tx-atomic").unwrap(), Some((6, 3)));
-    }
-
-    #[test]
-    fn current_v3_attached_nil_head_snapshot_migrates_without_losing_thread() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("oplog.bin");
-        let snapshot_state = ChangeId::generate();
-        let mut snapshot = make_batch_entry(1, 1, 0, Some("lane"));
-        snapshot.operation = OpRecord::Snapshot {
-            new_state: snapshot_state,
-            prev_head: None,
-            head: None,
-            thread: Some("main".to_string()),
-        };
-        write_current_v3(&path, &[snapshot], 1);
-
-        assert_eq!(
-            read_header(&path).unwrap().record_schema_version,
-            None,
-            "v3 is intentionally unversioned"
-        );
-        assert!(PackedOpLog::load(&path).is_err());
-        let loaded = load_for_migration_path(&path);
-        assert!(matches!(
-            &loaded.entries[0].operation,
-            OpRecord::Snapshot { head: None, thread: Some(thread), .. } if thread == "main"
-        ));
-
-        PackedOpLog::ensure_latest(&path).unwrap();
-        assert_eq!(
-            read_header(&path).unwrap().record_schema_version,
-            Some(OpRecordSchemaVersion::Current)
-        );
-        let migrated = PackedOpLog::load(&path).unwrap();
-        assert!(matches!(
-            &migrated.entries[0].operation,
-            OpRecord::Snapshot { new_state, head: None, thread: Some(thread), .. }
-                if *new_state == snapshot_state && thread == "main"
-        ));
-    }
-
-    #[test]
-    fn mixed_schema_v3_entries_migrate_per_entry_to_current_schema() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("oplog.bin");
-        let pre_atomic_state = ChangeId::generate();
-        let atomic_state = ChangeId::generate();
-        let current_state = ChangeId::generate();
-
-        let mut pre_atomic_snapshot = make_batch_entry(1, 1, 0, Some("lane"));
-        pre_atomic_snapshot.operation = OpRecord::Snapshot {
-            new_state: pre_atomic_state,
-            prev_head: None,
-            head: Some(pre_atomic_state),
-            thread: None,
-        };
-
-        let mut atomic_no_head_snapshot = make_batch_entry(2, 2, 0, Some("lane"));
-        atomic_no_head_snapshot.operation = OpRecord::Snapshot {
-            new_state: atomic_state,
-            prev_head: Some(pre_atomic_state),
-            head: Some(atomic_state),
-            thread: None,
-        };
-
-        let mut current_attached_snapshot = make_batch_entry(3, 3, 0, Some("lane"));
-        current_attached_snapshot.operation = OpRecord::Snapshot {
-            new_state: current_state,
-            prev_head: Some(atomic_state),
-            head: None,
-            thread: Some("main".to_string()),
-        };
-
-        let entries = vec![
-            (pre_atomic_snapshot, TestEntrySchema::PreAtomic),
-            (atomic_no_head_snapshot, TestEntrySchema::AtomicNoHead),
-            (current_attached_snapshot, TestEntrySchema::Current),
-        ];
-        write_mixed_schema_v3(&path, &entries, 3);
-
-        assert!(PackedOpLog::load(&path).is_err());
-        let loaded = load_for_migration_path(&path);
-        assert_eq!(loaded.entries.len(), 3);
-        assert!(matches!(
-            &loaded.entries[0].operation,
-            OpRecord::Snapshot { new_state, prev_head: None, head: Some(head), thread: None }
-                if *new_state == pre_atomic_state && *head == pre_atomic_state
-        ));
-        assert!(matches!(
-            &loaded.entries[1].operation,
-            OpRecord::Snapshot { new_state, prev_head: Some(prev), head: Some(head), thread: None }
-                if *new_state == atomic_state
-                    && *prev == pre_atomic_state
-                    && *head == atomic_state
-        ));
-        assert!(matches!(
-            &loaded.entries[2].operation,
-            OpRecord::Snapshot { new_state, prev_head: Some(prev), head: None, thread: Some(thread) }
-                if *new_state == current_state && *prev == atomic_state && thread == "main"
-        ));
-
-        PackedOpLog::ensure_latest(&path).unwrap();
-        assert_eq!(
-            read_header(&path).unwrap().record_schema_version,
-            Some(OpRecordSchemaVersion::Current)
-        );
-        let migrated = PackedOpLog::load(&path).unwrap();
-        assert_eq!(
-            migrated
-                .entries
-                .iter()
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>(),
-            vec![1, 2, 3]
-        );
-        assert!(matches!(
-            &migrated.entries[0].operation,
-            OpRecord::Snapshot { new_state, head: Some(head), thread: None, .. }
-                if *new_state == pre_atomic_state && *head == pre_atomic_state
-        ));
-        assert!(matches!(
-            &migrated.entries[2].operation,
-            OpRecord::Snapshot { new_state, head: None, thread: Some(thread), .. }
-                if *new_state == current_state && thread == "main"
-        ));
-        assert_eq!(
-            PackedOpLogIndex::open(&path)
-                .unwrap()
-                .recent_entries(3)
-                .unwrap()
-                .iter()
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>(),
-            vec![3, 2, 1]
-        );
-    }
-
-    #[test]
-    fn unversioned_entry_with_unknown_schema_names_failed_entry_index() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("oplog.bin");
-        write_current_v3(
-            &path,
-            &[make_entry(1, Some("lane")), make_entry(2, Some("lane"))],
-            2,
-        );
-        corrupt_payload_first_byte(&path, 1);
-
-        let err = match PackedOpLog::ensure_latest(&path) {
-            Ok(_) => panic!("expected migration to fail on a corrupted unversioned entry"),
-            Err(err) => err,
-        };
-        assert!(
-            matches!(&err, HeddleError::InvalidObject(message)
-                if message.contains("entry index 1")
-                    && message.contains("any known OpRecord schema")),
-            "unknown per-entry schema failure must name the entry index, got: {err:?}"
-        );
-    }
-
-    #[test]
-    fn current_v3_records_are_semantically_identical_after_ensure_latest() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("oplog.bin");
-        let state_1 = ChangeId::generate();
-        let state_2 = ChangeId::generate();
-        let state_3 = ChangeId::generate();
-        let state_4 = ChangeId::generate();
-        let state_5 = ChangeId::generate();
-        let state_6 = ChangeId::generate();
-        let state_7 = ChangeId::generate();
-        let state_8 = ChangeId::generate();
-
-        let mut entries = Vec::new();
-        let mut attached_snapshot = make_batch_entry(1, 1, 0, Some("lane"));
-        attached_snapshot.operation = OpRecord::Snapshot {
-            new_state: state_1,
-            prev_head: None,
-            head: None,
-            thread: Some("main".to_string()),
-        };
-        entries.push(attached_snapshot);
-
-        let mut detached_snapshot = make_batch_entry(2, 2, 0, Some("lane"));
-        detached_snapshot.operation = OpRecord::Snapshot {
-            new_state: state_2,
-            prev_head: Some(state_1),
-            head: Some(state_2),
-            thread: None,
-        };
-        entries.push(detached_snapshot);
-
-        let mut goto = make_batch_entry(3, 3, 0, Some("lane"));
-        goto.operation = OpRecord::Goto {
-            target: state_3,
-            prev_head: Some(state_2),
-            head: state_3,
-        };
-        entries.push(goto);
-
-        let mut fork_thread = make_batch_entry(4, 4, 0, Some("lane"));
-        fork_thread.operation = OpRecord::Fork {
-            from: state_3,
-            new_state: state_4,
-            thread: Some("topic".to_string()),
-            head: None,
-        };
-        entries.push(fork_thread);
-
-        let mut fork_head = make_batch_entry(5, 5, 0, Some("lane"));
-        fork_head.operation = OpRecord::Fork {
-            from: state_4,
-            new_state: state_5,
-            thread: None,
-            head: Some(state_5),
-        };
-        entries.push(fork_head);
-
-        let mut collapse = make_batch_entry(6, 6, 0, Some("lane"));
-        collapse.operation = OpRecord::Collapse {
-            sources: vec![state_4, state_5],
-            result: state_6,
-            thread: Some("main".to_string()),
-            pre_thread_state: None,
-        };
-        entries.push(collapse);
-
-        let mut remote_update = make_batch_entry(7, 7, 0, Some("lane"));
-        remote_update.operation = OpRecord::RemoteThreadUpdate {
-            remote: "origin".to_string(),
-            thread: "main".to_string(),
-            state: state_7,
-        };
-        entries.push(remote_update);
-
-        let mut remote_delete = make_batch_entry(8, 8, 0, Some("lane"));
-        remote_delete.operation = OpRecord::RemoteThreadDelete {
-            remote: "origin".to_string(),
-            thread: "old".to_string(),
-            state: state_7,
-        };
-        entries.push(remote_delete);
-
-        let mut undo = make_batch_entry(9, 9, 0, Some("lane"));
-        undo.operation = OpRecord::UndoRecoveryUpdate { state: state_8 };
-        entries.push(undo);
-
-        write_current_v3(&path, &entries, 9);
-        assert!(PackedOpLog::load(&path).is_err());
-        let before = load_for_migration_path(&path);
-        let before_entries = before
-            .entries
-            .iter()
-            .map(|entry| format!("{entry:?}"))
-            .collect::<Vec<_>>();
-        let before_payloads = before
-            .entries
-            .iter()
-            .map(|entry| encode_latest_record(&entry.operation).unwrap())
-            .collect::<Vec<_>>();
-
-        PackedOpLog::ensure_latest(&path).unwrap();
-        let after = PackedOpLog::load(&path).unwrap();
-        let after_entries = after
-            .entries
-            .iter()
-            .map(|entry| format!("{entry:?}"))
-            .collect::<Vec<_>>();
-        let after_payloads = after
-            .entries
-            .iter()
-            .map(|entry| encode_latest_record(&entry.operation).unwrap())
-            .collect::<Vec<_>>();
-
-        assert_eq!(after_entries, before_entries);
-        assert_eq!(after_payloads, before_payloads);
-        assert_eq!(PackedOpLog::read_head_id(&path).unwrap(), 9);
-    }
-
-    #[test]
-    fn checked_in_pre_atomic_fixture_opens_migrates_and_reads() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("oplog.bin");
-        std::fs::write(
-            &path,
-            include_bytes!(
-                "../../tests/fixtures/issue-449-legacy-pre-atomic/.heddle/oplog/oplog.bin"
+            matches!(
+                &err,
+                HeddleError::StorageFormatTooNew {
+                    storage,
+                    found,
+                    supported,
+                } if storage == OPLOG_CONTAINER_STORAGE
+                    && *found == CURRENT_CONTAINER_VERSION + 1
+                    && *supported == CURRENT_CONTAINER_VERSION
             ),
-        )
-        .unwrap();
-
+            "fast path must reject a too-new version, got: {err:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
         assert!(PackedOpLog::load(&path).is_err());
-        let loaded = load_for_migration_path(&path);
-        assert_eq!(loaded.entries.len(), 6);
-        assert!(matches!(
-            &loaded.entries[0].operation,
-            OpRecord::Snapshot {
-                head: Some(_),
-                thread: None,
-                ..
-            }
-        ));
-        assert!(matches!(
-            &loaded.entries[1].operation,
-            OpRecord::Snapshot { head: None, thread: Some(thread), .. } if thread == "main"
-        ));
-        assert!(matches!(
-            &loaded.entries[3].operation,
-            OpRecord::Fork { from, new_state, thread: None, head: None }
-                if *from == ChangeId::from_bytes([4; 16])
-                    && *new_state == ChangeId::from_bytes([5; 16])
-        ));
-
-        PackedOpLog::ensure_latest(&path).unwrap();
-        assert_eq!(PackedOpLog::read_head_id(&path).unwrap(), 6);
-        assert_eq!(
-            read_header(&path).unwrap().record_schema_version,
-            Some(OpRecordSchemaVersion::Current)
-        );
-        let index = PackedOpLogIndex::open(&path).unwrap();
-        assert_eq!(
-            index.transaction_commit("fixture-tx").unwrap(),
-            Some((6, 5))
-        );
-        assert_eq!(index.recent_entries(1).unwrap()[0].id, 6);
-
-        let migrated_once = std::fs::read(&path).unwrap();
-        PackedOpLog::ensure_latest(&path).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), migrated_once);
     }
 
     #[test]
-    fn v2_migration_crash_temp_file_leaves_old_file_authoritative() {
+    fn v2_and_v3_containers_are_refused_without_mutation() {
+        for version in [2, 3] {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("oplog.bin");
+            write_legacy_header(&path, version);
+            let error = refused_without_mutation(&path);
+            assert!(
+                matches!(
+                    &error,
+                    HeddleError::StorageFormatMigrationRequired {
+                        storage,
+                        found,
+                        required,
+                    } if storage == OPLOG_CONTAINER_STORAGE
+                        && *found == version
+                        && *required == CURRENT_CONTAINER_VERSION
+                ),
+                "legacy container {version} must require migration, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn v4_legacy_record_schemas_are_refused_without_mutation() {
+        for schema in 1..=3 {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("oplog.bin");
+            write_v4_header_with_schema(&path, schema);
+            let error = refused_without_mutation(&path);
+            assert!(
+                matches!(
+                    &error,
+                    HeddleError::StorageFormatMigrationRequired {
+                        storage,
+                        found,
+                        required,
+                    } if storage == "oplog record schema"
+                        && *found == schema
+                        && *required == CURRENT_OP_RECORD_SCHEMA_VERSION
+                ),
+                "legacy record schema {schema} must require migration, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn v4_too_new_record_schema_is_refused_without_mutation() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("oplog.bin");
-        write_v2(&path, vec![make_entry(1, Some("lane"))], 1);
-        std::fs::write(temp_path(&path), b"partial v3").unwrap();
+        let schema = CURRENT_OP_RECORD_SCHEMA_VERSION + 1;
+        write_v4_header_with_schema(&path, schema);
 
-        assert!(PackedOpLog::load(&path).is_err());
-        let loaded = load_for_migration_path(&path);
-        assert_eq!(loaded.head_id, 1);
+        let error = refused_without_mutation(&path);
+        assert!(
+            matches!(
+                &error,
+                HeddleError::StorageFormatTooNew {
+                    storage,
+                    found,
+                    supported,
+                } if storage == "oplog record schema"
+                    && *found == schema
+                    && *supported == CURRENT_OP_RECORD_SCHEMA_VERSION
+            ),
+            "too-new record schema must be refused, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn checked_in_change_id_fixture_is_refused_without_mutation() {
+        let tmp = TempDir::new().unwrap();
+        let oplog_dir = tmp.path().join("oplog");
+        std::fs::create_dir(&oplog_dir).unwrap();
+        let path = oplog_dir.join("oplog.bin");
+        let bytes = decode_hex_fixture(include_str!(
+            "../../tests/fixtures/issue-449-legacy-pre-atomic/oplog.bin.hex"
+        ))
+        .unwrap();
+        assert_eq!(bytes.len(), 704, "historical fixture length changed");
+        let expected_digest =
+            decode_hex_fixture("584f0dab2367507f86c6184bc29660765c20416fe529a1618eb064a960708c33")
+                .unwrap();
         assert_eq!(
-            PackedOpLog::on_disk_version(&path).unwrap(),
-            u32::from(V2::VERSION)
+            &Sha256::digest(&bytes)[..],
+            expected_digest.as_slice(),
+            "historical fixture bytes changed"
+        );
+        assert_eq!(&bytes[..12], b"LMOPLOG\0\x02\0\0\0");
+        std::fs::write(&path, bytes).unwrap();
+
+        let error = refused_without_mutation(&path);
+        assert!(
+            matches!(
+                &error,
+                HeddleError::StorageFormatMigrationRequired {
+                    storage,
+                    found: 2,
+                    required,
+                } if storage == OPLOG_CONTAINER_STORAGE
+                    && *required == CURRENT_CONTAINER_VERSION
+            ),
+            "checked-in legacy fixture must require migration, got {error:?}"
         );
 
-        PackedOpLog::ensure_latest(&path).unwrap();
-        assert_eq!(PackedOpLog::read_head_id(&path).unwrap(), 1);
+        let before = std::fs::read(&path).unwrap();
+        let before_root_listing = directory_listing(tmp.path());
+        let before_oplog_listing = directory_listing(&oplog_dir);
+        let oplog = crate::oplog::OpLog::new_unattributed(tmp.path());
+        for _ in 0..2 {
+            let public_error = oplog
+                .head_id()
+                .expect_err("public OpLog reads must refuse the legacy fixture");
+            assert_eq!(public_error.to_string(), error.to_string());
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(directory_listing(tmp.path()), before_root_listing);
+        assert_eq!(directory_listing(&oplog_dir), before_oplog_listing);
+    }
+
+    #[test]
+    fn hex_fixture_decoder_rejects_odd_or_invalid_input() {
+        assert!(decode_hex_fixture("0").is_err());
+        assert!(decode_hex_fixture("gg").is_err());
     }
 
     #[test]
@@ -3482,14 +2649,22 @@ mod tests {
         let mut bytes = Vec::new();
         write_header_to_vec(&mut bytes, 1, 0, 0);
         std::fs::write(&path, bytes).unwrap();
-        let err = PackedOpLog::ensure_latest(&path).unwrap_err();
+        let err = refused_without_mutation(&path);
         assert!(
-            matches!(&err, HeddleError::InvalidObject(message) if message.contains("unsupported oplog version 1")),
+            matches!(
+                &err,
+                HeddleError::StorageFormatMigrationRequired {
+                    storage,
+                    found: 1,
+                    required,
+                } if storage == OPLOG_CONTAINER_STORAGE
+                    && *required == CURRENT_CONTAINER_VERSION
+            ),
             "v1 must fail loudly, got {err:?}"
         );
 
         std::fs::write(&path, b"not an oplog").unwrap();
-        let err = PackedOpLog::ensure_latest(&path).unwrap_err();
+        let err = refused_without_mutation(&path);
         assert!(
             matches!(&err, HeddleError::InvalidObject(message) if message.contains("invalid oplog magic") || message.contains("truncated")),
             "corrupt header must fail loudly, got {err:?}"
@@ -3586,12 +2761,42 @@ mod tests {
     }
 
     #[test]
+    fn index_collect_batches_after_stops_at_newest_first_since_boundary() {
+        const BATCH_COUNT: u64 = 128;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        let mut log = PackedOpLog::new(path.clone());
+        log.append((1..=BATCH_COUNT).map(|id| make_entry(id, None)).collect());
+        log.head_id = BATCH_COUNT;
+        log.save().unwrap();
+
+        let index = PackedOpLogIndex::open(&path).unwrap();
+        BATCH_DIR_RECORDS_VISITED.with(|visits| visits.set(0));
+        let batches = index
+            .collect_batches_after_scoped(BATCH_COUNT - 2, usize::MAX, |_| true, None)
+            .unwrap();
+
+        assert_eq!(
+            batches.iter().map(|batch| batch.id).collect::<Vec<_>>(),
+            vec![BATCH_COUNT, BATCH_COUNT - 1]
+        );
+        BATCH_DIR_RECORDS_VISITED.with(|visits| {
+            assert_eq!(
+                visits.get(),
+                3,
+                "the newest-first batch directory must stop at the since boundary"
+            );
+        });
+    }
+
+    #[test]
     fn transaction_index_finds_commit_and_batch_records() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("oplog.bin");
         let mut op = make_entry(1, Some("lane"));
         op.operation = OpRecord::Snapshot {
-            new_state: ChangeId::generate(),
+            new_state: crate::oplog::fresh_state_id(),
             prev_head: None,
             head: None,
             thread: Some("main".into()),
@@ -3619,7 +2824,7 @@ mod tests {
         let path = tmp.path().join("oplog.bin");
         let mut op = make_entry(1, Some("lane"));
         op.operation = OpRecord::Snapshot {
-            new_state: ChangeId::generate(),
+            new_state: crate::oplog::fresh_state_id(),
             prev_head: None,
             head: None,
             thread: Some("main".into()),

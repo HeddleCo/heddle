@@ -33,6 +33,8 @@ Heddle is still moving quickly. Prefer the current model over preserving legacy 
 
 - Do not add backwards-compatibility shims unless the user explicitly asks for them.
 - When a model or API changes, it is acceptable to update callers, tests, and docs to the new behavior instead of keeping legacy support.
+- Do not use long explanatory comments, compatibility shims, fallback paths, or transitional adapters to compensate for a shallow or unclear module interface. Redesign the seam, complete the migration, or stop and ask for alignment.
+- Apply the same rule when touching existing code: remove obsolete shims and explanation-heavy workarounds when the owning module can make the invariant explicit instead.
 
 ## Project Overview
 
@@ -52,7 +54,7 @@ Heddle is an AI-native version control system written in Rust. It combines conte
 - Wire protocol for remote sync complete
 - Git Projection import/export/sync implemented
 - Packed refs, packfiles, shallow clone, hooks, and crypto signing implemented
-- Multi-agent parallel materialized threads implemented (`start --path`, `thread list/show/drop`, `actor spawn/list/done`)
+- Multi-agent parallel materialized threads and lease-backed agent workflows implemented (`start --path`, `thread list/show/drop`, `agent reserve/heartbeat/capture/ready/release`)
 - Hosted namespaces, repositories, grants, and content inspection APIs implemented in foundation form
 - Web product in progress: marketing site (shipped), hosted inspection and admin surfaces (foundation), request-access funnel (shipped)
 - GitHub App integration (`heddlebot`): PR semantic review summaries, webhook handling, OAuth login (foundation)
@@ -127,8 +129,8 @@ Note: `HEDDLE_SESSION_ID` and `HEDDLE_SESSION_SEGMENT` are **not implemented**. 
 - Provenance-backed local blame and hosted provenance inspection are implemented; richer compare/review UX on top of provenance is still planned
 - Hosted builds / workflows / artifact surfaces are planned, not implemented
 - `heddle undo` is scoped to the current checkout lane; it only rewinds operations recorded from that checkout's HEAD path
-- `heddle actor spawn` does not create filesystem isolation — it only creates a thread and registry entry; use `heddle start <name> --path <dir>` to get an isolated checkout with its own working directory
-- `heddle actor spawn` has no `--from` flag; it always bases the new actor's thread on the current HEAD
+- Agent presence records describe attribution and work context; only a token-authenticated writer lease grants exclusive write authority
+- Use `heddle start <name> --path <dir>` for filesystem isolation, then `heddle agent reserve --thread <name>` for the writer hot loop
 
 ## Quick Reference
 

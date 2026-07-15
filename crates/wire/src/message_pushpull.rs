@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::object::ChangeId;
+use objects::object::StateId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushComplete {
     pub success: bool,
-    pub new_state: Option<ChangeId>,
+    pub new_state: Option<StateId>,
     pub error: Option<String>,
     #[serde(default)]
     pub transfer_id: String,
@@ -24,7 +24,7 @@ pub struct PushComplete {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullComplete {
     pub success: bool,
-    pub final_state: Option<ChangeId>,
+    pub final_state: Option<StateId>,
     pub error: Option<String>,
     #[serde(default)]
     pub transfer_id: String,

@@ -111,7 +111,7 @@ impl PackBuilder {
 
         for (obj_type, mut objects) in grouped {
             if objects.len() < 2
-                || obj_type == ObjectType::State
+                || matches!(obj_type, ObjectType::State | ObjectType::StateAttachment)
                 || self.compression.max_delta_size == 0
             {
                 // Single objects, states, or transfer-tuned packs with delta disabled:
@@ -209,7 +209,7 @@ impl PackBuilder {
         for record in objects {
             let hash = match record.id {
                 PackObjectId::Hash(hash) => hash,
-                PackObjectId::ChangeId(_) => {
+                PackObjectId::StateId(_) => {
                     let offset = pack_data.len() as u64;
                     index.add(record.id, offset);
                     *total_uncompressed += record.data.len() as u64;

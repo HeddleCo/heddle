@@ -7,11 +7,19 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
+use heddle_core::git_projection_io_plan::{
+    ExportedRefSummaryFact, export_commits_summary, exported_refs_summary,
+};
+use heddle_git_projection::{
+    GitProjection, git_core::clone_url_to_bare, git_export::export_all,
+    git_ingest::import_git_history, git_util::ExportedRef,
+};
 use ingest::{ImportOptions, LossyImportEntry};
-use objects::object::{ChangeId, ThreadName};
+use objects::object::{StateId, ThreadName};
 use refs::Head;
 use repo::Repository;
 use serde::Serialize;
+use sley::remote::SilentProgress;
 
 use super::{
     action_line::print_next,
@@ -23,13 +31,7 @@ use super::{
         serialize_empty_action_as_null,
     },
 };
-use crate::{
-    cli::{Cli, cli_args::GitSource, should_output_json, style},
-    git_projection_engine::{
-        GitProjection, git_core::clone_url_to_bare, git_export::export_all,
-        git_ingest::import_git_history, git_util::ExportedRef,
-    },
-};
+use crate::cli::{Cli, cli_args::GitSource, should_output_json, style};
 
 /// A `GitSource` resolved to an on-disk path. For URL sources we own a
 /// scratch directory whose `Drop` cleans up the cloned bare repo after
@@ -91,7 +93,8 @@ fn resolve_source(repo: &Repository, source: GitSource) -> Result<ResolvedSource
             // repo it was for, not buried under the OS temp root.
             let tmp_root = repo.heddle_dir().join("tmp");
             let scratch = ScratchDir::new_in(&tmp_root, "import-")?;
-            clone_url_to_bare(&url, &scratch.path, None, None)?;
+            let mut progress = SilentProgress;
+            clone_url_to_bare(&url, &scratch.path, None, None, &mut progress)?;
             Ok(ResolvedSource {
                 path: scratch.path.clone(),
                 _temp: Some(scratch),
@@ -150,44 +153,19 @@ struct GitProjectionSyncOutput {
     trust: RepositoryVerificationState,
 }
 
-/// Render the `commits:` line for an export/sync summary: the total
-/// commits written to the destination, broken down into newly-minted vs.
-/// already-present. In the common git-overlay case `newly` is 0 and this
-/// reads "N total (already in sync)" rather than a misleading bare 0.
-fn export_commits_summary(total: usize, newly: usize) -> String {
-    let already = total.saturating_sub(newly);
-    let breakdown = if total == 0 {
-        String::new()
-    } else if newly == 0 {
-        format!(" ({})", style::accent("already in sync"))
-    } else if already == 0 {
-        format!(" ({} newly written)", style::bold(&newly.to_string()))
-    } else {
-        format!(
-            " ({} newly written, {} already in sync)",
-            style::bold(&newly.to_string()),
-            style::bold(&already.to_string())
-        )
-    };
-    format!("{} total{}", style::bold(&total.to_string()), breakdown)
-}
-
-/// Render a `branches:`/`tags:` line: the count, then each ref name with
-/// its tip short-SHA, e.g. `3   main af25b9d · spike-ok 7f1002c`.
-fn exported_refs_summary(refs: &[ExportedRef]) -> String {
-    let count = style::bold(&refs.len().to_string());
-    if refs.is_empty() {
-        return count;
-    }
-    let listing = refs
+/// Render a `branches:`/`tags:` line from exported refs (plain text core plan).
+fn exported_refs_summary_for_cli(refs: &[ExportedRef]) -> String {
+    // `ExportedRefSummaryFact` borrows tip hex; materialize tip strings first.
+    let tip_hexes: Vec<String> = refs.iter().map(|r| r.tip.to_hex()).collect();
+    let facts: Vec<ExportedRefSummaryFact<'_>> = refs
         .iter()
-        .map(|r| {
-            let short_tip = r.tip.to_hex().chars().take(7).collect::<String>();
-            format!("{} {}", r.name, style::dim(&short_tip))
+        .zip(tip_hexes.iter())
+        .map(|(r, tip)| ExportedRefSummaryFact {
+            name: r.name.as_str(),
+            tip_hex: tip.as_str(),
         })
-        .collect::<Vec<_>>()
-        .join(" · ");
-    format!("{count}   {listing}")
+        .collect();
+    exported_refs_summary(&facts)
 }
 
 /// JSON projection of exported refs: `[{"name":..,"tip":<full sha>}]`.
@@ -393,11 +371,11 @@ fn run_git_export(
         );
         println!(
             "  {}",
-            style::field("branches", &exported_refs_summary(&stats.branches))
+            style::field("branches", &exported_refs_summary_for_cli(&stats.branches))
         );
         println!(
             "  {}",
-            style::field("tags", &exported_refs_summary(&stats.tags))
+            style::field("tags", &exported_refs_summary_for_cli(&stats.tags))
         );
     }
     Ok(())
@@ -655,7 +633,7 @@ pub fn cmd_context_reason_git(
 
 fn materialize_imported_attached_thread(
     bridge: &mut GitProjection<'_>,
-    attached_before: Option<&(ThreadName, ChangeId)>,
+    attached_before: Option<&(ThreadName, StateId)>,
 ) -> Result<()> {
     let Some((thread, old_state)) = attached_before else {
         return Ok(());

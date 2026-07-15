@@ -9,6 +9,17 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::integration_plan::{
+    HarnessSelectionPlan, IntegrationHarnessError, IntegrationHarnessScopeError,
+    IntegrationScopeError, IntegrationScopeKind, PathModeKind, classify_opencode_plugin_path_mode,
+    claude_settings_has_relay, codex_config_has_relay, doctor_status_line, drifted_status_token,
+    empty_integrations_message, healthy_status_token, installed_message,
+    integration_capabilities as plan_integration_capabilities, is_timeline_capability_path,
+    list_status_line, missing_status_token, normalize_harness_names, parse_scope,
+    path_mode_from_absolute_flag, plan_harness_selection, relative_heddle_invocation,
+    uninstalled_message, upgraded_message, validate_harness_scope as plan_validate_harness_scope,
+    validate_install_plan as plan_validate_install_plan,
+};
 use objects::fs_atomic::write_file_atomic;
 use repo::Repository;
 use serde::{Deserialize, Serialize};
@@ -34,15 +45,31 @@ enum IntegrationScope {
 
 impl IntegrationScope {
     fn parse(value: &str) -> Result<Self> {
-        match value {
-            "repo" => Ok(Self::Repo),
-            "user" => Ok(Self::User),
-            other => Err(anyhow!(RecoveryAdvice::invalid_usage(
-                "integration_scope_invalid",
-                format!("invalid integration scope: {other}"),
-                "Use `--scope repo` or `--scope user`.",
-                "heddle integration install --scope repo",
-            ))),
+        parse_scope(value)
+            .map(IntegrationScope::from)
+            .map_err(|err| match err {
+                IntegrationScopeError::Invalid { value } => anyhow!(RecoveryAdvice::invalid_usage(
+                    "integration_scope_invalid",
+                    format!("invalid integration scope: {value}"),
+                    "Use `--scope repo` or `--scope user`.",
+                    "heddle integration install --scope repo",
+                )),
+            })
+    }
+
+    fn as_kind(&self) -> IntegrationScopeKind {
+        match self {
+            Self::Repo => IntegrationScopeKind::Repo,
+            Self::User => IntegrationScopeKind::User,
+        }
+    }
+}
+
+impl From<IntegrationScopeKind> for IntegrationScope {
+    fn from(kind: IntegrationScopeKind) -> Self {
+        match kind {
+            IntegrationScopeKind::Repo => Self::Repo,
+            IntegrationScopeKind::User => Self::User,
         }
     }
 }
@@ -57,6 +84,24 @@ enum PathMode {
     Absolute,
 }
 
+impl PathMode {
+    fn as_kind(self) -> PathModeKind {
+        match self {
+            Self::Relative => PathModeKind::Relative,
+            Self::Absolute => PathModeKind::Absolute,
+        }
+    }
+}
+
+impl From<PathModeKind> for PathMode {
+    fn from(kind: PathModeKind) -> Self {
+        match kind {
+            PathModeKind::Relative => Self::Relative,
+            PathModeKind::Absolute => Self::Absolute,
+        }
+    }
+}
+
 /// Resolved heddle invocation token to splice into the generated hook command.
 /// Either the literal string `heddle` (PATH-relative) or a shell-escaped absolute path.
 struct HeddleInvocation(String);
@@ -64,7 +109,7 @@ struct HeddleInvocation(String);
 impl HeddleInvocation {
     fn resolve(mode: PathMode) -> Result<Self> {
         Ok(match mode {
-            PathMode::Relative => HeddleInvocation("heddle".to_string()),
+            PathMode::Relative => HeddleInvocation(relative_heddle_invocation().to_string()),
             PathMode::Absolute => {
                 let exe = std::env::current_exe()
                     .context("resolving current executable for integration install")?;
@@ -76,7 +121,7 @@ impl HeddleInvocation {
     /// Raw form (unescaped) for embedding in non-shell contexts (e.g. JS strings).
     fn raw(mode: PathMode) -> Result<String> {
         Ok(match mode {
-            PathMode::Relative => "heddle".to_string(),
+            PathMode::Relative => relative_heddle_invocation().to_string(),
             PathMode::Absolute => std::env::current_exe()
                 .context("resolving current executable for integration install")?
                 .display()
@@ -217,12 +262,17 @@ fn list_integrations(cli: &Cli, repo: &Repository) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
         println!("{}", serde_json::to_string(&statuses)?);
     } else if statuses.is_empty() {
-        println!("No Heddle-managed harness integrations.");
+        println!("{}", empty_integrations_message());
     } else {
         for status in statuses {
             println!(
-                "{} [{}] {} ({})",
-                status.harness, status.scope, status.status, status.method
+                "{}",
+                list_status_line(
+                    &status.harness,
+                    &status.scope,
+                    &status.status,
+                    &status.method
+                )
             );
             if !status.capabilities.is_empty() {
                 println!("  capabilities: {}", status.capabilities.join(", "));
@@ -241,11 +291,7 @@ fn install_integrations(cli: &Cli, repo: &Repository, args: IntegrationInstallAr
     } else {
         normalize_harnesses(args.harnesses)?
     };
-    let path_mode = if args.absolute_path {
-        PathMode::Absolute
-    } else {
-        PathMode::Relative
-    };
+    let path_mode = PathMode::from(path_mode_from_absolute_flag(args.absolute_path));
     install_selected(
         cli,
         repo,
@@ -275,10 +321,7 @@ fn install_selected(
     }
     save_manifest(repo, &manifest)?;
     if !should_output_json(cli, Some(repo.config())) {
-        println!(
-            "Installed Heddle harness integrations for: {}",
-            harnesses.join(", ")
-        );
+        println!("{}", installed_message(harnesses));
     }
     Ok(())
 }
@@ -293,19 +336,18 @@ fn doctor_integrations(cli: &Cli, repo: &Repository) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
         println!("{}", serde_json::to_string(&statuses)?);
     } else if statuses.is_empty() {
-        println!("No Heddle-managed harness integrations.");
+        println!("{}", empty_integrations_message());
     } else {
         for status in statuses {
             println!(
-                "{} [{}] (path: {}): {}",
-                status.harness,
-                status.scope,
-                status.path_mode,
-                if status.healthy {
-                    "healthy"
-                } else {
-                    &status.status
-                }
+                "{}",
+                doctor_status_line(
+                    &status.harness,
+                    &status.scope,
+                    &status.path_mode,
+                    status.healthy,
+                    &status.status,
+                )
             );
         }
     }
@@ -320,10 +362,7 @@ fn uninstall_integrations(cli: &Cli, repo: &Repository, args: IntegrationTargetA
     }
     save_manifest(repo, &manifest)?;
     if !should_output_json(cli, Some(repo.config())) {
-        println!(
-            "Uninstalled Heddle harness integrations for: {}",
-            targets.join(", ")
-        );
+        println!("{}", uninstalled_message(&targets));
     }
     Ok(())
 }
@@ -366,10 +405,7 @@ fn upgrade_integrations(cli: &Cli, repo: &Repository, args: IntegrationTargetArg
     }
     save_manifest(repo, &manifest)?;
     if !should_output_json(cli, Some(repo.config())) {
-        println!(
-            "Upgraded Heddle harness integrations for: {}",
-            targets.join(", ")
-        );
+        println!("{}", upgraded_message(&targets));
     }
     Ok(())
 }
@@ -408,49 +444,31 @@ fn detect_path_mode(harness: &str, entry: &InstalledIntegration) -> Option<PathM
                         .as_str()
                         .map(str::to_string)
                 })?;
-            Some(classify_command_path_mode(&cmd))
+            Some(path_mode_from_command(&cmd))
         }
         "codex" => {
             // notify is `["/bin/sh", "-lc", "<cmd>"]` — read the third arg.
             let value: toml::Value = toml::from_str(&contents).ok()?;
             let arr = value.get("notify")?.as_array()?;
             let cmd = arr.get(2)?.as_str()?;
-            Some(classify_command_path_mode(cmd))
+            Some(path_mode_from_command(cmd))
         }
-        "opencode" => {
-            // Plugin script: the spawn invocation is the first quoted token in
-            // `Bun.spawnSync([...])`. We look for either `"heddle"` (relative) or
-            // a quoted absolute path. Probe the literal we emit at install time.
-            if contents.contains("Bun.spawnSync([\"heddle\"")
-                || contents.contains("Bun.spawnSync(['heddle'")
-            {
-                Some(PathMode::Relative)
-            } else if contents.contains("Bun.spawnSync([\"/")
-                || contents.contains("Bun.spawnSync(['/")
-            {
-                Some(PathMode::Absolute)
-            } else {
-                None
-            }
-        }
+        "opencode" => classify_opencode_plugin_path_mode(&contents).map(PathMode::from),
         _ => None,
     }
 }
 
-/// A command line is "PATH-relative" iff its first whitespace-delimited
-/// token is exactly `heddle`. Anything else (an absolute path, a
-/// shell-escaped absolute path) classifies as Absolute.
+/// CLI wrapper: pure classifier lives in `heddle_core::integration_plan`.
+fn path_mode_from_command(cmd: &str) -> PathMode {
+    PathMode::from(heddle_core::integration_plan::classify_command_path_mode(
+        cmd,
+    ))
+}
+
+/// Test/compat alias used by unit tests that call the historical name.
+#[cfg(test)]
 fn classify_command_path_mode(cmd: &str) -> PathMode {
-    let first = cmd
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .trim_matches('\'');
-    if first == "heddle" {
-        PathMode::Relative
-    } else {
-        PathMode::Absolute
-    }
+    path_mode_from_command(cmd)
 }
 
 fn relay_integration(repo: &Repository, args: IntegrationRelayArgs) -> Result<()> {
@@ -487,67 +505,54 @@ fn integration_status(
     entry: &InstalledIntegration,
 ) -> Result<IntegrationStatus> {
     let mut healthy = true;
-    let mut status = "healthy".to_string();
+    let mut status = healthy_status_token().to_string();
     for path in &entry.paths {
         if !Path::new(path).exists() {
             healthy = false;
-            status = "missing".to_string();
+            status = missing_status_token().to_string();
         }
     }
     if healthy && entry.harness == "claude-code" {
         let settings = entry.paths.first().map(PathBuf::from);
         if let Some(path) = settings
             && fs::read_to_string(&path)
-                .map(|contents| !contents.contains("heddle integration relay claude-code"))
+                .map(|contents| !claude_settings_has_relay(&contents))
                 .unwrap_or(true)
         {
             healthy = false;
-            status = "drifted".to_string();
+            status = drifted_status_token().to_string();
         }
     }
     if healthy && entry.harness == "codex" {
         let path = entry.paths.first().map(PathBuf::from);
         if let Some(path) = path
             && fs::read_to_string(&path)
-                .map(|contents| !contents.contains("integration relay codex notify"))
+                .map(|contents| !codex_config_has_relay(&contents))
                 .unwrap_or(true)
         {
             healthy = false;
-            status = "drifted".to_string();
+            status = drifted_status_token().to_string();
         }
     }
+    let capability_paths = integration_capability_paths(entry);
     Ok(IntegrationStatus {
         harness: entry.harness.clone(),
-        scope: match entry.scope {
-            IntegrationScope::Repo => "repo".to_string(),
-            IntegrationScope::User => "user".to_string(),
-        },
+        scope: entry.scope.as_kind().as_str().to_string(),
         method: entry.method.clone(),
         status,
         healthy,
         paths: entry.paths.clone(),
-        path_mode: match entry.path_mode {
-            PathMode::Relative => "relative".to_string(),
-            PathMode::Absolute => "absolute".to_string(),
-        },
-        capabilities: integration_capabilities(entry),
-        capability_paths: integration_capability_paths(entry),
+        path_mode: entry.path_mode.as_kind().as_str().to_string(),
+        capabilities: plan_integration_capabilities(&entry.harness, !capability_paths.is_empty()),
+        capability_paths,
     })
-}
-
-fn integration_capabilities(entry: &InstalledIntegration) -> Vec<String> {
-    if entry.harness == "opencode" && !integration_capability_paths(entry).is_empty() {
-        vec!["timeline".to_string()]
-    } else {
-        Vec::new()
-    }
 }
 
 fn integration_capability_paths(entry: &InstalledIntegration) -> Vec<String> {
     entry
         .paths
         .iter()
-        .filter(|path| path.ends_with("heddle.timeline.json"))
+        .filter(|path| is_timeline_capability_path(path))
         .cloned()
         .collect()
 }
@@ -589,27 +594,23 @@ fn command_on_path(bin: &str) -> bool {
 }
 
 fn resolve_selection_for_root(root: &Path, selection: &str) -> Result<Vec<String>> {
-    match selection {
-        "none" => Ok(Vec::new()),
-        "auto" => Ok(detect_harnesses_for_root(root)),
-        value => normalize_harnesses(value.split(',').map(|item| item.to_string()).collect()),
+    match plan_harness_selection(selection).map_err(harness_error_advice)? {
+        HarnessSelectionPlan::None => Ok(Vec::new()),
+        HarnessSelectionPlan::Auto => Ok(detect_harnesses_for_root(root)),
+        HarnessSelectionPlan::Explicit(names) => Ok(names),
     }
 }
 
 fn normalize_harnesses(harnesses: Vec<String>) -> Result<Vec<String>> {
-    let mut seen = BTreeSet::new();
-    for harness in harnesses {
-        let normalized = match harness.trim() {
-            "" => continue,
-            "claude" => "claude-code",
-            "codex" => "codex",
-            "claude-code" => "claude-code",
-            "opencode" => "opencode",
-            other => return Err(anyhow!(unsupported_harness_advice(other))),
-        };
-        seen.insert(normalized.to_string());
+    normalize_harness_names(harnesses).map_err(harness_error_advice)
+}
+
+fn harness_error_advice(err: IntegrationHarnessError) -> anyhow::Error {
+    match err {
+        IntegrationHarnessError::Unsupported { harness } => {
+            anyhow!(unsupported_harness_advice(&harness))
+        }
     }
-    Ok(seen.into_iter().collect())
 }
 
 fn unsupported_harness_advice(harness: &str) -> RecoveryAdvice {
@@ -641,15 +642,14 @@ fn target_harnesses(manifest: &IntegrationManifest, requested: Vec<String>) -> R
 /// `heddle init --install-harnesses codex` with the default `--scope repo`
 /// must fail in the preflight, not after integration writes have started.
 fn validate_harness_scope(harness: &str, scope: &IntegrationScope) -> Result<()> {
-    match harness {
-        "codex" if *scope != IntegrationScope::User => Err(anyhow!(RecoveryAdvice::invalid_usage(
+    plan_validate_harness_scope(harness, scope.as_kind()).map_err(|err| match err {
+        IntegrationHarnessScopeError::CodexRequiresUser => anyhow!(RecoveryAdvice::invalid_usage(
             "integration_codex_scope_invalid",
             "codex integration currently requires --scope user",
             "Rerun the install with `--scope user`.",
             "heddle integration install codex --scope user",
-        ))),
-        _ => Ok(()),
-    }
+        )),
+    })
 }
 
 /// Pre-write validation of a harness-install plan: the scope string parses AND
@@ -658,10 +658,14 @@ fn validate_harness_scope(harness: &str, scope: &IntegrationScope) -> Result<()>
 /// `codex` + `repo`) fails before `install_selected` starts writing files.
 fn validate_install_plan(harnesses: &[String], scope_value: &str) -> Result<()> {
     let scope = IntegrationScope::parse(scope_value)?;
-    for harness in harnesses {
-        validate_harness_scope(harness, &scope)?;
-    }
-    Ok(())
+    plan_validate_install_plan(harnesses, scope.as_kind()).map_err(|err| match err {
+        IntegrationHarnessScopeError::CodexRequiresUser => anyhow!(RecoveryAdvice::invalid_usage(
+            "integration_codex_scope_invalid",
+            "codex integration currently requires --scope user",
+            "Rerun the install with `--scope user`.",
+            "heddle integration install codex --scope user",
+        )),
+    })
 }
 
 fn install_codex(

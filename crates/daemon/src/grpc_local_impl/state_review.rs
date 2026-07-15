@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Local-mode implementation of the [`StateReviewService`] gRPC contract.
 //!
-//! Reads / writes the [`ReviewSignaturesBlob`] persisted at
-//! [`State::review_signatures`]. Verifies the client-supplied signature
-//! against the deterministic [`signing_payload`] before persisting.
+//! Reads and writes review-signature attachments. Verifies the client-supplied
+//! signature against the deterministic [`signing_payload`] before persisting.
 
 // `::state_review` disambiguates from this module's own name
 // (`grpc_local_impl::state_review`), the same way the hosted impl
@@ -13,26 +12,27 @@ use ::state_review::{
 };
 use crypto::verify_payload_signature;
 use grpc::heddle::v1::{
-    AnchoredDiscussion, GetReviewPayloadRequest, ListSignaturesRequest, ListSignaturesResponse,
-    MergeRequirement, PathSymbolRef as ProtoPathSymbolRef,
-    ReadingOrderPartition as ProtoReadingOrderPartition, ReviewPayload,
-    ReviewScope as ProtoReviewScope, ReviewSignature as ProtoReviewSignature, ReviewSummary,
-    RiskSignal as ProtoRiskSignal, SignStateRequest, SignStateResponse,
+    AnchoredDiscussion, GetReviewPayloadRequest, GetReviewProgressRequest,
+    GetReviewProgressResponse, ListSignaturesRequest, ListSignaturesResponse, MergeRequirement,
+    PathSymbolRef as ProtoPathSymbolRef, ReadingOrderPartition as ProtoReadingOrderPartition,
+    RecordCheckAckRequest, RecordCheckAckResponse, RecordVerdictRequest, RecordVerdictResponse,
+    ReviewPayload, ReviewScope as ProtoReviewScope, ReviewSignature as ProtoReviewSignature,
+    ReviewSummary, RiskSignal as ProtoRiskSignal, SignStateRequest, SignStateResponse,
     SignalAnchor as ProtoSignalAnchor, SigningFooter,
     state_review_service_server::StateReviewService,
 };
 use objects::{
     lock::RepositoryLockExt,
     object::{
-        Blob, ChangeId, DiffKind, Discussion, DiscussionResolution, DiscussionsBlob, ReviewKind,
-        ReviewScope, ReviewSignature, ReviewSignaturesBlob, RiskSignalBlob, State, SymbolAnchor,
-        signing_payload,
+        Blob, DiffKind, Discussion, DiscussionResolution, DiscussionsBlob, ReviewKind, ReviewScope,
+        ReviewSignature, ReviewSignaturesBlob, RiskSignalBlob, State, StateAttachment,
+        StateAttachmentBody, StateId, SymbolAnchor, signing_payload,
     },
     store::ObjectStore,
     worktree::diff_blobs,
 };
 use prost::Message;
-use repo::Repository;
+use repo::{Repository, StateAttachmentKind};
 use tonic::{Request, Response, Status};
 
 use super::{GrpcLocalService, to_status, with_idempotency};
@@ -61,14 +61,14 @@ impl StateReviewService for LocalStateReviewService {
         request: Request<GetReviewPayloadRequest>,
     ) -> Result<Response<ReviewPayload>, Status> {
         let req = request.into_inner();
-        let change_id = parse_change_id(&req.state_id)?;
+        let state_id = parse_state_id(&req.state_id)?;
         let repo = self.inner.repo();
         let state = repo
             .store()
-            .get_state(&change_id)
+            .get_state(&state_id)
             .map_err(to_status)?
             .ok_or_else(|| {
-                Status::not_found(format!("state {} not found", change_id.to_string_full()))
+                Status::not_found(format!("state {} not found", state_id.to_string_full()))
             })?;
 
         // Diff the state's tree against its first parent so the summary
@@ -98,7 +98,8 @@ impl StateReviewService for LocalStateReviewService {
         // read is "visible".
         let mut all_signals: Vec<ProtoRiskSignal> = Vec::new();
         if req.include_all_signals
-            && let Some(hash) = state.risk_signals
+            && let Some(hash) =
+                attachment_hash(repo, &state.state_id, StateAttachmentKind::RiskSignals)?
             && let Some(blob) = repo.store().get_blob(&hash).map_err(to_status)?
         {
             let decoded = RiskSignalBlob::decode(blob.content())
@@ -197,29 +198,30 @@ impl StateReviewService for LocalStateReviewService {
 
         // Project the state's `DiscussionsBlob` (when present)
         // into the wire-shape `AnchoredDiscussion` list.
-        let discussions = match state.discussions {
-            Some(hash) => {
-                let blob = repo
-                    .store()
-                    .get_blob(&hash)
-                    .map_err(to_status)?
-                    .ok_or_else(|| {
-                        Status::internal(format!(
-                            "discussions blob {} referenced by state {} is missing",
-                            hash,
-                            state.change_id.to_string_full()
-                        ))
-                    })?;
-                let decoded = DiscussionsBlob::decode(blob.content())
-                    .map_err(|err| Status::internal(format!("decode discussions: {err}")))?;
-                decoded
-                    .discussions
-                    .iter()
-                    .map(discussion_to_anchored_proto)
-                    .collect()
-            }
-            None => Vec::<AnchoredDiscussion>::new(),
-        };
+        let discussions =
+            match attachment_hash(repo, &state.state_id, StateAttachmentKind::Discussions)? {
+                Some(hash) => {
+                    let blob = repo
+                        .store()
+                        .get_blob(&hash)
+                        .map_err(to_status)?
+                        .ok_or_else(|| {
+                            Status::internal(format!(
+                                "discussions blob {} referenced by state {} is missing",
+                                hash,
+                                state.state_id.to_string_full()
+                            ))
+                        })?;
+                    let decoded = DiscussionsBlob::decode(blob.content())
+                        .map_err(|err| Status::internal(format!("decode discussions: {err}")))?;
+                    decoded
+                        .discussions
+                        .iter()
+                        .map(discussion_to_anchored_proto)
+                        .collect()
+                }
+                None => Vec::<AnchoredDiscussion>::new(),
+            };
 
         let mut summary = summary;
         summary.in_budget_signal_count = in_budget_signals.len() as u32;
@@ -279,41 +281,76 @@ impl StateReviewService for LocalStateReviewService {
         request: Request<ListSignaturesRequest>,
     ) -> Result<Response<ListSignaturesResponse>, Status> {
         let req = request.into_inner();
-        let change_id = parse_change_id(&req.state_id)?;
+        let state_id = parse_state_id(&req.state_id)?;
         let repo = self.inner.repo();
         let state = repo
             .store()
-            .get_state(&change_id)
+            .get_state(&state_id)
             .map_err(to_status)?
             .ok_or_else(|| {
-                Status::not_found(format!("state {} not found", change_id.to_string_full()))
+                Status::not_found(format!("state {} not found", state_id.to_string_full()))
             })?;
 
-        let signatures = match state.review_signatures {
-            Some(hash) => {
-                let blob = repo
-                    .store()
-                    .get_blob(&hash)
-                    .map_err(to_status)?
-                    .ok_or_else(|| {
-                        Status::internal(format!(
-                            "review signatures blob {} missing from object store",
-                            hash
-                        ))
+        let signatures =
+            match attachment_hash(repo, &state.state_id, StateAttachmentKind::ReviewSignatures)? {
+                Some(hash) => {
+                    let blob = repo
+                        .store()
+                        .get_blob(&hash)
+                        .map_err(to_status)?
+                        .ok_or_else(|| {
+                            Status::internal(format!(
+                                "review signatures blob {} missing from object store",
+                                hash
+                            ))
+                        })?;
+                    let decoded = ReviewSignaturesBlob::decode(blob.content()).map_err(|err| {
+                        Status::internal(format!("decode review signatures: {err}"))
                     })?;
-                let decoded = ReviewSignaturesBlob::decode(blob.content())
-                    .map_err(|err| Status::internal(format!("decode review signatures: {err}")))?;
-                decoded
-                    .signatures
-                    .into_iter()
-                    .enumerate()
-                    .map(|(idx, sig)| review_signature_to_proto(sig, synthetic_signature_id(idx)))
-                    .collect()
-            }
-            None => Vec::new(),
-        };
+                    decoded
+                        .signatures
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, sig)| {
+                            review_signature_to_proto(sig, synthetic_signature_id(idx))
+                        })
+                        .collect()
+                }
+                None => Vec::new(),
+            };
 
         Ok(Response::new(ListSignaturesResponse { signatures }))
+    }
+
+    // The verdict (weft#481) and review-progress (weft#482) RPCs are defined
+    // on the wire in heddle-grpc 0.19 but implemented server-side in weft
+    // (the verdict blob append + the `review_check_acks` table). Local mode
+    // does not back these; the handlers land with the weft impl.
+    async fn record_verdict(
+        &self,
+        _request: Request<RecordVerdictRequest>,
+    ) -> Result<Response<RecordVerdictResponse>, Status> {
+        Err(Status::unimplemented(
+            "RecordVerdict is not available in local mode (weft#481)",
+        ))
+    }
+
+    async fn record_check_ack(
+        &self,
+        _request: Request<RecordCheckAckRequest>,
+    ) -> Result<Response<RecordCheckAckResponse>, Status> {
+        Err(Status::unimplemented(
+            "RecordCheckAck is not available in local mode (weft#482)",
+        ))
+    }
+
+    async fn get_review_progress(
+        &self,
+        _request: Request<GetReviewProgressRequest>,
+    ) -> Result<Response<GetReviewProgressResponse>, Status> {
+        Err(Status::unimplemented(
+            "GetReviewProgress is not available in local mode (weft#482)",
+        ))
     }
 }
 
@@ -336,7 +373,7 @@ async fn execute_sign_state(
     };
 
     // 2. Locate the state.
-    let change_id = parse_change_id(&req.state_id)?;
+    let state_id = parse_state_id(&req.state_id)?;
     let repo = inner.repo();
 
     // 3. Translate the scope.
@@ -390,7 +427,7 @@ async fn execute_sign_state(
 
     let public_key_bytes = req.public_key.clone();
     let signature_bytes = req.signature.clone();
-    let payload = signing_payload(change_id, kind, &scope, signed_at, justification.as_deref());
+    let payload = signing_payload(state_id, kind, &scope, signed_at, justification.as_deref());
     verify_payload_signature(
         &payload,
         &req.algorithm,
@@ -404,23 +441,27 @@ async fn execute_sign_state(
         ))
     })?;
 
-    // 5. Serialize the read-modify-write on `review_signatures`
-    // behind the repo write-lock and re-load the state inside the
-    // critical section. Two concurrent SignStates with different
-    // operation ids would otherwise both read the same base blob and
-    // the second `put_state` would clobber the first signature.
+    // 5. Serialize the read-modify-write and re-load the state inside the
+    // critical section.
     let _lock = repo
         .locker()
         .write()
         .map_err(|err| Status::internal(err.to_string()))?;
-    let state = repo
-        .store()
-        .get_state(&change_id)
+    repo.store()
+        .get_state(&state_id)
         .map_err(to_status)?
         .ok_or_else(|| {
-            Status::not_found(format!("state {} not found", change_id.to_string_full()))
+            Status::not_found(format!("state {} not found", state_id.to_string_full()))
         })?;
-    let mut blob = match state.review_signatures {
+    let prior = repo
+        .latest_state_attachment(&state_id, StateAttachmentKind::ReviewSignatures)
+        .map_err(to_status)?;
+    let mut blob = match prior.as_ref().map(|attachment| {
+        let StateAttachmentBody::ReviewSignatures(hash) = &attachment.body else {
+            unreachable!()
+        };
+        *hash
+    }) {
         Some(hash) => {
             let raw = repo
                 .store()
@@ -449,9 +490,14 @@ async fn execute_sign_state(
         .put_blob(&Blob::new(bytes))
         .map_err(to_status)?;
 
-    // 7. Persist the updated state.
-    let new_state = state.with_review_signatures(content_hash);
-    repo.store().put_state(&new_state).map_err(to_status)?;
+    let attachment = StateAttachment {
+        state_id,
+        body: StateAttachmentBody::ReviewSignatures(content_hash),
+        attribution: repo.get_attribution().map_err(to_status)?,
+        created_at: chrono::Utc::now(),
+        supersedes: prior.map(|attachment| attachment.id()),
+    };
+    repo.put_state_attachment(&attachment).map_err(to_status)?;
 
     Ok(SignStateResponse {
         signature_id: synthetic_signature_id(new_index),
@@ -466,8 +512,28 @@ fn synthetic_signature_id(index: usize) -> String {
     format!("rs-{index}")
 }
 
-fn parse_change_id(s: &[u8]) -> Result<ChangeId, Status> {
-    ChangeId::try_from_slice(s)
+fn attachment_hash(
+    repo: &Repository,
+    state_id: &StateId,
+    kind: StateAttachmentKind,
+) -> Result<Option<objects::object::ContentHash>, Status> {
+    let Some(attachment) = repo
+        .latest_state_attachment(state_id, kind)
+        .map_err(to_status)?
+    else {
+        return Ok(None);
+    };
+    let hash = match attachment.body {
+        StateAttachmentBody::RiskSignals(hash)
+        | StateAttachmentBody::ReviewSignatures(hash)
+        | StateAttachmentBody::Discussions(hash) => hash,
+        _ => unreachable!(),
+    };
+    Ok(Some(hash))
+}
+
+fn parse_state_id(s: &[u8]) -> Result<StateId, Status> {
+    StateId::try_from_slice(s)
         .map_err(|err| Status::invalid_argument(format!("invalid state_id: {err}")))
 }
 
@@ -523,6 +589,10 @@ fn review_signature_to_proto(sig: ReviewSignature, signature_id: String) -> Prot
         algorithm: sig.algorithm,
         public_key: hex::decode(&sig.public_key).unwrap_or_default(),
         signature: hex::decode(&sig.signature).unwrap_or_default(),
+        // Legacy positive signatures predate the verdict surface (weft#481):
+        // VERDICT_UNSPECIFIED (treated as SIGN) with no decline reason.
+        verdict: grpc::heddle::v1::Verdict::Unspecified as i32,
+        reason: String::new(),
     }
 }
 
@@ -964,16 +1034,16 @@ mod tests {
         (svc, repo, temp)
     }
 
-    fn capture_state(repo: &Repository) -> ChangeId {
+    fn capture_state(repo: &Repository) -> StateId {
         // Write a tiny file so snapshot has something to capture.
         std::fs::write(repo.root().join("hello.txt"), b"hi").expect("write file");
         let state = repo
             .snapshot(Some("seed".to_string()), None)
             .expect("snapshot");
-        state.change_id
+        state.state_id
     }
 
-    fn sign_request(state_id: &ChangeId, op_id: &str) -> SignStateRequest {
+    fn sign_request(state_id: &StateId, op_id: &str) -> SignStateRequest {
         let signer = crypto::Ed25519Signer::generate().expect("generate ed25519 key");
         let scope = ReviewScope::WholeChange;
         let signed_at = chrono::Utc::now().timestamp();
@@ -1162,12 +1232,6 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(process_global)]
     async fn sign_state_serializes_concurrent_appends() {
-        // Regression for the codex-flagged race: two SignStates with
-        // different operation ids could both read the same base
-        // `review_signatures` blob, then the second `put_state` would
-        // clobber the first signature. The fix wraps the
-        // read-modify-write in `repo.locker().write()` and re-loads
-        // the state inside the lock.
         let (svc, repo, _tmp) = fresh_service();
         let state_id = capture_state(&repo);
 
@@ -1224,7 +1288,7 @@ mod tests {
         let resp_first = svc
             .get_review_payload(Request::new(GetReviewPayloadRequest {
                 repo_path: String::new(),
-                state_id: first.change_id.as_bytes().to_vec(),
+                state_id: first.state_id.as_bytes().to_vec(),
                 include_all_signals: false,
             }))
             .await
@@ -1269,7 +1333,7 @@ mod tests {
         let resp_second = svc
             .get_review_payload(Request::new(GetReviewPayloadRequest {
                 repo_path: String::new(),
-                state_id: second.change_id.as_bytes().to_vec(),
+                state_id: second.state_id.as_bytes().to_vec(),
                 include_all_signals: false,
             }))
             .await
@@ -1341,7 +1405,7 @@ mod tests {
                 "gitlink@example.test",
             )),
         );
-        let base_id = base.change_id;
+        let base_id = base.state_id;
         repo.store().put_state(&base).expect("put base state");
         let changed = State::new_snapshot(
             new_tree_hash,
@@ -1351,7 +1415,7 @@ mod tests {
                 "gitlink@example.test",
             )),
         );
-        let changed_id = changed.change_id;
+        let changed_id = changed.state_id;
         repo.store().put_state(&changed).expect("put changed state");
 
         let resp = svc
@@ -1418,6 +1482,7 @@ mod tests {
         let bogus_tree = objects::object::ContentHash::compute(b"definitely-not-in-store-bytes");
         let mut mutated = state.clone();
         mutated.tree = bogus_tree;
+        let missing_tree_state_id = mutated.id();
         repo.store().put_state(&mutated).expect("put mutated state");
 
         // The review payload must still come back — empty summary,
@@ -1425,7 +1490,7 @@ mod tests {
         let resp = svc
             .get_review_payload(Request::new(GetReviewPayloadRequest {
                 repo_path: String::new(),
-                state_id: state_id.as_bytes().to_vec(),
+                state_id: missing_tree_state_id.as_bytes().to_vec(),
                 include_all_signals: false,
             }))
             .await

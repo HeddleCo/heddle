@@ -1,19 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `heddle discuss` — anchored discussions on symbols.
+//! `heddle discuss` — durable repository collaboration.
 
 use clap::{Args, Subcommand};
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum DiscussCommands {
-    /// Open a new discussion anchored to a symbol.
+    /// Open a discussion anchored to a symbol.
     Open(DiscussOpenArgs),
-    /// Append a turn to an existing discussion.
+    /// Append a durable turn to a discussion.
     Append(DiscussAppendArgs),
-    /// Resolve a discussion by edit, dismissal, or context annotation.
+    /// Resolve a discussion.
     Resolve(DiscussResolveArgs),
-    /// List discussions on a state, symbol, or by status.
+    /// Reopen a resolved discussion.
+    Reopen(DiscussReopenArgs),
+    /// List repository discussions.
     List(DiscussListArgs),
-    /// Show a single discussion.
+    /// Show one discussion and its causal heads.
     Show(DiscussShowArgs),
 }
 
@@ -21,19 +23,19 @@ pub enum DiscussCommands {
 pub struct DiscussOpenArgs {
     /// Path of the file containing the symbol.
     pub file: String,
-    /// Symbol name (e.g. `Repository::open`).
+    /// Symbol name (for example `Repository::open`).
     pub symbol: String,
     /// First turn of the discussion.
     pub body: String,
-    /// State the discussion anchors against. Defaults to HEAD.
+    /// Human-readable summary. Defaults to the first line of the first turn.
+    #[arg(long)]
+    pub title: Option<String>,
+    /// State the symbol anchor was observed against. Defaults to HEAD.
     #[arg(long)]
     pub state: Option<String>,
     /// Visibility: `public` | `internal` | `team:NAME` | `restricted:LABEL` | `private:LABEL`.
     #[arg(long)]
     pub visibility: Option<String>,
-    /// Optional thread reference for grouping.
-    #[arg(long)]
-    pub thread: Option<String>,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -45,55 +47,48 @@ pub struct DiscussAppendArgs {
 #[derive(Clone, Debug, Args)]
 pub struct DiscussResolveArgs {
     pub discussion_id: String,
-    /// Resolution kind: `by-edit` | `dismiss` | `into-annotation`.
+    /// Resolution kind: `by-edit` or `dismiss`.
     #[arg(long, value_enum)]
     pub mode: ResolveModeArg,
-    /// For `into-annotation`: annotation kind.
-    #[arg(long)]
-    pub annotation_kind: Option<String>,
-    /// For `into-annotation`: annotation content.
-    #[arg(long)]
-    pub annotation_content: Option<String>,
-    /// For `into-annotation`: optional comma-separated tags.
-    #[arg(long)]
-    pub annotation_tags: Option<String>,
-    /// For `by-edit`: state the edit lives on (defaults to HEAD).
+    /// For `by-edit`: state containing the edit (defaults to HEAD).
     #[arg(long)]
     pub state: Option<String>,
-    /// For `dismiss`: reason (required).
+    /// For `dismiss`: non-empty reason.
     #[arg(long)]
     pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, clap::ValueEnum)]
 pub enum ResolveModeArg {
-    IntoAnnotation,
     ByEdit,
     Dismiss,
 }
 
 #[derive(Clone, Debug, Args)]
+pub struct DiscussReopenArgs {
+    pub discussion_id: String,
+    /// Why the prior resolution no longer applies.
+    #[arg(long)]
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Args)]
 pub struct DiscussListArgs {
-    /// Filter by state. When omitted, lists discussions on HEAD.
+    /// Filter by the state named in the discussion anchor.
     #[arg(long)]
     pub state: Option<String>,
-    /// Filter by file path.
+    /// Filter by anchored file path.
     #[arg(long)]
     pub file: Option<String>,
-    /// Filter by symbol name across reachable states. Requires `--file`.
+    /// Filter by anchored symbol. Requires `--file`.
     #[arg(long)]
     pub symbol: Option<String>,
-    /// Status filter: `open`|`resolved`|`all`|`orphaned`. Default `all`.
-    #[arg(long, default_value = "all")]
+    /// Status filter: `open`, `resolved`, `conflicted`, or `all`.
+    #[arg(long, default_value = "open")]
     pub status: String,
 }
 
 #[derive(Clone, Debug, Args)]
 pub struct DiscussShowArgs {
     pub discussion_id: String,
-    /// Resolve the discussion against this state instead of HEAD. Use when a
-    /// discussion lives on a prior state (found via `discuss list --state <s>`)
-    /// and is no longer on HEAD.
-    #[arg(long)]
-    pub state: Option<String>,
 }

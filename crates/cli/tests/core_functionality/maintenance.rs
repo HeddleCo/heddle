@@ -19,8 +19,8 @@ fn maintenance_inspect_json(path: &Path) -> Value {
     serde_json::from_str(&output).expect("maintenance inspect should return JSON")
 }
 
-fn maintenance_run(path: &Path) -> String {
-    heddle_with_env(&["maintenance", "run"], Some(path), &MAINTENANCE_ENVS).unwrap()
+fn maintenance_refresh(path: &Path) -> String {
+    heddle_with_env(&["maintenance", "refresh"], Some(path), &MAINTENANCE_ENVS).unwrap()
 }
 
 fn normalize_key(key: &str) -> String {
@@ -150,13 +150,15 @@ fn test_release_help_surfaces_keep_maintenance_tools_under_maintenance() {
         "maintenance help should expose garbage collection: {maintenance}"
     );
     assert!(
-        maintenance.contains("index"),
-        "maintenance help should expose index inspection as an admin maintenance tool: {maintenance}"
+        maintenance.contains("inspect"),
+        "maintenance help should expose sidecar inspection: {maintenance}"
     );
     assert!(
-        maintenance.contains("monitor"),
-        "maintenance help should expose monitor inspection as an admin maintenance tool: {maintenance}"
+        maintenance.contains("refresh"),
+        "maintenance help should expose sidecar refresh: {maintenance}"
     );
+    assert!(!maintenance.contains("index\n"));
+    assert!(!maintenance.contains("monitor\n"));
 }
 
 #[test]
@@ -205,7 +207,7 @@ fn test_maintenance_inspect_json_reports_repo_shape_fields() {
 }
 
 #[test]
-fn test_maintenance_run_creates_or_refreshes_sidecars_in_simple_repo() {
+fn test_maintenance_refresh_creates_or_refreshes_sidecars_in_simple_repo() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
@@ -217,26 +219,26 @@ fn test_maintenance_run_creates_or_refreshes_sidecars_in_simple_repo() {
     }
 
     std::thread::sleep(Duration::from_millis(25));
-    let output = maintenance_run(temp.path());
+    let output = maintenance_refresh(temp.path());
 
     assert!(
         output.is_empty()
             || output.contains("maintenance")
             || output.contains("index")
             || output.contains("monitor"),
-        "maintenance run output should be empty or mention maintenance work: {output}"
+        "maintenance refresh output should be empty or mention maintenance work: {output}"
     );
 
     let sidecars = known_state_sidecars(temp.path());
     assert!(
         sidecars.iter().any(|path| path.ends_with("index.bin")),
-        "maintenance run should create an index sidecar, found: {sidecars:?}"
+        "maintenance refresh should create an index sidecar, found: {sidecars:?}"
     );
     assert!(
         sidecars
             .iter()
             .any(|path| path.ends_with("fsmonitor.toml") || path.ends_with("monitor-native.bin")),
-        "maintenance run should create a monitor-related sidecar, found: {sidecars:?}"
+        "maintenance refresh should create a monitor-related sidecar, found: {sidecars:?}"
     );
 }
 
@@ -255,32 +257,32 @@ fn test_store_group_is_removed() {
 }
 
 #[test]
-fn test_maintenance_inspect_reflects_sidecars_after_run() {
+fn test_maintenance_inspect_reflects_sidecars_after_refresh() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     heddle_must_succeed(&["capture", "-m", "initial"], temp.path());
     mark_repo_with_missing_blob(temp.path());
 
-    maintenance_run(temp.path());
+    maintenance_refresh(temp.path());
     let inspect = maintenance_inspect_json(temp.path());
 
     let index = find_field(&inspect, &["index", "worktree_index"])
-        .expect("inspect should include index details after maintenance run");
+        .expect("inspect should include index details after maintenance refresh");
     assert!(
         is_present_like(index),
         "index details should report a present or usable sidecar after run: {inspect}"
     );
 
     let monitor = find_field(&inspect, &["monitor", "change_monitor"])
-        .expect("inspect should include monitor details after maintenance run");
+        .expect("inspect should include monitor details after maintenance refresh");
     assert!(
         is_present_like(monitor),
         "monitor details should report a present or usable sidecar after run: {inspect}"
     );
 
     let refs = find_field(&inspect, &["refs", "ref_summary", "refs_summary"])
-        .expect("inspect should include ref summary after maintenance run");
+        .expect("inspect should include ref summary after maintenance refresh");
     assert!(
         summary_count(refs).unwrap_or_default() >= 1,
         "ref summary should report at least one ref in a simple repo: {inspect}"
@@ -295,7 +297,7 @@ fn test_maintenance_inspect_reflects_sidecars_after_run() {
             "partial_fetch_missing",
         ],
     )
-    .expect("inspect should include missing blob details after maintenance run");
+    .expect("inspect should include missing blob details after maintenance refresh");
     assert!(
         summary_count(missing).unwrap_or_default() >= 1,
         "missing blob summary should reflect the recorded partial-fetch marker: {inspect}"
@@ -303,6 +305,6 @@ fn test_maintenance_inspect_reflects_sidecars_after_run() {
 
     assert!(
         temp.path().join(".heddle/state/index.bin").exists(),
-        "maintenance run should leave an index sidecar behind"
+        "maintenance refresh should leave an index sidecar behind"
     );
 }

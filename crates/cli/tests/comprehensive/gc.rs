@@ -11,39 +11,6 @@ fn count_objects(temp: &TempDir) -> usize {
 }
 
 #[test]
-fn test_gc_removes_unreachable_objects() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-
-    for i in 1..=5 {
-        fs::write(
-            temp.path().join(format!("file{}.txt", i)),
-            format!("content {}", i),
-        )
-        .unwrap();
-        heddle(
-            &["capture", "-m", &format!("Commit {}", i)],
-            Some(temp.path()),
-        )
-        .unwrap();
-    }
-
-    let count_before = count_objects(&temp);
-    heddle(&["switch", "HEAD~3"], Some(temp.path())).unwrap();
-
-    let result = heddle(&["maintenance", "gc"], Some(temp.path()));
-    assert!(result.is_ok(), "gc failed: {:?}", result.err());
-
-    let count_after = count_objects(&temp);
-    assert!(
-        count_after <= count_before,
-        "gc should remove or keep same objects: {} -> {}",
-        count_before,
-        count_after
-    );
-}
-
-#[test]
 fn test_gc_preserves_reachable_objects() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "content");
@@ -59,7 +26,7 @@ fn test_gc_preserves_reachable_objects() {
 }
 
 #[test]
-fn test_gc_dry_run_accurate() {
+fn test_gc_dry_run_does_not_mutate_loose_objects() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
@@ -76,12 +43,18 @@ fn test_gc_dry_run_accurate() {
         .unwrap();
     }
 
-    heddle(&["switch", "HEAD~2"], Some(temp.path())).unwrap();
+    let count_before = count_objects(&temp);
 
     let dry_run = heddle(&["maintenance", "gc", "--dry-run"], Some(temp.path()));
     assert!(dry_run.is_ok());
+    assert_eq!(
+        count_objects(&temp),
+        count_before,
+        "gc --dry-run must not mutate the loose object store"
+    );
 
-    let _actual = heddle(&["maintenance", "gc"], Some(temp.path()));
+    let actual = heddle(&["maintenance", "gc"], Some(temp.path()));
+    assert!(actual.is_ok(), "gc failed: {:?}", actual.err());
 }
 
 #[test]

@@ -1,0 +1,13 @@
+host_id=Lukes-MacBook-Pro-3
+timestamp_utc=20260711T211441Z
+commit=9cd7477538114d3e35ff80fb62af91d7d1df7f0d
+branch=codex/correctness-architecture-performance-program
+uname=Darwin Lukes-MacBook-Pro-3.local 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:38:56 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6000 arm64
+rustc=rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo=cargo 1.97.0 (c980f4866 2026-06-30)
+os_product=26.5.1
+cpu=Apple M1 Pro
+mem_bytes=34359738368
+loadavg=16:14  up 23 days,  5:35, 2 users, load averages: 22.10 13.63 12.37
+cargo_target_dir=/tmp/heddle-target-w5
+notes=Fill quiet/noisy and any concurrent jobs before citing externally.

@@ -7,7 +7,7 @@ use anyhow::Result;
 #[cfg(feature = "async-source")]
 use objects::store::AsyncObjectSource;
 use objects::{
-    object::{ChangeId, ContentHash, Tree, diff_trees},
+    object::{ContentHash, StateId, Tree, diff_trees},
     store::{AnyStore, ObjectSource, ObjectStore},
 };
 use oplog::OpLogBackend;
@@ -24,7 +24,7 @@ use super::{
 
 #[derive(Clone, Debug)]
 struct CommitGraphNode {
-    parents: Vec<ChangeId>,
+    parents: Vec<StateId>,
     generation: usize,
     tree_hash: ContentHash,
     created_at_secs: i64,
@@ -35,21 +35,21 @@ struct CommitGraphNode {
 #[cfg(feature = "async-source")]
 #[derive(Clone, Debug)]
 struct AsyncCommitGraphNode {
-    parents: Vec<ChangeId>,
+    parents: Vec<StateId>,
     generation: usize,
 }
 
 /// Cached metadata for a node — cheap to return by value.
 pub struct CachedNodeMetadata {
     pub tree_hash: ContentHash,
-    pub first_parent: Option<ChangeId>,
+    pub first_parent: Option<StateId>,
     pub agent_model: Option<String>,
     pub created_at_secs: i64,
 }
 
 pub struct CommitGraphIndex<'source, S: ObjectSource + ?Sized = AnyStore> {
     source: &'source S,
-    nodes: HashMap<ChangeId, CommitGraphNode>,
+    nodes: HashMap<StateId, CommitGraphNode>,
     cache: Box<dyn CommitGraphCache + 'source>,
     persistence_dirty: bool,
 }
@@ -98,7 +98,7 @@ where
     }
 
     /// Return cached metadata for a node if it has been loaded.
-    pub fn node_metadata(&self, id: &ChangeId) -> Option<CachedNodeMetadata> {
+    pub fn node_metadata(&self, id: &StateId) -> Option<CachedNodeMetadata> {
         self.nodes.get(id).map(|node| CachedNodeMetadata {
             tree_hash: node.tree_hash,
             first_parent: node.parents.first().copied(),
@@ -107,11 +107,7 @@ where
         })
     }
 
-    pub fn is_ancestor(
-        &mut self,
-        ancestor_id: &ChangeId,
-        descendant_id: &ChangeId,
-    ) -> Result<bool> {
+    pub fn is_ancestor(&mut self, ancestor_id: &StateId, descendant_id: &StateId) -> Result<bool> {
         if ancestor_id == descendant_id {
             return Ok(true);
         }
@@ -123,15 +119,15 @@ where
 
         let mut stack = vec![*descendant_id];
         let mut visited = HashSet::new();
-        while let Some(change_id) = stack.pop() {
-            if !visited.insert(change_id) {
+        while let Some(state_id) = stack.pop() {
+            if !visited.insert(state_id) {
                 continue;
             }
-            if change_id == *ancestor_id {
+            if state_id == *ancestor_id {
                 return Ok(true);
             }
 
-            let Some(node) = self.nodes.get(&change_id) else {
+            let Some(node) = self.nodes.get(&state_id) else {
                 continue;
             };
             for parent in &node.parents {
@@ -149,9 +145,9 @@ where
 
     pub fn find_merge_base(
         &mut self,
-        state_a: &ChangeId,
-        state_b: &ChangeId,
-    ) -> Result<Option<ChangeId>> {
+        state_a: &StateId,
+        state_b: &StateId,
+    ) -> Result<Option<StateId>> {
         self.ensure_loaded(*state_a)?;
         self.ensure_loaded(*state_b)?;
 
@@ -169,16 +165,16 @@ where
         Ok(best)
     }
 
-    fn collect_ancestors(&mut self, start: ChangeId) -> Result<HashSet<ChangeId>> {
+    fn collect_ancestors(&mut self, start: StateId) -> Result<HashSet<StateId>> {
         self.ensure_loaded(start)?;
 
         let mut ancestors = HashSet::new();
         let mut stack = vec![start];
-        while let Some(change_id) = stack.pop() {
-            if !ancestors.insert(change_id) {
+        while let Some(state_id) = stack.pop() {
+            if !ancestors.insert(state_id) {
                 continue;
             }
-            if let Some(node) = self.nodes.get(&change_id) {
+            if let Some(node) = self.nodes.get(&state_id) {
                 stack.extend(node.parents.iter().copied());
             }
         }
@@ -186,14 +182,14 @@ where
         Ok(ancestors)
     }
 
-    pub fn ensure_loaded(&mut self, change_id: ChangeId) -> Result<()> {
-        if self.nodes.contains_key(&change_id) {
+    pub fn ensure_loaded(&mut self, state_id: StateId) -> Result<()> {
+        if self.nodes.contains_key(&state_id) {
             return Ok(());
         }
 
         let initial_len = self.nodes.len();
         let mut expanded = HashSet::new();
-        let mut stack = vec![change_id];
+        let mut stack = vec![state_id];
         while let Some(current) = stack.pop() {
             if self.nodes.contains_key(&current) {
                 continue;
@@ -239,7 +235,7 @@ where
     }
 
     /// Compute and cache the Bloom filter for the given node.
-    pub fn ensure_bloom_populated(&mut self, id: ChangeId) -> Result<()> {
+    pub fn ensure_bloom_populated(&mut self, id: StateId) -> Result<()> {
         if self
             .nodes
             .get(&id)
@@ -278,15 +274,15 @@ where
     }
 
     /// Return the Bloom filter for a node if it has been computed.
-    pub fn node_bloom(&self, id: &ChangeId) -> Option<&[u8; 256]> {
+    pub fn node_bloom(&self, id: &StateId) -> Option<&[u8; 256]> {
         self.nodes.get(id).and_then(|n| n.bloom.as_ref())
     }
 
     fn load_state_data(
         &self,
-        change_id: ChangeId,
-    ) -> Result<(Vec<ChangeId>, ContentHash, i64, Option<String>)> {
-        match self.source.get_state(&change_id)? {
+        state_id: StateId,
+    ) -> Result<(Vec<StateId>, ContentHash, i64, Option<String>)> {
+        match self.source.get_state(&state_id)? {
             Some(state) => Ok((
                 state.parents,
                 state.tree,
@@ -297,8 +293,8 @@ where
         }
     }
 
-    fn generation(&self, change_id: ChangeId) -> Option<usize> {
-        self.nodes.get(&change_id).map(|node| node.generation)
+    fn generation(&self, state_id: StateId) -> Option<usize> {
+        self.nodes.get(&state_id).map(|node| node.generation)
     }
 
     fn persist_if_dirty(&mut self) {
@@ -309,9 +305,9 @@ where
         let persisted_nodes: HashMap<_, _> = self
             .nodes
             .iter()
-            .map(|(change_id, node)| {
+            .map(|(state_id, node)| {
                 (
-                    *change_id,
+                    *state_id,
                     PersistedCommitGraphNode {
                         parents: node.parents.clone(),
                         generation: node.generation,
@@ -345,15 +341,15 @@ fn cache_label(cache: &(impl CommitGraphCache + ?Sized)) -> String {
 }
 
 trait LoadedCommitGraphExt {
-    fn into_memory_nodes(self) -> HashMap<ChangeId, CommitGraphNode>;
+    fn into_memory_nodes(self) -> HashMap<StateId, CommitGraphNode>;
 }
 
 impl LoadedCommitGraphExt for LoadedCommitGraph {
-    fn into_memory_nodes(self) -> HashMap<ChangeId, CommitGraphNode> {
+    fn into_memory_nodes(self) -> HashMap<StateId, CommitGraphNode> {
         self.into_iter()
-            .map(|(change_id, node)| {
+            .map(|(state_id, node)| {
                 (
-                    change_id,
+                    state_id,
                     CommitGraphNode {
                         parents: node.parents,
                         generation: node.generation,
@@ -372,8 +368,8 @@ impl LoadedCommitGraphExt for LoadedCommitGraph {
 #[cfg(feature = "async-source")]
 pub async fn is_ancestor_async<S>(
     source: &S,
-    ancestor_id: &ChangeId,
-    descendant_id: &ChangeId,
+    ancestor_id: &StateId,
+    descendant_id: &StateId,
 ) -> Result<bool>
 where
     S: AsyncObjectSource + ?Sized,
@@ -390,15 +386,15 @@ where
 
     let mut stack = vec![*descendant_id];
     let mut visited = HashSet::new();
-    while let Some(change_id) = stack.pop() {
-        if !visited.insert(change_id) {
+    while let Some(state_id) = stack.pop() {
+        if !visited.insert(state_id) {
             continue;
         }
-        if change_id == *ancestor_id {
+        if state_id == *ancestor_id {
             return Ok(true);
         }
 
-        let Some(node) = nodes.get(&change_id) else {
+        let Some(node) = nodes.get(&state_id) else {
             continue;
         };
         for parent in &node.parents {
@@ -417,9 +413,9 @@ where
 #[cfg(feature = "async-source")]
 pub async fn find_merge_base_async<S>(
     source: &S,
-    state_a: &ChangeId,
-    state_b: &ChangeId,
-) -> Result<Option<ChangeId>>
+    state_a: &StateId,
+    state_b: &StateId,
+) -> Result<Option<StateId>>
 where
     S: AsyncObjectSource + ?Sized,
 {
@@ -444,9 +440,9 @@ where
 #[cfg(feature = "async-source")]
 async fn collect_ancestors_async<S>(
     source: &S,
-    nodes: &mut HashMap<ChangeId, AsyncCommitGraphNode>,
-    start: ChangeId,
-) -> Result<HashSet<ChangeId>>
+    nodes: &mut HashMap<StateId, AsyncCommitGraphNode>,
+    start: StateId,
+) -> Result<HashSet<StateId>>
 where
     S: AsyncObjectSource + ?Sized,
 {
@@ -454,11 +450,11 @@ where
 
     let mut ancestors = HashSet::new();
     let mut stack = vec![start];
-    while let Some(change_id) = stack.pop() {
-        if !ancestors.insert(change_id) {
+    while let Some(state_id) = stack.pop() {
+        if !ancestors.insert(state_id) {
             continue;
         }
-        if let Some(node) = nodes.get(&change_id) {
+        if let Some(node) = nodes.get(&state_id) {
             stack.extend(node.parents.iter().copied());
         }
     }
@@ -469,18 +465,18 @@ where
 #[cfg(feature = "async-source")]
 async fn ensure_loaded_async<S>(
     source: &S,
-    nodes: &mut HashMap<ChangeId, AsyncCommitGraphNode>,
-    change_id: ChangeId,
+    nodes: &mut HashMap<StateId, AsyncCommitGraphNode>,
+    state_id: StateId,
 ) -> Result<()>
 where
     S: AsyncObjectSource + ?Sized,
 {
-    if nodes.contains_key(&change_id) {
+    if nodes.contains_key(&state_id) {
         return Ok(());
     }
 
     let mut expanded = HashSet::new();
-    let mut stack = vec![change_id];
+    let mut stack = vec![state_id];
     while let Some(current) = stack.pop() {
         if nodes.contains_key(&current) {
             continue;
@@ -516,29 +512,29 @@ where
 }
 
 #[cfg(feature = "async-source")]
-async fn load_state_parents_async<S>(source: &S, change_id: ChangeId) -> Result<Vec<ChangeId>>
+async fn load_state_parents_async<S>(source: &S, state_id: StateId) -> Result<Vec<StateId>>
 where
     S: AsyncObjectSource + ?Sized,
 {
     Ok(source
-        .get_state(&change_id)
+        .get_state(&state_id)
         .await?
         .map_or_else(Vec::new, |state| state.parents))
 }
 
 #[cfg(feature = "async-source")]
 fn generation_async(
-    nodes: &HashMap<ChangeId, AsyncCommitGraphNode>,
-    change_id: ChangeId,
+    nodes: &HashMap<StateId, AsyncCommitGraphNode>,
+    state_id: StateId,
 ) -> Option<usize> {
-    nodes.get(&change_id).map(|node| node.generation)
+    nodes.get(&state_id).map(|node| node.generation)
 }
 
 pub fn find_merge_base<R, O, S>(
     repo: &Repository<R, O, S>,
-    state_a: &ChangeId,
-    state_b: &ChangeId,
-) -> Result<Option<ChangeId>>
+    state_a: &StateId,
+    state_b: &StateId,
+) -> Result<Option<StateId>>
 where
     R: RefBackend,
     O: OpLogBackend,
@@ -555,7 +551,7 @@ mod tests {
     use anyhow::Result;
     #[cfg(feature = "async-source")]
     use objects::{
-        object::{Attribution, Blob, ChangeId, ContentHash, Principal, State, Tree},
+        object::{Attribution, Blob, ContentHash, Principal, State, StateId, Tree},
         store::{AsyncObjectSource, InMemoryStore, ObjectStore},
     };
     use tempfile::TempDir;
@@ -577,8 +573,8 @@ mod tests {
         let next = repo.snapshot(Some("next".to_string()), None)?;
 
         let mut graph = CommitGraphIndex::new(&repo);
-        assert!(graph.is_ancestor(&base.change_id, &next.change_id)?);
-        assert!(!graph.is_ancestor(&next.change_id, &base.change_id)?);
+        assert!(graph.is_ancestor(&base.id(), &next.id())?);
+        assert!(!graph.is_ancestor(&next.id(), &base.id())?);
 
         Ok(())
     }
@@ -595,18 +591,18 @@ mod tests {
         std::fs::write(temp_dir.path().join("file.txt"), "c")?;
         let state_c = repo.snapshot(Some("c".to_string()), None)?;
 
-        repo.goto(&state_b.change_id)?;
+        repo.goto(&state_b.id())?;
         std::fs::write(temp_dir.path().join("side.txt"), "d")?;
         let state_d = repo.snapshot(Some("d".to_string()), None)?;
 
         let mut graph = CommitGraphIndex::new(&repo);
         assert_eq!(
-            graph.find_merge_base(&state_c.change_id, &state_d.change_id)?,
-            Some(state_b.change_id)
+            graph.find_merge_base(&state_c.id(), &state_d.id())?,
+            Some(state_b.id())
         );
         assert_eq!(
-            graph.find_merge_base(&state_a.change_id, &state_d.change_id)?,
-            Some(state_a.change_id)
+            graph.find_merge_base(&state_a.id(), &state_d.id())?,
+            Some(state_a.id())
         );
 
         Ok(())
@@ -624,11 +620,11 @@ mod tests {
 
         let path = commit_graph_path(&repo);
         let mut first_graph = CommitGraphIndex::new(&repo);
-        assert!(first_graph.is_ancestor(&base.change_id, &next.change_id)?);
+        assert!(first_graph.is_ancestor(&base.id(), &next.id())?);
         assert!(path.exists());
 
         let mut reloaded_graph = CommitGraphIndex::new(&repo);
-        assert!(reloaded_graph.is_ancestor(&base.change_id, &next.change_id)?);
+        assert!(reloaded_graph.is_ancestor(&base.id(), &next.id())?);
 
         Ok(())
     }
@@ -645,16 +641,16 @@ mod tests {
 
         let path = commit_graph_path(&repo);
         let mut graph = CommitGraphIndex::new(&repo);
-        assert!(graph.is_ancestor(&base.change_id, &next.change_id)?);
+        assert!(graph.is_ancestor(&base.id(), &next.id())?);
 
         fs::remove_file(&path)?;
         let mut missing_graph = CommitGraphIndex::new(&repo);
-        assert!(missing_graph.is_ancestor(&base.change_id, &next.change_id)?);
+        assert!(missing_graph.is_ancestor(&base.id(), &next.id())?);
         assert!(path.exists());
 
         fs::write(&path, b"invalid")?;
         let mut invalid_graph = CommitGraphIndex::new(&repo);
-        assert!(invalid_graph.is_ancestor(&base.change_id, &next.change_id)?);
+        assert!(invalid_graph.is_ancestor(&base.id(), &next.id())?);
 
         let bytes = fs::read(&path)?;
         assert!(bytes.starts_with(b"LMGRAPH\0"));
@@ -674,24 +670,24 @@ mod tests {
         fs::write(temp_dir.path().join("file.txt"), "c")?;
         let state_c = repo.snapshot(Some("c".to_string()), None)?;
 
-        repo.goto(&state_b.change_id)?;
+        repo.goto(&state_b.id())?;
         fs::write(temp_dir.path().join("side.txt"), "d")?;
         let state_d = repo.snapshot(Some("d".to_string()), None)?;
 
         let mut initial_graph = CommitGraphIndex::new(&repo);
         assert_eq!(
-            initial_graph.find_merge_base(&state_c.change_id, &state_d.change_id)?,
-            Some(state_b.change_id)
+            initial_graph.find_merge_base(&state_c.id(), &state_d.id())?,
+            Some(state_b.id())
         );
 
         let mut reloaded_graph = CommitGraphIndex::new(&repo);
         assert_eq!(
-            reloaded_graph.find_merge_base(&state_c.change_id, &state_d.change_id)?,
-            Some(state_b.change_id)
+            reloaded_graph.find_merge_base(&state_c.id(), &state_d.id())?,
+            Some(state_b.id())
         );
         assert_eq!(
-            reloaded_graph.find_merge_base(&state_a.change_id, &state_d.change_id)?,
-            Some(state_a.change_id)
+            reloaded_graph.find_merge_base(&state_a.id(), &state_d.id())?,
+            Some(state_a.id())
         );
 
         Ok(())
@@ -706,10 +702,10 @@ mod tests {
         let state = repo.snapshot(Some("snapshot".to_string()), None)?;
 
         let mut graph = CommitGraphIndex::new(&repo);
-        graph.ensure_loaded(state.change_id)?;
+        graph.ensure_loaded(state.id())?;
 
         let meta = graph
-            .node_metadata(&state.change_id)
+            .node_metadata(&state.id())
             .expect("metadata should be present");
         // The state's tree_hash should match what the graph stores
         assert_eq!(meta.tree_hash, state.tree);
@@ -728,10 +724,10 @@ mod tests {
         let state = repo.snapshot(Some("alpha".to_string()), None)?;
 
         let mut graph = CommitGraphIndex::new(&repo);
-        graph.ensure_bloom_populated(state.change_id)?;
+        graph.ensure_bloom_populated(state.id())?;
 
         let bloom = graph
-            .node_bloom(&state.change_id)
+            .node_bloom(&state.id())
             .expect("bloom should be present");
         // alpha.txt should be in the bloom filter
         use super::super::bloom_filter::bloom_maybe_contains;
@@ -746,20 +742,20 @@ mod tests {
         let store = InMemoryStore::new();
 
         let root = put_state(&store, vec![]);
-        let left_base = put_state(&store, vec![root.change_id]);
-        let right_base = put_state(&store, vec![root.change_id]);
-        let left_tip = put_state(&store, vec![left_base.change_id]);
-        let right_tip = put_state(&store, vec![right_base.change_id]);
-        let merge_a = put_state(&store, vec![left_base.change_id, right_base.change_id]);
-        let merge_b = put_state(&store, vec![right_base.change_id, left_base.change_id]);
+        let left_base = put_state(&store, vec![root.id()]);
+        let right_base = put_state(&store, vec![root.id()]);
+        let left_tip = put_state(&store, vec![left_base.id()]);
+        let right_tip = put_state(&store, vec![right_base.id()]);
+        let merge_a = put_state(&store, vec![left_base.id(), right_base.id()]);
+        let merge_b = put_state(&store, vec![right_base.id(), left_base.id()]);
 
         let async_source = AsyncInMemorySource(&store);
         for (ancestor, descendant) in [
-            (root.change_id, merge_a.change_id),
-            (left_base.change_id, merge_a.change_id),
-            (merge_a.change_id, merge_a.change_id),
-            (merge_a.change_id, merge_b.change_id),
-            (left_tip.change_id, right_tip.change_id),
+            (root.id(), merge_a.id()),
+            (left_base.id(), merge_a.id()),
+            (merge_a.id(), merge_a.id()),
+            (merge_a.id(), merge_b.id()),
+            (left_tip.id(), right_tip.id()),
         ] {
             let mut graph = CommitGraphIndex::with_cache(
                 &store,
@@ -779,10 +775,10 @@ mod tests {
         }
 
         for (left, right) in [
-            (merge_a.change_id, merge_b.change_id),
-            (left_base.change_id, merge_a.change_id),
-            (left_tip.change_id, right_tip.change_id),
-            (merge_a.change_id, merge_a.change_id),
+            (merge_a.id(), merge_b.id()),
+            (left_base.id(), merge_a.id()),
+            (left_tip.id(), right_tip.id()),
+            (merge_a.id(), merge_a.id()),
         ] {
             let mut graph = CommitGraphIndex::with_cache(
                 &store,
@@ -801,12 +797,8 @@ mod tests {
             &store,
             super::super::commit_graph_persistence::NullCommitGraphCache,
         );
-        let tie_base = graph
-            .find_merge_base(&merge_a.change_id, &merge_b.change_id)
-            .unwrap();
-        assert!(
-            matches!(tie_base, Some(id) if id == left_base.change_id || id == right_base.change_id)
-        );
+        let tie_base = graph.find_merge_base(&merge_a.id(), &merge_b.id()).unwrap();
+        assert!(matches!(tie_base, Some(id) if id == left_base.id() || id == right_base.id()));
     }
 
     #[cfg(feature = "async-source")]
@@ -818,7 +810,7 @@ mod tests {
             ObjectStore::get_tree(self.0, hash)
         }
 
-        async fn get_state(&self, id: &ChangeId) -> objects::error::Result<Option<State>> {
+        async fn get_state(&self, id: &StateId) -> objects::error::Result<Option<State>> {
             ObjectStore::get_state(self.0, id)
         }
 
@@ -828,7 +820,7 @@ mod tests {
     }
 
     #[cfg(feature = "async-source")]
-    fn put_state(store: &InMemoryStore, parents: Vec<ChangeId>) -> State {
+    fn put_state(store: &InMemoryStore, parents: Vec<StateId>) -> State {
         let state = State::new(
             Tree::new().hash(),
             parents,

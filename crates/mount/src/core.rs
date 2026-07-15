@@ -68,7 +68,7 @@ use std::{
 
 use objects::{
     object::{
-        Attribution, Blob, ChangeId, ContentHash, EntryType, FileMode, State, Tree, TreeEntry,
+        Attribution, Blob, ContentHash, EntryType, FileMode, State, StateId, Tree, TreeEntry,
         TreeEntryTarget,
     },
     store::{AnyStore, ObjectStore},
@@ -1089,7 +1089,7 @@ impl<S: ObjectStore + 'static> Drop for ContentAddressedMount<S> {
 
 #[derive(Clone, Copy, Debug)]
 struct MountState {
-    change_id: ChangeId,
+    state_id: StateId,
     tree: ContentHash,
 }
 
@@ -1195,9 +1195,9 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         &self.inner.thread
     }
 
-    /// The change id this mount currently points at.
-    pub fn current_change_id(&self) -> ChangeId {
-        self.inner.state.read_or_poisoned().change_id
+    /// The state id this mount currently points at.
+    pub fn current_state_id(&self) -> StateId {
+        self.inner.state.read_or_poisoned().state_id
     }
 
     fn store(&self) -> &S {
@@ -3225,16 +3225,16 @@ fn resolve_thread<S: ObjectStore>(
     thread: &str,
 ) -> Result<MountState> {
     let thread_name = objects::object::ThreadName::from(thread);
-    let change_id = repo
+    let state_id = repo
         .refs()
         .get_thread(&thread_name)?
         .ok_or_else(|| MountError::UnknownThread(thread.to_string()))?;
     let state = repo
         .store()
-        .get_state(&change_id)?
+        .get_state(&state_id)?
         .ok_or_else(|| MountError::UnknownThread(thread.to_string()))?;
     Ok(MountState {
-        change_id,
+        state_id,
         tree: state.tree,
     })
 }
@@ -4002,12 +4002,12 @@ impl ContentAddressedMount {
     /// ([`Repository::get_attribution`]) — this honours the
     /// `HEDDLE_AGENT_*` env, the repo config, and the user's
     /// principal. Richer attribution paths (CLI overrides,
-    /// `AgentRegistry`, session segments) live in
+    /// `ActorPresenceStore`, session segments) live in
     /// `crates/cli/src/cli/commands/snapshot.rs::build_attribution`;
     /// when the CLI wires this up it should call
     /// [`Self::capture_with_attribution`] instead and pass the result
     /// of that helper.
-    pub fn capture(&self, intent: impl Into<Option<String>>) -> Result<ChangeId> {
+    pub fn capture(&self, intent: impl Into<Option<String>>) -> Result<StateId> {
         let attribution = self
             .inner
             .repo
@@ -4024,7 +4024,7 @@ impl ContentAddressedMount {
         &self,
         intent: impl Into<Option<String>>,
         attribution: Attribution,
-    ) -> Result<ChangeId> {
+    ) -> Result<StateId> {
         // Step 0: drain hot buffers. Anything that was still being
         // edited gets promoted now so the resulting state captures
         // the agent's last writes even if it never closed the file.
@@ -4066,7 +4066,7 @@ impl ContentAddressedMount {
         // a mount-captured state is signed identically and no write bypasses it.
         self.inner
             .repo
-            .put_authored_state(&mut state)
+            .put_authored_state(&state)
             .map_err(MountError::Store)?;
 
         // Step 3 + 3a unified: advance the served thread and record the
@@ -4082,8 +4082,8 @@ impl ContentAddressedMount {
         // A mount always serves one specific thread, so the snapshot always
         // advances `self.inner.thread` — HEAD being attached elsewhere (or
         // detached) does not change which ref the mount advances.
-        let change_id = state.change_id;
-        let prev_head_change_id = state_snapshot.change_id;
+        let state_id = state.state_id;
+        let previous_state_id = state_snapshot.state_id;
         let served_thread = objects::object::ThreadName::from(self.inner.thread.as_str());
 
         // Invariant A (heddle#317): a mount-captured state is a freshly created
@@ -4103,8 +4103,8 @@ impl ContentAddressedMount {
         self.inner
             .repo
             .commit_snapshot_atomic_with_capture_visibility(
-                &change_id,
-                Some(prev_head_change_id),
+                &state_id,
+                Some(previous_state_id),
                 Some(&served_thread),
                 false,
             )
@@ -4139,7 +4139,7 @@ impl ContentAddressedMount {
         }
         let mut state_lock = self.inner.state.write_or_poisoned();
         *state_lock = MountState {
-            change_id,
+            state_id,
             tree: tree_hash,
         };
         // The new state's tree becomes the new root; we don't
@@ -4151,11 +4151,11 @@ impl ContentAddressedMount {
         }
         warn!(
             thread = %self.inner.thread,
-            change = %change_id,
+            state = %state_id,
             "captured mount writes into new state"
         );
 
-        Ok(change_id)
+        Ok(state_id)
     }
 }
 

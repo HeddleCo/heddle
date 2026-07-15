@@ -21,7 +21,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use objects::{
     lock::RepositoryLockExt,
-    object::{ChangeId, State, ThreadName, Tree, VisibilityTier},
+    object::{State, StateId, ThreadName, Tree, VisibilityTier},
     store::ObjectStore,
 };
 use oplog::OpRecord;
@@ -62,7 +62,7 @@ pub enum ThreadCaptureOutcome {
     /// if mtimes drifted via `touch`).
     NoOp,
     /// A new state was written and the thread head advanced.
-    Captured { state_id: ChangeId },
+    Captured { state_id: StateId },
 }
 
 fn thread_worktree_target_error(error: ThreadWorktreeTargetError) -> HeddleError {
@@ -142,7 +142,7 @@ impl Repository {
     /// `<heddle_dir>/threads/<thread>/manifest.toml`.
     ///
     /// Order of operations:
-    ///   1. Resolve `thread` → `ChangeId` → `State` → `Tree`.
+    ///   1. Resolve `thread` → `StateId` → `State` → `Tree`.
     ///   2. Call `Repository::materialize_tree(&tree, dest)` — the
     ///      existing clonefile-first materializer does the heavy
     ///      lifting (loose-uncompressed promotion, parallel writes).
@@ -162,13 +162,13 @@ impl Repository {
         dest: &Path,
         audience: &AudienceTier,
     ) -> Result<ThreadManifest> {
-        let change_id = self
+        let state_id = self
             .refs()
             .resolve(thread)?
             .ok_or_else(|| HeddleError::Config(format!("unknown thread {thread}")))?;
         let state = self
             .store()
-            .get_state(&change_id)?
+            .get_state(&state_id)?
             .ok_or_else(|| HeddleError::Config(format!("state for {thread} missing")))?;
         let target_disposition = prepare_thread_worktree_target(dest)?;
 
@@ -179,7 +179,7 @@ impl Repository {
         // outcome — not in the chokepoint, which `write_isolated_checkout` also
         // calls without wanting a thread manifest.
         let result = (|| -> Result<ThreadManifest> {
-            match self.checkout_state_gated(&change_id, &state, dest, audience)? {
+            match self.checkout_state_gated(&state_id, &state, dest, audience)? {
                 CheckoutMaterialization::Withheld { tier } => {
                     // Manifest reflects disk truth: no tracked files were
                     // materialized (the placeholder is untracked). `tree_hash`
@@ -192,13 +192,13 @@ impl Repository {
                     // signal is the withheld marker written by
                     // `checkout_state_gated`, keyed on the worktree root (heddle#316).
                     let mut manifest =
-                        ThreadManifest::new(change_id, state.tree, canonical_worktree_path(dest));
+                        ThreadManifest::new(state_id, state.tree, canonical_worktree_path(dest));
                     manifest.withheld = true;
                     write_manifest(self.heddle_dir(), thread, &manifest)
                         .map_err(HeddleError::Io)?;
                     debug!(
                         thread = %thread,
-                        state_id = %change_id,
+                        state_id = %state_id,
                         tier = tier.as_str(),
                         "thread checkout rendered courtesy stub (under-tier for audience)"
                     );
@@ -206,13 +206,13 @@ impl Repository {
                 }
                 CheckoutMaterialization::Materialized { tree } => {
                     let mut manifest =
-                        ThreadManifest::new(change_id, state.tree, canonical_worktree_path(dest));
+                        ThreadManifest::new(state_id, state.tree, canonical_worktree_path(dest));
                     populate_manifest_from_tree(self, &tree, dest, "", &mut manifest.files)?;
                     write_manifest(self.heddle_dir(), thread, &manifest)
                         .map_err(HeddleError::Io)?;
                     debug!(
                         thread = %thread,
-                        state_id = %change_id,
+                        state_id = %state_id,
                         files = manifest.files.len(),
                         "thread materialized"
                     );
@@ -228,7 +228,7 @@ impl Repository {
         result
     }
 
-    /// THE visibility-gated checkout chokepoint. Resolve `change_id`'s
+    /// THE visibility-gated checkout chokepoint. Resolve `state_id`'s
     /// effective tier against `audience` and either materialize its real tree
     /// to `dest` (visible) or write the operator-local courtesy stub and
     /// withhold the tracked bytes (under-tier).
@@ -238,7 +238,7 @@ impl Repository {
     /// `write_isolated_checkout` (`heddle start --path`) both do — so the
     /// visibility gate cannot be bypassed by a caller reaching for the raw,
     /// blob-keyed `materialize_tree`. The decision is made HERE, where the
-    /// `ChangeId` and the audience are both in scope; `materialize_tree`
+    /// `StateId` and the audience are both in scope; `materialize_tree`
     /// carries neither and so cannot make it. `materialize_tree` stays the
     /// primitive for *computed* trees (merge/cherry-pick results), which are
     /// not a single named state and carry no audience.
@@ -248,13 +248,13 @@ impl Repository {
     /// (the public mirror emits absence, spike §5.3).
     pub fn checkout_state_gated(
         &self,
-        change_id: &ChangeId,
+        state_id: &StateId,
         state: &State,
         dest: &Path,
         audience: &AudienceTier,
     ) -> Result<CheckoutMaterialization> {
-        let tier = self.effective_visibility_tier(change_id).map_err(|e| {
-            HeddleError::Config(format!("resolve visibility for {change_id}: {e:#}"))
+        let tier = self.effective_visibility_tier(state_id).map_err(|e| {
+            HeddleError::Config(format!("resolve visibility for {state_id}: {e:#}"))
         })?;
         if !visible(&tier, audience) {
             fs::create_dir_all(dest).map_err(HeddleError::Io)?;
@@ -295,9 +295,9 @@ impl Repository {
             )
             .map_err(HeddleError::Io)?;
             let embargo_until = self
-                .effective_state_visibility(change_id)
+                .effective_state_visibility(state_id)
                 .map_err(|e| {
-                    HeddleError::Config(format!("resolve visibility for {change_id}: {e:#}"))
+                    HeddleError::Config(format!("resolve visibility for {state_id}: {e:#}"))
                 })?
                 .and_then(|record| record.embargo_until);
             let stub = courtesy_stub_text(&tier, embargo_until);
@@ -314,7 +314,7 @@ impl Repository {
         let tree = self
             .store()
             .get_tree(&state.tree)?
-            .ok_or_else(|| HeddleError::Config(format!("tree for {change_id} missing")))?;
+            .ok_or_else(|| HeddleError::Config(format!("tree for {state_id} missing")))?;
         self.materialize_tree(&tree, dest)?;
         // Canonicalize only now that `materialize_tree` (via `create_dir_all`) has made
         // `dest` exist — same read/write-root agreement as the withheld branch above
@@ -497,7 +497,7 @@ impl Repository {
     pub fn record_thread_manifest(
         &self,
         thread: &str,
-        state_id: &ChangeId,
+        state_id: &StateId,
         dest: &Path,
     ) -> Result<ThreadManifest> {
         let state = self
@@ -543,7 +543,7 @@ impl Repository {
     pub fn record_withheld_thread_manifest(
         &self,
         thread: &str,
-        state_id: &ChangeId,
+        state_id: &StateId,
         dest: &Path,
     ) -> Result<ThreadManifest> {
         let state = self
@@ -571,7 +571,7 @@ impl Repository {
     /// caller stages this as the executor's single commit record (it is NOT
     /// appended eagerly); the commit marker dedups on the stable
     /// `transaction_id`.
-    pub fn thread_create_op_record(&self, name: &str, state: ChangeId) -> OpRecord {
+    pub fn thread_create_op_record(&self, name: &str, state: StateId) -> OpRecord {
         OpRecord::ThreadCreate {
             name: name.to_string(),
             state,
@@ -592,8 +592,8 @@ impl Repository {
     pub fn cas_guarded_thread_ref_rollback(
         &self,
         name: &ThreadName,
-        set_value: ChangeId,
-        restore_to: Option<ChangeId>,
+        set_value: StateId,
+        restore_to: Option<StateId>,
     ) -> Result<()> {
         // Compare-before-write: bail without touching the ref if it no longer
         // holds the value our forward set.
@@ -792,34 +792,31 @@ impl Repository {
             Some(prev) => vec![prev],
             None => vec![],
         };
-        let mut state = State::new_snapshot(new_tree_hash, parents, attribution);
+        let state = State::new_snapshot(new_tree_hash, parents, attribution);
         // Auto-sign this thread-materialization capture (heddle#482) via the
         // authored-state chokepoint, the same as the primary capture path — it
         // is a real author capture that bypasses `stage_snapshot_objects`. Last
         // mutation before the write.
-        self.put_authored_state(&mut state)?;
-        self.refs().set_thread(&thread_name, &state.change_id)?;
+        self.put_authored_state(&state)?;
+        self.refs().set_thread(&thread_name, &state.id())?;
 
         // 4. Rewrite the manifest to reflect the new state. `root` is
         //    the worktree being captured from — record its canonical
         //    path so the next snapshot can tell whether it's running
         //    inside this same worktree.
-        let mut manifest = ThreadManifest::new(
-            state.change_id,
-            new_tree_hash,
-            canonical_worktree_path(root),
-        );
+        let mut manifest =
+            ThreadManifest::new(state.id(), new_tree_hash, canonical_worktree_path(root));
         populate_manifest_from_tree(self, &new_tree, root, "", &mut manifest.files)?;
         write_manifest(self.heddle_dir(), thread, &manifest).map_err(HeddleError::Io)?;
 
         debug!(
             thread = %thread,
-            new_state = %state.change_id,
+            new_state = %state.id(),
             files = manifest.files.len(),
             "thread captured"
         );
         Ok(ThreadCaptureOutcome::Captured {
-            state_id: state.change_id,
+            state_id: state.id(),
         })
     }
 }
@@ -1512,7 +1509,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&dest).unwrap(), "user data\n");
     }
 
-    fn embargo_state_with_tier(repo: &Repository, tier: VisibilityTier) -> ChangeId {
+    fn embargo_state_with_tier(repo: &Repository, tier: VisibilityTier) -> StateId {
         use chrono::Utc;
         use objects::object::{Principal, StateVisibility};
         let state_id = repo
@@ -1541,17 +1538,17 @@ mod tests {
         dest: &Path,
         audience: &AudienceTier,
     ) -> CheckoutMaterialization {
-        let change_id = repo
+        let state_id = repo
             .refs()
             .resolve("main")
             .unwrap()
             .expect("main thread exists");
         let state = repo
             .store()
-            .get_state(&change_id)
+            .get_state(&state_id)
             .unwrap()
             .expect("main state exists");
-        repo.checkout_state_gated(&change_id, &state, dest, audience)
+        repo.checkout_state_gated(&state_id, &state, dest, audience)
             .unwrap()
     }
 
@@ -2339,7 +2336,7 @@ mod tests {
         let repo_dir = TempDir::new().unwrap();
         let repo = Repository::init_default(repo_dir.path()).unwrap();
         let dest = TempDir::new().unwrap();
-        let missing = objects::object::ChangeId::generate();
+        let missing = crate::test_state_id();
         let err = repo
             .record_thread_manifest("feature/x", &missing, &dest.path().join("out"))
             .expect_err("should fail when state is unknown");
@@ -2564,7 +2561,7 @@ mod tests {
             .unwrap()
             .expect("seed tree");
         let mut manifest = crate::thread_manifest::ThreadManifest::new(
-            initial.change_id,
+            initial.id(),
             initial.tree,
             canonical_worktree_path(repo_dir.path()),
         );
@@ -2584,14 +2581,14 @@ mod tests {
         fs::write(repo_dir.path().join("alpha.txt"), b"v2\n").unwrap();
 
         let captured = repo.snapshot(Some("after edit".into()), None).unwrap();
-        assert_ne!(captured.change_id, initial.change_id);
+        assert_ne!(captured.id(), initial.id());
         assert_ne!(captured.tree, initial.tree);
 
         // Manifest got refreshed to point at the new state and tree.
         let refreshed = crate::thread_manifest::read_manifest(repo.heddle_dir(), "main")
             .unwrap()
             .expect("manifest persists");
-        assert_eq!(refreshed.state_id, captured.change_id);
+        assert_eq!(refreshed.state_id, captured.id());
         assert_eq!(refreshed.tree_hash, captured.tree);
         // beta.txt was untouched — its stat fields (and hash) should
         // still appear in the refreshed manifest.
@@ -2641,7 +2638,8 @@ mod tests {
             .snapshot(Some("from main repo, not the mat worktree".into()), None)
             .unwrap();
         assert_ne!(
-            snap.change_id, materialize_state_id,
+            snap.id(),
+            materialize_state_id,
             "snapshot must advance main's head"
         );
 

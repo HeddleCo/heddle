@@ -12,12 +12,23 @@
 //! output makes the invariant visible to operators.
 
 use anyhow::Result;
-use objects::store::ObjectStore;
+use heddle_core::{
+    gc_plan::{
+        gc_consolidated_mirror_message, gc_dry_run_messages, gc_pack_message,
+        gc_preserved_redactions_message, gc_prune_loose_message, gc_pruned_git_mapping_message,
+        gc_status_token, plan_gc_dry_run,
+    },
+    maintenance_plan::{pack_install_recover_line, unpaired_packs_pruned_line},
+};
+#[cfg(feature = "git-overlay")]
+use heddle_git_projection::GitProjection;
+use objects::store::{
+    AnyStore, ObjectStore, PackInstallMetricsSnapshot, pack_install_metrics_snapshot,
+    recover_pack_install_intents,
+};
 use serde::Serialize;
 
 use crate::cli::{Cli, render::write_json_stdout, should_output_json};
-#[cfg(feature = "git-overlay")]
-use crate::git_projection_engine::GitProjection;
 
 #[derive(Serialize, Default)]
 struct GcOutput {
@@ -30,6 +41,14 @@ struct GcOutput {
     bytes_saved: u64,
     pruned_loose: u64,
     bytes_freed: u64,
+    /// L8 Option D: unpaired `.pack` files removed (no matching `.idx`).
+    unpaired_packs_pruned: u64,
+    /// L8 install-intent recover: intents completed during this GC.
+    pack_install_intents_completed: u64,
+    /// L8 install-intent recover: intents aborted during this GC.
+    pack_install_intents_aborted: u64,
+    /// Process-local pack-install scrape counters after recover.
+    pack_install_metrics: PackInstallMetricsSnapshot,
     pinned_redactions: usize,
     preserved_redactions: usize,
     #[cfg(feature = "git-overlay")]
@@ -44,7 +63,7 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
     let mut summary = GcOutput {
         output_kind: "gc",
         action: "gc",
-        status: "ok",
+        status: gc_status_token(dry_run),
         dry_run,
         prune,
         ..Default::default()
@@ -65,24 +84,14 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
     if dry_run {
         let blobs = repo.store().list_blobs()?;
         let trees = repo.store().list_trees()?;
-        let total_objects = blobs.len() + trees.len();
-        summary.packed_count = total_objects as u64;
-        summary.status = "dry_run";
+        let plan = plan_gc_dry_run(blobs.len(), trees.len());
+        summary.packed_count = plan.packed_count;
+        summary.status = plan.status;
 
         if !json {
-            println!(
-                "Would pack {} objects ({} blobs, {} trees)",
-                total_objects,
-                blobs.len(),
-                trees.len()
-            );
-
             let _ = prune;
-            println!("Would prune redundant loose objects after consolidating into a pack");
-            if pinned_redactions > 0 {
-                println!(
-                    "Pinned {pinned_redactions} redaction tombstone(s) — never collected by GC"
-                );
+            for line in gc_dry_run_messages(blobs.len(), trees.len(), pinned_redactions) {
+                println!("{line}");
             }
         }
     } else {
@@ -91,14 +100,7 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
         summary.bytes_saved = bytes_saved;
 
         if !json {
-            if packed_count > 0 {
-                println!(
-                    "Packed {} objects (saved {} bytes)",
-                    packed_count, bytes_saved
-                );
-            } else {
-                println!("No objects to pack");
-            }
+            println!("{}", gc_pack_message(packed_count, bytes_saved));
         }
 
         repo.refs().pack_refs()?;
@@ -109,8 +111,8 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
             if bridge.is_initialized() {
                 let removed = bridge.prune_unreachable_mapping_entries()?;
                 summary.pruned_git_mapping_entries = removed;
-                if !json && removed > 0 {
-                    println!("Pruned {removed} stale Git Projection Mapping entries");
+                if !json && let Some(msg) = gc_pruned_git_mapping_message(removed) {
+                    println!("{msg}");
                 }
 
                 // Consolidate the Bridge Mirror (`.heddle/git`): pack its
@@ -123,8 +125,8 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
                 // `GitProjection::consolidate_mirror`.
                 let consolidated = bridge.consolidate_mirror()?;
                 summary.consolidated_mirror_loose = consolidated;
-                if !json && consolidated > 0 {
-                    println!("Consolidated {consolidated} loose Bridge Mirror objects into a pack");
+                if !json && let Some(msg) = gc_consolidated_mirror_message(consolidated) {
+                    println!("{msg}");
                 }
             }
         }
@@ -144,14 +146,34 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
         summary.pruned_loose = removed;
         summary.bytes_freed = bytes_freed;
         if !json {
-            if removed > 0 {
-                println!(
-                    "Pruned {} redundant loose objects (freed {} bytes)",
-                    removed, bytes_freed
-                );
-            } else {
-                println!("No loose objects to prune");
-            }
+            println!("{}", gc_prune_loose_message(removed, bytes_freed));
+        }
+
+        // L8 residual: recover pack-install intents, then prune unpaired
+        // packs (Option D). Safe for correctness — loaders never open
+        // unpaired packs — and bounds crash-window disk leak. Prefer the
+        // public recover free-fn + FsStore::prune_unpaired_packs when the
+        // store is the filesystem backend.
+        let packs = repo.heddle_dir().join("packs");
+        let recover = recover_pack_install_intents(&packs)?;
+        summary.pack_install_intents_completed = recover.completed;
+        summary.pack_install_intents_aborted = recover.aborted;
+        summary.pack_install_metrics = pack_install_metrics_snapshot();
+        if !json {
+            println!(
+                "{}",
+                pack_install_recover_line(recover.completed, recover.aborted)
+            );
+        }
+        let (unpaired_removed, unpaired_bytes) = match repo.store() {
+            AnyStore::Fs(fs) => fs.prune_unpaired_packs()?,
+        };
+        summary.unpaired_packs_pruned = unpaired_removed;
+        if !json {
+            println!(
+                "{}",
+                unpaired_packs_pruned_line(unpaired_removed, unpaired_bytes)
+            );
         }
 
         // Post-GC invariant: every redaction we saw at the start of
@@ -187,11 +209,8 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
         }
         if pinned_redactions > 0 {
             summary.preserved_redactions = pinned_redactions;
-            if !json {
-                println!(
-                    "Preserved {pinned_redactions} redaction tombstone(s) across GC \
-                     (structurally outside the object store)"
-                );
+            if !json && let Some(msg) = gc_preserved_redactions_message(pinned_redactions) {
+                println!("{msg}");
             }
         }
     }

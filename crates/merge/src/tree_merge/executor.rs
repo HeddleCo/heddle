@@ -63,7 +63,9 @@ fn resolve_merged_leaf(
     {
         return FlatLeaf::symlink(hash);
     }
-    if !content_was_merged && our.entry_type == their.entry_type && our.entry_type == EntryType::Blob
+    if !content_was_merged
+        && our.entry_type == their.entry_type
+        && our.entry_type == EntryType::Blob
     {
         return FlatLeaf::blob(hash, union_executable(our.executable, their.executable));
     }
@@ -254,7 +256,11 @@ fn merge_remaining_paths(
             continue;
         }
 
-        match (base_flat.get(path), our_flat.get(path), their_flat.get(path)) {
+        match (
+            base_flat.get(path),
+            our_flat.get(path),
+            their_flat.get(path),
+        ) {
             (None, None, Some(leaf)) | (None, Some(leaf), None) => {
                 merged_flat.insert(path.clone(), *leaf);
             }
@@ -1414,7 +1420,10 @@ mod tests {
             .unwrap()
             .unwrap();
         let text = String::from_utf8_lossy(content.content());
-        assert!(text.contains("<<<<<<<"), "expected conflict markers: {text}");
+        assert!(
+            text.contains("<<<<<<<"),
+            "expected conflict markers: {text}"
+        );
     }
 
     /// Rename path rebuilds via `build_nested_tree`; that rebuild must carry

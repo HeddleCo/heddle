@@ -25,7 +25,7 @@ use objects::{
     object::{Blob, ContentHash, Tree, TreeEntry},
     store::{
         CompressionConfig, ObjectStore,
-        pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder},
+        pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder, SyncData},
     },
     util::{GitTreeNameClassification, GitTreeNameLossyAction, classify_git_tree_name},
 };
@@ -512,7 +512,7 @@ struct PackedImportStats {
     lossy_entries: Vec<LossyImportEntry>,
 }
 
-struct PackedImport<'a, W: std::io::Write + std::io::Read + std::io::Seek> {
+struct PackedImport<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> {
     git: &'a GitSource,
     map: &'a mut ShaMap,
     builder: StreamingPackBuilder<W>,
@@ -520,7 +520,7 @@ struct PackedImport<'a, W: std::io::Write + std::io::Read + std::io::Seek> {
     options: ImportOptions,
 }
 
-impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> {
+impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImport<'a, W> {
     fn new(
         git: &'a GitSource,
         map: &'a mut ShaMap,
@@ -694,14 +694,14 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
         Ok(hash)
     }
 
-    /// Write a commit state and return its Heddle change id (existing or new).
+    /// Write a commit state and return its physical Heddle state id (existing or new).
     fn write_commit_with_parent_policy(
         &mut self,
         commit: &CommitEntry,
         tree: ContentHash,
         git_lossy: bool,
         parent_policy: ParentMapPolicy,
-    ) -> crate::Result<objects::object::ChangeId> {
+    ) -> crate::Result<objects::object::StateId> {
         if let Some(cid) = self.map.get_commit(&commit.sha) {
             return Ok(cid);
         }
@@ -733,7 +733,7 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
         let data = rmp_serde::to_vec_named(&state)
             .map_err(|e| IngestError::Other(format!("serialize state for import pack: {e}")))?;
         self.builder.add_id(
-            PackObjectId::ChangeId(state.change_id),
+            PackObjectId::StateId(state.id()),
             PackObjectType::State,
             data,
         )?;
@@ -741,9 +741,9 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
         self.stats.states += 1;
 
         self.map
-            .insert_commit(&commit.sha, state.change_id)
+            .insert_commit(&commit.sha, state.state_id)
             .map_err(IngestError::from)?;
-        Ok(state.change_id)
+        Ok(state.state_id)
     }
 }
 
@@ -865,14 +865,14 @@ pub fn import_git_into_scoped_with_options_and_progress(
 /// real Git OID. Use full [`import_git_into`] / `heddle adopt` when the full
 /// history is needed.
 ///
-/// Returns the mapped Heddle change id for `git_sha`. Idempotent when the tip
+/// Returns the mapped Heddle state id for `git_sha`. Idempotent when the tip
 /// is already mapped.
 pub fn import_single_git_commit_into(
     git_path: impl AsRef<Path>,
     heddle_path: impl AsRef<Path>,
     git_sha: &str,
     options: ImportOptions,
-) -> crate::Result<objects::object::ChangeId> {
+) -> crate::Result<objects::object::StateId> {
     let git = GitSource::open(git_path)?;
     let heddle_path = heddle_path.as_ref();
     let root = strip_trailing_heddle(heddle_path);
@@ -890,6 +890,10 @@ pub fn import_single_git_commit_into(
         if repo.store().get_state(&existing)?.is_some() {
             return Ok(existing);
         }
+        return Err(IngestError::Other(format!(
+            "Git commit {git_sha} is mapped to missing Heddle state {}; run a full Git adoption to repair the mapping",
+            existing.to_string_full()
+        )));
     }
 
     let commit = git.read_commit(git_sha)?;
@@ -911,7 +915,7 @@ pub fn import_single_git_commit_into(
     let bucket_dir = staging_dir.join(format!("{run_id}-buckets"));
 
     map.begin_append_batch()?;
-    let write_result = (|| -> crate::Result<objects::object::ChangeId> {
+    let write_result = (|| -> crate::Result<objects::object::StateId> {
         let pack_file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -1602,7 +1606,7 @@ mod tests {
             .expect("get_state must succeed for an imported commit")
             .expect("imported main state should exist in the store");
         assert_eq!(
-            state.change_id, main_cid,
+            state.state_id, main_cid,
             "round-tripped state's change id should match the ref target"
         );
 

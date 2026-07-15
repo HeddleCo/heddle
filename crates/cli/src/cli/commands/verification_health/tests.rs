@@ -10,11 +10,12 @@ use heddle_core::status::next_action::{
     remote_tracking_next_action,
 };
 use objects::object::ThreadName;
+use refs::Head;
 use repo::{GitRemoteTrackingStatus, Repository};
 use tempfile::TempDir;
 
 use super::{
-    RepositoryVerificationState, VerificationActionPlan, action_template, clean_health,
+    RepositoryVerificationState, action_template, detached_git_head_mutation_advice,
     machine_contract_coverage, remote_drift_decision, repository_setup_guidance,
     repository_verification_blocked_advice,
 };
@@ -101,7 +102,7 @@ fn canonical_git_overlay_ref_commands_quote_parseable_refs() {
             .argv_template[1..],
         [
             "fsck",
-            "--repair",
+            "repair",
             "git",
             "--prefer",
             "heddle",
@@ -138,9 +139,9 @@ fn repository_verification_blocked_advice_uses_verify_when_no_action_exists() {
 #[test]
 fn repository_verification_blocked_advice_preserves_trust_recovery_commands() {
     let trust = verification_state(
-        "heddle fsck --repair git --ref main --preview",
+        "heddle fsck repair git --ref main --preview",
         vec![
-            "heddle fsck --repair git --ref main --preview".to_string(),
+            "heddle fsck repair git --ref main --preview".to_string(),
             "heddle verify".to_string(),
         ],
     );
@@ -158,7 +159,7 @@ fn repository_verification_blocked_advice_preserves_trust_recovery_commands() {
 
     assert_eq!(
         advice.primary_command,
-        "heddle fsck --repair git --ref main --preview"
+        "heddle fsck repair git --ref main --preview"
     );
     assert_eq!(advice.recovery_commands, trust.recovery_commands);
 }
@@ -173,7 +174,7 @@ fn repository_verification_blocked_advice_keeps_primary_override_first() {
     let advice = repository_verification_blocked_advice(
         "git_checkpoint_preflight_blocked",
         "blocked",
-        "retrying `heddle commit`",
+        "retrying `heddle capture`",
         &trust,
         "unsafe",
         "would change",
@@ -189,50 +190,6 @@ fn repository_verification_blocked_advice_keeps_primary_override_first() {
 }
 
 #[test]
-fn verification_action_plan_keeps_blockers_above_guidance() {
-    let clean_health = clean_health("clean", Vec::new());
-
-    let machine_gap = VerificationActionPlan::from_parts(
-        &clean_health,
-        Some("heddle push".to_string()),
-        Some("heddle land --thread feature --no-push".to_string()),
-        Some("heddle doctor schemas --output json".to_string()),
-    );
-    assert_eq!(
-        machine_gap.primary_action,
-        "heddle doctor schemas --output json"
-    );
-    assert_eq!(
-        machine_gap.recovery_commands,
-        vec!["heddle doctor schemas --output json"]
-    );
-    assert_eq!(machine_gap.remote_action.as_deref(), Some("heddle push"));
-    assert_eq!(
-        machine_gap.workflow_action.as_deref(),
-        Some("heddle land --thread feature --no-push")
-    );
-
-    let workflow_waiting = VerificationActionPlan::from_parts(
-        &clean_health,
-        Some("heddle push".to_string()),
-        Some("heddle land --thread feature --no-push".to_string()),
-        None,
-    );
-    assert_eq!(
-        workflow_waiting.primary_action,
-        "heddle land --thread feature --no-push"
-    );
-
-    let publish_guidance = VerificationActionPlan::from_parts(
-        &clean_health,
-        Some("heddle push".to_string()),
-        None,
-        None,
-    );
-    assert_eq!(publish_guidance.primary_action, "heddle push");
-}
-
-#[test]
 fn remote_tracking_next_action_covers_basic_git_states_without_repo_context() {
     assert_eq!(
         remote_tracking_next_action(&remote("main", "origin/main", 0, 1, "heddle pull")).as_deref(),
@@ -243,8 +200,7 @@ fn remote_tracking_next_action_covers_basic_git_states_without_repo_context() {
         Some("heddle push")
     );
     assert_eq!(
-        remote_tracking_next_action(&remote("main", "origin/main", 1, 1, "heddle fetch"))
-            .as_deref(),
+        remote_tracking_next_action(&remote("main", "origin/main", 1, 1, "heddle pull")).as_deref(),
         Some("heddle import git --ref origin/main")
     );
     assert_eq!(
@@ -256,7 +212,7 @@ fn remote_tracking_next_action_covers_basic_git_states_without_repo_context() {
 #[test]
 fn remote_drift_decision_prefers_import_until_upstream_thread_matches_git_tip() {
     let (_temp, repo) = test_repo();
-    let diverged = remote("main", "origin/main", 1, 1, "heddle fetch");
+    let diverged = remote("main", "origin/main", 1, 1, "heddle pull");
 
     let unimported = remote_drift_decision(&repo, &diverged);
     assert_eq!(unimported.status, "remote_diverged");
@@ -268,7 +224,7 @@ fn remote_drift_decision_prefers_import_until_upstream_thread_matches_git_tip() 
         unimported.recovery_commands,
         vec![
             "heddle import git --ref origin/main",
-            "heddle fsck --repair git --ref origin/main --preview"
+            "heddle fsck repair git --ref origin/main --preview"
         ]
     );
 
@@ -285,7 +241,7 @@ fn remote_drift_decision_prefers_import_until_upstream_thread_matches_git_tip() 
         stale_thread.recovery_commands,
         vec![
             "heddle import git --ref origin/main",
-            "heddle fsck --repair git --ref origin/main --preview"
+            "heddle fsck repair git --ref origin/main --preview"
         ]
     );
 }
@@ -301,6 +257,29 @@ fn remote_drift_decision_treats_local_only_branch_as_clean_publishable_state() {
     assert_eq!(decision.primary_action.as_deref(), Some("heddle push"));
     assert!(decision.recovery_commands.is_empty());
     assert!(!decision.requires_clean_worktree);
+}
+
+#[test]
+fn detached_head_without_known_thread_returns_typed_heddle_handoff() {
+    let (_temp, repo) = test_repo();
+    let main = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .expect("main state");
+    repo.refs()
+        .write_head(&Head::Detached { state: main })
+        .unwrap();
+
+    let advice = detached_git_head_mutation_advice(&repo, "commit");
+
+    assert_eq!(advice.kind, "git_head_detached");
+    assert_eq!(advice.primary_command, "heddle thread list");
+    assert_eq!(
+        advice.recovery_commands,
+        vec!["heddle thread list", "heddle thread switch <thread>"]
+    );
+    assert!(!advice.hint.contains("git switch"));
 }
 
 fn remote(

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use objects::{
     error::HeddleError,
-    object::{ChangeId, MarkerName, ThreadName},
+    object::{MarkerName, StateId, ThreadName},
 };
 use tempfile::TempDir;
 
@@ -19,7 +19,7 @@ fn create_ref_manager() -> (TempDir, RefManager) {
 #[test]
 fn test_get_thread_from_packed_refs() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     refs.set_thread(&ThreadName::new("cold-branch"), &id)
         .unwrap();
     refs.pack_refs().unwrap();
@@ -33,8 +33,8 @@ fn test_get_thread_from_packed_refs() {
 #[test]
 fn test_loose_overrides_packed_refs() {
     let (_temp, refs) = create_ref_manager();
-    let id1 = ChangeId::generate();
-    let id2 = ChangeId::generate();
+    let id1 = crate::refs::fresh_state_id();
+    let id2 = crate::refs::fresh_state_id();
     refs.set_thread(&ThreadName::new("main"), &id1).unwrap();
     refs.pack_refs().unwrap();
     refs.set_thread(&ThreadName::new("main"), &id2).unwrap();
@@ -46,7 +46,7 @@ fn test_loose_overrides_packed_refs() {
 #[test]
 fn test_pack_refs_consolidates_loose() {
     let (_temp, refs) = create_ref_manager();
-    let ids: Vec<ChangeId> = (0..5).map(|_| ChangeId::generate()).collect();
+    let ids: Vec<StateId> = (0..5).map(|_| crate::refs::fresh_state_id()).collect();
     for (i, id) in ids.iter().enumerate() {
         refs.set_thread(&ThreadName::new(format!("branch-{}", i)), id)
             .unwrap();
@@ -65,7 +65,7 @@ fn test_pack_refs_consolidates_loose() {
 #[test]
 fn test_list_threads_includes_packed() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     refs.set_thread(&ThreadName::new("packed-branch"), &id)
         .unwrap();
     refs.pack_refs().unwrap();
@@ -75,7 +75,7 @@ fn test_list_threads_includes_packed() {
 #[test]
 fn test_delete_thread_removes_from_packed() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     refs.set_thread(&ThreadName::new("to-delete"), &id).unwrap();
     refs.pack_refs().unwrap();
     refs.delete_thread(&ThreadName::new("to-delete")).unwrap();
@@ -87,7 +87,7 @@ fn test_delete_thread_removes_from_packed() {
 #[test]
 fn test_packed_refs_format() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     refs.set_thread(&ThreadName::new("format-test"), &id)
         .unwrap();
     refs.pack_refs().unwrap();
@@ -99,7 +99,7 @@ fn test_packed_refs_format() {
 #[test]
 fn test_markers_in_packed_refs() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     refs.create_marker(&MarkerName::new("v1.0.0"), &id).unwrap();
     refs.pack_refs().unwrap();
     let loose = refs.root.join("refs/markers/v1.0.0");
@@ -112,7 +112,7 @@ fn test_markers_in_packed_refs() {
 #[test]
 fn test_delete_thread_cas_removes_packed_entry() {
     let (_temp, refs) = create_ref_manager();
-    let id = ChangeId::generate();
+    let id = crate::refs::fresh_state_id();
     refs.set_thread(&ThreadName::new("packed-thread"), &id)
         .unwrap();
     refs.pack_refs().unwrap();
@@ -126,8 +126,8 @@ fn test_delete_thread_cas_removes_packed_entry() {
 #[test]
 fn test_delete_thread_cas_packed_conflict() {
     let (_temp, refs) = create_ref_manager();
-    let id1 = ChangeId::generate();
-    let id2 = ChangeId::generate();
+    let id1 = crate::refs::fresh_state_id();
+    let id2 = crate::refs::fresh_state_id();
     refs.set_thread(&ThreadName::new("packed-thread"), &id1)
         .unwrap();
     refs.pack_refs().unwrap();
@@ -145,9 +145,9 @@ fn test_delete_thread_cas_packed_conflict() {
 #[test]
 fn test_ref_summary_index_reports_packed_entries_and_loose_overrides() {
     let (_temp, refs) = create_ref_manager();
-    let packed_thread = ChangeId::generate();
-    let packed_marker = ChangeId::generate();
-    let loose_override = ChangeId::generate();
+    let packed_thread = crate::refs::fresh_state_id();
+    let packed_marker = crate::refs::fresh_state_id();
+    let loose_override = crate::refs::fresh_state_id();
 
     refs.set_thread(&ThreadName::new("release"), &packed_thread)
         .unwrap();

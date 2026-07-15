@@ -397,10 +397,10 @@ mod tests {
         assert!(written.contains(&format!("target-dir = \"{}\"", target.display(),)));
 
         // Redirect must not dirt capture/restack: local exclude covers .cargo/.
-        let exclude = std::fs::read_to_string(crate::cli::commands::worktree_cmd::hydrate::hydrate_exclude_path(
-            temp.path(),
-        ))
-            .expect("local exclude written for shared-target .cargo/");
+        let exclude = std::fs::read_to_string(
+            crate::cli::commands::worktree_cmd::hydrate::hydrate_exclude_path(temp.path()),
+        )
+        .expect("local exclude written for shared-target .cargo/");
         assert!(
             exclude.lines().any(|l| l.trim() == ".cargo/"),
             "expected .cargo/ ignore rule, got:\n{exclude}"

@@ -6,12 +6,12 @@
 
 use std::{collections::HashSet, fs, path::Path};
 
-use crate::{fs_atomic::write_file_atomic, object::ChangeId, store::Result};
+use crate::{fs_atomic::write_file_atomic, object::StateId, store::Result};
 
 /// Manages shallow state information.
 pub struct ShallowInfo {
     path: std::path::PathBuf,
-    shallow_states: HashSet<ChangeId>,
+    shallow_states: HashSet<StateId>,
 }
 
 impl ShallowInfo {
@@ -27,7 +27,7 @@ impl ShallowInfo {
                     if line.is_empty() || line.starts_with('#') {
                         None
                     } else {
-                        ChangeId::parse(line).ok()
+                        StateId::parse(line).ok()
                     }
                 })
                 .collect()
@@ -42,17 +42,17 @@ impl ShallowInfo {
     }
 
     /// Check if a state is shallow (has grafted parents).
-    pub fn is_shallow(&self, id: &ChangeId) -> bool {
+    pub fn is_shallow(&self, id: &StateId) -> bool {
         self.shallow_states.contains(id)
     }
 
     /// Get all shallow states.
-    pub fn shallow_states(&self) -> &HashSet<ChangeId> {
+    pub fn shallow_states(&self) -> &HashSet<StateId> {
         &self.shallow_states
     }
 
     /// Add a shallow state.
-    pub fn add_shallow(&mut self, id: ChangeId) -> Result<()> {
+    pub fn add_shallow(&mut self, id: StateId) -> Result<()> {
         if self.shallow_states.insert(id) {
             self.save()?;
         }
@@ -60,7 +60,7 @@ impl ShallowInfo {
     }
 
     /// Remove a shallow state (when history is unshallowed).
-    pub fn remove_shallow(&mut self, id: &ChangeId) -> Result<()> {
+    pub fn remove_shallow(&mut self, id: &StateId) -> Result<()> {
         if self.shallow_states.remove(id) {
             self.save()?;
         }
@@ -93,7 +93,7 @@ mod tests {
         fs::create_dir_all(&heddle_dir).unwrap();
 
         let mut shallow = ShallowInfo::load(&heddle_dir).unwrap();
-        let id = ChangeId::generate();
+        let id = StateId::from_bytes([7; 32]);
         shallow.add_shallow(id).unwrap();
 
         let reloaded = ShallowInfo::load(&heddle_dir).unwrap();

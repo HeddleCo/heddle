@@ -1,19 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Hosted-client command arguments.
 
-use clap::{Args, Subcommand};
+use clap::Subcommand;
 
 #[derive(Subcommand, Clone, Debug)]
 pub enum AuthCommands {
     /// Authenticate with a Heddle server
     Login {
-        /// Heddle server address
-        #[arg(long, default_value = "grpc.heddle.sh")]
-        server: String,
-
-        /// Don't open a browser automatically
+        /// Heddle server address (required for headless credential install).
         #[arg(long)]
-        no_browser: bool,
+        server: Option<String>,
+
+        /// Open the authorization URL in the system browser.
+        #[arg(long, conflicts_with = "token")]
+        open_browser: bool,
+
+        /// Install an existing Biscuit credential without opening a browser.
+        #[arg(long, requires_all = ["key_file", "server"])]
+        token: Option<String>,
+
+        /// Device private-key PEM matching the token's proof key.
+        #[arg(long, value_name = "PEM_PATH", requires = "token")]
+        key_file: Option<std::path::PathBuf>,
     },
 
     /// Remove stored credentials for a server
@@ -30,6 +38,37 @@ pub enum AuthCommands {
         server: Option<String>,
     },
 
+    /// Derive a scoped, short-lived agent token offline
+    DeriveAgent {
+        /// Server whose stored credential is the parent.
+        #[arg(long)]
+        server: String,
+
+        /// Delegation name recorded in the Biscuit chain.
+        #[arg(long)]
+        agent_id: Option<String>,
+
+        /// Child lifetime in seconds (clamped by the parent expiry).
+        #[arg(long = "ttl", default_value_t = 3600)]
+        ttl_secs: u64,
+
+        /// Forward-compatible resource scope (`repo:org/name`, `namespace:org`, or a bare repo path).
+        #[arg(long = "scope")]
+        scopes: Vec<String>,
+
+        /// Narrow the safe operation set (repeatable, using gRPC method names such as `Push`).
+        #[arg(long = "allow")]
+        allowed_operations: Vec<String>,
+
+        /// Write `token` and `metadata.json` files to this directory without exporting the device key.
+        #[arg(long, value_name = "DIR", conflicts_with = "stdout")]
+        out: Option<std::path::PathBuf>,
+
+        /// Print only the child token instead of installing it (security note goes to stderr).
+        #[arg(long, conflicts_with = "out")]
+        stdout: bool,
+    },
+
     /// Create a service token for CI/scripts, scoped to a namespace
     CreateServiceToken {
         /// Display name for the service account (e.g. "github-ci-main")
@@ -40,138 +79,177 @@ pub enum AuthCommands {
         /// Heddle server address
         #[arg(long)]
         server: Option<String>,
+        /// Write the private-key PEM to this path (default: under ~/.heddle/service-accounts/)
+        #[arg(long)]
+        key_out: Option<String>,
+        /// Include the private key PEM in stdout / JSON (default: write file only)
+        #[arg(long)]
+        show_secrets: bool,
     },
 }
 
 impl From<AuthCommands> for heddle_client::AuthCommand {
     fn from(command: AuthCommands) -> Self {
         match command {
-            AuthCommands::Login { server, no_browser } => {
-                heddle_client::AuthCommand::Login { server, no_browser }
-            }
+            AuthCommands::Login {
+                server,
+                open_browser,
+                token,
+                key_file,
+            } => heddle_client::AuthCommand::Login {
+                server,
+                open_browser,
+                token,
+                key_file,
+            },
             AuthCommands::Logout { server } => heddle_client::AuthCommand::Logout { server },
             AuthCommands::Status { server } => heddle_client::AuthCommand::Status { server },
+            AuthCommands::DeriveAgent {
+                server,
+                agent_id,
+                ttl_secs,
+                scopes,
+                allowed_operations,
+                out,
+                stdout,
+            } => heddle_client::AuthCommand::DeriveAgent {
+                server,
+                agent_id,
+                ttl_secs,
+                scopes,
+                allowed_operations,
+                out,
+                stdout,
+            },
             AuthCommands::CreateServiceToken {
                 name,
                 namespace,
                 server,
+                key_out,
+                show_secrets,
             } => heddle_client::AuthCommand::CreateServiceToken {
                 name,
                 namespace,
                 server,
+                key_out,
+                show_secrets,
             },
         }
     }
 }
 
-#[derive(Clone, Debug, Subcommand)]
-pub enum SupportCommands {
-    /// Grant a Heddle staff member temporary admin on a namespace or
-    /// repository. Reason and TTL are required; the server enforces a
-    /// hard cap of 7 days.
-    Grant(SupportGrantArgs),
-    /// List active (or all) support-access grants on a namespace/repo.
-    /// Caller must hold Admin on the target.
-    List(SupportListArgs),
-    /// Revoke an active support-access grant by id.
-    Revoke(SupportRevokeArgs),
-}
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
 
-impl From<SupportCommands> for heddle_client::SupportCommand {
-    fn from(command: SupportCommands) -> Self {
-        match command {
-            SupportCommands::Grant(args) => heddle_client::SupportCommand::Grant(args.into()),
-            SupportCommands::List(args) => heddle_client::SupportCommand::List(args.into()),
-            SupportCommands::Revoke(args) => heddle_client::SupportCommand::Revoke(args.into()),
+    use crate::cli::{AuthCommands, Cli, Commands};
+
+    #[test]
+    fn login_parses_headless_token_and_key_file() {
+        let cli = Cli::try_parse_from([
+            "heddle",
+            "auth",
+            "login",
+            "--server",
+            "127.0.0.1:8421",
+            "--token",
+            "biscuit-token",
+            "--key-file",
+            "/run/secrets/device.pem",
+        ])
+        .expect("headless login flags parse");
+
+        let Commands::Auth {
+            command:
+                AuthCommands::Login {
+                    server,
+                    token,
+                    key_file,
+                    open_browser,
+                },
+        } = cli.command
+        else {
+            panic!("expected auth login");
+        };
+        assert_eq!(server.as_deref(), Some("127.0.0.1:8421"));
+        assert_eq!(token.as_deref(), Some("biscuit-token"));
+        assert_eq!(
+            key_file.as_deref(),
+            Some(std::path::Path::new("/run/secrets/device.pem"))
+        );
+        assert!(!open_browser);
+    }
+
+    #[test]
+    fn login_requires_token_and_key_file_together() {
+        for incomplete in [
+            vec!["--token", "biscuit-token"],
+            vec!["--key-file", "/run/secrets/device.pem"],
+        ] {
+            let mut args = vec!["heddle", "auth", "login"];
+            args.extend(incomplete);
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "incomplete headless credential must be rejected"
+            );
         }
     }
-}
 
-#[derive(Clone, Debug, Args)]
-pub struct SupportGrantArgs {
-    /// The Heddle staff email being granted access.
-    pub operator_email: String,
-    /// Namespace path, e.g. `org/acme`. Mutually exclusive with --target-repo.
-    #[arg(long, conflicts_with = "support_repo")]
-    pub namespace: Option<String>,
-    /// Hosted repository path, e.g. `org/acme/heddle`. Mutually exclusive with
-    /// --namespace. The global --repo flag still selects the local Heddle repo.
-    #[arg(
-        long = "target-repo",
-        id = "support_repo",
-        conflicts_with = "namespace"
-    )]
-    pub repo: Option<String>,
-    /// Time-to-live, e.g. `2h`, `24h`, `4d`. Hard-capped at 7d server-side.
-    #[arg(long, default_value = "24h")]
-    pub ttl: String,
-    /// Free-form reason, surfaced in the audit listing. Required.
-    #[arg(long)]
-    pub reason: String,
-    /// Remote that maps to the hosted server (default: `origin`).
-    #[arg(long, default_value = "origin")]
-    pub remote: String,
-}
-
-impl From<SupportGrantArgs> for heddle_client::SupportGrant {
-    fn from(args: SupportGrantArgs) -> Self {
-        Self {
-            operator_email: args.operator_email,
-            namespace: args.namespace,
-            repo: args.repo,
-            ttl: args.ttl,
-            reason: args.reason,
-            remote: args.remote,
-        }
+    #[test]
+    fn headless_login_requires_an_explicit_server() {
+        assert!(
+            Cli::try_parse_from([
+                "heddle",
+                "auth",
+                "login",
+                "--token",
+                "biscuit-token",
+                "--key-file",
+                "/run/secrets/device.pem",
+            ])
+            .is_err()
+        );
+        Cli::try_parse_from(["heddle", "auth", "login"])
+            .expect("interactive login may resolve the configured default server");
     }
-}
 
-#[derive(Clone, Debug, Args)]
-pub struct SupportListArgs {
-    /// Namespace path. Mutually exclusive with --target-repo.
-    #[arg(long, conflicts_with = "support_repo")]
-    pub namespace: Option<String>,
-    /// Hosted repository path. Mutually exclusive with --namespace. The global
-    /// --repo flag still selects the local Heddle repo.
-    #[arg(
-        long = "target-repo",
-        id = "support_repo",
-        conflicts_with = "namespace"
-    )]
-    pub repo: Option<String>,
-    /// Include revoked + expired entries. Defaults to active-only.
-    #[arg(long)]
-    pub include_inactive: bool,
-    /// Remote that maps to the hosted server (default: `origin`).
-    #[arg(long, default_value = "origin")]
-    pub remote: String,
-}
+    #[test]
+    fn derive_agent_parses_repeatable_scopes_and_operation_narrowing() {
+        let cli = Cli::try_parse_from([
+            "heddle",
+            "auth",
+            "derive-agent",
+            "--server",
+            "grpc.heddle.test",
+            "--ttl",
+            "900",
+            "--scope",
+            "repo:acme/api",
+            "--scope",
+            "namespace:acme",
+            "--allow",
+            "Push",
+            "--allow",
+            "GetState",
+        ])
+        .expect("derive-agent flags parse");
 
-impl From<SupportListArgs> for heddle_client::SupportList {
-    fn from(args: SupportListArgs) -> Self {
-        Self {
-            namespace: args.namespace,
-            repo: args.repo,
-            include_inactive: args.include_inactive,
-            remote: args.remote,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Args)]
-pub struct SupportRevokeArgs {
-    /// Audit-row id of the grant to revoke (UUID).
-    pub id: String,
-    /// Remote that maps to the hosted server (default: `origin`).
-    #[arg(long, default_value = "origin")]
-    pub remote: String,
-}
-
-impl From<SupportRevokeArgs> for heddle_client::SupportRevoke {
-    fn from(args: SupportRevokeArgs) -> Self {
-        Self {
-            id: args.id,
-            remote: args.remote,
-        }
+        let Commands::Auth {
+            command:
+                AuthCommands::DeriveAgent {
+                    server,
+                    ttl_secs,
+                    scopes,
+                    allowed_operations,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected auth derive-agent");
+        };
+        assert_eq!(server, "grpc.heddle.test");
+        assert_eq!(ttl_secs, 900);
+        assert_eq!(scopes, ["repo:acme/api", "namespace:acme"]);
+        assert_eq!(allowed_operations, ["Push", "GetState"]);
     }
 }

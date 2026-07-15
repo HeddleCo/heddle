@@ -245,7 +245,7 @@ maintainer, written before this gate fires.
 ### 1.4 Soak / long-running test
 
 <TBD: maintainer> — no soak harness exists today. Proposed: a
-**24-hour** soak that runs `heddle commit` / `heddle undo` /
+**24-hour** soak that runs `heddle capture` / `heddle undo` /
 `heddle undo --redo` in a loop against a synthetic
 repository, asserts that no `fsck` errors appear at the end, asserts
 that the oplog is replayable from zero, and asserts that
@@ -350,8 +350,10 @@ meet first":
 - `tier_coverage.rs` — every `Commands` enum variant must be
   classified `Everyday` / `Advanced` / `Hidden`. Hidden verbs are
   not part of the stability commitment.
-- `op_id_coverage.rs` + `idempotency_lint.rs` — state-changing
-  verbs must thread `--op-id` and behave idempotently on replay.
+- `op_id_coverage.rs` — state-changing CLI verbs must thread `--op-id` and
+  behave idempotently on replay. The separate descriptor-driven
+  `heddle-devtools audit-grpc-contract` command governs protobuf RPC effect and
+  retry-key declarations.
 - `heddle doctor docs` — flag names referenced in tracked markdown
   must match the live binary.
 - `heddle doctor schemas` — every documented schema verb registered

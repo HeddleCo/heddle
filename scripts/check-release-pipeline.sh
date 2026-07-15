@@ -150,6 +150,55 @@ grep -E "\.tar\.gz" "$WF" >/dev/null && ok "tar.gz packaging" || err "no tar.gz 
 grep -E "\.zip"    "$WF" >/dev/null && ok "zip packaging"    || err "no zip packaging in $WF"
 grep -E "\.dmg"    "$WF" >/dev/null && ok "macOS cask DMG packaging" || err "no macOS cask DMG packaging in $WF"
 
+if grep -F 'FSMONITOR_WORKER_NAME: heddle-fsmonitor-worker' "$WF" >/dev/null \
+   && grep -F 'cp "target/${{ matrix.target }}/release/${FSMONITOR_WORKER_NAME}" "dist/${stage}/"' "$WF" >/dev/null \
+   && grep -F 'Copy-Item "target/${{ matrix.target }}/release/${env:FSMONITOR_WORKER_NAME}.exe" "dist/$stage/"' "$WF" >/dev/null \
+   && grep -F 'cp "target/${target}/release/${FSMONITOR_WORKER_NAME}" "dist/${stage}/"' "$WF" >/dev/null; then
+  ok "prebuilt CLI archives stage the fsmonitor worker beside heddle"
+else
+  err "every prebuilt CLI archive must stage heddle-fsmonitor-worker beside heddle"
+fi
+
+if grep -F -- '--bin heddle-fsmonitor-worker' scripts/build-macos-cask-artifact.sh >/dev/null \
+   && grep -F 'Contents/Resources/bin/heddle-fsmonitor-worker' scripts/build-macos-cask-artifact.sh >/dev/null \
+   && grep -F -B2 '"$STAGED_APP/Contents/Resources/bin/heddle-fsmonitor-worker"' scripts/build-macos-cask-artifact.sh \
+      | grep -F 'codesign --force --timestamp --options runtime' >/dev/null; then
+  ok "macOS app builds, signs, and stages the fsmonitor worker"
+else
+  err "the macOS app must build and stage heddle-fsmonitor-worker beside heddle"
+fi
+
+if grep -F 'target_cli="$REPO_ROOT/target/$target/release/heddle"' scripts/build-macos-cask-artifact.sh >/dev/null \
+   && grep -F 'target_worker="$REPO_ROOT/target/$target/release/heddle-fsmonitor-worker"' scripts/build-macos-cask-artifact.sh >/dev/null \
+   && grep -F 'codesign --force --timestamp --options runtime --sign "$DEVELOPER_ID" "$target_cli"' scripts/build-macos-cask-artifact.sh >/dev/null \
+   && grep -F 'codesign --force --timestamp --options runtime --sign "$DEVELOPER_ID" "$target_worker"' scripts/build-macos-cask-artifact.sh >/dev/null \
+   && grep -F 'xcrun notarytool submit "$STANDALONE_NOTARY_ZIP"' scripts/build-macos-cask-artifact.sh >/dev/null \
+   && grep -F 'spctl -a -vvv -t execute "$REPO_ROOT/target/$target/release/heddle-fsmonitor-worker"' scripts/build-macos-cask-artifact.sh >/dev/null; then
+  ok "standalone macOS CLI archives contain Developer ID signed and notarized binaries"
+else
+  err "standalone macOS CLI and fsmonitor worker binaries must be Developer ID signed and notarized before tar packaging"
+fi
+
+if grep -F 'install -m 0755 "$WORK/$stage/heddle-fsmonitor-worker" "$root/usr/bin/heddle-fsmonitor-worker"' scripts/build-apt-pool.sh >/dev/null; then
+  ok "apt package installs the fsmonitor worker beside heddle"
+else
+  err "the apt package must install heddle-fsmonitor-worker beside heddle"
+fi
+
+if grep -F 'FSMONITOR_WORKER_PATH=' crates/mount/swift/HeddleHost/pkg/make-pkg.sh >/dev/null \
+   && grep -F '"$PKGROOT/usr/local/bin/heddle-fsmonitor-worker"' crates/mount/swift/HeddleHost/pkg/make-pkg.sh >/dev/null \
+   && grep -F 'heddle-fsmonitor-worker` in `/usr/local/bin/heddle-fsmonitor-worker' crates/mount/swift/HeddleHost/BUILD.md >/dev/null; then
+  ok "macOS package installs the fsmonitor worker beside heddle"
+else
+  err "the macOS package must install heddle-fsmonitor-worker beside heddle"
+fi
+
+if grep -F '`heddle-fsmonitor-worker` (or `.exe` on Windows)' RELEASING.md >/dev/null; then
+  ok "artifact contract documents the fsmonitor worker"
+else
+  err "RELEASING.md must list heddle-fsmonitor-worker in every CLI archive"
+fi
+
 # macOS cask release path.
 if grep -E "^\s*build-macos-cask:" "$WF" >/dev/null \
    && grep -F "runs-on: macos-26" "$WF" >/dev/null \
@@ -173,7 +222,9 @@ else
 fi
 
 if grep -F "cargo build --release --locked -p heddle-mount --features fskit --target" scripts/build-macos-cask-artifact.sh >/dev/null \
-   && grep -F "cargo build --release --locked -p heddle-cli --bin heddle --features mount" scripts/build-macos-cask-artifact.sh >/dev/null; then
+   && grep -F "cargo build --release --locked -p heddle-cli" scripts/build-macos-cask-artifact.sh >/dev/null \
+   && grep -F -- "--bin heddle" scripts/build-macos-cask-artifact.sh >/dev/null \
+   && grep -F -- "--features mount,client" scripts/build-macos-cask-artifact.sh >/dev/null; then
   ok "macOS cask build explicitly enables FSKit/mount features"
 else
   err "macOS cask build must compile heddle-mount with --features fskit and heddle-cli with mount enabled"

@@ -31,6 +31,48 @@ keyed on the `session()` fact in the authority block; a sub-agent
 inherits that fact, so revoking the parent's session id rejects
 every descendant on the next request.
 
+## CLI: `heddle auth derive-agent`
+
+Derive from the credential currently stored for a server without contacting
+that server:
+
+```bash
+heddle auth derive-agent \
+  --server grpc.heddle.sh \
+  --agent-id review-worker \
+  --ttl 3600 \
+  --scope repo:acme/heddle \
+  --allow Push \
+  --allow GetState
+```
+
+Without `--allow`, the command installs the curated safe set: push/pull,
+repository reads, context operations, discussions, and `WhoAmI`. Repeating
+`--allow` selects a subset; it cannot opt into an unsafe method. Every derived
+block independently rejects `CreateServiceAccount`,
+`IssueServiceAccountCredential`, `DeleteRepository`, and `DeleteNamespace`.
+Those checks are the non-optional credential-issuing and destructive-operation
+floor, including for callers of the Rust helper. They restrict use of the
+derived token; they do not constrain device-key-authenticated `MintBiscuit`.
+
+By default the child replaces the active stored credential for `--server`, so
+the next push/pull and any further derivation use that child. Use `--stdout` to
+emit only the token without installing it, or `--out <DIR>` to write 0600
+`token` and `metadata.json` files. The metadata records the server, subject,
+effective expiry, and declared scopes. Neither export contains a private key.
+
+The derived token is strictly weaker than its parent: its operation fence and
+TTL are enforced server-side. Declared resource scopes await W3 enforcement.
+Hosted writes also require the matching device key from this host's shared
+identity store, so a token-only export is not a portable credential.
+
+W1 does not fully close G4 credential laundering. A process with the parent
+device root key can authenticate `MintBiscuit` independently of the attenuated
+token and obtain a fresh authority token. Do not treat a W1 derived token as a
+cross-trust-boundary security control. W2 delegated PoP gives each child its own
+block-bound key without handing over the parent device root key and closes that
+remaining path.
+
 ## API: `cli::auth`
 
 The CLI surface is small: one struct, one main function, two
@@ -71,6 +113,7 @@ let attenuated = attenuate_for_agent(
             ("repo".to_string(), "org/acme/heddle".to_string()),
             ("repo".to_string(), "org/acme/docs".to_string()),
         ]),
+        declared_scopes: Vec::new(),
     },
 )?;
 ```
@@ -89,6 +132,8 @@ the secure default.
 | `expires_at` | `check if time($now), $now < <ts>` | Verifier always injects `time`, so always evaluated |
 | `allowed_operations: Some([...])` | `check if operation($op), $op == "X" \|\| ...` | Reject (no operation fact → check fails closed) |
 | `allowed_resources: Some([...])` | `check if resource($k, $p), (...path matches...)` | Reject (no resource fact → check fails closed) |
+| `declared_scopes` | `agent_scope($kind, $path)` facts | Inert until W3 server enforcement |
+| hard deny floor | one `operation($op), $op != …` check per forbidden method | Reject (the floor is always emitted) |
 
 The path-prefix matcher accepts an exact match or any nested path:
 an entry of `("repo", "org/acme")` covers `repo:org/acme`,
@@ -124,8 +169,9 @@ let attenuated = time_bounded(
 )?;
 ```
 
-No operation or resource narrowing — the agent can do whatever the
-parent could, but only for the next 12 hours.
+No operation or resource allowlist — the agent inherits the parent except for
+the non-optional credential-issuance/delete floor, and only for the next 12
+hours.
 
 ### 3. Multi-repo writer
 
@@ -137,13 +183,15 @@ let attenuated = attenuate_for_agent(
     AgentAttenuation {
         agent_id: "agent-cross-repo".to_string(),
         expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
-        // No operation allowlist → can do anything the parent can.
+        // No operation allowlist → inherits the parent except for the
+        // non-optional credential-issuance/delete floor.
         allowed_operations: None,
         // But only on these two repos.
         allowed_resources: Some(vec![
             ("repo".to_string(), "org/acme/heddle".to_string()),
             ("repo".to_string(), "org/acme/docs".to_string()),
         ]),
+        declared_scopes: Vec::new(),
     },
 )?;
 ```
@@ -166,6 +214,7 @@ let sub_agent_token = attenuate_for_agent(
         allowed_resources: Some(vec![
             ("repo".to_string(), "org/acme/heddle".to_string()),
         ]),
+        declared_scopes: Vec::new(),
     },
 )?;
 ```
@@ -200,6 +249,10 @@ boundary is:
 
 ## What you can't do
 
+The statements in this section describe attenuation of the token itself. They
+do not apply to a holder of the W1 parent device root key, which remains able to
+authenticate `MintBiscuit` until W2 delegated PoP separates child proofs.
+
 - **Widen authority.** A child block can only emit *additional*
   checks. There is no way to add rights the parent didn't have.
 - **Remove a parent's checks.** If the parent restricts itself to
@@ -212,6 +265,10 @@ boundary is:
 - **Re-sign the chain.** The server's public key is the trust
   anchor. The server rejects any chain whose authority block
   doesn't trace back to it.
+- **Enforce CLI `--scope` on today's server.** W1 carries each scope as an
+  `agent_scope` fact and prevents sub-derivation from declaring a broader
+  scope. Request-level repository enforcement begins with W3. Operation and
+  TTL caveats are enforced today.
 
 ## Where the server enforces this
 

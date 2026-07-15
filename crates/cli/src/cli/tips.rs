@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tip {
-    /// "tip: `heddle checkpoint` writes the current capture to Git."
+    /// "tip: Git Overlay source history stays in direct Git commands."
     /// Emitted after a successful capture.
     CheckpointAfterCapture,
     /// "tip: `heddle query` searches saved change history."
@@ -45,7 +45,7 @@ impl Tip {
     pub fn message(&self) -> &'static str {
         match self {
             Self::CheckpointAfterCapture => {
-                "tip: `heddle checkpoint` writes the current captured state to a Git-facing checkpoint"
+                "tip: in Git Overlay, run `heddle commit` when the captured state is ready"
             }
             Self::QueryFromLog => "tip: `heddle query` searches saved change history",
             Self::AgentServeForLatency => {

@@ -28,8 +28,8 @@
 //!     {
 //!       "thread": "feature-a",
 //!       "parent_thread": null,
-//!       "base_state": "hd-...",
-//!       "current_state": "hd-...",
+//!       "base_state": "hs-...",
+//!       "current_state": "hs-...",
 //!       "state": "active",
 //!       "freshness": "current"
 //!     }

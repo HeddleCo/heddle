@@ -14,7 +14,7 @@ use std::{
 };
 
 use base64::Engine;
-use cli::git_projection_engine::{
+use heddle_git_projection::{
     GitProjection,
     git_core::{
         GitProjectionError, GitPushScope, SyncMapping, clone_url_to_bare, copy_local_repo_to_bare,
@@ -32,7 +32,8 @@ use cli::git_projection_engine::{
 };
 use objects::{
     object::{
-        Blob, ChangeId, ContentHash, EntryType, FileMode, MarkerName, ThreadName, Tree, TreeEntry,
+        Blob, ChangeId, ContentHash, EntryType, FileMode, MarkerName, StateId, ThreadName, Tree,
+        TreeEntry,
     },
     store::ObjectStore,
 };
@@ -84,7 +85,7 @@ fn import_all_with_options(
         .map_err(|error| error.to_string())?;
     let mirror_repo =
         test_support::open_git_repo(git_projection).map_err(|error| error.to_string())?;
-    test_support::seed_ingest_identity_mappings_from_mirror(git_projection, &mirror_repo)
+    test_support::seed_ingest_identity_mappings_from_repo(git_projection, &mirror_repo)
         .map_err(|error| error.to_string())?;
     Ok(import_stats_from_ingest(stats))
 }
@@ -816,14 +817,14 @@ fn sync_tags_peels_annotated_tags() {
         &mut git_projection,
         git_repo.workdir().expect("workdir").to_path_buf(),
     );
-    let change_id = ChangeId::generate();
-    test_support::mapping_mut(&mut git_projection).insert(change_id, commit_oid);
+    let state_id = StateId::from_bytes([61; 32]);
+    test_support::mapping_mut(&mut git_projection).insert(state_id, commit_oid);
 
     let synced = sync_tags(&mut git_projection).expect("sync tags");
     assert_eq!(synced, 1);
     assert_eq!(
         repo.refs().get_marker(&MarkerName::new("v1.0")).unwrap(),
-        Some(change_id)
+        Some(state_id)
     );
 }
 
@@ -934,7 +935,7 @@ fn export_tree_substitutes_stub_for_redacted_blob() {
     // Declare a redaction on the blob. The redaction's `state` doesn't
     // matter for export — the store is keyed by blob hash — but we
     // populate the field so the stub renders a believable audit line.
-    let dummy_state = ChangeId::from_bytes([42u8; 16]);
+    let dummy_state = StateId::from_bytes([42u8; 32]);
     repo.put_redaction(Redaction {
         redacted_blob: blob_hash,
         state: dummy_state,
@@ -1233,7 +1234,7 @@ fn both_engines_fail_hard_on_default_rerun_after_lossy() {
 fn checkout_materialization_reconstructs_faithful_commit_from_empty_mirror() {
     use std::collections::HashSet;
 
-    use cli::git_projection_engine::git_reconstruct::commit_object_id;
+    use heddle_git_projection::git_reconstruct::commit_object_id;
     use objects::object::{Attribution, Principal, State};
 
     let heddle_temp = TempDir::new().expect("heddle temp");
@@ -1258,7 +1259,7 @@ fn checkout_materialization_reconstructs_faithful_commit_from_empty_mirror() {
     )
     .with_raw_message("an imported commit\n");
     repo.store().put_state(&state).expect("put state");
-    let state_id = state.change_id;
+    let state_id = state.state_id;
 
     let mut git_projection = GitProjection::new(&repo);
 
@@ -1347,7 +1348,7 @@ fn checkout_materialization_hard_errors_on_oid_mismatch() {
     )
     .with_raw_message("an imported commit\n");
     repo.store().put_state(&state).expect("put state");
-    let state_id = state.change_id;
+    let state_id = state.state_id;
 
     let mut git_projection = GitProjection::new(&repo);
     // Deliberately map the state to a WRONG OID — reconstruction will produce a
@@ -1415,7 +1416,7 @@ fn checkout_materialization_backstops_lossy_commit_from_mirror() {
     .with_raw_message("a lossy imported commit\n")
     .with_git_lossy(true);
     repo.store().put_state(&state).expect("put state");
-    let state_id = state.change_id;
+    let state_id = state.state_id;
 
     let mut git_projection = GitProjection::new(&repo);
 
@@ -1676,7 +1677,7 @@ fn maintenance_gc_consolidates_mirror_loose_objects_losslessly() {
     // `repo.write_object`/`write_blob`/`write_tree` — the real-world loose
     // accumulation path that slows every read+write command.
     let attribution = || Attribution::human(Principal::new("Alice", "alice@example.com"));
-    let put_state = |contents: &[u8], name: &str, parents: Vec<ChangeId>| -> State {
+    let put_state = |contents: &[u8], name: &str, parents: Vec<StateId>| -> State {
         let store = test_support::heddle_repo(&git_projection).store();
         let blob_hash = store
             .put_blob(&Blob::from_slice(contents))
@@ -1691,11 +1692,11 @@ fn maintenance_gc_consolidates_mirror_loose_objects_losslessly() {
         state
     };
     let s1 = put_state(b"alpha\n", "a.txt", Vec::new());
-    let s2 = put_state(b"beta\n", "b.txt", vec![s1.change_id]);
-    let s3 = put_state(b"gamma\n", "c.txt", vec![s2.change_id]);
+    let s2 = put_state(b"beta\n", "b.txt", vec![s1.state_id]);
+    let s3 = put_state(b"gamma\n", "c.txt", vec![s2.state_id]);
     test_support::heddle_repo(&git_projection)
         .refs()
-        .set_thread(&ThreadName::new("main"), &s3.change_id)
+        .set_thread(&ThreadName::new("main"), &s3.state_id)
         .expect("set main thread");
 
     let exported = export_all(&mut git_projection).expect("export mints loose mirror objects");
@@ -1975,13 +1976,13 @@ fn mapping_persists_between_runs() {
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
     let (_git_temp, git_repo) = init_git_repo();
 
-    let change_id = ChangeId::generate();
+    let state_id = StateId::from_bytes([62; 32]);
     let git_oid: ObjectId = "0909090909090909090909090909090909090909"
         .parse()
         .expect("oid");
 
     let mut git_projection = GitProjection::new(&repo);
-    test_support::mapping_mut(&mut git_projection).insert(change_id, git_oid);
+    test_support::mapping_mut(&mut git_projection).insert(state_id, git_oid);
     test_support::save_mapping_to_disk(&git_projection).expect("save mapping");
 
     let mut reloaded = GitProjection::new(&repo);
@@ -1992,7 +1993,7 @@ fn mapping_persists_between_runs() {
     .expect("build mapping");
 
     assert_eq!(
-        test_support::mapping(&reloaded).get_git(&change_id),
+        test_support::mapping(&reloaded).get_git(&state_id),
         Some(git_oid)
     );
 }
@@ -2005,9 +2006,11 @@ fn mapping_rebuilds_from_heddle_notes() {
 
     let tree_oid = empty_tree_oid(&git_repo);
     let commit_oid = commit_with_tree(&git_repo, Some("refs/heads/main"), tree_oid, "base", &[]);
-    let change_id = ChangeId::generate();
+    let state_id = StateId::from_bytes([63; 32]);
     let note = git_notes::HeddleNote {
-        change_id: change_id.to_string_full(),
+        source_state: None,
+        state_id: state_id.to_string_full(),
+        change_id: ChangeId::from_bytes([1; 16]).to_string_full(),
         agent: None,
         confidence: None,
         status: "published".to_string(),
@@ -2026,7 +2029,7 @@ fn mapping_rebuilds_from_heddle_notes() {
 
     assert_eq!(
         test_support::mapping(&git_projection).get_heddle(commit_oid),
-        Some(change_id)
+        Some(state_id)
     );
 }
 
@@ -2038,13 +2041,15 @@ fn mapping_rebuild_prefers_heddle_notes_over_stale_cache() {
 
     let tree_oid = empty_tree_oid(&git_repo);
     let commit_oid = commit_with_tree(&git_repo, Some("refs/heads/main"), tree_oid, "base", &[]);
-    let change_id = ChangeId::generate();
+    let state_id = StateId::from_bytes([64; 32]);
     let stale_oid: ObjectId = "abababababababababababababababababababab"
         .parse()
         .expect("oid");
 
     let note = git_notes::HeddleNote {
-        change_id: change_id.to_string_full(),
+        source_state: None,
+        state_id: state_id.to_string_full(),
+        change_id: ChangeId::from_bytes([2; 16]).to_string_full(),
         agent: None,
         confidence: None,
         status: "published".to_string(),
@@ -2055,7 +2060,7 @@ fn mapping_rebuild_prefers_heddle_notes_over_stale_cache() {
     git_notes::write_note(&git_repo, commit_oid, &note).expect("write heddle note");
 
     let mut stale_git_projection = GitProjection::new(&repo);
-    test_support::mapping_mut(&mut stale_git_projection).insert(change_id, stale_oid);
+    test_support::mapping_mut(&mut stale_git_projection).insert(state_id, stale_oid);
     test_support::save_mapping_to_disk(&stale_git_projection).expect("save stale cache");
 
     let mut git_projection = GitProjection::new(&repo);
@@ -2066,7 +2071,7 @@ fn mapping_rebuild_prefers_heddle_notes_over_stale_cache() {
     .expect("notes should rebuild over stale cache");
 
     assert_eq!(
-        test_support::mapping(&git_projection).get_git(&change_id),
+        test_support::mapping(&git_projection).get_git(&state_id),
         Some(commit_oid),
         "refs/notes/heddle is authoritative for exported Git identity"
     );
@@ -2091,11 +2096,11 @@ fn mapping_rebuild_prefers_heddle_notes_over_stale_cache() {
 #[test]
 fn test_sync_mapping() {
     let mut mapping = SyncMapping::new();
-    let change_id = ChangeId::generate();
+    let state_id = StateId::from_bytes([65; 32]);
     let oid: ObjectId = "0101010101010101010101010101010101010101".parse().unwrap();
-    mapping.insert(change_id, oid);
-    assert_eq!(mapping.get_git(&change_id), Some(oid));
-    assert_eq!(mapping.get_heddle(oid), Some(change_id));
+    mapping.insert(state_id, oid);
+    assert_eq!(mapping.get_git(&state_id), Some(oid));
+    assert_eq!(mapping.get_heddle(oid), Some(state_id));
 }
 
 #[test]
@@ -2120,8 +2125,8 @@ fn sync_branches_propagates_track_write_failures() {
         &mut git_projection,
         git_repo.workdir().expect("workdir").to_path_buf(),
     );
-    let change_id = ChangeId::generate();
-    test_support::mapping_mut(&mut git_projection).insert(change_id, commit_oid);
+    let state_id = StateId::from_bytes([66; 32]);
+    test_support::mapping_mut(&mut git_projection).insert(state_id, commit_oid);
 
     let result = sync_branches(&mut git_projection);
 
@@ -2152,8 +2157,8 @@ fn sync_tags_propagates_marker_write_failures() {
         &mut git_projection,
         git_repo.workdir().expect("workdir").to_path_buf(),
     );
-    let change_id = ChangeId::generate();
-    test_support::mapping_mut(&mut git_projection).insert(change_id, commit_oid);
+    let state_id = StateId::from_bytes([67; 32]);
+    test_support::mapping_mut(&mut git_projection).insert(state_id, commit_oid);
 
     let result = sync_tags(&mut git_projection);
 
@@ -2333,7 +2338,9 @@ fn fetch_rejects_reserved_git_remote_name_at_boundary() {
         .expect_err("fetch of reserved remote name must be rejected");
     let message = err.to_string();
     assert!(
-        message.contains("reserved namespace") && message.contains("rename"),
+        message.contains("reserved namespace")
+            && message.contains("heddle remote add")
+            && message.contains("heddle remote remove git"),
         "fetch error must explain the reserved-namespace collision and how to fix it, got: {message}"
     );
 }
@@ -2349,7 +2356,9 @@ fn pull_rejects_reserved_git_remote_name_at_boundary() {
         .expect_err("pull of reserved remote name must be rejected");
     let message = err.to_string();
     assert!(
-        message.contains("reserved namespace") && message.contains("rename"),
+        message.contains("reserved namespace")
+            && message.contains("heddle remote add")
+            && message.contains("heddle remote remove git"),
         "pull error must explain the reserved-namespace collision and how to fix it, got: {message}"
     );
 }
@@ -2472,7 +2481,7 @@ fn failed_import_restores_mapping_and_overrides() {
     let mut git_projection = GitProjection::new(&repo);
     test_support::set_commit_message_override(
         &mut git_projection,
-        ChangeId::from_bytes([3; 16]),
+        StateId::from_bytes([3; 32]),
         "pre-call override".to_string(),
     );
     let pre_mapping = test_support::mapping(&git_projection).clone();
@@ -2553,10 +2562,10 @@ fn push_exports_local_branches_and_tags_to_path_remote() {
     assert!(
         !message.contains("Heddle-Change-Id:"),
         "Phase B: Heddle trailers must not be written into commit messages; \
-         change_id lives in refs/notes/heddle instead"
+         state_id lives in refs/notes/heddle instead"
     );
 
-    // The note carrying the change_id should have travelled along with
+    // The note carrying the state_id should have travelled along with
     // the branches and tags.
     let note_ref = find_reference(&remote_repo, git_notes::NOTES_REF)
         .expect("notes ref should be pushed to remote");
@@ -2821,7 +2830,8 @@ fn clone_url_to_bare_populates_destination_from_file_url() {
     // Clone into a fresh dest dir.
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
-    clone_url_to_bare(url.as_str(), &dest, None, None).expect("clone file url");
+    let mut progress = sley::remote::SilentProgress;
+    clone_url_to_bare(url.as_str(), &dest, None, None, &mut progress).expect("clone file url");
 
     // Verify the dest has main + the v1.0 tag with the original commit OID.
     let dest_repo = open_git(&dest).expect("open dest");
@@ -2888,7 +2898,8 @@ fn clone_url_to_bare_rejects_shallow_file_url_without_shelling_to_git() {
 
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
-    let err = clone_url_to_bare(url.as_str(), &dest, Some(1), None)
+    let mut progress = sley::remote::SilentProgress;
+    let err = clone_url_to_bare(url.as_str(), &dest, Some(1), None, &mut progress)
         .expect_err("shallow file:// clone should fail closed in no-git runtime");
     let msg = err.to_string();
     assert!(
@@ -2919,8 +2930,15 @@ fn clone_url_to_bare_rejects_blob_none_filter_without_shelling_to_git() {
 
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
-    let err = clone_url_to_bare(url.as_str(), &dest, Some(1), Some("blob:none"))
-        .expect_err("filtered clone must be rejected in no-git runtime");
+    let mut progress = sley::remote::SilentProgress;
+    let err = clone_url_to_bare(
+        url.as_str(),
+        &dest,
+        Some(1),
+        Some("blob:none"),
+        &mut progress,
+    )
+    .expect_err("filtered clone must be rejected in no-git runtime");
     let msg = err.to_string();
     assert!(
         msg.contains("partial Git clone filter `blob:none` is not supported")
@@ -2947,7 +2965,8 @@ fn clone_url_to_bare_filter_rejection_preserves_pre_created_empty_dest() {
     std::fs::create_dir(&dest).expect("pre-create empty dest");
     assert!(dest.exists() && dest.read_dir().expect("read empty").next().is_none());
 
-    let err = clone_url_to_bare(url.as_str(), &dest, None, Some("blob:none"))
+    let mut progress = sley::remote::SilentProgress;
+    let err = clone_url_to_bare(url.as_str(), &dest, None, Some("blob:none"), &mut progress)
         .expect_err("filtered clone must be rejected in no-git runtime");
     assert!(
         err.to_string().contains("retry without --filter/--lazy"),
@@ -2977,8 +2996,15 @@ fn clone_url_to_bare_filter_rejection_precedes_remote_probe() {
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
 
-    let err =
-        clone_url_to_bare(url.as_str(), &dest, Some(1), Some("blob:none")).expect_err("must fail");
+    let mut progress = sley::remote::SilentProgress;
+    let err = clone_url_to_bare(
+        url.as_str(),
+        &dest,
+        Some(1),
+        Some("blob:none"),
+        &mut progress,
+    )
+    .expect_err("must fail");
     let msg = err.to_string();
     assert!(
         msg.contains("partial Git clone filter `blob:none` is not supported"),
@@ -3296,7 +3322,7 @@ fn export_counts_exclude_orphan_minted_state_from_total_and_newly() {
     let git_projection = GitProjection::new(&repo);
 
     let attribution = || Attribution::human(Principal::new("Alice", "alice@example.com"));
-    let put_state = |parents: Vec<ChangeId>| -> State {
+    let put_state = |parents: Vec<StateId>| -> State {
         let store = test_support::heddle_repo(&git_projection).store();
         let blob_hash = store
             .put_blob(&Blob::from_slice(b"contents"))
@@ -3315,10 +3341,10 @@ fn export_counts_exclude_orphan_minted_state_from_total_and_newly() {
     // the mirror and reachable from refs/heads/main, so both land in the
     // destination.
     let main_first = put_state(Vec::new());
-    let main_tip = put_state(vec![main_first.change_id]);
+    let main_tip = put_state(vec![main_first.state_id]);
     test_support::heddle_repo(&git_projection)
         .refs()
-        .set_thread(&ThreadName::new("main"), &main_tip.change_id)
+        .set_thread(&ThreadName::new("main"), &main_tip.state_id)
         .expect("set main thread");
 
     // A native `scratch` thread, dropped before export. Its state stays in
@@ -3328,7 +3354,7 @@ fn export_counts_exclude_orphan_minted_state_from_total_and_newly() {
     let orphan = put_state(Vec::new());
     test_support::heddle_repo(&git_projection)
         .refs()
-        .set_thread(&ThreadName::new("scratch"), &orphan.change_id)
+        .set_thread(&ThreadName::new("scratch"), &orphan.state_id)
         .expect("set scratch thread");
     test_support::heddle_repo(&git_projection)
         .refs()
@@ -3428,14 +3454,14 @@ fn failed_export_restores_mapping_and_overrides_after_purge() {
         .put_state(&exported_state)
         .expect("put exported state");
     repo.refs()
-        .set_thread(&ThreadName::new("main"), &exported_state.change_id)
+        .set_thread(&ThreadName::new("main"), &exported_state.state_id)
         .expect("set main thread");
 
     let mut git_projection = GitProjection::new(&repo);
     export_all(&mut git_projection).expect("initial export seeds mapping");
 
     repo.put_state_visibility(StateVisibility {
-        state: exported_state.change_id,
+        state: exported_state.state_id,
         tier: VisibilityTier::Private {
             scope_label: "embargo".to_string(),
         },
@@ -3460,12 +3486,12 @@ fn failed_export_restores_mapping_and_overrides_after_purge() {
     let bad_state = State::new(bad_tree_hash, Vec::new(), attribution());
     store.put_state(&bad_state).expect("put bad state");
     repo.refs()
-        .set_thread(&ThreadName::new("main"), &bad_state.change_id)
+        .set_thread(&ThreadName::new("main"), &bad_state.state_id)
         .expect("set main to bad state");
 
     test_support::set_commit_message_override(
         &mut git_projection,
-        exported_state.change_id,
+        exported_state.state_id,
         "pre-call override".to_string(),
     );
     let pre_mapping = test_support::mapping(&git_projection).clone();
@@ -3578,11 +3604,11 @@ fn export_preserves_original_commit_shas() {
     );
 }
 
-/// Phase B: a heddle change_id assigned at import time must survive a full
+/// Phase B: a heddle state_id assigned at import time must survive a full
 /// round-trip through git — even when the destination is re-imported into a
 /// fresh heddle repo with no sidecar.
 #[test]
-fn round_trip_preserves_change_ids_via_notes() {
+fn round_trip_preserves_state_ids_via_notes() {
     let heddle_a_temp = TempDir::new().expect("heddle A temp");
     let repo_a = Repository::init(heddle_a_temp.path()).expect("init heddle A");
 
@@ -3590,14 +3616,14 @@ fn round_trip_preserves_change_ids_via_notes() {
     let tree_oid = empty_tree_oid(&source_repo);
     let commit_oid = commit_with_tree(&source_repo, Some("refs/heads/main"), tree_oid, "base", &[]);
 
-    // Step 1: import into heddle A. Capture the change_id assigned.
+    // Step 1: import into heddle A. Capture the state_id assigned.
     let mut git_projection_a = GitProjection::new(&repo_a);
     git_projection_a
         .import(Some(source_repo.workdir().expect("workdir").as_path()))
         .expect("import into A");
-    let change_id_in_a = test_support::mapping(&git_projection_a)
+    let state_id_in_a = test_support::mapping(&git_projection_a)
         .get_heddle(commit_oid)
-        .expect("change_id should be mapped in A");
+        .expect("state_id should be mapped in A");
 
     // Step 2: export A to a fresh git destination.
     let dest_root = TempDir::new().expect("dest temp");
@@ -3608,7 +3634,7 @@ fn round_trip_preserves_change_ids_via_notes() {
 
     // Step 3: import the exported repo into heddle B (fresh repo, no
     // sidecar carryover). The note attached to the commit must let B
-    // recover the same change_id A assigned.
+    // recover the same state_id A assigned.
     let heddle_b_temp = TempDir::new().expect("heddle B temp");
     let repo_b = Repository::init(heddle_b_temp.path()).expect("init heddle B");
     let mut git_projection_b = GitProjection::new(&repo_b);
@@ -3616,13 +3642,13 @@ fn round_trip_preserves_change_ids_via_notes() {
         .import(Some(&dest_path))
         .expect("import into B");
 
-    let change_id_in_b = test_support::mapping(&git_projection_b)
+    let state_id_in_b = test_support::mapping(&git_projection_b)
         .get_heddle(commit_oid)
         .expect("B should have mapped the original commit OID");
 
     assert_eq!(
-        change_id_in_a, change_id_in_b,
-        "Phase B: change_id must survive the git→heddle→git→heddle roundtrip via the note"
+        state_id_in_a, state_id_in_b,
+        "Phase B: state_id must survive the git→heddle→git→heddle roundtrip via the note"
     );
 }
 
@@ -3671,14 +3697,14 @@ fn round_trip_preserves_symlinks() {
     // Verify the imported tree marks "link" as a symlink at the entry-type
     // level (the Phase E source-side fix). This is what the materializer
     // checks to write a real symlink to the worktree.
-    let head_change_id = repo
+    let head_state_id = repo
         .refs()
         .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread");
     let state = repo
         .store()
-        .get_state(&head_change_id)
+        .get_state(&head_state_id)
         .expect("state lookup")
         .expect("state present");
     let imported_tree = repo
@@ -3856,7 +3882,7 @@ fn import_isolates_per_ref_mirror_failures() {
             test_support::mapping(&git_projection)
                 .get_heddle(good_oid)
                 .is_some(),
-            "good commit's change_id should be in mapping"
+            "good commit's state_id should be in mapping"
         );
     } else {
         // If the broken ref propagated as a hard error, that's the
@@ -3990,7 +4016,7 @@ fn export_lags_public_branch_to_frontier_emitting_absence_for_embargoed_tip() {
 
 /// #316 / PR #528 Finding 1: a commit exported while PUBLIC, then later marked
 /// `Private`, must NOT keep being served on the next export. The stale
-/// ChangeId→OID mapping is rebuilt from the notes/cache every run, so the
+/// StateId→OID mapping is rebuilt from the notes/cache every run, so the
 /// export must re-validate current visibility and retract the public branch
 /// down to the served frontier (here, the still-public base A).
 #[test]
@@ -4080,7 +4106,7 @@ fn export_retracts_branch_when_public_commit_is_later_embargoed() {
         .expect("mapping cache should be readable after export");
     assert!(
         !mapping_cache.contains(&state_b.to_string_full()),
-        "the Git projection mapping cache must not persist embargoed ChangeIds: {mapping_cache}"
+        "the Git projection mapping cache must not persist embargoed StateIds: {mapping_cache}"
     );
     assert!(
         !mapping_cache.contains(&oid_b.to_string()),
@@ -4105,9 +4131,9 @@ fn export_retracts_branch_when_public_commit_is_later_embargoed() {
 /// invariant on `export_scoped`.
 ///
 /// `export_scoped` runs, in this exact order:
-///   1. `seed_ingest_identity_mappings_from_mirror` — re-hydrates the in-memory
+///   1. `seed_ingest_identity_mappings_from_repo` — re-hydrates the in-memory
 ///      mapping from the PERSISTENT ingest SHA map (`.heddle/ingest/sha_map.sqlite`),
-///      so a commit imported earlier is re-mapped ChangeId→OID even on a brand-new
+///      so a commit imported earlier is re-mapped StateId→OID even on a brand-new
 ///      git_projection whose live mapping is empty;
 ///   2. `purge_unserved_mappings` — drops every mapping whose state (or a reachable
 ///      ancestor) is not served at the Public tier;
@@ -4198,7 +4224,7 @@ fn export_purge_drops_seeded_embargoed_sha_before_serving_mapping() {
         let mut seed_probe = GitProjection::new(&repo);
         test_support::set_git_repo_path(&mut seed_probe, source_workdir.clone());
         let mirror = test_support::open_git_repo(&seed_probe).expect("open mirror for seed probe");
-        test_support::seed_ingest_identity_mappings_from_mirror(&mut seed_probe, &mirror)
+        test_support::seed_ingest_identity_mappings_from_repo(&mut seed_probe, &mirror)
             .expect("seed from ingest map");
         assert_eq!(
             test_support::mapping(&seed_probe).get_git(&change_b),
@@ -4228,12 +4254,12 @@ fn export_purge_drops_seeded_embargoed_sha_before_serving_mapping() {
 
     // The CRITICAL leak surface: the served git-projection-mapping.json on disk. A
     // pre-purge save (the resurrected `save_mapping_to_disk_preserving` bug) would
-    // leak B's ChangeId and OID here even though the in-memory purge ran.
+    // leak B's StateId and OID here even though the in-memory purge ran.
     let served = std::fs::read_to_string(test_support::mapping_path(&export_git_projection))
         .expect("served git-projection-mapping.json must exist after export");
     assert!(
         !served.contains(&change_b.to_string_full()),
-        "served mapping must NOT contain the embargoed ChangeId B (seed→purge→save leak): {served}"
+        "served mapping must NOT contain the embargoed StateId B (seed→purge→save leak): {served}"
     );
     assert!(
         !served.contains(&git_b.to_string()),
@@ -4254,7 +4280,7 @@ fn export_purge_drops_seeded_embargoed_sha_before_serving_mapping() {
 fn export_path_saves_mapping_strictly_after_the_embargo_purge() {
     let src_path = std::path::PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/git_projection_engine/git_export.rs"
+        "/../git-projection/src/git_export.rs"
     ));
     let src = std::fs::read_to_string(&src_path)
         .unwrap_or_else(|e| panic!("read git_export.rs at {}: {e}", src_path.display()));
@@ -4289,10 +4315,10 @@ fn export_path_saves_mapping_strictly_after_the_embargo_purge() {
 }
 
 /// #316 / PR #528 r3 Finding 2: when a public commit is later embargoed, the
-/// purge drops its ChangeId→OID mapping AND its `refs/notes/heddle` entry must
+/// purge drops its StateId→OID mapping AND its `refs/notes/heddle` entry must
 /// be retracted too. `collect_ref_updates` copies `refs/notes/*` to the mirror
 /// alongside branches and tags, so a note left for a withheld commit keeps
-/// publishing that commit's metadata (change_id, agent, status) even after the
+/// publishing that commit's metadata (state_id, agent, status) even after the
 /// branch was retracted — a metadata leak. The note for a still-served commit
 /// must survive.
 #[test]
@@ -4336,13 +4362,13 @@ fn export_retracts_note_for_retracted_commit() {
     {
         let mirror = test_support::open_git_repo(&git_projection).expect("open mirror");
         assert!(
-            cli::git_projection_engine::git_notes::read_note(&mirror, oid_a)
+            heddle_git_projection::git_notes::read_note(&mirror, oid_a)
                 .unwrap()
                 .is_some(),
             "A must carry a note after run 1"
         );
         assert!(
-            cli::git_projection_engine::git_notes::read_note(&mirror, oid_b)
+            heddle_git_projection::git_notes::read_note(&mirror, oid_b)
                 .unwrap()
                 .is_some(),
             "B must carry a note after run 1"
@@ -4371,13 +4397,13 @@ fn export_retracts_note_for_retracted_commit() {
     export_all(&mut git_projection).expect("second export");
     let mirror = test_support::open_git_repo(&git_projection).expect("open mirror");
     assert!(
-        cli::git_projection_engine::git_notes::read_note(&mirror, oid_b)
+        heddle_git_projection::git_notes::read_note(&mirror, oid_b)
             .unwrap()
             .is_none(),
         "run 2 must retract the note for the now-embargoed B (no metadata leak)"
     );
     assert!(
-        cli::git_projection_engine::git_notes::read_note(&mirror, oid_a)
+        heddle_git_projection::git_notes::read_note(&mirror, oid_a)
             .unwrap()
             .is_some(),
         "A is still served — its note must survive the retraction"
@@ -4399,7 +4425,7 @@ fn scoped_export_retracts_note_for_commit_with_embargoed_ancestor() {
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
-    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> State {
+    let put_state = |content: &[u8], parents: Vec<StateId>| -> State {
         let store = repo.store();
         let blob_hash = store
             .put_blob(&Blob::from_slice(content))
@@ -4420,29 +4446,29 @@ fn scoped_export_retracts_note_for_commit_with_embargoed_ancestor() {
 
     // main line: public root R → public tip X (X descends from R).
     let state_r = put_state(b"root\n", Vec::new());
-    let state_x = put_state(b"tip\n", vec![state_r.change_id]);
+    let state_x = put_state(b"tip\n", vec![state_r.state_id]);
     repo.refs()
-        .set_thread(&ThreadName::new("main"), &state_x.change_id)
+        .set_thread(&ThreadName::new("main"), &state_x.state_id)
         .expect("set main to X");
     // A separate, independent line on thread `other`: public root O.
     let state_o = put_state(b"other root\n", Vec::new());
     repo.refs()
-        .set_thread(&ThreadName::new("other"), &state_o.change_id)
+        .set_thread(&ThreadName::new("other"), &state_o.state_id)
         .expect("set other to O");
 
     // Run 1 — everything public. Notes get written for R, X, and O.
     let mut git_projection = GitProjection::new(&repo);
     export_all(&mut git_projection).expect("first export");
     let oid_x = test_support::mapping(&git_projection)
-        .get_git(&state_x.change_id)
+        .get_git(&state_x.state_id)
         .expect("X minted while public");
     let oid_o = test_support::mapping(&git_projection)
-        .get_git(&state_o.change_id)
+        .get_git(&state_o.state_id)
         .expect("O minted while public");
     {
         let mirror = test_support::open_git_repo(&git_projection).expect("open mirror");
         assert!(
-            cli::git_projection_engine::git_notes::read_note(&mirror, oid_x)
+            heddle_git_projection::git_notes::read_note(&mirror, oid_x)
                 .unwrap()
                 .is_some(),
             "X must carry a note after run 1"
@@ -4452,7 +4478,7 @@ fn scoped_export_retracts_note_for_commit_with_embargoed_ancestor() {
     // Embargo R (X's ANCESTOR) — X's own tier stays public, but downward
     // closure now withholds X.
     repo.put_state_visibility(StateVisibility {
-        state: state_r.change_id,
+        state: state_r.state_id,
         tier: VisibilityTier::Private {
             scope_label: "sec-embargo".into(),
         },
@@ -4473,13 +4499,13 @@ fn scoped_export_retracts_note_for_commit_with_embargoed_ancestor() {
     export_current_thread(&mut git_projection, "other").expect("scoped export");
     let mirror = test_support::open_git_repo(&git_projection).expect("open mirror");
     assert!(
-        cli::git_projection_engine::git_notes::read_note(&mirror, oid_x)
+        heddle_git_projection::git_notes::read_note(&mirror, oid_x)
             .unwrap()
             .is_none(),
         "scoped export must retract X's note (ancestor embargoed) — no notes leak"
     );
     assert!(
-        cli::git_projection_engine::git_notes::read_note(&mirror, oid_o)
+        heddle_git_projection::git_notes::read_note(&mirror, oid_o)
             .unwrap()
             .is_some(),
         "O is served — its note must survive the scoped retraction"
@@ -4499,7 +4525,7 @@ fn scoped_export_reconciles_cross_thread_embargo() {
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
-    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> State {
+    let put_state = |content: &[u8], parents: Vec<StateId>| -> State {
         let store = repo.store();
         let blob_hash = store
             .put_blob(&Blob::from_slice(content))
@@ -4521,28 +4547,28 @@ fn scoped_export_reconciles_cross_thread_embargo() {
     // Two independent lines (no shared ancestry).
     // alpha: A0 → A1 (both public). beta: B0 → B1 → B2 (all public).
     let state_a0 = put_state(b"a0\n", Vec::new());
-    let state_a1 = put_state(b"a1\n", vec![state_a0.change_id]);
+    let state_a1 = put_state(b"a1\n", vec![state_a0.state_id]);
     repo.refs()
-        .set_thread(&ThreadName::new("alpha"), &state_a1.change_id)
+        .set_thread(&ThreadName::new("alpha"), &state_a1.state_id)
         .expect("set alpha to A1");
     let state_b0 = put_state(b"b0\n", Vec::new());
-    let state_b1 = put_state(b"b1\n", vec![state_b0.change_id]);
-    let state_b2 = put_state(b"b2\n", vec![state_b1.change_id]);
+    let state_b1 = put_state(b"b1\n", vec![state_b0.state_id]);
+    let state_b2 = put_state(b"b2\n", vec![state_b1.state_id]);
     repo.refs()
-        .set_thread(&ThreadName::new("beta"), &state_b2.change_id)
+        .set_thread(&ThreadName::new("beta"), &state_b2.state_id)
         .expect("set beta to B2");
 
     // Run 1 — everything public, all-thread export. Both branches published.
     let mut git_projection = GitProjection::new(&repo);
     let run1 = export_all(&mut git_projection).expect("first export");
     let oid_a1 = test_support::mapping(&git_projection)
-        .get_git(&state_a1.change_id)
+        .get_git(&state_a1.state_id)
         .expect("A1 minted while public");
     let oid_b0 = test_support::mapping(&git_projection)
-        .get_git(&state_b0.change_id)
+        .get_git(&state_b0.state_id)
         .expect("B0 minted while public");
     let oid_b2 = test_support::mapping(&git_projection)
-        .get_git(&state_b2.change_id)
+        .get_git(&state_b2.state_id)
         .expect("B2 minted while public");
     assert!(
         run1.branches
@@ -4554,7 +4580,7 @@ fn scoped_export_reconciles_cross_thread_embargo() {
     // Embargo B1 — a commit reachable ONLY via beta. Downward closure withholds
     // B1 and its descendant B2; B0 stays served.
     repo.put_state_visibility(StateVisibility {
-        state: state_b1.change_id,
+        state: state_b1.state_id,
         tier: VisibilityTier::Private {
             scope_label: "sec-embargo".into(),
         },
@@ -4619,7 +4645,7 @@ fn scoped_push_propagates_cross_thread_embargo_to_destination() {
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
-    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> State {
+    let put_state = |content: &[u8], parents: Vec<StateId>| -> State {
         let store = repo.store();
         let blob_hash = store
             .put_blob(&Blob::from_slice(content))
@@ -4642,19 +4668,19 @@ fn scoped_push_propagates_cross_thread_embargo_to_destination() {
     // alpha: A0 → A1 (public). beta: B0 → B1 → B2 (public; B1 embargoed below).
     // gamma: G0 (public; later embargoed AND advanced out of band at the destination).
     let state_a0 = put_state(b"a0\n", Vec::new());
-    let state_a1 = put_state(b"a1\n", vec![state_a0.change_id]);
+    let state_a1 = put_state(b"a1\n", vec![state_a0.state_id]);
     repo.refs()
-        .set_thread(&ThreadName::new("alpha"), &state_a1.change_id)
+        .set_thread(&ThreadName::new("alpha"), &state_a1.state_id)
         .expect("set alpha to A1");
     let state_b0 = put_state(b"b0\n", Vec::new());
-    let state_b1 = put_state(b"b1\n", vec![state_b0.change_id]);
-    let state_b2 = put_state(b"b2\n", vec![state_b1.change_id]);
+    let state_b1 = put_state(b"b1\n", vec![state_b0.state_id]);
+    let state_b2 = put_state(b"b2\n", vec![state_b1.state_id]);
     repo.refs()
-        .set_thread(&ThreadName::new("beta"), &state_b2.change_id)
+        .set_thread(&ThreadName::new("beta"), &state_b2.state_id)
         .expect("set beta to B2");
     let state_g0 = put_state(b"g0\n", Vec::new());
     repo.refs()
-        .set_thread(&ThreadName::new("gamma"), &state_g0.change_id)
+        .set_thread(&ThreadName::new("gamma"), &state_g0.state_id)
         .expect("set gamma to G0");
 
     // Run 1 — everything public, full export+push to a local destination. All three
@@ -4666,16 +4692,16 @@ fn scoped_push_propagates_cross_thread_embargo_to_destination() {
         .export_to_path(&dest_path)
         .expect("first full export+push publishes alpha, beta, gamma");
     let oid_a1 = test_support::mapping(&git_projection)
-        .get_git(&state_a1.change_id)
+        .get_git(&state_a1.state_id)
         .expect("A1 minted");
     let oid_b0 = test_support::mapping(&git_projection)
-        .get_git(&state_b0.change_id)
+        .get_git(&state_b0.state_id)
         .expect("B0 minted");
     let oid_b2 = test_support::mapping(&git_projection)
-        .get_git(&state_b2.change_id)
+        .get_git(&state_b2.state_id)
         .expect("B2 minted");
     let oid_g0 = test_support::mapping(&git_projection)
-        .get_git(&state_g0.change_id)
+        .get_git(&state_g0.state_id)
         .expect("G0 minted");
     {
         let dest = open_git(&dest_path).expect("open dest");
@@ -4706,7 +4732,7 @@ fn scoped_push_propagates_cross_thread_embargo_to_destination() {
     // Embargo B1 (reachable ONLY via beta) AND the whole gamma line (G0). Downward
     // closure withholds B1/B2 (B0 stays served) and the whole gamma line (no served
     // frontier ⇒ gamma is retracted from the mirror).
-    let embargo = |state: ChangeId| {
+    let embargo = |state: StateId| {
         repo.put_state_visibility(StateVisibility {
             state,
             tier: VisibilityTier::Private {
@@ -4723,8 +4749,8 @@ fn scoped_push_propagates_cross_thread_embargo_to_destination() {
         })
         .unwrap();
     };
-    embargo(state_b1.change_id);
-    embargo(state_g0.change_id);
+    embargo(state_b1.state_id);
+    embargo(state_g0.state_id);
 
     // Attach HEAD to alpha so a CurrentThread push scopes its EXPORT to alpha —
     // alpha reaches neither beta nor gamma.
@@ -4865,7 +4891,7 @@ fn export_deletes_branch_when_thread_reset_to_private_root() {
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
-    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> State {
+    let put_state = |content: &[u8], parents: Vec<StateId>| -> State {
         let store = repo.store();
         let blob_hash = store
             .put_blob(&Blob::from_slice(content))
@@ -4887,13 +4913,13 @@ fn export_deletes_branch_when_thread_reset_to_private_root() {
     // Public root A on main.
     let state_a = put_state(b"public base\n", Vec::new());
     repo.refs()
-        .set_thread(&ThreadName::new("main"), &state_a.change_id)
+        .set_thread(&ThreadName::new("main"), &state_a.state_id)
         .expect("set main to A");
 
     let mut git_projection = GitProjection::new(&repo);
     let run1 = export_all(&mut git_projection).expect("first export");
     let oid_a = test_support::mapping(&git_projection)
-        .get_git(&state_a.change_id)
+        .get_git(&state_a.state_id)
         .expect("A minted while public");
     assert!(
         run1.branches
@@ -4905,7 +4931,7 @@ fn export_deletes_branch_when_thread_reset_to_private_root() {
     // Reset main onto an unrelated Private root B (no shared ancestry with A).
     let state_b = put_state(b"private root\n", Vec::new());
     repo.put_state_visibility(StateVisibility {
-        state: state_b.change_id,
+        state: state_b.state_id,
         tier: VisibilityTier::Private {
             scope_label: "sec-embargo".into(),
         },
@@ -4920,7 +4946,7 @@ fn export_deletes_branch_when_thread_reset_to_private_root() {
     })
     .unwrap();
     repo.refs()
-        .set_thread(&ThreadName::new("main"), &state_b.change_id)
+        .set_thread(&ThreadName::new("main"), &state_b.state_id)
         .expect("reset main to B");
 
     // A stays public — NOT embargoed — so r1's embargoed-tip retraction cannot
@@ -4939,7 +4965,7 @@ fn export_deletes_branch_when_thread_reset_to_private_root() {
     // target resolving to no served frontier, not by an embargo of the old tip.
     assert!(
         test_support::mapping(&git_projection)
-            .get_git(&state_a.change_id)
+            .get_git(&state_a.state_id)
             .is_some(),
         "the old public tip A remains served; deletion is not driven by an embargo of A"
     );
@@ -4957,7 +4983,7 @@ fn export_deletes_tag_when_marker_retargeted_to_private() {
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
-    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> State {
+    let put_state = |content: &[u8], parents: Vec<StateId>| -> State {
         let store = repo.store();
         let blob_hash = store
             .put_blob(&Blob::from_slice(content))
@@ -4979,16 +5005,16 @@ fn export_deletes_tag_when_marker_retargeted_to_private() {
     // Public state A on main, plus a marker v1.0 pinned to A.
     let state_a = put_state(b"public release\n", Vec::new());
     repo.refs()
-        .set_thread(&ThreadName::new("main"), &state_a.change_id)
+        .set_thread(&ThreadName::new("main"), &state_a.state_id)
         .expect("set main to A");
     repo.refs()
-        .create_marker(&MarkerName::new("v1.0"), &state_a.change_id)
+        .create_marker(&MarkerName::new("v1.0"), &state_a.state_id)
         .expect("create marker at A");
 
     let mut git_projection = GitProjection::new(&repo);
     let run1 = export_all(&mut git_projection).expect("first export");
     let oid_a = test_support::mapping(&git_projection)
-        .get_git(&state_a.change_id)
+        .get_git(&state_a.state_id)
         .expect("A minted while public");
     assert!(
         run1.tags.iter().any(|t| t.name == "v1.0" && t.tip == oid_a),
@@ -4998,7 +5024,7 @@ fn export_deletes_tag_when_marker_retargeted_to_private() {
     // Retarget v1.0 onto a Private state B (never minted into the mirror).
     let state_b = put_state(b"private release\n", Vec::new());
     repo.put_state_visibility(StateVisibility {
-        state: state_b.change_id,
+        state: state_b.state_id,
         tier: VisibilityTier::Private {
             scope_label: "sec-embargo".into(),
         },
@@ -5016,7 +5042,7 @@ fn export_deletes_tag_when_marker_retargeted_to_private() {
         .delete_marker(&MarkerName::new("v1.0"))
         .expect("clear old marker");
     repo.refs()
-        .create_marker(&MarkerName::new("v1.0"), &state_b.change_id)
+        .create_marker(&MarkerName::new("v1.0"), &state_b.state_id)
         .expect("retarget marker to B");
 
     // A is still served (not embargoed), so r1's stale-tag retraction cannot
@@ -5033,7 +5059,7 @@ fn export_deletes_tag_when_marker_retargeted_to_private() {
     );
     assert!(
         test_support::mapping(&git_projection)
-            .get_git(&state_a.change_id)
+            .get_git(&state_a.state_id)
             .is_some(),
         "the old tag tip A remains served; deletion is not driven by an embargo of A"
     );
@@ -5065,7 +5091,7 @@ fn scoped_export_preserves_unminted_out_of_scope_public_tag() {
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
-    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> objects::object::State {
+    let put_state = |content: &[u8], parents: Vec<StateId>| -> objects::object::State {
         use objects::object::{Attribution, Principal, State};
         let store = repo.store();
         let blob_hash = store
@@ -5089,14 +5115,14 @@ fn scoped_export_preserves_unminted_out_of_scope_public_tag() {
     // B-only state pinned by marker v1.0). alpha never reaches beta.
     let state_a = put_state(b"alpha\n", Vec::new());
     repo.refs()
-        .set_thread(&ThreadName::new("alpha"), &state_a.change_id)
+        .set_thread(&ThreadName::new("alpha"), &state_a.state_id)
         .expect("set alpha to A");
     let state_b = put_state(b"beta release\n", Vec::new());
     repo.refs()
-        .set_thread(&ThreadName::new("beta"), &state_b.change_id)
+        .set_thread(&ThreadName::new("beta"), &state_b.state_id)
         .expect("set beta to B");
     repo.refs()
-        .create_marker(&MarkerName::new("v1.0"), &state_b.change_id)
+        .create_marker(&MarkerName::new("v1.0"), &state_b.state_id)
         .expect("create marker v1.0 at B");
 
     // Run 1 — full export+push to a real destination. Both threads + the tag land,
@@ -5108,7 +5134,7 @@ fn scoped_export_preserves_unminted_out_of_scope_public_tag() {
         .export_to_path(&dest_path)
         .expect("first full export publishes alpha, beta, and tag v1.0");
     let oid_b = test_support::mapping(&git_projection)
-        .get_git(&state_b.change_id)
+        .get_git(&state_b.state_id)
         .expect("B minted while public");
     {
         let dest = open_git(&dest_path).expect("open dest");
@@ -5125,15 +5151,15 @@ fn scoped_export_preserves_unminted_out_of_scope_public_tag() {
     // Advance beta to a NEW public state C and RETARGET v1.0 onto it. C has never
     // been exported, so it carries no note/sidecar mapping — the only way a still
     // public marker target reaches the reconcile's `None` arm.
-    let state_c = put_state(b"beta rc\n", vec![state_b.change_id]);
+    let state_c = put_state(b"beta rc\n", vec![state_b.state_id]);
     repo.refs()
-        .set_thread(&ThreadName::new("beta"), &state_c.change_id)
+        .set_thread(&ThreadName::new("beta"), &state_c.state_id)
         .expect("advance beta to C");
     repo.refs()
         .delete_marker(&MarkerName::new("v1.0"))
         .expect("clear old marker");
     repo.refs()
-        .create_marker(&MarkerName::new("v1.0"), &state_c.change_id)
+        .create_marker(&MarkerName::new("v1.0"), &state_c.state_id)
         .expect("retarget marker v1.0 to C");
 
     // Attach HEAD to alpha so a CurrentThread push scopes the EXPORT to alpha,
@@ -5148,7 +5174,7 @@ fn scoped_export_preserves_unminted_out_of_scope_public_tag() {
     // this is the served-but-unminted condition the fix must handle.
     assert!(
         test_support::mapping(&git_projection)
-            .get_git(&state_c.change_id)
+            .get_git(&state_c.state_id)
             .is_none(),
         "C must be unminted so the marker reconcile takes the `None` arm"
     );
@@ -5194,7 +5220,7 @@ fn scoped_export_preserves_unminted_out_of_scope_public_tag() {
 fn matrix_put_state(
     repo: &Repository,
     content: &[u8],
-    parents: Vec<ChangeId>,
+    parents: Vec<StateId>,
 ) -> objects::object::State {
     use objects::object::{Attribution, Principal, State};
     let store = repo.store();
@@ -5216,7 +5242,7 @@ fn matrix_put_state(
 }
 
 /// Mark `state` Private so the export treats it as unserved (embargoed).
-fn matrix_embargo(repo: &Repository, state: ChangeId) {
+fn matrix_embargo(repo: &Repository, state: StateId) {
     use chrono::Utc;
     use objects::object::{Principal, StateVisibility, VisibilityTier};
     repo.put_state_visibility(StateVisibility {
@@ -5348,15 +5374,15 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .set_thread(&ThreadName::new("main"), &a.state_id)
                     .unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .create_marker(&MarkerName::new("v"), &a.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
                 let oid_a = test_support::mapping(&git_projection)
-                    .get_git(&a.change_id)
+                    .get_git(&a.state_id)
                     .expect("A minted");
                 (matrix_mirror_tag(&git_projection, "v"), Some(oid_a))
             }),
@@ -5370,22 +5396,22 @@ fn tag_reconcile_conformance_matrix() {
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let b = matrix_put_state(&repo, b"B\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .set_thread(&ThreadName::new("main"), &a.state_id)
                     .unwrap();
                 repo.refs()
-                    .set_thread(&ThreadName::new("rel"), &b.change_id)
+                    .set_thread(&ThreadName::new("rel"), &b.state_id)
                     .unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .create_marker(&MarkerName::new("v"), &a.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
                 let oid_b = test_support::mapping(&git_projection)
-                    .get_git(&b.change_id)
+                    .get_git(&b.state_id)
                     .expect("B minted");
                 repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &b.change_id)
+                    .create_marker(&MarkerName::new("v"), &b.state_id)
                     .unwrap();
                 export_all(&mut git_projection).unwrap();
                 (matrix_mirror_tag(&git_projection, "v"), Some(oid_b))
@@ -5401,23 +5427,23 @@ fn tag_reconcile_conformance_matrix() {
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let b = matrix_put_state(&repo, b"B\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .set_thread(&ThreadName::new("main"), &a.state_id)
                     .unwrap();
                 repo.refs()
-                    .set_thread(&ThreadName::new("rel"), &b.change_id)
+                    .set_thread(&ThreadName::new("rel"), &b.state_id)
                     .unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .create_marker(&MarkerName::new("v"), &a.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
                 let oid_b = test_support::mapping(&git_projection)
-                    .get_git(&b.change_id)
+                    .get_git(&b.state_id)
                     .expect("B minted");
-                matrix_embargo(&repo, a.change_id);
+                matrix_embargo(&repo, a.state_id);
                 repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &b.change_id)
+                    .create_marker(&MarkerName::new("v"), &b.state_id)
                     .unwrap();
                 export_all(&mut git_projection).unwrap();
                 (matrix_mirror_tag(&git_projection, "v"), Some(oid_b))
@@ -5431,15 +5457,15 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .set_thread(&ThreadName::new("main"), &a.state_id)
                     .unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .create_marker(&MarkerName::new("v"), &a.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
                 let oid_a = test_support::mapping(&git_projection)
-                    .get_git(&a.change_id)
+                    .get_git(&a.state_id)
                     .expect("A minted");
                 export_all(&mut git_projection).unwrap();
                 (matrix_mirror_tag(&git_projection, "v"), Some(oid_a))
@@ -5455,13 +5481,13 @@ fn tag_reconcile_conformance_matrix() {
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let b = matrix_put_state(&repo, b"B\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("alpha"), &a.change_id)
+                    .set_thread(&ThreadName::new("alpha"), &a.state_id)
                     .unwrap();
                 repo.refs()
-                    .set_thread(&ThreadName::new("beta"), &b.change_id)
+                    .set_thread(&ThreadName::new("beta"), &b.state_id)
                     .unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &b.change_id)
+                    .create_marker(&MarkerName::new("v"), &b.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_current_thread(&mut git_projection, "beta").unwrap();
@@ -5477,29 +5503,29 @@ fn tag_reconcile_conformance_matrix() {
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let b = matrix_put_state(&repo, b"B\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("alpha"), &a.change_id)
+                    .set_thread(&ThreadName::new("alpha"), &a.state_id)
                     .unwrap();
                 repo.refs()
-                    .set_thread(&ThreadName::new("beta"), &b.change_id)
+                    .set_thread(&ThreadName::new("beta"), &b.state_id)
                     .unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &b.change_id)
+                    .create_marker(&MarkerName::new("v"), &b.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
                 let oid_b = test_support::mapping(&git_projection)
-                    .get_git(&b.change_id)
+                    .get_git(&b.state_id)
                     .expect("B minted");
                 // Advance beta to a NEW public state C and retarget v→C; C is never
                 // exported, so it stays unminted and the scoped run takes the
                 // served-but-unminted path.
-                let c = matrix_put_state(&repo, b"C\n", vec![b.change_id]);
+                let c = matrix_put_state(&repo, b"C\n", vec![b.state_id]);
                 repo.refs()
-                    .set_thread(&ThreadName::new("beta"), &c.change_id)
+                    .set_thread(&ThreadName::new("beta"), &c.state_id)
                     .unwrap();
                 repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &c.change_id)
+                    .create_marker(&MarkerName::new("v"), &c.state_id)
                     .unwrap();
                 export_current_thread(&mut git_projection, "alpha").unwrap();
                 (matrix_mirror_tag(&git_projection, "v"), Some(oid_b))
@@ -5516,13 +5542,13 @@ fn tag_reconcile_conformance_matrix() {
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let p = matrix_put_state(&repo, b"P\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("alpha"), &a.change_id)
+                    .set_thread(&ThreadName::new("alpha"), &a.state_id)
                     .unwrap();
                 repo.refs()
-                    .set_thread(&ThreadName::new("rel"), &p.change_id)
+                    .set_thread(&ThreadName::new("rel"), &p.state_id)
                     .unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &p.change_id)
+                    .create_marker(&MarkerName::new("v"), &p.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
@@ -5530,10 +5556,10 @@ fn tag_reconcile_conformance_matrix() {
                 // scoped run. Embargo P (still reachable via `rel`) so the EXISTING
                 // tag's tip enters `embargoed_oids`. Retarget v→C.
                 let c = matrix_put_state(&repo, b"C\n", Vec::new());
-                matrix_embargo(&repo, p.change_id);
+                matrix_embargo(&repo, p.state_id);
                 repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &c.change_id)
+                    .create_marker(&MarkerName::new("v"), &c.state_id)
                     .unwrap();
                 export_current_thread(&mut git_projection, "alpha").unwrap();
                 (matrix_mirror_tag(&git_projection, "v"), None)
@@ -5548,10 +5574,10 @@ fn tag_reconcile_conformance_matrix() {
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let c = matrix_put_state(&repo, b"C\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("alpha"), &a.change_id)
+                    .set_thread(&ThreadName::new("alpha"), &a.state_id)
                     .unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &c.change_id)
+                    .create_marker(&MarkerName::new("v"), &c.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_current_thread(&mut git_projection, "alpha").unwrap();
@@ -5568,18 +5594,18 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .set_thread(&ThreadName::new("main"), &a.state_id)
                     .unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .create_marker(&MarkerName::new("v"), &a.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
                 let b = matrix_put_state(&repo, b"B\n", Vec::new());
-                matrix_embargo(&repo, b.change_id);
+                matrix_embargo(&repo, b.state_id);
                 repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &b.change_id)
+                    .create_marker(&MarkerName::new("v"), &b.state_id)
                     .unwrap();
                 export_all(&mut git_projection).unwrap();
                 (matrix_mirror_tag(&git_projection, "v"), None)
@@ -5594,14 +5620,14 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .set_thread(&ThreadName::new("main"), &a.state_id)
                     .unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .create_marker(&MarkerName::new("v"), &a.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
-                matrix_embargo(&repo, a.change_id);
+                matrix_embargo(&repo, a.state_id);
                 export_all(&mut git_projection).unwrap();
                 (matrix_mirror_tag(&git_projection, "v"), None)
             }),
@@ -5614,12 +5640,12 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let b = matrix_put_state(&repo, b"B\n", Vec::new());
-                matrix_embargo(&repo, b.change_id);
+                matrix_embargo(&repo, b.state_id);
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .set_thread(&ThreadName::new("main"), &a.state_id)
                     .unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &b.change_id)
+                    .create_marker(&MarkerName::new("v"), &b.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
@@ -5636,10 +5662,10 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .set_thread(&ThreadName::new("main"), &a.state_id)
                     .unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .create_marker(&MarkerName::new("v"), &a.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
@@ -5657,10 +5683,10 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .set_thread(&ThreadName::new("main"), &a.state_id)
                     .unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .create_marker(&MarkerName::new("v"), &a.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
@@ -5682,7 +5708,7 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let p = matrix_put_state(&repo, b"P\n", Vec::new());
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &p.change_id)
+                    .create_marker(&MarkerName::new("v"), &p.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 // Run 1 mints P (every store state is minted by export_all) and
@@ -5692,15 +5718,15 @@ fn tag_reconcile_conformance_matrix() {
                 // and export ONLY `alpha` — P is now unreachable from the scoped
                 // frontier (no thread/marker reaches it), so it is NOT in this run's
                 // purge drop-set, yet v's existing tag still points at P's OID.
-                matrix_embargo(&repo, p.change_id);
+                matrix_embargo(&repo, p.state_id);
                 let alpha = matrix_put_state(&repo, b"A\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("alpha"), &alpha.change_id)
+                    .set_thread(&ThreadName::new("alpha"), &alpha.state_id)
                     .unwrap();
                 let c = matrix_put_state(&repo, b"C\n", Vec::new());
                 repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
                 repo.refs()
-                    .create_marker(&MarkerName::new("v"), &c.change_id)
+                    .create_marker(&MarkerName::new("v"), &c.state_id)
                     .unwrap();
                 export_current_thread(&mut git_projection, "alpha").unwrap();
                 (matrix_mirror_tag(&git_projection, "v"), None)
@@ -5717,7 +5743,7 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .set_thread(&ThreadName::new("main"), &a.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
@@ -5751,12 +5777,12 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .set_thread(&ThreadName::new("main"), &a.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
                 let oid_a = test_support::mapping(&git_projection)
-                    .get_git(&a.change_id)
+                    .get_git(&a.state_id)
                     .expect("A minted");
                 // Plant the foreign tag at the heddle-minted OID, AFTER the first
                 // export so the managed record already exists (the name is not in it).
@@ -5807,17 +5833,17 @@ fn head_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .set_thread(&ThreadName::new("main"), &a.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
-                let b = matrix_put_state(&repo, b"B\n", vec![a.change_id]);
+                let b = matrix_put_state(&repo, b"B\n", vec![a.state_id]);
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &b.change_id)
+                    .set_thread(&ThreadName::new("main"), &b.state_id)
                     .unwrap();
                 export_all(&mut git_projection).unwrap();
                 let oid_b = test_support::mapping(&git_projection)
-                    .get_git(&b.change_id)
+                    .get_git(&b.state_id)
                     .expect("B minted");
                 HeadOutcome {
                     observed: matrix_mirror_head(&git_projection, "main"),
@@ -5834,19 +5860,19 @@ fn head_reconcile_conformance_matrix() {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
-                let b = matrix_put_state(&repo, b"B\n", vec![a.change_id]);
+                let b = matrix_put_state(&repo, b"B\n", vec![a.state_id]);
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &b.change_id)
+                    .set_thread(&ThreadName::new("main"), &b.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
                 let oid_a = test_support::mapping(&git_projection)
-                    .get_git(&a.change_id)
+                    .get_git(&a.state_id)
                     .expect("A minted");
                 let oid_b = test_support::mapping(&git_projection)
-                    .get_git(&b.change_id)
+                    .get_git(&b.state_id)
                     .expect("B minted");
-                matrix_embargo(&repo, b.change_id);
+                matrix_embargo(&repo, b.state_id);
                 export_all(&mut git_projection).unwrap();
                 HeadOutcome {
                     observed: matrix_mirror_head(&git_projection, "main"),
@@ -5863,14 +5889,14 @@ fn head_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .set_thread(&ThreadName::new("main"), &a.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
                 let oid_a = test_support::mapping(&git_projection)
-                    .get_git(&a.change_id)
+                    .get_git(&a.state_id)
                     .expect("A minted");
-                matrix_embargo(&repo, a.change_id);
+                matrix_embargo(&repo, a.state_id);
                 export_all(&mut git_projection).unwrap();
                 HeadOutcome {
                     observed: matrix_mirror_head(&git_projection, "main"),
@@ -5892,25 +5918,25 @@ fn head_reconcile_conformance_matrix() {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
-                let b = matrix_put_state(&repo, b"B\n", vec![a.change_id]);
+                let b = matrix_put_state(&repo, b"B\n", vec![a.state_id]);
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &b.change_id)
+                    .set_thread(&ThreadName::new("main"), &b.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
                 let oid_a = test_support::mapping(&git_projection)
-                    .get_git(&a.change_id)
+                    .get_git(&a.state_id)
                     .expect("A minted");
                 let oid_b = test_support::mapping(&git_projection)
-                    .get_git(&b.change_id)
+                    .get_git(&b.state_id)
                     .expect("B minted");
                 // Embargo the published tip B, rewind main to its served ancestor A,
                 // and export ONLY main (scoped). B is now unreachable from the scoped
                 // frontier, so it is NOT in this run's purge drop-set — only the
                 // served-OID classification rewinds the head off B.
-                matrix_embargo(&repo, b.change_id);
+                matrix_embargo(&repo, b.state_id);
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .set_thread(&ThreadName::new("main"), &a.state_id)
                     .unwrap();
                 export_current_thread(&mut git_projection, "main").unwrap();
                 HeadOutcome {
@@ -5932,12 +5958,12 @@ fn head_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 repo.refs()
-                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .set_thread(&ThreadName::new("main"), &a.state_id)
                     .unwrap();
                 let mut git_projection = GitProjection::new(&repo);
                 export_all(&mut git_projection).unwrap();
                 let oid_a = test_support::mapping(&git_projection)
-                    .get_git(&a.change_id)
+                    .get_git(&a.state_id)
                     .expect("A minted");
                 matrix_plant_foreign_branch(&git_projection, "user-feature", oid_a);
                 export_all(&mut git_projection).unwrap();
@@ -5982,10 +6008,10 @@ fn mirror_managed_record_claims_written_drops_deleted_excludes_foreign() {
     let repo = Repository::init(temp.path()).unwrap();
     let a = matrix_put_state(&repo, b"A\n", Vec::new());
     repo.refs()
-        .set_thread(&ThreadName::new("main"), &a.change_id)
+        .set_thread(&ThreadName::new("main"), &a.state_id)
         .unwrap();
     repo.refs()
-        .create_marker(&MarkerName::new("v"), &a.change_id)
+        .create_marker(&MarkerName::new("v"), &a.state_id)
         .unwrap();
     let mut git_projection = GitProjection::new(&repo);
     export_all(&mut git_projection).unwrap();
@@ -6003,7 +6029,7 @@ fn mirror_managed_record_claims_written_drops_deleted_excludes_foreign() {
 
     // EXCLUDE FOREIGN: a foreign tag at a heddle OID never enters the record.
     let oid_a = test_support::mapping(&git_projection)
-        .get_git(&a.change_id)
+        .get_git(&a.state_id)
         .expect("A minted");
     matrix_plant_foreign_tag(&git_projection, "user-v1", oid_a);
     export_all(&mut git_projection).unwrap();
@@ -6059,10 +6085,10 @@ fn first_export_after_upgrade_seeds_record_and_still_retracts() {
     let a = matrix_put_state(&repo, b"A\n", Vec::new());
     let p = matrix_put_state(&repo, b"P\n", Vec::new());
     repo.refs()
-        .set_thread(&ThreadName::new("main"), &a.change_id)
+        .set_thread(&ThreadName::new("main"), &a.state_id)
         .unwrap();
     repo.refs()
-        .create_marker(&MarkerName::new("v"), &p.change_id)
+        .create_marker(&MarkerName::new("v"), &p.state_id)
         .unwrap();
     let mut git_projection = GitProjection::new(&repo);
     export_all(&mut git_projection).unwrap();
@@ -6209,7 +6235,7 @@ fn export_propagates_tag_and_note_deletion() {
         state
     };
     repo.refs()
-        .create_marker(&MarkerName::new("v1.0"), &r.change_id)
+        .create_marker(&MarkerName::new("v1.0"), &r.state_id)
         .expect("create marker at R");
 
     let dest_root = TempDir::new().expect("dest temp");
@@ -6219,7 +6245,7 @@ fn export_propagates_tag_and_note_deletion() {
         .export_to_path(&dest_path)
         .expect("first export");
     let oid_r = test_support::mapping(&git_projection)
-        .get_git(&r.change_id)
+        .get_git(&r.state_id)
         .expect("R minted");
 
     {
@@ -6229,7 +6255,7 @@ fn export_propagates_tag_and_note_deletion() {
             "destination must have the tag while public"
         );
         assert!(
-            cli::git_projection_engine::git_notes::read_note(&dest, oid_r)
+            heddle_git_projection::git_notes::read_note(&dest, oid_r)
                 .unwrap()
                 .is_some(),
             "destination must carry R's note while public"
@@ -6257,7 +6283,7 @@ fn export_propagates_tag_and_note_deletion() {
     // Embargo R → the mirror deletes the tag and retracts R's note entry. main
     // is independent of R, so it is untouched (no rewind).
     repo.put_state_visibility(StateVisibility {
-        state: r.change_id,
+        state: r.state_id,
         tier: VisibilityTier::Private {
             scope_label: "sec-embargo".into(),
         },
@@ -6286,7 +6312,7 @@ fn export_propagates_tag_and_note_deletion() {
         "a stale heddle-managed notes ref absent from the served mirror must be DELETED at the destination"
     );
     assert!(
-        cli::git_projection_engine::git_notes::read_note(&dest, oid_r)
+        heddle_git_projection::git_notes::read_note(&dest, oid_r)
             .unwrap()
             .is_none(),
         "the embargoed commit's note must no longer be readable at the destination"
@@ -6736,7 +6762,7 @@ fn foreign_ref_on_url_remote_survives() {
 /// the destination's newer commit survives. Covers local-path AND URL/network.
 #[test]
 fn out_of_band_destination_descendant_not_force_overwritten() {
-    use cli::git_projection_engine::git_core::GitProjectionError;
+    use heddle_git_projection::git_core::GitProjectionError;
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
@@ -7739,7 +7765,7 @@ fn foreign_destination_ref_spared() {
 /// local-path AND URL/network.
 #[test]
 fn out_of_band_destination_tag_not_overwritten() {
-    use cli::git_projection_engine::git_core::GitProjectionError;
+    use heddle_git_projection::git_core::GitProjectionError;
     use objects::object::{Attribution, Principal, State};
 
     let heddle_temp = TempDir::new().expect("heddle temp");
@@ -7773,7 +7799,7 @@ fn out_of_band_destination_tag_not_overwritten() {
         state
     };
     repo.refs()
-        .create_marker(&MarkerName::new("v1.0"), &r.change_id)
+        .create_marker(&MarkerName::new("v1.0"), &r.state_id)
         .expect("create marker at R");
 
     let mut git_projection = GitProjection::new(&repo);
@@ -8113,12 +8139,12 @@ fn import_preserves_commit_git_fidelity_fields() {
     )
     .expect("import");
 
-    let change_id = test_support::mapping(&git_projection)
+    let state_id = test_support::mapping(&git_projection)
         .get_heddle(commit_oid)
         .expect("commit mapped");
     let state = repo
         .store()
-        .get_state(&change_id)
+        .get_state(&state_id)
         .expect("load state")
         .expect("state written");
 

@@ -11,7 +11,7 @@
 
 use objects::{
     error::Result,
-    object::{ChangeId, MarkerName, ThreadName},
+    object::{MarkerName, StateId, ThreadName},
 };
 
 use super::{Head, RefUpdate};
@@ -61,7 +61,7 @@ impl LoadRequest {
 #[derive(Clone, Debug)]
 pub enum Loaded {
     Head(Head),
-    Point(Option<ChangeId>),
+    Point(Option<StateId>),
     ThreadList(Vec<ThreadName>),
     MarkerList(Vec<MarkerName>),
     RemoteList(Vec<String>),
@@ -81,9 +81,9 @@ pub struct ReconcileOutcome {
     pub loaded: Loaded,
     pub republish: Vec<RefUpdate>,
     /// `(remote, thread, Some(state) | None == delete)` materializations.
-    pub remote_updates: Vec<(String, ThreadName, Option<ChangeId>)>,
+    pub remote_updates: Vec<(String, ThreadName, Option<StateId>)>,
     /// New undo-recovery pointer to materialize, if a lagged batch set it.
-    pub undo_recovery: Option<ChangeId>,
+    pub undo_recovery: Option<StateId>,
 }
 
 /// The write-side dual of [`RefReconciler`] (heddle#330 §2.2 "The write

@@ -2,7 +2,7 @@
 //! Translate git refs into Heddle threads and markers.
 //!
 //! After the state writer has translated every reachable commit, this
-//! module points Heddle's refs at the resulting `ChangeId`s. The mapping is
+//! module points Heddle's refs at the resulting `StateId`s. The mapping is
 //! mechanical:
 //!
 //! | Git                              | Heddle                            |
@@ -28,7 +28,7 @@
 //! acceptable.
 
 use objects::{
-    object::{ChangeId, MarkerName, ThreadName, Tree},
+    object::{MarkerName, StateId, ThreadName, Tree},
     store::ObjectStore,
 };
 use refs::refs::{RefBackend, RefExpectation, RefUpdate};
@@ -186,8 +186,8 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
 
     fn thread_can_adopt_change(
         &self,
-        existing: &ChangeId,
-        incoming: &ChangeId,
+        existing: &StateId,
+        incoming: &StateId,
     ) -> crate::Result<bool> {
         if existing == incoming || self.thread_is_unclaimed_bootstrap(existing)? {
             return Ok(true);
@@ -195,8 +195,8 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
         change_is_ancestor(self.store, existing, incoming)
     }
 
-    fn thread_is_unclaimed_bootstrap(&self, change_id: &ChangeId) -> crate::Result<bool> {
-        let Some(state) = self.store.get_state(change_id).map_err(IngestError::from)? else {
+    fn thread_is_unclaimed_bootstrap(&self, state_id: &StateId) -> crate::Result<bool> {
+        let Some(state) = self.store.get_state(state_id).map_err(IngestError::from)? else {
             return Ok(false);
         };
         if !state.parents.is_empty() {
@@ -215,8 +215,8 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
 
 fn change_is_ancestor<S: ObjectStore>(
     store: &S,
-    ancestor: &ChangeId,
-    descendant: &ChangeId,
+    ancestor: &StateId,
+    descendant: &StateId,
 ) -> crate::Result<bool> {
     if ancestor == descendant {
         return Ok(true);
@@ -245,7 +245,7 @@ fn change_is_ancestor<S: ObjectStore>(
 #[cfg(test)]
 mod tests {
     use objects::{
-        object::{Attribution, ChangeId, Principal, State},
+        object::{Attribution, Principal, State, StateId},
         store::{InMemoryStore, ObjectStore},
     };
     use refs::refs::RefManager;
@@ -274,16 +274,16 @@ mod tests {
         }
     }
 
-    fn test_state(store: &InMemoryStore, parents: Vec<ChangeId>) -> ChangeId {
+    fn test_state(store: &InMemoryStore, parents: Vec<StateId>) -> StateId {
         let tree = store.put_tree(&Tree::new()).unwrap();
         let state = State::new(
             tree,
             parents,
             Attribution::human(Principal::new("Test", "test@example.com")),
         );
-        let change_id = state.change_id;
+        let state_id = state.state_id;
         store.put_state(&state).unwrap();
-        change_id
+        state_id
     }
 
     #[test]

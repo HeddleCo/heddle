@@ -5,7 +5,8 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 use heddle_core::{
-    CaptureSplitOptions, ThreadMoveOptions, ThreadShapingError, capture_split, thread_move,
+    CaptureSplitOptions, ThreadMoveOptions, ThreadShapingError, capture_split,
+    is_manual_review_blocker, thread_move,
 };
 use objects::object::ThreadName;
 use repo::{GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
@@ -19,12 +20,12 @@ use super::{
     operator_core::{OperatorAction, OperatorCommandOutput},
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
-    snapshot::{SnapshotAgentOverrides, create_snapshot},
+    snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
     thread_cmd::{
         capture_thread_update_before, current_thread_ref_state, load_thread, refresh_thread,
         refresh_thread_freshness, save_thread_update_with_oplog, thread_not_found_advice,
     },
-    thread_landing::{land_command_for_thread, land_command_with_push_target},
+    thread_landing::{land_command_for_thread, land_local_command},
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 use crate::{
@@ -90,7 +91,7 @@ pub fn cmd_capture_split(
                     no_agent: false,
                 },
             )?
-            .change_id)
+            .state_id)
         },
     )
     .map_err(map_thread_shaping_anyhow_error)?;
@@ -130,7 +131,7 @@ pub fn cmd_thread_move(
                     no_agent: false,
                 },
             )?
-            .change_id)
+            .state_id)
         },
     )
     .map_err(map_thread_shaping_anyhow_error)?;
@@ -170,6 +171,16 @@ pub fn cmd_thread_absorb(
             },
         )?;
     }
+    // Bootstrap missing current state (freshly-adopted git-overlay parent) so
+    // the core merge facade has a base to absorb into instead of hard-erroring.
+    let _ = ensure_current_state(
+        &parent_repo,
+        &user_config,
+        Some(format!(
+            "Bootstrap git-overlay before absorbing {}",
+            child.thread
+        )),
+    )?;
     let output = merge_thread_into_current(
         &parent_repo,
         &child.thread,
@@ -315,12 +326,12 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
             .ok_or_else(|| anyhow!("Thread '{}' has no current state", thread.id))?;
         if rebase_state
             .pre_conflict_head
-            .is_some_and(|head| head != current_state.change_id)
+            .is_some_and(|head| head != current_state.state_id)
         {
-            recommended_action = "heddle rebase --continue".to_string();
+            recommended_action = "heddle continue".to_string();
         } else {
             blockers.push(
-                "refresh has a rebase in progress; capture a manual resolution in the thread checkout, then run `heddle rebase --continue`".to_string(),
+                "refresh has a replay in progress; capture the manual resolution in the thread checkout, then run `heddle continue`".to_string(),
             );
         }
     }
@@ -331,6 +342,16 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
             .manual_resolution_state
             .is_none()
     {
+        // Bootstrap missing current state (freshly-adopted git-overlay repo)
+        // so the conflict-preview merge has a base instead of hard-erroring.
+        let _ = ensure_current_state(
+            &repo,
+            &UserConfig::load_default().unwrap_or_default(),
+            Some(format!(
+                "Bootstrap git-overlay before resolving {}",
+                thread.id
+            )),
+        )?;
         let preview =
             merge_thread_into_current(&repo, &thread.id, None, false, true, false, false, false)?;
         if preview.conflict_count > 0 {
@@ -408,10 +429,6 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
     )
 }
 
-fn is_manual_review_blocker(blocker: &str) -> bool {
-    blocker.starts_with("Heavy-impact change:")
-}
-
 fn thread_resolve_next_action(
     blockers: &[String],
     operation: Option<&RepositoryOperationStatus>,
@@ -442,10 +459,10 @@ fn thread_resolve_rebase_followup_operator(
     let mut blockers = Vec::new();
     if rebase_state
         .pre_conflict_head
-        .is_none_or(|head| head == current_state.change_id)
+        .is_none_or(|head| head == current_state.state_id)
     {
         blockers.push(
-            "refresh has a rebase in progress; capture a manual resolution in the thread checkout, then run `heddle rebase --continue`".to_string(),
+            "refresh has a replay in progress; capture the manual resolution in the thread checkout, then run `heddle continue`".to_string(),
         );
     }
 
@@ -507,7 +524,7 @@ fn thread_resolve_refresh_operator(
     thread_id: &str,
     trust: &RepositoryVerificationState,
 ) -> OperatorCommandOutput {
-    let land_command = land_command_with_push_target(thread_id, trust.default_remote.is_some());
+    let land_command = land_local_command(thread_id);
     if trust.verified {
         return OperatorCommandOutput {
             status: "synced".to_string(),
@@ -644,12 +661,12 @@ mod tests {
                 "active Git branch has not been imported"
             }
             .to_string(),
-            recommended_action: (!verified).then(|| "heddle adopt --ref main".to_string()),
+            recommended_action: (!verified).then(|| "heddle import git --ref main".to_string()),
             recommended_action_template: None,
             recovery_commands: if verified {
                 Vec::new()
             } else {
-                vec!["heddle adopt --ref main".to_string()]
+                vec!["heddle import git --ref main".to_string()]
             },
             recovery_action_templates: Vec::new(),
             details: std::collections::BTreeMap::new(),
@@ -693,7 +710,7 @@ mod tests {
         assert_eq!(clean.status, "synced");
         assert_eq!(
             clean.recommended_action.as_deref(),
-            Some("heddle land --thread feature/clean --no-push")
+            Some("heddle land --thread feature/clean")
         );
 
         let blocked = thread_resolve_refresh_operator("feature/blocked", &trust_state(false));
@@ -707,7 +724,7 @@ mod tests {
         );
         assert_eq!(
             blocked.recommended_action.as_deref(),
-            Some("heddle adopt --ref main")
+            Some("heddle import git --ref main")
         );
         assert!(
             blocked

@@ -24,6 +24,7 @@
 //! `heddle` binary — the wrapper is invisible for non-thread work.
 
 use anyhow::Result;
+use heddle_core::shell_plan::{ShellHookKind, shell_hook_snippet};
 
 use super::{cmd_completion, status::prompt_segment};
 use crate::cli::{Cli, ShellCommands, ShellKind};
@@ -32,7 +33,7 @@ pub fn cmd_shell(cli: &Cli, command: ShellCommands) -> Result<()> {
     match command {
         ShellCommands::Init { kind } => {
             // Stdout — the caller is expected to redirect / `eval`.
-            print!("{}", snippet_for(kind));
+            print!("{}", shell_hook_snippet(shell_hook_kind(kind)));
             Ok(())
         }
         ShellCommands::Completion { shell } => cmd_completion(shell),
@@ -45,118 +46,18 @@ pub fn cmd_shell(cli: &Cli, command: ShellCommands) -> Result<()> {
     }
 }
 
-/// Return the shell-hook snippet for `kind`. Pure function so the
-/// snippet selection is unit-testable without capturing stdout.
-fn snippet_for(kind: ShellKind) -> &'static str {
+/// Map CLI clap shell kind onto the pure hook kind in heddle-core.
+fn shell_hook_kind(kind: ShellKind) -> ShellHookKind {
     match kind {
-        ShellKind::Zsh | ShellKind::Bash => ZSH_BASH_SNIPPET,
-        ShellKind::Fish => FISH_SNIPPET,
+        ShellKind::Zsh => ShellHookKind::Zsh,
+        ShellKind::Bash => ShellHookKind::Bash,
+        ShellKind::Fish => ShellHookKind::Fish,
     }
 }
-
-/// zsh + bash share a function shape. The differences (`local`
-/// availability, `${@:N}` slicing) are compatible across both.
-const ZSH_BASH_SNIPPET: &str = r#"# heddle shell hook — installed via `heddle shell init zsh` (or bash)
-# Wraps `heddle start`, `heddle thread switch`, and `heddle thread cd`
-# so they auto-cd into the target thread's worktree.
-# Also defines `__heddle_ps1`, a compact prompt segment helper.
-heddle() {
-    case "$1 $2" in
-        "start "*)
-            local path
-            path=$(command heddle start "${@:2}" --print-cd-path 2>/dev/null) || {
-                command heddle "$@"
-                return $?
-            }
-            cd "$path" && printf 'heddle: %s\n' "$path"
-            ;;
-        "thread switch "*)
-            local path
-            path=$(command heddle thread switch "${@:3}" --print-cd-path 2>/dev/null) || {
-                command heddle "$@"
-                return $?
-            }
-            cd "$path" && printf 'heddle: %s\n' "$path"
-            ;;
-        "thread cd "*)
-            local path
-            path=$(command heddle thread cd "${@:3}") || return $?
-            cd "$path"
-            ;;
-        *)
-            command heddle "$@"
-            ;;
-    esac
-}
-
-__heddle_ps1() {
-    local segment
-    segment=$(command heddle shell prompt 2>/dev/null) || return 0
-    [ -n "$segment" ] && printf '(%s)' "$segment"
-}
-"#;
-
-/// fish uses a different function syntax. Wrappable via `function … end`.
-const FISH_SNIPPET: &str = r#"# heddle shell hook — installed via `heddle shell init fish`
-# Wraps `heddle start`, `heddle thread switch`, and `heddle thread cd`
-# so they auto-cd into the target thread's worktree.
-# Also defines `__heddle_ps1`, a compact prompt segment helper.
-function heddle
-    switch "$argv[1] $argv[2]"
-        case 'start *'
-            set -l path (command heddle start $argv[2..] --print-cd-path 2>/dev/null)
-            if test $status -ne 0
-                command heddle $argv
-                return $status
-            end
-            cd "$path"; and printf 'heddle: %s\n' "$path"
-        case 'thread switch *'
-            set -l path (command heddle thread switch $argv[3..] --print-cd-path 2>/dev/null)
-            if test $status -ne 0
-                command heddle $argv
-                return $status
-            end
-            cd "$path"; and printf 'heddle: %s\n' "$path"
-        case 'thread cd *'
-            set -l path (command heddle thread cd $argv[3..])
-            if test $status -ne 0
-                return $status
-            end
-            cd "$path"
-        case '*'
-            command heddle $argv
-    end
-end
-
-function __heddle_ps1
-    set -l segment (command heddle shell prompt 2>/dev/null)
-    if test -n "$segment"
-        printf '(%s)' "$segment"
-    end
-end
-"#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn snippet_for_zsh_and_bash_share_the_same_body() {
-        assert!(std::ptr::eq(
-            snippet_for(ShellKind::Zsh),
-            snippet_for(ShellKind::Bash)
-        ));
-        assert!(snippet_for(ShellKind::Zsh).contains("heddle() {"));
-        assert!(snippet_for(ShellKind::Zsh).contains("__heddle_ps1()"));
-    }
-
-    #[test]
-    fn snippet_for_fish_uses_fish_function_syntax() {
-        let body = snippet_for(ShellKind::Fish);
-        assert!(body.contains("function heddle"));
-        assert!(body.contains("$argv"));
-        assert!(body.contains("function __heddle_ps1"));
-    }
 
     #[test]
     fn cmd_shell_init_runs_for_every_shell_kind() {
@@ -174,5 +75,12 @@ mod tests {
             };
             cmd_shell(&cli, ShellCommands::Init { kind }).expect("init prints");
         }
+    }
+
+    #[test]
+    fn shell_hook_kind_maps_all_variants() {
+        assert_eq!(shell_hook_kind(ShellKind::Zsh), ShellHookKind::Zsh);
+        assert_eq!(shell_hook_kind(ShellKind::Bash), ShellHookKind::Bash);
+        assert_eq!(shell_hook_kind(ShellKind::Fish), ShellHookKind::Fish);
     }
 }

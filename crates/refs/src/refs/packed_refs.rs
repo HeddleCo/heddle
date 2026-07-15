@@ -5,12 +5,13 @@ use std::path::Path;
 
 use objects::{
     error::{HeddleError, Result},
-    object::ChangeId,
+    object::StateId,
 };
 
 use super::PackedRefsModel as CorePackedRefs;
-use crate::fs_atomic::write_file_atomic;
+use crate::fs_atomic::{create_dir_all_durable, write_file_atomic};
 
+#[derive(Clone)]
 pub(super) struct PackedRefs {
     inner: CorePackedRefs,
 }
@@ -37,24 +38,24 @@ impl PackedRefs {
         let parent = path
             .parent()
             .ok_or_else(|| HeddleError::Config("invalid packed-refs path".to_string()))?;
-        std::fs::create_dir_all(parent)?;
+        create_dir_all_durable(parent)?;
         let content = self.inner.to_text();
         Ok(write_file_atomic(path, content.as_bytes())?)
     }
 
-    pub fn get_thread(&self, name: &str) -> Option<ChangeId> {
+    pub fn get_thread(&self, name: &str) -> Option<StateId> {
         self.inner.get_thread(name)
     }
 
-    pub fn get_marker(&self, name: &str) -> Option<ChangeId> {
+    pub fn get_marker(&self, name: &str) -> Option<StateId> {
         self.inner.get_marker(name)
     }
 
-    pub fn set_thread(&mut self, name: &str, id: ChangeId) {
+    pub fn set_thread(&mut self, name: &str, id: StateId) {
         self.inner.set_thread(name, id);
     }
 
-    pub fn set_marker(&mut self, name: &str, id: ChangeId) {
+    pub fn set_marker(&mut self, name: &str, id: StateId) {
         self.inner.set_marker(name, id);
     }
 

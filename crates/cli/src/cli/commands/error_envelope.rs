@@ -198,7 +198,15 @@ impl ErrorClassification {
     }
 
     fn from_recovery_details(details: &objects::RecoveryDetails) -> Self {
-        let recovery_commands = typed_recovery_commands(details.kind);
+        // Prefer explicit, path-specific commands the callsite attached (e.g.
+        // `heddle --repo <checkout> ready …` for source-thread refusals). The
+        // `kind`-keyed fallback below has no access to that path, so it can only
+        // reconstruct the generic recovery variant (HeddleCo/heddle#981).
+        let recovery_commands = details
+            .recovery_commands
+            .clone()
+            .filter(|commands| !commands.is_empty())
+            .unwrap_or_else(|| typed_recovery_commands(details.kind));
         let primary_command = recovery_commands
             .first()
             .cloned()
@@ -303,6 +311,20 @@ fn typed_recovery_commands(kind: &str) -> Vec<String> {
         "repository_integrity_error" => &["heddle fsck --full"],
         "repository_not_found" => &["heddle init"],
         "state_not_found" => &["heddle log"],
+        // Merge-orchestration refusals raised from core as typed
+        // `RecoveryDetails` (crates/core/src/merge/advice.rs). Before this
+        // mapping they all degraded to `heddle help --output json` in the
+        // machine envelope, losing the specific recovery path the human
+        // hint already documents (HeddleCo/heddle#981 regression). Commands
+        // mirror the CLI-side `RecoveryAdvice` versions on `main`.
+        "merge_already_in_progress" => {
+            &["heddle status", "heddle continue", "heddle resolve --abort"]
+        }
+        "thread_not_found" => &["heddle thread list"],
+        "merge_no_common_ancestor" => &["heddle status"],
+        "dirty_worktree" | "source_thread_uncaptured_work" => {
+            &[super::advice::DIRTY_WORKTREE_CAPTURE_COMMAND]
+        }
         _ => &["heddle help --output json"],
     };
     commands
@@ -423,7 +445,7 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
             };
         }
         if let Some(git_error) =
-            cause.downcast_ref::<crate::git_projection_engine::git_core::GitProjectionError>()
+            cause.downcast_ref::<heddle_git_projection::git_core::GitProjectionError>()
             && let Some(advice) = RecoveryAdvice::from_git_projection_error(git_error)
         {
             return ErrorClassification::from_advice(&advice);
@@ -509,6 +531,78 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                         extra_json_fields: serde_json::Map::new(),
                     };
                 }
+                HeddleError::RepositoryFormatMigrationRequired {
+                    found, required, ..
+                } => {
+                    return ErrorClassification {
+                        kind: "repository_format_migration_required".to_string(),
+                        human_error: Some(heddle_err.to_string()),
+                        hint: format!(
+                            "This alpha repository uses format v{found}. Back it up, then recreate it or re-adopt its Git history as format v{required}."
+                        ),
+                        unsafe_condition: format!(
+                            "repository format v{found} is incompatible with required format v{required}"
+                        ),
+                        would_change:
+                            "opening it as the current format could misread legacy state"
+                                .to_string(),
+                        preserved:
+                            "the repository config, objects, refs, metadata, and worktree were left unchanged"
+                                .to_string(),
+                        primary_command: "heddle help adopt".to_string(),
+                        recovery_commands: vec!["heddle help adopt".to_string()],
+                        extra_json_fields: serde_json::Map::new(),
+                    };
+                }
+                HeddleError::StorageFormatTooNew {
+                    storage,
+                    found,
+                    supported,
+                } => {
+                    return ErrorClassification {
+                        kind: "storage_format_too_new".to_string(),
+                        human_error: Some(heddle_err.to_string()),
+                        hint: "Upgrade heddle to a binary that supports this storage format."
+                            .to_string(),
+                        unsafe_condition: format!(
+                            "{storage} format {found} is newer than this binary's supported format {supported}"
+                        ),
+                        would_change: format!(
+                            "opening the newer {storage} could misread persisted repository history"
+                        ),
+                        preserved:
+                            "repository objects, refs, metadata, and worktree files were left unchanged"
+                                .to_string(),
+                        primary_command: "heddle status".to_string(),
+                        recovery_commands: vec!["heddle status".to_string()],
+                        extra_json_fields: serde_json::Map::new(),
+                    };
+                }
+                HeddleError::StorageFormatMigrationRequired {
+                    storage,
+                    found,
+                    required,
+                } => {
+                    return ErrorClassification {
+                        kind: "storage_format_migration_required".to_string(),
+                        human_error: Some(heddle_err.to_string()),
+                        hint: format!(
+                            "This alpha repository contains {storage} format {found}. Back it up, then recreate it or re-adopt its Git history as format {required}."
+                        ),
+                        unsafe_condition: format!(
+                            "{storage} format {found} is incompatible with required format {required}"
+                        ),
+                        would_change: format!(
+                            "opening the legacy {storage} could misread persisted repository history"
+                        ),
+                        preserved:
+                            "repository objects, refs, metadata, and worktree files were left unchanged"
+                                .to_string(),
+                        primary_command: "heddle help adopt".to_string(),
+                        recovery_commands: vec!["heddle help adopt".to_string()],
+                        extra_json_fields: serde_json::Map::new(),
+                    };
+                }
                 HeddleError::RepositoryExists(_) => {
                     return ErrorClassification::known(
                         "repository_exists",
@@ -544,6 +638,16 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                         "there is no active merge operation to continue, abort, or inspect",
                         "continuing an absent operation could target unrelated work",
                         "repository state, refs, metadata, and worktree files were left unchanged",
+                        "heddle status",
+                    );
+                }
+                HeddleError::Lock(_) => {
+                    return ErrorClassification::known(
+                        "repository_lock_unavailable",
+                        "Retry after the other Heddle operation finishes.",
+                        "another operation or lock acquisition failure made the repository unavailable",
+                        "continuing without the repository lock could interleave incompatible writes",
+                        "the command stopped before its protected mutation",
                         "heddle status",
                     );
                 }
@@ -745,6 +849,60 @@ mod tests {
     }
 
     #[test]
+    fn legacy_repository_format_is_migration_refusal_not_corruption() {
+        let err = anyhow!(HeddleError::RepositoryFormatMigrationRequired {
+            path: std::path::PathBuf::from("/tmp/legacy/.heddle/config.toml"),
+            found: 2,
+            required: 3,
+        });
+
+        let classified = classify_error(&err);
+        assert_eq!(classified.kind, "repository_format_migration_required");
+        assert_eq!(classified.primary_command, "heddle help adopt");
+        assert!(classified.preserved.contains("config"));
+        assert!(classified.recovery_commands.iter().all(|command| {
+            crate::cli::commands::command_catalog::validate_recommended_action(command).is_ok()
+        }));
+        assert!(
+            [
+                classified.kind.as_str(),
+                classified.hint.as_str(),
+                classified.unsafe_condition.as_str(),
+                classified.would_change.as_str(),
+            ]
+            .iter()
+            .all(|value| !value.contains("corrupt"))
+        );
+    }
+
+    #[test]
+    fn legacy_storage_format_is_migration_refusal_not_corruption() {
+        let err = anyhow!(HeddleError::StorageFormatMigrationRequired {
+            storage: "packed oplog container".to_string(),
+            found: 2,
+            required: 4,
+        });
+
+        let classified = classify_error(&err);
+        assert_eq!(classified.kind, "storage_format_migration_required");
+        assert_eq!(classified.primary_command, "heddle help adopt");
+        assert!(classified.preserved.contains("left unchanged"));
+        assert!(classified.recovery_commands.iter().all(|command| {
+            crate::cli::commands::command_catalog::validate_recommended_action(command).is_ok()
+        }));
+        assert!(
+            [
+                classified.kind.as_str(),
+                classified.hint.as_str(),
+                classified.unsafe_condition.as_str(),
+                classified.would_change.as_str(),
+            ]
+            .iter()
+            .all(|value| !value.contains("corrupt"))
+        );
+    }
+
+    #[test]
     fn typed_no_merge_in_progress_gets_operation_recovery() {
         let err = anyhow!(HeddleError::NoMergeInProgress);
 
@@ -755,8 +913,66 @@ mod tests {
     }
 
     #[test]
+    fn typed_lock_failure_is_transient_not_integrity_failure() {
+        let err = anyhow!(HeddleError::Lock(objects::lock::LockError::Acquire(
+            std::io::Error::new(std::io::ErrorKind::WouldBlock, "contended"),
+        )));
+        let classified = classify_error(&err);
+        assert_eq!(classified.kind, "repository_lock_unavailable");
+        assert_eq!(classified.primary_command, "heddle status");
+    }
+
+    #[test]
+    fn typed_merge_refusal_kinds_keep_specific_recovery_commands() {
+        // HeddleCo/heddle#981: merge-orchestration refusals raised from core
+        // as typed `RecoveryDetails` must not degrade to
+        // `heddle help --output json` in the machine envelope.
+        let in_progress = anyhow!(HeddleError::recovery(RecoveryDetails::safety_refusal(
+            "merge_already_in_progress",
+            "A merge is already in progress",
+            "hint",
+            "unsafe",
+            "would change",
+            "preserved",
+        )));
+        let classified = classify_error(&in_progress);
+        assert_eq!(classified.kind, "merge_already_in_progress");
+        assert_eq!(classified.primary_command, "heddle status");
+        assert_eq!(
+            classified.recovery_commands,
+            vec!["heddle status", "heddle continue", "heddle resolve --abort"]
+        );
+
+        let not_found = anyhow!(HeddleError::recovery(RecoveryDetails::safety_refusal(
+            "thread_not_found",
+            "Thread 'x' not found",
+            "hint",
+            "unsafe",
+            "would change",
+            "preserved",
+        )));
+        let classified = classify_error(&not_found);
+        assert_eq!(classified.primary_command, "heddle thread list");
+
+        let dirty = anyhow!(HeddleError::recovery(RecoveryDetails::safety_refusal(
+            "dirty_worktree",
+            "Refusing to merge with a dirty worktree",
+            "hint",
+            "unsafe",
+            "would change",
+            "preserved",
+        )));
+        let classified = classify_error(&dirty);
+        assert_ne!(classified.primary_command, "heddle help --output json");
+        assert_eq!(
+            classified.recovery_commands,
+            vec![super::super::advice::DIRTY_WORKTREE_CAPTURE_COMMAND.to_string()]
+        );
+    }
+
+    #[test]
     fn typed_state_not_found_routes_through_recovery_details() {
-        let state = objects::object::ChangeId::generate();
+        let state = objects::object::StateId::from_bytes([68; 32]);
         let err = anyhow!(HeddleError::StateNotFound(state));
 
         let classified = classify_error(&err);

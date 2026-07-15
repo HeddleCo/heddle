@@ -12,23 +12,20 @@
 //!
 //! | Short | Long(s)                           | Used by                       |
 //! |-------|-----------------------------------|-------------------------------|
-//! | `-m`  | `--message`, `--intent`           | capture, merge, revert,       |
-//! |       |                                   | cherry-pick, checkpoint,      |
-//! |       |                                   | stash push, context set/edit, |
-//! |       |                                   | discuss append                |
+//! | `-m`  | `--message`, `--intent`           | capture, revert, context,     |
+//! |       |                                   | discuss                       |
 //! | `-n`  | `--limit` (queries),              | log, list, query (limit);     |
 //! |       | `--steps` (undo/redo)             | undo, redo (steps)            |
-//! | `-f`  | `--force`                         | capture, push, goto, clean,   |
-//! |       |                                   | cherry-pick, rebase           |
+//! | `-f`  | `--force`                         | capture, push, revert, purge  |
 //! | `-s`  | `--short`                         | status                        |
 //! | `-U`  | `--unified`                       | diff                          |
 //! | `-C`  | `--repo`                          | global                        |
 //! | `-v`  | `--verbose` (repeatable)          | global                        |
 //! | `-q`  | `--quiet`                         | global                        |
 //!
-//! Renames are out of scope — scripts written against the surface MUST
-//! keep working. Add a new short alias only when the letter is already
-//! reserved for that semantic in the table above.
+//! Heddle is pre-1.0 and contracts misleading surface area instead of
+//! preserving obsolete spellings. Add a short alias only when the letter is
+//! already reserved for that semantic in the current table above.
 
 use clap::Parser;
 

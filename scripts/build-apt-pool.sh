@@ -125,8 +125,8 @@ find_archive() {
 }
 
 # Build one architecture .deb from its release tarball. The tarball extracts
-# to a top-level heddle-<tag>-<target>/ dir containing the `heddle` binary
-# plus README/LICENSE/NOTICE (release.yml stage step).
+# to a top-level heddle-<tag>-<target>/ dir containing `heddle`, its
+# fsmonitor worker, and README/LICENSE/NOTICE (release.yml stage step).
 build_cli_deb() {
   local arch="$1" target="$2"
   local artifact="heddle-${TAG}-${target}.tar.gz"
@@ -147,6 +147,7 @@ build_cli_deb() {
   mkdir -p "$root/usr/bin" "$root/usr/share/doc/heddle" "$root/DEBIAN"
   tar -xzf "$archive" -C "$WORK"
   install -m 0755 "$WORK/$stage/heddle" "$root/usr/bin/heddle"
+  install -m 0755 "$WORK/$stage/heddle-fsmonitor-worker" "$root/usr/bin/heddle-fsmonitor-worker"
   install -m 0644 "$WORK/$stage/README.md" "$root/usr/share/doc/heddle/README.md"
   install -m 0644 "$WORK/$stage/LICENSE" "$root/usr/share/doc/heddle/copyright"
   install -m 0644 "$WORK/$stage/NOTICE" "$root/usr/share/doc/heddle/NOTICE"

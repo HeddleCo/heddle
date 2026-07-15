@@ -3,7 +3,7 @@
 
 use std::future::Future;
 
-use objects::object::{ChangeId, MarkerName, ThreadName};
+use objects::object::{MarkerName, StateId, ThreadName};
 
 use super::{Head, RefExpectation, RefUpdate};
 
@@ -32,42 +32,42 @@ pub trait CoreRefBackend: Send + Sync {
     fn get_thread(
         &self,
         name: &ThreadName,
-    ) -> impl Future<Output = Result<Option<ChangeId>, Self::Error>> + Send;
-    fn set_thread(&self, name: &ThreadName, state: &ChangeId) -> Result<(), Self::Error>;
+    ) -> impl Future<Output = Result<Option<StateId>, Self::Error>> + Send;
+    fn set_thread(&self, name: &ThreadName, state: &StateId) -> Result<(), Self::Error>;
     fn set_thread_cas(
         &self,
         name: &ThreadName,
-        expected: RefExpectation<ChangeId>,
-        state: &ChangeId,
+        expected: RefExpectation<StateId>,
+        state: &StateId,
     ) -> Result<(), Self::Error>;
-    fn delete_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>, Self::Error>;
+    fn delete_thread(&self, name: &ThreadName) -> Result<Option<StateId>, Self::Error>;
     fn delete_thread_cas(
         &self,
         name: &ThreadName,
-        expected: RefExpectation<ChangeId>,
+        expected: RefExpectation<StateId>,
     ) -> Result<(), Self::Error>;
     fn list_threads(&self) -> Result<Vec<ThreadName>, Self::Error>;
 
     fn get_marker(
         &self,
         name: &MarkerName,
-    ) -> impl Future<Output = Result<Option<ChangeId>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<StateId>, Self::Error>> + Send;
     fn create_marker(
         &self,
         name: &MarkerName,
-        state: &ChangeId,
+        state: &StateId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
     fn set_marker_cas(
         &self,
         name: &MarkerName,
-        expected: RefExpectation<ChangeId>,
-        state: &ChangeId,
+        expected: RefExpectation<StateId>,
+        state: &StateId,
     ) -> Result<(), Self::Error>;
-    fn delete_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>, Self::Error>;
+    fn delete_marker(&self, name: &MarkerName) -> Result<Option<StateId>, Self::Error>;
     fn delete_marker_cas(
         &self,
         name: &MarkerName,
-        expected: RefExpectation<ChangeId>,
+        expected: RefExpectation<StateId>,
     ) -> Result<(), Self::Error>;
     fn list_markers(&self) -> Result<Vec<MarkerName>, Self::Error>;
 
@@ -76,7 +76,7 @@ pub trait CoreRefBackend: Send + Sync {
     fn resolve(
         &self,
         refspec: &str,
-    ) -> impl Future<Output = Result<Option<ChangeId>, Self::Error>> + Send {
+    ) -> impl Future<Output = Result<Option<StateId>, Self::Error>> + Send {
         async move {
             if refspec == "@" || refspec == "HEAD" {
                 // Bind the `read_head()?` result before the `.await` below so
@@ -95,7 +95,7 @@ pub trait CoreRefBackend: Send + Sync {
             if let Some(id) = self.get_marker(&MarkerName::new(refspec)).await? {
                 return Ok(Some(id));
             }
-            if let Ok(id) = ChangeId::parse(refspec) {
+            if let Ok(id) = StateId::parse(refspec) {
                 return Ok(Some(id));
             }
             Ok(None)
@@ -109,7 +109,7 @@ mod tests {
 
     use objects::{
         error::HeddleError,
-        object::{ChangeId, MarkerName, ThreadName},
+        object::{MarkerName, StateId, ThreadName},
         sync::LockExt,
     };
 
@@ -122,8 +122,8 @@ mod tests {
     #[derive(Default)]
     struct MemRefBackend {
         head: Mutex<Option<Head>>,
-        threads: Mutex<HashMap<String, ChangeId>>,
-        markers: Mutex<HashMap<String, ChangeId>>,
+        threads: Mutex<HashMap<String, StateId>>,
+        markers: Mutex<HashMap<String, StateId>>,
     }
 
     impl CoreRefBackend for MemRefBackend {
@@ -146,10 +146,10 @@ mod tests {
         ) -> Result<(), HeddleError> {
             self.write_head(head)
         }
-        async fn get_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>, HeddleError> {
+        async fn get_thread(&self, name: &ThreadName) -> Result<Option<StateId>, HeddleError> {
             Ok(self.threads.lock_or_poisoned().get(name.as_str()).copied())
         }
-        fn set_thread(&self, name: &ThreadName, state: &ChangeId) -> Result<(), HeddleError> {
+        fn set_thread(&self, name: &ThreadName, state: &StateId) -> Result<(), HeddleError> {
             self.threads
                 .lock_or_poisoned()
                 .insert(name.as_str().to_string(), *state);
@@ -158,18 +158,18 @@ mod tests {
         fn set_thread_cas(
             &self,
             name: &ThreadName,
-            _expected: RefExpectation<ChangeId>,
-            state: &ChangeId,
+            _expected: RefExpectation<StateId>,
+            state: &StateId,
         ) -> Result<(), HeddleError> {
             self.set_thread(name, state)
         }
-        fn delete_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>, HeddleError> {
+        fn delete_thread(&self, name: &ThreadName) -> Result<Option<StateId>, HeddleError> {
             Ok(self.threads.lock_or_poisoned().remove(name.as_str()))
         }
         fn delete_thread_cas(
             &self,
             _name: &ThreadName,
-            _expected: RefExpectation<ChangeId>,
+            _expected: RefExpectation<StateId>,
         ) -> Result<(), HeddleError> {
             Ok(())
         }
@@ -181,13 +181,13 @@ mod tests {
                 .map(|k| ThreadName::new(k.as_str()))
                 .collect())
         }
-        async fn get_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>, HeddleError> {
+        async fn get_marker(&self, name: &MarkerName) -> Result<Option<StateId>, HeddleError> {
             Ok(self.markers.lock_or_poisoned().get(name.as_str()).copied())
         }
         async fn create_marker(
             &self,
             name: &MarkerName,
-            state: &ChangeId,
+            state: &StateId,
         ) -> Result<(), HeddleError> {
             self.markers
                 .lock_or_poisoned()
@@ -197,21 +197,21 @@ mod tests {
         fn set_marker_cas(
             &self,
             name: &MarkerName,
-            _expected: RefExpectation<ChangeId>,
-            state: &ChangeId,
+            _expected: RefExpectation<StateId>,
+            state: &StateId,
         ) -> Result<(), HeddleError> {
             self.markers
                 .lock_or_poisoned()
                 .insert(name.as_str().to_string(), *state);
             Ok(())
         }
-        fn delete_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>, HeddleError> {
+        fn delete_marker(&self, name: &MarkerName) -> Result<Option<StateId>, HeddleError> {
             Ok(self.markers.lock_or_poisoned().remove(name.as_str()))
         }
         fn delete_marker_cas(
             &self,
             _name: &MarkerName,
-            _expected: RefExpectation<ChangeId>,
+            _expected: RefExpectation<StateId>,
         ) -> Result<(), HeddleError> {
             Ok(())
         }
@@ -238,14 +238,14 @@ mod tests {
             &self,
             _remote: &str,
             _thread: &ThreadName,
-        ) -> Result<Option<ChangeId>, HeddleError> {
+        ) -> Result<Option<StateId>, HeddleError> {
             Ok(None)
         }
         fn set_remote_thread(
             &self,
             _remote: &str,
             _thread: &ThreadName,
-            _state: &ChangeId,
+            _state: &StateId,
         ) -> Result<(), HeddleError> {
             Ok(())
         }
@@ -253,7 +253,7 @@ mod tests {
             &self,
             _remote: &str,
             _thread: &ThreadName,
-        ) -> Result<Option<ChangeId>, HeddleError> {
+        ) -> Result<Option<StateId>, HeddleError> {
             Ok(None)
         }
         fn list_remotes(&self) -> Result<Vec<String>, HeddleError> {
@@ -282,10 +282,10 @@ mod tests {
     #[test]
     fn default_resolve_covers_every_branch() {
         let backend = MemRefBackend::default();
-        let thread_id = ChangeId::generate();
-        let marker_id = ChangeId::generate();
-        let detached_id = ChangeId::generate();
-        let parseable_id = ChangeId::generate();
+        let thread_id = crate::refs::fresh_state_id();
+        let marker_id = crate::refs::fresh_state_id();
+        let detached_id = crate::refs::fresh_state_id();
+        let parseable_id = crate::refs::fresh_state_id();
 
         backend
             .set_thread(&ThreadName::new("main"), &thread_id)
@@ -318,7 +318,7 @@ mod tests {
             Some(detached_id)
         );
 
-        // Bare thread name, then bare marker name, then a raw ChangeId.
+        // Bare thread name, then bare marker name, then a raw StateId.
         assert_eq!(
             pollster::block_on(backend.resolve("main")).unwrap(),
             Some(thread_id)
@@ -332,7 +332,7 @@ mod tests {
             Some(parseable_id)
         );
 
-        // Unknown refspec that is neither a thread, marker, nor ChangeId.
+        // Unknown refspec that is neither a thread, marker, nor StateId.
         assert_eq!(
             pollster::block_on(backend.resolve("no-such-ref")).unwrap(),
             None
@@ -342,9 +342,9 @@ mod tests {
     #[test]
     fn mem_backend_exercises_full_trait_surface() {
         let backend = MemRefBackend::default();
-        let thread_id = ChangeId::generate();
-        let marker_id = ChangeId::generate();
-        let head_id = ChangeId::generate();
+        let thread_id = crate::refs::fresh_state_id();
+        let marker_id = crate::refs::fresh_state_id();
+        let head_id = crate::refs::fresh_state_id();
 
         // write_head_cas writes through to the head slot.
         let head = Head::Detached { state: head_id };

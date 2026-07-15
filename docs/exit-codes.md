@@ -46,7 +46,7 @@ intentionally — let it surface naturally.
   setting rather than retry.
 - **`65` (DataErr) covers semantic rejection of well-formed input**
   (e.g. `commit` with nothing to capture, `merge` with unresolvable
-  conflict, `fsck --repair git` that needs a `--prefer` side chosen,
+  conflict, `fsck repair git` requested against the repository's source authority,
   repository state that fails decoding — `state_corrupted` — and
   `--output json`/`json-compact` requested from a command without that
   output contract). Agents must surface the condition (for unsupported
@@ -76,7 +76,7 @@ Today, only a representative subset of commands has populated
 `exit_codes`:
 
 - `init`, `verify`, `push`, `pull`, `commit`, `merge`, `status`
-- `import git`, `fsck --repair git`, `sync git`
+- `import git`, `fsck repair git`, `sync git`
 
 Commands not yet swept implicitly contract to `0` on success and an
 unspecified non-zero on failure — currently always mapped through

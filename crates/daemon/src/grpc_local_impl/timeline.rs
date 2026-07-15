@@ -35,7 +35,7 @@ use grpc::heddle::v1::{
     timeline_service_server::TimelineService,
 };
 use objects::object::{
-    BranchCreatedV1, ChangeId, ContentHash, CursorMovedV1, NativeToolCallRefV1, TimelineBranchId,
+    BranchCreatedV1, ContentHash, CursorMovedV1, NativeToolCallRefV1, StateId, TimelineBranchId,
     TimelineBranchReason, TimelineCursorMoveReason, TimelineLabel, TimelineOperationBodyV1,
     TimelineOperationEnvelope, TimelineOperationId, TimelineStepId, TimelineToolCallStatus,
     TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
@@ -1611,7 +1611,7 @@ fn tool_call_started_from_proto(
         parent_step_id: optional_step_id(body.parent_step_id),
         native: native_from_proto(body.native)?,
         tool_name: body.tool_name,
-        before_state: change_id_from_bytes(&body.before_state, "before_state")?,
+        before_state: state_id_from_bytes(&body.before_state, "before_state")?,
         payload: payload_from_proto(body.payload)?,
         started_at_ms: body.started_at_ms,
     })
@@ -1626,9 +1626,9 @@ fn tool_call_finished_from_proto(
         branch_id: TimelineBranchId::new(body.branch_id),
         native: native_from_proto(body.native)?,
         status: parse_tool_call_status(&body.status)?,
-        before_state: change_id_from_bytes(&body.before_state, "before_state")?,
-        after_state: change_id_from_bytes(&body.after_state, "after_state")?,
-        capture_state: optional_change_id(body.capture_state, "capture_state")?,
+        before_state: state_id_from_bytes(&body.before_state, "before_state")?,
+        after_state: state_id_from_bytes(&body.after_state, "after_state")?,
+        capture_state: optional_state_id(body.capture_state, "capture_state")?,
         capture_oplog_batch_id: body.capture_oplog_batch_id,
         changed: body.changed,
         touched_paths: body.touched_paths,
@@ -1643,8 +1643,8 @@ fn cursor_moved_from_proto(body: AgentTimelineCursorMoved) -> Result<CursorMoved
         branch_id: TimelineBranchId::new(body.branch_id),
         from_step_id: optional_step_id(body.from_step_id),
         to_step_id: optional_step_id(body.to_step_id),
-        from_state: change_id_from_bytes(&body.from_state, "from_state")?,
-        to_state: change_id_from_bytes(&body.to_state, "to_state")?,
+        from_state: state_id_from_bytes(&body.from_state, "from_state")?,
+        to_state: state_id_from_bytes(&body.to_state, "to_state")?,
         reason: parse_cursor_reason(&body.reason)?,
         moved_at_ms: body.moved_at_ms,
     })
@@ -1656,7 +1656,7 @@ fn branch_created_from_proto(body: AgentTimelineBranchCreated) -> Result<BranchC
         branch_id: TimelineBranchId::new(body.branch_id),
         parent_branch_id: optional_branch_id(body.parent_branch_id),
         from_step_id: optional_step_id(body.from_step_id),
-        from_state: change_id_from_bytes(&body.from_state, "from_state")?,
+        from_state: state_id_from_bytes(&body.from_state, "from_state")?,
         reason: parse_branch_reason(&body.reason)?,
         created_at_ms: body.created_at_ms,
     })
@@ -1795,16 +1795,16 @@ fn payload_to_proto(
     })
 }
 
-fn change_id_from_bytes(bytes: &[u8], field: &str) -> Result<ChangeId, Status> {
-    ChangeId::try_from_slice(bytes)
+fn state_id_from_bytes(bytes: &[u8], field: &str) -> Result<StateId, Status> {
+    StateId::try_from_slice(bytes)
         .map_err(|err| Status::invalid_argument(format!("invalid {field}: {err}")))
 }
 
-fn optional_change_id(bytes: Vec<u8>, field: &str) -> Result<Option<ChangeId>, Status> {
+fn optional_state_id(bytes: Vec<u8>, field: &str) -> Result<Option<StateId>, Status> {
     if bytes.is_empty() {
         return Ok(None);
     }
-    change_id_from_bytes(&bytes, field).map(Some)
+    state_id_from_bytes(&bytes, field).map(Some)
 }
 
 fn optional_content_hash(bytes: Vec<u8>, field: &str) -> Result<Option<ContentHash>, Status> {
@@ -1969,9 +1969,9 @@ mod tests {
                                 tool_call_id: tool_call_id.to_string(),
                             }),
                             status: "succeeded".to_string(),
-                            before_state: vec![before; 16],
-                            after_state: vec![after; 16],
-                            capture_state: vec![after; 16],
+                            before_state: vec![before; 32],
+                            after_state: vec![after; 32],
+                            capture_state: vec![after; 32],
                             capture_oplog_batch_id: Some(finished_at_ms as u64),
                             changed: true,
                             touched_paths: vec![format!("src/{step_id}.rs")],
@@ -1991,22 +1991,22 @@ mod tests {
         root: &std::path::Path,
         path: &str,
         content: &str,
-    ) -> ChangeId {
+    ) -> StateId {
         fs::write(root.join(path), content).unwrap();
         service
             .inner
             .repo()
             .snapshot(Some(path.to_string()), None)
             .unwrap()
-            .change_id
+            .state_id
     }
 
     async fn record_finished_step_for_states(
         service: &LocalTimelineService,
         step_id: &str,
         tool_call_id: &str,
-        before: ChangeId,
-        after: ChangeId,
+        before: StateId,
+        after: StateId,
         touched_path: &str,
         finished_at_ms: i64,
     ) {
@@ -2065,7 +2065,7 @@ mod tests {
                                 tool_call_id: "call-1".to_string(),
                             }),
                             tool_name: "shell".to_string(),
-                            before_state: vec![1; 16],
+                            before_state: vec![1; 32],
                             payload: None,
                             started_at_ms: 1_700_000_000_000,
                         },
@@ -2113,7 +2113,7 @@ mod tests {
             .into_inner();
         assert_eq!(status.current_branch_id, "tlb-main");
         assert_eq!(status.current_step_id, "tls-step-2");
-        assert_eq!(status.current_state.unwrap().state_id, vec![3; 16]);
+        assert_eq!(status.current_state.unwrap().state_id, vec![3; 32]);
         assert_eq!(status.step_count, 2);
 
         let listed = service
@@ -2161,7 +2161,7 @@ mod tests {
         assert_eq!(moved.operation.unwrap().kind, "cursor_moved");
         let moved_status = moved.status.unwrap();
         assert_eq!(moved_status.current_step_id, "tls-step-1");
-        assert_eq!(moved_status.current_state.unwrap().state_id, vec![2; 16]);
+        assert_eq!(moved_status.current_state.unwrap().state_id, vec![2; 32]);
 
         let moved = service
             .seek_to_native_tool_call(Request::new(SeekTimelineToNativeToolCallRequest {
@@ -2179,7 +2179,7 @@ mod tests {
             .into_inner();
         let moved_status = moved.status.unwrap();
         assert_eq!(moved_status.current_step_id, "tls-step-2");
-        assert_eq!(moved_status.current_state.unwrap().state_id, vec![3; 16]);
+        assert_eq!(moved_status.current_state.unwrap().state_id, vec![3; 32]);
     }
 
     #[tokio::test]
@@ -2214,7 +2214,7 @@ mod tests {
         assert_eq!(summary.step_id, "tls-step-2");
         assert_eq!(summary.native.as_ref().unwrap().harness, "opencode");
         assert_eq!(summary.native.as_ref().unwrap().tool_call_id, "call-2");
-        assert_eq!(current.cursor_state, vec![3; 16]);
+        assert_eq!(current.cursor_state, vec![3; 32]);
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@
 //! Heddle object lane: content-addressed objects that can ride the native pack,
 //! and signed sidecars that must use the out-of-pack verification paths.
 
-use objects::{object::ChangeId, store::ObjectStore};
+use objects::{object::StateId, store::ObjectStore};
 
 use crate::{
     ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, Result, StateClosureOptions,
@@ -53,12 +53,13 @@ pub struct TransferPlanStats {
     pub actions: usize,
     pub redactions: usize,
     pub state_visibilities: usize,
+    pub state_attachments: usize,
 }
 
 impl RepositoryTransferPlan<PlannedObject> {
     pub fn from_state_closure_plan(
         store: &impl ObjectStore,
-        root: ChangeId,
+        root: StateId,
         options: StateClosureOptions,
         git_lane: GitLaneTransferIntent,
     ) -> Result<Self> {
@@ -137,6 +138,7 @@ impl TransferPlanStats {
             ObjectTypeBucket::Action => self.actions += 1,
             ObjectTypeBucket::Redaction => self.redactions += 1,
             ObjectTypeBucket::StateVisibility => self.state_visibilities += 1,
+            ObjectTypeBucket::StateAttachment => self.state_attachments += 1,
         }
     }
 }
@@ -176,7 +178,7 @@ fn object_info_type(object: &ObjectInfo) -> ObjectType {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{ChangeId, ContentHash};
+    use objects::object::{ContentHash, StateId};
 
     use super::*;
     use crate::ObjectId;
@@ -187,7 +189,7 @@ mod tests {
 
     #[test]
     fn partitions_split_native_pack_objects_from_sidecars() {
-        let state = ChangeId::from_bytes([9; 16]);
+        let state = StateId::from_bytes([9; 32]);
         let plan = RepositoryTransferPlan::from_planned_objects(
             vec![
                 PlannedObject {
@@ -203,7 +205,7 @@ mod tests {
                     obj_type: ObjectType::Redaction,
                 },
                 PlannedObject {
-                    id: ObjectId::ChangeId(state),
+                    id: ObjectId::StateId(state),
                     obj_type: ObjectType::StateVisibility,
                 },
             ],
@@ -224,10 +226,10 @@ mod tests {
 
     #[test]
     fn sidecar_only_plan_does_not_require_native_pack() {
-        let state = ChangeId::from_bytes([3; 16]);
+        let state = StateId::from_bytes([3; 32]);
         let plan = RepositoryTransferPlan::from_object_infos(
             vec![ObjectInfo {
-                id: ObjectId::ChangeId(state),
+                id: ObjectId::StateId(state),
                 obj_type: ObjectType::StateVisibility,
                 size: 128,
                 delta_base: None,

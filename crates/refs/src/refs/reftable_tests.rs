@@ -6,14 +6,14 @@
 //! cold-lookup helper that binary-searches against serialized bytes without
 //! parsing the whole payload.
 
-use objects::object::ChangeId;
+use objects::object::StateId;
 
 use super::{FOOTER_LEN, HEADER_LEN, MAGIC, ReftableModel};
 
-fn cid(n: u8) -> ChangeId {
-    let mut bytes = [0u8; 16];
-    bytes[15] = n;
-    ChangeId::from_bytes(bytes)
+fn cid(n: u8) -> StateId {
+    let mut bytes = [0u8; 32];
+    bytes[31] = n;
+    StateId::from_bytes(bytes)
 }
 
 #[test]

@@ -6,7 +6,11 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use objects::{fs_atomic::write_file_atomic, object::ChangeId, store::ObjectStore};
+use objects::{
+    fs_atomic::write_file_atomic,
+    object::StateId,
+    store::{ObjectStore, pack_install_metrics_snapshot, recover_pack_install_intents},
+};
 use refs::{Head, RefSummaryIndexInspection};
 use serde::{Deserialize, Serialize};
 use wire::{PlannedObject, StateClosureOptions, enumerate_state_closure_plan_with_options};
@@ -75,6 +79,10 @@ pub struct RefCountsInspection {
 pub struct PackFilesInspection {
     pub pack_count: usize,
     pub index_count: usize,
+    /// `.pack` files with no matching `.idx` (L8 orphan / Option D candidates).
+    pub unpaired_pack_count: usize,
+    /// Durable install intents under `packs/.install-intent/*.json`, if present.
+    pub pending_install_intents: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,6 +108,20 @@ pub struct RepositoryMaintenanceRunReport {
     pub refreshed_change_monitor: bool,
     pub rebuilt_pull_planner_cache: bool,
     pub pruned_pull_planner_entries: usize,
+    /// Pack install intents finished by L8 recovery (`PackInstallRecoverReport.completed`).
+    pub pack_install_intents_recovered_completed: u64,
+    /// Pack install intents aborted by L8 recovery.
+    pub pack_install_intents_aborted: u64,
+    /// Non-expired / lock-held intents left alone during recovery.
+    pub pack_install_intents_skipped_in_progress: u64,
+    /// Malformed intents moved to quarantine.
+    pub pack_install_intents_quarantined: u64,
+    /// Process-local pack-install counters (scrape hook for hosted/ops).
+    pub pack_install_metrics: objects::store::PackInstallMetricsSnapshot,
+    /// Unpaired `.pack` files removed (Option D backstop).
+    pub unpaired_packs_pruned: u64,
+    /// Bytes freed by unpaired pack prune.
+    pub unpaired_pack_bytes_freed: u64,
     pub report: RepositoryPerformanceInspectionReport,
 }
 
@@ -165,6 +187,14 @@ impl Repository {
         let mut rebuilt_worktree_index = false;
         let refreshed_change_monitor;
 
+        // L8 residual: finish or abort incomplete pack installs, then prune
+        // unpaired packs (Option D). Free functions on the packs path so we
+        // do not need an ObjectStore downcast.
+        let packs_dir = self.heddle_dir.join("packs");
+        let pack_install_recover = recover_pack_install_intents(&packs_dir).unwrap_or_default();
+        let (unpaired_packs_pruned, unpaired_pack_bytes_freed) =
+            prune_unpaired_pack_files(&packs_dir).unwrap_or((0, 0));
+
         let state_ids = self.store().list_states()?;
         if !state_ids.is_empty() {
             let mut graph = CommitGraphIndex::new(self);
@@ -194,6 +224,14 @@ impl Repository {
             refreshed_change_monitor = true;
         }
 
+        // `maintenance refresh` is the deliberate place to pay for a full-tree
+        // monitor scan and (re)materialize the native monitor sidecars
+        // (`monitor-native.bin` + `fsmonitor.toml`). The status hot path
+        // intentionally no-ops the native snapshot to stay cheap, so without
+        // this explicit rebuild maintenance would stop refreshing the monitor
+        // sidecar it has always produced.
+        crate::fsmonitor::rebuild_local_monitor_snapshot(self.root(), options.fsmonitor)?;
+
         let report = self.inspect_performance_with_options(options)?;
         Ok(RepositoryMaintenanceRunReport {
             rebuilt_commit_graph,
@@ -202,6 +240,13 @@ impl Repository {
             refreshed_change_monitor,
             rebuilt_pull_planner_cache: pull_planner_maintenance.rebuilt,
             pruned_pull_planner_entries: pull_planner_maintenance.pruned_entries,
+            pack_install_intents_recovered_completed: pack_install_recover.completed,
+            pack_install_intents_aborted: pack_install_recover.aborted,
+            pack_install_intents_skipped_in_progress: pack_install_recover.skipped_in_progress,
+            pack_install_intents_quarantined: pack_install_recover.quarantined,
+            pack_install_metrics: pack_install_metrics_snapshot(),
+            unpaired_packs_pruned,
+            unpaired_pack_bytes_freed,
             report,
         })
     }
@@ -318,21 +363,84 @@ fn inspect_pack_files(heddle_dir: &Path) -> PackFilesInspection {
     let packs_dir = heddle_dir.join("packs");
     let mut pack_count = 0usize;
     let mut index_count = 0usize;
+    let mut unpaired_pack_count = 0usize;
+    let mut pack_paths = Vec::new();
 
     if let Ok(entries) = fs::read_dir(&packs_dir) {
         for entry in entries.flatten() {
-            match entry.path().extension().and_then(|ext| ext.to_str()) {
-                Some("pack") => pack_count += 1,
+            let path = entry.path();
+            match path.extension().and_then(|ext| ext.to_str()) {
+                Some("pack") => {
+                    pack_count += 1;
+                    pack_paths.push(path);
+                }
                 Some("idx") => index_count += 1,
                 _ => {}
             }
         }
     }
 
+    for pack_path in &pack_paths {
+        if !pack_path.with_extension("idx").exists() {
+            unpaired_pack_count += 1;
+        }
+    }
+
+    let pending_install_intents = count_pending_install_intents(&packs_dir);
+
     PackFilesInspection {
         pack_count,
         index_count,
+        unpaired_pack_count,
+        pending_install_intents,
     }
+}
+
+fn count_pending_install_intents(packs_dir: &Path) -> usize {
+    let intent_dir = packs_dir.join(".install-intent");
+    if !intent_dir.exists() {
+        return 0;
+    }
+    let Ok(entries) = fs::read_dir(intent_dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .count()
+}
+
+/// Option D backstop: remove `.pack` files with no matching `.idx`.
+///
+/// Mirrors `objects::store::fs::fs_pack::prune_unpaired_pack_files` (crate-
+/// private) so repository maintenance can run without an `FsStore` downcast.
+/// Returns `(removed_count, bytes_freed)`.
+fn prune_unpaired_pack_files(packs_dir: &Path) -> io::Result<(u64, u64)> {
+    if !packs_dir.exists() {
+        return Ok((0, 0));
+    }
+    let mut removed = 0u64;
+    let mut bytes_freed = 0u64;
+    for entry in fs::read_dir(packs_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("pack") {
+            continue;
+        }
+        if path.with_extension("idx").exists() {
+            continue;
+        }
+        let bytes = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                removed += 1;
+                bytes_freed = bytes_freed.saturating_add(bytes);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((removed, bytes_freed))
 }
 
 fn inspect_pull_planner_cache(repo_root: &Path) -> PullPlannerCacheInspection {
@@ -446,17 +554,17 @@ struct ColdCloneThreadEntryMirror {
 
 #[derive(Clone)]
 struct PullPlannerKeyMirror {
-    remote_state_id: ChangeId,
+    remote_state_id: StateId,
     depth: Option<u32>,
-    exclude_states: Vec<ChangeId>,
+    exclude_states: Vec<StateId>,
     availability_mode: PullAvailabilityModeMirror,
 }
 
 impl PullPlannerKeyMirror {
     fn new(
-        remote_state_id: ChangeId,
+        remote_state_id: StateId,
         depth: Option<u32>,
-        exclude_states: Vec<ChangeId>,
+        exclude_states: Vec<StateId>,
         availability_mode: PullAvailabilityModeMirror,
     ) -> Self {
         Self {
@@ -563,7 +671,7 @@ fn prune_invalid_pull_plans(repo: &Repository, repo_path: Option<&str>) -> Resul
                 Ok(plan) => {
                     plan.schema_version != PULL_PLANNER_SCHEMA_VERSION
                         || repo_path.is_some_and(|expected| plan.repo_path != expected)
-                        || ChangeId::parse(&plan.remote_state_id).is_err()
+                        || StateId::parse(&plan.remote_state_id).is_err()
                         || !valid_states.contains(&plan.remote_state_id)
                 }
                 Err(_) => true,
@@ -602,7 +710,7 @@ fn pull_planner_manifest_needs_rebuild(
         else {
             return Ok(true);
         };
-        let state_id = ChangeId::parse(&thread.state_id).map_err(|err| {
+        let state_id = StateId::parse(&thread.state_id).map_err(|err| {
             HeddleError::Io(io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
         })?;
         let full_key =
@@ -636,7 +744,7 @@ fn rebuild_pull_planner_manifest(repo: &Repository, repo_path: &str) -> Result<(
 
     let mut thread_entries = Vec::with_capacity(threads.len());
     for thread in &threads {
-        let state_id = ChangeId::parse(&thread.state_id).map_err(|err| {
+        let state_id = StateId::parse(&thread.state_id).map_err(|err| {
             HeddleError::Io(io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
         })?;
         let full_key =
@@ -747,13 +855,13 @@ fn pull_planner_plans_dir(repo_root: &Path) -> PathBuf {
     pull_planner_root(repo_root).join("plans")
 }
 
-fn sorted_change_ids(ids: &[ChangeId]) -> Vec<String> {
-    let mut values = ids.iter().map(ChangeId::to_string_full).collect::<Vec<_>>();
+fn sorted_change_ids(ids: &[StateId]) -> Vec<String> {
+    let mut values = ids.iter().map(StateId::to_string_full).collect::<Vec<_>>();
     values.sort();
     values
 }
 
-fn pull_planner_exclude_fingerprint(ids: &[ChangeId]) -> String {
+fn pull_planner_exclude_fingerprint(ids: &[StateId]) -> String {
     let joined = sorted_change_ids(ids).join("\n");
     objects::object::ContentHash::compute(joined.as_bytes())
         .to_hex()
@@ -972,16 +1080,16 @@ mod tests {
                 "head": {
                     "kind": "attached",
                     "value": "main",
-                    "head_state": first.change_id.to_string_full(),
+                    "head_state": first.id().to_string_full(),
                 },
                 "markers": [],
                 "threads": [{
                     "name": "main",
-                    "state_id": first.change_id.to_string_full(),
+                    "state_id": first.id().to_string_full(),
                 }],
                 "thread_entries": [{
                     "thread": "main",
-                    "state_id": first.change_id.to_string_full(),
+                    "state_id": first.id().to_string_full(),
                     "planner_key_full": "missing-full.json",
                     "planner_key_lazy": "missing-lazy.json",
                     "object_count": 0,
@@ -1022,5 +1130,62 @@ mod tests {
         assert_eq!(run.report.pull_planner_cache.manifest_count, 1);
         assert_eq!(run.report.pull_planner_cache.planner_entry_count, 2);
         assert!(pull_root.join("cold-clone-manifest.json").exists());
+        assert_eq!(run.pack_install_intents_recovered_completed, 0);
+        assert_eq!(run.pack_install_intents_aborted, 0);
+        assert_eq!(run.unpaired_packs_pruned, 0);
+        assert_eq!(run.unpaired_pack_bytes_freed, 0);
+    }
+
+    #[test]
+    fn run_maintenance_recovers_pack_install_intents_and_prunes_unpaired_packs() {
+        let (_temp_dir, repo) = create_test_repo();
+        let packs = repo.heddle_dir().join("packs");
+        fs::create_dir_all(&packs).unwrap();
+
+        // Legacy L8 orphan: pack without index (Option D prune target).
+        let orphan_pack = packs.join("orphan.pack");
+        fs::write(&orphan_pack, b"orphan-pack-bytes").unwrap();
+
+        // Incomplete install intent (prepared, no finals) — recovery aborts.
+        let install_id = "maint-test-abort";
+        let intent_dir = packs.join(".install-intent");
+        fs::create_dir_all(&intent_dir).unwrap();
+        let staging_dir = packs.join(".staging").join(install_id);
+        fs::create_dir_all(&staging_dir).unwrap();
+        fs::write(staging_dir.join("pack"), b"staged-p").unwrap();
+        fs::write(staging_dir.join("idx"), b"staged-i").unwrap();
+        fs::write(
+            intent_dir.join(format!("{install_id}.json")),
+            serde_json::to_vec_pretty(&json!({
+                "version": 2,
+                "install_id": install_id,
+                "pack_name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "phase": "prepared",
+                "created_unix": 1,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let before = repo.inspect_performance().unwrap();
+        assert_eq!(before.pack_files.pack_count, 1);
+        assert_eq!(before.pack_files.index_count, 0);
+        assert_eq!(before.pack_files.unpaired_pack_count, 1);
+        assert_eq!(before.pack_files.pending_install_intents, 1);
+
+        let run = repo.run_maintenance().unwrap();
+
+        assert_eq!(run.pack_install_intents_recovered_completed, 0);
+        assert_eq!(run.pack_install_intents_aborted, 1);
+        assert_eq!(run.unpaired_packs_pruned, 1);
+        assert_eq!(
+            run.unpaired_pack_bytes_freed,
+            b"orphan-pack-bytes".len() as u64
+        );
+        assert!(!orphan_pack.exists());
+        assert!(!intent_dir.join(format!("{install_id}.json")).exists());
+        assert!(!staging_dir.exists());
+        assert_eq!(run.report.pack_files.unpaired_pack_count, 0);
+        assert_eq!(run.report.pack_files.pending_install_intents, 0);
     }
 }

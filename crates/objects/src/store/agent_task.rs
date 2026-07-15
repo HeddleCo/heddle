@@ -142,7 +142,7 @@ impl AgentTaskStore {
     }
 
     fn write_record_file(&self, record: &AgentTaskRecord) -> Result<()> {
-        std::fs::create_dir_all(&self.tasks_dir)?;
+        crate::fs_atomic::create_dir_all_durable(&self.tasks_dir)?;
         let path = self.task_path(&record.task_id)?;
         let content =
             toml::to_string_pretty(record).map_err(|err| HeddleError::Config(err.to_string()))?;
@@ -173,7 +173,7 @@ impl AgentTaskStore {
     /// Create and persist a task, generating a task id when absent.
     pub fn create(&self, mut record: AgentTaskRecord) -> Result<AgentTaskRecord> {
         let _lock = self.write_lock()?;
-        std::fs::create_dir_all(&self.tasks_dir)?;
+        crate::fs_atomic::create_dir_all_durable(&self.tasks_dir)?;
         if record.task_id.is_empty() {
             record.task_id = generate_agent_task_id();
         }
@@ -288,7 +288,7 @@ mod tests {
             "main".into(),
         );
         task.body = "Do the thing".into();
-        task.base_state = Some("hd-base".into());
+        task.base_state = Some("hs-base".into());
         task.base_root = Some("root123".into());
 
         let created = store.create(task).unwrap();
@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(loaded.title, "Demo task");
         assert_eq!(loaded.body, "Do the thing");
         assert_eq!(loaded.target_thread, "main");
-        assert_eq!(loaded.base_state.as_deref(), Some("hd-base"));
+        assert_eq!(loaded.base_state.as_deref(), Some("hs-base"));
         assert_eq!(loaded.base_root.as_deref(), Some("root123"));
     }
 

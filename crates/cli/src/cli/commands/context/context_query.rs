@@ -4,19 +4,24 @@
 use std::{collections::BTreeMap, path::Path};
 
 use anyhow::Result;
+use heddle_core::{
+    annotation_status_label, audit_duplicate_count, audit_staleness_key, audit_target_key,
+    filter_annotations, suggestion_tier_human_label, suggestion_tier_token,
+};
 use objects::{
     object::{AnnotationStatus, ContextTarget},
-    store::{AgentRegistry, ContextQueryEntry},
+    store::{ActorPresenceStore, ContextQueryEntry},
 };
 use repo::{
-    ContextSuggestionTier, Repository, ThreadManager,
+    Repository, ThreadManager,
     staleness::{self, StalenessStatus},
 };
 use serde::Serialize;
 
 use super::{
-    AnnotationHistoryOutput, AnnotationOutput, ContextListRow, RevisionOutput, filter_annotations,
-    print_context_get, resolve_state, resolve_state_id, target_label,
+    AnnotationHistoryOutput, AnnotationOutput, ContextListRow, RevisionOutput,
+    context_root_for_state, parse_scope, print_context_get, resolve_state, resolve_state_id,
+    target_label,
 };
 use crate::cli::{Cli, commands::RecoveryAdvice, should_output_json};
 
@@ -44,19 +49,23 @@ pub async fn cmd_context_get(
     let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let target = super::resolve_target(&repo, path, state)?;
-    let Some(context_root) = &state_obj.context else {
+    let Some(context_root) = context_root_for_state(&repo, &state_obj)? else {
         return print_context_get(cli, &target, Vec::new());
     };
 
-    let blob = repo.get_context_blob(context_root, &target)?;
+    let blob = repo.get_context_blob(&context_root, &target)?;
     let empty = objects::object::ContextBlob::new(vec![]);
     let blob_ref = blob.as_ref().unwrap_or(&empty);
+    let scope_filter = match scope.as_deref() {
+        Some(s) => Some(parse_scope(Some(s))?),
+        None => None,
+    };
     let annotations = filter_annotations(
         &blob_ref.annotations,
-        scope.as_deref(),
+        scope_filter.as_ref(),
         tag.as_deref(),
         false,
-    )?;
+    );
 
     let _ = target
         .path()
@@ -74,7 +83,7 @@ pub async fn cmd_context_list(
 ) -> Result<()> {
     let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
-    let Some(context_root) = &state_obj.context else {
+    let Some(context_root) = context_root_for_state(&repo, &state_obj)? else {
         if should_output_json(cli, None) {
             println!(
                 "{}",
@@ -86,7 +95,7 @@ pub async fn cmd_context_list(
         return Ok(());
     };
 
-    let entries = repo.list_context_entries(context_root, prefix.as_deref().map(Path::new))?;
+    let entries = repo.list_context_entries(&context_root, prefix.as_deref().map(Path::new))?;
 
     if should_output_json(cli, None) {
         let items: Vec<ContextListRow> = entries
@@ -97,8 +106,7 @@ pub async fn cmd_context_list(
                     None,
                     tag.as_deref(),
                     include_superseded,
-                )
-                .ok()?;
+                );
                 if annotations.is_empty() {
                     return None;
                 }
@@ -127,7 +135,7 @@ pub async fn cmd_context_list(
                 None,
                 tag.as_deref(),
                 include_superseded,
-            )?;
+            );
             if annotations.is_empty() {
                 continue;
             }
@@ -152,13 +160,11 @@ pub async fn cmd_context_history(
 ) -> Result<()> {
     let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
-    let context_root = state_obj
-        .context
-        .as_ref()
+    let context_root = context_root_for_state(&repo, &state_obj)?
         .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
 
     let (target, blob, index) = repo
-        .find_annotation(context_root, &annotation_id)?
+        .find_annotation(&context_root, &annotation_id)?
         .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::annotation_not_found(&annotation_id)))?;
     let annotation = &blob.annotations[index];
     let (target_kind, target_label) = target_label(&target);
@@ -168,10 +174,7 @@ pub async fn cmd_context_history(
         target_kind,
         target: target_label,
         scope: annotation.scope.to_string(),
-        status: match annotation.status {
-            AnnotationStatus::Active => "active".to_string(),
-            AnnotationStatus::Superseded => "superseded".to_string(),
-        },
+        status: annotation_status_label(annotation.status).to_string(),
         supersedes_annotation_id: annotation.supersedes_annotation_id.clone(),
         supersedes_rewrite_pct: annotation.supersedes_rewrite_pct,
         revisions: annotation
@@ -219,9 +222,7 @@ pub async fn cmd_context_check(
 ) -> Result<()> {
     let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
-    let context_root = state_obj
-        .context
-        .as_ref()
+    let context_root = context_root_for_state(&repo, &state_obj)?
         .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
 
     let target_filter = match (path, state) {
@@ -238,7 +239,7 @@ pub async fn cmd_context_check(
         }
     };
 
-    let entries = repo.list_context_entries(context_root, None)?;
+    let entries = repo.list_context_entries(&context_root, None)?;
     let filtered_entries: Vec<_> = entries
         .into_iter()
         .filter(|entry| {
@@ -272,17 +273,13 @@ pub async fn cmd_context_check(
 
     for entry in &filtered_entries {
         for annotation in &entry.blob.annotations {
-            if annotation.status == AnnotationStatus::Superseded {
+            // Active + optional tag only; scope filter not used by check.
+            if !heddle_core::annotation_passes_filters(annotation, None, tag.as_deref(), false) {
                 continue;
             }
             let Some(current) = annotation.current_revision() else {
                 continue;
             };
-            if let Some(ref tag_filter) = tag
-                && !current.tags.iter().any(|candidate| candidate == tag_filter)
-            {
-                continue;
-            }
 
             total += 1;
             let status = staleness::check_annotation_staleness(
@@ -362,10 +359,7 @@ pub async fn cmd_context_suggest(cli: &Cli, r#ref: Option<String>, limit: usize)
             .map(|suggestion| SuggestionOutput {
                 path: suggestion.path,
                 score: suggestion.score,
-                tier: match suggestion.tier {
-                    ContextSuggestionTier::Medium => "medium".to_string(),
-                    ContextSuggestionTier::High => "high".to_string(),
-                },
+                tier: suggestion_tier_token(&suggestion.tier).to_string(),
                 reasons: suggestion.reasons,
                 recent_changes: suggestion.recent_changes,
                 distinct_states: suggestion.distinct_states,
@@ -383,10 +377,7 @@ pub async fn cmd_context_suggest(cli: &Cli, r#ref: Option<String>, limit: usize)
         println!("No low-noise context suggestions right now.");
     } else {
         for suggestion in suggestions {
-            let tier = match suggestion.tier {
-                ContextSuggestionTier::Medium => "may benefit",
-                ContextSuggestionTier::High => "recommended",
-            };
+            let tier = suggestion_tier_human_label(&suggestion.tier);
             println!("{}  {} ({})", suggestion.path, suggestion.score, tier);
             for reason in suggestion.reasons {
                 println!("  - {reason}");
@@ -400,7 +391,7 @@ pub async fn cmd_context_suggest(cli: &Cli, r#ref: Option<String>, limit: usize)
 pub async fn cmd_context_audit(cli: &Cli, r#ref: Option<String>) -> Result<()> {
     let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
-    let Some(context_root) = &state_obj.context else {
+    let Some(context_root) = context_root_for_state(&repo, &state_obj)? else {
         if should_output_json(cli, None) {
             println!(
                 "{}",
@@ -418,7 +409,7 @@ pub async fn cmd_context_audit(cli: &Cli, r#ref: Option<String>) -> Result<()> {
         return Ok(());
     };
 
-    let entries = repo.list_context_entries(context_root, None)?;
+    let entries = repo.list_context_entries(&context_root, None)?;
     let stale_map = staleness::check_context_staleness(&repo, &state_obj)?;
     let mut total = 0u32;
     let mut superseded = 0u32;
@@ -434,26 +425,14 @@ pub async fn cmd_context_audit(cli: &Cli, r#ref: Option<String>) -> Result<()> {
             let Some(current) = annotation.current_revision() else {
                 continue;
             };
-            let key = match &entry.target {
-                ContextTarget::File { path } => format!("{path}:{}", annotation.scope),
-                ContextTarget::State { change_id } => {
-                    format!(
-                        "state:{}:{}",
-                        change_id.to_string_full(),
-                        annotation.annotation_id
-                    )
-                }
-            };
+            let key = audit_staleness_key(&entry.target, annotation);
             if stale_map
                 .get(&key)
                 .is_some_and(|status| !matches!(status, StalenessStatus::Fresh))
             {
                 stale += 1;
             }
-            let target_key = match &entry.target {
-                ContextTarget::File { path } => path.clone(),
-                ContextTarget::State { change_id } => change_id.to_string_full(),
-            };
+            let target_key = audit_target_key(&entry.target);
             *signatures
                 .entry((
                     target_key,
@@ -464,7 +443,7 @@ pub async fn cmd_context_audit(cli: &Cli, r#ref: Option<String>) -> Result<()> {
         }
     }
 
-    let duplicates = signatures.values().filter(|count| **count > 1).count() as u32;
+    let duplicates = audit_duplicate_count(signatures.values().copied());
 
     if should_output_json(cli, None) {
         println!(
@@ -493,7 +472,7 @@ fn log_context_query_if_agent_session(
     path: &str,
     scope: Option<&str>,
 ) -> std::result::Result<(), ()> {
-    let registry = AgentRegistry::new(repo.heddle_dir());
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let session = registry
         .find_active_by_path(repo.root())
         .map_err(|_| ())?
@@ -503,7 +482,7 @@ fn log_context_query_if_agent_session(
                 .ok()
                 .flatten()?;
             registry.list().ok()?.into_iter().find(|entry| {
-                entry.status == objects::store::AgentStatus::Active
+                entry.status == objects::store::ActorPresenceStatus::Active
                     && entry.thread_id.as_deref() == Some(thread.id.as_str())
             })
         });

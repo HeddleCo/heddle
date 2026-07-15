@@ -42,7 +42,14 @@ use std::sync::OnceLock;
 /// empty string (treated as no checkpoints active).
 static FAULT_POINTS: OnceLock<Option<Vec<String>>> = OnceLock::new();
 
-fn active_points() -> &'static Option<Vec<String>> {
+// Test-only in-process override (avoids `OnceLock` + env pollution).
+#[cfg(test)]
+thread_local! {
+    static TEST_FAULT_POINTS: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn env_active_points() -> &'static Option<Vec<String>> {
     FAULT_POINTS.get_or_init(|| {
         std::env::var("HEDDLE_FAULT_INJECT").ok().map(|raw| {
             raw.split(',')
@@ -52,6 +59,24 @@ fn active_points() -> &'static Option<Vec<String>> {
                 .collect()
         })
     })
+}
+
+fn point_is_active(name: &str) -> bool {
+    #[cfg(test)]
+    {
+        let override_hit = TEST_FAULT_POINTS.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|points| points.iter().any(|active| active == name))
+        });
+        // Some(true/false) = override active; None = fall through to env cache.
+        if let Some(active) = override_hit {
+            return active;
+        }
+    }
+    env_active_points()
+        .as_ref()
+        .is_some_and(|points| points.iter().any(|active| active == name))
 }
 
 /// Crash the current process if `name` is listed in `HEDDLE_FAULT_INJECT`.
@@ -64,9 +89,7 @@ fn active_points() -> &'static Option<Vec<String>> {
 /// The panic message includes the checkpoint name so test logs can
 /// distinguish an intentional fault from a real bug.
 pub fn maybe_panic_at(name: &str) {
-    if let Some(points) = active_points().as_ref()
-        && points.iter().any(|active| active == name)
-    {
+    if point_is_active(name) {
         panic!("HEDDLE_FAULT_INJECT: crashing at checkpoint `{name}` (intentional)");
     }
 }
@@ -81,9 +104,7 @@ pub fn maybe_panic_at(name: &str) {
 /// partial state. With the env var unset the cached `None`
 /// short-circuits, exactly like [`maybe_panic_at`].
 pub fn maybe_fail_at(name: &str) -> std::io::Result<()> {
-    if let Some(points) = active_points().as_ref()
-        && points.iter().any(|active| active == name)
-    {
+    if point_is_active(name) {
         return Err(std::io::Error::other(format!(
             "HEDDLE_FAULT_INJECT: failing at checkpoint `{name}` (intentional)"
         )));
@@ -91,24 +112,24 @@ pub fn maybe_fail_at(name: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Test-only helper: clear the cached env-var read so a single
-/// process can re-parse `HEDDLE_FAULT_INJECT` between phases. Not
-/// for production use — the cache is what makes the production
-/// hot-path free.
+/// Run `f` with in-process fault checkpoints active (test only).
+///
+/// Prefer this over mutating `HEDDLE_FAULT_INJECT` in unit tests: the env
+/// parse is memoised in a process-global `OnceLock` and cannot be safely
+/// flipped under parallel `cargo test`.
 #[cfg(test)]
-pub fn reset_for_test() {
-    // OnceLock has no public reset; we work around by leaking a new
-    // one. This is fine for tests because the binary lifetime is
-    // bounded.
-    use std::sync::atomic::{AtomicPtr, Ordering};
-    static SLOT: AtomicPtr<OnceLock<Option<Vec<String>>>> = AtomicPtr::new(std::ptr::null_mut());
-    let new = Box::leak(Box::new(OnceLock::new()));
-    SLOT.store(new as *mut _, Ordering::SeqCst);
-    // The static FAULT_POINTS isn't actually swappable; tests that
-    // need to flip the env var multiple times within one process
-    // should spawn child processes instead. This helper exists so
-    // unit tests of `maybe_panic_at` itself can reset between
-    // setup/teardown — and even there we just leak.
+pub fn with_fault_points<R>(points: &[&str], f: impl FnOnce() -> R) -> R {
+    TEST_FAULT_POINTS.with(|cell| {
+        *cell.borrow_mut() = Some(points.iter().map(|s| (*s).to_owned()).collect());
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    TEST_FAULT_POINTS.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+    match result {
+        Ok(v) => v,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 #[cfg(test)]

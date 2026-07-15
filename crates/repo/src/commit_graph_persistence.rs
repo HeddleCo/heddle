@@ -10,16 +10,16 @@ use std::{
 use anyhow::{Context, Result, bail};
 use objects::{
     fs_atomic::write_file_atomic,
-    object::{ChangeId, ContentHash},
+    object::{ContentHash, StateId},
 };
 
 const GRAPH_FILE_NAME: &str = "commit-graph.bin";
 const GRAPH_MAGIC: [u8; 8] = *b"LMGRAPH\0";
-const GRAPH_VERSION: u32 = 1;
-const CHANGE_ID_BYTES: usize = 16;
+const GRAPH_VERSION: u32 = 2;
+const STATE_ID_BYTES: usize = 32;
 const CONTENT_HASH_BYTES: usize = 32;
 
-pub(crate) type LoadedCommitGraph = HashMap<ChangeId, PersistedCommitGraphNode>;
+pub(crate) type LoadedCommitGraph = HashMap<StateId, PersistedCommitGraphNode>;
 
 pub(crate) trait CommitGraphCache {
     fn load(&self) -> Result<Option<LoadedCommitGraph>>;
@@ -70,7 +70,7 @@ impl CommitGraphCache for NullCommitGraphCache {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PersistedCommitGraphNode {
-    pub(crate) parents: Vec<ChangeId>,
+    pub(crate) parents: Vec<StateId>,
     pub(crate) generation: usize,
     pub(crate) tree_hash: ContentHash,
     pub(crate) created_at_secs: i64,
@@ -84,7 +84,7 @@ pub(crate) fn commit_graph_path(repo_root: &Path) -> PathBuf {
 
 pub(crate) fn load_commit_graph(
     path: &Path,
-) -> Result<Option<HashMap<ChangeId, PersistedCommitGraphNode>>> {
+) -> Result<Option<HashMap<StateId, PersistedCommitGraphNode>>> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -101,7 +101,7 @@ pub(crate) fn load_commit_graph(
 
 pub(crate) fn save_commit_graph(
     path: &Path,
-    nodes: &HashMap<ChangeId, PersistedCommitGraphNode>,
+    nodes: &HashMap<StateId, PersistedCommitGraphNode>,
 ) -> Result<()> {
     let bytes = serialize_commit_graph(nodes)?;
     write_file_atomic(path, &bytes)
@@ -109,7 +109,7 @@ pub(crate) fn save_commit_graph(
     Ok(())
 }
 
-fn serialize_commit_graph(nodes: &HashMap<ChangeId, PersistedCommitGraphNode>) -> Result<Vec<u8>> {
+fn serialize_commit_graph(nodes: &HashMap<StateId, PersistedCommitGraphNode>) -> Result<Vec<u8>> {
     let node_count = u64::try_from(nodes.len()).context("commit graph has too many nodes")?;
     let mut entries: Vec<_> = nodes.iter().collect();
     entries.sort_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
@@ -119,13 +119,13 @@ fn serialize_commit_graph(nodes: &HashMap<ChangeId, PersistedCommitGraphNode>) -
     bytes.extend_from_slice(&GRAPH_VERSION.to_le_bytes());
     bytes.extend_from_slice(&node_count.to_le_bytes());
 
-    for (change_id, node) in entries {
+    for (state_id, node) in entries {
         let generation = u64::try_from(node.generation)
             .context("commit graph generation does not fit in u64")?;
         let parent_count =
             u32::try_from(node.parents.len()).context("commit graph node has too many parents")?;
 
-        bytes.extend_from_slice(change_id.as_bytes());
+        bytes.extend_from_slice(state_id.as_bytes());
         bytes.extend_from_slice(&generation.to_le_bytes());
         bytes.extend_from_slice(&parent_count.to_le_bytes());
         for parent in &node.parents {
@@ -166,7 +166,7 @@ fn serialize_commit_graph(nodes: &HashMap<ChangeId, PersistedCommitGraphNode>) -
     Ok(bytes)
 }
 
-fn parse_commit_graph(bytes: &[u8]) -> Result<HashMap<ChangeId, PersistedCommitGraphNode>> {
+fn parse_commit_graph(bytes: &[u8]) -> Result<HashMap<StateId, PersistedCommitGraphNode>> {
     let mut cursor = GraphCursor::new(bytes);
     let magic = cursor.read_array::<8>()?;
     if magic != GRAPH_MAGIC {
@@ -182,16 +182,14 @@ fn parse_commit_graph(bytes: &[u8]) -> Result<HashMap<ChangeId, PersistedCommitG
         .context("commit graph node count does not fit in usize")?;
     let mut nodes = HashMap::with_capacity(node_count);
     for _ in 0..node_count {
-        let change_id = ChangeId::from_bytes(cursor.read_array::<CHANGE_ID_BYTES>()?);
+        let state_id = StateId::from_bytes(cursor.read_array::<STATE_ID_BYTES>()?);
         let generation = usize::try_from(cursor.read_u64()?)
             .context("commit graph generation does not fit in usize")?;
         let parent_count = usize::try_from(cursor.read_u32()?)
             .context("commit graph parent count does not fit in usize")?;
         let mut parents = Vec::with_capacity(parent_count);
         for _ in 0..parent_count {
-            parents.push(ChangeId::from_bytes(
-                cursor.read_array::<CHANGE_ID_BYTES>()?,
-            ));
+            parents.push(StateId::from_bytes(cursor.read_array::<STATE_ID_BYTES>()?));
         }
 
         let tree_hash = ContentHash::from_bytes(cursor.read_array::<CONTENT_HASH_BYTES>()?);
@@ -218,7 +216,7 @@ fn parse_commit_graph(bytes: &[u8]) -> Result<HashMap<ChangeId, PersistedCommitG
 
         if nodes
             .insert(
-                change_id,
+                state_id,
                 PersistedCommitGraphNode {
                     parents,
                     generation,
@@ -230,7 +228,7 @@ fn parse_commit_graph(bytes: &[u8]) -> Result<HashMap<ChangeId, PersistedCommitG
             )
             .is_some()
         {
-            bail!("duplicate change id in commit graph");
+            bail!("duplicate state id in commit graph");
         }
     }
 
@@ -321,14 +319,14 @@ mod tests {
     use std::collections::HashMap;
 
     use anyhow::{Context, Result};
-    use objects::object::{ChangeId, ContentHash};
+    use objects::object::{ContentHash, StateId};
 
     use super::{
         PersistedCommitGraphNode, commit_graph_path, load_commit_graph, parse_commit_graph,
         save_commit_graph,
     };
 
-    fn make_node(parents: Vec<ChangeId>, generation: usize) -> PersistedCommitGraphNode {
+    fn make_node(parents: Vec<StateId>, generation: usize) -> PersistedCommitGraphNode {
         PersistedCommitGraphNode {
             parents,
             generation,
@@ -343,8 +341,8 @@ mod tests {
     fn commit_graph_round_trips_on_disk() -> Result<()> {
         let temp_dir = tempfile::TempDir::new()?;
         let path = commit_graph_path(temp_dir.path());
-        let root = ChangeId::generate();
-        let child = ChangeId::generate();
+        let root = crate::test_state_id();
+        let child = crate::test_state_id();
         let mut nodes = HashMap::new();
         nodes.insert(root, make_node(Vec::new(), 0));
         nodes.insert(child, make_node(vec![root], 1));
@@ -360,7 +358,7 @@ mod tests {
     fn commit_graph_round_trips_with_full_metadata() -> Result<()> {
         let temp_dir = tempfile::TempDir::new()?;
         let path = commit_graph_path(temp_dir.path());
-        let id = ChangeId::generate();
+        let id = crate::test_state_id();
         let tree_hash = ContentHash::from_bytes([42u8; 32]);
         let mut bloom = [0u8; 256];
         bloom[0] = 0xFF;

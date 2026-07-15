@@ -54,7 +54,7 @@ pub fn run(
                             "function body diverges {:.0}% from prior version",
                             divergence * 100.0
                         ),
-                        new.change_id,
+                        new.state_id,
                         computed_at,
                     ));
                     continue;
@@ -84,7 +84,7 @@ pub fn run(
                             "new function shape diverges {:.0}% from sibling exemplars",
                             divergence * 100.0
                         ),
-                        new.change_id,
+                        new.state_id,
                         computed_at,
                     ));
                 }
@@ -98,7 +98,7 @@ fn make_signal(
     path: &std::path::Path,
     symbol: &str,
     reason: String,
-    against: objects::object::ChangeId,
+    against: objects::object::StateId,
     ts: i64,
 ) -> RiskSignal {
     RiskSignal {
@@ -190,7 +190,7 @@ mod tests {
                     && signal.anchor.file == "src/scoring.rs"
                     && signal.anchor.symbol.as_deref() == Some("score")
                     && signal.reason.contains("prior version")
-                    && signal.computed_against == Some(new.change_id)
+                    && signal.computed_against == Some(new.state_id)
             }),
             "expected prior-version pattern deviation, got: {signals:?}"
         );

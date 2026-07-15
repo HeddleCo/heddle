@@ -164,5 +164,5 @@ fn test_blame_multiple_commits_attribution() {
     assert!(result.is_ok(), "blame failed: {:?}", result.err());
 
     let output = result.unwrap();
-    assert!(output.contains("line 1") || output.contains("modified 2") || output.contains("hd-"));
+    assert!(output.contains("line 1") || output.contains("modified 2") || output.contains("hs-"));
 }

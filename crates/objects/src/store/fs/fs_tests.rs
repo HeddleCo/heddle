@@ -11,7 +11,7 @@ use super::{
 use crate::{
     fs_atomic::temp_path,
     object::{
-        Action, Attribution, Blob, ChangeId, ContentHash, Operation, Principal, State, Tree,
+        Action, Attribution, Blob, ContentHash, Operation, Principal, State, StateId, Tree,
         TreeEntry,
     },
     store::{
@@ -226,7 +226,7 @@ fn list_states_sees_packs_installed_after_store_construction() {
 
     let mut builder = PackBuilder::new(CompressionConfig::disabled());
     builder.add_id(
-        PackObjectId::ChangeId(state.change_id),
+        PackObjectId::StateId(state.id()),
         PackObjectType::State,
         rmp_serde::to_vec_named(&state).unwrap(),
     );
@@ -235,7 +235,7 @@ fn list_states_sees_packs_installed_after_store_construction() {
 
     assert_eq!(
         store_a.list_states().unwrap(),
-        vec![state.change_id],
+        vec![state.id()],
         "stale pack manager must refresh before enumerating packed states"
     );
 }
@@ -253,6 +253,43 @@ fn put_blobs_packed_with_empty_input_is_a_noop() {
         .map(|iter| iter.count())
         .unwrap_or(0);
     assert_eq!(pack_count, 0, "empty bulk install should not touch packs/");
+}
+
+#[test]
+fn install_pack_streaming_publishes_via_durable_rename_and_loads_objects() {
+    // Regression for streaming pack install crash-consistency: the old
+    // path raw-renamed staged files without fsync and fell back to
+    // in-place `fs::copy` on *any* rename error. The durable path must
+    // still consume the stage files and make objects readable.
+    let (_temp, store) = create_test_store();
+    let stage = TempDir::new().unwrap();
+
+    let blob = Blob::from("streaming durable pack blob");
+    let blob_hash = blob.hash();
+    let mut builder = PackBuilder::new(CompressionConfig::disabled());
+    builder.add(blob_hash, PackObjectType::Blob, blob.clone().into_content());
+    let (pack_data, index_data, _) = builder.build().unwrap();
+
+    let staged_pack = stage.path().join("staged.pack");
+    let staged_index = stage.path().join("staged.idx");
+    std::fs::write(&staged_pack, &pack_data).unwrap();
+    std::fs::write(&staged_index, &index_data).unwrap();
+
+    let ids = store
+        .install_pack_streaming(&staged_pack, &staged_index)
+        .expect("streaming install");
+    assert!(ids.contains(&PackObjectId::Hash(blob_hash)));
+    assert!(
+        !staged_pack.exists(),
+        "durable publish must consume pack stage"
+    );
+    assert!(
+        !staged_index.exists(),
+        "durable publish must consume index stage"
+    );
+
+    let loaded = store.get_blob(&blob_hash).unwrap().expect("packed blob");
+    assert_eq!(loaded.content(), blob.content());
 }
 
 #[test]
@@ -311,7 +348,7 @@ fn install_pack_accepts_valid_mixed_native_pack() {
     let state = State::new(tree_hash, vec![], attribution.clone()).with_intent("packed state");
     let mut action = Action::new(
         None,
-        state.change_id,
+        state.id(),
         Operation::Snapshot,
         "packed action",
         attribution,
@@ -327,7 +364,7 @@ fn install_pack_accepts_valid_mixed_native_pack() {
         rmp_serde::to_vec_named(&tree).unwrap(),
     );
     builder.add_id(
-        PackObjectId::ChangeId(state.change_id),
+        PackObjectId::StateId(state.id()),
         PackObjectType::State,
         rmp_serde::to_vec_named(&state).unwrap(),
     );
@@ -349,91 +386,12 @@ fn install_pack_accepts_valid_mixed_native_pack() {
         tree.entries(),
     );
     assert_eq!(
-        store.get_state(&state.change_id).unwrap().unwrap().intent,
+        store.get_state(&state.id()).unwrap().unwrap().intent,
         Some("packed state".to_string()),
     );
     assert_eq!(
         store.get_action(&action_id).unwrap().unwrap().description,
         "packed action",
-    );
-}
-
-/// States are addressed by `change_id`, NOT content hash, so the same id can
-/// have a stale PACKED body and a newer LOOSE body — the #570 fidelity backfill
-/// re-hashes adopted states (packed at adopt time) and writes them loose. A
-/// cold read (cache miss) MUST return the loose body, not the stale packed one.
-/// Pre-fix the pack was consulted before the loose object and won. (heddle#570)
-#[test]
-fn loose_state_shadows_stale_packed_copy_on_cold_read() {
-    let (_temp, store) = create_test_store();
-
-    let tree = Tree::new();
-    let tree_hash = tree.hash();
-    store.put_tree(&tree).unwrap();
-    let attribution = Attribution::human(Principal::new("Adopt", "adopt@example.com"));
-    let packed = State::new(tree_hash, vec![], attribution).with_intent("stale-packed");
-    let change_id = packed.change_id;
-
-    let mut builder = PackBuilder::new(CompressionConfig::disabled());
-    builder.add_id(
-        PackObjectId::ChangeId(change_id),
-        PackObjectType::State,
-        rmp_serde::to_vec_named(&packed).unwrap(),
-    );
-    let (pack_data, index_data, _) = builder.build().unwrap();
-    store.install_pack(&pack_data, &index_data).unwrap();
-
-    // With only the packed copy present, the read returns it.
-    store.clear_recent_object_caches();
-    assert_eq!(
-        store.get_state(&change_id).unwrap().unwrap().intent,
-        Some("stale-packed".to_string()),
-        "packed state is read before any loose copy exists",
-    );
-
-    // The backfill rewrites the same change_id LOOSE with new content.
-    let fresh = packed.clone().with_intent("fresh-loose");
-    store.put_state(&fresh).unwrap();
-
-    // Cold read (cache miss) must return the loose body, not the packed one.
-    store.clear_recent_object_caches();
-    assert_eq!(
-        store.get_state(&change_id).unwrap().unwrap().intent,
-        Some("fresh-loose".to_string()),
-        "loose write shadows the stale packed copy on a cold read",
-    );
-}
-
-#[test]
-fn install_pack_refreshes_state_as_loose_authoritative_copy() {
-    let (_temp, store) = create_test_store();
-
-    let tree = Tree::new();
-    let tree_hash = tree.hash();
-    store.put_tree(&tree).unwrap();
-    let attribution = Attribution::human(Principal::new("Sync", "sync@example.com"));
-    let base = State::new(tree_hash, vec![], attribution);
-    let change_id = base.change_id;
-    store.put_state(&base).unwrap();
-
-    let discussion_hash = ContentHash::compute(b"discussion-sidecar");
-    let refreshed = base.clone().with_discussions(discussion_hash);
-    let mut builder = PackBuilder::new(CompressionConfig::disabled());
-    builder.add_id(
-        PackObjectId::ChangeId(change_id),
-        PackObjectType::State,
-        rmp_serde::to_vec_named(&refreshed).unwrap(),
-    );
-    let (pack_data, index_data, _) = builder.build().unwrap();
-
-    store.install_pack(&pack_data, &index_data).unwrap();
-
-    store.clear_recent_object_caches();
-    assert_eq!(
-        store.get_state(&change_id).unwrap().unwrap().discussions,
-        Some(discussion_hash),
-        "received state pack must refresh the loose state body so mutable \
-         tail pointers are visible on cold reads",
     );
 }
 
@@ -790,8 +748,8 @@ fn test_state_roundtrip() {
 
     store.put_state(&state).unwrap();
 
-    let retrieved = store.get_state(&state.change_id).unwrap().unwrap();
-    assert_eq!(retrieved.change_id, state.change_id);
+    let retrieved = store.get_state(&state.id()).unwrap().unwrap();
+    assert_eq!(retrieved.state_id, state.state_id);
     assert_eq!(retrieved.intent, Some("Test state".to_string()));
 }
 
@@ -814,7 +772,7 @@ fn test_state_roundtrip_preserves_non_utf8_raw_message() {
 
     store.put_state(&state).unwrap();
 
-    let retrieved = store.get_state(&state.change_id).unwrap().unwrap();
+    let retrieved = store.get_state(&state.id()).unwrap().unwrap();
     assert_eq!(
         retrieved.raw_message.as_deref(),
         Some(raw.as_slice()),
@@ -874,18 +832,71 @@ fn test_large_blob() {
     assert_eq!(retrieved.content(), large_content.as_slice());
 }
 
+/// SECURITY regression: a purged blob must be gone from the in-process
+/// cache too, not just from disk. `purge` (redaction) deletes the loose
+/// bytes and then drops the cache; after that sequence a long-lived
+/// process must neither serve the content nor report it present. This
+/// mirrors the store-level half of the redaction `purge_blob` path
+/// (delete loose bytes + `clear_recent_caches`).
 #[test]
-fn test_recent_blob_cache_does_not_hide_deleted_loose_object() {
+fn test_recent_blob_cache_evicted_on_purge_neither_served_nor_present() {
     let (_temp, store) = create_test_store();
 
     let blob = Blob::from("cached content");
     let hash = store.put_blob(&blob).unwrap();
 
-    let path = hash_path(&blobs_dir(store.root()), &hash);
-    std::fs::remove_file(path).unwrap();
+    // Sanity: the blob is cached (put-time populate) and present.
+    assert!(store.get_blob(&hash).unwrap().is_some());
+    assert!(store.has_blob(&hash).unwrap());
 
-    let retrieved = store.get_blob(&hash).unwrap();
-    assert!(retrieved.is_none());
+    // Purge sequence: delete the loose bytes, then drop the cache the
+    // way `remove_loose_blob_bytes` does. Deleting the file alone is
+    // NOT enough — the cache would keep serving the destroyed content.
+    let path = hash_path(&blobs_dir(store.root()), &hash);
+    std::fs::remove_file(&path).unwrap();
+    store.clear_recent_caches();
+
+    // Post-purge the blob must be neither served nor reported present.
+    assert!(
+        store.get_blob(&hash).unwrap().is_none(),
+        "purged blob must not be served from cache after its bytes are deleted"
+    );
+    assert!(
+        !store.has_blob(&hash).unwrap(),
+        "purged blob must not be reported present after its bytes are deleted"
+    );
+}
+
+/// The targeted single-hash eviction (`evict_recent_blob`) must also
+/// stop a purged blob from being served/reported present, without
+/// requiring a full cache flush. Other cached blobs must survive.
+#[test]
+fn test_evict_recent_blob_removes_only_target() {
+    let (_temp, store) = create_test_store();
+
+    let purged = Blob::from("secret to destroy");
+    let kept = Blob::from("innocent bystander");
+    let purged_hash = store.put_blob(&purged).unwrap();
+    let kept_hash = store.put_blob(&kept).unwrap();
+
+    // Delete the purged blob's loose bytes and evict just that hash.
+    let path = hash_path(&blobs_dir(store.root()), &purged_hash);
+    std::fs::remove_file(&path).unwrap();
+    store.evict_recent_blob(&purged_hash);
+
+    assert!(
+        store.get_blob(&purged_hash).unwrap().is_none(),
+        "evicted+deleted blob must not be served from cache"
+    );
+    assert!(
+        !store.has_blob(&purged_hash).unwrap(),
+        "evicted+deleted blob must not be reported present"
+    );
+    // The unrelated blob is still cached and served.
+    assert!(
+        store.get_blob(&kept_hash).unwrap().is_some(),
+        "single-hash eviction must not drop unrelated cached blobs"
+    );
 }
 
 #[test]
@@ -940,15 +951,15 @@ fn test_get_state_rejects_wrong_object_swap() {
     let swapped_path = store
         .root
         .join("objects/states")
-        .join(format!("{}.state", state1.change_id.to_string_full()));
+        .join(format!("{}.state", state1.id().to_string_full()));
     std::fs::write(&swapped_path, rmp_serde::to_vec(&state2).unwrap()).unwrap();
     store.clear_recent_object_caches();
 
     let error = store
-        .get_state(&state1.change_id)
+        .get_state(&state1.id())
         .expect_err("swapped state should be rejected");
     assert!(
-        matches!(error, HeddleError::InvalidObject(message) if message.contains("state change_id mismatch"))
+        matches!(error, HeddleError::InvalidObject(message) if message.contains("state id mismatch"))
     );
 }
 
@@ -959,7 +970,7 @@ fn test_get_action_rejects_wrong_object_swap() {
     let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
     let mut action1 = Action::new(
         None,
-        ChangeId::generate(),
+        StateId::from_bytes([3; 32]),
         Operation::Snapshot,
         "first action",
         attribution.clone(),
@@ -967,7 +978,7 @@ fn test_get_action_rejects_wrong_object_swap() {
     .with_timestamp(Utc.timestamp_opt(1_700_000_000, 0).unwrap());
     let mut action2 = Action::new(
         None,
-        ChangeId::generate(),
+        StateId::from_bytes([4; 32]),
         Operation::Snapshot,
         "second action",
         attribution,
@@ -1041,12 +1052,7 @@ fn loose_blob_path_rejects_torn_cache_mirror() {
     let probed = store.loose_blob_path(&hash);
     assert_eq!(probed, Some(path.clone()));
     assert!(
-        store
-            .verified_loose_blobs
-            .read()
-            .unwrap()
-            .get(&hash)
-            .is_some(),
+        store.verified_loose_blobs.read().unwrap().contains(&hash),
         "verified cache should pick up the hash after first probe"
     );
 
@@ -1061,5 +1067,53 @@ fn loose_blob_path_rejects_torn_cache_mirror() {
     assert!(
         probed.is_none(),
         "corrupted loose blob must not be served as canonical bytes"
+    );
+}
+
+/// The byte budget must evict LRU entries once cumulative cached bytes
+/// exceed the cap, so a read-only workload streaming many blobs can't
+/// retain `capacity × max-entry-bytes` of deep-cloned Vecs.
+#[test]
+fn test_recent_object_cache_byte_budget_evicts_lru() {
+    // Large per-entry count cap, tiny byte budget: eviction is driven
+    // purely by bytes. Each value is `len` bytes.
+    let mut cache = super::fs_store::RecentObjectCache::<u32, Vec<u8>>::with_byte_budget(
+        1_000,
+        100,
+        |v: &Vec<u8>| v.len(),
+    );
+
+    cache.insert(1, vec![0u8; 40]); // total 40
+    cache.insert(2, vec![0u8; 40]); // total 80
+    // Touch key 1 so it becomes MRU; key 2 is now the LRU victim.
+    assert!(cache.contains(&1));
+    cache.get(&1);
+    cache.insert(3, vec![0u8; 40]); // total would be 120 > 100 → evict LRU (key 2)
+
+    assert!(cache.contains(&1), "recently-touched entry must survive");
+    assert!(
+        !cache.contains(&2),
+        "LRU entry must be evicted when the byte budget is exceeded"
+    );
+    assert!(
+        cache.contains(&3),
+        "freshly inserted entry must be retained"
+    );
+}
+
+/// A single entry larger than the whole budget is kept (soft cap): the
+/// budget bounds aggregate retention, and the per-entry size gate is
+/// enforced upstream, not here.
+#[test]
+fn test_recent_object_cache_byte_budget_keeps_single_oversize_entry() {
+    let mut cache = super::fs_store::RecentObjectCache::<u32, Vec<u8>>::with_byte_budget(
+        1_000,
+        100,
+        |v: &Vec<u8>| v.len(),
+    );
+    cache.insert(1, vec![0u8; 500]);
+    assert!(
+        cache.contains(&1),
+        "a lone oversize entry is retained; the budget is a soft aggregate cap"
     );
 }

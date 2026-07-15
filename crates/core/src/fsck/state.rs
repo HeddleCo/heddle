@@ -4,10 +4,9 @@ use std::{
     path::Path,
 };
 
-use crypto::StateSigningExt;
 use objects::{
     error::Result,
-    object::{ContentHash, State, Tree},
+    object::{ContentHash, SignatureStatus, State, Tree},
     store::ObjectStore,
 };
 use repo::Repository;
@@ -28,7 +27,7 @@ pub(crate) fn check_states(
             Some(state) => {
                 *objects_checked += 1;
                 if thorough {
-                    parent_map.insert(state.change_id, state.parents.clone());
+                    parent_map.insert(state.state_id, state.parents.clone());
                 }
                 check_state_integrity(repo, &state, errors, thorough)?;
             }
@@ -73,19 +72,15 @@ fn check_state_integrity(
         }
     }
 
-    if thorough && state.signature.is_some() {
-        match state.verify_signature() {
-            Ok(()) => {}
-            Err(error) => errors.push(make_error(
-                "invalid_signature",
-                &format!(
-                    "State {} signature could not be verified: {}",
-                    state.change_id.short(),
-                    error
-                ),
-                Some(state.change_id.short()),
-            )),
-        }
+    if thorough && repo.verify_state_signature(&state.state_id)? == SignatureStatus::Invalid {
+        errors.push(make_error(
+            "invalid_signature",
+            &format!(
+                "State {} signature could not be verified",
+                state.state_id.short()
+            ),
+            Some(state.state_id.short()),
+        ));
     }
 
     if thorough && let Some(provenance_root) = state.provenance {
@@ -94,7 +89,7 @@ fn check_state_integrity(
                 "missing_provenance",
                 &format!(
                     "State {} references missing provenance tree {}",
-                    state.change_id.short(),
+                    state.state_id.short(),
                     provenance_root.short()
                 ),
                 Some(provenance_root.short()),
@@ -250,7 +245,7 @@ fn check_provenance_tree(
 }
 
 fn check_state_cycles(
-    parent_map: &HashMap<objects::object::ChangeId, Vec<objects::object::ChangeId>>,
+    parent_map: &HashMap<objects::object::StateId, Vec<objects::object::StateId>>,
     errors: &mut Vec<FsckError>,
 ) {
     let mut visiting = HashSet::new();
@@ -270,11 +265,11 @@ fn check_state_cycles(
 }
 
 fn detect_cycle(
-    state_id: objects::object::ChangeId,
-    parent_map: &HashMap<objects::object::ChangeId, Vec<objects::object::ChangeId>>,
-    visiting: &mut HashSet<objects::object::ChangeId>,
-    visited: &mut HashSet<objects::object::ChangeId>,
-    reported: &mut HashSet<objects::object::ChangeId>,
+    state_id: objects::object::StateId,
+    parent_map: &HashMap<objects::object::StateId, Vec<objects::object::StateId>>,
+    visiting: &mut HashSet<objects::object::StateId>,
+    visited: &mut HashSet<objects::object::StateId>,
+    reported: &mut HashSet<objects::object::StateId>,
     errors: &mut Vec<FsckError>,
 ) {
     if visited.contains(&state_id) {

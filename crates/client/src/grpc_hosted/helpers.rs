@@ -6,7 +6,7 @@ use grpc::heddle::v1::{
     HostedGrant, HostedNamespace, HostedRepository, ObjectAvailabilityStatus, ObjectDescriptor,
     TransferCheckpoint, TransportMode,
 };
-use objects::object::{ChangeId, ContentHash};
+use objects::object::{ContentHash, StateAttachmentId, StateId};
 use tonic::Status;
 use wire::{ObjectId, ObjectInfo, ObjectType, ProtocolError};
 
@@ -78,10 +78,25 @@ pub(super) fn parse_object_id(
     obj_type: ObjectType,
 ) -> Result<ObjectId, ProtocolError> {
     match obj_type {
-        // State and its per-state visibility sidecar are both keyed by ChangeId.
-        ObjectType::State | ObjectType::StateVisibility => Ok(ObjectId::ChangeId(
-            ChangeId::parse(value).map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
-        )),
+        // State and its per-state visibility sidecar are both keyed by StateId.
+        ObjectType::State | ObjectType::StateVisibility => {
+            Ok(ObjectId::StateId(StateId::parse(value).map_err(|err| {
+                ProtocolError::InvalidState(err.to_string())
+            })?))
+        }
+        ObjectType::StateAttachment => {
+            let (state, attachment) = value.split_once(':').ok_or_else(|| {
+                ProtocolError::InvalidState("invalid state attachment locator".to_string())
+            })?;
+            Ok(ObjectId::StateAttachment {
+                state: StateId::parse(state)
+                    .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
+                id: StateAttachmentId::from_hash(
+                    ContentHash::from_hex(attachment)
+                        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
+                ),
+            })
+        }
         ObjectType::Blob | ObjectType::Tree | ObjectType::Action | ObjectType::Redaction => {
             Ok(ObjectId::Hash(ContentHash::from_hex(value).map_err(
                 |err| ProtocolError::InvalidState(err.to_string()),
@@ -106,7 +121,10 @@ pub(super) fn object_descriptor_with_status(
     ObjectDescriptor {
         id: match &info.id {
             ObjectId::Hash(hash) => hash.to_hex(),
-            ObjectId::ChangeId(change_id) => change_id.to_string_full(),
+            ObjectId::StateId(state_id) => state_id.to_string_full(),
+            ObjectId::StateAttachment { state, id } => {
+                format!("{}:{}", state.to_string_full(), id.as_hash().to_hex())
+            }
         },
         object_type: object_type_name(info.obj_type).to_string(),
         availability_status: availability_status as i32,
@@ -135,20 +153,31 @@ pub(super) fn descriptor_id(descriptor: &ObjectDescriptor) -> (String, String) {
 pub(super) fn descriptor_id_from_info(info: &ObjectInfo) -> (String, String) {
     let id = match &info.id {
         ObjectId::Hash(hash) => hash.to_hex(),
-        ObjectId::ChangeId(change_id) => change_id.to_string_full(),
+        ObjectId::StateId(state_id) => state_id.to_string_full(),
+        ObjectId::StateAttachment { state, id } => {
+            format!("{}:{}", state.to_string_full(), id.as_hash().to_hex())
+        }
     };
     (id, object_type_name(info.obj_type).to_string())
 }
 
 pub(super) fn status_to_protocol_error(status: Status) -> ProtocolError {
+    let message = if status.message().contains("missing x-heddle-proof-ts") {
+        format!(
+            "{}; credential missing device proof key — re-login / re-install the credential with its matching private key",
+            status.message()
+        )
+    } else {
+        status.message().to_string()
+    };
     match status.code() {
         tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => {
-            ProtocolError::AuthorizationFailed(status.message().to_string())
+            ProtocolError::AuthorizationFailed(message)
         }
-        tonic::Code::NotFound => ProtocolError::ObjectNotFound(status.message().to_string()),
-        tonic::Code::AlreadyExists => ProtocolError::AlreadyExists(status.message().to_string()),
-        tonic::Code::InvalidArgument => ProtocolError::InvalidState(status.message().to_string()),
-        _ => ProtocolError::Remote(status.message().to_string()),
+        tonic::Code::NotFound => ProtocolError::ObjectNotFound(message),
+        tonic::Code::AlreadyExists => ProtocolError::AlreadyExists(message),
+        tonic::Code::InvalidArgument => ProtocolError::InvalidState(message),
+        _ => ProtocolError::Remote(message),
     }
 }
 
@@ -207,5 +236,21 @@ pub(super) fn hosted_role_proto_to_string(role: i32) -> String {
         HostedRole::Admin => "admin".into(),
         HostedRole::Owner => "owner".into(),
         HostedRole::Unspecified => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_proof_timestamp_error_explains_how_to_recover() {
+        let error = status_to_protocol_error(Status::unauthenticated(
+            "missing x-heddle-proof-ts metadata",
+        ));
+        let message = error.to_string();
+
+        assert!(message.contains("credential missing device proof key"));
+        assert!(message.contains("re-login / re-install"));
     }
 }

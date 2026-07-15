@@ -20,10 +20,19 @@
 use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
+use heddle_core::retro_plan::{
+    DEFAULT_FALLBACK_WINDOW_HOURS, MAX_OPLOG_BATCHES, agent_task_window_overlaps,
+    agent_window_overlaps, choose_default_since_ts, context_annotation_in_window,
+    display_free_text, duration_secs as plan_duration_secs, excerpt, is_turn_boundary_intent,
+    is_verify_fail_marker, is_verify_pass_signal, retro_header_line, short_state_id,
+    timeline_step_in_window,
+};
 use objects::{
-    object::{ChangeId, State},
-    store::{AgentRegistry, AgentStatus, AgentTaskRecord, AgentTaskStore, ObjectStore},
+    object::{State, StateId},
+    store::{
+        ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStore, ObjectStore,
+    },
 };
 use oplog::OpRecord;
 use repo::{Repository, TimelineStore, TimelineView};
@@ -31,18 +40,6 @@ use serde::Serialize;
 
 use super::history_target::resolve_state_id;
 use crate::cli::{Cli, should_output_json};
-
-/// Maximum oplog batches to scan when assembling the retro. The walk
-/// stops as soon as a batch's timestamp falls below `since`, so this
-/// is just a hard ceiling for pathological cases (e.g. clock skew).
-const MAX_OPLOG_BATCHES: usize = 4096;
-
-/// Default fallback window when `--since` is omitted and no recent
-/// `Claude Code turn` capture is found.
-const DEFAULT_FALLBACK_WINDOW_HOURS: i64 = 1;
-
-/// Length of excerpted free-text fields in non-verbose mode.
-const EXCERPT_LEN: usize = 160;
 
 #[derive(Clone, Debug)]
 pub struct RetroCommandOptions {
@@ -65,7 +62,7 @@ struct RetroOutput {
     /// unresolvable (a brand-new repo before any captures).
     duration_secs: Option<i64>,
     states_captured: Vec<StateEntry>,
-    agents_active: Vec<AgentEntry>,
+    agents_active: Vec<ActorPresence>,
     agent_tasks: Vec<AgentTaskEntry>,
     timeline_steps: Vec<TimelineStepEntry>,
     markers_created: Vec<MarkerEntry>,
@@ -79,7 +76,7 @@ struct RetroOutput {
 
 #[derive(Serialize, Clone)]
 struct StateEntry {
-    change_id: String,
+    state_id: String,
     intent: Option<String>,
     confidence: Option<f32>,
     agent: Option<String>,
@@ -88,7 +85,7 @@ struct StateEntry {
 }
 
 #[derive(Serialize)]
-struct AgentEntry {
+struct ActorPresence {
     session_id: String,
     provider: Option<String>,
     model: Option<String>,
@@ -183,10 +180,10 @@ pub async fn cmd_retro(cli: &Cli, options: RetroCommandOptions) -> Result<()> {
     let (since_id, since_ts) = resolve_since_bound(&repo, options.since.as_deref(), &head_state)?;
 
     let until_ts = head_state.as_ref().map(|s| s.created_at);
-    let duration_secs = match (since_ts, until_ts) {
-        (Some(lo), Some(hi)) => Some((hi - lo).num_seconds().max(0)),
-        _ => None,
-    };
+    let duration_secs = plan_duration_secs(
+        since_ts.map(|ts| ts.timestamp()),
+        until_ts.map(|ts| ts.timestamp()),
+    );
 
     // The single oplog walk. Every grouped output (states, markers,
     // merges, undos) reads from the same batch list so a single
@@ -201,7 +198,7 @@ pub async fn cmd_retro(cli: &Cli, options: RetroCommandOptions) -> Result<()> {
     let mut merges = Vec::new();
     let mut undos = Vec::new();
     let mut verify_signals = Vec::new();
-    let mut seen_state_ids: HashSet<ChangeId> = HashSet::new();
+    let mut seen_state_ids: HashSet<StateId> = HashSet::new();
 
     for batch in &batches {
         // Batches arrive newest-first. We can stop once we hit one
@@ -322,7 +319,7 @@ pub async fn cmd_retro(cli: &Cli, options: RetroCommandOptions) -> Result<()> {
 
     let output = RetroOutput {
         since: since_id.map(|id| id.to_string_full()),
-        until: head_state.as_ref().map(|s| s.change_id.to_string_full()),
+        until: head_state.as_ref().map(|s| s.state_id.to_string_full()),
         duration_secs,
         states_captured,
         agents_active,
@@ -348,7 +345,7 @@ fn resolve_since_bound(
     repo: &Repository,
     since: Option<&str>,
     head_state: &Option<State>,
-) -> Result<(Option<ChangeId>, Option<DateTime<Utc>>)> {
+) -> Result<(Option<StateId>, Option<DateTime<Utc>>)> {
     if let Some(spec) = since {
         let id = resolve_state_id(repo, spec)?;
         let ts = repo.store().get_state(&id)?.map(|state| state.created_at);
@@ -357,14 +354,15 @@ fn resolve_since_bound(
 
     // No explicit since: pick the more-recent of (last "Claude Code
     // turn"-style capture, one hour ago).
-    let one_hour_ago = Utc::now() - Duration::hours(DEFAULT_FALLBACK_WINDOW_HOURS);
+    let now = Utc::now();
     let recent_turn_ts = find_recent_turn_ts(repo)?;
-
-    let chosen = match (recent_turn_ts, head_state.as_ref()) {
-        (Some(turn_ts), _) if turn_ts > one_hour_ago => Some(turn_ts),
-        (_, Some(_)) => Some(one_hour_ago),
-        _ => None,
-    };
+    let chosen_secs = choose_default_since_ts(
+        now.timestamp(),
+        recent_turn_ts.map(|ts| ts.timestamp()),
+        head_state.is_some(),
+        DEFAULT_FALLBACK_WINDOW_HOURS,
+    );
+    let chosen = chosen_secs.and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0));
     Ok((None, chosen))
 }
 
@@ -409,9 +407,7 @@ fn find_recent_turn_ts(repo: &Repository) -> Result<Option<DateTime<Utc>>> {
             };
             if let Some(state) = repo.store().get_state(&new_state)?
                 && let Some(intent) = state.intent.as_deref()
-                && (intent.contains("Claude Code turn")
-                    || intent.contains("session segment")
-                    || intent.contains("UserPromptSubmit"))
+                && is_turn_boundary_intent(intent)
             {
                 return Ok(Some(state.created_at));
             }
@@ -420,8 +416,11 @@ fn find_recent_turn_ts(repo: &Repository) -> Result<Option<DateTime<Utc>>> {
     Ok(None)
 }
 
-fn collect_agents(repo: &Repository, since_ts: Option<DateTime<Utc>>) -> Result<Vec<AgentEntry>> {
-    let registry = AgentRegistry::new(repo.heddle_dir());
+fn collect_agents(
+    repo: &Repository,
+    since_ts: Option<DateTime<Utc>>,
+) -> Result<Vec<ActorPresence>> {
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let entries = registry.list().unwrap_or_default();
     let mut out = Vec::new();
     for entry in entries {
@@ -429,23 +428,20 @@ fn collect_agents(repo: &Repository, since_ts: Option<DateTime<Utc>>) -> Result<
         // within (since, now]. An agent that started before `since`
         // but is still Active counts; one that completed before
         // `since` does not.
-        let window_overlaps = match since_ts {
-            Some(lo) => {
-                let active_now = matches!(entry.status, objects::store::AgentStatus::Active);
-                let last_activity = entry
-                    .completed_at
-                    .or(entry.last_progress_at)
-                    .or(entry.heartbeat_at)
-                    .unwrap_or(entry.started_at);
-                active_now || last_activity >= lo
-            }
-            None => true,
-        };
-        if !window_overlaps {
+        let active_now = matches!(entry.status, objects::store::ActorPresenceStatus::Active);
+        let last_activity = entry
+            .completed_at
+            .or(entry.last_progress_at)
+            .unwrap_or(entry.started_at);
+        if !agent_window_overlaps(
+            since_ts.map(|ts| ts.timestamp()),
+            active_now,
+            last_activity.timestamp(),
+        ) {
             continue;
         }
 
-        out.push(AgentEntry {
+        out.push(ActorPresence {
             session_id: entry.session_id.clone(),
             provider: entry.provider.clone(),
             model: entry.model.clone(),
@@ -468,11 +464,11 @@ fn collect_agent_tasks(
     since_ts: Option<DateTime<Utc>>,
     verbose: bool,
 ) -> Result<Vec<AgentTaskEntry>> {
-    let active_task_ids = AgentRegistry::new(repo.heddle_dir())
+    let active_task_ids = ActorPresenceStore::new(repo.heddle_dir())
         .list()
         .context("failed to list agent registry for retro task correlation")?
         .into_iter()
-        .filter(|entry| entry.status == AgentStatus::Active)
+        .filter(|entry| entry.status == ActorPresenceStatus::Active)
         .filter_map(|entry| entry.task_assignment_id)
         .collect::<HashSet<_>>();
     let tasks = AgentTaskStore::new(repo.heddle_dir())
@@ -480,15 +476,12 @@ fn collect_agent_tasks(
         .context("failed to list agent tasks for retro task correlation")?;
     let mut out = Vec::new();
     for task in tasks {
-        let window_overlaps = match since_ts {
-            Some(lo) => {
-                active_task_ids.contains(&task.task_id)
-                    || task.updated_at >= lo
-                    || task.completed_at.is_some_and(|completed| completed >= lo)
-            }
-            None => true,
-        };
-        if window_overlaps {
+        if agent_task_window_overlaps(
+            since_ts.map(|ts| ts.timestamp()),
+            active_task_ids.contains(&task.task_id),
+            task.updated_at.timestamp(),
+            task.completed_at.map(|ts| ts.timestamp()),
+        ) {
             out.push(agent_task_entry(&task, verbose));
         }
     }
@@ -521,9 +514,7 @@ fn collect_timeline_steps(
     let mut out = Vec::new();
     for step in view.steps() {
         let step_ms = step.finished_at_ms.or(step.started_at_ms);
-        if let Some(lo) = lo_ms
-            && step_ms.is_none_or(|ms| ms < lo)
-        {
+        if !timeline_step_in_window(lo_ms, step_ms) {
             continue;
         }
         out.push(TimelineStepEntry {
@@ -564,12 +555,12 @@ fn collect_context_annotations(
     let Some(state) = head_state else {
         return Ok(Vec::new());
     };
-    let Some(context_root) = state.context.as_ref() else {
+    let Some(context_root) = repo.inherit_parent_context(state)? else {
         return Ok(Vec::new());
     };
 
     let entries = repo
-        .list_context_entries(context_root, None::<&Path>)
+        .list_context_entries(&context_root, None::<&Path>)
         .unwrap_or_default();
 
     let lo_secs = since_ts.map(|ts| ts.timestamp());
@@ -583,9 +574,7 @@ fn collect_context_annotations(
             let Some(current) = annotation.current_revision() else {
                 continue;
             };
-            if let Some(lo) = lo_secs
-                && current.created_at < lo
-            {
+            if !context_annotation_in_window(lo_secs, current.created_at) {
                 continue;
             }
             let content = if verbose {
@@ -614,7 +603,7 @@ fn state_entry(state: &State, verbose: bool) -> StateEntry {
         .as_ref()
         .map(|i| if verbose { i.clone() } else { excerpt(i) });
     StateEntry {
-        change_id: state.change_id.to_string_full(),
+        state_id: state.state_id.to_string_full(),
         intent,
         confidence: state.confidence,
         agent: state
@@ -632,10 +621,7 @@ fn state_entry(state: &State, verbose: bool) -> StateEntry {
 /// hook's `failed-*` marker shape: see `.claude/hooks/heddle-verify.sh`.
 fn derive_verify_signal_from_state(state: &State) -> Option<VerifySignal> {
     let intent = state.intent.as_deref()?;
-    if !intent.starts_with("verified:") {
-        return None;
-    }
-    if state.confidence.unwrap_or(0.0) < 0.85 {
+    if !is_verify_pass_signal(intent, state.confidence) {
         return None;
     }
     Some(VerifySignal {
@@ -646,7 +632,7 @@ fn derive_verify_signal_from_state(state: &State) -> Option<VerifySignal> {
 }
 
 fn derive_verify_signal_from_marker(name: &str, timestamp: &str) -> Option<VerifySignal> {
-    if !name.starts_with("failed-") {
+    if !is_verify_fail_marker(name) {
         return None;
     }
     Some(VerifySignal {
@@ -654,71 +640,6 @@ fn derive_verify_signal_from_marker(name: &str, timestamp: &str) -> Option<Verif
         label: name.to_string(),
         timestamp: timestamp.to_string(),
     })
-}
-
-fn excerpt(s: &str) -> String {
-    let trimmed = s.trim();
-    if trimmed.chars().count() <= EXCERPT_LEN {
-        return trimmed.to_string();
-    }
-    let take: String = trimmed.chars().take(EXCERPT_LEN).collect();
-    format!("{take}…")
-}
-
-fn display_free_text(s: &str, verbose: bool) -> String {
-    if verbose {
-        s.trim().to_string()
-    } else {
-        scrub_path_like_tokens(&excerpt(s))
-    }
-}
-
-fn scrub_path_like_tokens(s: &str) -> String {
-    s.split_whitespace()
-        .map(|token| {
-            if is_path_like_token(token) {
-                "[redacted-path]"
-            } else {
-                token
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn is_path_like_token(token: &str) -> bool {
-    let trimmed = token.trim_matches(|c: char| {
-        matches!(
-            c,
-            '"' | '\''
-                | '`'
-                | ','
-                | ';'
-                | ':'
-                | '.'
-                | '!'
-                | '?'
-                | '('
-                | ')'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-        )
-    });
-    if trimmed.contains('/') || trimmed.contains('\\') {
-        return true;
-    }
-    let Some((stem, extension)) = trimmed.rsplit_once('.') else {
-        return false;
-    };
-    !stem.is_empty()
-        && !extension.is_empty()
-        && extension.len() <= 10
-        && extension.chars().all(|c| c.is_ascii_alphanumeric())
-        && stem
-            .chars()
-            .any(|c| c.is_ascii_alphabetic() || matches!(c, '-' | '_'))
 }
 
 fn format_ts(ts: DateTime<Utc>) -> String {
@@ -742,13 +663,12 @@ fn timeline_status_label(status: &objects::object::TimelineToolCallStatus) -> St
 
 fn print_human(output: &RetroOutput, _verbose: bool) {
     println!(
-        "Retro: since={} until={} duration={}",
-        output.since.as_deref().unwrap_or("<default-window>"),
-        output.until.as_deref().unwrap_or("<no-head>"),
-        output
-            .duration_secs
-            .map(|s| format!("{s}s"))
-            .unwrap_or_else(|| "<unknown>".to_string()),
+        "{}",
+        retro_header_line(
+            output.since.as_deref(),
+            output.until.as_deref(),
+            output.duration_secs,
+        )
     );
     println!();
     println!("States captured ({}):", output.states_captured.len());
@@ -760,7 +680,7 @@ fn print_human(output: &RetroOutput, _verbose: bool) {
             .unwrap_or_else(|| "—".to_string());
         println!(
             "  {} {} conf={} [{}]",
-            short_id(&entry.change_id),
+            short_state_id(&entry.state_id),
             intent,
             confidence,
             entry.timestamp,
@@ -839,13 +759,6 @@ fn print_human(output: &RetroOutput, _verbose: bool) {
     }
 }
 
-fn short_id(id: &str) -> &str {
-    let id_no_prefix = id.strip_prefix("hd-").unwrap_or(id);
-    let prefix_len = if id.starts_with("hd-") { 3 } else { 0 };
-    let take = std::cmp::min(8, id_no_prefix.len());
-    &id[..(prefix_len + take)]
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -877,6 +790,7 @@ mod tests {
 
     #[test]
     fn excerpt_truncates_long_content() {
+        use heddle_core::retro_plan::EXCERPT_LEN;
         let long = "a".repeat(EXCERPT_LEN + 50);
         let out = excerpt(&long);
         let char_count = out.chars().count();
@@ -1047,7 +961,7 @@ mod tests {
         let head_state = repo.current_state().unwrap();
         let output = RetroOutput {
             since: None,
-            until: head_state.map(|s| s.change_id.to_string_full()),
+            until: head_state.map(|s| s.state_id.to_string_full()),
             duration_secs: None,
             states_captured: Vec::new(),
             agents_active: Vec::new(),

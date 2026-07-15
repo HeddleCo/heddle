@@ -4,7 +4,7 @@
 
 - Prefer `--output json` for automation.
 - Treat text output as human-facing and unstable.
-- `auto` switches to JSON when stdout is not a TTY.
+- Text is the default even when stdout is piped; pass `--output json` or `--output json-compact` explicitly.
 
 ## Attribution
 
@@ -38,29 +38,31 @@ heddle diff --semantic --output json
 heddle query --attribution src/file.rs --output json
 ```
 
-## Harness And Actor Model
+## Harness And Agent Model
 
 When a supported coding harness is involved, prefer the Heddle-native mental model:
 
 - thread = the work context
-- actor = the active worker
-- session = the provenance record for that actor
+- presence = attribution and work context for the active worker
+- provenance session = provider/model/policy epochs for that worker
+- task = the local delegation record
+- writer lease = exclusive, token-authenticated write authority for a thread
 
 Do not frame Heddle as a wrapper that should execute the harness. Heddle should follow the harness ambiently when possible.
 
 Current shipped surfaces:
 
 ```bash
-heddle actor list
-heddle actor show
-heddle actor explain
+heddle agent presence list
+heddle agent presence show
+heddle agent presence explain
 heddle integration install claude-code
 heddle integration doctor
 ```
 
 Important current behavior:
 
-- `heddle actor explain` is the first place to inspect why Heddle attached activity to a given actor/session
+- `heddle agent presence explain` is the first place to inspect why Heddle attached activity to an agent
 - `heddle integration install` is the explicit opt-in path for supported harnesses on an existing repo
 - `heddle integration relay` are internal plumbing surfaces, not the main user story
 
@@ -70,8 +72,12 @@ For the common agent flow, prefer:
 
 ```bash
 heddle start feature/auth --task "Implement auth middleware"
-heddle capture -m "Implement auth middleware"
-heddle merge feature/auth --preview
+heddle agent reserve --thread feature/auth
+heddle agent heartbeat --lease <LEASE> --token <TOKEN>
+heddle agent capture --lease <LEASE> --token <TOKEN> -m "Implement auth middleware"
+heddle agent ready --lease <LEASE> --token <TOKEN>
+heddle agent release --lease <LEASE> --token <TOKEN>
+heddle land --thread feature/auth
 ```
 
 Important current behavior:
@@ -80,11 +86,22 @@ Important current behavior:
 - `heddle thread show/list/refresh/promote/drop` manage thread lifecycle and maintenance.
 - `heddle start <thread> --path <dir>` creates a user-visible isolated checkout when the thread needs its own working directory.
 - `capture` records changed paths, impact categories, freshness, and promotion warnings for the active thread.
-- `merge --preview` shows the semantic integration summary before apply.
+- `ready` shows the semantic integration summary before `land`.
 - `start <thread> --path <dir>` is the canonical isolated-checkout path.
-- `actor spawn` creates a thread-linked actor registry entry only; it does not create filesystem isolation.
-- `actor spawn` is for explicit Heddle actors; ambient harness integration may create actors automatically.
 - use `start <thread> --path <dir>` when you need a real isolated checkout.
+
+## Reservation Liveness
+
+Agent reservations use a five-minute heartbeat lease. `agent heartbeat`,
+`agent capture`, and `agent ready` renew a current lease. `--hold-for-pid`
+adds an early-death signal for a long-lived orchestrator process; PID liveness
+does not replace heartbeats.
+
+`agent reserve` returns a `lease_id` and bearer `token`. `heartbeat`, `capture`,
+`ready`, and `release` require both. Guarded commands
+require both. Prefer `HEDDLE_RESERVATION_TOKEN` over `--token` when process-list
+visibility matters. Actor session IDs identify provenance; they do not grant
+writer authority.
 
 ## Harness Integration Install
 

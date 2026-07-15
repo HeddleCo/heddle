@@ -235,7 +235,7 @@ fn extract_command_arms(source: &str) -> Vec<Arm> {
         }
 
         // Word-boundary check: skip when preceded by an identifier char
-        // (e.g. `ContextCommands::`, `ActorCommands::`, `SessionCommands::`).
+        // (e.g. `ContextCommands::`, `AgentPresenceCommands::`).
         if start > 0 {
             let prev = bytes[start - 1];
             if prev.is_ascii_alphanumeric() || prev == b'_' {

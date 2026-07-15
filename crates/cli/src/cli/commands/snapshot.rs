@@ -4,16 +4,18 @@
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
+use heddle_core::{
+    GitScope, SavePlan, SaveVerb, execute_save, large_capture_requires_force,
+    principal_lacks_accountable_identity,
+};
+use heddle_git_projection::GitProjection;
 use objects::{
-    object::{Agent, Attribution, ChangeId, Principal, ThreadName, Tree},
+    object::{Agent, Attribution, Principal, StateId, ThreadName, Tree},
     store::ObjectStore,
     worktree::WorktreeStatus,
 };
 use refs::Head;
-use repo::{
-    Hook, HookContext, HookManager, Repository, RepositoryCapability, SessionManager,
-    SnapshotProfile, format_confidence, refresh_active_thread_metadata,
-};
+use repo::{Repository, RepositoryCapability, SessionManager, SnapshotProfile, format_confidence};
 // Re-export the helper derivations so existing CLI call sites
 // (`thread.rs`, `harness/mod.rs`) keep `super::snapshot::summarize_*`
 // imports working without churn. The implementations live in
@@ -27,7 +29,6 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
-    error_envelope::print_error_with_hint,
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::complete_current_thread_manual_resolution,
     thread::find_active_thread_entry,
@@ -43,7 +44,6 @@ use crate::{
     attribution::clean_attribution_value,
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
-    git_projection_engine::GitProjection,
     perf::{ProfileField, emit_profile, profile_enabled},
 };
 
@@ -52,7 +52,7 @@ pub(crate) struct SnapshotOutput {
     pub output_kind: &'static str,
     pub status: &'static str,
     pub action: &'static str,
-    pub change_id: String,
+    pub state_id: String,
     pub content_hash: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
@@ -167,12 +167,6 @@ struct AgentEnv {
     segment: Option<String>,
 }
 
-/// Stable exit code emitted when capture aborts because the filesystem
-/// is out of space. Mirrors the POSIX ENOSPC value (28) so shell users
-/// and supervisors that already classify "disk full" by OS code see a
-/// matching signal from heddle.
-pub const CAPTURE_EXIT_DISK_FULL: i32 = 28;
-
 pub async fn cmd_snapshot(
     cli: &Cli,
     intent: Option<String>,
@@ -240,14 +234,12 @@ pub async fn cmd_snapshot(
             // ENOSPC is the only mid-capture failure where the user's
             // working tree is guaranteed safe (we never touched it) and
             // the recovery is mechanical (free disk, re-run). Surface
-            // that contract through the shared advice/envelope renderer
-            // while preserving the stable exit code. Every other error
-            // bubbles through `?` unchanged so the existing diagnostics
-            // path keeps working.
+            // that contract through typed RecoveryAdvice so `main`
+            // prints the envelope and maps `capture_out_of_space` →
+            // IoErr (74). Every other error bubbles through `?`
+            // unchanged so the existing diagnostics path keeps working.
             if is_disk_full_anyhow(&err) {
-                let err = anyhow!(capture_disk_full_advice(&err));
-                print_error_with_hint(cli, &err);
-                std::process::exit(CAPTURE_EXIT_DISK_FULL);
+                return Err(anyhow!(capture_disk_full_advice(&err)));
             }
             return Err(err);
         }
@@ -274,7 +266,7 @@ pub async fn cmd_snapshot(
         match repo.current_state() {
             Ok(Some(state)) => {
                 let bridge = GitProjection::new(&repo);
-                if let Err(err) = bridge.update_intent_to_add(&state.change_id) {
+                if let Err(err) = bridge.update_intent_to_add(&state.state_id) {
                     debug!("intent-to-add index update skipped: {err}");
                 }
             }
@@ -296,7 +288,7 @@ pub async fn cmd_snapshot(
         // continue to receive a clean ANSI-free string.
         println!(
             "Captured state {} ({})",
-            style::change_id(&output.change_id),
+            style::state_id(&output.state_id),
             style::dim(&output.content_hash),
         );
         println!(
@@ -417,7 +409,7 @@ fn missing_capture_intent_advice() -> RecoveryAdvice {
 
 fn nothing_to_capture_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
-        "nothing_to_commit",
+        "nothing_to_capture",
         "nothing to capture: worktree has no changes eligible for Heddle capture",
         "Inspect the worktree with `heddle status`; make changes before running `heddle capture -m \"...\"`.",
         "the worktree has no modified, deleted, or untracked paths relative to the current Heddle state",
@@ -461,31 +453,6 @@ fn missing_capture_identity_advice() -> RecoveryAdvice {
     )
 }
 
-/// Resolve the current thread name for hook payloads. Returns `""`
-/// when HEAD is detached (no thread context); the hook protocol uses
-/// the same empty-string sentinel.
-fn current_thread_name(repo: &Repository) -> String {
-    use refs::Head;
-    match repo.head_ref() {
-        Ok(Head::Attached { thread }) => thread.to_string(),
-        _ => String::new(),
-    }
-}
-
-/// Large-capture safety preflight for `commit`'s dirty path, reusing an
-/// already-computed Git-overlay worktree status instead of re-walking the
-/// worktree. The Git Projection commit path has already computed the same
-/// pre-mutation status for its own preflights and the clean classification, so
-/// threading it here
-/// removes a redundant full walk. The large-capture gating decision is
-/// byte-identical because it reads the same `WorktreeStatus`.
-pub(crate) fn preflight_large_capture_for_git_projection_commit_with_worktree_status(
-    force: bool,
-    worktree_status: &repo::Result<Option<WorktreeStatus>>,
-) -> Result<()> {
-    preflight_large_capture_with_status(force, worktree_status)
-}
-
 /// Large-capture safety preflight built from an already-computed git-overlay
 /// worktree status instead of re-walking the worktree. The large-capture
 /// classification is byte-identical because it reads the same `WorktreeStatus`;
@@ -505,8 +472,7 @@ fn preflight_large_capture_with_status(
     let total = status.change_count();
     let delete_count = status.deleted.len();
     let add_count = status.added.len();
-    let large_capture = total > 100 || delete_count > 25 || add_count > 100;
-    if !large_capture {
+    if !large_capture_requires_force(total, delete_count, add_count) {
         return Ok(());
     }
 
@@ -575,6 +541,10 @@ pub(crate) fn create_snapshot(
     create_snapshot_profiled(repo, user_config, intent, confidence, agent).map(|(output, _)| output)
 }
 
+/// Shared entry for staged-tree captures that still want CLI-shaped
+/// [`SnapshotOutput`] (hooks + attribution + execute_save). Kept for
+/// non-commit callers; commit now builds a [`SavePlan`] directly.
+#[allow(dead_code)]
 pub(crate) fn create_snapshot_from_tree(
     repo: &Repository,
     user_config: &UserConfig,
@@ -591,23 +561,15 @@ pub(crate) fn ensure_current_state(
     repo: &Repository,
     user_config: &UserConfig,
     intent: Option<String>,
-) -> Result<ChangeId> {
+) -> Result<StateId> {
     if let Some(state) = repo.current_state()? {
-        return Ok(state.change_id);
+        return Ok(state.state_id);
     }
 
-    // Git-overlay: bind the active Git tip instead of inventing a parentless
-    // "Bootstrap git-overlay…" worktree snapshot. A synthetic orphan root has
-    // no Git mapping, so the first export/write-through of agent threads lands
-    // as an orphan Git branch with no merge-base against main (P0-A).
-    if repo.capability() == RepositoryCapability::GitOverlay {
-        match bind_git_overlay_active_tip(repo)? {
-            Some(change_id) => return Ok(change_id),
-            None => {
-                // No commit-pointing Git tip (empty/unborn repo): fall through
-                // to a worktree bootstrap snapshot so first capture still works.
-            }
-        }
+    if repo.capability() == RepositoryCapability::GitOverlay
+        && let Some(state_id) = bind_git_overlay_active_tip(repo)?
+    {
+        return Ok(state_id);
     }
 
     create_snapshot(
@@ -630,23 +592,13 @@ pub(crate) fn ensure_current_state(
         .ok_or_else(|| anyhow::anyhow!("Failed to establish initial current state"))
 }
 
-/// Lazy single-tip bind for Git-overlay checkouts with no Heddle current state.
-///
-/// Returns:
-/// - `Ok(Some(id))` when a Git HEAD commit was mapped (or already mapped) and
-///   the attached thread/HEAD points at it
-/// - `Ok(None)` when there is no commit-pointing Git tip (unborn/empty)
-/// - `Err` when a tip exists but bind failed — never invents an orphan root
-fn bind_git_overlay_active_tip(repo: &Repository) -> Result<Option<ChangeId>> {
-    let tip_sha = match resolve_active_git_tip_sha(repo)? {
-        Some(sha) => sha,
-        None => return Ok(None),
+fn bind_git_overlay_active_tip(repo: &Repository) -> Result<Option<StateId>> {
+    let Some(tip_sha) = resolve_active_git_tip_sha(repo)? else {
+        return Ok(None);
     };
 
-    if let Some(existing) = repo.git_overlay_mapped_change_for_git_commit(&tip_sha)? {
-        // Ensure export can parent onto the real tip OID (checkpoint seed
-        // copies objects into the projection mirror).
-        if repo.latest_git_checkpoint_for_change(&existing)?.is_none() {
+    if let Some(existing) = repo.git_overlay_mapped_state_for_git_commit(&tip_sha)? {
+        if repo.latest_git_checkpoint_for_state(&existing)?.is_none() {
             repo.record_git_checkpoint(
                 &existing,
                 tip_sha.clone(),
@@ -657,13 +609,10 @@ fn bind_git_overlay_active_tip(repo: &Repository) -> Result<Option<ChangeId>> {
         return Ok(Some(existing));
     }
 
-    // Hydrate Heddle notes so re-imports of previously exported commits keep
-    // stable change ids (same preflight adopt uses).
-    crate::git_projection_engine::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(
+    heddle_git_projection::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(
         repo.root(),
     );
-
-    let change_id = ingest::import_single_git_commit_into(
+    let state_id = ingest::import_single_git_commit_into(
         repo.root(),
         repo.root(),
         &tip_sha,
@@ -674,39 +623,28 @@ fn bind_git_overlay_active_tip(repo: &Repository) -> Result<Option<ChangeId>> {
             "failed to map Git tip {tip_sha}: {error}"
         )))
     })?;
-
-    // Confirm the state is readable through this process's store handle
-    // (pack install on the importer's handle is visible via pack reload).
-    if repo.store().get_state(&change_id)?.is_none() {
+    if repo.store().get_state(&state_id)?.is_none() {
         return Err(anyhow!(RecoveryAdvice::git_overlay_tip_bind_failed(
             format!(
-                "mapped Git tip {tip_sha} to {} but the state object is not readable; \
-                 run `heddle adopt` to repair the ingest mapping",
-                change_id.short()
+                "mapped Git tip {tip_sha} to {} but the state object is not readable",
+                state_id.short()
             )
         )));
     }
-
-    // Record a checkpoint mapping to the *existing* Git tip (no new commit).
-    // Export's `seed_git_checkpoint_mappings_from_checkout` copies the tip into
-    // the projection mirror and keeps parent OIDs on the real Git tip — without
-    // this, ingest-only mapping is skipped when the mirror lacks the OID and
-    // export re-mints an orphan reconstruction of the tip.
-    if repo.latest_git_checkpoint_for_change(&change_id)?.is_none() {
+    if repo.latest_git_checkpoint_for_state(&state_id)?.is_none() {
         repo.record_git_checkpoint(
-            &change_id,
+            &state_id,
             tip_sha.clone(),
             format!("Bound active Git tip {}", &tip_sha[..tip_sha.len().min(12)]),
         )?;
     }
-
-    point_overlay_head_at_mapped_tip(repo, &change_id)?;
+    point_overlay_head_at_mapped_tip(repo, &state_id)?;
     info!(
         git_tip = %tip_sha,
-        change_id = %change_id.short(),
+        state_id = %state_id.short(),
         "bound active Git tip as first Heddle state"
     );
-    Ok(Some(change_id))
+    Ok(Some(state_id))
 }
 
 fn resolve_active_git_tip_sha(repo: &Repository) -> Result<Option<String>> {
@@ -723,27 +661,20 @@ fn resolve_active_git_tip_sha(repo: &Repository) -> Result<Option<String>> {
             )));
         }
     };
-
-    let head = match git.head() {
-        Ok(head) => head,
+    match git.head() {
+        Ok(head) => Ok(head.oid.map(|oid| oid.to_string())),
         Err(error) => {
-            // Unborn HEAD / empty repo: treat as no tip.
             debug!(error = %error, "Git HEAD not resolvable; no tip to bind");
-            return Ok(None);
+            Ok(None)
         }
-    };
-    Ok(head.oid.map(|oid| oid.to_string()))
+    }
 }
 
-/// Ensure the attached branch thread (or detached HEAD) points at the mapped tip
-/// so `current_state()` / `head()` resolve without re-walking git mappings only.
-fn point_overlay_head_at_mapped_tip(repo: &Repository, change_id: &ChangeId) -> Result<()> {
-    // Prefer git's current branch so the first state lands on the same tip
-    // the user/agent is looking at in Git, not a stale Heddle HEAD.
+fn point_overlay_head_at_mapped_tip(repo: &Repository, state_id: &StateId) -> Result<()> {
     if let Some(branch) = repo.git_overlay_current_branch()? {
         let thread = ThreadName::from(branch.as_str());
-        if repo.refs().get_thread(&thread)?.as_ref() != Some(change_id) {
-            repo.refs().set_thread(&thread, change_id)?;
+        if repo.refs().get_thread(&thread)?.as_ref() != Some(state_id) {
+            repo.refs().set_thread(&thread, state_id)?;
         }
         let expected = Head::Attached {
             thread: thread.clone(),
@@ -756,15 +687,14 @@ fn point_overlay_head_at_mapped_tip(repo: &Repository, change_id: &ChangeId) -> 
 
     match repo.head_ref()? {
         Head::Attached { thread } => {
-            if repo.refs().get_thread(&thread)?.as_ref() != Some(change_id) {
-                repo.refs().set_thread(&thread, change_id)?;
+            if repo.refs().get_thread(&thread)?.as_ref() != Some(state_id) {
+                repo.refs().set_thread(&thread, state_id)?;
             }
         }
-        Head::Detached { state } if state == *change_id => {}
-        Head::Detached { .. } => {
-            repo.refs()
-                .write_head(&Head::Detached { state: *change_id })?;
-        }
+        Head::Detached { state } if state == *state_id => {}
+        Head::Detached { .. } => repo
+            .refs()
+            .write_head(&Head::Detached { state: *state_id })?,
     }
     Ok(())
 }
@@ -828,117 +758,38 @@ fn create_snapshot_profiled_inner(
         return Err(anyhow!(advice));
     }
 
-    let hook_manager = HookManager::new(repo);
-    let hook_ctx = HookContext::new(repo);
-
-    hook_manager.run(Hook::PreSnapshot, &hook_ctx)?;
-
-    // JSON-protocol `pre_capture` invocation. Same hook
-    // file as the legacy env-var path; the new protocol opts in via
-    // `HEDDLE_HOOK_PROTOCOL=json` and gives the hook a chance to
-    // veto. A non-empty `abort` aborts the snapshot.
-    let pre_capture_payload = serde_json::json!({
-        "thread": current_thread_name(repo),
-        "intent": intent.clone().unwrap_or_default(),
-    });
-    let pre_capture_response = hook_manager.run_with_payload(
-        Hook::PreSnapshot,
-        &hook_ctx,
-        &pre_capture_payload,
-        std::time::Duration::from_secs(5),
-    )?;
-    if let Some(resp) = pre_capture_response
-        && !resp.abort.is_empty()
-    {
-        return Err(anyhow!(RecoveryAdvice::hook_veto(
-            "pre_capture",
-            "capture",
-            resp.abort
-        )));
-    }
-
     let attribution = build_attribution(repo, user_config, &agent)?;
-
     if let Some(ref agent) = attribution.agent {
         debug!(provider = %agent.provider, model = %agent.model, "Agent attribution");
     }
 
-    // Invariant A (heddle#317, spike #266 §5.4): the inherited default
-    // visibility tier is bound to the freshly created state inside the snapshot
-    // chokepoint (`snapshot_with_attribution_profiled`), so every creator —
-    // capture, cherry-pick, revert, daemon/mount — inherits it by construction.
-    // No per-call-site bind here.
-    let mut execution =
-        repo.snapshot_with_attribution_profiled(intent.clone(), confidence, attribution)?;
-
-    let thread_metadata_start = Instant::now();
-    let (promotion_suggested, heavy_impact_paths) =
-        update_active_thread_metadata(repo, &execution.state, &execution.tree)?;
-    let thread_metadata_ms = thread_metadata_start.elapsed().as_millis();
-
-    let trust = build_repository_verification_state(repo);
-    let recommended_action =
-        (!trust.recommended_action.trim().is_empty()).then(|| trust.recommended_action.clone());
-    let recommended_action_template = recommended_action
-        .as_deref()
-        .and_then(action_template)
-        .or_else(|| trust.recommended_action_template.clone());
-    let task_assignment_id = active_task_assignment_id(repo)?;
-
-    let output = SnapshotOutput {
-        output_kind: "capture",
-        status: "captured",
-        action: "capture",
-        change_id: execution.state.change_id.short(),
-        content_hash: execution.state.hash().short(),
-        intent: execution.state.intent.clone(),
-        confidence: execution.state.confidence,
-        task_assignment_id,
-        principal: (&execution.state.attribution.principal).into(),
-        agent: execution
-            .state
-            .attribution
-            .agent
-            .as_ref()
-            .map(SnapshotAgentOutput::from),
-        promotion_suggested,
-        heavy_impact_paths: heavy_impact_paths.clone(),
-        signed: execution.state.signature.is_some(),
-        message: format!(
-            "Captured state {} ({})",
-            execution.state.change_id.short(),
-            execution.state.hash().short()
-        ),
-        next_action: recommended_action.clone(),
-        next_action_template: recommended_action_template.clone(),
-        recommended_action,
-        recommended_action_template,
-        trust,
+    // Shared save pipeline: hooks + repo snapshot + thread metadata + verify.
+    let mut plan = SavePlan {
+        verb: SaveVerb::Capture,
+        intent,
+        confidence,
+        attribution,
+        git_scope: GitScope::None,
+        supplied_tree: None,
+        reuse_current_state: false,
+        require_clean_worktree: false,
+        worktree_status_options: worktree_status_options(Some(repo.config())),
+        run_hooks: true,
+        commit_safe_post_verify: false,
+        coalesce_snapshot_and_checkpoint: false,
+        linearize_git_parent: false,
+        precomputed_worktree_status: None,
     };
-
-    hook_manager.run(Hook::PostSnapshot, &hook_ctx)?;
-
-    // `post_capture` JSON-protocol fire. Best-effort: a
-    // post-capture hook can't veto the snapshot (already persisted).
-    // A timeout/error is tracing-warned and swallowed.
-    let post_capture_payload = serde_json::json!({
-        "state_id": execution.state.change_id.to_string_full(),
-    });
-    if let Err(err) = hook_manager.run_with_payload(
-        Hook::PostSnapshot,
-        &hook_ctx,
-        &post_capture_payload,
-        std::time::Duration::from_secs(5),
-    ) {
-        tracing::warn!(error = %err, "post_capture hook error swallowed");
+    if let Some(status) = worktree_status {
+        // Owned copy so SavePlan can take the Result; re-walk is avoided on the
+        // success path because execute_save recomputes post-mutation verification.
+        plan.precomputed_worktree_status = Some(clone_worktree_status_result(status));
     }
-
-    Ok((
-        output,
-        snapshot_command_profile(execution.profile, thread_metadata_ms),
-    ))
+    let report = execute_save(repo, plan)?;
+    snapshot_output_from_save_report(repo, report)
 }
 
+#[allow(dead_code)]
 pub(crate) fn create_snapshot_from_tree_profiled(
     repo: &Repository,
     user_config: &UserConfig,
@@ -957,47 +808,52 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         return Err(anyhow!(advice));
     }
 
-    let hook_manager = HookManager::new(repo);
-    let hook_ctx = HookContext::new(repo);
-
-    hook_manager.run(Hook::PreSnapshot, &hook_ctx)?;
-
-    let pre_capture_payload = serde_json::json!({
-        "thread": current_thread_name(repo),
-        "intent": intent.clone().unwrap_or_default(),
-    });
-    let pre_capture_response = hook_manager.run_with_payload(
-        Hook::PreSnapshot,
-        &hook_ctx,
-        &pre_capture_payload,
-        std::time::Duration::from_secs(5),
-    )?;
-    if let Some(resp) = pre_capture_response
-        && !resp.abort.is_empty()
-    {
-        return Err(anyhow!(RecoveryAdvice::hook_veto(
-            "pre_capture",
-            "capture",
-            resp.abort
-        )));
-    }
-
     let attribution = build_attribution(repo, user_config, &agent)?;
     if let Some(ref agent) = attribution.agent {
         debug!(provider = %agent.provider, model = %agent.model, "Agent attribution");
     }
 
-    let mut execution = repo.snapshot_tree_with_attribution_profiled(
-        tree,
-        intent.clone(),
+    let plan = SavePlan {
+        verb: SaveVerb::Capture,
+        intent,
         confidence,
         attribution,
-    )?;
-    let thread_metadata_start = Instant::now();
-    let (promotion_suggested, heavy_impact_paths) =
-        update_active_thread_metadata(repo, &execution.state, &execution.tree)?;
-    let thread_metadata_ms = thread_metadata_start.elapsed().as_millis();
+        git_scope: GitScope::None,
+        supplied_tree: Some(tree),
+        reuse_current_state: false,
+        require_clean_worktree: false,
+        worktree_status_options: worktree_status_options(Some(repo.config())),
+        run_hooks: true,
+        commit_safe_post_verify: false,
+        coalesce_snapshot_and_checkpoint: false,
+        linearize_git_parent: false,
+        precomputed_worktree_status: None,
+    };
+    let report = execute_save(repo, plan)?;
+    snapshot_output_from_save_report(repo, report)
+}
 
+fn clone_worktree_status_result(
+    status: &repo::Result<Option<WorktreeStatus>>,
+) -> repo::Result<Option<WorktreeStatus>> {
+    match status {
+        Ok(Some(s)) => Ok(Some(WorktreeStatus {
+            modified: s.modified.clone(),
+            added: s.added.clone(),
+            deleted: s.deleted.clone(),
+        })),
+        Ok(None) => Ok(None),
+        Err(err) => Err(objects::HeddleError::Config(err.to_string())),
+    }
+}
+
+fn snapshot_output_from_save_report(
+    repo: &Repository,
+    report: heddle_core::SaveReport,
+) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
+    // Public capture JSON still uses the CLI verification adapter so
+    // Machine-Contract Proof is injected from the command catalog. Core
+    // `execute_save` already computed proof for the embedder path.
     let trust = build_repository_verification_state(repo);
     let recommended_action =
         (!trust.recommended_action.trim().is_empty()).then(|| trust.recommended_action.clone());
@@ -1006,65 +862,31 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         .and_then(action_template)
         .or_else(|| trust.recommended_action_template.clone());
     let task_assignment_id = active_task_assignment_id(repo)?;
-
     let output = SnapshotOutput {
         output_kind: "capture",
         status: "captured",
         action: "capture",
-        change_id: execution.state.change_id.short(),
-        content_hash: execution.state.hash().short(),
-        intent: execution.state.intent.clone(),
-        confidence: execution.state.confidence,
+        state_id: report.state_id.short(),
+        content_hash: report.content_hash.short(),
+        intent: report.intent,
+        confidence: report.confidence,
         task_assignment_id,
-        principal: (&execution.state.attribution.principal).into(),
-        agent: execution
-            .state
-            .attribution
-            .agent
-            .as_ref()
-            .map(SnapshotAgentOutput::from),
-        promotion_suggested,
-        heavy_impact_paths: heavy_impact_paths.clone(),
-        signed: execution.state.signature.is_some(),
-        message: format!(
-            "Captured state {} ({})",
-            execution.state.change_id.short(),
-            execution.state.hash().short()
-        ),
+        principal: (&report.principal).into(),
+        agent: report.agent.as_ref().map(SnapshotAgentOutput::from),
+        promotion_suggested: report.promotion_suggested,
+        heavy_impact_paths: report.heavy_impact_paths.clone(),
+        signed: report.signed,
+        message: report.summary,
         next_action: recommended_action.clone(),
         next_action_template: recommended_action_template.clone(),
         recommended_action,
         recommended_action_template,
         trust,
     };
-
-    hook_manager.run(Hook::PostSnapshot, &hook_ctx)?;
-
-    let post_capture_payload = serde_json::json!({
-        "state_id": execution.state.change_id.to_string_full(),
-    });
-    if let Err(err) = hook_manager.run_with_payload(
-        Hook::PostSnapshot,
-        &hook_ctx,
-        &post_capture_payload,
-        std::time::Duration::from_secs(5),
-    ) {
-        tracing::warn!(error = %err, "post_capture hook error swallowed");
-    }
-
     Ok((
         output,
-        snapshot_command_profile(execution.profile, thread_metadata_ms),
+        snapshot_command_profile(report.snapshot_profile, report.thread_metadata_ms),
     ))
-}
-
-fn update_active_thread_metadata(
-    repo: &Repository,
-    state: &objects::object::State,
-    tree: &Tree,
-) -> Result<(bool, Vec<String>)> {
-    let refresh = refresh_active_thread_metadata(repo, state, tree)?;
-    Ok((refresh.promotion_suggested, refresh.heavy_impact_paths))
 }
 
 fn active_task_assignment_id(repo: &Repository) -> Result<Option<String>> {
@@ -1076,7 +898,7 @@ fn active_task_assignment_id(repo: &Repository) -> Result<Option<String>> {
 
 fn default_bootstrap_intent(repo: &Repository) -> String {
     match repo.head_ref() {
-        Ok(Head::Attached { thread }) => format!("Bootstrap git-overlay on {}", thread),
+        Ok(refs::Head::Attached { thread }) => format!("Bootstrap git-overlay on {}", thread),
         _ => "Bootstrap git-overlay state".to_string(),
     }
 }
@@ -1095,7 +917,7 @@ fn snapshot_command_profile(
     }
 }
 
-fn build_attribution(
+pub(crate) fn build_attribution(
     repo: &Repository,
     user_config: &UserConfig,
     agent: &SnapshotAgentOverrides,
@@ -1139,7 +961,7 @@ fn build_attribution_with_env(
     // Pull the thread's declared actor — set when the user ran
     // `heddle start --agent-provider X --agent-model Y` to dedicate this
     // thread to a specific agent. The `start` command writes an
-    // `AgentEntry` into the `AgentRegistry`; `heddle status` already
+    // `ActorPresence` into the `ActorPresenceStore`; `heddle status` already
     // surfaces it via `build_thread_view`. We look it up here so
     // `heddle capture` propagates it onto the resulting state's
     // `attribution.agent` — otherwise every captured state on an agent
@@ -1156,7 +978,7 @@ fn build_attribution_with_env(
         .flatten()
         .and_then(|t| find_active_thread_entry(repo, &t.id).ok().flatten());
     // Harness probing writes the literal "unknown" placeholder into
-    // `AgentEntry.model` and `SessionSegment.model` when it can't
+    // `ActorPresence.model` and `SessionSegment.model` when it can't
     // identify the model from argv/env (see `harness::open_session`
     // and `claude_hook::handle_user_prompt_segment_rotate`). If we
     // let that placeholder participate in the precedence chain, an
@@ -1294,7 +1116,7 @@ fn build_attribution_with_env(
 ///
 /// Differs from the snapshot path in two ways — both intentional: it does not
 /// honor explicit `--agent-*` flag overrides (other commands don't expose
-/// those), and it does not consult the active `heddle session` chain. Use the
+/// those), and it does not consult the active `heddle agent provenance` chain. Use the
 /// snapshot path's full `resolve_*` for capture flows.
 pub(crate) fn resolve_attribution(
     repo: &Repository,
@@ -1401,9 +1223,7 @@ pub(crate) fn placeholder_principal_warning(principal: &Principal) -> String {
 }
 
 fn is_default_unknown_principal(principal: &Principal) -> bool {
-    principal.name.trim().is_empty()
-        || principal.email.trim().is_empty()
-        || (principal.name.trim() == "Unknown" && principal.email.trim() == "unknown@example.com")
+    principal_lacks_accountable_identity(&principal.name, &principal.email)
 }
 
 /// Walks the `anyhow::Error` source chain looking for an underlying
@@ -1439,13 +1259,13 @@ mod tests {
         repo: &Repository,
         provider: &str,
         model: &str,
-    ) -> objects::store::AgentEntry {
+    ) -> objects::store::ActorPresence {
         let thread = current_thread(repo)
             .unwrap()
             .expect("initialized repository has a current thread");
-        let registry = objects::store::AgentRegistry::new(repo.heddle_dir());
-        let entry = objects::store::AgentEntry {
-            session_id: objects::store::generate_agent_id(),
+        let registry = objects::store::ActorPresenceStore::new(repo.heddle_dir());
+        let entry = objects::store::ActorPresence {
+            session_id: objects::store::generate_actor_session_id(),
             client_instance_id: None,
             native_actor_key: Some("claude-code:session:session-457".to_string()),
             native_parent_actor_key: None,
@@ -1453,13 +1273,8 @@ mod tests {
             heddle_session_id: None,
             thread_id: Some(thread.id.clone()),
             thread: thread.id,
-            pid: Some(std::process::id()),
-            boot_id: None,
-            liveness_path: None,
-            heartbeat_at: Some(chrono::Utc::now()),
             anchor_state: None,
             anchor_root: None,
-            reservation_token: Some(objects::store::generate_agent_id()),
             path: Some(repo.root().to_path_buf()),
             base_state: String::new(),
             started_at: chrono::Utc::now(),
@@ -1476,7 +1291,7 @@ mod tests {
             winning_attach_rule: Some("test".to_string()),
             probe_source: Some("hook_payload".to_string()),
             probe_confidence: Some(0.99),
-            status: objects::store::AgentStatus::Active,
+            status: objects::store::ActorPresenceStatus::Active,
             completed_at: None,
             context_queries: Vec::new(),
         };

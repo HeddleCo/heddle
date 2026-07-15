@@ -170,7 +170,7 @@ fn test_thread_and_marker_listing_survives_ref_summary_maintenance() {
     heddle_must_succeed(&["thread", "create", "feature/ref-summary"], temp.path());
     heddle_must_succeed(&["thread", "marker", "create", "stable"], temp.path());
 
-    heddle_must_succeed(&["maintenance", "run"], temp.path());
+    heddle_must_succeed(&["maintenance", "refresh"], temp.path());
 
     let threads = heddle(&["thread", "list"], Some(temp.path())).unwrap();
     assert!(threads.contains("feature/ref-summary"));

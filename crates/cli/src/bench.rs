@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use objects::{
-    object::{ChangeId, Tree},
+    object::{StateId, Tree},
     store::ObjectStore,
 };
 use repo::Repository;
@@ -9,9 +9,9 @@ use crate::cli::commands::{bench_detect_renames, bench_find_merge_base, bench_th
 
 pub fn find_merge_base_for_bench(
     repo: &Repository,
-    state_a: &ChangeId,
-    state_b: &ChangeId,
-) -> anyhow::Result<Option<ChangeId>> {
+    state_a: &StateId,
+    state_b: &StateId,
+) -> anyhow::Result<Option<StateId>> {
     bench_find_merge_base(repo, state_a, state_b)
 }
 

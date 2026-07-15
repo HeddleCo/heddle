@@ -10,6 +10,24 @@ fn head_short(root: &std::path::Path) -> String {
     repo.head().unwrap().expect("repo has HEAD").short()
 }
 
+/// Drop pack store contents so a removed loose state cannot be resolved via pack.
+/// Handles L8 journal subdirs (`.staging`, `.install-intent`, `.pack-locks`) that
+/// plain `remove_file` cannot delete (PermissionDenied / EISDIR on directories).
+fn wipe_pack_store(repo_root: &std::path::Path) {
+    let packs_dir = repo_root.join(".heddle/packs");
+    if !packs_dir.exists() {
+        return;
+    }
+    for entry in std::fs::read_dir(&packs_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).unwrap();
+        } else {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+}
+
 #[test]
 fn test_undo_at_beginning() {
     let temp = TempDir::new().unwrap();
@@ -192,231 +210,6 @@ fn test_undo_refuses_when_tracked_file_modified() {
     heddle(&["undo", "-n", "1"], Some(temp.path())).expect("undo succeeds once worktree is clean");
 }
 
-/// Regression: `heddle cherry-pick` must refuse when an untracked file sits in
-/// the worktree. Cherry-pick rewrites the worktree to match the picked commit's
-/// tree, and without the guard any untracked file on a path the picked tree
-/// touches is silently destroyed.
-#[test]
-fn test_cherry_pick_refuses_when_untracked_file_present() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    // Build a feature commit on a side thread, then come back to main.
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "Feature"], temp.path());
-    let log = heddle_must_succeed(&["log", "--oneline", "--output", "text"], temp.path());
-    let feature_commit = log
-        .lines()
-        .next()
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_string();
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-
-    // Drop an untracked file the user cares about into the worktree.
-    let untracked = temp.path().join("user-notes.md");
-    std::fs::write(&untracked, "user-written content").unwrap();
-
-    let err = heddle(
-        &["cherry-pick", &feature_commit, "--output", "json"],
-        Some(temp.path()),
-    )
-    .expect_err("cherry-pick must refuse on dirty worktree");
-    assert!(
-        err.contains("untracked"),
-        "error should mention untracked: {err}"
-    );
-    assert!(untracked.exists(), "untracked file must survive refusal");
-}
-
-/// Regression: `heddle cherry-pick` must refuse when a tracked file has been
-/// modified since the last snapshot. The modification would be silently
-/// destroyed by the cherry-pick's tree apply.
-#[test]
-fn test_cherry_pick_refuses_when_tracked_file_modified() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "Feature"], temp.path());
-    let log = heddle_must_succeed(&["log", "--oneline", "--output", "text"], temp.path());
-    let feature_commit = log
-        .lines()
-        .next()
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_string();
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-
-    // Modify a tracked file without snapshotting.
-    std::fs::write(temp.path().join("base.txt"), "uncommitted edit").unwrap();
-
-    let err = heddle(
-        &["cherry-pick", &feature_commit, "--output", "json"],
-        Some(temp.path()),
-    )
-    .expect_err("cherry-pick must refuse with modified file");
-    assert!(
-        err.contains("modified"),
-        "error should mention modified: {err}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("base.txt")).unwrap(),
-        "uncommitted edit",
-        "modification must survive refusal"
-    );
-}
-
-/// `heddle cherry-pick --force` bypasses the guard. The uncommitted edit is
-/// (expectedly) destroyed when the cherry-picked tree is applied.
-#[test]
-fn test_cherry_pick_force_proceeds_and_destroys_edit() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "Feature"], temp.path());
-    let log = heddle_must_succeed(&["log", "--oneline", "--output", "text"], temp.path());
-    let feature_commit = log
-        .lines()
-        .next()
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_string();
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-
-    // Untracked file the user cares about — `--force` should clobber it.
-    let untracked = temp.path().join("user-notes.md");
-    std::fs::write(&untracked, "user-written content").unwrap();
-
-    heddle(
-        &["cherry-pick", "--force", &feature_commit],
-        Some(temp.path()),
-    )
-    .expect("cherry-pick --force must succeed past the guard");
-}
-
-/// Regression: `heddle rebase` must refuse when an untracked file sits in the
-/// worktree. Rebase calls `fast_forward_attached` which goes through
-/// `plan_worktree_apply`, where the dirty-worktree fallback to
-/// `FullRematerialize` would silently wipe the untracked file.
-#[test]
-fn test_rebase_refuses_when_untracked_file_present() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    // Create a side thread that advances; main stays behind so rebase has
-    // somewhere to fast-forward to.
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "Feature"], temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    let untracked = temp.path().join("user-notes.md");
-    std::fs::write(&untracked, "user-written content").unwrap();
-
-    let err = heddle(
-        &["rebase", "feature", "--output", "json"],
-        Some(temp.path()),
-    )
-    .expect_err("rebase must refuse on dirty worktree");
-    assert!(
-        err.contains("untracked"),
-        "error should mention untracked: {err}"
-    );
-    assert!(untracked.exists(), "untracked file must survive refusal");
-}
-
-/// Regression: `heddle rebase` must refuse when a tracked file has been
-/// modified since the last snapshot. The modification would be silently
-/// destroyed by the rebase's tree apply.
-#[test]
-fn test_rebase_refuses_when_tracked_file_modified() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "Feature"], temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    std::fs::write(temp.path().join("base.txt"), "uncommitted edit").unwrap();
-
-    let err = heddle(
-        &["rebase", "feature", "--output", "json"],
-        Some(temp.path()),
-    )
-    .expect_err("rebase must refuse with modified file");
-    assert!(
-        err.contains("modified"),
-        "error should mention modified: {err}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("base.txt")).unwrap(),
-        "uncommitted edit",
-        "modification must survive refusal"
-    );
-}
-
-/// `heddle rebase --force` bypasses the guard. The uncommitted edit is
-/// (expectedly) destroyed when the fast-forward applies the target tree.
-#[test]
-fn test_rebase_force_proceeds_and_destroys_edit() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "Feature"], temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    let untracked = temp.path().join("user-notes.md");
-    std::fs::write(&untracked, "user-written content").unwrap();
-
-    heddle(&["rebase", "--force", "feature"], Some(temp.path()))
-        .expect("rebase --force must succeed past the guard");
-}
-
-/// Regression: a Repository-level test that `clear_worktree` and the
-/// incremental remove path both tolerate ENOTEMPTY when the directory holds
-/// local-only content. This is the unit-level companion to the CLI test
-/// above.
 #[test]
 fn test_undo_with_dotgit_directory_present() {
     let temp = TempDir::new().unwrap();
@@ -456,13 +249,6 @@ fn test_undo_with_dotgit_directory_present() {
         "worktree must match HEAD after undo"
     );
 }
-
-// ---------------------------------------------------------------------------
-// MVP undo coverage for the three operations daily users will reach for:
-// `heddle capture`, `heddle merge` (FF and non-FF), plus the safety contracts
-// the MVP must satisfy (--dry-run alias, refusal across destructive boundaries,
-// discoverable --help surface).
-// ---------------------------------------------------------------------------
 
 /// `heddle capture` followed by `heddle undo` must restore HEAD to the
 /// pre-capture parent state — not "some earlier state", not "the empty state",
@@ -554,13 +340,8 @@ fn test_undo_captures_pre_undo_state_into_recovery_marker() {
     );
 }
 
-/// The recovery marker makes the pre-undo content recoverable by name,
-/// independent of the (fragile) redo stack: after undo, `heddle switch
-/// undo-recovery` restores the pre-undo worktree even once a divergent capture
-/// has been layered on top of the reverted state. This is the data-safety
-/// guarantee — nothing absorbed by the undone capture is lost.
 #[test]
-fn test_undo_recovery_marker_survives_divergent_capture() {
+fn test_undo_recover_survives_divergent_capture() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
 
@@ -570,42 +351,58 @@ fn test_undo_recovery_marker_survives_divergent_capture() {
     heddle_must_succeed(&["capture", "-m", "friction"], temp.path());
     let friction_state = head_short(temp.path());
 
-    heddle_must_succeed(&["undo"], temp.path());
+    let undo: Value = serde_json::from_str(&heddle_must_succeed(
+        &["--output", "json", "undo"],
+        temp.path(),
+    ))
+    .unwrap();
+    assert_eq!(undo["next_action"], "heddle undo --recover");
 
-    // Diverge: a fresh capture layered onto the reverted worktree.
     std::fs::write(temp.path().join("notes.md"), "different direction\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "diverge"], temp.path());
-
-    // The durable internal recovery ref still pins the pre-undo (friction)
-    // state, untouched by the divergent capture.
-    let repo = Repository::open(temp.path()).unwrap();
-    let recovery = repo
-        .refs()
-        .get_undo_recovery()
+    let divergent_tip = head_short(temp.path());
+    let head_before = Repository::open(temp.path())
         .unwrap()
-        .expect("recovery ref must survive a divergent capture");
-    assert_eq!(recovery.short(), friction_state);
+        .refs()
+        .read_head()
+        .unwrap();
 
-    // Recover the pre-undo content via the well-known handle.
-    heddle_must_succeed(&["switch", ".undo-recovery"], temp.path());
+    let recovered: Value = serde_json::from_str(&heddle_must_succeed(
+        &["--output", "json", "undo", "--recover"],
+        temp.path(),
+    ))
+    .unwrap();
+    assert_eq!(recovered["output_kind"], "undo_recover");
+    assert_eq!(recovered["action"], "recover");
+    assert_eq!(recovered["status"], "completed");
+    assert_eq!(recovered["recovery_state"], friction_state);
+    assert!(
+        recovered["recommended_action"]
+            .as_str()
+            .is_some_and(|action| action.starts_with("heddle capture")),
+        "{recovered}"
+    );
     assert_eq!(
         std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
-        "FRICTION ONE\nFRICTION TWO\n",
-        "the pre-undo content must be recoverable via the durable recovery handle"
+        "FRICTION ONE\nFRICTION TWO\n"
     );
+
+    let repo = Repository::open(temp.path()).unwrap();
+    assert_eq!(
+        repo.head().unwrap().map(|state| state.short()),
+        Some(divergent_tip)
+    );
+    assert_eq!(repo.refs().read_head().unwrap(), head_before);
+    let status: Value = serde_json::from_str(&heddle_must_succeed(
+        &["--output", "json", "status"],
+        temp.path(),
+    ))
+    .unwrap();
+    assert_eq!(status["verification"]["worktree_state"], "dirty");
 }
 
-/// heddle#305 r2: the pre-undo recovery pointer must live in a heddle-internal
-/// reserved ref, NOT the user marker namespace. Storing it as a user marker
-/// named `undo-recovery` couples heddle bookkeeping to a user-writable name:
-/// the `MarkerDelete` undo inverse re-creates user markers with a `Missing`
-/// expectation, so a same-named recovery marker pre-written by `undo` would
-/// make that inverse fail (`create_marker(undo-recovery, Missing)` collides).
-/// Moving recovery out of `refs/markers/` makes the whole class impossible by
-/// construction: user `marker create/delete` (and their inverses) can never
-/// see or clobber the internal pointer, and vice versa.
 #[test]
-fn test_undo_recovery_lives_outside_user_marker_namespace() {
+fn test_undo_recover_ref_lives_outside_user_marker_namespace() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
 
@@ -616,8 +413,6 @@ fn test_undo_recovery_lives_outside_user_marker_namespace() {
     let friction_state = head_short(temp.path());
 
     heddle_must_succeed(&["undo"], temp.path());
-
-    // (a) recovery must NOT pollute the user marker namespace.
     let markers: Value = serde_json::from_str(&heddle_must_succeed(
         &["--output", "json", "thread", "marker", "list"],
         temp.path(),
@@ -628,37 +423,9 @@ fn test_undo_recovery_lives_outside_user_marker_namespace() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|m| m["name"] != "undo-recovery"),
-        "recovery bookkeeping must not appear as a user marker"
+            .all(|marker| marker["name"] != "undo-recovery")
     );
 
-    // (b) it lives in the heddle-internal recovery ref, pinning the pre-undo
-    // state — a namespace the user marker CLI cannot enumerate or collide with.
-    let repo = Repository::open(temp.path()).unwrap();
-    let recovery = repo
-        .refs()
-        .get_undo_recovery()
-        .unwrap()
-        .expect("undo must preserve the pre-undo state in the internal recovery ref");
-    assert_eq!(
-        recovery.short(),
-        friction_state,
-        "internal recovery ref must pin the pre-undo (friction) state"
-    );
-
-    // (c) the recovery UX is preserved: `goto .undo-recovery` resolves the
-    // internal ref and restores the pre-undo content.
-    heddle_must_succeed(&["switch", ".undo-recovery"], temp.path());
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
-        "FRICTION\n",
-        "the pre-undo content must be recoverable via the internal handle"
-    );
-
-    // (d) coexistence: a user may now legitimately create and delete their own
-    // marker named `undo-recovery` without colliding with — or disturbing —
-    // the internal recovery pointer. This is the closed class: the two
-    // namespaces are independent.
     heddle_must_succeed(
         &["thread", "marker", "create", "undo-recovery"],
         temp.path(),
@@ -672,29 +439,27 @@ fn test_undo_recovery_lives_outside_user_marker_namespace() {
         repo.refs()
             .get_undo_recovery()
             .unwrap()
-            .map(|id| id.short()),
-        Some(friction_state),
-        "user marker create/delete must not touch the internal recovery ref"
+            .map(|state| state.short()),
+        Some(friction_state.clone())
+    );
+
+    let head_before_recovery = head_short(temp.path());
+    heddle_must_succeed(&["undo", "--recover"], temp.path());
+    assert_eq!(head_short(temp.path()), head_before_recovery);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
+        "FRICTION\n"
     );
 }
 
-/// heddle#305 r3: the advertised recovery handle must be UNSHADOWABLE on the
-/// READ path too. Worst case: a user already owns a marker literally named
-/// `undo-recovery`. The advertised handle `undo` prints (`recovery_marker`)
-/// must resolve to the INTERNAL pre-undo state, never the user's ref. r2 fixed
-/// the write path (internal ref) but left the advertised handle a bare
-/// user-namespace name that `resolve_refspec` resolves to the user ref first —
-/// this conformance test closes that direction.
 #[test]
-fn test_recovery_handle_unshadowable_by_user_marker() {
+fn test_undo_recover_is_unshadowable_by_same_named_user_marker() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
 
     std::fs::write(temp.path().join("notes.md"), "base\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "base"], temp.path());
     let base_state = head_short(temp.path());
-
-    // The user owns a marker named `undo-recovery`, pinning the BASE state.
     heddle_must_succeed(
         &["thread", "marker", "create", "undo-recovery"],
         temp.path(),
@@ -703,471 +468,95 @@ fn test_recovery_handle_unshadowable_by_user_marker() {
     std::fs::write(temp.path().join("notes.md"), "FRICTION\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "friction"], temp.path());
     let friction_state = head_short(temp.path());
-    assert_ne!(base_state, friction_state);
+    heddle_must_succeed(&["undo"], temp.path());
+    assert_eq!(
+        Repository::open(temp.path())
+            .unwrap()
+            .refs()
+            .get_undo_recovery()
+            .unwrap()
+            .map(|state| state.short()),
+        Some(friction_state)
+    );
+    heddle_must_succeed(&["undo", "--recover"], temp.path());
 
-    let undo: Value = serde_json::from_str(&heddle_must_succeed(
-        &["--output", "json", "undo"],
-        temp.path(),
-    ))
-    .unwrap();
-    let advertised = undo["recovery_marker"]
-        .as_str()
-        .expect("undo advertises a recovery handle");
-
-    // The advertised handle must resolve to the INTERNAL pre-undo (friction)
-    // state, NOT the user's same-named marker (which pins base).
-    heddle_must_succeed(&["switch", advertised], temp.path());
     assert_eq!(
         std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
-        "FRICTION\n",
-        "advertised recovery handle must restore the internal pre-undo state, not the user's ref"
+        "FRICTION\n"
     );
-
-    // The user's own `undo-recovery` marker is untouched and still pins base.
     let repo = Repository::open(temp.path()).unwrap();
+    assert_eq!(
+        repo.head().unwrap().map(|state| state.short()),
+        Some(base_state.clone())
+    );
     assert_eq!(
         repo.refs()
             .get_marker(&objects::object::MarkerName::new("undo-recovery"))
             .unwrap()
-            .map(|id| id.short()),
-        Some(base_state),
-        "the user's own undo-recovery marker must remain intact and independent"
+            .map(|state| state.short()),
+        Some(base_state)
     );
 }
 
-/// Fast-forward merge undo, full restoration: HEAD *and* the merged-into
-/// thread ref both rewind to the pre-merge tip. This pins the heddle#99 fix —
-/// before it landed, the FF merge recorded an `OpRecord::Goto` whose inverse
-/// only rewinds HEAD, stranding the target thread ref at the FF target. The
-/// new `OpRecord::FastForward` variant carries the pre-FF tip so undo restores
-/// both refs together.
-///
-/// This test was previously named
-/// `test_undo_ff_merge_restores_head_but_strands_thread_ref` and asserted the
-/// stranded-ref behavior as a pinned bug. Renamed and the strand assertion
-/// flipped when heddle#99 closed.
 #[test]
-fn test_undo_ff_merge_restores_head_and_thread_ref() {
+fn test_undo_recover_refuses_without_recovery_state_or_clean_worktree() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    std::fs::write(temp.path().join("notes.md"), "base\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-    let main_tip_before = head_short(temp.path());
 
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
-    let feature_tip_before = head_short(temp.path());
-    assert_ne!(main_tip_before, feature_tip_before);
+    let absent = heddle(
+        &["--output", "json", "undo", "--recover"],
+        Some(temp.path()),
+    )
+    .expect_err("recovery without a preserved state must refuse");
+    assert!(absent.contains("undo_recovery_unavailable"), "{absent}");
 
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    assert_eq!(head_short(temp.path()), main_tip_before);
-
-    heddle_must_succeed(&["merge", "feature"], temp.path());
-    assert_eq!(
-        head_short(temp.path()),
-        feature_tip_before,
-        "FF merge must advance main to feature's tip"
-    );
-
+    std::fs::write(temp.path().join("notes.md"), "recover me\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "recoverable"], temp.path());
     heddle_must_succeed(&["undo"], temp.path());
+    std::fs::write(temp.path().join("notes.md"), "unsaved\n").unwrap();
+    let dirty = heddle(
+        &["--output", "json", "undo", "--recover"],
+        Some(temp.path()),
+    )
+    .expect_err("recovery must refuse a dirty worktree");
+    assert!(dirty.contains("dirty_worktree"), "{dirty}");
     assert_eq!(
-        head_short(temp.path()),
-        main_tip_before,
-        "undo of FF merge must restore HEAD to main's pre-merge tip"
-    );
-
-    let repo = Repository::open(temp.path()).unwrap();
-
-    // Feature thread never moved during FF merge, so its tip is unchanged.
-    let feature_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("feature"))
-        .unwrap()
-        .expect("feature thread still exists")
-        .short();
-    assert_eq!(
-        feature_tip, feature_tip_before,
-        "feature thread tip must be unchanged across merge + undo"
-    );
-
-    // The heddle#99 fix: undoing an FF merge restores BOTH HEAD and the
-    // target thread ref to the pre-merge state. Recording the FF as
-    // `OpRecord::FastForward` (instead of `OpRecord::Goto`) gives the
-    // inverse the thread context it needs.
-    let main_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .expect("main thread still exists")
-        .short();
-    assert_eq!(
-        main_tip, main_tip_before,
-        "undo of FF merge must restore the `main` thread ref to its pre-merge tip \
-         (heddle#99 — was stranded at the FF target before the fix)"
-    );
-
-    // HEAD must remain attached to `main` so subsequent ops record on the
-    // expected lane. Pre-fix the strand also left HEAD detached, which
-    // silently broke scope filtering on the next undo.
-    match repo.head_ref().unwrap() {
-        refs::Head::Attached { thread } => assert_eq!(
-            thread, "main",
-            "HEAD must stay attached to `main` after FF undo"
-        ),
-        refs::Head::Detached { state } => panic!(
-            "HEAD must stay attached to `main`; got detached at {}",
-            state.short()
-        ),
-    }
-}
-
-/// Destructive-boundary protection covers `OpRecord::FastForward` too: if
-/// the pre-FF state is gone from the object store (gc --prune past the live
-/// oplog window, or oplog backup restored without its objects), undo must
-/// refuse loudly with a clear message instead of half-rewinding the worktree
-/// or panicking deep inside `goto`. Mirrors the `Goto`/`Snapshot` coverage
-/// in `test_undo_refuses_when_prior_state_missing` but exercises the new
-/// FF arm specifically.
-#[test]
-fn test_undo_ff_merge_refuses_when_pre_target_state_missing() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-    let main_tip_before = head_short(temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    heddle_must_succeed(&["merge", "feature"], temp.path());
-
-    // Simulate gc reaching past the pre-FF tip. Same shape as the
-    // Goto/Snapshot coverage above: drop the loose state file and any
-    // pack that could resolve it.
-    let state_path = locate_state_loose_file(temp.path(), &main_tip_before)
-        .expect("pre-FF state's loose file is present after merge");
-    std::fs::remove_file(&state_path).unwrap();
-    let packs_dir = temp.path().join(".heddle/packs");
-    if packs_dir.exists() {
-        for entry in std::fs::read_dir(&packs_dir).unwrap() {
-            std::fs::remove_file(entry.unwrap().path()).unwrap();
-        }
-    }
-
-    let err = heddle(&["undo"], Some(temp.path()))
-        .expect_err("undo must refuse when the pre-FF state is missing");
-    let lower = err.to_lowercase();
-    assert!(
-        lower.contains("missing") || lower.contains("gone") || lower.contains("garbage"),
-        "error must explain that prior state is missing: {err}"
+        std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
+        "unsaved\n"
     );
 }
 
-/// FF merge undo + redo round-trip: redo re-applies the FF, advancing both
-/// HEAD and the target thread ref back to the source's tip. The source
-/// thread is untouched throughout.
 #[test]
-fn test_redo_ff_merge_restores_head_and_thread_ref() {
+fn test_undo_recover_refuses_when_preserved_state_is_missing() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    std::fs::write(temp.path().join("notes.md"), "base\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-    let main_tip_before = head_short(temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
-    let feature_tip_before = head_short(temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    heddle_must_succeed(&["merge", "feature"], temp.path());
-    heddle_must_succeed(&["undo"], temp.path());
-    assert_eq!(head_short(temp.path()), main_tip_before);
-
-    heddle_must_succeed(&["undo", "--redo"], temp.path());
-    assert_eq!(
-        head_short(temp.path()),
-        feature_tip_before,
-        "redo of FF merge must re-advance HEAD to feature's tip"
-    );
-
-    let repo = Repository::open(temp.path()).unwrap();
-    let main_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .expect("main thread still exists")
-        .short();
-    assert_eq!(
-        main_tip, feature_tip_before,
-        "redo of FF merge must re-advance `main` thread ref to feature's tip"
-    );
-    let feature_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("feature"))
-        .unwrap()
-        .expect("feature thread still exists")
-        .short();
-    assert_eq!(
-        feature_tip, feature_tip_before,
-        "feature thread tip stays put across the full merge/undo/redo round-trip"
-    );
-}
-
-/// Redo of an FF merge must replay the *recorded* operation, not re-derive
-/// it from the source thread's current tip. heddle#99 r1 resolved
-/// `source_thread → tip` at redo time; if the source thread had advanced
-/// between undo and redo, redo silently pulled in commits that were never
-/// part of the original merge. The fix records `post_target_id` (the FF
-/// result SHA) at recording time and uses it directly on redo, so the
-/// replay is deterministic.
-///
-/// Pinned the bug pre-fix: this test was red before `FastForward` landed.
-#[test]
-fn test_redo_ff_merge_pins_recorded_tip_when_source_advances() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-    let main_tip_before = head_short(temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
-    let feature_tip_at_ff = head_short(temp.path());
-
-    // FF main → feature, then undo back to main_tip_before.
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    heddle_must_succeed(&["merge", "feature"], temp.path());
-    heddle_must_succeed(&["undo"], temp.path());
-    assert_eq!(head_short(temp.path()), main_tip_before);
-
-    // Advance the source thread after undo: a second capture on feature
-    // gives it a new tip distinct from the FF target. Pre-fix, redo would
-    // pick up *this* tip instead of the recorded FF target.
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work + more").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature again"], temp.path());
-    let feature_tip_advanced = head_short(temp.path());
-    assert_ne!(
-        feature_tip_at_ff, feature_tip_advanced,
-        "post-undo capture on feature must produce a new tip distinct from the FF target"
-    );
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    heddle_must_succeed(&["undo", "--redo"], temp.path());
-
-    // The recorded FF target — not feature's current tip — is what redo must
-    // restore. HEAD and the `main` thread ref both end at the original FF SHA.
-    assert_eq!(
-        head_short(temp.path()),
-        feature_tip_at_ff,
-        "redo of FF merge must replay to the recorded FF target, not source's current tip"
-    );
-    let repo = Repository::open(temp.path()).unwrap();
-    let main_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .expect("main thread still exists")
-        .short();
-    assert_eq!(
-        main_tip, feature_tip_at_ff,
-        "redo of FF merge must set `main` ref to the recorded FF target, not source's current tip"
-    );
-    let feature_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("feature"))
-        .unwrap()
-        .expect("feature thread still exists")
-        .short();
-    assert_eq!(
-        feature_tip, feature_tip_advanced,
-        "feature thread's own ref is independent of redo — it stays at its new tip"
-    );
-}
-
-/// Redo of an FF merge must succeed even when the source thread has been
-/// deleted after undo. The original merged state is fully recoverable from
-/// the recorded `post_target_id`; refusing redo here would punish the user
-/// for housekeeping a now-merged feature branch.
-///
-/// Pinned the bug pre-fix: heddle#99 r1's redo resolved `source_thread → tip`
-/// live and errored with "source thread no longer exists" when the user
-/// dropped the thread between undo and redo.
-#[test]
-fn test_redo_ff_merge_succeeds_when_source_deleted() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-    let main_tip_before = head_short(temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
-    let feature_tip_at_ff = head_short(temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    heddle_must_succeed(&["merge", "feature"], temp.path());
-    heddle_must_succeed(&["undo"], temp.path());
-    assert_eq!(head_short(temp.path()), main_tip_before);
-
-    // Delete the source thread between undo and redo.
-    heddle_must_succeed(
-        &["thread", "drop", "feature", "--delete-thread"],
-        temp.path(),
-    );
-
-    heddle_must_succeed(&["undo", "--redo"], temp.path());
-
-    assert_eq!(
-        head_short(temp.path()),
-        feature_tip_at_ff,
-        "redo must replay to the recorded FF target even when source thread is gone"
-    );
-    let repo = Repository::open(temp.path()).unwrap();
-    let main_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .expect("main thread still exists")
-        .short();
-    assert_eq!(
-        main_tip, feature_tip_at_ff,
-        "main ref must reach the recorded FF target after redo, source-thread-deletion notwithstanding"
-    );
-}
-
-/// Symmetric to `test_undo_ff_merge_refuses_when_pre_target_state_missing`:
-/// redo also has a destructive-boundary case. The state we'd advance to
-/// (`post_target_id`) must still be in the object store; if it has been
-/// pruned, redo must refuse with a clear message rather than partially
-/// rewinding HEAD past the boundary or panicking deep in `goto`.
-#[test]
-fn test_redo_ff_merge_refuses_when_post_target_state_missing() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
-    let feature_tip_at_ff = head_short(temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    heddle_must_succeed(&["merge", "feature"], temp.path());
-    // Undo first: HEAD is now back at main_tip_before, so the FF target SHA
-    // is no longer pinned by HEAD and can be removed to simulate a gc that
-    // pruned past the redo's reach.
+    std::fs::write(temp.path().join("notes.md"), "recover me\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "recoverable"], temp.path());
+    let recovery_state = head_short(temp.path());
     heddle_must_succeed(&["undo"], temp.path());
 
-    let state_path = locate_state_loose_file(temp.path(), &feature_tip_at_ff)
-        .expect("FF target state's loose file is present after undo");
-    std::fs::remove_file(&state_path).unwrap();
-    let packs_dir = temp.path().join(".heddle/packs");
-    if packs_dir.exists() {
-        for entry in std::fs::read_dir(&packs_dir).unwrap() {
-            std::fs::remove_file(entry.unwrap().path()).unwrap();
-        }
-    }
-    // Also drop the source thread ref so a live-resolve path can't smuggle
-    // the SHA back in by reading `feature → tip`. (Belt-and-braces: the new
-    // redo arm doesn't read the source thread at all, but locking this down
-    // ensures the test fails in the right way if a regression re-introduces
-    // a live-resolve fallback.)
-    heddle_must_succeed(
-        &["thread", "drop", "feature", "--delete-thread"],
-        temp.path(),
-    );
+    let state_path = locate_state_loose_file(temp.path(), &recovery_state)
+        .expect("preserved state has a loose object");
+    std::fs::remove_file(state_path).unwrap();
+    wipe_pack_store(temp.path());
 
-    let err = heddle(&["undo", "--redo"], Some(temp.path()))
-        .expect_err("redo must refuse when the FF target state is missing");
-    let lower = err.to_lowercase();
-    assert!(
-        lower.contains("missing") || lower.contains("gone") || lower.contains("garbage"),
-        "error must explain that the redo target state is missing: {err}"
+    let missing = heddle(
+        &["--output", "json", "undo", "--recover"],
+        Some(temp.path()),
+    )
+    .expect_err("recovery must refuse when its preserved state is missing");
+    assert!(missing.contains("undo_recovery_state_missing"), "{missing}");
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
+        "base\n"
     );
 }
 
-/// Divergent target/source histories are stale until refreshed. The old
-/// direct non-fast-forward merge path used to synthesize a merge state here;
-/// the stricter verification model refuses before writing an undoable op.
-#[test]
-fn test_stale_non_ff_merge_refuses_without_moving_threads() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    // Diverge feature.
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
-    let feature_tip_before = head_short(temp.path());
-
-    // Diverge main (independent file so the merge is conflict-free but non-FF).
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    std::fs::write(temp.path().join("main.txt"), "main work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "main work"], temp.path());
-    let main_tip_before = head_short(temp.path());
-
-    let err = heddle(&["merge", "feature"], Some(temp.path()))
-        .expect_err("stale divergent merge must refuse before mutation");
-    assert!(
-        err.contains("Thread 'feature' is stale") && err.contains("heddle sync --thread feature"),
-        "stale merge should explain the refresh path: {err}"
-    );
-    assert_eq!(
-        head_short(temp.path()),
-        main_tip_before,
-        "stale merge refusal must leave HEAD at main's pre-merge tip"
-    );
-
-    let repo = Repository::open(temp.path()).unwrap();
-
-    let main_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .expect("main thread still exists")
-        .short();
-    assert_eq!(
-        main_tip, main_tip_before,
-        "stale merge refusal must leave the `main` thread ref unchanged"
-    );
-
-    let feature_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("feature"))
-        .unwrap()
-        .expect("feature thread still exists")
-        .short();
-    assert_eq!(
-        feature_tip, feature_tip_before,
-        "stale merge refusal must leave the source thread unchanged"
-    );
-}
-
-/// `--dry-run` is the discoverable spelling of `--preview` documented in
-/// `heddle undo --help`. It must not mutate state.
+/// Dry-run reports the pending undo without changing repository state.
 #[test]
 fn test_undo_dry_run_alias_does_not_apply() {
     let temp = TempDir::new().unwrap();
@@ -1231,12 +620,7 @@ fn test_undo_refuses_when_prior_state_missing() {
     // Drop every pack in the repo too; heddle writes packs eagerly and a
     // surviving pack would still resolve the state, masking the test's
     // destructive-boundary intent.
-    let packs_dir = temp.path().join(".heddle/packs");
-    if packs_dir.exists() {
-        for entry in std::fs::read_dir(&packs_dir).unwrap() {
-            std::fs::remove_file(entry.unwrap().path()).unwrap();
-        }
-    }
+    wipe_pack_store(temp.path());
 
     let err = heddle(&["undo"], Some(temp.path()))
         .expect_err("undo must refuse when the prior state is missing");
@@ -1272,11 +656,15 @@ fn test_undo_help_lists_undoable_and_unsupported() {
         "--help should list capture as undoable: {help}"
     );
     assert!(
-        lower.contains("merge"),
-        "--help should list merge as undoable: {help}"
+        lower.contains("land"),
+        "--help should list land as undoable: {help}"
     );
     assert!(
-        lower.contains("push") || lower.contains("fetch") || lower.contains("cross-worktree"),
+        lower.contains("--recover") && lower.contains("worktree changes"),
+        "--help should explain recovery without moving HEAD: {help}"
+    );
+    assert!(
+        lower.contains("push") || lower.contains("pull") || lower.contains("cross-worktree"),
         "--help should call out what is NOT undoable: {help}"
     );
     // The worktree-attached refusal is a 0.3 contract — `--help` must
@@ -2268,146 +1656,7 @@ fn test_undo_preview_surfaces_worktree_refusal() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// heddle#110 — Rule-7 sweep for the remaining `fast_forward_attached`
-// callers (rebase / pull / land / merge-abort). Each daily-use command
-// recorded an implicit `OpRecord::Goto` for its FF, and the `Goto`
-// inverse only rewinds HEAD — silently stranding the attached thread
-// ref at the post-FF target. heddle#99 closed the bug for `merge` by
-// emitting `OpRecord::FastForward` instead; this PR extends the same
-// pattern to the other call sites. Per-site tests below pin each fix.
-// ---------------------------------------------------------------------------
-
-/// Rebase fast-forward (ancestor path): when `current → target` is a
-/// pure ancestor relation, `heddle rebase target` short-circuits to a
-/// single `fast_forward_attached` call. Undo must restore both HEAD
-/// and the rebased thread's ref to its pre-rebase tip — pre-fix the
-/// ref was stranded at `target` while HEAD rewound to the pre-rebase
-/// state, leaving the repo in a divergent shape.
-#[test]
-fn test_undo_rebase_ancestor_ff_restores_thread_ref() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    // Build feature past main: feature is a strict descendant of main.
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
-    let feature_tip = head_short(temp.path());
-
-    // Back on main; main is an ancestor of feature, so rebase is a
-    // pure FF that flows through `rebase/mod.rs:177`.
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    let main_tip_before = head_short(temp.path());
-    heddle_must_succeed(&["rebase", "feature"], temp.path());
-    assert_eq!(
-        head_short(temp.path()),
-        feature_tip,
-        "ancestor rebase must FF main to feature's tip"
-    );
-
-    heddle_must_succeed(&["undo"], temp.path());
-    assert_eq!(
-        head_short(temp.path()),
-        main_tip_before,
-        "undo of rebase FF must restore HEAD to main's pre-rebase tip"
-    );
-    let repo = Repository::open(temp.path()).unwrap();
-    let main_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .expect("main thread still exists")
-        .short();
-    assert_eq!(
-        main_tip, main_tip_before,
-        "undo of rebase FF must restore main thread ref to pre-rebase tip \
-         (heddle#110 — was stranded at the FF target before the fix)"
-    );
-    match repo.head_ref().unwrap() {
-        refs::Head::Attached { thread } => assert_eq!(
-            thread, "main",
-            "HEAD must stay attached to main after rebase FF undo"
-        ),
-        refs::Head::Detached { state } => panic!(
-            "HEAD must stay attached to main; got detached at {}",
-            state.short()
-        ),
-    }
-}
-
-/// Rebase replay: when the threads have diverged, rebase replays
-/// each commit one at a time. Each replay step records its own
-/// `OpRecord::FastForward`, so a single `heddle undo` after the
-/// rebase rewinds exactly one replayed commit — and the thread ref
-/// rewinds with it. Pre-fix, the ref was stranded at the last
-/// replayed commit while HEAD rewound to the prior step.
-#[test]
-fn test_undo_rebase_replay_restores_thread_ref() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    // feature diverges from main on a different file.
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature commit"], temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    std::fs::write(temp.path().join("main.txt"), "main work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "main commit"], temp.path());
-    let main_tip_before = head_short(temp.path());
-
-    // Rebase main onto feature: replays main's commit on top of
-    // feature, flowing through `rebase_ops.rs:284` (apply_commit).
-    heddle_must_succeed(&["rebase", "feature"], temp.path());
-    let after_rebase = head_short(temp.path());
-    assert_ne!(
-        after_rebase, main_tip_before,
-        "rebase replay must produce a fresh tip distinct from the pre-rebase main"
-    );
-
-    // Single undo rewinds the last (and only) replayed commit.
-    heddle_must_succeed(&["undo"], temp.path());
-    assert_eq!(
-        head_short(temp.path()),
-        main_tip_before,
-        "undo of rebase replay must restore HEAD to main's pre-rebase tip"
-    );
-    let repo = Repository::open(temp.path()).unwrap();
-    let main_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .expect("main thread still exists")
-        .short();
-    assert_eq!(
-        main_tip, main_tip_before,
-        "undo of rebase replay must restore main thread ref to pre-rebase tip \
-         (heddle#110 — was stranded at the replay tip before the fix)"
-    );
-    match repo.head_ref().unwrap() {
-        refs::Head::Attached { thread } => assert_eq!(thread, "main"),
-        refs::Head::Detached { state } => panic!(
-            "HEAD must stay attached to main; got detached at {}",
-            state.short()
-        ),
-    }
-}
-
-/// Pull (local sync): `heddle pull <source>` advances the local
-/// thread ref to the pulled state and, when the pulled thread is the
-/// current checkout, materializes the worktree via
-/// `fast_forward_attached`. Undo must restore the local thread ref
-/// to its pre-pull tip — pre-fix the implicit `OpRecord::Goto` left
-/// the local ref stranded at the pulled state on undo.
+/// Undoing a pull must restore both HEAD and the attached thread ref.
 #[test]
 fn test_undo_pull_local_restores_thread_ref() {
     let source = TempDir::new().unwrap();
@@ -2548,12 +1797,8 @@ fn test_undo_resolve_abort_keeps_thread_ref_at_ours() {
 /// `thread resolve` from main to flip the resolution flag. `heddle
 /// land --thread <feature>` then enters `adopt_manual_resolution`,
 /// whose `fast_forward_attached` call we're pinning.
-///
-/// In environments where land can't reach the adopt branch (no
-/// git-overlay, no hosted config), we fall back to asserting that
-/// the migration didn't break the `thread resolve` flow itself.
 #[test]
-fn test_undo_ship_manual_resolution_restores_thread_ref() {
+fn test_undo_land_manual_resolution_restores_thread_ref() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
 
@@ -2583,26 +1828,43 @@ fn test_undo_ship_manual_resolution_restores_thread_ref() {
     // `thread resolve` flips manual_resolution_state on feature
     // when the thread merges cleanly. This is the trigger
     // `adopt_manual_resolution` looks for during land.
-    let _ = heddle(&["thread", "resolve", "feature"], Some(temp.path()));
+    heddle_must_succeed(&["thread", "resolve", "feature"], temp.path());
+    {
+        use repo::ThreadManager;
+
+        let repo = Repository::open(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+        let feature = manager
+            .find_by_thread("feature")
+            .unwrap()
+            .expect("feature thread record exists after resolve");
+        assert!(
+            feature
+                .integration_policy_result
+                .manual_resolution_state
+                .is_some(),
+            "thread resolve must record the state that land will adopt"
+        );
+    }
 
     let land = heddle(
         &["--output", "json", "land", "--thread", "feature"],
         Some(temp.path()),
     );
-    let ship_out = match land {
+    let land_out = match land {
         Ok(out) => out,
         Err(err) => {
             panic!("land failed: {err}");
         }
     };
     assert!(
-        ship_out.contains("\"status\":\"landed\"") || ship_out.contains("\"status\": \"landed\""),
-        "land must reach the manual-resolution adopt path: {ship_out}"
+        land_out.contains("\"status\":\"landed\"") || land_out.contains("\"status\": \"landed\""),
+        "land must reach the manual-resolution adopt path: {land_out}"
     );
     let after_ship = head_short(temp.path());
     assert_ne!(
         after_ship, main_tip_before,
-        "land must advance main; otherwise the FF is a no-op and there's nothing to undo: {ship_out}"
+        "land must advance main; otherwise the FF is a no-op and there's nothing to undo: {land_out}"
     );
 
     heddle_must_succeed(&["undo"], temp.path());
@@ -2620,67 +1882,11 @@ fn test_undo_ship_manual_resolution_restores_thread_ref() {
     );
 }
 
-/// Deterministic redo for `rebase`: forward FF → undo → advance the
+/// Deterministic redo for `pull`: forward FF → undo → advance the
 /// source thread → redo must replay to the recorded post-FF SHA,
 /// not re-resolve from the source thread's (now advanced) tip. This
-/// pins heddle#99 r2's deterministic-redo contract for the rebase
-/// call sites: the recorded FastForward carries `post_target_id`
-/// so the OpRecord is self-sufficient.
-#[test]
-fn test_redo_rebase_pins_recorded_tip_when_source_advances() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
-    let feature_at_rebase = head_short(temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    let main_tip_before = head_short(temp.path());
-    // Ancestor FF (main → feature): records FastForward with
-    // post_target_id = feature's current tip.
-    heddle_must_succeed(&["rebase", "feature"], temp.path());
-    assert_eq!(head_short(temp.path()), feature_at_rebase);
-
-    heddle_must_succeed(&["undo"], temp.path());
-    assert_eq!(head_short(temp.path()), main_tip_before);
-
-    // Advance feature after undo. Pre-fix (or under a name-resolve
-    // redo), this new tip would be smuggled into the redo target.
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature + more").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature again"], temp.path());
-    let feature_advanced = head_short(temp.path());
-    assert_ne!(feature_at_rebase, feature_advanced);
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    heddle_must_succeed(&["undo", "--redo"], temp.path());
-    assert_eq!(
-        head_short(temp.path()),
-        feature_at_rebase,
-        "redo of rebase FF must replay to the recorded post-FF SHA, \
-         not feature's advanced tip"
-    );
-    let repo = Repository::open(temp.path()).unwrap();
-    let main_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .expect("main thread still exists")
-        .short();
-    assert_eq!(main_tip, feature_at_rebase);
-}
-
-/// Deterministic redo for `pull`: forward pull → undo → advance the
-/// remote source thread → redo must replay to the recorded pulled
-/// SHA, not re-resolve the remote's current tip. The bug shape is
-/// identical to the rebase case above; this pin guarantees the
-/// FastForward contract holds on the pull call site too.
+/// pins the recorded FastForward contract: `post_target_id` makes the
+/// operation self-sufficient.
 #[test]
 fn test_redo_pull_pins_recorded_tip_when_source_advances() {
     let source = TempDir::new().unwrap();
@@ -2722,524 +1928,7 @@ fn test_redo_pull_pins_recorded_tip_when_source_advances() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// heddle#198 — `heddle undo` for `heddle rebase` via transaction grouping.
-//
-// Pre-fix, `rebase_ops::replay_commits` recorded one `FastForward` op
-// per replayed commit, each in its own undo batch. A 3-commit rebase
-// therefore needed 3 `heddle undo` invocations to roll back, and an
-// undo chain that stopped one or two steps in left the thread tip
-// stranded at an intermediate replayed commit. Post-fix, the whole
-// rebase is wrapped in a single oplog batch so one undo rewinds the
-// whole rebase atomically — matching the "safety net" framing of
-// `heddle undo`.
-// ---------------------------------------------------------------------------
-
-/// Red commit: rebase replays multiple commits, then a single `heddle
-/// undo` must rewind the entire rebase to the pre-rebase thread tip
-/// and the rebased thread ref must follow. Pre-fix this needed N undo
-/// steps for N replayed commits; one step rewound only the last
-/// replay, leaving the thread tip on a synthetic intermediate state.
-#[test]
-fn test_undo_rebase_replay_multi_commit_rewinds_whole_transaction() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    // feature diverges on a different file so the rebase replays
-    // cleanly (no conflict resolution needed).
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature commit"], temp.path());
-
-    // main accumulates THREE commits on disjoint paths so the rebase
-    // produces three apply_commit calls, each of which today records
-    // its own FastForward entry.
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    std::fs::write(temp.path().join("a.txt"), "a1").unwrap();
-    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
-    std::fs::write(temp.path().join("b.txt"), "b1").unwrap();
-    heddle_must_succeed(&["capture", "-m", "b"], temp.path());
-    std::fs::write(temp.path().join("c.txt"), "c1").unwrap();
-    heddle_must_succeed(&["capture", "-m", "c"], temp.path());
-    let main_tip_before = head_short(temp.path());
-
-    heddle_must_succeed(&["rebase", "feature"], temp.path());
-    let after_rebase = head_short(temp.path());
-    assert_ne!(
-        after_rebase, main_tip_before,
-        "rebase replay must produce a fresh tip distinct from the pre-rebase main"
-    );
-
-    // The contract: ONE undo rewinds the whole rebase (not N undos
-    // for N replayed commits).
-    heddle_must_succeed(&["undo"], temp.path());
-    assert_eq!(
-        head_short(temp.path()),
-        main_tip_before,
-        "single undo of a multi-commit rebase must restore HEAD to the pre-rebase tip"
-    );
-    let repo = Repository::open(temp.path()).unwrap();
-    let main_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .expect("main thread still exists")
-        .short();
-    assert_eq!(
-        main_tip, main_tip_before,
-        "single undo of a multi-commit rebase must restore main thread ref to the pre-rebase tip"
-    );
-    match repo.head_ref().unwrap() {
-        refs::Head::Attached { thread } => assert_eq!(thread, "main"),
-        refs::Head::Detached { state } => panic!(
-            "HEAD must stay attached to main; got detached at {}",
-            state.short()
-        ),
-    }
-
-    // Materializing the pre-rebase tip must still find the original
-    // commits' trees in the store — the append-only object store
-    // means the rebase's tree mutations don't displace the originals.
-    for path in ["a.txt", "b.txt", "c.txt"].iter() {
-        assert!(
-            temp.path().join(path).exists(),
-            "{path} from the original pre-rebase tree must still materialize after undo"
-        );
-    }
-}
-
-/// Redo symmetry for multi-commit rebase: undo then redo must restore
-/// the post-rebase tip in a single redo step (matching the single-step
-/// undo). Persists across CLI invocations, same as the existing FF
-/// redo surface in `test_redo_rebase_pins_recorded_tip_when_source_advances`.
-#[test]
-fn test_redo_rebase_replay_multi_commit_restores_post_rebase_tip() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature commit"], temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    std::fs::write(temp.path().join("a.txt"), "a1").unwrap();
-    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
-    std::fs::write(temp.path().join("b.txt"), "b1").unwrap();
-    heddle_must_succeed(&["capture", "-m", "b"], temp.path());
-
-    heddle_must_succeed(&["rebase", "feature"], temp.path());
-    let after_rebase = head_short(temp.path());
-
-    heddle_must_succeed(&["undo"], temp.path());
-    heddle_must_succeed(&["undo", "--redo"], temp.path());
-    assert_eq!(
-        head_short(temp.path()),
-        after_rebase,
-        "single redo of a multi-commit rebase must restore HEAD to the post-rebase tip"
-    );
-    let repo = Repository::open(temp.path()).unwrap();
-    let main_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .expect("main thread still exists")
-        .short();
-    assert_eq!(
-        main_tip, after_rebase,
-        "single redo of a multi-commit rebase must restore main thread ref to the post-rebase tip"
-    );
-}
-
-/// AC #4: `heddle undo` must refuse to roll back a rebase batch if
-/// the worktree is dirty (uncommitted edits to tracked files or
-/// untracked content). The general undo guard already covers this;
-/// the test pins that rebase batches go through the same path so a
-/// future refactor doesn't accidentally bypass it.
-#[test]
-fn test_undo_rebase_refuses_when_worktree_dirty() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    std::fs::write(temp.path().join("a.txt"), "a").unwrap();
-    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
-    std::fs::write(temp.path().join("b.txt"), "b").unwrap();
-    heddle_must_succeed(&["capture", "-m", "b"], temp.path());
-    let main_tip_before = head_short(temp.path());
-
-    heddle_must_succeed(&["rebase", "feature"], temp.path());
-    let after_rebase = head_short(temp.path());
-    assert_ne!(after_rebase, main_tip_before);
-
-    // Modify a tracked file post-rebase to put the worktree out of
-    // sync with HEAD. The rebase batch must NOT be undone while this
-    // edit could be silently destroyed by the rewind.
-    std::fs::write(temp.path().join("a.txt"), "uncommitted change").unwrap();
-    let err = heddle(&["undo", "--output", "json"], Some(temp.path()))
-        .expect_err("undo of rebase must refuse on dirty worktree");
-    assert!(
-        err.contains("modified") || err.contains("dirty") || err.contains("untracked"),
-        "refusal must name the dirty-worktree concern: {err}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("a.txt")).unwrap(),
-        "uncommitted change",
-        "uncommitted edit must survive the refusal"
-    );
-    // Tip stays at the post-rebase state — no half-undo.
-    assert_eq!(head_short(temp.path()), after_rebase);
-}
-
-/// AC #5: `heddle undo` must refuse to roll back a rebase batch when
-/// a blob reachable from the pre-rebase tree has been purged since
-/// (`Redact apply` + `Purge`). The rewind would land HEAD on a tip
-/// whose materialize would fail with a missing-blob error; refusing
-/// pre-mutation gives operators a single clear message instead.
-/// Mirrors the `Redact` inverse's "Refused regardless of the flag
-/// when the underlying bytes have since been purged" rule.
-#[test]
-fn test_undo_rebase_refuses_when_pre_rebase_blob_purged() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    // `secrets.toml` is captured into a blob that the rebase leaves
-    // unchanged (only `a.txt` / `b.txt` move on the main side), so
-    // the same blob is reachable from both the pre- and post-rebase
-    // trees. Purging it then invalidates the pre-rebase rewind.
-    std::fs::create_dir_all(temp.path().join("config")).unwrap();
-    std::fs::write(
-        temp.path().join("config/secrets.toml"),
-        b"api_token = \"will-be-purged\"\n",
-    )
-    .unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    std::fs::write(temp.path().join("a.txt"), "a").unwrap();
-    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
-    std::fs::write(temp.path().join("b.txt"), "b").unwrap();
-    heddle_must_succeed(&["capture", "-m", "b"], temp.path());
-
-    heddle_must_succeed(&["rebase", "feature"], temp.path());
-
-    // Need a state id for `redact apply <state> --path …`. After the
-    // rebase, the current state contains config/secrets.toml at the
-    // same blob hash as the pre-rebase tree.
-    let log_json = heddle_must_succeed(&["--output", "json", "log", "--limit", "1"], temp.path());
-    let log: Value = serde_json::from_str(&log_json).unwrap();
-    let current_state = log["states"][0]["change_id"].as_str().unwrap().to_string();
-
-    heddle_must_succeed(
-        &[
-            "redact",
-            "apply",
-            &current_state,
-            "--path",
-            "config/secrets.toml",
-            "--reason",
-            "rebase-undo-safety test",
-        ],
-        temp.path(),
-    );
-    heddle_must_succeed(
-        &[
-            "redact",
-            "purge",
-            "apply",
-            &current_state,
-            "--path",
-            "config/secrets.toml",
-            "--force",
-        ],
-        temp.path(),
-    );
-
-    let err = heddle(&["undo", "--allow-redact-undo"], Some(temp.path()))
-        .expect_err("undo of rebase must refuse when a pre-rebase blob has been purged");
-    assert!(
-        err.to_lowercase().contains("purge") || err.to_lowercase().contains("purged"),
-        "refusal must name the purge concern: {err}"
-    );
-}
-
-/// Pending-advances persistence across `heddle rebase --continue`:
-/// when the rebase pauses on a conflict mid-replay, the per-commit
-/// FF records that *did* apply cleanly before the conflict must
-/// survive the pause and end up in the same final batch as the
-/// post-resolution FF. Without persistence the buffered records
-/// would be lost on the second `heddle` invocation and the rebase
-/// would land with only the post-conflict FFs in the oplog, leaving
-/// `heddle undo` unable to rewind back past the conflict point.
-#[test]
-fn test_undo_rebase_continue_preserves_pre_conflict_advances() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    // Conflict happens on conflict.txt only — main has a clean
-    // commit on a.txt first, then a commit that conflicts.
-    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("conflict.txt"), "feature version\n").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature edit"], temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    // Commit #1 (a.txt) — clean against feature; rebase will apply
-    // this one successfully and buffer its FF record in
-    // RebaseState.pending_advances.
-    std::fs::write(temp.path().join("a.txt"), "a1").unwrap();
-    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
-    // Commit #2 (conflict.txt) — conflicts with feature; rebase
-    // pauses here. The buffered FF for commit #1 must survive the
-    // pause via the on-disk REBASE_STATE.
-    std::fs::write(temp.path().join("conflict.txt"), "main version\n").unwrap();
-    heddle_must_succeed(&["capture", "-m", "main conflict"], temp.path());
-    let main_tip_before = head_short(temp.path());
-
-    let rebase_output = heddle(&["rebase", "feature"], Some(temp.path())).unwrap_or_else(|out| out);
-    assert!(
-        rebase_output.contains("Conflict applying")
-            || rebase_output.contains("\"status\": \"conflict\""),
-        "expected rebase to pause on conflict; got: {rebase_output}"
-    );
-    assert!(
-        temp.path().join(".heddle/REBASE_STATE").exists(),
-        "rebase state should persist while waiting for manual resolution"
-    );
-
-    // Resolve via a manual capture, then thread resolve + continue
-    // (matching the existing test_rebase_continue_accepts_manual_resolution_snapshot
-    // pattern in state_management/merge.rs).
-    std::fs::write(
-        temp.path().join("conflict.txt"),
-        "feature version\nmain version\n",
-    )
-    .unwrap();
-    heddle_must_succeed(&["capture", "-m", "Manual rebase resolution"], temp.path());
-    let _ = heddle(&["thread", "resolve", "main", "--json"], Some(temp.path()));
-    heddle_must_succeed(&["rebase", "--continue"], temp.path());
-    assert!(
-        !temp.path().join(".heddle/REBASE_STATE").exists(),
-        "REBASE_STATE should clear after a successful continue"
-    );
-
-    // Single undo must rewind back past BOTH the pre-conflict FF
-    // (commit #1) AND the post-resolution FF — i.e. all the way to
-    // the pre-rebase tip. If pending_advances were lost across the
-    // continue, the undo would stop at the pre-conflict point and
-    // strand the tip on a synthetic state.
-    heddle_must_succeed(&["undo"], temp.path());
-    assert_eq!(
-        head_short(temp.path()),
-        main_tip_before,
-        "single undo must restore HEAD to pre-rebase tip even when the rebase paused on a conflict"
-    );
-    let repo = Repository::open(temp.path()).unwrap();
-    let main_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .expect("main thread still exists")
-        .short();
-    assert_eq!(
-        main_tip, main_tip_before,
-        "single undo must restore main thread ref to pre-rebase tip across a --continue"
-    );
-}
-
-/// Redo symmetry after a conflict-paused rebase: the manual-resolution
-/// step (the user's `capture -m "Manual resolution"` between the pause
-/// and the `--continue`) must be folded into the rebase batch so that
-/// `undo` → `redo` lands the thread back on the manual-resolution
-/// tip — not on the last cleanly replayed pre-conflict commit.
-///
-/// Pre-fix (Codex PR #218 P1): `resume_manual_resolution_if_present`
-/// advances `current_index` after accepting the captured resolution
-/// state but never appends an `OpRecord` to `pending_advances`, so the
-/// rebase batch's last FF target is the pre-conflict commit's rebased
-/// tip, not the manual-resolution tip. Undo of the batch *appears* to
-/// work (the first FF's `pre_target_id` is still the pre-rebase tip),
-/// but redo replays only the recorded FFs and lands one commit short.
-#[test]
-fn test_redo_rebase_continue_restores_manual_resolution_tip() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("conflict.txt"), "feature version\n").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature edit"], temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    std::fs::write(temp.path().join("a.txt"), "a1").unwrap();
-    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
-    std::fs::write(temp.path().join("conflict.txt"), "main version\n").unwrap();
-    heddle_must_succeed(&["capture", "-m", "main conflict"], temp.path());
-    let main_tip_before = head_short(temp.path());
-
-    let rebase_output = heddle(&["rebase", "feature"], Some(temp.path())).unwrap_or_else(|out| out);
-    assert!(
-        rebase_output.contains("Conflict applying")
-            || rebase_output.contains("\"status\": \"conflict\""),
-        "expected rebase to pause on conflict; got: {rebase_output}"
-    );
-
-    std::fs::write(
-        temp.path().join("conflict.txt"),
-        "feature version\nmain version\n",
-    )
-    .unwrap();
-    heddle_must_succeed(&["capture", "-m", "Manual rebase resolution"], temp.path());
-    let _ = heddle(&["thread", "resolve", "main", "--json"], Some(temp.path()));
-    heddle_must_succeed(&["rebase", "--continue"], temp.path());
-
-    let after_rebase = head_short(temp.path());
-    assert_ne!(
-        after_rebase, main_tip_before,
-        "rebase must produce a fresh tip distinct from pre-rebase main"
-    );
-
-    heddle_must_succeed(&["undo"], temp.path());
-    assert_eq!(
-        head_short(temp.path()),
-        main_tip_before,
-        "single undo of a conflict-paused rebase must restore HEAD to pre-rebase tip"
-    );
-
-    heddle_must_succeed(&["undo", "--redo"], temp.path());
-    assert_eq!(
-        head_short(temp.path()),
-        after_rebase,
-        "single redo must restore HEAD to the manual-resolution tip, \
-         not the pre-conflict FF target"
-    );
-
-    let repo = Repository::open(temp.path()).unwrap();
-    let main_tip = repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .expect("main thread still exists")
-        .short();
-    assert_eq!(
-        main_tip, after_rebase,
-        "single redo must restore main thread ref to the manual-resolution tip \
-         across a --continue"
-    );
-}
-
-/// heddle#198 r2 (Codex PR #218 P2): `rebase --abort` must survive a
-/// corrupted `pending_advance=` line in REBASE_STATE. Pre-fix the
-/// strict loader's hard-fail on the first decode error blocked both
-/// abort and continue, leaving the operator stuck in an in-progress
-/// rebase with no CLI recovery path. Abort only needs `original_head`
-/// to rewind; the buffered FF history is discarded either way.
-#[test]
-fn test_rebase_abort_tolerates_corrupted_pending_advance_line() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("conflict.txt"), "feature\n").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature edit"], temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    // First commit (clean) — buffered as a pending_advance.
-    std::fs::write(temp.path().join("a.txt"), "a").unwrap();
-    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
-    // Second commit conflicts so the rebase pauses with REBASE_STATE
-    // persisting at least one `pending_advance=` line on disk.
-    std::fs::write(temp.path().join("conflict.txt"), "main\n").unwrap();
-    heddle_must_succeed(&["capture", "-m", "main conflict"], temp.path());
-    let main_tip_before = head_short(temp.path());
-
-    let rebase_output = heddle(&["rebase", "feature"], Some(temp.path())).unwrap_or_else(|out| out);
-    assert!(
-        rebase_output.contains("Conflict applying")
-            || rebase_output.contains("\"status\": \"conflict\""),
-        "expected rebase to pause on conflict; got: {rebase_output}"
-    );
-
-    // Simulate a crash mid-write / hand-edit by mangling the first
-    // `pending_advance=` line in place. The strict loader rejects this
-    // file outright; the abort loader must skip past it.
-    let state_path = temp.path().join(".heddle/REBASE_STATE");
-    let body = std::fs::read_to_string(&state_path).unwrap();
-    assert!(
-        body.contains("pending_advance="),
-        "fixture precondition: REBASE_STATE must carry at least one pending_advance entry; got:\n{body}"
-    );
-    let corrupted: String = body
-        .lines()
-        .map(|line| {
-            if line.starts_with("pending_advance=") {
-                "pending_advance=not-hex!!".to_string()
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(&state_path, format!("{corrupted}\n")).unwrap();
-
-    // Continue must still refuse loudly — the strict loader is what
-    // protects `--continue` from silently flushing a truncated batch.
-    let cont_err = heddle(&["rebase", "--continue"], Some(temp.path()))
-        .expect_err("continue must hard-fail on corrupted pending_advance");
-    assert!(
-        cont_err.contains("pending_advance"),
-        "continue refusal must name the corrupted record; got: {cont_err}"
-    );
-
-    // Abort must succeed: rewind HEAD to original_head and clear state.
-    heddle_must_succeed(&["rebase", "--abort"], temp.path());
-    assert_eq!(
-        head_short(temp.path()),
-        main_tip_before,
-        "abort must rewind HEAD to original_head even with a corrupted pending_advance line"
-    );
-    assert!(
-        !temp.path().join(".heddle/REBASE_STATE").exists(),
-        "REBASE_STATE must be cleared after a successful abort"
-    );
-}
-
-/// heddle#355: the atomic `undo`/`redo` migration commits a record-less
-/// `TransactionCommit` marker batch as its commit point. That marker carries no
-/// user-facing operation, so `undo --list` must filter it out — otherwise every
-/// undo would leave a phantom "transaction commit" batch in the history view
-/// (and the next `undo` would try to undo it). The raw oplog keeps the marker
-/// (it is the dedup/commit sentinel); only the history view hides it.
+/// Internal atomic marker batches must not appear as user-undoable operations.
 #[test]
 fn test_undo_list_hides_atomic_commit_marker_batches() {
     let temp = TempDir::new().unwrap();
@@ -3284,272 +1973,4 @@ fn test_undo_list_hides_atomic_commit_marker_batches() {
             "undo --list must not surface a record-less commit-marker batch: {list}"
         );
     }
-}
-
-/// A rebase batch must show up in `heddle undo --list` as a SINGLE
-/// batch with N entries (one per replayed commit), not N separate
-/// batches with one entry each. The JSON contract is the structured
-/// surface that downstream tools (and our own integration tests)
-/// depend on.
-#[test]
-fn test_undo_list_shows_multi_commit_rebase_as_single_batch() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("feat.txt"), "feature").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    std::fs::write(temp.path().join("a.txt"), "a").unwrap();
-    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
-    std::fs::write(temp.path().join("b.txt"), "b").unwrap();
-    heddle_must_succeed(&["capture", "-m", "b"], temp.path());
-
-    heddle_must_succeed(&["rebase", "feature"], temp.path());
-
-    let list = heddle_must_succeed(
-        &["--output", "json", "undo", "--list", "--depth", "10"],
-        temp.path(),
-    );
-    let parsed: Value = serde_json::from_str(&list).expect("list output is JSON");
-    let batches = parsed
-        .get("batches")
-        .and_then(|b| b.as_array())
-        .expect("list output has batches array");
-
-    // The most recent batch (index 0 — undo --list is most-recent-first)
-    // must be the rebase, and it must carry both replayed-commit ops
-    // in one batch.
-    let rebase_batch = &batches[0];
-    let ops = rebase_batch
-        .get("operations")
-        .and_then(|o| o.as_array())
-        .expect("batch has operations array");
-    assert!(
-        ops.len() >= 2,
-        "multi-commit rebase batch must contain >=2 ops; saw {}: {list}",
-        ops.len()
-    );
-    // Every op in the batch must be a fast-forward — no foreign ops
-    // should have been folded into the rebase batch.
-    for op in ops {
-        let desc = op.get("description").and_then(|d| d.as_str()).unwrap_or("");
-        assert!(
-            desc.starts_with("fast-forward") || desc.starts_with("transaction commit"),
-            "rebase batch entry must be FF or txn-commit marker, got: {desc}"
-        );
-    }
-}
-
-/// `heddle rebase <thread>` against the current thread's own tip is a
-/// no-op short-circuit. The JSON output path emits `up_to_date` and
-/// must not write a rebase batch to the oplog — pre-#198 a stray
-/// `record_ff_advance` on an identical tip would have written a
-/// zero-delta FF; the deferred-flush refactor preserves the original
-/// short-circuit shape (no batch).
-#[test]
-fn test_rebase_up_to_date_when_already_at_target_emits_json_and_records_nothing() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-    std::fs::write(temp.path().join("a.txt"), "a").unwrap();
-    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
-
-    let batches_before = heddle_must_succeed(
-        &["--output", "json", "undo", "--list", "--depth", "20"],
-        temp.path(),
-    );
-    let parsed_before: Value = serde_json::from_str(&batches_before).unwrap();
-    let count_before = parsed_before["batches"].as_array().unwrap().len();
-
-    let out = heddle_must_succeed(&["--output", "json", "rebase", "main"], temp.path());
-    let parsed: Value = serde_json::from_str(out.trim()).expect("up_to_date json");
-    assert_eq!(parsed["status"].as_str(), Some("up_to_date"));
-
-    let batches_after = heddle_must_succeed(
-        &["--output", "json", "undo", "--list", "--depth", "20"],
-        temp.path(),
-    );
-    let parsed_after: Value = serde_json::from_str(&batches_after).unwrap();
-    let count_after = parsed_after["batches"].as_array().unwrap().len();
-    assert_eq!(
-        count_before, count_after,
-        "no-op rebase must not append a batch to the oplog"
-    );
-}
-
-/// JSON output for the is_ancestor fast-forward arm. Distinct shape
-/// from `up_to_date` — must surface `fast_forwarded` with the target
-/// SHA so scripted callers can detect "this rebase materialized as a
-/// pure FF" vs the multi-commit replay flow. Also exercises the
-/// `flush_rebase_batch(&[advance])` single-FF wrap so `undo --list`
-/// shows the FF inside a transaction envelope.
-#[test]
-fn test_rebase_fast_forwarded_json_lists_target_and_creates_batch() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    // Create feature off main, advance it. main is now a strict ancestor
-    // of feature → rebasing main onto feature is a pure FF.
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("f.txt"), "feature").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-
-    let out = heddle_must_succeed(&["--output", "json", "rebase", "feature"], temp.path());
-    let parsed: Value = serde_json::from_str(out.trim()).expect("fast_forwarded json");
-    assert_eq!(parsed["status"].as_str(), Some("fast_forwarded"));
-    let to = parsed["to"].as_str().expect("to field present");
-    assert!(!to.is_empty());
-
-    // The single-FF arm must still wrap in a rebase batch — i.e.
-    // [FF, TransactionCommit] — so undo treats it like any other
-    // rebase. Verify via undo --list shape.
-    let list = heddle_must_succeed(
-        &["--output", "json", "undo", "--list", "--depth", "5"],
-        temp.path(),
-    );
-    let parsed_list: Value = serde_json::from_str(&list).unwrap();
-    let top = &parsed_list["batches"][0];
-    let ops = top["operations"].as_array().unwrap();
-    let has_tc = ops.iter().any(|op| {
-        op["description"]
-            .as_str()
-            .is_some_and(|d| d.starts_with("transaction commit"))
-    });
-    assert!(
-        has_tc,
-        "single-FF rebase batch must carry TransactionCommit marker"
-    );
-}
-
-/// JSON output for the multi-commit replay entry path. Must emit
-/// `started` with the commits count *before* the per-commit
-/// `applying` lines. Pairs with the `completed` event at the end of
-/// `replay_commits_internal`.
-#[test]
-fn test_rebase_started_json_announces_commit_count() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("f.txt"), "feature").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    std::fs::write(temp.path().join("a.txt"), "a").unwrap();
-    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
-    std::fs::write(temp.path().join("b.txt"), "b").unwrap();
-    heddle_must_succeed(&["capture", "-m", "b"], temp.path());
-
-    let out = heddle_must_succeed(&["--output", "json", "rebase", "feature"], temp.path());
-    // Output is multi-line JSON ND-stream: started, then per-commit
-    // applying, then completed. Pull the first line.
-    let first = out.lines().next().expect("at least one json line");
-    let parsed: Value = serde_json::from_str(first).expect("started json");
-    assert_eq!(parsed["status"].as_str(), Some("started"));
-    assert_eq!(parsed["commits"].as_u64(), Some(2));
-}
-
-/// `heddle rebase --abort` cleans the REBASE_STATE file and rewinds
-/// HEAD to `original_head`. Must emit the `aborted` JSON status and
-/// must NOT write a rebase batch to the oplog (the abort is a
-/// worktree-only rollback — `handle_abort` doesn't go through
-/// `flush_rebase_batch`).
-#[test]
-fn test_rebase_abort_json_clears_state_without_oplog_batch() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-
-    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
-    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
-
-    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
-    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
-    std::fs::write(temp.path().join("conflict.txt"), "feature\n").unwrap();
-    heddle_must_succeed(&["capture", "-m", "feature edit"], temp.path());
-
-    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    std::fs::write(temp.path().join("conflict.txt"), "main\n").unwrap();
-    heddle_must_succeed(&["capture", "-m", "main edit"], temp.path());
-    let head_before = head_short(temp.path());
-
-    // Force the rebase into a conflict pause so we have a
-    // REBASE_STATE file to abort.
-    let _ = heddle(&["rebase", "feature"], Some(temp.path()));
-    assert!(
-        temp.path().join(".heddle/REBASE_STATE").exists(),
-        "rebase should pause and leave REBASE_STATE on disk"
-    );
-
-    let batches_before_abort = heddle_must_succeed(
-        &["--output", "json", "undo", "--list", "--depth", "20"],
-        temp.path(),
-    );
-    let count_before = serde_json::from_str::<Value>(&batches_before_abort).unwrap()["batches"]
-        .as_array()
-        .unwrap()
-        .len();
-
-    let out = heddle_must_succeed(&["--output", "json", "rebase", "--abort"], temp.path());
-    let parsed: Value = serde_json::from_str(out.trim()).expect("aborted json");
-    assert_eq!(parsed["status"].as_str(), Some("aborted"));
-    assert!(
-        !temp.path().join(".heddle/REBASE_STATE").exists(),
-        "abort must remove REBASE_STATE"
-    );
-    assert_eq!(
-        head_short(temp.path()),
-        head_before,
-        "abort must rewind HEAD to original_head"
-    );
-
-    let batches_after = heddle_must_succeed(
-        &["--output", "json", "undo", "--list", "--depth", "20"],
-        temp.path(),
-    );
-    let count_after = serde_json::from_str::<Value>(&batches_after).unwrap()["batches"]
-        .as_array()
-        .unwrap()
-        .len();
-    assert_eq!(
-        count_before, count_after,
-        "abort is worktree-only — no oplog batch should appear"
-    );
-}
-
-/// `heddle rebase --abort` / `--continue` against a repo with no
-/// in-progress rebase must error rather than no-op. Covers the
-/// "No rebase in progress" arms in both `handle_abort` and
-/// `handle_continue`.
-#[test]
-fn test_rebase_abort_and_continue_without_state_error() {
-    let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
-    std::fs::write(temp.path().join("a.txt"), "a").unwrap();
-    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
-
-    let abort_err = heddle(&["rebase", "--abort"], Some(temp.path()))
-        .expect_err("abort with no rebase must error");
-    assert!(
-        abort_err.contains("No rebase in progress"),
-        "got: {abort_err}"
-    );
-
-    let cont_err = heddle(&["rebase", "--continue"], Some(temp.path()))
-        .expect_err("continue with no rebase must error");
-    assert!(
-        cont_err.contains("No rebase in progress"),
-        "got: {cont_err}"
-    );
 }

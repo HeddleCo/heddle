@@ -5,7 +5,7 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
-use crate::object::{ChangeId, ContentHash};
+use crate::object::{ContentHash, StateId};
 
 /// Current timeline operation schema version.
 pub const TIMELINE_OPERATION_SCHEMA_VERSION: u16 = LatestTimelineOperationSchema::VERSION;
@@ -394,7 +394,7 @@ pub struct ToolCallStartedV1 {
     pub parent_step_id: Option<TimelineStepId>,
     pub native: NativeToolCallRefV1,
     pub tool_name: String,
-    pub before_state: ChangeId,
+    pub before_state: StateId,
     pub payload: Option<TimelineToolPayloadMetadata>,
     pub started_at_ms: i64,
 }
@@ -407,9 +407,9 @@ pub struct ToolCallFinishedV1 {
     pub branch_id: TimelineBranchId,
     pub native: NativeToolCallRefV1,
     pub status: TimelineToolCallStatus,
-    pub before_state: ChangeId,
-    pub after_state: ChangeId,
-    pub capture_state: Option<ChangeId>,
+    pub before_state: StateId,
+    pub after_state: StateId,
+    pub capture_state: Option<StateId>,
     pub capture_oplog_batch_id: Option<u64>,
     pub changed: bool,
     pub touched_paths: Vec<String>,
@@ -424,8 +424,8 @@ pub struct CursorMovedV1 {
     pub branch_id: TimelineBranchId,
     pub from_step_id: Option<TimelineStepId>,
     pub to_step_id: Option<TimelineStepId>,
-    pub from_state: ChangeId,
-    pub to_state: ChangeId,
+    pub from_state: StateId,
+    pub to_state: StateId,
     pub reason: TimelineCursorMoveReason,
     pub moved_at_ms: i64,
 }
@@ -437,7 +437,7 @@ pub struct BranchCreatedV1 {
     pub branch_id: TimelineBranchId,
     pub parent_branch_id: Option<TimelineBranchId>,
     pub from_step_id: Option<TimelineStepId>,
-    pub from_state: ChangeId,
+    pub from_state: StateId,
     pub reason: TimelineBranchReason,
     pub created_at_ms: i64,
 }
@@ -509,7 +509,7 @@ mod tests {
                 tool_call_id: "call-1".to_string(),
             },
             tool_name: "shell".to_string(),
-            before_state: ChangeId::from_bytes([1; 16]),
+            before_state: StateId::from_bytes([1; 32]),
             payload: Some(TimelineToolPayloadMetadata {
                 summary: Some("listed files".to_string()),
                 hash: Some(ContentHash::compute_typed(
@@ -562,7 +562,7 @@ mod tests {
                         parent_step_id: None,
                         native: sample_native("call-1"),
                         tool_name: "bash".to_string(),
-                        before_state: ChangeId::from_bytes([1; 16]),
+                        before_state: StateId::from_bytes([1; 32]),
                         payload: Some(sample_payload("started")),
                         started_at_ms: 1_700_000_000_001,
                     }),
@@ -582,9 +582,9 @@ mod tests {
                         branch_id: TimelineBranchId::new("tlb-main"),
                         native: sample_native("call-1"),
                         status: TimelineToolCallStatus::Succeeded,
-                        before_state: ChangeId::from_bytes([1; 16]),
-                        after_state: ChangeId::from_bytes([2; 16]),
-                        capture_state: Some(ChangeId::from_bytes([2; 16])),
+                        before_state: StateId::from_bytes([1; 32]),
+                        after_state: StateId::from_bytes([2; 32]),
+                        capture_state: Some(StateId::from_bytes([2; 32])),
                         capture_oplog_batch_id: Some(42),
                         changed: true,
                         touched_paths: vec!["tracked.txt".to_string()],
@@ -605,8 +605,8 @@ mod tests {
                         branch_id: TimelineBranchId::new("tlb-main"),
                         from_step_id: Some(TimelineStepId::new("tls-step")),
                         to_step_id: None,
-                        from_state: ChangeId::from_bytes([2; 16]),
-                        to_state: ChangeId::from_bytes([1; 16]),
+                        from_state: StateId::from_bytes([2; 32]),
+                        to_state: StateId::from_bytes([1; 32]),
                         reason: TimelineCursorMoveReason::Undo,
                         moved_at_ms: 1_700_000_000_003,
                     }),
@@ -621,7 +621,7 @@ mod tests {
                         branch_id: TimelineBranchId::new("tlb-child"),
                         parent_branch_id: Some(TimelineBranchId::new("tlb-main")),
                         from_step_id: Some(TimelineStepId::new("tls-step")),
-                        from_state: ChangeId::from_bytes([2; 16]),
+                        from_state: StateId::from_bytes([2; 32]),
                         reason: TimelineBranchReason::ExplicitFork,
                         created_at_ms: 1_700_000_000_004,
                     }),
@@ -662,18 +662,34 @@ mod tests {
                 let bytes = envelope.encode().unwrap();
                 let decoded = TimelineOperationEnvelope::decode(&bytes).unwrap();
                 assert_eq!(decoded.encode().unwrap(), bytes);
-                format!(
-                    "{name}:{}:{}",
-                    hex::encode(&bytes),
-                    TimelineOperationId::for_bytes(&bytes).to_hex()
+                (
+                    name,
+                    bytes.len(),
+                    TimelineOperationId::for_bytes(&bytes).to_hex(),
                 )
             })
             .collect::<Vec<_>>();
         let expected = vec![
-            "tool_call_started:84ae736368656d615f76657273696f6e01a46b696e64b1746f6f6c5f63616c6c5f73746172746564a66c6162656c7392af7265706f2d72657665727369626c65b469676e6f7265642d706174682d746f7563686564a4626f6479dc0131cc89cca6746872656164cca46d61696ecca7737465705f6964cca8746c732d73746570cca96272616e63685f6964cca8746c622d6d61696eccae706172656e745f737465705f6964ccc0cca66e6174697665cc84cca76861726e657373cca86f70656e636f6465ccaa73657373696f6e5f6964cca973657373696f6e2d31ccaa6d6573736167655f6964cca96d6573736167652d31ccac746f6f6c5f63616c6c5f6964cca663616c6c2d31cca9746f6f6c5f6e616d65cca462617368ccac6265666f72655f7374617465ccdc001001010101010101010101010101010101cca77061796c6f6164cc82cca773756d6d617279cca773746172746564cca468617368ccdc00206e3dccccccfa0e2eccccccf4cccccc94764f5dccccccafccccccd0ccccccf5cccccca7cccccc90ccccccb4ccccccdeccccccddccccccef603acccccc9dccccccefccccccb8086d10cccccc8a7320cccccc9dccccccb1ccad737461727465645f61745f6d73cccf000001cc8bcccfcce56801:37911d1d8858d0eb8bc22606a27f366bd6aae4db7de86b27c5577e7461bce86a".to_string(),
-            "tool_call_finished:84ae736368656d615f76657273696f6e01a46b696e64b2746f6f6c5f63616c6c5f66696e6973686564a66c6162656c7392af7265706f2d72657665727369626c65bd65787465726e616c2d736964652d656666656374732d756e6b6e6f776ea4626f6479dc019ecc8dcca6746872656164cca46d61696ecca7737465705f6964cca8746c732d73746570cca96272616e63685f6964cca8746c622d6d61696ecca66e6174697665cc84cca76861726e657373cca86f70656e636f6465ccaa73657373696f6e5f6964cca973657373696f6e2d31ccaa6d6573736167655f6964cca96d6573736167652d31ccac746f6f6c5f63616c6c5f6964cca663616c6c2d31cca6737461747573cca9737563636565646564ccac6265666f72655f7374617465ccdc001001010101010101010101010101010101ccab61667465725f7374617465ccdc001002020202020202020202020202020202ccad636170747572655f7374617465ccdc001002020202020202020202020202020202ccb6636170747572655f6f706c6f675f62617463685f69642acca76368616e676564ccc3ccad746f75636865645f7061746873cc91ccab747261636b65642e747874cca77061796c6f6164cc82cca773756d6d617279cca866696e6973686564cca468617368ccdc00200fccccccbd60ccccccc9ccccccf675ccccccc4ccccccf22036cccccca07dcccccc8f5b5b6ecccccca6cccccce7615318ccccccf7cccccc88ccccccc5ccccccf17d6e23cccccc8ecccccc974121ccae66696e69736865645f61745f6d73cccf000001cc8bcccfcce56802:d73dfa15ed34bd9b097bfe78566b32bc6af6489ebd09c2db51bab310040f6fc5".to_string(),
-            "cursor_moved:84ae736368656d615f76657273696f6e01a46b696e64ac637572736f725f6d6f766564a66c6162656c7390a4626f6479dc009dcc88cca6746872656164cca46d61696ecca96272616e63685f6964cca8746c622d6d61696eccac66726f6d5f737465705f6964cca8746c732d73746570ccaa746f5f737465705f6964ccc0ccaa66726f6d5f7374617465ccdc001002020202020202020202020202020202cca8746f5f7374617465ccdc001001010101010101010101010101010101cca6726561736f6ecca4756e646fccab6d6f7665645f61745f6d73cccf000001cc8bcccfcce56803:ba4e8547435e4865b645f365edc7997d034a55991c68ed08a25eff7015f41e19".to_string(),
-            "branch_created:84ae736368656d615f76657273696f6e01a46b696e64ae6272616e63685f63726561746564a66c6162656c7391af7265706f2d72657665727369626c65a4626f6479dc009bcc87cca6746872656164cca46d61696ecca96272616e63685f6964cca9746c622d6368696c64ccb0706172656e745f6272616e63685f6964cca8746c622d6d61696eccac66726f6d5f737465705f6964cca8746c732d73746570ccaa66726f6d5f7374617465ccdc001002020202020202020202020202020202cca6726561736f6eccad6578706c696369742d666f726bccad637265617465645f61745f6d73cccf000001cc8bcccfcce56804:94ad46e244cd4b9436237be0a5678532915f9ceb15211a5b03bc856716650666".to_string(),
+            (
+                "tool_call_started",
+                484,
+                "1d24c2d5e716e6e37e714af7318e37d050f6fa94ec19e4c46e8d955c5613af99".to_string(),
+            ),
+            (
+                "tool_call_finished",
+                637,
+                "050d4345073bbfa132b868f68b267593a4bc8f57bebd2f36bf2426da92fa2b9f".to_string(),
+            ),
+            (
+                "cursor_moved",
+                260,
+                "811a82ee991d9a50041c86ef649942837ae8cc4eca073b52c9d7458b707b3fb3".to_string(),
+            ),
+            (
+                "branch_created",
+                258,
+                "50d2f8103b083a86f40e8c9d250ec7f061c2fcc24314230b5d4b574b73035502".to_string(),
+            ),
         ];
         assert_eq!(actual, expected);
     }

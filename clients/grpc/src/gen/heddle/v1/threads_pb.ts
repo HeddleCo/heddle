@@ -2,8 +2,9 @@
 // @generated from file heddle/v1/threads.proto (package heddle.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
-import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import { file_heddle_v1_options } from "./options_pb.js";
 import type { Timestamp } from "@bufbuild/protobuf/wkt";
 import { file_google_protobuf_timestamp } from "@bufbuild/protobuf/wkt";
 import type { UsageSummary } from "./common_pb.js";
@@ -14,7 +15,77 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file heddle/v1/threads.proto.
  */
 export const file_heddle_v1_threads: GenFile = /*@__PURE__*/
-  fileDesc("ChdoZWRkbGUvdjEvdGhyZWFkcy5wcm90bxIJaGVkZGxlLnYxIqENCg1UaHJlYWRTdW1tYXJ5EgwKBG5hbWUYASABKAkSFwoKYmFzZV9zdGF0ZRgCIAEoDEgAiAEBEhoKDWN1cnJlbnRfc3RhdGUYAyABKAxIAYgBARIRCgRwYXRoGAQgASgJSAKIAQESFQoIcHJvdmlkZXIYBSABKAlIA4gBARISCgVtb2RlbBgGIAEoCUgEiAEBEhsKE2Nvb3JkaW5hdGlvbl9zdGF0dXMYByABKAkSEgoKaXNfY3VycmVudBgIIAEoCBITCgtpc19pc29sYXRlZBgJIAEoCBIaCg10YXJnZXRfdGhyZWFkGAogASgJSAWIAQESGgoNcGFyZW50X3RocmVhZBgLIAEoCUgGiAEBEhEKBHRhc2sYDCABKAlIB4gBARIYCgt0aHJlYWRfbW9kZRgNIAEoCUgIiAEBEhkKDHRocmVhZF9zdGF0ZRgOIAEoCUgJiAEBEhYKCWZyZXNobmVzcxgPIAEoCUgKiAEBEkIKFHZlcmlmaWNhdGlvbl9zdW1tYXJ5GBAgASgLMiQuaGVkZGxlLnYxLlRocmVhZFZlcmlmaWNhdGlvblN1bW1hcnkSPgoSY29uZmlkZW5jZV9zdW1tYXJ5GBEgASgLMiIuaGVkZGxlLnYxLlRocmVhZENvbmZpZGVuY2VTdW1tYXJ5EkUKGWludGVncmF0aW9uX3BvbGljeV9yZXN1bHQYEiABKAsyIi5oZWRkbGUudjEuVGhyZWFkSW50ZWdyYXRpb25Qb2xpY3kSFAoHaGFybmVzcxgTIAEoCUgLiAEBEhsKDnRoaW5raW5nX2xldmVsGBQgASgJSAyIAQESLgoNdXNhZ2Vfc3VtbWFyeRgVIAEoCzIXLmhlZGRsZS52MS5Vc2FnZVN1bW1hcnkSOQoQbGFzdF9wcm9ncmVzc19hdBgWIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXBIDYgBARIfChJyZXBvcnRfZmx1c2hfc3RhdGUYFyABKAlIDogBARIeChFoZWRkbGVfc2Vzc2lvbl9pZBgYIAEoCUgPiAEBEhoKDWF0dGFjaF9yZWFzb24YGSABKAlIEIgBARIdChBuYXRpdmVfYWN0b3Jfa2V5GBogASgJSBGIAQESJAoXbmF0aXZlX3BhcmVudF9hY3Rvcl9rZXkYGyABKAlIEogBARIZCgxwcm9iZV9zb3VyY2UYHCABKAlIE4gBARIdChBwcm9iZV9jb25maWRlbmNlGB0gASgCSBSIAQESHwoScmVjb21tZW5kZWRfYWN0aW9uGB4gASgJSBWIAQESEAoIYmxvY2tlcnMYHyADKAkSGgoNdGhyZWFkX2hlYWx0aBggIAEoCUgWiAEBEhsKE3Byb21vdGlvbl9zdWdnZXN0ZWQYISABKAgSFQoNY2hpbGRfdGhyZWFkcxgiIAMoCRITCgtzdGFja19kZXB0aBgjIAEoDRI5ChBsYXN0X2FjdGl2aXR5X2F0GCQgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcEgXiAEBEhcKCnZpc2liaWxpdHkYJSABKAlIGIgBARIVCg1jaGFuZ2VkX3BhdGhzGCYgAygJEhkKEWltcGFjdF9jYXRlZ29yaWVzGCcgAygJEhoKEmhlYXZ5X2ltcGFjdF9wYXRocxgoIAMoCUINCgtfYmFzZV9zdGF0ZUIQCg5fY3VycmVudF9zdGF0ZUIHCgVfcGF0aEILCglfcHJvdmlkZXJCCAoGX21vZGVsQhAKDl90YXJnZXRfdGhyZWFkQhAKDl9wYXJlbnRfdGhyZWFkQgcKBV90YXNrQg4KDF90aHJlYWRfbW9kZUIPCg1fdGhyZWFkX3N0YXRlQgwKCl9mcmVzaG5lc3NCCgoIX2hhcm5lc3NCEQoPX3RoaW5raW5nX2xldmVsQhMKEV9sYXN0X3Byb2dyZXNzX2F0QhUKE19yZXBvcnRfZmx1c2hfc3RhdGVCFAoSX2hlZGRsZV9zZXNzaW9uX2lkQhAKDl9hdHRhY2hfcmVhc29uQhMKEV9uYXRpdmVfYWN0b3Jfa2V5QhoKGF9uYXRpdmVfcGFyZW50X2FjdG9yX2tleUIPCg1fcHJvYmVfc291cmNlQhMKEV9wcm9iZV9jb25maWRlbmNlQhUKE19yZWNvbW1lbmRlZF9hY3Rpb25CEAoOX3RocmVhZF9oZWFsdGhCEwoRX2xhc3RfYWN0aXZpdHlfYXRCDQoLX3Zpc2liaWxpdHkitwEKGVRocmVhZFZlcmlmaWNhdGlvblN1bW1hcnkSGQoMdGVzdHNfcGFzc2VkGAEgASgISACIAQESFAoMdGVzdHNfZmFpbGVkGAIgASgNEhkKDGNvdmVyYWdlX3BjdBgDIAEoAkgBiAEBEhoKDWxpbnRfd2FybmluZ3MYBCABKA1IAogBAUIPCg1fdGVzdHNfcGFzc2VkQg8KDV9jb3ZlcmFnZV9wY3RCEAoOX2xpbnRfd2FybmluZ3MiUwoXVGhyZWFkQ29uZmlkZW5jZVN1bW1hcnkSEgoFdmFsdWUYASABKAJIAIgBARIRCgRiYW5kGAIgASgJSAGIAQFCCAoGX3ZhbHVlQgcKBV9iYW5kIjkKF1RocmVhZEludGVncmF0aW9uUG9saWN5Eg4KBnN0YXR1cxgBIAEoCRIOCgZyZWFzb24YAiABKAki6wUKDlRocmVhZE1ldGFkYXRhEgwKBG5hbWUYASABKAkSGgoNdGFyZ2V0X3RocmVhZBgCIAEoCUgAiAEBEhoKDXBhcmVudF90aHJlYWQYAyABKAlIAYgBARIRCgR0YXNrGAQgASgJSAKIAQESEwoLdGhyZWFkX21vZGUYBSABKAkSFAoMdGhyZWFkX3N0YXRlGAYgASgJEhEKCWZyZXNobmVzcxgHIAEoCRISCgpiYXNlX3N0YXRlGAggASgMEhEKCWJhc2Vfcm9vdBgJIAEoDBIaCg1jdXJyZW50X3N0YXRlGAogASgMSAOIAQESGQoMbWVyZ2VkX3N0YXRlGAsgASgMSASIAQESFQoNY2hhbmdlZF9wYXRocxgMIAMoCRIZChFpbXBhY3RfY2F0ZWdvcmllcxgNIAMoCRIaChJoZWF2eV9pbXBhY3RfcGF0aHMYDiADKAkSGwoTcHJvbW90aW9uX3N1Z2dlc3RlZBgPIAEoCBJCChR2ZXJpZmljYXRpb25fc3VtbWFyeRgQIAEoCzIkLmhlZGRsZS52MS5UaHJlYWRWZXJpZmljYXRpb25TdW1tYXJ5Ej4KEmNvbmZpZGVuY2Vfc3VtbWFyeRgRIAEoCzIiLmhlZGRsZS52MS5UaHJlYWRDb25maWRlbmNlU3VtbWFyeRJFChlpbnRlZ3JhdGlvbl9wb2xpY3lfcmVzdWx0GBIgASgLMiIuaGVkZGxlLnYxLlRocmVhZEludGVncmF0aW9uUG9saWN5Ei4KCmNyZWF0ZWRfYXQYEyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi4KCnVwZGF0ZWRfYXQYFCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wQhAKDl90YXJnZXRfdGhyZWFkQhAKDl9wYXJlbnRfdGhyZWFkQgcKBV90YXNrQhAKDl9jdXJyZW50X3N0YXRlQg8KDV9tZXJnZWRfc3RhdGUieAoSU3RhcnRUaHJlYWRSZXF1ZXN0EhEKCXJlcG9fcGF0aBgBIAEoCRIMCgRuYW1lGAIgASgJEhIKCmZyb21fc3RhdGUYAyABKAkSDAoEcGF0aBgEIAEoCRIQCghwcm92aWRlchgFIAEoCRINCgVtb2RlbBgGIAEoCSInChJMaXN0VGhyZWFkc1JlcXVlc3QSEQoJcmVwb19wYXRoGAEgASgJIkAKE0xpc3RUaHJlYWRzUmVzcG9uc2USKQoHdGhyZWFkcxgBIAMoCzIYLmhlZGRsZS52MS5UaHJlYWRTdW1tYXJ5Ii8KGkdldFdvcmtzcGFjZVN1bW1hcnlSZXF1ZXN0EhEKCXJlcG9fcGF0aBgBIAEoCSJcChRXb3Jrc3BhY2VUaHJlYWRHcm91cBIKCgJpZBgBIAEoCRINCgVsYWJlbBgCIAEoCRIpCgd0aHJlYWRzGAMgAygLMhguaGVkZGxlLnYxLlRocmVhZFN1bW1hcnkinAEKEFdvcmtzcGFjZVN1bW1hcnkSEQoJcmVwb19wYXRoGAEgASgJEhsKDmN1cnJlbnRfdGhyZWFkGAIgASgJSACIAQESLwoGZ3JvdXBzGAMgAygLMh8uaGVkZGxlLnYxLldvcmtzcGFjZVRocmVhZEdyb3VwEhQKDHRocmVhZF9jb3VudBgEIAEoDUIRCg9fY3VycmVudF90aHJlYWQiMwoQR2V0VGhyZWFkUmVxdWVzdBIRCglyZXBvX3BhdGgYASABKAkSDAoEbmFtZRgCIAEoCSJvChRDYXB0dXJlVGhyZWFkUmVxdWVzdBIRCglyZXBvX3BhdGgYASABKAkSDAoEbmFtZRgCIAEoCRIOCgZpbnRlbnQYAyABKAkSFwoKY29uZmlkZW5jZRgEIAEoAkgAiAEBQg0KC19jb25maWRlbmNlIlcKFUNhcHR1cmVUaHJlYWRSZXNwb25zZRIOCgZ0aHJlYWQYASABKAkSEQoJY2hhbmdlX2lkGAIgASgMEhsKE2Nvb3JkaW5hdGlvbl9zdGF0dXMYAyABKAkiVQoVQ29tcGxldGVUaHJlYWRSZXF1ZXN0EhEKCXJlcG9fcGF0aBgBIAEoCRIMCgRuYW1lGAIgASgJEhsKE2NsaWVudF9vcGVyYXRpb25faWQYDyABKAkiQAoTV2F0Y2hUaHJlYWRzUmVxdWVzdBIRCglyZXBvX3BhdGgYASABKAkSFgoOYWZ0ZXJfZXZlbnRfaWQYAiABKAMingEKC1RocmVhZEV2ZW50EhAKCGV2ZW50X2lkGAEgASgDEg4KBnRocmVhZBgCIAEoCRISCgpldmVudF90eXBlGAMgASgJEikKB3N1bW1hcnkYBCABKAsyGC5oZWRkbGUudjEuVGhyZWFkU3VtbWFyeRIuCgpjcmVhdGVkX2F0GAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcDKYBQoVVGhyZWFkV29ya2Zsb3dTZXJ2aWNlEkYKC1N0YXJ0VGhyZWFkEh0uaGVkZGxlLnYxLlN0YXJ0VGhyZWFkUmVxdWVzdBoYLmhlZGRsZS52MS5UaHJlYWRTdW1tYXJ5EkwKC0xpc3RUaHJlYWRzEh0uaGVkZGxlLnYxLkxpc3RUaHJlYWRzUmVxdWVzdBoeLmhlZGRsZS52MS5MaXN0VGhyZWFkc1Jlc3BvbnNlElkKE0dldFdvcmtzcGFjZVN1bW1hcnkSJS5oZWRkbGUudjEuR2V0V29ya3NwYWNlU3VtbWFyeVJlcXVlc3QaGy5oZWRkbGUudjEuV29ya3NwYWNlU3VtbWFyeRJeChZTdHJlYW1Xb3Jrc3BhY2VTdW1tYXJ5EiUuaGVkZGxlLnYxLkdldFdvcmtzcGFjZVN1bW1hcnlSZXF1ZXN0GhsuaGVkZGxlLnYxLldvcmtzcGFjZVN1bW1hcnkwARJCCglHZXRUaHJlYWQSGy5oZWRkbGUudjEuR2V0VGhyZWFkUmVxdWVzdBoYLmhlZGRsZS52MS5UaHJlYWRTdW1tYXJ5ElIKDUNhcHR1cmVUaHJlYWQSHy5oZWRkbGUudjEuQ2FwdHVyZVRocmVhZFJlcXVlc3QaIC5oZWRkbGUudjEuQ2FwdHVyZVRocmVhZFJlc3BvbnNlEkwKDkNvbXBsZXRlVGhyZWFkEiAuaGVkZGxlLnYxLkNvbXBsZXRlVGhyZWFkUmVxdWVzdBoYLmhlZGRsZS52MS5UaHJlYWRTdW1tYXJ5EkgKDFdhdGNoVGhyZWFkcxIeLmhlZGRsZS52MS5XYXRjaFRocmVhZHNSZXF1ZXN0GhYuaGVkZGxlLnYxLlRocmVhZEV2ZW50MAFiBnByb3RvMw", [file_google_protobuf_timestamp, file_heddle_v1_common]);
+  fileDesc("ChdoZWRkbGUvdjEvdGhyZWFkcy5wcm90bxIJaGVkZGxlLnYxIucBCgtUaHJlYWRTdGF0ZSLXAQoES2luZBIcChhUSFJFQURfU1RBVEVfVU5TUEVDSUZJRUQQABIWChJUSFJFQURfU1RBVEVfRFJBRlQQARIXChNUSFJFQURfU1RBVEVfQUNUSVZFEAISFgoSVEhSRUFEX1NUQVRFX1JFQURZEAMSGAoUVEhSRUFEX1NUQVRFX0JMT0NLRUQQBBIXChNUSFJFQURfU1RBVEVfTUVSR0VEEAUSGgoWVEhSRUFEX1NUQVRFX0FCQU5ET05FRBAGEhkKFVRIUkVBRF9TVEFURV9QUk9NT1RFRBAHIrwOCg1UaHJlYWRTdW1tYXJ5EgwKBG5hbWUYASABKAkSFwoKYmFzZV9zdGF0ZRgCIAEoDEgAiAEBEhoKDWN1cnJlbnRfc3RhdGUYAyABKAxIAYgBARIRCgRwYXRoGAQgASgJSAKIAQESFQoIcHJvdmlkZXIYBSABKAlIA4gBARISCgVtb2RlbBgGIAEoCUgEiAEBEhsKE2Nvb3JkaW5hdGlvbl9zdGF0dXMYByABKAkSEgoKaXNfY3VycmVudBgIIAEoCBITCgtpc19pc29sYXRlZBgJIAEoCBIaCg10YXJnZXRfdGhyZWFkGAogASgJSAWIAQESGgoNcGFyZW50X3RocmVhZBgLIAEoCUgGiAEBEhEKBHRhc2sYDCABKAlIB4gBARIYCgt0aHJlYWRfbW9kZRgNIAEoCUgIiAEBEhkKDHRocmVhZF9zdGF0ZRgOIAEoCUgJiAEBEhYKCWZyZXNobmVzcxgPIAEoCUgKiAEBEkIKFHZlcmlmaWNhdGlvbl9zdW1tYXJ5GBAgASgLMiQuaGVkZGxlLnYxLlRocmVhZFZlcmlmaWNhdGlvblN1bW1hcnkSPgoSY29uZmlkZW5jZV9zdW1tYXJ5GBEgASgLMiIuaGVkZGxlLnYxLlRocmVhZENvbmZpZGVuY2VTdW1tYXJ5EkUKGWludGVncmF0aW9uX3BvbGljeV9yZXN1bHQYEiABKAsyIi5oZWRkbGUudjEuVGhyZWFkSW50ZWdyYXRpb25Qb2xpY3kSFAoHaGFybmVzcxgTIAEoCUgLiAEBEhsKDnRoaW5raW5nX2xldmVsGBQgASgJSAyIAQESLgoNdXNhZ2Vfc3VtbWFyeRgVIAEoCzIXLmhlZGRsZS52MS5Vc2FnZVN1bW1hcnkSOQoQbGFzdF9wcm9ncmVzc19hdBgWIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXBIDYgBARIfChJyZXBvcnRfZmx1c2hfc3RhdGUYFyABKAlIDogBARIeChFoZWRkbGVfc2Vzc2lvbl9pZBgYIAEoCUgPiAEBEhoKDWF0dGFjaF9yZWFzb24YGSABKAlIEIgBARIdChBuYXRpdmVfYWN0b3Jfa2V5GBogASgJSBGIAQESJAoXbmF0aXZlX3BhcmVudF9hY3Rvcl9rZXkYGyABKAlIEogBARIZCgxwcm9iZV9zb3VyY2UYHCABKAlIE4gBARIdChBwcm9iZV9jb25maWRlbmNlGB0gASgCSBSIAQESHwoScmVjb21tZW5kZWRfYWN0aW9uGB4gASgJSBWIAQESEAoIYmxvY2tlcnMYHyADKAkSGgoNdGhyZWFkX2hlYWx0aBggIAEoCUgWiAEBEhsKE3Byb21vdGlvbl9zdWdnZXN0ZWQYISABKAgSFQoNY2hpbGRfdGhyZWFkcxgiIAMoCRITCgtzdGFja19kZXB0aBgjIAEoDRI5ChBsYXN0X2FjdGl2aXR5X2F0GCQgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcEgXiAEBEhcKCnZpc2liaWxpdHkYJSABKAlIGIgBARIVCg1jaGFuZ2VkX3BhdGhzGCYgAygJEhkKEWltcGFjdF9jYXRlZ29yaWVzGCcgAygJEhoKEmhlYXZ5X2ltcGFjdF9wYXRocxgoIAMoCRITCgZyZWFzb24YKSABKAlIGYgBARIaCg1zdXBlcnNlZGVkX2J5GCogASgJSBqIAQESEgoKc3VwZXJzZWRlcxgrIAMoCRI3ChJ0aHJlYWRfc3RhdGVfdHlwZWQYLCABKA4yGy5oZWRkbGUudjEuVGhyZWFkU3RhdGUuS2luZEINCgtfYmFzZV9zdGF0ZUIQCg5fY3VycmVudF9zdGF0ZUIHCgVfcGF0aEILCglfcHJvdmlkZXJCCAoGX21vZGVsQhAKDl90YXJnZXRfdGhyZWFkQhAKDl9wYXJlbnRfdGhyZWFkQgcKBV90YXNrQg4KDF90aHJlYWRfbW9kZUIPCg1fdGhyZWFkX3N0YXRlQgwKCl9mcmVzaG5lc3NCCgoIX2hhcm5lc3NCEQoPX3RoaW5raW5nX2xldmVsQhMKEV9sYXN0X3Byb2dyZXNzX2F0QhUKE19yZXBvcnRfZmx1c2hfc3RhdGVCFAoSX2hlZGRsZV9zZXNzaW9uX2lkQhAKDl9hdHRhY2hfcmVhc29uQhMKEV9uYXRpdmVfYWN0b3Jfa2V5QhoKGF9uYXRpdmVfcGFyZW50X2FjdG9yX2tleUIPCg1fcHJvYmVfc291cmNlQhMKEV9wcm9iZV9jb25maWRlbmNlQhUKE19yZWNvbW1lbmRlZF9hY3Rpb25CEAoOX3RocmVhZF9oZWFsdGhCEwoRX2xhc3RfYWN0aXZpdHlfYXRCDQoLX3Zpc2liaWxpdHlCCQoHX3JlYXNvbkIQCg5fc3VwZXJzZWRlZF9ieSK3AQoZVGhyZWFkVmVyaWZpY2F0aW9uU3VtbWFyeRIZCgx0ZXN0c19wYXNzZWQYASABKAhIAIgBARIUCgx0ZXN0c19mYWlsZWQYAiABKA0SGQoMY292ZXJhZ2VfcGN0GAMgASgCSAGIAQESGgoNbGludF93YXJuaW5ncxgEIAEoDUgCiAEBQg8KDV90ZXN0c19wYXNzZWRCDwoNX2NvdmVyYWdlX3BjdEIQCg5fbGludF93YXJuaW5ncyJTChdUaHJlYWRDb25maWRlbmNlU3VtbWFyeRISCgV2YWx1ZRgBIAEoAkgAiAEBEhEKBGJhbmQYAiABKAlIAYgBAUIICgZfdmFsdWVCBwoFX2JhbmQiOQoXVGhyZWFkSW50ZWdyYXRpb25Qb2xpY3kSDgoGc3RhdHVzGAEgASgJEg4KBnJlYXNvbhgCIAEoCSLrBQoOVGhyZWFkTWV0YWRhdGESDAoEbmFtZRgBIAEoCRIaCg10YXJnZXRfdGhyZWFkGAIgASgJSACIAQESGgoNcGFyZW50X3RocmVhZBgDIAEoCUgBiAEBEhEKBHRhc2sYBCABKAlIAogBARITCgt0aHJlYWRfbW9kZRgFIAEoCRIUCgx0aHJlYWRfc3RhdGUYBiABKAkSEQoJZnJlc2huZXNzGAcgASgJEhIKCmJhc2Vfc3RhdGUYCCABKAwSEQoJYmFzZV9yb290GAkgASgMEhoKDWN1cnJlbnRfc3RhdGUYCiABKAxIA4gBARIZCgxtZXJnZWRfc3RhdGUYCyABKAxIBIgBARIVCg1jaGFuZ2VkX3BhdGhzGAwgAygJEhkKEWltcGFjdF9jYXRlZ29yaWVzGA0gAygJEhoKEmhlYXZ5X2ltcGFjdF9wYXRocxgOIAMoCRIbChNwcm9tb3Rpb25fc3VnZ2VzdGVkGA8gASgIEkIKFHZlcmlmaWNhdGlvbl9zdW1tYXJ5GBAgASgLMiQuaGVkZGxlLnYxLlRocmVhZFZlcmlmaWNhdGlvblN1bW1hcnkSPgoSY29uZmlkZW5jZV9zdW1tYXJ5GBEgASgLMiIuaGVkZGxlLnYxLlRocmVhZENvbmZpZGVuY2VTdW1tYXJ5EkUKGWludGVncmF0aW9uX3BvbGljeV9yZXN1bHQYEiABKAsyIi5oZWRkbGUudjEuVGhyZWFkSW50ZWdyYXRpb25Qb2xpY3kSLgoKY3JlYXRlZF9hdBgTIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoKdXBkYXRlZF9hdBgUIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXBCEAoOX3RhcmdldF90aHJlYWRCEAoOX3BhcmVudF90aHJlYWRCBwoFX3Rhc2tCEAoOX2N1cnJlbnRfc3RhdGVCDwoNX21lcmdlZF9zdGF0ZSJ4ChJTdGFydFRocmVhZFJlcXVlc3QSEQoJcmVwb19wYXRoGAEgASgJEgwKBG5hbWUYAiABKAkSEgoKZnJvbV9zdGF0ZRgDIAEoCRIMCgRwYXRoGAQgASgJEhAKCHByb3ZpZGVyGAUgASgJEg0KBW1vZGVsGAYgASgJIicKEkxpc3RUaHJlYWRzUmVxdWVzdBIRCglyZXBvX3BhdGgYASABKAkiQAoTTGlzdFRocmVhZHNSZXNwb25zZRIpCgd0aHJlYWRzGAEgAygLMhguaGVkZGxlLnYxLlRocmVhZFN1bW1hcnkiLwoaR2V0V29ya3NwYWNlU3VtbWFyeVJlcXVlc3QSEQoJcmVwb19wYXRoGAEgASgJIlwKFFdvcmtzcGFjZVRocmVhZEdyb3VwEgoKAmlkGAEgASgJEg0KBWxhYmVsGAIgASgJEikKB3RocmVhZHMYAyADKAsyGC5oZWRkbGUudjEuVGhyZWFkU3VtbWFyeSKcAQoQV29ya3NwYWNlU3VtbWFyeRIRCglyZXBvX3BhdGgYASABKAkSGwoOY3VycmVudF90aHJlYWQYAiABKAlIAIgBARIvCgZncm91cHMYAyADKAsyHy5oZWRkbGUudjEuV29ya3NwYWNlVGhyZWFkR3JvdXASFAoMdGhyZWFkX2NvdW50GAQgASgNQhEKD19jdXJyZW50X3RocmVhZCIzChBHZXRUaHJlYWRSZXF1ZXN0EhEKCXJlcG9fcGF0aBgBIAEoCRIMCgRuYW1lGAIgASgJIm8KFENhcHR1cmVUaHJlYWRSZXF1ZXN0EhEKCXJlcG9fcGF0aBgBIAEoCRIMCgRuYW1lGAIgASgJEg4KBmludGVudBgDIAEoCRIXCgpjb25maWRlbmNlGAQgASgCSACIAQFCDQoLX2NvbmZpZGVuY2UiVgoVQ2FwdHVyZVRocmVhZFJlc3BvbnNlEg4KBnRocmVhZBgBIAEoCRIQCghzdGF0ZV9pZBgCIAEoDBIbChNjb29yZGluYXRpb25fc3RhdHVzGAMgASgJIlsKFUNvbXBsZXRlVGhyZWFkUmVxdWVzdBIRCglyZXBvX3BhdGgYASABKAkSDAoEbmFtZRgCIAEoCRIhChNjbGllbnRfb3BlcmF0aW9uX2lkGA8gASgJQgSQtRgBIkAKE1dhdGNoVGhyZWFkc1JlcXVlc3QSEQoJcmVwb19wYXRoGAEgASgJEhYKDmFmdGVyX2V2ZW50X2lkGAIgASgDIp4BCgtUaHJlYWRFdmVudBIQCghldmVudF9pZBgBIAEoAxIOCgZ0aHJlYWQYAiABKAkSEgoKZXZlbnRfdHlwZRgDIAEoCRIpCgdzdW1tYXJ5GAQgASgLMhguaGVkZGxlLnYxLlRocmVhZFN1bW1hcnkSLgoKY3JlYXRlZF9hdBgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAy6AUKFVRocmVhZFdvcmtmbG93U2VydmljZRJQCgtTdGFydFRocmVhZBIdLmhlZGRsZS52MS5TdGFydFRocmVhZFJlcXVlc3QaGC5oZWRkbGUudjEuVGhyZWFkU3VtbWFyeSIIirUYBAgDEAESVgoLTGlzdFRocmVhZHMSHS5oZWRkbGUudjEuTGlzdFRocmVhZHNSZXF1ZXN0Gh4uaGVkZGxlLnYxLkxpc3RUaHJlYWRzUmVzcG9uc2UiCIq1GAQIARABEmMKE0dldFdvcmtzcGFjZVN1bW1hcnkSJS5oZWRkbGUudjEuR2V0V29ya3NwYWNlU3VtbWFyeVJlcXVlc3QaGy5oZWRkbGUudjEuV29ya3NwYWNlU3VtbWFyeSIIirUYBAgBEAESaAoWU3RyZWFtV29ya3NwYWNlU3VtbWFyeRIlLmhlZGRsZS52MS5HZXRXb3Jrc3BhY2VTdW1tYXJ5UmVxdWVzdBobLmhlZGRsZS52MS5Xb3Jrc3BhY2VTdW1tYXJ5IgiKtRgECAEQATABEkwKCUdldFRocmVhZBIbLmhlZGRsZS52MS5HZXRUaHJlYWRSZXF1ZXN0GhguaGVkZGxlLnYxLlRocmVhZFN1bW1hcnkiCIq1GAQIARABElwKDUNhcHR1cmVUaHJlYWQSHy5oZWRkbGUudjEuQ2FwdHVyZVRocmVhZFJlcXVlc3QaIC5oZWRkbGUudjEuQ2FwdHVyZVRocmVhZFJlc3BvbnNlIgiKtRgECAMQARJWCg5Db21wbGV0ZVRocmVhZBIgLmhlZGRsZS52MS5Db21wbGV0ZVRocmVhZFJlcXVlc3QaGC5oZWRkbGUudjEuVGhyZWFkU3VtbWFyeSIIirUYBAgDEAISUgoMV2F0Y2hUaHJlYWRzEh4uaGVkZGxlLnYxLldhdGNoVGhyZWFkc1JlcXVlc3QaFi5oZWRkbGUudjEuVGhyZWFkRXZlbnQiCIq1GAQIARABMAFiBnByb3RvMw", [file_heddle_v1_options, file_google_protobuf_timestamp, file_heddle_v1_common]);
+
+/**
+ * Typed thread lifecycle state (weft#469), mirroring `repo::ThreadState`
+ * (thread_model.rs:186). Wrapper message namespaces the enum. Promoted
+ * alongside the legacy untyped `ThreadSummary.thread_state` string (field
+ * 14), which stays one release for wire-compat before deprecation — the
+ * typed `thread_state_typed` field is new, not a replacement.
+ *
+ * @generated from message heddle.v1.ThreadState
+ */
+export type ThreadState = Message<"heddle.v1.ThreadState"> & {
+};
+
+/**
+ * Describes the message heddle.v1.ThreadState.
+ * Use `create(ThreadStateSchema)` to create a new message.
+ */
+export const ThreadStateSchema: GenMessage<ThreadState> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_threads, 0);
+
+/**
+ * @generated from enum heddle.v1.ThreadState.Kind
+ */
+export enum ThreadState_Kind {
+  /**
+   * @generated from enum value: THREAD_STATE_UNSPECIFIED = 0;
+   */
+  THREAD_STATE_UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: THREAD_STATE_DRAFT = 1;
+   */
+  THREAD_STATE_DRAFT = 1,
+
+  /**
+   * @generated from enum value: THREAD_STATE_ACTIVE = 2;
+   */
+  THREAD_STATE_ACTIVE = 2,
+
+  /**
+   * @generated from enum value: THREAD_STATE_READY = 3;
+   */
+  THREAD_STATE_READY = 3,
+
+  /**
+   * @generated from enum value: THREAD_STATE_BLOCKED = 4;
+   */
+  THREAD_STATE_BLOCKED = 4,
+
+  /**
+   * @generated from enum value: THREAD_STATE_MERGED = 5;
+   */
+  THREAD_STATE_MERGED = 5,
+
+  /**
+   * @generated from enum value: THREAD_STATE_ABANDONED = 6;
+   */
+  THREAD_STATE_ABANDONED = 6,
+
+  /**
+   * @generated from enum value: THREAD_STATE_PROMOTED = 7;
+   */
+  THREAD_STATE_PROMOTED = 7,
+}
+
+/**
+ * Describes the enum heddle.v1.ThreadState.Kind.
+ */
+export const ThreadState_KindSchema: GenEnum<ThreadState_Kind> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_threads, 0, 0);
 
 /**
  * @generated from message heddle.v1.ThreadSummary
@@ -219,6 +290,35 @@ export type ThreadSummary = Message<"heddle.v1.ThreadSummary"> & {
    * @generated from field: repeated string heavy_impact_paths = 40;
    */
   heavyImpactPaths: string[];
+
+  /**
+   * +weft#469: abandonment/learning payload ("why")
+   *
+   * @generated from field: optional string reason = 41;
+   */
+  reason?: string | undefined;
+
+  /**
+   * +weft#469: the successor attempt that replaced this thread
+   *
+   * @generated from field: optional string superseded_by = 42;
+   */
+  supersededBy?: string | undefined;
+
+  /**
+   * +weft#469: prior attempts this thread replaces
+   *
+   * @generated from field: repeated string supersedes = 43;
+   */
+  supersedes: string[];
+
+  /**
+   * +weft#469: typed lifecycle state alongside the legacy untyped
+   * `thread_state` string (field 14, kept for one release). Do not repurpose 14.
+   *
+   * @generated from field: heddle.v1.ThreadState.Kind thread_state_typed = 44;
+   */
+  threadStateTyped: ThreadState_Kind;
 };
 
 /**
@@ -226,7 +326,7 @@ export type ThreadSummary = Message<"heddle.v1.ThreadSummary"> & {
  * Use `create(ThreadSummarySchema)` to create a new message.
  */
 export const ThreadSummarySchema: GenMessage<ThreadSummary> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 0);
+  messageDesc(file_heddle_v1_threads, 1);
 
 /**
  * @generated from message heddle.v1.ThreadVerificationSummary
@@ -258,7 +358,7 @@ export type ThreadVerificationSummary = Message<"heddle.v1.ThreadVerificationSum
  * Use `create(ThreadVerificationSummarySchema)` to create a new message.
  */
 export const ThreadVerificationSummarySchema: GenMessage<ThreadVerificationSummary> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 1);
+  messageDesc(file_heddle_v1_threads, 2);
 
 /**
  * @generated from message heddle.v1.ThreadConfidenceSummary
@@ -280,7 +380,7 @@ export type ThreadConfidenceSummary = Message<"heddle.v1.ThreadConfidenceSummary
  * Use `create(ThreadConfidenceSummarySchema)` to create a new message.
  */
 export const ThreadConfidenceSummarySchema: GenMessage<ThreadConfidenceSummary> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 2);
+  messageDesc(file_heddle_v1_threads, 3);
 
 /**
  * @generated from message heddle.v1.ThreadIntegrationPolicy
@@ -302,7 +402,7 @@ export type ThreadIntegrationPolicy = Message<"heddle.v1.ThreadIntegrationPolicy
  * Use `create(ThreadIntegrationPolicySchema)` to create a new message.
  */
 export const ThreadIntegrationPolicySchema: GenMessage<ThreadIntegrationPolicy> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 3);
+  messageDesc(file_heddle_v1_threads, 4);
 
 /**
  * @generated from message heddle.v1.ThreadMetadata
@@ -414,7 +514,7 @@ export type ThreadMetadata = Message<"heddle.v1.ThreadMetadata"> & {
  * Use `create(ThreadMetadataSchema)` to create a new message.
  */
 export const ThreadMetadataSchema: GenMessage<ThreadMetadata> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 4);
+  messageDesc(file_heddle_v1_threads, 5);
 
 /**
  * @generated from message heddle.v1.StartThreadRequest
@@ -456,7 +556,7 @@ export type StartThreadRequest = Message<"heddle.v1.StartThreadRequest"> & {
  * Use `create(StartThreadRequestSchema)` to create a new message.
  */
 export const StartThreadRequestSchema: GenMessage<StartThreadRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 5);
+  messageDesc(file_heddle_v1_threads, 6);
 
 /**
  * @generated from message heddle.v1.ListThreadsRequest
@@ -473,7 +573,7 @@ export type ListThreadsRequest = Message<"heddle.v1.ListThreadsRequest"> & {
  * Use `create(ListThreadsRequestSchema)` to create a new message.
  */
 export const ListThreadsRequestSchema: GenMessage<ListThreadsRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 6);
+  messageDesc(file_heddle_v1_threads, 7);
 
 /**
  * @generated from message heddle.v1.ListThreadsResponse
@@ -490,7 +590,7 @@ export type ListThreadsResponse = Message<"heddle.v1.ListThreadsResponse"> & {
  * Use `create(ListThreadsResponseSchema)` to create a new message.
  */
 export const ListThreadsResponseSchema: GenMessage<ListThreadsResponse> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 7);
+  messageDesc(file_heddle_v1_threads, 8);
 
 /**
  * @generated from message heddle.v1.GetWorkspaceSummaryRequest
@@ -507,7 +607,7 @@ export type GetWorkspaceSummaryRequest = Message<"heddle.v1.GetWorkspaceSummaryR
  * Use `create(GetWorkspaceSummaryRequestSchema)` to create a new message.
  */
 export const GetWorkspaceSummaryRequestSchema: GenMessage<GetWorkspaceSummaryRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 8);
+  messageDesc(file_heddle_v1_threads, 9);
 
 /**
  * @generated from message heddle.v1.WorkspaceThreadGroup
@@ -534,7 +634,7 @@ export type WorkspaceThreadGroup = Message<"heddle.v1.WorkspaceThreadGroup"> & {
  * Use `create(WorkspaceThreadGroupSchema)` to create a new message.
  */
 export const WorkspaceThreadGroupSchema: GenMessage<WorkspaceThreadGroup> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 9);
+  messageDesc(file_heddle_v1_threads, 10);
 
 /**
  * @generated from message heddle.v1.WorkspaceSummary
@@ -566,7 +666,7 @@ export type WorkspaceSummary = Message<"heddle.v1.WorkspaceSummary"> & {
  * Use `create(WorkspaceSummarySchema)` to create a new message.
  */
 export const WorkspaceSummarySchema: GenMessage<WorkspaceSummary> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 10);
+  messageDesc(file_heddle_v1_threads, 11);
 
 /**
  * @generated from message heddle.v1.GetThreadRequest
@@ -588,7 +688,7 @@ export type GetThreadRequest = Message<"heddle.v1.GetThreadRequest"> & {
  * Use `create(GetThreadRequestSchema)` to create a new message.
  */
 export const GetThreadRequestSchema: GenMessage<GetThreadRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 11);
+  messageDesc(file_heddle_v1_threads, 12);
 
 /**
  * @generated from message heddle.v1.CaptureThreadRequest
@@ -620,7 +720,7 @@ export type CaptureThreadRequest = Message<"heddle.v1.CaptureThreadRequest"> & {
  * Use `create(CaptureThreadRequestSchema)` to create a new message.
  */
 export const CaptureThreadRequestSchema: GenMessage<CaptureThreadRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 12);
+  messageDesc(file_heddle_v1_threads, 13);
 
 /**
  * @generated from message heddle.v1.CaptureThreadResponse
@@ -632,9 +732,9 @@ export type CaptureThreadResponse = Message<"heddle.v1.CaptureThreadResponse"> &
   thread: string;
 
   /**
-   * @generated from field: bytes change_id = 2;
+   * @generated from field: bytes state_id = 2;
    */
-  changeId: Uint8Array;
+  stateId: Uint8Array;
 
   /**
    * @generated from field: string coordination_status = 3;
@@ -647,7 +747,7 @@ export type CaptureThreadResponse = Message<"heddle.v1.CaptureThreadResponse"> &
  * Use `create(CaptureThreadResponseSchema)` to create a new message.
  */
 export const CaptureThreadResponseSchema: GenMessage<CaptureThreadResponse> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 13);
+  messageDesc(file_heddle_v1_threads, 14);
 
 /**
  * @generated from message heddle.v1.CompleteThreadRequest
@@ -664,8 +764,6 @@ export type CompleteThreadRequest = Message<"heddle.v1.CompleteThreadRequest"> &
   name: string;
 
   /**
-   * Idempotency (audit-idempotency enforces tag 15).
-   *
    * @generated from field: string client_operation_id = 15;
    */
   clientOperationId: string;
@@ -676,7 +774,7 @@ export type CompleteThreadRequest = Message<"heddle.v1.CompleteThreadRequest"> &
  * Use `create(CompleteThreadRequestSchema)` to create a new message.
  */
 export const CompleteThreadRequestSchema: GenMessage<CompleteThreadRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 14);
+  messageDesc(file_heddle_v1_threads, 15);
 
 /**
  * @generated from message heddle.v1.WatchThreadsRequest
@@ -698,7 +796,7 @@ export type WatchThreadsRequest = Message<"heddle.v1.WatchThreadsRequest"> & {
  * Use `create(WatchThreadsRequestSchema)` to create a new message.
  */
 export const WatchThreadsRequestSchema: GenMessage<WatchThreadsRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 15);
+  messageDesc(file_heddle_v1_threads, 16);
 
 /**
  * @generated from message heddle.v1.ThreadEvent
@@ -735,7 +833,7 @@ export type ThreadEvent = Message<"heddle.v1.ThreadEvent"> & {
  * Use `create(ThreadEventSchema)` to create a new message.
  */
 export const ThreadEventSchema: GenMessage<ThreadEvent> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_threads, 16);
+  messageDesc(file_heddle_v1_threads, 17);
 
 /**
  * @generated from service heddle.v1.ThreadWorkflowService

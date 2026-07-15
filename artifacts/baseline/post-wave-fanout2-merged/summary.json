@@ -1,0 +1,52 @@
+{
+  "jobs": 5,
+  "counts": {
+    "pass": 5
+  },
+  "results": [
+    {
+      "id": "facade-render-free",
+      "status": "pass",
+      "duration_ms": 234,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "fmt-check",
+      "status": "pass",
+      "duration_ms": 29858,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "git-process-lint",
+      "status": "pass",
+      "duration_ms": 73292,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-core",
+      "status": "pass",
+      "duration_ms": 26561,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "roundtrip-fidelity",
+      "status": "pass",
+      "duration_ms": 5492,
+      "oracle": true,
+      "exit_code": 0
+    }
+  ],
+  "certification": {
+    "label": "post-wave-fanout2-high-signal",
+    "commit": "b7f51aa4a505c69c3dea5831ed44069f954b36c3",
+    "branch": "codex/correctness-architecture-performance-program",
+    "note": "Wave 8 partial cert: high-signal 5-job re-run + n=5 core-loop perf cert on program tip",
+    "cargo_target_dir": "/tmp/heddle-cert-w8",
+    "perf_stamp": "20260711T041555Z",
+    "perf_trials": 5
+  }
+}

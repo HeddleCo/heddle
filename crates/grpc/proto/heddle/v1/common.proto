@@ -4,11 +4,10 @@ package heddle.v1;
 
 message RefEntry {
   string name = 1;
-  bytes change_id = 2;
+  bytes state_id = 2;
   bool is_thread = 3;
   // Explicit revision address for two-lane storage. Native refs use
-  // `heddle:<change_id>`; Git-overlay refs use `git:<commit_oid>`.
-  // `change_id` remains populated for native refs during the transition.
+  // `heddle:<state_id>`; Git-overlay refs use `git:<commit_oid>`.
   string revision_address = 4;
 }
 
@@ -37,16 +36,56 @@ enum ReviewKind {
 
 // State publication status. Captures whether a state is in-progress
 // (`DRAFT`) or pinned as the published shape of the work (`PUBLISHED`).
+// The failure/terminal statuses (`ABANDONED`/`ABORTED`/`SUPERSEDED`) are
+// author/gate-driven (weft#469) and orthogonal to reviewer verdicts —
+// `RecordVerdict` never sets them. `FAILED` is intentionally absent: it is
+// derivable from `verification.tests_failed > 0`.
 enum StateStatus {
   STATE_STATUS_UNSPECIFIED = 0;
   STATE_STATUS_DRAFT = 1;
   STATE_STATUS_PUBLISHED = 2;
+  STATE_STATUS_ABANDONED = 3;   // +weft#469: author gave up on the task
+  STATE_STATUS_ABORTED = 4;     // +weft#469: hard merge-gate/policy killed it
+  STATE_STATUS_SUPERSEDED = 5;  // +weft#469: replaced by a successor attempt
 }
 
 // Grants are scoped to either a namespace or a repository — never both,
 // never neither. The `target` oneof is the wire-level form of that
 // "exactly one of" guarantee. Server-side `classify_grant_target`
 // translates it to a `GrantTarget` enum without runtime branching.
+// Lifecycle phases surfaced for a git-provider import and its automatic
+// adoption (weft#489/#391). Defined here (not import.proto) so both the import
+// stream and hosted.proto's `ImportJobSummary` can reuse it without a circular
+// file import (import.proto already imports hosted.proto for SpoolVisibility,
+// so hosted.proto cannot import import.proto back).
+enum ImportPhase {
+  IMPORT_PHASE_UNSPECIFIED = 0;
+  IMPORT_PHASE_QUEUED = 1;
+  IMPORT_PHASE_CLONING = 2;
+  IMPORT_PHASE_MIRRORING = 3;
+  IMPORT_PHASE_METADATA = 4;
+  IMPORT_PHASE_STARS = 5;
+  IMPORT_PHASE_DONE = 6;
+  IMPORT_PHASE_FAILED = 7;
+  IMPORT_PHASE_ADOPTING = 8;
+  IMPORT_PHASE_NATIVE = 9;
+}
+
+// Terminal failure classification for an import job (weft#489/#490). Set at
+// `fail()` time from the durable row, NOT regexed from the error string at
+// stream time. `SOURCE_NOT_ALLOWED` stays deliberately generic (no SSRF
+// oracle); `AUTH_FAILED` is only for the credentialed modes.
+enum ImportErrorCode {
+  IMPORT_ERROR_UNSPECIFIED = 0;
+  IMPORT_ERROR_INVALID_SOURCE = 1;      // malformed URL / full_name
+  IMPORT_ERROR_SOURCE_NOT_ALLOWED = 2;  // SSRF-blocked (generic on purpose)
+  IMPORT_ERROR_AUTH_FAILED = 3;         // token/installation rejected by provider
+  IMPORT_ERROR_NOT_FOUND = 4;           // repo 404 / private without creds
+  IMPORT_ERROR_TOO_LARGE = 5;           // byte/object cap hit
+  IMPORT_ERROR_TIMED_OUT = 6;
+  IMPORT_ERROR_INTERNAL = 7;
+}
+
 message GrantTargetRef {
   oneof target {
     string namespace_path = 1;

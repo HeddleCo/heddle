@@ -2,12 +2,20 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "google/protobuf/timestamp.proto";
 
 service ReviewService {
-  rpc StartReviewAnalysis(StartReviewAnalysisRequest) returns (StartReviewAnalysisResponse);
-  rpc GetReviewAnalysisStatus(GetReviewAnalysisStatusRequest) returns (GetReviewAnalysisStatusResponse);
-  rpc GetReviewAnalysisResult(GetReviewAnalysisResultRequest) returns (GetReviewAnalysisResultResponse);
+  rpc StartReviewAnalysis(StartReviewAnalysisRequest) returns (StartReviewAnalysisResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_TRANSIENT_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetReviewAnalysisStatus(GetReviewAnalysisStatusRequest) returns (GetReviewAnalysisStatusResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetReviewAnalysisResult(GetReviewAnalysisResultRequest) returns (GetReviewAnalysisResultResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
 }
 
 message StartReviewAnalysisRequest {

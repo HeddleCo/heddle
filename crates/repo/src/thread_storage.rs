@@ -9,7 +9,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use objects::{
     lock::RepoLock,
-    object::ChangeId,
+    object::StateId,
     store::{HeddleError, ObjectStore, Result},
 };
 
@@ -172,7 +172,7 @@ impl SyncedThreadMetadata {
     pub fn from_record(
         repo: &crate::Repository,
         record: &ThreadRecord,
-        current_state_override: Option<ChangeId>,
+        current_state_override: Option<StateId>,
     ) -> Result<Self> {
         let mut record = record.clone();
         let resolve_full = |spec: &str| -> Result<String> {
@@ -206,12 +206,12 @@ impl SyncedThreadMetadata {
     pub fn from_thread(
         repo: &crate::Repository,
         thread: &Thread,
-        current_state_override: Option<ChangeId>,
+        current_state_override: Option<StateId>,
     ) -> Result<Self> {
         Self::from_record(repo, &thread.to_record(), current_state_override)
     }
 
-    pub fn current_state_change_id(&self, repo: &crate::Repository) -> Result<Option<ChangeId>> {
+    pub fn current_state_id(&self, repo: &crate::Repository) -> Result<Option<StateId>> {
         match self.current_state.as_deref() {
             Some(state) => Ok(repo.resolve_state(state)?),
             None => Ok(None),
@@ -417,7 +417,7 @@ impl ThreadManager {
         &self,
         repo: &crate::Repository,
         thread: &str,
-        current_state_override: Option<ChangeId>,
+        current_state_override: Option<StateId>,
     ) -> Result<Option<SyncedThreadMetadata>> {
         self.find_record_by_thread(thread)?
             .map(|record| SyncedThreadMetadata::from_record(repo, &record, current_state_override))

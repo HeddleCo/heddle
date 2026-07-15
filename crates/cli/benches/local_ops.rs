@@ -4,7 +4,7 @@ use std::{env, hint::black_box, path::Path};
 use cli::bench::{detect_renames_for_bench, find_merge_base_for_bench, three_way_merge_for_bench};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use objects::{
-    object::{Blob, ChangeId, MarkerName, ThreadName, Tree, TreeEntry},
+    object::{Blob, MarkerName, StateId, ThreadName, Tree, TreeEntry},
     store::{InMemoryStore, ObjectStore},
 };
 use refs::{Head, RefExpectation, RefManager};
@@ -190,7 +190,7 @@ fn populate_threads(refs: &RefManager, count: usize) {
     for index in 0..count {
         refs.set_thread(
             &ThreadName::new(format!("branch-{index:05}")),
-            &ChangeId::generate(),
+            &StateId::from_bytes([6; 32]),
         )
         .unwrap();
     }
@@ -200,7 +200,7 @@ fn populate_markers(refs: &RefManager, count: usize) {
     for index in 0..count {
         refs.create_marker(
             &MarkerName::new(format!("marker-{index:05}")),
-            &ChangeId::generate(),
+            &StateId::from_bytes([7; 32]),
         )
         .unwrap();
     }
@@ -211,7 +211,7 @@ fn populate_remote_threads(refs: &RefManager, remote: &str, count: usize) {
         refs.set_remote_thread(
             remote,
             &ThreadName::new(format!("branch-{index:05}")),
-            &ChangeId::generate(),
+            &StateId::from_bytes([8; 32]),
         )
         .unwrap();
     }
@@ -344,7 +344,7 @@ fn bench_snapshot_profile_flat_repo(c: &mut Criterion) {
                     )
                     .unwrap();
                 black_box((
-                    execution.state.change_id,
+                    execution.state.state_id,
                     execution.profile.tree_walk_ms,
                     execution.profile.blob_prep_ms,
                     execution.profile.blob_write_ms,
@@ -510,7 +510,8 @@ fn bench_refs_update_thread_rebuild_summary(c: &mut Criterion) {
         let hot = ThreadName::new(format!("branch-{:05}", count / 2));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
             b.iter(|| {
-                refs.set_thread(&hot, &ChangeId::generate()).unwrap();
+                refs.set_thread(&hot, &StateId::from_bytes([9; 32]))
+                    .unwrap();
             });
         });
     }
@@ -525,7 +526,7 @@ fn bench_refs_update_marker_rebuild_summary(c: &mut Criterion) {
         let hot = MarkerName::new(format!("marker-{:05}", count / 2));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
             b.iter(|| {
-                refs.set_marker_cas(&hot, RefExpectation::Any, &ChangeId::generate())
+                refs.set_marker_cas(&hot, RefExpectation::Any, &StateId::from_bytes([10; 32]))
                     .unwrap();
             });
         });
@@ -541,7 +542,7 @@ fn bench_refs_update_remote_thread_rebuild_summary(c: &mut Criterion) {
         let hot = ThreadName::new(format!("branch-{:05}", count / 2));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
             b.iter(|| {
-                refs.set_remote_thread("origin", &hot, &ChangeId::generate())
+                refs.set_remote_thread("origin", &hot, &StateId::from_bytes([11; 32]))
                     .unwrap();
             });
         });
@@ -727,8 +728,8 @@ fn bench_goto_same_tree(c: &mut Criterion) {
             &file_count,
             |b, _| {
                 b.iter(|| {
-                    repo.goto(&state.change_id).unwrap();
-                    black_box(state.change_id);
+                    repo.goto(&state.state_id).unwrap();
+                    black_box(state.state_id);
                 });
             },
         );
@@ -749,18 +750,18 @@ fn bench_goto_small_delta(c: &mut Criterion) {
     .unwrap();
     let delta = repo.snapshot(Some("delta".to_string()), None).unwrap();
 
-    repo.goto(&base.change_id).unwrap();
-    let mut target = delta.change_id;
+    repo.goto(&base.state_id).unwrap();
+    let mut target = delta.state_id;
     group.bench_with_input(
         BenchmarkId::from_parameter(file_count),
         &file_count,
         |b, _| {
             b.iter(|| {
                 repo.goto(&target).unwrap();
-                target = if target == delta.change_id {
-                    base.change_id
+                target = if target == delta.state_id {
+                    base.state_id
                 } else {
-                    delta.change_id
+                    delta.state_id
                 };
                 black_box(target);
             });
@@ -785,18 +786,18 @@ fn bench_goto_large_delta(c: &mut Criterion) {
         }
         let delta = repo.snapshot(Some("delta".to_string()), None).unwrap();
 
-        repo.goto(&base.change_id).unwrap();
-        let mut target = delta.change_id;
+        repo.goto(&base.state_id).unwrap();
+        let mut target = delta.state_id;
         group.bench_with_input(
             BenchmarkId::from_parameter(file_count),
             &file_count,
             |b, _| {
                 b.iter(|| {
                     repo.goto(&target).unwrap();
-                    target = if target == delta.change_id {
-                        base.change_id
+                    target = if target == delta.state_id {
+                        base.state_id
                     } else {
-                        delta.change_id
+                        delta.state_id
                     };
                     black_box(target);
                 });
@@ -818,9 +819,9 @@ fn bench_goto_same_tree_then_status(c: &mut Criterion) {
         &file_count,
         |b, _| {
             b.iter(|| {
-                repo.goto(&state.change_id).unwrap();
+                repo.goto(&state.state_id).unwrap();
                 let clean = repo.worktree_is_clean_cached(&tree).unwrap();
-                black_box((state.change_id, clean));
+                black_box((state.state_id, clean));
             });
         },
     );
@@ -841,23 +842,23 @@ fn bench_goto_small_delta_then_status(c: &mut Criterion) {
     let base_tree = repo.store().get_tree(&base.tree).unwrap().unwrap();
     let delta_tree = repo.store().get_tree(&delta.tree).unwrap().unwrap();
 
-    repo.goto(&base.change_id).unwrap();
-    let mut target = delta.change_id;
+    repo.goto(&base.state_id).unwrap();
+    let mut target = delta.state_id;
     group.bench_with_input(
         BenchmarkId::from_parameter(file_count),
         &file_count,
         |b, _| {
             b.iter(|| {
                 repo.goto(&target).unwrap();
-                let clean = if target == delta.change_id {
+                let clean = if target == delta.state_id {
                     repo.worktree_is_clean_cached(&delta_tree).unwrap()
                 } else {
                     repo.worktree_is_clean_cached(&base_tree).unwrap()
                 };
-                target = if target == delta.change_id {
-                    base.change_id
+                target = if target == delta.state_id {
+                    base.state_id
                 } else {
-                    delta.change_id
+                    delta.state_id
                 };
                 black_box((target, clean));
             });
@@ -881,7 +882,7 @@ fn bench_full_rematerialize_then_status(c: &mut Criterion) {
     let base_tree = repo.store().get_tree(&base.tree).unwrap().unwrap();
     let delta_tree = repo.store().get_tree(&delta.tree).unwrap().unwrap();
 
-    repo.goto(&base.change_id).unwrap();
+    repo.goto(&base.state_id).unwrap();
 
     group.bench_with_input(
         BenchmarkId::from_parameter(file_count),
@@ -893,9 +894,9 @@ fn bench_full_rematerialize_then_status(c: &mut Criterion) {
                     "dirty worktree forces fallback\n",
                 )
                 .unwrap();
-                repo.goto(&delta.change_id).unwrap();
+                repo.goto(&delta.state_id).unwrap();
                 let delta_clean = repo.worktree_is_clean_cached(&delta_tree).unwrap();
-                repo.goto(&base.change_id).unwrap();
+                repo.goto(&base.state_id).unwrap();
                 let base_clean = repo.worktree_is_clean_cached(&base_tree).unwrap();
                 black_box((delta_clean, base_clean));
             });
@@ -907,9 +908,9 @@ fn bench_full_rematerialize_then_status(c: &mut Criterion) {
 fn setup_divergent_history() -> (
     TempDir,
     Repository,
-    objects::object::ChangeId,
-    objects::object::ChangeId,
-    objects::object::ChangeId,
+    objects::object::StateId,
+    objects::object::StateId,
+    objects::object::StateId,
 ) {
     let temp = TempDir::new().unwrap();
     let repo = Repository::init_default(temp.path()).unwrap();
@@ -918,7 +919,7 @@ fn setup_divergent_history() -> (
     let base = repo.snapshot(Some("base".to_string()), None).unwrap();
 
     repo.refs()
-        .set_thread(&ThreadName::new("topic"), &base.change_id)
+        .set_thread(&ThreadName::new("topic"), &base.state_id)
         .unwrap();
 
     std::fs::write(temp.path().join("main-only.txt"), "main\n").unwrap();
@@ -929,7 +930,7 @@ fn setup_divergent_history() -> (
             thread: ThreadName::new("topic"),
         })
         .unwrap();
-    repo.goto(&base.change_id).unwrap();
+    repo.goto(&base.state_id).unwrap();
     std::fs::write(temp.path().join("topic-only.txt"), "topic\n").unwrap();
     let topic_tip = repo.snapshot(Some("topic tip".to_string()), None).unwrap();
 
@@ -938,14 +939,14 @@ fn setup_divergent_history() -> (
             thread: ThreadName::new("main"),
         })
         .unwrap();
-    repo.goto(&main_tip.change_id).unwrap();
+    repo.goto(&main_tip.state_id).unwrap();
 
     (
         temp,
         repo,
-        base.change_id,
-        main_tip.change_id,
-        topic_tip.change_id,
+        base.state_id,
+        main_tip.state_id,
+        topic_tip.state_id,
     )
 }
 

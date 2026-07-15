@@ -8,10 +8,8 @@ use heddle_core::status::next_action::{
 };
 use serde_json::{Map, Value};
 
-pub(crate) const DIRTY_WORKTREE_COMMIT_COMMAND: &str = "heddle commit -m \"...\"";
 pub(crate) const DIRTY_WORKTREE_CAPTURE_COMMAND: &str = "heddle capture -m \"...\"";
-pub(crate) const DIRTY_WORKTREE_STASH_COMMAND: &str = "heddle stash push -m \"...\"";
-pub(crate) const GIT_OVERLAY_CHECKPOINT_COMMAND: &str = "heddle checkpoint -m \"...\"";
+pub(crate) const GIT_OVERLAY_CHECKPOINT_COMMAND: &str = "heddle commit -m \"...\"";
 
 #[derive(Debug, Clone)]
 pub struct RecoveryAdvice {
@@ -78,12 +76,12 @@ impl RecoveryAdvice {
         } else {
             format!("unsaved worktree path(s): {path_list}, and {overflow} more")
         };
-        let primary_command = DIRTY_WORKTREE_COMMIT_COMMAND.to_string();
+        let primary_command = DIRTY_WORKTREE_CAPTURE_COMMAND.to_string();
         Self {
             kind: "dirty_worktree",
-            error: format!("Save or stash worktree changes before {action}"),
+            error: format!("Capture worktree changes before {action}"),
             hint: format!(
-                "Save the work with `{primary_command}`; use `{DIRTY_WORKTREE_CAPTURE_COMMAND}` for a Heddle-only recovery point or park it with `{DIRTY_WORKTREE_STASH_COMMAND}`, then retry."
+                "Capture the intended work with `{DIRTY_WORKTREE_CAPTURE_COMMAND}`, then retry."
             ),
             unsafe_condition,
             would_change: format!(
@@ -335,24 +333,6 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn merge_integrity_refusal(
-        error: impl Into<String>,
-        unsafe_condition: impl Into<String>,
-        would_change: impl Into<String>,
-        preserved: impl Into<String>,
-    ) -> Self {
-        Self::safety_refusal(
-            "repository_integrity_error",
-            error,
-            "Inspect repository integrity with `heddle fsck --full`, then restore or repair the reported object/ref.",
-            unsafe_condition,
-            would_change,
-            preserved,
-            "heddle fsck --full",
-            vec!["heddle fsck --full".to_string()],
-        )
-    }
-
     pub(crate) fn stale_daemon_protocol(their_version: u32, our_version: u32) -> Self {
         Self::safety_refusal(
             "daemon_protocol_version_mismatch",
@@ -413,17 +393,13 @@ impl RecoveryAdvice {
         )
     }
 
-    /// Lazy Git-tip bind failed while establishing the first Heddle state on a
-    /// Git-overlay checkout. Refuse inventing a parentless bootstrap root that
-    /// would later export as an orphan Git branch with no merge-base.
     pub(crate) fn git_overlay_tip_bind_failed(details: impl Into<String>) -> Self {
         let primary = "heddle adopt".to_string();
         Self::safety_refusal(
             "git_overlay_tip_bind_failed",
             "Could not bind the active Git tip into Heddle",
             format!(
-                "Run `{primary}` to import Git history explicitly, then retry. \
-                 Heddle refused to invent a parentless bootstrap root while a Git tip exists."
+                "Run `{primary}` to import Git history explicitly, then retry. Heddle refused to invent a parentless bootstrap root while a Git tip exists."
             ),
             details.into(),
             "binding the active Git tip would otherwise be skipped in favor of an orphan Heddle root",
@@ -472,15 +448,6 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn git_remote_name_invalid(name: &str) -> Self {
-        Self::invalid_usage(
-            "git_remote_name_invalid",
-            format!("invalid Git remote name for Git-overlay repository: {name}"),
-            "Use a Git remote name without spaces, control characters, path separators, ref metacharacters, leading dots, or a `.lock` suffix.",
-            "heddle remote list",
-        )
-    }
-
     pub(crate) fn hook_veto(hook: &str, action: &str, reason: impl Into<String>) -> Self {
         let reason = reason.into();
         Self::safety_refusal(
@@ -496,22 +463,6 @@ impl RecoveryAdvice {
             "the operation stopped at the hook boundary before the protected action ran",
             "heddle hook list",
             vec!["heddle hook list".to_string()],
-        )
-    }
-
-    #[cfg(not(feature = "semantic"))]
-    pub(crate) fn feature_unavailable(command: &str, feature: &str) -> Self {
-        Self::safety_refusal(
-            "feature_unavailable",
-            format!("{command} requires building heddle with --features {feature}"),
-            format!(
-                "Use a heddle binary built with `--features {feature}`, or rerun without the feature-specific flag."
-            ),
-            format!("this heddle binary was built without the `{feature}` feature"),
-            format!("{command} cannot run because the requested analysis engine is unavailable"),
-            "repository state, refs, and worktree files were left unchanged",
-            "heddle help --output json",
-            vec!["heddle help --output json".to_string()],
         )
     }
 
@@ -638,13 +589,13 @@ impl RecoveryAdvice {
         Self::safety_refusal(
             "repository_no_head",
             format!("Repository has no HEAD state for {action}"),
-            "Create a Heddle anchor with `heddle commit -m \"...\"`; for a clean Git-overlay checkout that only needs metadata, use `heddle checkpoint -m \"...\"`, then retry.",
+            "Create a Heddle anchor with `heddle capture -m \"...\"`; commit Git-owned source history with `heddle commit -m \"...\"`, then retry.",
             "the repository has no current HEAD state",
             format!("`{action}` needs a concrete Heddle state id and cannot safely infer one"),
             "no repository objects, refs, metadata, or worktree files were changed",
-            DIRTY_WORKTREE_COMMIT_COMMAND,
+            DIRTY_WORKTREE_CAPTURE_COMMAND,
             vec![
-                DIRTY_WORKTREE_COMMIT_COMMAND.to_string(),
+                DIRTY_WORKTREE_CAPTURE_COMMAND.to_string(),
                 GIT_OVERLAY_CHECKPOINT_COMMAND.to_string(),
                 "heddle status".to_string(),
             ],
@@ -723,9 +674,11 @@ impl RecoveryAdvice {
         };
         let hint = match explicit_selector {
             Some(selector) => format!(
-                "Start a session with `heddle session start`, or retry `heddle {command}` with `{selector}` to choose a session explicitly."
+                "Begin provenance with `heddle agent provenance begin`, or retry `heddle {command}` with `{selector}` to choose a session explicitly."
             ),
-            None => "Start a session with `heddle session start`, then retry.".to_string(),
+            None => {
+                "Begin provenance with `heddle agent provenance begin`, then retry.".to_string()
+            }
         };
         Self::safety_refusal(
             "no_current_session",
@@ -764,87 +717,6 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn land_push_remote_missing(thread: &str) -> Self {
-        let local_command = super::thread_landing::land_local_command(thread);
-        Self::safety_refusal(
-            "land_push_remote_missing",
-            format!("Refusing to land thread `{thread}` with --push: no push remote is configured"),
-            format!(
-                "Run `{local_command}` to land locally, or configure a remote and retry with `--push`."
-            ),
-            "no default Git or Heddle remote is configured for push",
-            "landing with --push would merge and checkpoint before discovering there is nowhere to push",
-            "repository state, refs, metadata, and worktree files were left unchanged",
-            local_command.clone(),
-            vec![local_command, "heddle remote add <name> <url>".to_string()],
-        )
-    }
-
-    pub(crate) fn land_remote_requires_push(thread: &str, remote: &str) -> Self {
-        let push_command = super::thread_landing::land_push_remote_command(thread, remote);
-        let local_command = super::thread_landing::land_local_command(thread);
-        Self::safety_refusal(
-            "land_remote_requires_push",
-            format!("Land remote `{remote}` was provided without --push"),
-            format!(
-                "Run `{push_command}` to land and publish, or `{local_command}` to land locally."
-            ),
-            "`--remote` names a push destination, but this land invocation did not request a push",
-            "continuing would merge/checkpoint locally while leaving the named remote unchanged",
-            "repository state, refs, metadata, remote refs, and worktree files were left unchanged",
-            push_command.clone(),
-            vec![push_command, local_command],
-        )
-    }
-
-    pub(crate) fn land_push_option_conflict(thread: &str) -> Self {
-        let push_command = super::thread_landing::land_push_command(thread);
-        let local_command = super::thread_landing::land_local_command(thread);
-        Self::safety_refusal(
-            "land_push_option_conflict",
-            "Land was asked to both push and not push",
-            format!("Choose `{push_command}` or `{local_command}`."),
-            "`--push` and `--no-push` are mutually exclusive publish choices",
-            "continuing would make the publish side effect ambiguous",
-            "repository state, refs, metadata, remote refs, and worktree files were left unchanged",
-            local_command.clone(),
-            vec![push_command, local_command],
-        )
-    }
-
-    pub(crate) fn land_push_partial_failure(
-        thread: &str,
-        push_error: impl fmt::Display,
-        performed_steps: Vec<String>,
-        git_commit: Option<&str>,
-        attempted_remote: Option<&str>,
-    ) -> Self {
-        let completed = if performed_steps.is_empty() {
-            "no completed steps were recorded".to_string()
-        } else {
-            performed_steps.join(", ")
-        };
-        let checkpoint = git_commit
-            .map(|oid| format!(" Git checkpoint {oid} was written."))
-            .unwrap_or_default();
-        let push_command = attempted_remote
-            .filter(|remote| !remote.trim().is_empty())
-            .map(|remote| format!("heddle push {remote}"))
-            .unwrap_or_else(|| "heddle push".to_string());
-        Self::safety_refusal(
-            "land_push_partial_failure",
-            format!("Land partially completed for `{thread}`, but push failed: {push_error}"),
-            format!(
-                "The thread was preserved locally. Run `heddle undo` to roll back the local land, or fix the remote and run `{push_command}`."
-            ),
-            "push failed after Heddle had already completed local land steps",
-            "retrying blindly could duplicate or obscure the already-landed local merge/checkpoint",
-            format!("completed steps: {completed}.{checkpoint}"),
-            "heddle undo",
-            vec!["heddle undo".to_string(), push_command],
-        )
-    }
-
     pub(crate) fn land_checkpoint_partial_failure(
         thread: &str,
         checkpoint_error: impl fmt::Display,
@@ -860,7 +732,7 @@ impl RecoveryAdvice {
             format!(
                 "Land partially completed for `{thread}`, but Git checkpoint failed: {checkpoint_error}"
             ),
-            "Run `heddle undo` to roll back the local land, or resolve the checkpoint issue and run `heddle commit -m \"...\"`.",
+            "Run `heddle undo` to roll back the local land, or resolve the Git issue and run `heddle commit -m \"...\"`.",
             "Git checkpoint failed after Heddle had already completed local land steps",
             "retrying blindly could obscure the already-landed local merge state",
             format!("completed steps: {completed}. No Git checkpoint was written."),
@@ -872,8 +744,6 @@ impl RecoveryAdvice {
         )
     }
 
-    /// Land integrated Heddle, Git checkpoint failed, and land auto-undid the
-    /// integration batch so the tip is not left Heddle-ahead-of-Git.
     pub(crate) fn land_checkpoint_rolled_back(
         thread: &str,
         checkpoint_error: impl fmt::Display,
@@ -884,29 +754,23 @@ impl RecoveryAdvice {
         } else {
             performed_steps.join(", ")
         };
+        let retry = super::thread_landing::land_local_command(thread);
         Self::safety_refusal(
             "land_checkpoint_rolled_back",
             format!(
                 "Land for `{thread}` failed at Git checkpoint and was rolled back: {checkpoint_error}"
             ),
-            format!(
-                "Resolve the Git checkpoint issue, then retry `{}`.",
-                super::thread_landing::land_local_command(thread)
-            ),
-            "Git checkpoint failed after Heddle land steps; land auto-undid the local integration so Git and Heddle tips stay consistent",
-            "retrying land after fixing the checkpoint issue is safe because the Heddle integration was rolled back",
+            format!("Resolve the Git checkpoint issue, then retry `{retry}`."),
+            "Git checkpoint failed after local land steps; land auto-undid the integration so Git and Heddle tips stay consistent",
+            "retrying after fixing the checkpoint issue is safe because the Heddle integration was rolled back",
             format!(
                 "completed steps before rollback: {completed}. No Git checkpoint was written; land-owned Heddle integration was undone."
             ),
-            super::thread_landing::land_local_command(thread),
-            vec![
-                "heddle verify".to_string(),
-                super::thread_landing::land_local_command(thread),
-            ],
+            retry.clone(),
+            vec!["heddle verify".to_string(), retry],
         )
     }
 
-    /// Land integrated Heddle, Git checkpoint failed, and auto-undo itself failed.
     pub(crate) fn land_checkpoint_partial_failure_undo_failed(
         thread: &str,
         checkpoint_error: impl fmt::Display,
@@ -923,8 +787,8 @@ impl RecoveryAdvice {
             format!(
                 "Land partially completed for `{thread}`, but Git checkpoint failed: {checkpoint_error}. Auto-undo also failed: {undo_error}"
             ),
-            "Run `heddle undo` to roll back the local land, or resolve the checkpoint issue and run `heddle commit -m \"...\"`.",
-            "Git checkpoint failed after Heddle had already completed local land steps, and automatic rollback did not complete",
+            "Run `heddle undo` to roll back the local land, or resolve the Git issue and run `heddle commit -m \"...\"`.",
+            "Git checkpoint failed after local land steps, and automatic rollback did not complete",
             "retrying blindly could obscure the already-landed local merge state; manual undo is required",
             format!("completed steps: {completed}. No Git checkpoint was written."),
             "heddle undo",
@@ -935,13 +799,67 @@ impl RecoveryAdvice {
         )
     }
 
+    pub(crate) fn land_checkpoint_recovery_required(
+        thread: &str,
+        checkpoint_error: impl fmt::Display,
+        recovery_error: impl fmt::Display,
+        performed_steps: Vec<String>,
+    ) -> Self {
+        let completed = if performed_steps.is_empty() {
+            "no completed steps were recorded".to_string()
+        } else {
+            performed_steps.join(", ")
+        };
+        Self::safety_refusal(
+            "land_checkpoint_recovery_required",
+            format!(
+                "Land checkpoint recovery for `{thread}` did not complete: {checkpoint_error}. Recovery also failed: {recovery_error}"
+            ),
+            "Run `heddle status` to retry durable checkpoint recovery before changing either tip.",
+            "Git checkpoint publication may have completed, but its durable Heddle metadata could not be finalized",
+            "rolling back Heddle while Git may already point at the landed state would split the two tips",
+            format!(
+                "completed steps: {completed}. The incomplete-land marker was preserved for a later recovery attempt."
+            ),
+            "heddle status",
+            vec!["heddle status".to_string(), "heddle verify".to_string()],
+        )
+    }
+
+    pub(crate) fn land_checkpoint_rollback_marker_cleanup_failed(
+        thread: &str,
+        checkpoint_error: impl fmt::Display,
+        cleanup_error: impl fmt::Display,
+        performed_steps: Vec<String>,
+    ) -> Self {
+        let completed = if performed_steps.is_empty() {
+            "no completed steps were recorded".to_string()
+        } else {
+            performed_steps.join(", ")
+        };
+        Self::safety_refusal(
+            "land_checkpoint_marker_cleanup_failed",
+            format!(
+                "Land for `{thread}` was rolled back after checkpoint failure, but its recovery marker could not be removed: {checkpoint_error}. Marker cleanup failed: {cleanup_error}"
+            ),
+            "Restore write access to `.heddle`, remove `.heddle/incomplete-land.json`, then retry the land.",
+            "the land-owned Heddle integration was undone, but the stale recovery marker remains",
+            "leaving the marker unreported would make the next command attempt to recover work that is already rolled back",
+            format!(
+                "completed steps before rollback: {completed}. Git was not checkpointed; the land-owned integration was undone."
+            ),
+            "heddle status",
+            vec!["heddle status".to_string()],
+        )
+    }
+
     pub(crate) fn from_git_projection_error(
-        error: &crate::git_projection_engine::git_core::GitProjectionError,
+        error: &heddle_git_projection::git_core::GitProjectionError,
     ) -> Option<Self> {
-        use crate::git_projection_engine::git_core::GitProjectionError;
+        use heddle_git_projection::git_core::GitProjectionError;
         match error {
             GitProjectionError::NonFastForwardRef { name, .. }
-                if name == crate::git_projection_engine::git_notes::NOTES_REF =>
+                if name == heddle_git_projection::git_notes::NOTES_REF =>
             {
                 Some(Self::git_overlay_note_ref_conflict())
             }
@@ -980,13 +898,13 @@ impl RecoveryAdvice {
         Self::safety_refusal(
             "git_overlay_note_ref_conflict",
             "Remote Heddle notes do not fast-forward",
-            "Fetch the remote Heddle notes, then retry the push. If the conflict remains, create a fresh Heddle clone from the remote so Git-to-Heddle identity metadata stays authoritative.",
+            "Pull the remote Heddle metadata, then retry the push. If the conflict remains, create a fresh Heddle clone from the remote so Git-to-Heddle identity metadata stays authoritative.",
             "updating refs/notes/heddle would replace remote Git-to-Heddle identity metadata instead of fast-forwarding it",
             "pushing would remap commits that another Heddle checkout already identified",
             "remote refs/notes/heddle was left unchanged",
-            "heddle fetch",
+            "heddle pull",
             vec![
-                "heddle fetch".to_string(),
+                "heddle pull".to_string(),
                 "heddle push".to_string(),
                 "heddle clone <remote> <fresh-path>".to_string(),
             ],
@@ -1047,11 +965,11 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn git_overlay_remote_push_rejected(branch: &str) -> Self {
-        let primary_command = "heddle fetch".to_string();
+        let primary_command = "heddle pull".to_string();
         Self::safety_refusal(
             "git_overlay_remote_diverged",
             "Remote branch does not fast-forward the local Git checkpoint",
-            "Fetch first so Heddle can inspect the remote tip locally, then run `heddle verify` for the exact integration command.",
+            "Run `heddle pull` so Heddle can stream and inspect the remote tip, then run `heddle verify` for the exact integration command.",
             format!(
                 "pushing branch '{branch}' would rewrite the remote branch instead of fast-forwarding it"
             ),
@@ -1062,25 +980,24 @@ impl RecoveryAdvice {
         )
     }
 
-    /// Local write-through / mirror-branch update is not a fast-forward.
-    /// Distinct from remote push rejection so recovery does not claim "remote branch".
+    /// Updating the authoritative checkout branch would replace a local Git
+    /// commit. Keep this distinct from a remote push rejection so recovery is
+    /// executable in the current checkout.
     pub(crate) fn git_overlay_local_non_fast_forward(branch: &str) -> Self {
-        let primary_command = "heddle verify".to_string();
+        let import_command = format!("heddle import git --ref {branch}");
         Self::safety_refusal(
             "git_overlay_local_non_fast_forward",
             format!("Local Git branch '{branch}' does not fast-forward from the Heddle tip"),
-            "Inspect with `heddle verify`, then reconcile local Git history (`heddle import git --ref <branch>` or `heddle checkpoint -m \"...\"` after the tips share ancestry) before retrying.",
             format!(
-                "updating local branch '{branch}' would rewrite the Git tip instead of fast-forwarding it from the current Heddle state"
+                "Inspect with `heddle status`, then reconcile the authoritative Git branch with `{import_command}` before retrying."
             ),
-            "forcing the local Git branch would replace work that exists only on the Git tip",
-            "Heddle refs, the local Git branch tip, index, and worktree files were left unchanged by this ref update",
-            primary_command.clone(),
-            vec![
-                primary_command,
-                format!("heddle import git --ref {branch}"),
-                "heddle checkpoint -m \"...\"".to_string(),
-            ],
+            format!(
+                "updating local branch '{branch}' would replace work that exists only on the Git tip"
+            ),
+            "forcing the local Git branch could discard Git-owned history",
+            "Heddle refs, the local Git branch, index, and worktree were left unchanged by this ref update",
+            "heddle status",
+            vec!["heddle status".to_string(), import_command],
         )
     }
 
@@ -1157,72 +1074,6 @@ impl RecoveryAdvice {
                 "heddle remote list".to_string(),
                 "heddle remote add <name> <url>".to_string(),
             ],
-        )
-    }
-
-    pub(crate) fn git_remote_in_included_config(name: &str, path: &std::path::Path) -> Self {
-        let path = path.display();
-        Self::safety_refusal(
-            "git_remote_in_included_config",
-            format!(
-                "Remote '{name}' is defined in an included Git config that heddle won't edit: {path}"
-            ),
-            "Edit the included config file directly, or move the `[remote]` section into the repository's own `.git/config`.",
-            format!(
-                "remote '{name}' resolves to a `[remote]` section in '{path}', reached through an include.path/includeIf directive outside the repository's Git directory"
-            ),
-            "editing that file would mutate config the user pulled in via an include directive rather than the repository's own config",
-            "remote configuration, refs, objects, and worktree files were left unchanged",
-            "heddle remote list",
-            vec!["heddle remote list".to_string()],
-        )
-    }
-
-    pub(crate) fn remote_name_required_for_fetch() -> Self {
-        Self::safety_refusal(
-            "remote_name_required",
-            "Refusing to fetch: remote name required unless --all is set",
-            "Run `heddle fetch <remote>` for one remote, or `heddle fetch --all` for every configured remote.",
-            "fetch was requested without a remote name and without --all",
-            "fetch updates remote refs and object storage, so the target remote set must be explicit",
-            "no remote refs or objects were written",
-            "heddle fetch --all",
-            vec![
-                "heddle fetch --all".to_string(),
-                "heddle remote list".to_string(),
-            ],
-        )
-    }
-
-    pub(crate) fn git_overlay_tracking_refresh_failed(
-        remote_name: &str,
-        full_ref: &str,
-        cause: Option<String>,
-    ) -> Self {
-        let fetch_command = format!("heddle fetch {remote_name}");
-        let error = match cause {
-            Some(cause) => format!(
-                "Pushed to {remote_name}, but could not refresh local tracking ref {full_ref}: {cause}"
-            ),
-            None => {
-                format!(
-                    "Pushed to {remote_name}, but could not refresh local tracking ref {full_ref}"
-                )
-            }
-        };
-        Self::safety_refusal(
-            "git_overlay_tracking_refresh_failed",
-            error,
-            format!(
-                "Run `{fetch_command}` if `heddle verify` still reports remote drift after the push."
-            ),
-            format!("remote push completed, but local Git tracking ref {full_ref} was not updated"),
-            format!(
-                "updating {full_ref} would record the pushed HEAD as the local tracking view of {remote_name}"
-            ),
-            "the remote push completed; the failed tracking-ref refresh did not make additional local tracking changes",
-            fetch_command.clone(),
-            vec![fetch_command, "heddle verify".to_string()],
         )
     }
 
@@ -1335,32 +1186,6 @@ impl RecoveryAdvice {
                 refresh_command,
                 "heddle thread list".to_string(),
             ],
-        )
-    }
-
-    /// Merge planning could not find a common ancestor between the
-    /// current change and the target change. This usually means the two
-    /// histories are completely disjoint — typically because the
-    /// repositories were imported separately or one side was rewritten
-    /// without preserving identity.
-    pub(crate) fn merge_no_common_ancestor(current_ref: &str, target_ref: &str) -> Self {
-        let current_show = format!("heddle thread show {current_ref}");
-        let target_show = format!("heddle thread show {target_ref}");
-        Self::safety_refusal(
-            "merge_no_common_ancestor",
-            format!(
-                "No common ancestor between '{current_ref}' and '{target_ref}' — the two histories are disjoint"
-            ),
-            format!(
-                "Inspect each side with `{current_show}` and `{target_show}` to confirm whether one history was imported separately, then choose an integration path that doesn't require a shared base."
-            ),
-            format!(
-                "merge planning needs a shared base commit, but the commit graph for '{current_ref}' and '{target_ref}' has no common ancestor"
-            ),
-            "merging two disjoint histories without an explicit reconciliation strategy could overwrite one side's commits",
-            "repository state, refs, metadata, and worktree files were left unchanged",
-            current_show.clone(),
-            vec![current_show, target_show, "heddle log".to_string()],
         )
     }
 
@@ -1481,11 +1306,7 @@ impl RecoveryAdvice {
 }
 
 pub(crate) fn dirty_worktree_recovery_commands() -> Vec<String> {
-    vec![
-        DIRTY_WORKTREE_COMMIT_COMMAND.to_string(),
-        DIRTY_WORKTREE_CAPTURE_COMMAND.to_string(),
-        DIRTY_WORKTREE_STASH_COMMAND.to_string(),
-    ]
+    vec![DIRTY_WORKTREE_CAPTURE_COMMAND.to_string()]
 }
 
 fn hex_hash(hash: [u8; 32]) -> String {
@@ -1521,13 +1342,9 @@ impl Error for RecoveryAdvice {}
 
 #[cfg(test)]
 mod tests {
-    use super::RecoveryAdvice;
-    use crate::git_projection_engine::git_core::GitProjectionError;
-    use sley::{ObjectFormat, ObjectId};
+    use heddle_git_projection::git_core::GitProjectionError;
 
-    fn null_oid() -> ObjectId {
-        ObjectId::null(ObjectFormat::Sha1)
-    }
+    use super::RecoveryAdvice;
 
     #[test]
     fn git_projection_mapping_conflict_returns_typed_advice() {
@@ -1583,107 +1400,14 @@ mod tests {
     }
 
     #[test]
-    fn local_non_fast_forward_is_not_titled_as_remote_rejection() {
-        let error = GitProjectionError::NonFastForwardRef {
-            name: "refs/heads/main".to_string(),
-            old: null_oid(),
-            new: null_oid(),
-            remote_destination: false,
-        };
+    fn rejected_git_push_recovers_through_heddle_pull() {
+        let advice = RecoveryAdvice::git_overlay_remote_push_rejected("main");
 
-        let advice = RecoveryAdvice::from_git_projection_error(&error)
-            .expect("local non-FF should be classified");
-
-        assert_eq!(advice.kind, "git_overlay_local_non_fast_forward");
-        assert!(
-            !advice.error.to_lowercase().contains("remote"),
-            "local write-through non-FF must not claim remote: {}",
-            advice.error
+        assert_eq!(advice.primary_command, "heddle pull");
+        assert_eq!(
+            advice.recovery_commands,
+            vec!["heddle pull", "heddle verify"]
         );
-        assert!(
-            advice.error.contains("Local Git branch"),
-            "local non-FF should name the local branch: {}",
-            advice.error
-        );
-        assert_eq!(advice.primary_command, "heddle verify");
-        assert!(
-            advice
-                .recovery_commands
-                .iter()
-                .any(|command| command.contains("import git") || command.contains("checkpoint")),
-            "local recovery should point at import/checkpoint, not fetch: {:?}",
-            advice.recovery_commands
-        );
-    }
-
-    #[test]
-    fn remote_non_fast_forward_keeps_remote_push_advice() {
-        let error = GitProjectionError::NonFastForwardRef {
-            name: "refs/heads/main".to_string(),
-            old: null_oid(),
-            new: null_oid(),
-            remote_destination: true,
-        };
-
-        let advice = RecoveryAdvice::from_git_projection_error(&error)
-            .expect("remote non-FF should be classified");
-
-        assert_eq!(advice.kind, "git_overlay_remote_diverged");
-        assert!(
-            advice.error.contains("Remote branch"),
-            "remote non-FF should keep remote wording: {}",
-            advice.error
-        );
-        assert_eq!(advice.primary_command, "heddle fetch");
-    }
-
-    #[test]
-    fn land_checkpoint_rolled_back_does_not_require_manual_undo() {
-        let advice = RecoveryAdvice::land_checkpoint_rolled_back(
-            "feature/x",
-            "git write failed",
-            vec!["merge".to_string()],
-        );
-
-        assert_eq!(advice.kind, "land_checkpoint_rolled_back");
-        assert!(
-            advice.error.contains("rolled back"),
-            "rolled-back land should say so: {}",
-            advice.error
-        );
-        assert!(
-            !advice.primary_command.contains("undo"),
-            "after auto-undo, primary recovery is retry land, not manual undo: {}",
-            advice.primary_command
-        );
-        assert!(
-            advice.primary_command.contains("land"),
-            "primary recovery should retry land: {}",
-            advice.primary_command
-        );
-    }
-
-    #[test]
-    fn land_checkpoint_partial_failure_still_points_at_manual_undo() {
-        let advice = RecoveryAdvice::land_checkpoint_partial_failure(
-            "feature/x",
-            "git write failed",
-            vec!["merge".to_string()],
-        );
-        assert_eq!(advice.kind, "land_checkpoint_partial_failure");
-        assert_eq!(advice.primary_command, "heddle undo");
-
-        let undo_failed = RecoveryAdvice::land_checkpoint_partial_failure_undo_failed(
-            "feature/x",
-            "git write failed",
-            "no land integration oplog batch was found to roll back",
-            vec!["merge".to_string()],
-        );
-        assert_eq!(undo_failed.kind, "land_checkpoint_partial_failure");
-        assert!(
-            undo_failed.error.contains("Auto-undo also failed"),
-            "undo-failed path should surface both failures: {}",
-            undo_failed.error
-        );
+        assert!(!advice.hint.contains("git fetch"));
     }
 }

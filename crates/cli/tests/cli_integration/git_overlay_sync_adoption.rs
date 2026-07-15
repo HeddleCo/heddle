@@ -33,7 +33,7 @@ fn ingest_mapped_change(path: &std::path::Path, git_sha: &str) -> Option<String>
     let map_path = path.join(".heddle").join("ingest").join("sha_map.sqlite");
     let map = ingest::ShaMap::open(map_path).expect("open ingest SHA map");
     map.get_commit(git_sha)
-        .map(|change_id| change_id.to_string_full())
+        .map(|state_id| state_id.to_string_full())
 }
 
 #[test]
@@ -226,13 +226,12 @@ fn init_then_start_binds_git_tip_not_orphan_bootstrap() {
         "must not invent a synthetic Bootstrap git-overlay root when a Git tip exists; intents={intents:?}"
     );
 
-    // Capture + checkpoint on main: write-through must parent onto the real Git tip.
+    // Capture + commit on main: write-through must parent onto the real Git tip.
     std::fs::write(work.join("story.txt"), "one\ntwo\nmain-work\n").unwrap();
     heddle(&["capture", "-m", "main agent work"], Some(&work)).unwrap();
-    let show: Value = serde_json::from_str(
-        &heddle(&["show", "--output", "json"], Some(&work)).unwrap(),
-    )
-    .expect("show json");
+    let show: Value =
+        serde_json::from_str(&heddle(&["show", "--output", "json"], Some(&work)).unwrap())
+            .expect("show json");
     let parents = show["parents"].as_array().expect("parents array");
     assert!(
         !parents.is_empty(),
@@ -240,13 +239,14 @@ fn init_then_start_binds_git_tip_not_orphan_bootstrap() {
     );
     assert!(
         parents.iter().any(|p| {
-            p.as_str()
-                .is_some_and(|id| mapped.starts_with(id) || id.starts_with(&mapped[..12.min(mapped.len())]))
+            p.as_str().is_some_and(|id| {
+                mapped.starts_with(id) || id.starts_with(&mapped[..12.min(mapped.len())])
+            })
         }),
         "parent should be the mapped tip {mapped}; parents={parents:?}"
     );
 
-    heddle(&["checkpoint", "-m", "main checkpoint"], Some(&work)).unwrap();
+    heddle(&["commit", "-m", "main checkpoint"], Some(&work)).unwrap();
     let new_git_tip = git(&work, &["rev-parse", "HEAD"]);
     let parent_of_new = git(&work, &["rev-parse", "HEAD^"]);
     assert_eq!(

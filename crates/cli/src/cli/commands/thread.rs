@@ -2,47 +2,54 @@
 //! Thread commands.
 
 use std::{
-    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
-    process,
     time::Instant,
 };
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use heddle_core::status::next_action::{
-    NextActionInput, canonical_git_repair_ref_preview_command, effective_next_action,
-    thread_recovery_action_is_primary as shared_thread_recovery_action_is_primary,
+use heddle_core::{
+    AutoWorkspaceDefault, AvailableGitRef, ThreadBaseError, ThreadBaseSelection,
+    ThreadCreateOptions, ThreadListOptions, ThreadPathIsolationError, ThreadPlanError,
+    ThreadStartOptions, WorkspaceModeRequest, active_reservation_blocks_start,
+    active_reservation_path_matches, check_explicit_path_isolation, list_threads,
+    plan_checkout_path, plan_shared_target_redirect, plan_thread_create, plan_thread_materialize,
+    plan_thread_mode, plan_thread_start, select_thread_base, shared_target_redirect_applies,
+    should_advise_shared_target, should_warn_materialized_without_reflink,
+    status::next_action::{
+        canonical_git_repair_ref_preview_command,
+        thread_recovery_action_is_primary as shared_thread_recovery_action_is_primary,
+    },
+};
+pub use heddle_core::{
+    CoordinationStatus, ThreadActorInfo, ThreadSummary, collect_thread_summaries,
+    find_thread_summary, thread_is_available_git_ref, thread_is_imported_git_ref,
 };
 use objects::{
-    object::{ChangeId, State, ThreadName, Tree},
+    object::{State, StateId, ThreadName},
     store::{
-        AgentEntry, AgentRegistry, AgentStatus, AgentTaskRecord, AgentTaskStore, ObjectStore,
-        current_boot_id,
+        ActorPresence, ActorPresenceStatus, ActorPresenceStore, ObjectStore, WriterLeaseStatus,
+        WriterLeaseStore,
     },
 };
 use oplog::OpLogRecorder;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
-    AgentUsageSummary, GitOverlayBranchTip, GitRemoteTrackingStatus, Repository,
-    RepositoryOperationStatus, Thread, ThreadCaptureOutcome, ThreadConfidenceSummary,
-    ThreadFreshness, ThreadId, ThreadIdError, ThreadImpactCategory, ThreadIntegrationPolicy,
-    ThreadManager, ThreadMode, ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary,
-    ThreadView, describe_thread_advice, shell_quote,
+    AgentUsageSummary, Repository, Thread, ThreadCaptureOutcome, ThreadFreshness, ThreadId,
+    ThreadIdError, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState,
 };
 use serde::Serialize;
-use sley::Repository as SleyRepository;
 
 use super::{
     action_line::{print_nested_next_step, print_nested_optional, print_next_step, print_optional},
     advice::RecoveryAdvice,
-    command_catalog::{ActionTemplate, heddle_action, recommended_action_template},
+    command_catalog::{ActionTemplate, recommended_action_template},
     mount_lifecycle,
     next_action::{NextActionValidationContext, write_full_command_json},
     operator_loop::primary_next_action_with_verification,
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
     start_atomic,
-    thread_cmd::{refresh_thread_freshness, thread_not_found_advice},
+    thread_cmd::thread_not_found_advice,
     verification_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
         build_repository_verification_state, git_overlay_mutation_preflight_advice,
@@ -55,242 +62,12 @@ use super::{
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
-    cli::{
-        Cli, ThreadListArgs, ThreadStartArgs, WorkspaceModeArg, should_output_json, style,
-        worktree_status_options,
-    },
+    cli::{Cli, ThreadListArgs, ThreadStartArgs, WorkspaceModeArg, should_output_json, style},
     config::{UserConfig, UserThreadWorkspaceMode},
     perf::{ProfileField, ProfileMode, emit_profile, profile_enabled, profile_mode},
 };
 
 pub(crate) const DEFAULT_AVAILABLE_GIT_REF_LIMIT: usize = 5;
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum CoordinationStatus {
-    Clean,
-    Ahead,
-    Diverged,
-    Blocked,
-    MergeReady,
-}
-
-impl std::fmt::Display for CoordinationStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Clean => write!(f, "clean"),
-            Self::Ahead => write!(f, "ahead"),
-            Self::Diverged => write!(f, "diverged"),
-            Self::Blocked => write!(f, "blocked"),
-            Self::MergeReady => write!(f, "merge-ready"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ThreadSummary {
-    pub name: String,
-    pub operation: Option<RepositoryOperationStatus>,
-    pub remote_tracking: Option<GitRemoteTrackingStatus>,
-    pub base_state: Option<String>,
-    pub base_root: Option<String>,
-    pub current_state: Option<String>,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub heddle_session_id: Option<String>,
-    pub actor: Option<ThreadActorInfo>,
-    pub harness: Option<String>,
-    pub thinking_level: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub native_actor_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub native_parent_actor_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub probe_source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub probe_confidence: Option<f32>,
-    pub usage_summary: Option<AgentUsageSummary>,
-    pub last_progress_at: Option<String>,
-    pub last_activity_at: Option<String>,
-    pub report_flush_state: Option<String>,
-    pub attach_reason: Option<String>,
-    pub thread_mode: Option<ThreadMode>,
-    pub thread_state: Option<ThreadState>,
-    pub freshness: Option<ThreadFreshness>,
-    pub visibility: String,
-    pub target_thread: Option<String>,
-    pub parent_thread: Option<String>,
-    pub child_threads: Vec<String>,
-    pub sibling_threads: Vec<String>,
-    pub stack_depth: usize,
-    pub stale_from_parent: bool,
-    pub task: Option<String>,
-    pub task_assignment_id: Option<String>,
-    pub task_summary: Option<ThreadTaskSummary>,
-    pub changed_paths: Vec<String>,
-    pub promotion_suggested: bool,
-    pub impact_categories: Vec<ThreadImpactCategory>,
-    pub heavy_impact_paths: Vec<String>,
-    pub verification_summary: ThreadVerificationSummary,
-    pub confidence_summary: ThreadConfidenceSummary,
-    pub integration_policy_result: ThreadIntegrationPolicy,
-    pub coordination_status: CoordinationStatus,
-    pub is_current: bool,
-    pub is_isolated: bool,
-    pub thread_health: String,
-    pub blockers: Vec<String>,
-    #[serde(serialize_with = "serialize_empty_action_as_null")]
-    pub recommended_action: String,
-    pub recommended_action_template: Option<ActionTemplate>,
-    pub git_branch_tip: Option<String>,
-    pub history_imported: bool,
-    /// Mirror of [`repo::ThreadRecord::auto`]. `true` when the thread
-    /// was created by a harness integration rather than an explicit
-    /// user verb. Used by `heddle thread list` (default-hides) and
-    /// `heddle thread cleanup --auto`.
-    pub auto: bool,
-    /// Mirror of [`repo::ThreadRecord::shared_target_dir`]. When
-    /// present, the thread's checkout has its cargo `target/`
-    /// redirected to this absolute path via a `.cargo/config.toml`
-    /// committed inside the checkout. `None` for threads using
-    /// cargo's default per-checkout `target/`.
-    pub shared_target_dir: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AvailableGitRef {
-    pub name: String,
-    pub git_commit: String,
-    #[serde(serialize_with = "serialize_empty_action_as_null")]
-    pub recommended_action: String,
-    pub recommended_action_template: Option<ActionTemplate>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ThreadActorInfo {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ThreadTaskSummary {
-    pub task_id: String,
-    pub title: String,
-    pub status: String,
-    pub target_thread: String,
-    pub updated_at: String,
-    pub completed_at: Option<String>,
-    pub coordination_discussion_id: Option<String>,
-}
-
-impl From<&AgentTaskRecord> for ThreadTaskSummary {
-    fn from(task: &AgentTaskRecord) -> Self {
-        Self {
-            task_id: task.task_id.clone(),
-            title: task.title.clone(),
-            status: task.status.to_string(),
-            target_thread: task.target_thread.clone(),
-            updated_at: task.updated_at.to_rfc3339(),
-            completed_at: task.completed_at.map(|time| time.to_rfc3339()),
-            coordination_discussion_id: task.coordination_discussion_id.clone(),
-        }
-    }
-}
-
-impl ThreadSummary {
-    fn from_view(view: ThreadView, coordination_status: CoordinationStatus) -> Self {
-        let mode = view.record.mode.clone();
-        ThreadSummary {
-            name: view.record.thread,
-            operation: None,
-            remote_tracking: None,
-            base_state: Some(view.record.base_state),
-            base_root: Some(view.record.base_root),
-            current_state: view.record.current_state,
-            path: view
-                .runtime
-                .materialized_path
-                .as_ref()
-                .or(view.runtime.path.as_ref())
-                .and_then(|p| display_path_string(p)),
-            execution_path: view
-                .runtime
-                .execution_path
-                .as_ref()
-                .and_then(|p| display_path_string(p)),
-            session_id: view.runtime.session_id,
-            heddle_session_id: view.runtime.heddle_session_id,
-            actor: match (view.runtime.provider, view.runtime.model) {
-                (None, None) => None,
-                (provider, model) => Some(ThreadActorInfo { provider, model }),
-            },
-            harness: view.runtime.harness,
-            thinking_level: view.runtime.thinking_level,
-            native_actor_key: view.runtime.native_actor_key,
-            native_parent_actor_key: view.runtime.native_parent_actor_key,
-            probe_source: view.runtime.probe_source,
-            probe_confidence: view.runtime.probe_confidence,
-            usage_summary: view.runtime.usage_summary,
-            last_progress_at: view.runtime.last_progress_at.map(|ts| ts.to_rfc3339()),
-            last_activity_at: Some(view.record.updated_at.to_rfc3339()),
-            report_flush_state: view.runtime.report_flush_state,
-            attach_reason: view.runtime.attach_reason,
-            thread_mode: Some(mode.clone()),
-            thread_state: Some(view.record.state),
-            freshness: Some(view.record.freshness),
-            visibility: if view.is_isolated {
-                visibility_label(&mode).to_string()
-            } else {
-                "ref_only".to_string()
-            },
-            target_thread: view.record.target_thread,
-            parent_thread: view.record.parent_thread,
-            child_threads: Vec::new(),
-            sibling_threads: Vec::new(),
-            stack_depth: 0,
-            stale_from_parent: false,
-            task: view.record.task,
-            task_assignment_id: None,
-            task_summary: None,
-            changed_paths: view.record.changed_paths,
-            promotion_suggested: view.record.promotion_suggested,
-            impact_categories: view.record.impact_categories,
-            heavy_impact_paths: view.record.heavy_impact_paths,
-            verification_summary: view.record.verification_summary,
-            confidence_summary: view.record.confidence_summary,
-            integration_policy_result: view.record.integration_policy_result,
-            coordination_status,
-            is_current: view.is_current,
-            is_isolated: view.is_isolated,
-            thread_health: "clean".to_string(),
-            blockers: Vec::new(),
-            recommended_action: String::new(),
-            recommended_action_template: None,
-            git_branch_tip: None,
-            history_imported: true,
-            auto: view.record.auto,
-            shared_target_dir: view
-                .record
-                .shared_target_dir
-                .as_ref()
-                .map(|p| p.display().to_string()),
-        }
-    }
-}
-
-fn display_path_string(path: &Path) -> Option<String> {
-    let rendered = path.display().to_string();
-    if rendered.trim().is_empty() {
-        None
-    } else {
-        Some(rendered)
-    }
-}
 
 #[derive(Serialize)]
 struct ThreadListOutput {
@@ -368,7 +145,7 @@ pub(crate) struct ThreadOpOutput {
 
 #[derive(Serialize)]
 pub(crate) struct ThreadCaptureOutput {
-    pub change_id: String,
+    pub state_id: String,
     pub created_at: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
@@ -398,7 +175,10 @@ pub fn cmd_start(cli: &Cli, args: ThreadStartArgs) -> Result<()> {
     )? {
         return Err(anyhow!(advice));
     }
-    if args.path.is_some() {
+    // Pure option preflight (name + path isolation flags) before materialization.
+    let start_plan = plan_thread_start(&thread_start_options_from_args(&args))
+        .map_err(|ThreadPlanError::InvalidName(err)| anyhow!(thread_name_invalid_advice(&err)))?;
+    if start_plan.requires_clean_worktree {
         ensure_worktree_clean(&repo, "start thread")?;
     }
     let print_cd = args.print_cd_path;
@@ -458,7 +238,7 @@ pub(crate) fn cmd_thread_captures(
             .unwrap_or_else(|| "None".to_string());
         println!(
             "  {} {} {}",
-            style::accent(&capture.change_id),
+            style::accent(&capture.state_id),
             capture.message,
             style::dim(&format!("confidence {confidence}"))
         );
@@ -484,13 +264,13 @@ fn collect_thread_captures(
         .map(|thread| thread.base_state);
     let mut out = Vec::new();
     let mut cursor = Some(current);
-    while let Some(change_id) = cursor {
-        if base.as_deref() == Some(change_id.short().as_str())
-            || base.as_deref().and_then(|base| ChangeId::parse(base).ok()) == Some(change_id)
+    while let Some(state_id) = cursor {
+        if base.as_deref() == Some(state_id.short().as_str())
+            || base.as_deref().and_then(|base| StateId::parse(base).ok()) == Some(state_id)
         {
             break;
         }
-        let Some(state) = repo.store().get_state(&change_id)? else {
+        let Some(state) = repo.store().get_state(&state_id)? else {
             break;
         };
         if state
@@ -537,9 +317,9 @@ fn thread_capture_output(
     let message = state
         .intent
         .clone()
-        .unwrap_or_else(|| format!("Capture {}", state.change_id.short()));
+        .unwrap_or_else(|| format!("Capture {}", state.state_id.short()));
     ThreadCaptureOutput {
-        change_id: state.change_id.short(),
+        state_id: state.state_id.short(),
         created_at: state.created_at.to_rfc3339(),
         intent: state.intent.clone(),
         confidence: state.confidence,
@@ -547,243 +327,6 @@ fn thread_capture_output(
         message,
         summary,
     }
-}
-
-pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>> {
-    let thread_refs = repo.refs().list_threads()?;
-    let current = repo.current_lane()?;
-    let operation = repo.operation_status()?;
-    let remote_tracking = repo.git_remote_tracking_status().unwrap_or(None);
-    let import_hint = repo.git_import_guidance().unwrap_or(None);
-    let branch_tips = repo
-        .git_overlay_branch_tips()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|tip| (tip.branch.clone(), tip))
-        .collect::<HashMap<_, _>>();
-    let registry = AgentRegistry::new(repo.heddle_dir());
-    let task_store = AgentTaskStore::new(repo.heddle_dir());
-    let thread_manager = ThreadManager::new(repo.heddle_dir());
-    let mut entries_by_thread: HashMap<String, Vec<AgentEntry>> = HashMap::new();
-    let mut threads_by_name: HashMap<String, Thread> = HashMap::new();
-    for entry in registry.list()? {
-        entries_by_thread
-            .entry(entry.thread.clone())
-            .or_default()
-            .push(entry);
-    }
-    for mut thread in thread_manager.list()? {
-        if thread.state == ThreadState::Abandoned
-            && repo
-                .refs()
-                .get_thread(&ThreadName::new(&thread.thread))?
-                .is_none()
-        {
-            continue;
-        }
-        refresh_thread_freshness(repo, &mut thread)?;
-        threads_by_name.insert(thread.thread.clone(), thread);
-    }
-
-    let mut names: BTreeSet<String> = thread_refs.iter().map(|t| t.to_string()).collect();
-    names.extend(current.iter().cloned());
-    names.extend(entries_by_thread.keys().cloned());
-    names.extend(threads_by_name.keys().cloned());
-    names.extend(branch_tips.keys().cloned());
-
-    let mut summaries = Vec::new();
-    for name in names {
-        let entries = entries_by_thread.remove(&name).unwrap_or_default();
-        let task_assignment_id = task_assignment_id_from_entries(&entries);
-        let task_summary = task_summary_for_assignment(&task_store, task_assignment_id.as_deref())?;
-        let (view, coordination_status) = build_thread_view(
-            repo,
-            current.as_ref() == Some(&name),
-            name.clone(),
-            entries,
-            threads_by_name.remove(&name),
-            branch_tips.get(&name).cloned(),
-        )?;
-        let mut summary = ThreadSummary::from_view(view, coordination_status);
-        summary.task_assignment_id = task_assignment_id;
-        summary.task_summary = task_summary;
-        if let Some(branch_tip) = branch_tips.get(&summary.name) {
-            summary.git_branch_tip = Some(branch_tip.git_commit.clone());
-            summary.history_imported = branch_tip.history_imported;
-        }
-        let has_heddle_tip = thread_refs.iter().any(|thread| thread == &summary.name);
-        let thread = Thread {
-            id: summary.name.clone(),
-            thread: summary.name.clone(),
-            target_thread: summary.target_thread.clone(),
-            parent_thread: summary.parent_thread.clone(),
-            mode: summary
-                .thread_mode
-                .clone()
-                .unwrap_or(ThreadMode::Materialized),
-            state: summary.thread_state.clone().unwrap_or(ThreadState::Active),
-            base_state: summary.base_state.clone().unwrap_or_default(),
-            base_root: summary.base_root.clone().unwrap_or_default(),
-            current_state: summary.current_state.clone(),
-            merged_state: None,
-            task: summary.task.clone(),
-            execution_path: summary
-                .execution_path
-                .as_ref()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| repo.root().to_path_buf()),
-            materialized_path: summary.path.as_ref().map(PathBuf::from),
-            changed_paths: summary.changed_paths.clone(),
-            impact_categories: summary.impact_categories.clone(),
-            heavy_impact_paths: summary.heavy_impact_paths.clone(),
-            promotion_suggested: summary.promotion_suggested,
-            freshness: summary
-                .freshness
-                .clone()
-                .unwrap_or(ThreadFreshness::Unknown),
-            verification_summary: summary.verification_summary.clone(),
-            confidence_summary: summary.confidence_summary.clone(),
-            integration_policy_result: summary.integration_policy_result.clone(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            ephemeral: None,
-            auto: summary.auto,
-            shared_target_dir: summary.shared_target_dir.as_ref().map(PathBuf::from),
-        };
-        let advice = describe_thread_advice(&thread, false, 0, false);
-        summary.thread_health = advice.thread_health;
-        summary.blockers = advice.blockers;
-        summary.recommended_action = advice.recommended_action;
-        apply_terminal_thread_advice(&mut summary);
-        apply_materialized_merge_advice(repo, &mut summary);
-        if let Some(branch_tip) = branch_tips.get(&summary.name)
-            && !has_heddle_tip
-        {
-            summary.blockers.clear();
-            summary.thread_health = if branch_tip.history_imported {
-                "imported".to_string()
-            } else {
-                "git_backed".to_string()
-            };
-            if summary.is_current {
-                summary.recommended_action.clear();
-            } else {
-                summary.recommended_action = if branch_tip.branch.starts_with('-') {
-                    format!("heddle switch -- {}", shell_quote(&branch_tip.branch))
-                } else {
-                    format!("heddle switch {}", shell_quote(&branch_tip.branch))
-                };
-            }
-        }
-        if summary.history_imported
-            && summary.current_state.is_some()
-            && remote_tracking_local_ref(repo, &summary.name).is_some()
-        {
-            summary.thread_health = "remote_tracking".to_string();
-            summary.coordination_status = CoordinationStatus::Clean;
-            summary.blockers.clear();
-            summary.recommended_action =
-                canonical_git_repair_ref_preview_command(None, &summary.name);
-        }
-        if summary.is_current {
-            enrich_current_summary_with_dirty_paths(repo, &mut summary)?;
-            summary.operation = operation.clone();
-            summary.remote_tracking = remote_tracking.clone();
-            summary.recommended_action = effective_next_action(
-                NextActionInput::default(
-                    operation.as_ref(),
-                    remote_tracking.as_ref(),
-                    import_hint.as_ref(),
-                    Some(&summary.recommended_action),
-                )
-                .current_thread(Some(&summary.thread_health)),
-            );
-            summary.recommended_action = contextual_thread_action(
-                repo,
-                &summary.name,
-                summary.target_thread.as_deref(),
-                &summary.recommended_action,
-            );
-        }
-        summaries.push(summary);
-    }
-
-    let mut children_by_parent: HashMap<String, Vec<String>> = HashMap::new();
-    for summary in &summaries {
-        if let Some(parent) = &summary.parent_thread {
-            children_by_parent
-                .entry(parent.clone())
-                .or_default()
-                .push(summary.name.clone());
-        }
-    }
-    for summary in &mut summaries {
-        if let Some(children) = children_by_parent.remove(&summary.name) {
-            let mut children = children;
-            children.sort();
-            summary.child_threads = children;
-        }
-    }
-
-    let summaries_by_name = summaries
-        .iter()
-        .map(|summary| (summary.name.clone(), summary.clone()))
-        .collect::<HashMap<_, _>>();
-    let mut siblings_by_thread: HashMap<String, Vec<String>> = HashMap::new();
-    for summary in &summaries {
-        if let Some(parent) = &summary.parent_thread {
-            let siblings = summaries_by_name
-                .values()
-                .filter(|candidate| candidate.parent_thread.as_deref() == Some(parent.as_str()))
-                .filter(|candidate| candidate.name != summary.name)
-                .map(|candidate| candidate.name.clone())
-                .collect::<Vec<_>>();
-            siblings_by_thread.insert(summary.name.clone(), siblings);
-        }
-    }
-    for summary in &mut summaries {
-        summary.sibling_threads = siblings_by_thread.remove(&summary.name).unwrap_or_default();
-        summary.stack_depth = stack_depth(&summaries_by_name, &summary.name);
-        summary.stale_from_parent =
-            summary.parent_thread.is_some() && summary.freshness == Some(ThreadFreshness::Stale);
-        if summary.last_progress_at.is_some() {
-            summary.last_activity_at = summary.last_progress_at.clone();
-        }
-        summary.recommended_action_template =
-            recommended_action_template(&summary.recommended_action);
-    }
-
-    summaries.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(summaries)
-}
-
-fn enrich_current_summary_with_dirty_paths(
-    repo: &Repository,
-    summary: &mut ThreadSummary,
-) -> Result<()> {
-    let baseline = match repo.current_state()? {
-        Some(state) => repo.require_tree(&state.tree)?,
-        None => Tree::new(),
-    };
-    let status = repo.compare_worktree_cached_with_options(
-        &baseline,
-        &worktree_status_options(Some(repo.config())),
-    )?;
-    let mut paths = summary
-        .changed_paths
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    paths.extend(
-        status
-            .modified
-            .iter()
-            .chain(status.added.iter())
-            .chain(status.deleted.iter())
-            .map(|path| path.to_string_lossy().to_string()),
-    );
-    summary.changed_paths = paths.into_iter().collect();
-    Ok(())
 }
 
 pub(crate) fn suppress_thread_actions_while_trust_blocked(
@@ -812,7 +355,7 @@ pub(crate) fn suppress_thread_actions_while_trust_blocked(
         if trust.status == "needs_import"
             && summary
                 .recommended_action
-                .starts_with("heddle adopt --ref ")
+                .starts_with("heddle import git --ref ")
         {
             summary.recommended_action_template =
                 recommended_action_template(&summary.recommended_action);
@@ -821,247 +364,6 @@ pub(crate) fn suppress_thread_actions_while_trust_blocked(
         summary.recommended_action.clear();
         summary.recommended_action_template = None;
     }
-}
-
-fn stack_depth(summaries_by_name: &HashMap<String, ThreadSummary>, thread: &str) -> usize {
-    let mut depth = 0usize;
-    let mut cursor = summaries_by_name
-        .get(thread)
-        .and_then(|summary| summary.parent_thread.clone());
-    while let Some(parent) = cursor {
-        depth += 1;
-        cursor = summaries_by_name
-            .get(&parent)
-            .and_then(|summary| summary.parent_thread.clone());
-    }
-    depth
-}
-
-fn primary_agent_entry(entries: &[AgentEntry]) -> Option<&AgentEntry> {
-    entries
-        .iter()
-        .filter(|entry| entry.status == AgentStatus::Active)
-        .max_by_key(|entry| entry.started_at)
-        .or_else(|| entries.iter().max_by_key(|entry| entry.started_at))
-}
-
-fn task_assignment_id_from_entries(entries: &[AgentEntry]) -> Option<String> {
-    primary_agent_entry(entries).and_then(|entry| entry.task_assignment_id.clone())
-}
-
-fn task_summary_for_assignment(
-    store: &AgentTaskStore,
-    task_assignment_id: Option<&str>,
-) -> Result<Option<ThreadTaskSummary>> {
-    let Some(task_assignment_id) = task_assignment_id else {
-        return Ok(None);
-    };
-    Ok(store
-        .load(task_assignment_id)?
-        .as_ref()
-        .map(ThreadTaskSummary::from))
-}
-
-fn build_thread_view(
-    repo: &Repository,
-    is_current: bool,
-    name: String,
-    entries: Vec<AgentEntry>,
-    thread: Option<Thread>,
-    branch_tip: Option<GitOverlayBranchTip>,
-) -> Result<(ThreadView, CoordinationStatus)> {
-    let ref_state = repo.refs().get_thread(&ThreadName::new(&name))?;
-    let current_state = ref_state
-        .or_else(|| {
-            (is_current && repo.capability() == repo::RepositoryCapability::GitOverlay)
-                .then(|| {
-                    branch_tip
-                        .as_ref()
-                        .and_then(|tip| tip.mapped_change)
-                        .or_else(|| {
-                            repo.git_overlay_mapped_change_for_branch(&name)
-                                .ok()
-                                .flatten()
-                        })
-                })
-                .flatten()
-        })
-        .map(|id| id.short());
-    let has_heddle_tip = current_state.is_some();
-    let active: Vec<&AgentEntry> = entries
-        .iter()
-        .filter(|entry| entry.status == AgentStatus::Active)
-        .collect();
-    let complete: Vec<&AgentEntry> = entries
-        .iter()
-        .filter(|entry| entry.status == AgentStatus::Complete)
-        .collect();
-
-    let primary = active
-        .iter()
-        .max_by_key(|entry| entry.started_at)
-        .copied()
-        .or_else(|| entries.iter().max_by_key(|entry| entry.started_at));
-    let base_state = thread
-        .as_ref()
-        .map(|thread| thread.base_state.clone())
-        .or_else(|| primary.map(|entry| entry.base_state.clone()))
-        .or(current_state.clone());
-    let base_root = thread.as_ref().map(|thread| thread.base_root.clone());
-    let runtime = ThreadRuntimeOverlay {
-        path: thread
-            .as_ref()
-            .and_then(|thread| thread.materialized_path.clone())
-            .or_else(|| primary.and_then(|entry| entry.path.clone())),
-        execution_path: thread.as_ref().map(|thread| thread.execution_path.clone()),
-        materialized_path: thread
-            .as_ref()
-            .and_then(|thread| thread.materialized_path.clone()),
-        session_id: primary.map(|entry| entry.session_id.clone()),
-        heddle_session_id: primary.and_then(|entry| entry.heddle_session_id.clone()),
-        harness: primary.and_then(|entry| entry.harness.clone()),
-        thinking_level: primary.and_then(|entry| entry.thinking_level.clone()),
-        native_actor_key: primary.and_then(|entry| entry.native_actor_key.clone()),
-        native_parent_actor_key: primary.and_then(|entry| entry.native_parent_actor_key.clone()),
-        probe_source: primary.and_then(|entry| entry.probe_source.clone()),
-        probe_confidence: primary.and_then(|entry| entry.probe_confidence),
-        usage_summary: primary.map(|entry| entry.usage_summary.clone()),
-        last_progress_at: primary.and_then(|entry| entry.last_progress_at),
-        report_flush_state: primary.and_then(|entry| entry.report_flush_state.clone()),
-        attach_reason: primary.and_then(|entry| entry.attach_reason.clone()),
-        provider: primary.and_then(|entry| entry.provider.clone()),
-        model: primary.and_then(|entry| entry.model.clone()),
-        thread_mode: thread.as_ref().map(|thread| thread.mode.clone()),
-        thread_state: thread.as_ref().map(|thread| thread.state.clone()),
-    };
-    let thread_record = thread.as_ref().map(|thread| thread.to_record());
-    let thread_state_for_status = thread_record.as_ref().map(|thread| thread.state.clone());
-    let coordination_status = if matches!(
-        thread_state_for_status,
-        Some(ThreadState::Merged | ThreadState::Abandoned)
-    ) {
-        CoordinationStatus::Clean
-    } else if thread_state_for_status == Some(ThreadState::Blocked) {
-        CoordinationStatus::Blocked
-    } else if thread_state_for_status == Some(ThreadState::Ready) {
-        CoordinationStatus::MergeReady
-    } else if active.len() > 1 {
-        CoordinationStatus::Blocked
-    } else if !active.is_empty()
-        && complete
-            .iter()
-            .any(|entry| entry.base_state != active[0].base_state)
-    {
-        CoordinationStatus::Diverged
-    } else if !complete.is_empty() {
-        CoordinationStatus::MergeReady
-    } else if base_state.is_some() && current_state.is_some() && base_state != current_state {
-        CoordinationStatus::Ahead
-    } else {
-        CoordinationStatus::Clean
-    };
-
-    let view = match thread {
-        Some(mut thread) => {
-            thread.current_state = current_state;
-            thread.to_view(runtime, is_current)
-        }
-        None => ThreadView::from_record(
-            repo::ThreadRecord {
-                id: name.clone(),
-                thread: name.clone(),
-                target_thread: None,
-                parent_thread: None,
-                mode: ThreadMode::Materialized,
-                state: ThreadState::Active,
-                base_state: base_state.unwrap_or_default(),
-                base_root: base_root.unwrap_or_default(),
-                current_state,
-                merged_state: None,
-                task: None,
-                changed_paths: Vec::new(),
-                impact_categories: Vec::new(),
-                heavy_impact_paths: Vec::new(),
-                promotion_suggested: false,
-                freshness: ThreadFreshness::Unknown,
-                verification_summary: Default::default(),
-                confidence_summary: Default::default(),
-                integration_policy_result: Default::default(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-                ephemeral: None,
-                auto: false,
-                shared_target_dir: None,
-            },
-            runtime,
-            is_current,
-        ),
-    };
-
-    if let Some(branch_tip) = branch_tip
-        && !has_heddle_tip
-        && view.record.current_state.is_none()
-    {
-        let mut record = view.record.clone();
-        record.current_state = None;
-        let mut runtime = view.runtime.clone();
-        if runtime.attach_reason.is_none() {
-            runtime.attach_reason = Some(format!(
-                "using Git-backed branch tip {}",
-                branch_tip.git_commit
-            ));
-        }
-        return Ok((
-            ThreadView::from_record(record, runtime, is_current),
-            coordination_status,
-        ));
-    }
-
-    Ok((view, coordination_status))
-}
-
-pub fn find_thread_summary(repo: &Repository, name: &str) -> Result<Option<ThreadSummary>> {
-    Ok(collect_thread_summaries(repo)?
-        .into_iter()
-        .find(|summary| summary.name == name))
-}
-
-fn apply_materialized_merge_advice(repo: &Repository, summary: &mut ThreadSummary) {
-    let Some(action) = materialized_merge_resolve_action(repo, summary) else {
-        return;
-    };
-    summary.thread_health = "blocked".to_string();
-    if summary.blockers.is_empty() {
-        summary
-            .blockers
-            .push("Merge conflicts need resolution".to_string());
-    }
-    summary.recommended_action = action;
-    summary.recommended_action_template = recommended_action_template(&summary.recommended_action);
-}
-
-fn materialized_merge_resolve_action(repo: &Repository, summary: &ThreadSummary) -> Option<String> {
-    if let Some(path) = summary.execution_path.as_deref() {
-        let path = PathBuf::from(path);
-        if !path.exists() {
-            return None;
-        }
-        let thread_repo = Repository::open(&path).ok()?;
-        return thread_repo
-            .merge_state_manager()
-            .is_merge_in_progress()
-            .then(|| {
-                heddle_action(vec![
-                    "--repo".to_string(),
-                    path.display().to_string(),
-                    "resolve".to_string(),
-                    "--list".to_string(),
-                ])
-            });
-    }
-
-    (summary.is_current && repo.merge_state_manager().is_merge_in_progress())
-        .then(|| heddle_action(["resolve", "--list"]))
 }
 
 pub(crate) fn contextual_thread_action(
@@ -1083,32 +385,6 @@ pub(crate) fn thread_recovery_action_is_primary(
     thread_action: &str,
 ) -> bool {
     shared_thread_recovery_action_is_primary(thread_health, thread_action)
-}
-
-fn apply_terminal_thread_advice(summary: &mut ThreadSummary) {
-    match summary.thread_state {
-        Some(ThreadState::Merged) => {
-            summary.thread_health = "clean".to_string();
-            summary.blockers.clear();
-            summary.recommended_action = "heddle thread cleanup --merged --dry-run".to_string();
-            summary.coordination_status = CoordinationStatus::Clean;
-        }
-        Some(ThreadState::Abandoned) => {
-            summary.thread_health = "clean".to_string();
-            summary.blockers.clear();
-            summary.recommended_action.clear();
-            summary.coordination_status = CoordinationStatus::Clean;
-        }
-        _ => {}
-    }
-}
-
-pub(crate) fn visibility_label(mode: &ThreadMode) -> &'static str {
-    match mode {
-        ThreadMode::Materialized => "materialized",
-        ThreadMode::Virtualized => "virtualized",
-        ThreadMode::Solid => "solid",
-    }
 }
 
 pub(crate) fn thread_workspace_label(mode: &ThreadMode) -> &'static str {
@@ -1185,48 +461,20 @@ fn render_repository_context_lines(context: Option<&crate::cli::render::Reposito
     }
 }
 
-pub(crate) fn split_available_git_refs(summaries: &mut Vec<ThreadSummary>) -> Vec<AvailableGitRef> {
-    let mut available = Vec::new();
-    summaries.retain(|summary| {
-        if thread_is_available_git_ref(summary) {
-            available.push(available_git_ref_from_summary(summary));
-            false
-        } else {
-            true
-        }
-    });
-    available
-}
-
-fn available_git_ref_from_summary(summary: &ThreadSummary) -> AvailableGitRef {
-    AvailableGitRef {
-        name: summary.name.clone(),
-        git_commit: summary.git_branch_tip.clone().unwrap_or_default(),
-        recommended_action: summary.recommended_action.clone(),
-        recommended_action_template: summary
-            .recommended_action_template
-            .clone()
-            .or_else(|| recommended_action_template(&summary.recommended_action)),
-    }
-}
-
 pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs) -> Result<()> {
     let body_start = Instant::now();
     let as_json = should_output_json(cli, Some(repo.config()));
-    let current = repo.current_lane()?;
     let collect_start = Instant::now();
-    let mut summaries = collect_thread_summaries(repo)?;
+    let report = list_threads(
+        repo,
+        ThreadListOptions::new().include_auto(args.include_auto),
+    )?;
     let collect_summaries_ms = collect_start.elapsed().as_millis();
     let verification_start = Instant::now();
     let mut trust = build_repository_verification_state(repo);
     let verification_ms = verification_start.elapsed().as_millis();
-    if !args.include_auto {
-        // Always keep the current thread visible even if it's auto:
-        // hiding it from the user who is *standing in it* would be
-        // worse than the noise it adds.
-        summaries.retain(|summary| summary.is_current || !summary.auto);
-    }
-    let available_git_refs = split_available_git_refs(&mut summaries);
+    let mut summaries = report.threads;
+    let available_git_refs = report.available_git_refs;
     suppress_thread_actions_while_trust_blocked(&mut summaries, &trust);
     let current_summary = summaries.iter().find(|summary| summary.is_current);
     if let Some(current) = current_summary
@@ -1263,7 +511,7 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
     );
     let current = current_summary
         .map(|summary| summary.name.clone())
-        .or(current);
+        .or(report.current);
     let output = ThreadListOutput {
         output_kind: "thread_list",
         repository_capability: repo.capability_label().to_string(),
@@ -1416,35 +664,6 @@ fn thread_ready_to_merge(entry: &ThreadSummary) -> bool {
         || (entry.coordination_status == CoordinationStatus::Ahead
             && entry.thread_state != Some(ThreadState::Merged)
             && entry.target_thread.is_some())
-}
-
-pub(crate) fn thread_is_imported_git_ref(entry: &ThreadSummary) -> bool {
-    !entry.is_current
-        && entry.path.is_none()
-        && entry.execution_path.is_none()
-        && entry.target_thread.is_none()
-        && entry.current_state.is_some()
-        && entry.history_imported
-        && (entry.git_branch_tip.is_some() || entry.name.starts_with("origin/"))
-}
-
-pub(crate) fn thread_is_available_git_ref(entry: &ThreadSummary) -> bool {
-    !entry.is_current
-        && entry.path.is_none()
-        && entry.execution_path.is_none()
-        && entry.target_thread.is_none()
-        && entry.current_state.is_none()
-        && entry.git_branch_tip.is_some()
-}
-
-fn remote_tracking_local_ref(repo: &Repository, thread_name: &str) -> Option<String> {
-    let git = SleyRepository::discover(repo.root()).ok()?;
-    let remotes = git.remote_names().ok()?;
-    remotes
-        .iter()
-        .find_map(|remote| thread_name.strip_prefix(&format!("{remote}/")))
-        .filter(|branch| !branch.is_empty())
-        .map(str::to_string)
 }
 
 fn render_available_git_refs(refs: &[AvailableGitRef], verbose: bool) {
@@ -1634,7 +853,7 @@ fn render_thread_entry(entry: &ThreadSummary, verbose: bool) {
 pub(crate) fn start_transaction_id(
     scope: &str,
     name: &str,
-    base_state: &ChangeId,
+    base_state: &StateId,
     start_epoch: DateTime<Utc>,
 ) -> String {
     format!(
@@ -1681,10 +900,16 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // a name that isn't a safe single shell token here so a thread id with a
     // space or shell metacharacter can never be persisted — and so every
     // downstream breadcrumb can interpolate it bare. (heddle#464 close-the-class.)
-    ThreadId::new(args.name.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
+    // Pure preflight lives in heddle-core; materialization stays below.
+    plan_thread_start(&thread_start_options_from_args(&args))
+        .map_err(|ThreadPlanError::InvalidName(err)| anyhow!(thread_name_invalid_advice(&err)))?;
 
-    let existing = find_active_thread_entry(repo, &args.name)?;
-    if let Some(entry) = existing {
+    let existing = WriterLeaseStore::new(repo.heddle_dir())
+        .list()?
+        .into_iter()
+        .find(|lease| lease.status == WriterLeaseStatus::Active && lease.thread == args.name);
+    if active_reservation_blocks_start(existing.is_some()) {
+        let entry = existing.expect("active reservation present");
         if let Some(ref requested_path) = args.path {
             let requested = normalize_path_for_containment(&absolute_path(requested_path)?)?;
             let existing_path = entry
@@ -1693,7 +918,10 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
                 .ok_or_else(|| anyhow!(active_reservation_advice(&args.name, None)))?;
             let existing_path_normalized = normalize_path_for_containment(existing_path)
                 .unwrap_or_else(|_| existing_path.clone());
-            if existing_path_normalized != requested {
+            if !active_reservation_path_matches(
+                Some(existing_path_normalized.as_path()),
+                Some(requested.as_path()),
+            ) {
                 return Err(anyhow!(active_reservation_advice(
                     &args.name,
                     Some(existing_path.display().to_string())
@@ -1706,27 +934,18 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     }
 
     let existing_thread_state = repo.refs().get_thread(&ThreadName::new(&args.name))?;
-    let base_state = match (&args.from, existing_thread_state) {
-        (Some(spec), Some(existing)) => {
-            let requested = repo.resolve_state(spec)?.ok_or_else(|| {
-                anyhow!(RecoveryAdvice::thread_referenced_state_missing(
-                    spec, "State"
-                ))
-            })?;
-            if requested != existing {
-                return Err(anyhow!(thread_anchor_mismatch_advice(
-                    &args.name, &existing, &requested
-                )));
-            }
-            existing
-        }
-        (None, Some(existing)) => existing,
-        (Some(spec), None) => repo.resolve_state(spec)?.ok_or_else(|| {
+    // Resolve I/O facts, then apply pure base-selection rules from heddle-core.
+    let requested_from = match args.from.as_deref() {
+        Some(spec) => Some(repo.resolve_state(spec)?.ok_or_else(|| {
             anyhow!(RecoveryAdvice::thread_referenced_state_missing(
                 spec, "State"
             ))
-        })?,
-        (None, None) => ensure_current_state(
+        })?),
+        None => None,
+    };
+    let base_state = match select_thread_base(requested_from, existing_thread_state) {
+        Ok(ThreadBaseSelection::Use(state)) => state,
+        Ok(ThreadBaseSelection::RequireCurrent) => ensure_current_state(
             repo,
             &UserConfig::load_default().unwrap_or_default(),
             Some(format!(
@@ -1734,6 +953,14 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
                 args.name
             )),
         )?,
+        Err(ThreadBaseError::AnchorMismatch {
+            existing,
+            requested,
+        }) => {
+            return Err(anyhow!(thread_anchor_mismatch_advice(
+                &args.name, &existing, &requested
+            )));
+        }
     };
 
     let actor_identity = resolve_start_actor_identity(repo, &args)?;
@@ -1747,9 +974,11 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // they know why their disk usage will be higher than the design-
     // doc promises. Fires once per `thread start` invocation, goes
     // to stderr so JSON consumers on stdout are unaffected.
-    if args.workspace == WorkspaceModeArg::Materialized
-        && !objects::fs_clone::filesystem_supports_reflink(repo.root())
-    {
+    // Pure warn decision lives in heddle-core; CLI still owns the message.
+    if should_warn_materialized_without_reflink(
+        args.workspace == WorkspaceModeArg::Materialized,
+        objects::fs_clone::filesystem_supports_reflink(repo.root()),
+    ) {
         eprintln!(
             "{}: this filesystem doesn't support reflinks/clonefile, so \
              `--workspace materialized` will fall back to per-file copies — \
@@ -1759,27 +988,16 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             style::warn("note"),
         );
     }
-    let path = match thread_mode {
-        // Bytes-on-disk modes honour an explicit `--path`. Clonefile
-        // (`Materialized`) doesn't care where the destination lives;
-        // full-copy (`Solid`) doesn't either. Default to a managed
-        // path when `--path` is absent — heddle-internal layout for
-        // Materialized so we can sweep it cleanly; the top-level
-        // `default_thread_path` for Solid because users typically
-        // want a navigable sibling directory.
-        ThreadMode::Materialized => args
-            .path
-            .clone()
-            .unwrap_or_else(|| default_lightweight_thread_path(repo, &args.name)),
-        ThreadMode::Solid => args
-            .path
-            .clone()
-            .unwrap_or_else(|| default_thread_path(repo, &args.name)),
-        // Virtualised mounts must live at a Heddle-managed path so a
-        // user-named directory never gets shadowed by a kernel mount.
-        ThreadMode::Virtualized => default_virtualized_thread_path(repo, &args.name),
-    };
-    if args.path.is_some() {
+    // Pure path layout: explicit `--path` for solid/materialized, managed
+    // default otherwise. Virtualized always uses the managed layout so a
+    // user-named directory is never shadowed by a kernel mount.
+    let path_plan = plan_checkout_path(
+        &thread_mode,
+        args.path.clone(),
+        default_thread_checkout_path(repo, &args.name),
+    );
+    let path = path_plan.path;
+    if path_plan.from_explicit_path {
         ensure_explicit_start_path_outside_tracked_tree(repo, &args.name, &path)?;
     }
     // The retry-stable idempotency key, resolved BEFORE the fresh-start preflight
@@ -1820,48 +1038,54 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     let target_dir_created = prepared_target.target_dir_created;
     let abs_path = normalize_path_for_containment(&prepared_target.path)?;
 
-    // Shared cargo target: default-on for solid/materialized threads in
-    // Rust workspaces (top-level Cargo.toml). `--no-shared-target` opts
-    // out; `--shared-target` forces the attempt. We compute the path
-    // *before* materialization so the heads-up advisory below can
-    // reflect what would have happened, and we apply the redirect
-    // *after* materialization (only the cargo config.toml writer
-    // touches the checkout; the materializer populates the rest).
+    // Item 2.1 of the heddle 6→8 plan: when starting a heavy
+    // (materialized/lightweight) thread in a Rust workspace, redirect
+    // the new checkout's `target/` to a workspace-shared dir so
+    // parallel threads don't multiply cargo target trees on disk.
     //
-    // Explicit `--shared-target` in a non-Rust repo is a harmless no-op
-    // rather than an error: automation that passes the flag
-    // unconditionally across mixed-language repos shouldn't have to
-    // special-case every non-cargo project. We log a debug-level note
-    // so a curious operator can still see it landed silently.
+    // Pure redirect / advisory decisions live in heddle-core. We resolve
+    // the shared dir *before* materialization so the heads-up advisory
+    // below can reflect what would have happened, and we apply the
+    // redirect *after* materialization (only the cargo config.toml
+    // writer touches the checkout; the materializer populates the rest).
+    //
+    // `--shared-target` in a non-Rust repo is a harmless no-op rather
+    // than an error: automation that passes the flag unconditionally
+    // across mixed-language repos shouldn't have to special-case
+    // every non-cargo project. We log a debug-level note so a curious
+    // operator can still see it landed silently.
     let is_rust_workspace = shared_target::workspace_root_is_rust(repo);
     let wants_shared_target = shared_target::shared_target_requested(
         args.shared_target,
         args.no_shared_target,
         is_rust_workspace,
     );
-    let shared_target_dir_path: Option<PathBuf> = if wants_shared_target
-        && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized)
-    {
-        if is_rust_workspace {
+    let shared_target_decision =
+        plan_shared_target_redirect(wants_shared_target, &thread_mode, is_rust_workspace);
+    let shared_target_dir_path: Option<PathBuf> = match shared_target_decision {
+        heddle_core::SharedTargetRedirectDecision::Apply => {
             Some(shared_target::shared_target_dir(repo)?)
-        } else {
+        }
+        heddle_core::SharedTargetRedirectDecision::SkipNonRustWorkspace => {
             tracing::debug!(
                 repo = %repo.root().display(),
                 "--shared-target requested in a non-Rust repo (no top-level Cargo.toml); skipping"
             );
             None
         }
-    } else {
-        None
+        heddle_core::SharedTargetRedirectDecision::NotApplicable => None,
     };
 
-    // Heads-up advisory: when starting a second-or-later solid/materialized
-    // thread in a Rust workspace *without* a shared target (opt-out or
-    // otherwise), nudge toward sharing. Doesn't fail the start; just stderr.
-    if shared_target_dir_path.is_none()
-        && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized)
-        && shared_target::should_advise_shared_target(repo)
-    {
+    // Heads-up advisory: when starting a second-or-later materialized
+    // thread in a Rust workspace without `--shared-target`, nudge the
+    // user toward the flag. Doesn't fail the start; just stderr.
+    // Pure gate (requested + mode) lives in heddle-core; rust/busy I/O
+    // stays in shared_target so the pre-start population is counted once.
+    if should_advise_shared_target(
+        wants_shared_target,
+        &thread_mode,
+        shared_target::should_advise_shared_target(repo),
+    ) {
         shared_target::print_advisory(&args.name);
     }
 
@@ -1940,10 +1164,22 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // precise directory + symlink rewind, back to the exact pre-start state;
     // the oplog `ThreadCreate` is the staged commit record appended once at
     // the single commit point. See `start_atomic::StartThread`.
+    //
+    // Pure step sequence / hydrate / shared-target flags come from
+    // heddle-core; the transaction still owns FS clonefile/copy and mounts.
     let mount_ownership = mount_lifecycle::MountOwnership::from_flags(args.daemon, args.no_daemon);
     // `scope` + `transaction_id` were resolved above the commit-detection gate.
-    let hydrate_requested =
-        args.hydrate && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized);
+    let materialize_plan = plan_thread_materialize(
+        &thread_mode,
+        shared_target_redirect_applies(shared_target_decision),
+        args.hydrate,
+    );
+    let hydrate_requested = materialize_plan.hydrate;
+    debug_assert_eq!(
+        materialize_plan.apply_shared_target,
+        shared_target_dir_path.is_some(),
+        "shared-target plan and resolved dir must agree before execute"
+    );
     let start_output = repo::atomic::execute(
         repo,
         start_atomic::StartThread {
@@ -1957,6 +1193,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             shared_target_dir: shared_target_dir_path,
             hydrate: hydrate_requested,
             mount_ownership,
+            interactive_setup: args.interactive_setup,
             record: thread_state,
         },
     )
@@ -1984,13 +1221,13 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
 /// what it anchors on, so reconstruct the finalize inputs from it rather than
 /// re-running the fresh-start preflight (which would reject the now-non-empty
 /// checkout) or `execute` (whose `apply` would fail on the existing `.heddle`).
-/// `base_state` is the full `ChangeId` already resolved by `start_thread` (the
+/// `base_state` is the full `StateId` already resolved by `start_thread` (the
 /// record only persists the short form). No hydrate is re-run, so no hydrate
 /// note is emitted (the original start already linked the deps).
 fn finalize_committed_start(
     repo: &Repository,
     args: &ThreadStartArgs,
-    base_state: ChangeId,
+    base_state: StateId,
     actor_identity: &StartActorIdentity,
 ) -> Result<ThreadOpOutput> {
     let committed = ThreadManager::new(repo.heddle_dir())
@@ -2023,7 +1260,7 @@ fn finalize_committed_start(
 
 /// The post-commit bookkeeping shared by a fresh `thread start` and a committed
 /// retry ([`finalize_committed_start`]): emit the hydrate note, create the
-/// `AgentRegistry` reservation entry (the "active reservation" a crash before
+/// `ActorPresenceStore` reservation entry (the "active reservation" a crash before
 /// this step leaves missing), and build the command output. Idempotent w.r.t. the
 /// reservation: it is only reached when no live owner exists (a live owner is
 /// caught earlier by `find_active_thread_entry`), so the retry completes the
@@ -2034,7 +1271,7 @@ fn finalize_thread_start(
     args: &ThreadStartArgs,
     thread_mode: &ThreadMode,
     abs_path: &Path,
-    base_state: ChangeId,
+    base_state: StateId,
     base_short: &str,
     base_root: &str,
     actor_identity: &StartActorIdentity,
@@ -2062,11 +1299,11 @@ fn finalize_thread_start(
         }
     }
 
-    let registry = AgentRegistry::new(repo.heddle_dir());
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let path_for_entry = abs_path.to_path_buf();
     let thread_name = args.name.clone();
-    let entry = registry.create_generated_entry_for_thread(&thread_name, |session_id| {
-        Ok(AgentEntry {
+    let entry = registry.create_generated_entry(|session_id| {
+        Ok(ActorPresence {
             session_id: session_id.to_string(),
             client_instance_id: None,
             native_actor_key: actor_identity.native_actor_key.clone(),
@@ -2075,17 +1312,8 @@ fn finalize_thread_start(
             heddle_session_id: None,
             thread_id: Some(thread_name.clone()),
             thread: thread_name.clone(),
-            pid: Some(process::id()),
-            boot_id: current_boot_id(),
-            liveness_path: Some(
-                repo.heddle_dir()
-                    .join("agents")
-                    .join(format!("{session_id}.live")),
-            ),
-            heartbeat_at: Some(Utc::now()),
             anchor_state: Some(base_state.to_string_full()),
             anchor_root: Some(base_root.to_string()),
-            reservation_token: Some(objects::store::generate_agent_id()),
             path: match thread_mode {
                 ThreadMode::Solid | ThreadMode::Materialized | ThreadMode::Virtualized => {
                     Some(path_for_entry.clone())
@@ -2109,7 +1337,7 @@ fn finalize_thread_start(
             winning_attach_rule: Some("thread-start".to_string()),
             probe_source: actor_identity.probe_source.clone(),
             probe_confidence: actor_identity.probe_confidence,
-            status: AgentStatus::Active,
+            status: ActorPresenceStatus::Active,
             completed_at: None,
             context_queries: vec![],
         })
@@ -2220,13 +1448,7 @@ fn resolve_start_actor_identity(
 }
 
 fn non_empty_identity_value(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        if value.trim().is_empty() {
-            None
-        } else {
-            Some(value)
-        }
-    })
+    value.filter(|value| !value.trim().is_empty())
 }
 
 fn active_reservation_advice(thread: &str, existing_path: Option<String>) -> RecoveryAdvice {
@@ -2239,7 +1461,7 @@ fn active_reservation_advice(thread: &str, existing_path: Option<String>) -> Rec
         "active_thread_reservation",
         format!("Thread '{thread}' already has an active reservation{location}"),
         format!(
-            "Inspect it with `{primary_command}`, or release that session before starting another writer."
+            "Inspect it with `{primary_command}`, or release that lease before starting another writer."
         ),
         format!("thread '{thread}' already has an active writer reservation{location}"),
         "starting another writer could create competing worktree materializations for the same thread",
@@ -2251,8 +1473,8 @@ fn active_reservation_advice(thread: &str, existing_path: Option<String>) -> Rec
 
 fn thread_anchor_mismatch_advice(
     thread: &str,
-    existing: &ChangeId,
-    requested: &ChangeId,
+    existing: &StateId,
+    requested: &StateId,
 ) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "thread_anchor_mismatch",
@@ -2277,64 +1499,38 @@ fn thread_anchor_mismatch_advice(
 }
 
 fn resolve_thread_mode(repo: &Repository, args: &ThreadStartArgs) -> ThreadMode {
-    // Explicit `--workspace` wins. `--path` only changes *where* the
-    // worktree lives; the mode dispatch decides *how* the bytes get
-    // there (clonefile vs mount vs full copy). We respect explicit
-    // modes even on filesystems that won't deliver their full
-    // performance promise (e.g. `--workspace materialized` on ext4
-    // silently falls through to per-blob `fs::copy` inside the
-    // materializer); the auto path probes the FS instead so the
-    // mode label in `heddle status` stays accurate.
-    match args.workspace {
-        WorkspaceModeArg::Materialized => ThreadMode::Materialized,
-        WorkspaceModeArg::Virtualized => ThreadMode::Virtualized,
-        WorkspaceModeArg::Solid => ThreadMode::Solid,
-        WorkspaceModeArg::Auto => {
-            // Explicit `--path` with no explicit mode reads as "I want
-            // a checkout I can navigate to" — point Auto away from
-            // `virtualized` (which is always managed) toward the
-            // bytes-on-disk modes.
-            let candidate = if args.path.is_some() {
-                ThreadMode::Materialized
-            } else {
-                match resolve_auto_workspace_default(repo, args) {
-                    UserThreadWorkspaceMode::Materialized => ThreadMode::Materialized,
-                    UserThreadWorkspaceMode::Virtualized => ThreadMode::Virtualized,
-                    UserThreadWorkspaceMode::Solid => ThreadMode::Solid,
-                    UserThreadWorkspaceMode::Auto => ThreadMode::Materialized,
-                }
-            };
-            // Auto-only reflink-capability probe. `materialized`
-            // implies "clonefile/reflink the captured tree into a
-            // thread dir"; on ext4 / HFS+ / NTFS the clonefile call
-            // returns `EOPNOTSUPP` and `materialize_blob` falls back
-            // to per-blob `fs::copy`. That works but uses N× the disk
-            // a CoW share would, and a user-facing `Workspace:
-            // materialized` line would be misleading. Downgrade to
-            // `solid` so the mode label matches what's actually on
-            // disk. One-shot syscall pair (write + clonefile on a
-            // tiny probe file under repo root), measured at <1 ms.
-            if candidate == ThreadMode::Materialized
-                && !objects::fs_clone::filesystem_supports_reflink(repo.root())
-            {
-                tracing::debug!(
-                    root = %repo.root().display(),
-                    "Auto workspace: filesystem does not support reflinks; \
-                     falling back to `solid` so the mode label reflects disk truth"
-                );
-                return ThreadMode::Solid;
-            }
-            candidate
-        }
+    // Pure mode planning in heddle-core; CLI only loads config + probes the FS.
+    // Explicit modes win as-is (including materialized without reflinks —
+    // honesty messaging stays here). Auto uses config defaults and may
+    // downgrade materialized → solid when the host lacks reflinks.
+    let auto_default = resolve_auto_workspace_default(repo, args);
+    let supports_reflink = objects::fs_clone::filesystem_supports_reflink(repo.root());
+    let mode = plan_thread_mode(
+        workspace_mode_request_from_arg(args.workspace),
+        args.path.is_some(),
+        auto_default,
+        supports_reflink,
+    );
+    if matches!(args.workspace, WorkspaceModeArg::Auto)
+        && mode == ThreadMode::Solid
+        && !supports_reflink
+    {
+        // Only log when Auto actually fell back because of the probe.
+        tracing::debug!(
+            root = %repo.root().display(),
+            "Auto workspace: filesystem does not support reflinks; \
+             falling back to `solid` so the mode label reflects disk truth"
+        );
     }
+    mode
 }
 
 fn resolve_auto_workspace_default(
     _repo: &Repository,
     args: &ThreadStartArgs,
-) -> UserThreadWorkspaceMode {
+) -> AutoWorkspaceDefault {
     let user_config = UserConfig::load_default().unwrap_or_default();
-    if args.parent_thread.is_some() || args.automated {
+    let mode = if args.parent_thread.is_some() || args.automated {
         user_config
             .worktree
             .thread_workspace
@@ -2342,6 +1538,35 @@ fn resolve_auto_workspace_default(
             .unwrap_or(UserThreadWorkspaceMode::Materialized)
     } else {
         user_config.worktree.thread_workspace.top_level_default
+    };
+    match mode {
+        UserThreadWorkspaceMode::Materialized => AutoWorkspaceDefault::Materialized,
+        UserThreadWorkspaceMode::Virtualized => AutoWorkspaceDefault::Virtualized,
+        UserThreadWorkspaceMode::Solid => AutoWorkspaceDefault::Solid,
+        UserThreadWorkspaceMode::Auto => AutoWorkspaceDefault::Auto,
+    }
+}
+
+fn workspace_mode_request_from_arg(arg: WorkspaceModeArg) -> WorkspaceModeRequest {
+    match arg {
+        WorkspaceModeArg::Auto => WorkspaceModeRequest::Auto,
+        WorkspaceModeArg::Materialized => WorkspaceModeRequest::Materialized,
+        WorkspaceModeArg::Virtualized => WorkspaceModeRequest::Virtualized,
+        WorkspaceModeArg::Solid => WorkspaceModeRequest::Solid,
+    }
+}
+
+fn thread_start_options_from_args(args: &ThreadStartArgs) -> ThreadStartOptions {
+    ThreadStartOptions {
+        name: args.name.clone(),
+        from: args.from.clone(),
+        path: args.path.clone(),
+        workspace: workspace_mode_request_from_arg(args.workspace),
+        parent_thread: args.parent_thread.clone(),
+        automated: args.automated,
+        task: args.task.clone(),
+        shared_target: args.shared_target,
+        hydrate: args.hydrate,
     }
 }
 
@@ -2355,14 +1580,18 @@ pub(crate) fn cmd_thread_create(
     // Same user/external creation boundary guard as `start_thread`: reject a
     // name that isn't a safe single shell token before any ref/record is
     // persisted, so `heddle thread create` can't slip an unsafe id past the
-    // early-reject layer. (heddle#464 close-the-class.)
-    ThreadId::new(name.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
+    // early-reject layer. (heddle#464 close-the-class.) Pure preflight is
+    // owned by heddle-core; CLI still performs ref/record materialization.
+    let create_plan = plan_thread_create(&ThreadCreateOptions {
+        name: name.clone(),
+        ephemeral,
+        ttl_secs,
+    })
+    .map_err(|ThreadPlanError::InvalidName(err)| anyhow!(thread_name_invalid_advice(&err)))?;
+    let name = create_plan.name.as_str().to_string();
+    let ephemeral = create_plan.ephemeral;
+    let ttl_secs = create_plan.ttl_secs;
 
-    // `ephemeral` / `ttl_secs` are part of main's evolved
-    // ephemeral-threads API; not yet plumbed into the Thread record
-    // here. TODO: thread these through to a ThreadLifecycle field
-    // when the ephemeral-threads work lands.
-    let _ = (ephemeral, ttl_secs);
     // Codex's body: auto-bootstrap a current state when there isn't
     // one — needed in fresh git-overlay repos where `heddle init`
     // hasn't produced a snapshot yet.
@@ -2764,10 +1993,10 @@ pub(crate) fn cmd_thread_switch(
         if repo.capability() == repo::RepositoryCapability::GitOverlay
             && repo.root().join(".git").exists()
         {
-            let mut bridge = crate::git_projection_engine::GitProjection::new(repo);
+            let mut bridge = heddle_git_projection::GitProjection::new(repo);
             match bridge.write_through_thread_checkout(&name)? {
-                crate::git_projection_engine::WriteThroughOutcome::Wrote(_) => {}
-                crate::git_projection_engine::WriteThroughOutcome::Skipped(reason) => {
+                heddle_git_projection::WriteThroughOutcome::Wrote(_) => {}
+                heddle_git_projection::WriteThroughOutcome::Skipped(reason) => {
                     return Err(anyhow!(thread_switch_git_checkout_skipped_advice(
                         &name,
                         reason.to_string()
@@ -3144,11 +2373,7 @@ pub(crate) fn show_thread_summary(
             println!();
             println!("{}", style::section("Recent saved states"));
             for capture in captures {
-                println!(
-                    "  {} {}",
-                    style::accent(&capture.change_id),
-                    capture.message
-                );
+                println!("  {} {}", style::accent(&capture.state_id), capture.message);
             }
         }
         if summary.promotion_suggested && !summary.heavy_impact_paths.is_empty() {
@@ -3380,13 +2605,17 @@ fn render_thread_op(cli: &Cli, output: ThreadOpOutput) -> Result<()> {
 }
 
 fn non_empty_string(value: Option<&str>) -> Option<&str> {
-    value.and_then(|value| {
-        if value.trim().is_empty() {
-            None
-        } else {
-            Some(value)
-        }
-    })
+    value.filter(|value| !value.trim().is_empty())
+}
+
+#[cfg(test)]
+fn display_path_string(path: &Path) -> Option<String> {
+    let rendered = path.display().to_string();
+    if rendered.trim().is_empty() {
+        None
+    } else {
+        Some(rendered)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3463,14 +2692,14 @@ fn default_thread_path(repo: &Repository, name: &str) -> PathBuf {
 /// and which is excluded from overlay/status traversal). What it must NOT
 /// do is land in the repo's *tracked* working tree — a checkout there
 /// would surface as nested unsaved work in the parent repo's status.
+///
+/// Normalization is CLI-owned (FS canonicalize); the containment decision
+/// is pure and lives in [`heddle_core::check_explicit_path_isolation`].
 fn ensure_explicit_start_path_outside_tracked_tree(
     repo: &Repository,
     name: &str,
     path: &Path,
 ) -> Result<()> {
-    if repo.capability() != repo::RepositoryCapability::GitOverlay {
-        return Ok(());
-    }
     let requested = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -3478,39 +2707,46 @@ fn ensure_explicit_start_path_outside_tracked_tree(
     };
     let requested_for_check = normalize_path_for_containment(&requested)?;
     let heddle_dir = normalize_path_for_containment(repo.heddle_dir())?;
+    let repo_root = normalize_path_for_containment(repo.root())?;
+    let is_git_overlay = repo.capability() == repo::RepositoryCapability::GitOverlay;
     // Under `.heddle/` is allowed — that's where managed checkouts live.
     // (`validate_worktree_target` further restricts this to the
     // `.heddle/threads` subtree so a checkout can't target the store.)
-    // Check this BEFORE the repo-root test, since `.heddle` is itself a
-    // child of the repo root.
-    if requested_for_check == heddle_dir || requested_for_check.starts_with(&heddle_dir) {
-        return Ok(());
+    // Pure placement check runs after normalize; only git-overlay enforces.
+    match check_explicit_path_isolation(
+        is_git_overlay,
+        &requested_for_check,
+        &repo_root,
+        &heddle_dir,
+    ) {
+        Ok(()) => Ok(()),
+        Err(ThreadPathIsolationError::InsideTrackedTree {
+            requested: refused,
+            repo_root: refused_root,
+        }) => {
+            let suggested = default_thread_path(repo, name);
+            let suggested_command = format!("heddle start {name} --path {}", suggested.display());
+            Err(anyhow!(RecoveryAdvice::safety_refusal(
+                "thread_start_path_inside_repo",
+                format!(
+                    "Refusing to start thread '{name}' inside the current repository at '{}'",
+                    refused.display()
+                ),
+                format!(
+                    "Choose a checkout under `.heddle/threads` (the default) or a sibling outside the repository, for example `{suggested_command}`."
+                ),
+                format!(
+                    "requested checkout path '{}' is inside the tracked working tree of repository '{}'",
+                    refused.display(),
+                    refused_root.display()
+                ),
+                "starting an isolated checkout inside the source worktree would make Heddle report the nested checkout as unsaved work",
+                "no thread refs, checkout directories, mounts, or worktree files were changed",
+                suggested_command.clone(),
+                vec![suggested_command],
+            )))
+        }
     }
-    let repo_root = normalize_path_for_containment(repo.root())?;
-    if requested_for_check == repo_root || requested_for_check.starts_with(&repo_root) {
-        let suggested = default_thread_path(repo, name);
-        let suggested_command = format!("heddle start {name} --path {}", suggested.display());
-        return Err(anyhow!(RecoveryAdvice::safety_refusal(
-            "thread_start_path_inside_repo",
-            format!(
-                "Refusing to start thread '{name}' inside the current repository at '{}'",
-                requested_for_check.display()
-            ),
-            format!(
-                "Choose a checkout under `.heddle/threads` (the default) or a sibling outside the repository, for example `{suggested_command}`."
-            ),
-            format!(
-                "requested checkout path '{}' is inside the tracked working tree of repository '{}'",
-                requested_for_check.display(),
-                repo_root.display()
-            ),
-            "starting an isolated checkout inside the source worktree would make Heddle report the nested checkout as unsaved work",
-            "no thread refs, checkout directories, mounts, or worktree files were changed",
-            suggested_command.clone(),
-            vec![suggested_command],
-        )));
-    }
-    Ok(())
 }
 
 fn normalize_path_for_containment(path: &Path) -> Result<PathBuf> {
@@ -3544,22 +2780,6 @@ fn normalize_path_for_containment(path: &Path) -> Result<PathBuf> {
     Ok(normalized)
 }
 
-/// Lightweight (materialized) checkout path:
-/// `<repo>/.heddle/threads/<name>/<repo-name>`.
-fn default_lightweight_thread_path(repo: &Repository, name: &str) -> PathBuf {
-    default_thread_checkout_path(repo, name)
-}
-
-/// Mount-point path for a virtualized thread:
-/// `<repo>/.heddle/threads/<name>/<repo-name>`. Shares the same managed
-/// `.heddle/threads/<name>/<repo-name>` layout as solid/lightweight checkouts
-/// (thread names are unique per repo), keeping the per-thread
-/// `manifest.toml` sidecar a sibling of the mount point rather than a
-/// stray entry inside it.
-fn default_virtualized_thread_path(repo: &Repository, name: &str) -> PathBuf {
-    default_thread_checkout_path(repo, name)
-}
-
 fn absolute_path(path: &std::path::Path) -> Result<PathBuf> {
     if path.is_absolute() {
         Ok(path.to_path_buf())
@@ -3568,7 +2788,7 @@ fn absolute_path(path: &std::path::Path) -> Result<PathBuf> {
     }
 }
 
-/// Return the most recently started *active* `AgentEntry` for `thread`, if
+/// Return the most recently started *active* `ActorPresence` for `thread`, if
 /// any. Used by `heddle status` to surface the actor for a thread, and
 /// (since the Phase-D demo work) by `heddle capture` to inherit the
 /// thread's actor as the captured state's `attribution.agent` — without
@@ -3576,12 +2796,12 @@ fn absolute_path(path: &std::path::Path) -> Result<PathBuf> {
 pub(crate) fn find_active_thread_entry(
     repo: &Repository,
     thread: &str,
-) -> Result<Option<AgentEntry>> {
-    let registry = AgentRegistry::new(repo.heddle_dir());
+) -> Result<Option<ActorPresence>> {
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     Ok(registry
-        .list()?
+        .active_entries()?
         .into_iter()
-        .filter(|entry| entry.thread == thread && entry.status == AgentStatus::Active)
+        .filter(|entry| entry.thread == thread)
         .max_by_key(|entry| entry.started_at))
 }
 
@@ -3606,7 +2826,7 @@ mod tests {
         assert!(advice.unsafe_condition.contains("dirty Git index"));
         assert_eq!(
             advice.primary_command,
-            "heddle fsck --repair git --prefer heddle --ref feature/git --preview"
+            "heddle fsck repair git --prefer heddle --ref feature/git --preview"
         );
         assert!(advice.preserved.contains("Git checkout was left unchanged"));
     }

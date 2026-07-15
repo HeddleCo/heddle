@@ -6,15 +6,15 @@ use std::{fmt, path::Path};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
-use super::{ChangeId, ContentHash};
+use super::{ContentHash, SpoolId, StateId};
 
-const TREE_FORMAT_VERSION: u8 = 2;
+const TREE_FORMAT_VERSION: u8 = 3;
 const ENTRY_KIND_BLOB: u8 = 0;
 const ENTRY_KIND_TREE: u8 = 1;
 const ENTRY_KIND_SYMLINK: u8 = 2;
 const ENTRY_KIND_GITLINK: u8 = 3;
 /// Native child-spool edge: the entry's payload is a spool-id + anchored
-/// state-id (both 16-byte [`ChangeId`]s), NOT a git commit OID. This link is
+/// state-id, not a git commit OID. This link is
 /// deliberately NOT a git submodule — see [`FileMode::Spoollink`].
 const ENTRY_KIND_SPOOLLINK: u8 = 4;
 const GIT_OBJECT_FORMAT_SHA1: u8 = 1;
@@ -151,8 +151,8 @@ pub enum TreeEntryTarget {
     /// explicitly (skip on export). The Spool children facet consumes this in
     /// a later phase.
     Spoollink {
-        spool_id: ChangeId,
-        state_id: ChangeId,
+        spool_id: SpoolId,
+        state_id: StateId,
     },
 }
 
@@ -198,9 +198,9 @@ impl TreeEntryTarget {
 
     /// The child-spool pointer `(spool_id, state_id)` for a spoollink entry,
     /// or `None` for any other kind.
-    pub fn spoollink_target(&self) -> Option<(ChangeId, ChangeId)> {
+    pub fn spoollink_target(&self) -> Option<(&SpoolId, StateId)> {
         match self {
-            TreeEntryTarget::Spoollink { spool_id, state_id } => Some((*spool_id, *state_id)),
+            TreeEntryTarget::Spoollink { spool_id, state_id } => Some((spool_id, *state_id)),
             _ => None,
         }
     }
@@ -212,7 +212,7 @@ impl TreeEntryTarget {
             | TreeEntryTarget::Symlink { hash } => hash.as_bytes().len(),
             TreeEntryTarget::Gitlink { target } => target.as_bytes().len(),
             TreeEntryTarget::Spoollink { spool_id, state_id } => {
-                spool_id.as_bytes().len() + state_id.as_bytes().len()
+                4 + spool_id.as_str().len() + state_id.as_bytes().len()
             }
         }
     }
@@ -229,7 +229,8 @@ impl TreeEntryTarget {
                 hasher.update(target.as_bytes())
             }
             TreeEntryTarget::Spoollink { spool_id, state_id } => {
-                hasher.update(spool_id.as_bytes());
+                hasher.update(&(spool_id.as_str().len() as u32).to_le_bytes());
+                hasher.update(spool_id.as_str().as_bytes());
                 hasher.update(state_id.as_bytes())
             }
         };
@@ -327,8 +328,8 @@ impl TreeEntry {
     /// `state_id`. Not a git submodule (see [`TreeEntryTarget::Spoollink`]).
     pub fn spoollink(
         name: impl Into<String>,
-        spool_id: ChangeId,
-        state_id: ChangeId,
+        spool_id: SpoolId,
+        state_id: StateId,
     ) -> Result<Self, TreeError> {
         let name = name.into();
         validate_name(&name)?;
@@ -427,7 +428,7 @@ impl TreeEntry {
     }
 
     /// The `(spool_id, state_id)` pointer for a spoollink entry, else `None`.
-    pub fn spoollink_target(&self) -> Option<(ChangeId, ChangeId)> {
+    pub fn spoollink_target(&self) -> Option<(&SpoolId, StateId)> {
         self.target.spoollink_target()
     }
 
@@ -580,13 +581,13 @@ struct EncodedTreeEntryV2 {
     executable: Option<bool>,
     git_format: Option<u8>,
     git_oid: Option<Vec<u8>>,
-    // Child-spool pointer for SPOOLLINK entries (16-byte ChangeIds). `default`
+    // Child-spool pointer for SPOOLLINK entries. `default`
     // keeps the encoding backward-compatible: pre-SPOOLLINK payloads simply
     // omit these fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    spool_id: Option<ChangeId>,
+    spool_id: Option<SpoolId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    spool_state_id: Option<ChangeId>,
+    spool_state_id: Option<StateId>,
 }
 
 impl Serialize for Tree {
@@ -685,7 +686,7 @@ impl From<&TreeEntry> for EncodedTreeEntryV2 {
                 executable: None,
                 git_format: None,
                 git_oid: None,
-                spool_id: Some(*spool_id),
+                spool_id: Some(spool_id.clone()),
                 spool_state_id: Some(*state_id),
             },
         }
@@ -822,9 +823,9 @@ mod spoollink_tests {
 
     #[test]
     fn spoollink_entry_shape() {
-        let spool_id = ChangeId::from_bytes([7u8; 16]);
-        let state_id = ChangeId::from_bytes([9u8; 16]);
-        let entry = TreeEntry::spoollink("child", spool_id, state_id).unwrap();
+        let spool_id = SpoolId::parse("acme/child").unwrap();
+        let state_id = StateId::from_bytes([9u8; 32]);
+        let entry = TreeEntry::spoollink("child", spool_id.clone(), state_id).unwrap();
 
         assert!(entry.is_spoollink());
         assert_eq!(entry.entry_type(), EntryType::Spoollink);
@@ -833,20 +834,20 @@ mod spoollink_tests {
         assert_eq!(entry.content_hash(), None);
         assert_eq!(entry.leaf_content_hash(), None);
         assert_eq!(entry.gitlink_target(), None);
-        assert_eq!(entry.spoollink_target(), Some((spool_id, state_id)));
+        assert_eq!(entry.spoollink_target(), Some((&spool_id, state_id)));
     }
 
     #[test]
     fn spoollink_roundtrips_through_encoded_tree_v2() {
-        let spool_id = ChangeId::from_bytes([1u8; 16]);
-        let state_id = ChangeId::from_bytes([2u8; 16]);
+        let spool_id = SpoolId::parse("acme/child").unwrap();
+        let state_id = StateId::from_bytes([2u8; 32]);
 
         // Mix a spoollink alongside the existing kinds so the round-trip also
         // proves existing entries are undisturbed.
         let blob_hash = ContentHash::compute(b"hello");
         let tree = Tree::from_entries(vec![
             TreeEntry::file("a_blob", blob_hash, false).unwrap(),
-            TreeEntry::spoollink("z_child", spool_id, state_id).unwrap(),
+            TreeEntry::spoollink("z_child", spool_id.clone(), state_id).unwrap(),
         ]);
 
         let bytes = rmp_serde::to_vec(&tree).unwrap();
@@ -857,7 +858,7 @@ mod spoollink_tests {
         let child = decoded
             .get("z_child")
             .expect("spoollink survives round-trip");
-        assert_eq!(child.spoollink_target(), Some((spool_id, state_id)));
+        assert_eq!(child.spoollink_target(), Some((&spool_id, state_id)));
         assert_eq!(child.entry_type(), EntryType::Spoollink);
 
         // Hash is stable and distinct from a same-name gitlink/blob shape.

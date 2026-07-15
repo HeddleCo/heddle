@@ -33,18 +33,16 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use crypto::verify_state_signature_bytes;
 use objects::{
     error::{HeddleError, Result},
     fs_atomic::write_file_atomic,
     legacy,
     store::ObjectStore,
 };
-use oplog::OpLogBackend;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Repository, ResignOutcome,
+    Repository,
     repository::repo_config,
     thread_model::{
         EphemeralMarker, ThreadConfidenceSummary, ThreadFreshness, ThreadImpactCategory,
@@ -85,7 +83,6 @@ pub struct PlannedDeletionMigration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SchemaTarget {
-    OpLog,
     ContextBlobs,
     ThreadRecords,
     OperationIndex,
@@ -203,25 +200,24 @@ pub static MIGRATIONS: &[Migration] = &[
         applies_to: SchemaTarget::Trees,
         run: run_canonicalize_tree_entries,
     },
-    Migration {
-        id: "0004_canonicalize_context_roots",
-        description: "Rewrite legacy direct-path context roots without breaking signed states",
-        applies_to: SchemaTarget::ContextBlobs,
-        run: run_canonicalize_context_roots,
-    },
-    Migration {
-        id: "0005_resecure_pre_fidelity_signatures",
-        description: "Backfill pre-fidelity state signatures onto current hashes",
-        applies_to: SchemaTarget::Mixed,
-        run: run_resecure_pre_fidelity_signatures,
-    },
-    Migration {
-        id: "0006_canonicalize_packed_oplog",
-        description: "Rewrite packed oplog files into the latest container and record schema",
-        applies_to: SchemaTarget::OpLog,
-        run: run_canonicalize_packed_oplog,
-    },
 ];
+
+/// Returns true when every registered migration id is already recorded in
+/// the schema ledger. Used by repository open to skip the migration pass
+/// entirely on a clean ledger (see `docs/perf/cli-core-loop-todo.md`).
+///
+/// Missing or malformed ledger → `false` (caller must run
+/// [`apply_pending`]). Malformed ledger is *not* surfaced as an error here:
+/// open still routes through `apply_pending`, which reports the parse failure.
+pub fn is_schema_ledger_complete(heddle_dir: &Path) -> bool {
+    let path = heddle_dir.join("state/schema_versions.toml");
+    let Ok(ledger) = SchemaVersionsLedger::load(&path) else {
+        return false;
+    };
+    MIGRATIONS
+        .iter()
+        .all(|migration| ledger.applied.contains(migration.id))
+}
 
 /// Apply any registered migration not yet present in
 /// `<repo>/.heddle/state/schema_versions.toml`. Idempotent: a second
@@ -286,91 +282,6 @@ fn run_canonicalize_thread_records(ctx: &mut MigrationCtx<'_>) -> Result<()> {
         store.save_record(&record)?;
     }
     Ok(())
-}
-
-fn run_canonicalize_context_roots(ctx: &mut MigrationCtx<'_>) -> Result<()> {
-    let mut blocked = Vec::new();
-
-    for state_id in ctx.repo.store().list_states()? {
-        let Some(state) = ctx.repo.store().get_state(&state_id)? else {
-            continue;
-        };
-        let Some(context_root) = state.context else {
-            continue;
-        };
-        let (canonical_root, changed) = ctx.repo.canonicalize_context_root(&context_root)?;
-        if !changed {
-            continue;
-        }
-
-        let prior_hash = state.compute_hash();
-        let prior_pre_fidelity_hash = state.compute_hash_for_legacy_signature_migration();
-        let mut rewritten = state.with_context(canonical_root);
-
-        match ctx
-            .repo
-            .resign_if_owned(&mut rewritten, &[prior_hash, prior_pre_fidelity_hash])
-        {
-            ResignOutcome::Unsigned | ResignOutcome::Resigned => {
-                ctx.repo.store().put_state(&rewritten)?;
-            }
-            ResignOutcome::Unreproducible => {
-                blocked.push(state_id);
-            }
-        }
-    }
-
-    if blocked.is_empty() {
-        Ok(())
-    } else {
-        Err(HeddleError::Conflict(format!(
-            "0004_canonicalize_context_roots left {} signed state(s) with unreproducible legacy direct-path context roots; keep the legacy context fallback or migrate them with the owning key",
-            blocked.len()
-        )))
-    }
-}
-
-fn run_resecure_pre_fidelity_signatures(ctx: &mut MigrationCtx<'_>) -> Result<()> {
-    let mut blocked = Vec::new();
-
-    for state_id in ctx.repo.store().list_states()? {
-        let Some(mut state) = ctx.repo.store().get_state(&state_id)? else {
-            continue;
-        };
-        let Some(signature) = state.signature.clone() else {
-            continue;
-        };
-        let current_hash = state.compute_hash();
-        if verify_state_signature_bytes(&signature, &current_hash).is_ok() {
-            continue;
-        }
-        let pre_fidelity_hash = state.compute_hash_for_legacy_signature_migration();
-        if verify_state_signature_bytes(&signature, &pre_fidelity_hash).is_err() {
-            continue;
-        }
-
-        match ctx
-            .repo
-            .resign_if_owned(&mut state, &[current_hash, pre_fidelity_hash])
-        {
-            ResignOutcome::Resigned => ctx.repo.store().put_state(&state)?,
-            ResignOutcome::Unsigned => {}
-            ResignOutcome::Unreproducible => blocked.push(state_id),
-        }
-    }
-
-    if blocked.is_empty() {
-        Ok(())
-    } else {
-        Err(HeddleError::Conflict(format!(
-            "0005_resecure_pre_fidelity_signatures found {} valid pre-fidelity signature(s) whose key is not owned by this repo; keep the legacy signature migration hash until they are explicitly preserved or re-signed by the owning key",
-            blocked.len()
-        )))
-    }
-}
-
-fn run_canonicalize_packed_oplog(ctx: &mut MigrationCtx<'_>) -> Result<()> {
-    ctx.repo.oplog().migrate_to_current_format()
 }
 
 fn run_canonicalize_tree_entries(ctx: &mut MigrationCtx<'_>) -> Result<()> {
@@ -520,44 +431,19 @@ impl From<LegacyThreadRecord> for ThreadRecord {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Mutex};
+    use std::path::PathBuf;
 
-    use crypto::StateSigningExt;
-    use objects::object::{
-        Annotation, AnnotationKind, AnnotationScope, Attribution, Blob, ContentHash, ContextBlob,
-        ContextTarget, EntryType, Principal, SignatureStatus, State, Tree, TreeEntry,
-    };
+    use objects::object::{Blob, ContentHash, Tree, TreeEntry};
     use serde::Serialize;
     use tempfile::TempDir;
 
     use super::*;
     use crate::{Repository, thread_record_store::FilesystemThreadRecordStore};
 
-    static SIGNING_HOME_LOCK: Mutex<()> = Mutex::new(());
-
     fn fresh_repo() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         (temp, repo)
-    }
-
-    fn with_signing_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
-        let _guard = SIGNING_HOME_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = std::env::var_os("HEDDLE_HOME");
-        unsafe {
-            std::env::set_var("HEDDLE_HOME", home);
-        }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        match previous {
-            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
-            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
-        }
-        match result {
-            Ok(value) => value,
-            Err(payload) => std::panic::resume_unwind(payload),
-        }
     }
 
     fn remove_ledger(repo: &Repository) {
@@ -618,48 +504,6 @@ mod tests {
         .unwrap()
     }
 
-    fn test_annotation(content: &str) -> Annotation {
-        Annotation::new(
-            AnnotationScope::File,
-            AnnotationKind::Rationale,
-            content.to_string(),
-            vec![],
-            "test@example.com".to_string(),
-            1700000000,
-            None,
-            None,
-        )
-    }
-
-    fn tree_path(repo: &Repository, components: &[String], blob_hash: ContentHash) -> ContentHash {
-        let mut tree = Tree::new();
-        if components.len() == 1 {
-            tree.insert(TreeEntry::file(&components[0], blob_hash, false).unwrap());
-        } else {
-            let subtree = tree_path(repo, &components[1..], blob_hash);
-            tree.insert(TreeEntry::directory(&components[0], subtree).unwrap());
-        }
-        repo.store().put_tree(&tree).unwrap()
-    }
-
-    fn legacy_context_root(repo: &Repository, path: &str, blob: &ContextBlob) -> ContentHash {
-        let bytes = blob.encode().unwrap();
-        let blob_hash = repo.store().put_blob(&Blob::new(bytes)).unwrap();
-        let components = Path::new(path)
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy().to_string())
-            .collect::<Vec<_>>();
-        tree_path(repo, &components, blob_hash)
-    }
-
-    fn unsigned_state() -> State {
-        State::new_snapshot(
-            ContentHash::compute(b"tree"),
-            vec![],
-            Attribution::human(Principal::new("Test", "test@example.com")),
-        )
-    }
-
     #[test]
     fn first_apply_runs_every_registered_migration() {
         let (_temp, repo) = fresh_repo();
@@ -698,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn deletion_wave_hooks_are_registered_in_order() {
+    fn migrations_are_registered_in_order() {
         let registered = MIGRATIONS
             .iter()
             .map(|migration| migration.id)
@@ -709,9 +553,6 @@ mod tests {
             vec![
                 "0002_canonicalize_thread_records",
                 "0003_canonicalize_tree_entries",
-                "0004_canonicalize_context_roots",
-                "0005_resecure_pre_fidelity_signatures",
-                "0006_canonicalize_packed_oplog",
             ],
             "the deletion-wave migration ids must stay ordered and reviewable",
         );
@@ -809,102 +650,5 @@ updated_at = "2024-01-01T00:00:01Z"
         assert!(rewritten.contains("[confidence_summary]"));
         assert!(rewritten.contains("[integration_policy_result]"));
         assert!(rewritten.contains("conflicts_resolved_manually = false"));
-    }
-
-    #[test]
-    fn migration_0003_canonicalizes_owned_signed_context_root_and_resigns() {
-        let home = TempDir::new().unwrap();
-        with_signing_home(home.path(), || {
-            let temp = TempDir::new().unwrap();
-            let repo = Repository::init(temp.path()).unwrap();
-            remove_ledger(&repo);
-            let target = ContextTarget::file("src/main.rs").unwrap();
-            let blob = ContextBlob::new(vec![test_annotation("legacy")]);
-            let legacy_root = legacy_context_root(&repo, "src/main.rs", &blob);
-
-            let signer = repo.signing_signer().unwrap();
-            let mut state = unsigned_state().with_context(legacy_root);
-            state.sign(&*signer).unwrap();
-            let state_id = state.change_id;
-            repo.store().put_state(&state).unwrap();
-
-            apply_pending(&repo).unwrap();
-
-            let migrated = repo.store().get_state(&state_id).unwrap().unwrap();
-            assert_ne!(migrated.context, Some(legacy_root));
-            assert_eq!(
-                repo.verify_state_signature(&state_id).unwrap(),
-                SignatureStatus::Valid
-            );
-            let new_root = migrated.context.unwrap();
-            assert_eq!(
-                repo.get_context_blob(&new_root, &target).unwrap(),
-                Some(blob)
-            );
-            let top = repo.store().get_tree(&new_root).unwrap().unwrap();
-            assert!(top.get("src").is_none());
-            assert_eq!(
-                top.get("__files").map(|entry| entry.entry_type()),
-                Some(EntryType::Tree),
-            );
-        });
-    }
-
-    #[test]
-    fn migration_0005_resigns_owned_pre_fidelity_signature() {
-        let home = TempDir::new().unwrap();
-        with_signing_home(home.path(), || {
-            let temp = TempDir::new().unwrap();
-            let repo = Repository::init(temp.path()).unwrap();
-            remove_ledger(&repo);
-
-            let signer = repo.signing_signer().unwrap();
-            let mut state = unsigned_state();
-            let legacy_hash = state.compute_hash_for_legacy_signature_migration();
-            state.signature = Some(
-                crypto::state_signature_from_signer(&legacy_hash, &*signer)
-                    .expect("sign legacy hash"),
-            );
-            let state_id = state.change_id;
-            repo.store().put_state(&state).unwrap();
-            assert_eq!(
-                repo.verify_state_signature(&state_id).unwrap(),
-                SignatureStatus::Invalid,
-            );
-
-            apply_pending(&repo).unwrap();
-
-            assert_eq!(
-                repo.verify_state_signature(&state_id).unwrap(),
-                SignatureStatus::Valid,
-            );
-        });
-    }
-
-    #[test]
-    fn migration_0005_refuses_to_mark_foreign_pre_fidelity_signature_complete() {
-        let temp = TempDir::new().unwrap();
-        let repo = Repository::init(temp.path()).unwrap();
-        remove_ledger(&repo);
-        let foreign = crypto::Ed25519Signer::generate().unwrap();
-        let mut state = unsigned_state();
-        let legacy_hash = state.compute_hash_for_legacy_signature_migration();
-        state.signature = Some(
-            crypto::state_signature_from_signer(&legacy_hash, &foreign)
-                .expect("foreign-sign legacy hash"),
-        );
-        repo.store().put_state(&state).unwrap();
-
-        let err = apply_pending(&repo).expect_err("foreign legacy signature blocks 0005");
-        assert!(
-            err.to_string()
-                .contains("0005_resecure_pre_fidelity_signatures"),
-            "{err}"
-        );
-        let ledger_file = ledger_path(&repo);
-        if ledger_file.exists() {
-            let ledger = std::fs::read_to_string(&ledger_file).unwrap();
-            assert!(!ledger.contains("0005_resecure_pre_fidelity_signatures"));
-        }
     }
 }

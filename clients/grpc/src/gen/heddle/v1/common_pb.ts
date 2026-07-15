@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file heddle/v1/common.proto.
  */
 export const file_heddle_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("ChZoZWRkbGUvdjEvY29tbW9uLnByb3RvEgloZWRkbGUudjEiWAoIUmVmRW50cnkSDAoEbmFtZRgBIAEoCRIRCgljaGFuZ2VfaWQYAiABKAwSEQoJaXNfdGhyZWFkGAMgASgIEhgKEHJldmlzaW9uX2FkZHJlc3MYBCABKAkiSQoOR3JhbnRUYXJnZXRSZWYSGAoObmFtZXNwYWNlX3BhdGgYASABKAlIABITCglyZXBvX3BhdGgYAiABKAlIAEIICgZ0YXJnZXQiIQoORGVsZXRlUmVzcG9uc2USDwoHZGVsZXRlZBgBIAEoCCL2AQoMVXNhZ2VTdW1tYXJ5EhkKDGlucHV0X3Rva2VucxgBIAEoBEgAiAEBEhoKDW91dHB1dF90b2tlbnMYAiABKARIAYgBARIdChByZWFzb25pbmdfdG9rZW5zGAMgASgESAKIAQESFwoKdG9vbF9jYWxscxgEIAEoBEgDiAEBEhwKD2Nvc3RfbWljcm9zX3VzZBgFIAEoBEgEiAEBQg8KDV9pbnB1dF90b2tlbnNCEAoOX291dHB1dF90b2tlbnNCEwoRX3JlYXNvbmluZ190b2tlbnNCDQoLX3Rvb2xfY2FsbHNCEgoQX2Nvc3RfbWljcm9zX3VzZCqmAQoKSG9zdGVkUm9sZRIbChdIT1NURURfUk9MRV9VTlNQRUNJRklFRBAAEhYKEkhPU1RFRF9ST0xFX1JFQURFUhABEhkKFUhPU1RFRF9ST0xFX0RFVkVMT1BFUhACEhoKFkhPU1RFRF9ST0xFX01BSU5UQUlORVIQAxIVChFIT1NURURfUk9MRV9BRE1JThAEEhUKEUhPU1RFRF9ST0xFX09XTkVSEAUqfwoKUmV2aWV3S2luZBIbChdSRVZJRVdfS0lORF9VTlNQRUNJRklFRBAAEhQKEFJFVklFV19LSU5EX1JFQUQQARIdChlSRVZJRVdfS0lORF9BR0VOVF9QUkVWSUVXEAISHwobUkVWSUVXX0tJTkRfQUdFTlRfQ09fUkVWSUVXEAMqXwoLU3RhdGVTdGF0dXMSHAoYU1RBVEVfU1RBVFVTX1VOU1BFQ0lGSUVEEAASFgoSU1RBVEVfU1RBVFVTX0RSQUZUEAESGgoWU1RBVEVfU1RBVFVTX1BVQkxJU0hFRBACYgZwcm90bzM");
+  fileDesc("ChZoZWRkbGUvdjEvY29tbW9uLnByb3RvEgloZWRkbGUudjEiVwoIUmVmRW50cnkSDAoEbmFtZRgBIAEoCRIQCghzdGF0ZV9pZBgCIAEoDBIRCglpc190aHJlYWQYAyABKAgSGAoQcmV2aXNpb25fYWRkcmVzcxgEIAEoCSJJCg5HcmFudFRhcmdldFJlZhIYCg5uYW1lc3BhY2VfcGF0aBgBIAEoCUgAEhMKCXJlcG9fcGF0aBgCIAEoCUgAQggKBnRhcmdldCIhCg5EZWxldGVSZXNwb25zZRIPCgdkZWxldGVkGAEgASgIIvYBCgxVc2FnZVN1bW1hcnkSGQoMaW5wdXRfdG9rZW5zGAEgASgESACIAQESGgoNb3V0cHV0X3Rva2VucxgCIAEoBEgBiAEBEh0KEHJlYXNvbmluZ190b2tlbnMYAyABKARIAogBARIXCgp0b29sX2NhbGxzGAQgASgESAOIAQESHAoPY29zdF9taWNyb3NfdXNkGAUgASgESASIAQFCDwoNX2lucHV0X3Rva2Vuc0IQCg5fb3V0cHV0X3Rva2Vuc0ITChFfcmVhc29uaW5nX3Rva2Vuc0INCgtfdG9vbF9jYWxsc0ISChBfY29zdF9taWNyb3NfdXNkKqYBCgpIb3N0ZWRSb2xlEhsKF0hPU1RFRF9ST0xFX1VOU1BFQ0lGSUVEEAASFgoSSE9TVEVEX1JPTEVfUkVBREVSEAESGQoVSE9TVEVEX1JPTEVfREVWRUxPUEVSEAISGgoWSE9TVEVEX1JPTEVfTUFJTlRBSU5FUhADEhUKEUhPU1RFRF9ST0xFX0FETUlOEAQSFQoRSE9TVEVEX1JPTEVfT1dORVIQBSp/CgpSZXZpZXdLaW5kEhsKF1JFVklFV19LSU5EX1VOU1BFQ0lGSUVEEAASFAoQUkVWSUVXX0tJTkRfUkVBRBABEh0KGVJFVklFV19LSU5EX0FHRU5UX1BSRVZJRVcQAhIfChtSRVZJRVdfS0lORF9BR0VOVF9DT19SRVZJRVcQAyqyAQoLU3RhdGVTdGF0dXMSHAoYU1RBVEVfU1RBVFVTX1VOU1BFQ0lGSUVEEAASFgoSU1RBVEVfU1RBVFVTX0RSQUZUEAESGgoWU1RBVEVfU1RBVFVTX1BVQkxJU0hFRBACEhoKFlNUQVRFX1NUQVRVU19BQkFORE9ORUQQAxIYChRTVEFURV9TVEFUVVNfQUJPUlRFRBAEEhsKF1NUQVRFX1NUQVRVU19TVVBFUlNFREVEEAUqkQIKC0ltcG9ydFBoYXNlEhwKGElNUE9SVF9QSEFTRV9VTlNQRUNJRklFRBAAEhcKE0lNUE9SVF9QSEFTRV9RVUVVRUQQARIYChRJTVBPUlRfUEhBU0VfQ0xPTklORxACEhoKFklNUE9SVF9QSEFTRV9NSVJST1JJTkcQAxIZChVJTVBPUlRfUEhBU0VfTUVUQURBVEEQBBIWChJJTVBPUlRfUEhBU0VfU1RBUlMQBRIVChFJTVBPUlRfUEhBU0VfRE9ORRAGEhcKE0lNUE9SVF9QSEFTRV9GQUlMRUQQBxIZChVJTVBPUlRfUEhBU0VfQURPUFRJTkcQCBIXChNJTVBPUlRfUEhBU0VfTkFUSVZFEAkqggIKD0ltcG9ydEVycm9yQ29kZRIcChhJTVBPUlRfRVJST1JfVU5TUEVDSUZJRUQQABIfChtJTVBPUlRfRVJST1JfSU5WQUxJRF9TT1VSQ0UQARIjCh9JTVBPUlRfRVJST1JfU09VUkNFX05PVF9BTExPV0VEEAISHAoYSU1QT1JUX0VSUk9SX0FVVEhfRkFJTEVEEAMSGgoWSU1QT1JUX0VSUk9SX05PVF9GT1VORBAEEhoKFklNUE9SVF9FUlJPUl9UT09fTEFSR0UQBRIaChZJTVBPUlRfRVJST1JfVElNRURfT1VUEAYSGQoVSU1QT1JUX0VSUk9SX0lOVEVSTkFMEAdiBnByb3RvMw");
 
 /**
  * @generated from message heddle.v1.RefEntry
@@ -22,9 +22,9 @@ export type RefEntry = Message<"heddle.v1.RefEntry"> & {
   name: string;
 
   /**
-   * @generated from field: bytes change_id = 2;
+   * @generated from field: bytes state_id = 2;
    */
-  changeId: Uint8Array;
+  stateId: Uint8Array;
 
   /**
    * @generated from field: bool is_thread = 3;
@@ -33,8 +33,7 @@ export type RefEntry = Message<"heddle.v1.RefEntry"> & {
 
   /**
    * Explicit revision address for two-lane storage. Native refs use
-   * `heddle:<change_id>`; Git-overlay refs use `git:<commit_oid>`.
-   * `change_id` remains populated for native refs during the transition.
+   * `heddle:<state_id>`; Git-overlay refs use `git:<commit_oid>`.
    *
    * @generated from field: string revision_address = 4;
    */
@@ -49,11 +48,6 @@ export const RefEntrySchema: GenMessage<RefEntry> = /*@__PURE__*/
   messageDesc(file_heddle_v1_common, 0);
 
 /**
- * Grants are scoped to either a namespace or a repository — never both,
- * never neither. The `target` oneof is the wire-level form of that
- * "exactly one of" guarantee. Server-side `classify_grant_target`
- * translates it to a `GrantTarget` enum without runtime branching.
- *
  * @generated from message heddle.v1.GrantTargetRef
  */
 export type GrantTargetRef = Message<"heddle.v1.GrantTargetRef"> & {
@@ -220,6 +214,10 @@ export const ReviewKindSchema: GenEnum<ReviewKind> = /*@__PURE__*/
 /**
  * State publication status. Captures whether a state is in-progress
  * (`DRAFT`) or pinned as the published shape of the work (`PUBLISHED`).
+ * The failure/terminal statuses (`ABANDONED`/`ABORTED`/`SUPERSEDED`) are
+ * author/gate-driven (weft#469) and orthogonal to reviewer verdicts —
+ * `RecordVerdict` never sets them. `FAILED` is intentionally absent: it is
+ * derivable from `verification.tests_failed > 0`.
  *
  * @generated from enum heddle.v1.StateStatus
  */
@@ -238,6 +236,27 @@ export enum StateStatus {
    * @generated from enum value: STATE_STATUS_PUBLISHED = 2;
    */
   PUBLISHED = 2,
+
+  /**
+   * +weft#469: author gave up on the task
+   *
+   * @generated from enum value: STATE_STATUS_ABANDONED = 3;
+   */
+  ABANDONED = 3,
+
+  /**
+   * +weft#469: hard merge-gate/policy killed it
+   *
+   * @generated from enum value: STATE_STATUS_ABORTED = 4;
+   */
+  ABORTED = 4,
+
+  /**
+   * +weft#469: replaced by a successor attempt
+   *
+   * @generated from enum value: STATE_STATUS_SUPERSEDED = 5;
+   */
+  SUPERSEDED = 5,
 }
 
 /**
@@ -245,4 +264,141 @@ export enum StateStatus {
  */
 export const StateStatusSchema: GenEnum<StateStatus> = /*@__PURE__*/
   enumDesc(file_heddle_v1_common, 2);
+
+/**
+ * Grants are scoped to either a namespace or a repository — never both,
+ * never neither. The `target` oneof is the wire-level form of that
+ * "exactly one of" guarantee. Server-side `classify_grant_target`
+ * translates it to a `GrantTarget` enum without runtime branching.
+ * Lifecycle phases surfaced for a git-provider import and its automatic
+ * adoption (weft#489/#391). Defined here (not import.proto) so both the import
+ * stream and hosted.proto's `ImportJobSummary` can reuse it without a circular
+ * file import (import.proto already imports hosted.proto for SpoolVisibility,
+ * so hosted.proto cannot import import.proto back).
+ *
+ * @generated from enum heddle.v1.ImportPhase
+ */
+export enum ImportPhase {
+  /**
+   * @generated from enum value: IMPORT_PHASE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_QUEUED = 1;
+   */
+  QUEUED = 1,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_CLONING = 2;
+   */
+  CLONING = 2,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_MIRRORING = 3;
+   */
+  MIRRORING = 3,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_METADATA = 4;
+   */
+  METADATA = 4,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_STARS = 5;
+   */
+  STARS = 5,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_DONE = 6;
+   */
+  DONE = 6,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_FAILED = 7;
+   */
+  FAILED = 7,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_ADOPTING = 8;
+   */
+  ADOPTING = 8,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_NATIVE = 9;
+   */
+  NATIVE = 9,
+}
+
+/**
+ * Describes the enum heddle.v1.ImportPhase.
+ */
+export const ImportPhaseSchema: GenEnum<ImportPhase> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_common, 3);
+
+/**
+ * Terminal failure classification for an import job (weft#489/#490). Set at
+ * `fail()` time from the durable row, NOT regexed from the error string at
+ * stream time. `SOURCE_NOT_ALLOWED` stays deliberately generic (no SSRF
+ * oracle); `AUTH_FAILED` is only for the credentialed modes.
+ *
+ * @generated from enum heddle.v1.ImportErrorCode
+ */
+export enum ImportErrorCode {
+  /**
+   * @generated from enum value: IMPORT_ERROR_UNSPECIFIED = 0;
+   */
+  IMPORT_ERROR_UNSPECIFIED = 0,
+
+  /**
+   * malformed URL / full_name
+   *
+   * @generated from enum value: IMPORT_ERROR_INVALID_SOURCE = 1;
+   */
+  IMPORT_ERROR_INVALID_SOURCE = 1,
+
+  /**
+   * SSRF-blocked (generic on purpose)
+   *
+   * @generated from enum value: IMPORT_ERROR_SOURCE_NOT_ALLOWED = 2;
+   */
+  IMPORT_ERROR_SOURCE_NOT_ALLOWED = 2,
+
+  /**
+   * token/installation rejected by provider
+   *
+   * @generated from enum value: IMPORT_ERROR_AUTH_FAILED = 3;
+   */
+  IMPORT_ERROR_AUTH_FAILED = 3,
+
+  /**
+   * repo 404 / private without creds
+   *
+   * @generated from enum value: IMPORT_ERROR_NOT_FOUND = 4;
+   */
+  IMPORT_ERROR_NOT_FOUND = 4,
+
+  /**
+   * byte/object cap hit
+   *
+   * @generated from enum value: IMPORT_ERROR_TOO_LARGE = 5;
+   */
+  IMPORT_ERROR_TOO_LARGE = 5,
+
+  /**
+   * @generated from enum value: IMPORT_ERROR_TIMED_OUT = 6;
+   */
+  IMPORT_ERROR_TIMED_OUT = 6,
+
+  /**
+   * @generated from enum value: IMPORT_ERROR_INTERNAL = 7;
+   */
+  IMPORT_ERROR_INTERNAL = 7,
+}
+
+/**
+ * Describes the enum heddle.v1.ImportErrorCode.
+ */
+export const ImportErrorCodeSchema: GenEnum<ImportErrorCode> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_common, 4);
 

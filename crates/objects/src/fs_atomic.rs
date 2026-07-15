@@ -291,6 +291,92 @@ pub fn sync_directory(path: &Path) -> io::Result<()> {
     dir.sync_all()
 }
 
+/// Collect missing path components (deepest-first) and the deepest pre-existing
+/// parent that will hold the first new dirent. Used by durable dir creators so
+/// post-create fsync covers every new link without weakening create semantics.
+fn plan_missing_dirs(path: &Path) -> (Vec<PathBuf>, Option<PathBuf>) {
+    // Walk from `path` upward until we hit an existing directory (or run out of
+    // parents). `missing[0]` is the leaf; `missing.last()` is the shallowest new dir.
+    let mut missing: Vec<PathBuf> = Vec::new();
+    {
+        let mut cur = path;
+        loop {
+            match fs::metadata(cur) {
+                Ok(meta) if meta.is_dir() => break,
+                Ok(_) => {
+                    // Exists but is not a directory. Fall through to the create
+                    // call so the error matches the platform/create helper.
+                    break;
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    missing.push(cur.to_path_buf());
+                    match cur.parent() {
+                        // `Path::new("a").parent()` is `Some("")` for a single
+                        // relative component — treat empty as cwd (`.`).
+                        Some(parent) if parent.as_os_str().is_empty() => break,
+                        // Root is its own parent (`"/".parent() == Some("/")`).
+                        Some(parent) if parent != cur => cur = parent,
+                        _ => break,
+                    }
+                }
+                // Permission / IO errors walking ancestors: let the create
+                // helper surface a consistent failure for the full path.
+                Err(_) => break,
+            }
+        }
+    }
+
+    let deepest_existing = missing
+        .last()
+        .and_then(|shallowest| match shallowest.parent() {
+            Some(parent) if parent.as_os_str().is_empty() => Some(PathBuf::from(".")),
+            Some(parent) => Some(parent.to_path_buf()),
+            None => None,
+        });
+
+    (missing, deepest_existing)
+}
+
+/// Fsync newly created directories deepest-first, then the deepest pre-existing
+/// parent so each new child dirent is durable. No-op when nothing was created.
+fn sync_new_dirents(missing: &[PathBuf], deepest_existing: Option<&Path>) -> io::Result<()> {
+    if missing.is_empty() {
+        return Ok(());
+    }
+    for dir in missing {
+        sync_directory(dir)?;
+    }
+    // Fsync the deepest pre-existing parent so the first new child dirent
+    // (the grandparent→shard link in the classic `blobs/ab/` case) is durable.
+    if let Some(existing) = deepest_existing {
+        sync_directory(existing)?;
+    }
+    Ok(())
+}
+
+/// Create a directory and any missing ancestors, making new dirents crash-durable.
+///
+/// Bare [`fs::create_dir_all`] only ensures the directories exist in the live
+/// filesystem view. After the first write into a newly created shard
+/// (e.g. `blobs/ab/…`), [`write_file_atomic`] fsyncs the shard directory so
+/// the *file* dirent is durable — but the grandparent that holds the new
+/// shard dirent may never be fsynced. A crash can then drop the entire new
+/// shard tree despite per-file durability (GAP_MAP L6).
+///
+/// This helper:
+/// 1. creates missing ancestor directories (same end state as `create_dir_all`);
+/// 2. fsyncs each newly created directory, deepest-first;
+/// 3. fsyncs the deepest pre-existing parent so the new child dirent is durable.
+///
+/// On Windows, directory fsync is a no-op (see [`sync_directory`]); creation
+/// still proceeds. Cost is once per new path segment (typically once per
+/// object-store shard).
+pub fn create_dir_all_durable(path: &Path) -> io::Result<()> {
+    let (missing, deepest_existing) = plan_missing_dirs(path);
+    fs::create_dir_all(path)?;
+    sync_new_dirents(&missing, deepest_existing.as_deref())
+}
+
 /// Wrap an `io::Error` raised while writing `path` so that ENOSPC carries
 /// an actionable message naming the path. Non-ENOSPC errors pass through
 /// unchanged. The wrapped error's `raw_os_error()` still returns 28, and
@@ -430,14 +516,39 @@ impl std::error::Error for EnrichedFsError {
     }
 }
 
-fn write_file_atomic_impl(
+pub struct StagedAtomicWrite {
+    path: PathBuf,
+    parent: PathBuf,
+    tmp: PathBuf,
+    pending: bool,
+}
+
+impl StagedAtomicWrite {
+    pub fn publish(mut self) -> io::Result<()> {
+        fs::rename(&self.tmp, &self.path)
+            .map_err(|error| enrich_rename_error(&self.tmp, &self.path, error))?;
+        self.pending = false;
+        sync_directory(&self.parent)
+            .map_err(|error| enrich_fs_error(&self.parent, "syncing", error))
+    }
+}
+
+impl Drop for StagedAtomicWrite {
+    fn drop(&mut self) {
+        if self.pending {
+            let _ = fs::remove_file(&self.tmp);
+        }
+    }
+}
+
+fn stage_file_atomic_impl(
     path: &Path,
     bytes: &[u8],
     kind: AtomicWriteKind,
     before_write: impl FnOnce(&File, &Path) -> io::Result<()>,
-) -> io::Result<()> {
+) -> io::Result<StagedAtomicWrite> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
+    create_dir_all_durable(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
 
     let tmp = temp_path(path);
     let inner = (|| -> io::Result<()> {
@@ -457,12 +568,57 @@ fn write_file_atomic_impl(
         return Err(enrich_write_error(path, err));
     }
 
-    fs::rename(&tmp, path).map_err(|e| enrich_rename_error(&tmp, path, e))?;
-    sync_directory(parent).map_err(|e| enrich_fs_error(parent, "syncing", e))
+    Ok(StagedAtomicWrite {
+        path: path.to_path_buf(),
+        parent: parent.to_path_buf(),
+        tmp,
+        pending: true,
+    })
+}
+
+fn write_file_atomic_impl(
+    path: &Path,
+    bytes: &[u8],
+    kind: AtomicWriteKind,
+    before_write: impl FnOnce(&File, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    stage_file_atomic_impl(path, bytes, kind, before_write)?.publish()
 }
 
 pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_file_atomic_impl(path, bytes, AtomicWriteKind::Normal, |_, _| Ok(()))
+}
+
+/// Create a directory tree with owner-only permissions on Unix (`0o700`),
+/// making newly created dirents crash-durable (same fsync chain as
+/// [`create_dir_all_durable`]).
+///
+/// Used for `.heddle` / `~/.heddle` trees that hold credentials, keys, and
+/// repository secrets. On Unix, missing ancestors are created with mode
+/// `0o700` and then fsynced deepest-first, plus the deepest pre-existing
+/// parent. On non-Unix platforms this falls back to durable
+/// [`create_dir_all_durable`] (no portable POSIX mode API). Existing
+/// directories are left as-is (creation-time privacy; callers that need to
+/// tighten existing modes should do so explicitly).
+pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let (missing, deepest_existing) = plan_missing_dirs(path);
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        match builder.create(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        sync_new_dirents(&missing, deepest_existing.as_deref())
+    }
+    #[cfg(not(unix))]
+    {
+        // No portable POSIX mode API — same durable create chain as public dirs.
+        create_dir_all_durable(path)
+    }
 }
 
 /// Atomically write secret material without ever creating a group/world
@@ -476,6 +632,92 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// fsync, and rename sequence.
 pub fn write_file_atomic_secret(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_file_atomic_impl(path, bytes, AtomicWriteKind::Secret, |_, _| Ok(()))
+}
+
+pub fn stage_file_atomic_secret(path: &Path, bytes: &[u8]) -> io::Result<StagedAtomicWrite> {
+    stage_file_atomic_impl(path, bytes, AtomicWriteKind::Secret, |_, _| Ok(()))
+}
+
+/// Publish an existing on-disk file at `src` to `dst` with the same
+/// crash-consistency contract as [`write_file_atomic`]:
+///
+/// 1. `fsync` the source so its data blocks are stable before any directory
+///    entry is updated (`rename` moves a dirent; it does not re-write bytes).
+/// 2. `rename(src, dst)` when both paths share a filesystem — atomic dirent
+///    publish.
+/// 3. On `EXDEV`, stream-copy into a *same-directory* temp, `fsync` the temp,
+///    `rename` over `dst`, then remove `src`. Never write the final path in
+///    place: a crash mid-copy must not leave a torn content-addressed object
+///    under its final name.
+/// 4. `fsync` the destination parent so the new dirent is durable.
+///
+/// If `dst` already exists and rename reports `AlreadyExists` (Windows;
+/// POSIX `rename` replaces files), the source is removed and `Ok(())` is
+/// returned — content-addressed install idempotency.
+///
+/// Non-`EXDEV` rename failures propagate. Callers must not silently fall
+/// through to a raw in-place copy on unrelated errors (the previous
+/// streaming-pack install path did exactly that).
+/// Fsync an existing regular file's data blocks.
+///
+/// On Windows, `FlushFileBuffers` requires write access — a read-only
+/// `File::open` + `sync_all` returns `ERROR_ACCESS_DENIED` (code 5). Open
+/// with write so pack install / L8 journal publish works under Windows
+/// tempdirs (projfs smoke fixtures).
+fn fsync_file_data(path: &Path) -> io::Result<()> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| enrich_fs_error(path, "opening", e))?;
+    file.sync_all()
+        .map_err(|e| enrich_fs_error(path, "syncing", e))
+}
+
+pub fn publish_file_durable(src: &Path, dst: &Path) -> io::Result<()> {
+    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    create_dir_all_durable(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
+
+    // Data-block durability before publishing the dirent. Required even on
+    // the same-filesystem rename path: StreamingPackBuilder (and similar
+    // staged writers) only `flush` buffered writers; without this fsync a
+    // crash after rename can lose the published object.
+    fsync_file_data(src)?;
+
+    match fs::rename(src, dst) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            // Content-addressed install: destination already present.
+            let _ = fs::remove_file(src);
+        }
+        Err(e) if is_cross_device_link(&e) => {
+            publish_file_via_copy_durable(src, dst)?;
+        }
+        Err(e) => return Err(enrich_rename_error(src, dst, e)),
+    }
+
+    sync_directory(parent).map_err(|e| enrich_fs_error(parent, "syncing", e))
+}
+
+/// Cross-device publish path: copy to a same-dir temp, fsync, rename over
+/// `dst`. Exposed to unit tests so the no-torn-final-path contract is
+/// exercised without needing a real multi-mount layout.
+fn publish_file_via_copy_durable(src: &Path, dst: &Path) -> io::Result<()> {
+    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    create_dir_all_durable(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
+
+    let tmp = temp_path(dst);
+    let result = (|| -> io::Result<()> {
+        fs::copy(src, &tmp).map_err(|e| enrich_fs_error(&tmp, "writing", e))?;
+        fsync_file_data(&tmp)?;
+        fs::rename(&tmp, dst).map_err(|e| enrich_rename_error(&tmp, dst, e))?;
+        let _ = fs::remove_file(src);
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -776,6 +1018,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn create_private_dir_all_sets_0700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("nested/private");
+        create_private_dir_all(&target).expect("create private dir");
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "new private dir must be 0700, got {mode:o}");
+        // Intermediate ancestors created by the recursive private create must
+        // also be owner-only (DirBuilder mode applies to each new segment).
+        let mid_mode = fs::metadata(dir.path().join("nested"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mid_mode, 0o700,
+            "intermediate private ancestor must be 0700"
+        );
+        // Idempotent after durable create: re-run is success and modes stick.
+        create_private_dir_all(&target).expect("idempotent private create");
+        let mode_again = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode_again, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn write_file_atomic_secret_is_0600_before_write_and_after_rename() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -818,6 +1087,28 @@ mod tests {
         assert!(!tmp.exists(), "failed secret write should remove temp file");
     }
 
+    #[test]
+    fn staged_secret_is_unpublished_until_publish() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("secret.txt");
+        let staged = stage_file_atomic_secret(&target, b"secret").unwrap();
+
+        assert!(!target.exists());
+        staged.publish().unwrap();
+        assert_eq!(fs::read(target).unwrap(), b"secret");
+    }
+
+    #[test]
+    fn dropping_staged_secret_removes_temporary_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("secret.txt");
+        let staged = stage_file_atomic_secret(&target, b"secret").unwrap();
+        drop(staged);
+
+        assert!(!target.exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
     /// Regression for heddle#105: `sync_directory` must succeed on any
     /// writable directory. The original implementation called
     /// `OpenOptions::new().read(true).open(dir)` + `sync_all()`, which
@@ -849,5 +1140,172 @@ mod tests {
             );
         }
         result.expect("write_file_atomic");
+    }
+
+    #[test]
+    fn publish_file_durable_renames_and_removes_source() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("staged.pack");
+        let dst = dir.path().join("objects/packs/final.pack");
+        fs::write(&src, b"pack-bytes").unwrap();
+
+        publish_file_durable(&src, &dst).unwrap();
+
+        assert!(!src.exists(), "source must be consumed by publish");
+        assert_eq!(fs::read(&dst).unwrap(), b"pack-bytes");
+    }
+
+    /// Windows: FlushFileBuffers needs write access; read-only open +
+    /// sync_all fails with ERROR_ACCESS_DENIED and broke L8 pack install /
+    /// projfs fixture setup under tempdirs.
+    #[test]
+    fn publish_file_durable_syncs_source_without_permission_deny() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("staged.bin");
+        let dst = dir.path().join("final.bin");
+        fs::write(&src, b"need-fsync-before-rename").unwrap();
+        let result = publish_file_durable(&src, &dst);
+        if let Err(e) = &result {
+            assert!(
+                !is_permission_denied(e),
+                "publish_file_durable PermissionDenied on source fsync: {e}"
+            );
+        }
+        result.expect("publish_file_durable");
+        assert_eq!(fs::read(&dst).unwrap(), b"need-fsync-before-rename");
+    }
+
+    #[test]
+    fn publish_file_via_copy_durable_never_writes_final_path_directly() {
+        // Regression for streaming pack install: the EXDEV fallback used
+        // `fs::copy(src, dst)` straight into the content-addressed final
+        // path. A crash mid-copy left a torn pack under its BLAKE3 name
+        // (readers treat that name as authoritative). The durable path
+        // must land bytes at a temp sibling first, then rename.
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("staged.pack");
+        let dst = dir.path().join("final.pack");
+        // Pre-existing destination simulates a previous torn install that
+        // a naive in-place copy would non-atomically overwrite.
+        fs::write(&dst, b"TORN-OLD-CONTENT!!!!!!!!!!!!!").unwrap();
+        fs::write(&src, b"complete-new-pack-bytes").unwrap();
+
+        publish_file_via_copy_durable(&src, &dst).unwrap();
+
+        assert!(!src.exists(), "source must be removed after copy publish");
+        assert_eq!(fs::read(&dst).unwrap(), b"complete-new-pack-bytes");
+        // No leftover temps in the destination directory.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "durable copy must not leave temp siblings: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn publish_file_via_copy_durable_cleans_temp_when_rename_cannot_publish() {
+        // If the final rename cannot complete, the temp sibling must be
+        // removed so a crash/retry path doesn't accumulate junk — and the
+        // pre-existing destination must be left untouched (atomic replace
+        // failed → old bytes still authoritative).
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("staged.pack");
+        let dst_dir = dir.path().join("final.pack");
+        fs::write(&src, b"new-bytes").unwrap();
+        // Make `dst` a directory so `rename(temp, dst)` fails (EISDIR /
+        // ERROR_ACCESS_DENIED class). The copy-into-temp step succeeds;
+        // only the publish rename fails.
+        fs::create_dir(&dst_dir).unwrap();
+
+        let err = publish_file_via_copy_durable(&src, &dst_dir).expect_err("rename over dir");
+        assert!(
+            err.kind() == io::ErrorKind::AlreadyExists
+                || err.raw_os_error().is_some()
+                || is_permission_denied(&err)
+                || err.kind() == io::ErrorKind::Other
+                || err.kind() == io::ErrorKind::IsADirectory
+                || err.kind() == io::ErrorKind::DirectoryNotEmpty,
+            "unexpected error kind for rename-over-dir: {err:?}"
+        );
+        assert!(src.exists(), "failed publish must leave source intact");
+        assert!(dst_dir.is_dir(), "destination directory must be untouched");
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "failed publish must clean temp siblings: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn publish_file_durable_propagates_non_exdev_rename_failures() {
+        // The previous install_pack_files_streaming path treated *any*
+        // rename failure as "try fs::copy into the final path". A
+        // permission / type error must surface, not be laundered into a
+        // second write attempt against the content-addressed name.
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("staged.pack");
+        let dst = dir.path().join("final.pack");
+        fs::write(&src, b"pack-bytes").unwrap();
+        fs::create_dir(&dst).unwrap();
+
+        let err = publish_file_durable(&src, &dst).expect_err("rename over directory");
+        assert!(
+            !is_cross_device_link(&err),
+            "failure must not be misclassified as EXDEV: {err}"
+        );
+        // Source remains for the caller to retry / clean up.
+        assert!(src.exists());
+    }
+
+    /// GAP_MAP L6: nested shard directories must be creatable via the durable
+    /// helper. We cannot observe fsync from userspace, but we can assert the
+    /// end state matches `create_dir_all` (full nested path exists as dirs).
+    #[test]
+    fn create_dir_all_durable_creates_nested_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Classic object-store shard layout: grandparent holds the new shard
+        // dirent (`ab`), parent is the shard itself.
+        let shard = dir.path().join("blobs/ab");
+        create_dir_all_durable(&shard).expect("create nested shard path");
+        assert!(shard.is_dir(), "leaf shard directory must exist");
+        assert!(
+            dir.path().join("blobs").is_dir(),
+            "intermediate grandparent must exist"
+        );
+        // Idempotent: re-running against an existing tree is a no-op success.
+        create_dir_all_durable(&shard).expect("idempotent durable create");
+        assert!(shard.is_dir());
+    }
+
+    /// GAP_MAP L6: `write_file_atomic` must still round-trip when the full
+    /// parent chain is missing — it now goes through `create_dir_all_durable`
+    /// instead of bare `create_dir_all`.
+    #[test]
+    fn write_file_atomic_creates_missing_shard_parents() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("blobs/ab/object.bin");
+        write_file_atomic(&target, b"shard-bytes").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"shard-bytes");
+        assert!(dir.path().join("blobs/ab").is_dir());
+    }
+
+    /// Existing parent chain: durable create must not fail or alter contents.
+    #[test]
+    fn create_dir_all_durable_ok_when_path_already_exists() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let nested = dir.path().join("already/there");
+        fs::create_dir_all(&nested).unwrap();
+        create_dir_all_durable(&nested).expect("existing dir");
+        assert!(nested.is_dir());
     }
 }

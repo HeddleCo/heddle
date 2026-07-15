@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pack and prune operations for FsStore.
 
-use std::fs;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use super::{
     FsStore,
@@ -15,6 +18,53 @@ use crate::{
         pack::{ObjectType as PackObjectType, PackBuilder},
     },
 };
+
+/// Paths of `*.pack` files in `packs_dir` that have no matching `*.idx`.
+///
+/// L8 residual: crash between durable pack and index publish can leave an
+/// unpaired pack that [`FsStore::reload_packs`] ignores. Listing supports
+/// optional GC (design: `docs/program/L8_PACK_INSTALL_JOURNAL.md` Option D).
+/// Does not delete anything.
+pub(crate) fn list_unpaired_pack_files(packs_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    if !packs_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut unpaired = Vec::new();
+    for entry in fs::read_dir(packs_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("pack") {
+            continue;
+        }
+        let idx = path.with_extension("idx");
+        if !idx.exists() {
+            unpaired.push(path);
+        }
+    }
+    unpaired.sort();
+    Ok(unpaired)
+}
+
+/// Remove unpaired `*.pack` files (no matching `*.idx`) under `packs_dir`.
+///
+/// Safe for correctness: loaders never open unpaired packs. Bounds L8 disk
+/// leak. Returns `(removed_count, bytes_freed)`.
+pub(crate) fn prune_unpaired_pack_files(packs_dir: &Path) -> std::io::Result<(u64, u64)> {
+    let mut removed = 0u64;
+    let mut bytes_freed = 0u64;
+    for path in list_unpaired_pack_files(packs_dir)? {
+        let bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                removed += 1;
+                bytes_freed = bytes_freed.saturating_add(bytes);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok((removed, bytes_freed))
+}
 
 fn remove_file_ignore_missing(path: &std::path::Path) -> Result<()> {
     match fs::remove_file(path) {
@@ -104,11 +154,6 @@ impl FsStore {
     /// started with. Running GC again over an already-consolidated store
     /// is a no-op (nothing loose, one pack already covers everything).
     ///
-    /// State objects are addressed by `ChangeId` and may have a stale
-    /// packed body shadowed by a fresher loose copy (#570). We re-pack
-    /// the packed state body verbatim; the loose copy (which `prune`
-    /// never touches) keeps shadowing it on read, so the shadow semantics
-    /// are preserved across the repack.
     pub(super) fn pack_objects_impl(&self, aggressive: bool) -> Result<(u64, u64)> {
         let loose_blobs = list_hashes_from_dir(&blobs_dir(&self.root))?;
         let loose_trees = list_hashes_from_dir(&trees_dir(&self.root))?;
@@ -157,7 +202,7 @@ impl FsStore {
         // 1. Carry forward everything already in a pack so the old packs
         //    can be retired. `get_object` resolves the body + type for
         //    any id (blob/tree/state/action), and `add_id` preserves
-        //    ChangeId-keyed state objects.
+        //    content-addressed state objects.
         for id in existing_ids {
             if !seen.insert(id) {
                 continue;
@@ -224,6 +269,7 @@ impl FsStore {
         // forward. The consolidated pack is content-addressed, so if it
         // happened to hash-collide with an old pack (a store that was
         // already a single consolidated pack) that file is excluded here.
+        // Stack hex digest; compare as &str — no format!/String intermediate.
         let new_pack_name = blake3::hash(&pack_data).to_hex();
         for (pack_path, index_path) in &old_pack_files {
             let is_new_pack = pack_path
@@ -248,15 +294,12 @@ impl FsStore {
 
     pub(super) fn install_pack_files(&self, pack_data: &[u8], index_data: &[u8]) -> Result<()> {
         let packs = packs_dir(&self.root);
-        fs::create_dir_all(&packs)?;
-
-        let pack_hash = blake3::hash(pack_data);
-        let pack_name = format!("{}", pack_hash.to_hex());
-        let pack_path = packs.join(format!("{}.pack", pack_name));
-        let index_path = packs.join(format!("{}.idx", pack_name));
-
-        self.write_pack_atomic(&pack_path, pack_data)?;
-        self.write_pack_atomic(&index_path, index_data)?;
+        // L8 A+: durable staging + intent journal for in-memory pack install
+        // (same crash-safety as install_pack_files_streaming).
+        // Design: docs/program/L8_PACK_INSTALL_JOURNAL.md
+        let _pack_name = super::pack_install_journal::install_pack_bytes_journaled(
+            &packs, pack_data, index_data,
+        )?;
         // Pack manager picks up the new files. We do *not* clear the
         // recent-object caches here — every caller that follows this
         // with a destructive prune is responsible for clearing them
@@ -274,10 +317,9 @@ impl FsStore {
     /// installation step never load the full pack or index into
     /// memory.
     ///
-    /// Both source files are `rename(2)`'d into place; the index is
-    /// no longer copied through memory the way `install_pack_files`
-    /// did via `write_pack_atomic`. Cross-device renames fall back to
-    /// copy + remove for the rare EXDEV case.
+    /// Sources are staged then published via the L8 A+ install journal
+    /// ([`super::pack_install_journal`]): durable staging + intent, then
+    /// pack/index publish with crash recovery on reload.
     pub(super) fn install_pack_files_streaming(
         &self,
         src_pack_path: &std::path::Path,
@@ -286,7 +328,7 @@ impl FsStore {
         use std::io::Read;
 
         let packs = packs_dir(&self.root);
-        fs::create_dir_all(&packs)?;
+        crate::fs_atomic::create_dir_all_durable(&packs)?;
 
         // Stream-hash the pack file to derive its name. 64 KiB chunks
         // keep the hasher's working set tiny.
@@ -301,49 +343,30 @@ impl FsStore {
             hasher.update(&buf[..n]);
         }
         drop(file);
+        // Native digest for potential callers; hex String only for the journal
+        // path/name boundary (filenames + intent JSON).
         let pack_hash = hasher.finalize();
-        let pack_name = format!("{}", pack_hash.to_hex());
-        let pack_path = packs.join(format!("{}.pack", pack_name));
-        let index_path = packs.join(format!("{}.idx", pack_name));
+        let pack_name = pack_hash.to_hex().to_string();
 
-        // Move the staged pack file into the store. `rename` is
-        // atomic on POSIX when both paths are on the same filesystem;
-        // the heddle store keeps its staging dir under the same root,
-        // so this should always satisfy that constraint.
-        match fs::rename(src_pack_path, &pack_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Same pack already installed (content-addressed).
-                // Drop the staging copy so it doesn't accumulate.
-                let _ = fs::remove_file(src_pack_path);
-            }
-            Err(e) => {
-                // Fall back to copy + remove for the (rare) case of
-                // a cross-device rename. EXDEV is not on a stable
-                // ErrorKind variant; match by raw_os_error if needed
-                // on Linux.
-                let _ = fs::copy(src_pack_path, &pack_path)?;
-                let _ = fs::remove_file(src_pack_path);
-                let _ = e; // silence unused-var if EXDEV path didn't fire
-            }
-        }
+        // L8 A+: durable staging + intent journal, then pack/index publish.
+        // Recovery on reload finishes or aborts incomplete installs.
+        // Design: docs/program/L8_PACK_INSTALL_JOURNAL.md
+        super::pack_install_journal::install_pack_files_journaled(
+            &packs,
+            src_pack_path,
+            src_index_path,
+            &pack_name,
+        )?;
 
-        // Move the index file alongside the pack. Same rename
-        // semantics as the pack: atomic on same-filesystem POSIX,
-        // copy+remove fallback for cross-device.
-        match fs::rename(src_index_path, &index_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let _ = fs::remove_file(src_index_path);
-            }
-            Err(_) => {
-                let _ = fs::copy(src_index_path, &index_path)?;
-                let _ = fs::remove_file(src_index_path);
-            }
-        }
         self.clear_recent_object_caches();
         self.reload_packs()?;
         Ok(())
+    }
+
+    /// Remove L8 orphan packs (`.pack` without `.idx`) from this store.
+    pub fn prune_unpaired_packs(&self) -> Result<(u64, u64)> {
+        let packs = packs_dir(&self.root);
+        Ok(prune_unpaired_pack_files(&packs)?)
     }
 
     pub(super) fn prune_loose_objects_impl(&self) -> Result<(u64, u64)> {
@@ -405,5 +428,43 @@ impl FsStore {
         }
 
         Ok((removed, bytes_freed))
+    }
+}
+
+#[cfg(test)]
+mod unpaired_pack_tests {
+    use std::fs;
+
+    use super::{list_unpaired_pack_files, prune_unpaired_pack_files};
+
+    #[test]
+    fn list_and_prune_unpaired_packs() {
+        let dir = tempfile::tempdir().unwrap();
+        let packs = dir.path();
+        fs::write(packs.join("aaa.pack"), b"pack-only").unwrap();
+        fs::write(packs.join("bbb.pack"), b"paired-pack").unwrap();
+        fs::write(packs.join("bbb.idx"), b"paired-idx").unwrap();
+        fs::write(packs.join("ccc.idx"), b"index-only").unwrap();
+
+        let listed = list_unpaired_pack_files(packs).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].ends_with("aaa.pack"));
+
+        let (removed, bytes) = prune_unpaired_pack_files(packs).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(bytes, b"pack-only".len() as u64);
+        assert!(!packs.join("aaa.pack").exists());
+        assert!(packs.join("bbb.pack").exists());
+        assert!(packs.join("bbb.idx").exists());
+        assert!(packs.join("ccc.idx").exists());
+        assert!(list_unpaired_pack_files(packs).unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_packs_dir_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope");
+        assert!(list_unpaired_pack_files(&missing).unwrap().is_empty());
+        assert_eq!(prune_unpaired_pack_files(&missing).unwrap(), (0, 0));
     }
 }

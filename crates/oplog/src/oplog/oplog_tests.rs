@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName};
+use objects::object::{ContentHash, MarkerName, StateId, ThreadName};
 use tempfile::TempDir;
 
 use super::{OpLog, OpLogRecorder, OpRecord, oplog_backend::OpLogBackend};
@@ -22,7 +22,7 @@ fn create_oplog() -> (TempDir, OpLog) {
 #[test]
 fn test_record_snapshot() {
     let (_temp, oplog) = create_oplog();
-    let state = ChangeId::generate();
+    let state = crate::oplog::fresh_state_id();
 
     let id = oplog
         .record_snapshot(&state, None, None, Some("lane-a"))
@@ -53,8 +53,8 @@ fn test_record_snapshot() {
 fn test_record_multiple() {
     let (_temp, oplog) = create_oplog();
 
-    let state1 = ChangeId::generate();
-    let state2 = ChangeId::generate();
+    let state1 = crate::oplog::fresh_state_id();
+    let state2 = crate::oplog::fresh_state_id();
 
     oplog
         .record_snapshot(&state1, None, None, Some("lane-a"))
@@ -73,7 +73,7 @@ fn test_record_multiple() {
 fn test_record_batch() {
     let (_temp, oplog) = create_oplog();
 
-    let state = ChangeId::generate();
+    let state = crate::oplog::fresh_state_id();
     let ids = oplog
         .record_batch(vec![
             OpRecord::ThreadCreate {
@@ -98,8 +98,8 @@ fn test_record_batch() {
 fn test_undo_batches() {
     let (_temp, oplog) = create_oplog();
 
-    let state1 = ChangeId::generate();
-    let state2 = ChangeId::generate();
+    let state1 = crate::oplog::fresh_state_id();
+    let state2 = crate::oplog::fresh_state_id();
 
     oplog
         .record_snapshot(&state1, None, None, Some("lane-a"))
@@ -120,8 +120,8 @@ fn test_undo_batches() {
 fn test_redo_batches() {
     let (_temp, oplog) = create_oplog();
 
-    let state1 = ChangeId::generate();
-    let state2 = ChangeId::generate();
+    let state1 = crate::oplog::fresh_state_id();
+    let state2 = crate::oplog::fresh_state_id();
 
     oplog
         .record_snapshot(&state1, None, None, Some("lane-a"))
@@ -153,7 +153,7 @@ fn test_record_snapshot_serializes_concurrent_writers() {
             let oplog = Arc::clone(&oplog);
             let barrier = Arc::clone(&barrier);
             thread::spawn(move || {
-                let state = ChangeId::generate();
+                let state = crate::oplog::fresh_state_id();
                 barrier.wait();
                 oplog
                     .record_snapshot(&state, None, None, Some("lane-a"))
@@ -178,9 +178,9 @@ fn test_record_snapshot_serializes_concurrent_writers() {
 #[test]
 fn test_undo_batches_scoped() {
     let (_temp, oplog) = create_oplog();
-    let state1 = ChangeId::generate();
-    let state2 = ChangeId::generate();
-    let state3 = ChangeId::generate();
+    let state1 = crate::oplog::fresh_state_id();
+    let state2 = crate::oplog::fresh_state_id();
+    let state3 = crate::oplog::fresh_state_id();
 
     oplog
         .record_snapshot(&state1, None, None, Some("lane-a"))
@@ -205,9 +205,9 @@ fn test_undo_batches_scoped() {
 #[test]
 fn recent_batches_scoped_merges_non_adjacent_coalesced_batches() {
     let (_temp, oplog) = create_oplog();
-    let state1 = ChangeId::generate();
-    let state2 = ChangeId::generate();
-    let state3 = ChangeId::generate();
+    let state1 = crate::oplog::fresh_state_id();
+    let state2 = crate::oplog::fresh_state_id();
+    let state3 = crate::oplog::fresh_state_id();
 
     let first = oplog
         .record_snapshot(&state1, None, None, Some("lane-a"))
@@ -253,9 +253,9 @@ fn recent_batches_scoped_merges_non_adjacent_coalesced_batches() {
 #[test]
 fn committed_batch_records_uses_rebuilt_index_for_non_adjacent_coalesced_batch() {
     let (_temp, oplog) = create_oplog();
-    let committed_state = ChangeId::generate();
-    let later_state = ChangeId::generate();
-    let middle_state = ChangeId::generate();
+    let committed_state = crate::oplog::fresh_state_id();
+    let later_state = crate::oplog::fresh_state_id();
+    let middle_state = crate::oplog::fresh_state_id();
 
     let committed = oplog
         .record_batch_exactly_once(
@@ -305,8 +305,8 @@ fn test_oplogbackend_trait_async_methods_dispatch() {
     // `impl OpLogBackend for OpLog` async bodies and the non-scoped trait
     // defaults that delegate to them are covered.
     let (_temp, oplog) = create_oplog();
-    let state1 = ChangeId::generate();
-    let state2 = ChangeId::generate();
+    let state1 = crate::oplog::fresh_state_id();
+    let state2 = crate::oplog::fresh_state_id();
     oplog
         .record_snapshot(&state1, None, None, Some("lane-a"))
         .unwrap();
@@ -375,7 +375,7 @@ fn record_batch_exactly_once_dedups_past_any_window() {
     // recent-window the bounded helper would scan.
     for _ in 0..200 {
         oplog
-            .record_snapshot(&ChangeId::generate(), None, None, Some("lane"))
+            .record_snapshot(&crate::oplog::fresh_state_id(), None, None, Some("lane"))
             .unwrap();
     }
 
@@ -429,7 +429,7 @@ fn committed_batch_records_refreshes_for_cross_process_dedup_hit() {
     );
 
     // A commits the transaction with a distinguishable Snapshot payload.
-    let committed_state = ChangeId::generate();
+    let committed_state = crate::oplog::fresh_state_id();
     let appended = proc_a
         .record_batch_exactly_once(
             vec![
@@ -453,7 +453,7 @@ fn committed_batch_records_refreshes_for_cross_process_dedup_hit() {
     // B replays the same transaction id: a cross-process dedup hit. B's
     // regenerated Snapshot id differs from A's, so a stale reconstruction
     // would diverge even if it found anything.
-    let replay_state = ChangeId::generate();
+    let replay_state = crate::oplog::fresh_state_id();
     let replay = proc_b
         .record_batch_exactly_once(
             vec![
@@ -501,8 +501,8 @@ fn committed_batch_records_refreshes_for_cross_process_dedup_hit() {
 /// the load-bearing cases.
 #[test]
 fn op_record_variants_roundtrip_and_describe() {
-    let st = ChangeId::from_bytes([3u8; 16]);
-    let st2 = ChangeId::from_bytes([5u8; 16]);
+    let st = StateId::from_bytes([3u8; 32]);
+    let st2 = StateId::from_bytes([5u8; 32]);
     let blob = ContentHash::from_bytes([7u8; 32]);
     let redaction = ContentHash::from_bytes([9u8; 32]);
 
@@ -661,8 +661,8 @@ fn op_record_variants_roundtrip_and_describe() {
 /// assert they survive.
 #[test]
 fn fork_collapse_published_ref_fields_roundtrip() {
-    let from = ChangeId::from_bytes([1u8; 16]);
-    let new_state = ChangeId::from_bytes([2u8; 16]);
+    let from = StateId::from_bytes([1u8; 32]);
+    let new_state = StateId::from_bytes([2u8; 32]);
 
     let fork = OpRecord::Fork {
         from,
@@ -716,8 +716,8 @@ fn fork_collapse_published_ref_fields_roundtrip() {
 #[test]
 fn record_methods_persist_expected_variants() {
     let (_temp, oplog) = create_oplog();
-    let from = ChangeId::generate();
-    let result = ChangeId::generate();
+    let from = crate::oplog::fresh_state_id();
+    let result = crate::oplog::fresh_state_id();
     let blob = ContentHash::from_bytes([7u8; 32]);
     let redaction = ContentHash::from_bytes([9u8; 32]);
 
@@ -826,7 +826,7 @@ fn head_id_tracks_generation() {
     assert_eq!(oplog.head_id().unwrap(), 0);
 
     oplog
-        .record_snapshot(&ChangeId::generate(), None, None, Some("lane"))
+        .record_snapshot(&crate::oplog::fresh_state_id(), None, None, Some("lane"))
         .unwrap();
     assert_eq!(oplog.head_id().unwrap(), 1);
 
@@ -834,11 +834,11 @@ fn head_id_tracks_generation() {
         .record_batch(vec![
             OpRecord::MarkerCreate {
                 name: "v1".into(),
-                state: ChangeId::generate(),
+                state: crate::oplog::fresh_state_id(),
             },
             OpRecord::MarkerDelete {
                 name: "v1".into(),
-                state: ChangeId::generate(),
+                state: crate::oplog::fresh_state_id(),
             },
         ])
         .unwrap();
@@ -1015,11 +1015,11 @@ mod default_backend {
     /// these calls assert that the expected variants land in recorded batches.
     #[test]
     fn default_record_wrappers_emit_expected_variants() {
-        use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName};
+        use objects::object::{ContentHash, MarkerName, StateId, ThreadName};
 
         let backend = MemOpLog::default();
-        let from = ChangeId::from_bytes([1u8; 16]);
-        let cid = ChangeId::from_bytes([2u8; 16]);
+        let from = StateId::from_bytes([1u8; 32]);
+        let cid = StateId::from_bytes([2u8; 32]);
         let blob = ContentHash::from_bytes([7u8; 32]);
         let redaction = ContentHash::from_bytes([9u8; 32]);
 

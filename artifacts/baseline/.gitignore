@@ -1,0 +1,7 @@
+# Default-deny bulky per-run trees; allow summaries and README.
+*
+!.gitignore
+!README.md
+!**/
+!**/summary.json
+**/logs/

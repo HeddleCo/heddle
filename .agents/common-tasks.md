@@ -47,7 +47,7 @@ When making changes:
 ## Multi-Agent Work
 
 1. Use `heddle start <name> --path <dir>` when you need a real isolated checkout
-2. Use `heddle actor spawn --thread <name> --provider ... --model ...` when you need explicit actor metadata on a thread
+2. Reserve exclusive write authority with `heddle agent reserve --thread <name>` and retain its returned token
 3. Run `heddle undo` from the specific isolated checkout you want to rewind; undo is thread-local
 
 ## Hosted Backend Changes

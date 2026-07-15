@@ -2,18 +2,54 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "google/protobuf/timestamp.proto";
 import "heddle/v1/common.proto";
 
 service ThreadWorkflowService {
-  rpc StartThread(StartThreadRequest) returns (ThreadSummary);
-  rpc ListThreads(ListThreadsRequest) returns (ListThreadsResponse);
-  rpc GetWorkspaceSummary(GetWorkspaceSummaryRequest) returns (WorkspaceSummary);
-  rpc StreamWorkspaceSummary(GetWorkspaceSummaryRequest) returns (stream WorkspaceSummary);
-  rpc GetThread(GetThreadRequest) returns (ThreadSummary);
-  rpc CaptureThread(CaptureThreadRequest) returns (CaptureThreadResponse);
-  rpc CompleteThread(CompleteThreadRequest) returns (ThreadSummary);
-  rpc WatchThreads(WatchThreadsRequest) returns (stream ThreadEvent);
+  rpc StartThread(StartThreadRequest) returns (ThreadSummary) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc ListThreads(ListThreadsRequest) returns (ListThreadsResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetWorkspaceSummary(GetWorkspaceSummaryRequest) returns (WorkspaceSummary) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc StreamWorkspaceSummary(GetWorkspaceSummaryRequest) returns (stream WorkspaceSummary) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc GetThread(GetThreadRequest) returns (ThreadSummary) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc CaptureThread(CaptureThreadRequest) returns (CaptureThreadResponse) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_NONE };
+  }
+  rpc CompleteThread(CompleteThreadRequest) returns (ThreadSummary) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_DURABLE_WRITE deduplication: RPC_DEDUPLICATION_CLIENT_OPERATION_ID };
+  }
+  rpc WatchThreads(WatchThreadsRequest) returns (stream ThreadEvent) {
+    option (heddle.v1.rpc_contract) = { effect: RPC_EFFECT_READ_ONLY deduplication: RPC_DEDUPLICATION_NONE };
+  }
+}
+
+// Typed thread lifecycle state (weft#469), mirroring `repo::ThreadState`
+// (thread_model.rs:186). Wrapper message namespaces the enum. Promoted
+// alongside the legacy untyped `ThreadSummary.thread_state` string (field
+// 14), which stays one release for wire-compat before deprecation — the
+// typed `thread_state_typed` field is new, not a replacement.
+message ThreadState {
+  enum Kind {
+    THREAD_STATE_UNSPECIFIED = 0;
+    THREAD_STATE_DRAFT = 1;
+    THREAD_STATE_ACTIVE = 2;
+    THREAD_STATE_READY = 3;
+    THREAD_STATE_BLOCKED = 4;
+    THREAD_STATE_MERGED = 5;
+    THREAD_STATE_ABANDONED = 6;
+    THREAD_STATE_PROMOTED = 7;
+  }
 }
 
 message ThreadSummary {
@@ -57,6 +93,12 @@ message ThreadSummary {
   repeated string changed_paths = 38;
   repeated string impact_categories = 39;
   repeated string heavy_impact_paths = 40;
+  optional string reason = 41;         // +weft#469: abandonment/learning payload ("why")
+  optional string superseded_by = 42;  // +weft#469: the successor attempt that replaced this thread
+  repeated string supersedes = 43;     // +weft#469: prior attempts this thread replaces
+  // +weft#469: typed lifecycle state alongside the legacy untyped
+  // `thread_state` string (field 14, kept for one release). Do not repurpose 14.
+  ThreadState.Kind thread_state_typed = 44;
 }
 
 message ThreadVerificationSummary {
@@ -147,15 +189,14 @@ message CaptureThreadRequest {
 
 message CaptureThreadResponse {
   string thread = 1;
-  bytes change_id = 2;
+  bytes state_id = 2;
   string coordination_status = 3;
 }
 
 message CompleteThreadRequest {
   string repo_path = 1;
   string name = 2;
-  // Idempotency (audit-idempotency enforces tag 15).
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message WatchThreadsRequest {

@@ -101,7 +101,7 @@ which is catalogued `surface(...)`-only and carries no
 | `export git` | advanced | `push` | direct_command |
 | `import git` | advanced | `adopt` | workflow |
 | `sync git` | advanced | `adopt` | workflow |
-| `fsck --repair git` | advanced | `adopt` | workflow |
+| `fsck repair git` | advanced | `adopt` | workflow |
 | `bridge git push` | advanced | `push` | direct_command |
 | `bridge git pull` | advanced | `pull` | direct_command |
 | `context reason git` | advanced | — | — |

@@ -1,0 +1,72 @@
+{
+  "jobs": 9,
+  "counts": {
+    "pass": 8,
+    "fail": 1
+  },
+  "results": [
+    {
+      "id": "commit-conformance",
+      "status": "pass",
+      "duration_ms": 3228,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "facade-render-free",
+      "status": "pass",
+      "duration_ms": 39,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "fmt-check",
+      "status": "fail",
+      "duration_ms": 3433,
+      "oracle": false,
+      "exit_code": 1
+    },
+    {
+      "id": "git-process-lint",
+      "status": "pass",
+      "duration_ms": 1773,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-core",
+      "status": "pass",
+      "duration_ms": 38757,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-crypto",
+      "status": "pass",
+      "duration_ms": 18381,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-format",
+      "status": "pass",
+      "duration_ms": 3529,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-merge",
+      "status": "pass",
+      "duration_ms": 25960,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "roundtrip-fidelity",
+      "status": "pass",
+      "duration_ms": 4802,
+      "oracle": true,
+      "exit_code": 0
+    }
+  ]
+}

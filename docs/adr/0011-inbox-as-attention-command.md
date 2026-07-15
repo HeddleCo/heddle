@@ -17,6 +17,6 @@ Unresolved collaboration operations appear in `inbox` as diagnostics or attentio
 
 Local-only and hosted-rejected collaboration should appear in `inbox` when they affect actionability, readiness, or sync, but as typed diagnostics with reason codes and lane metadata. They should not be disguised as discussion turns or generic warnings.
 
-**Status:** proposed
+**Status:** accepted
 
 **Considered Options:** Keeping attention only under `discuss`, `review`, and `thread` would avoid another top-level command, but it would force agents to poll several surfaces and reconstruct priority themselves. `status` already owns the current checkout condition and next action, not a personal or agent work queue.

@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package heddle.v1;
 
+import "heddle/v1/options.proto";
+
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "heddle/v1/common.proto";
@@ -21,7 +23,7 @@ message GrantSupportAccessRequest {
   // Free-form reason (incident id, ticket link, "fix p0 in deploy
   // pipeline"). Required, non-empty. Surfaced in the audit listing.
   string reason = 4;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }
 
 message SupportAccessGrant {
@@ -58,5 +60,5 @@ message ListSupportAccessGrantsResponse {
 
 message RevokeSupportAccessRequest {
   string id = 1;
-  string client_operation_id = 15;
+  string client_operation_id = 15 [(heddle.v1.idempotency_key) = true];
 }

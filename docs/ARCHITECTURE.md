@@ -61,7 +61,7 @@ crates/
   repo/      # repository operations and helpers
   refs/      # threads, markers, HEAD, packed refs
   oplog/     # undo/redo oplog logic
-  cli/src/git_projection_engine/   # Git interoperability (module within the cli crate)
+  git-projection/ # Git interoperability engine, re-exported by the CLI
   semantic/  # semantic diff and parser-heavy analysis
   ...
 docs/             # architecture, hosted model, roadmap, future-state plans
@@ -153,35 +153,39 @@ Object lookup order is loose object first, then packfile fallback.
 
 ## Worktrees And Agent Isolation
 
-An isolated worktree is a normal checkout directory that points at a shared object store via a `.heddle` file.
+An isolated worktree is a normal checkout directory with local authority and HEAD metadata that points at the shared object store.
 
 ```text
 /workspace/agent-a/
-  .heddle   # objectstore: /main/repo/.heddle
-  HEAD    # per-checkout HEAD
+  .heddle/
+    objectstore  # shared path plus checkout source authority
+    HEAD         # per-checkout HEAD
 ```
 
 Important current behavior:
 
 - `heddle start <thread> --path <dir>` creates a filesystem-isolated checkout
 - `heddle start <thread>` records thread and agent metadata while keeping execution roots private by default
-- the oplog is still global across worktrees, so undo/redo semantics are repository-global rather than checkout-local
+- the oplog is shared, while undo and redo filter operations to the current checkout lane
 
-## Threads, Actors, And Sessions
+## Threads, Presence, Leases, And Provenance
 
 Heddle's current coordination model is best understood as:
 
 - **thread** - the human-facing work context
-- **actor** - the active worker on that thread
-- **session** - the execution and provenance record for that actor
-- **segment** - a provider/model epoch within a session
+- **agent presence** - attribution and work context for an active worker
+- **writer lease** - exclusive, token-authenticated write authority for a thread
+- **provenance session** - the execution provenance record for an agent
+- **provenance segment** - a provider/model epoch within a provenance session
 
 This matters for harness integration work:
 
 - Heddle should follow supported harnesses ambiently rather than requiring users to run tools through Heddle
-- actors are stored in the lightweight registry under `.heddle/agents/`
+- presence records are stored separately from writer leases
 - harness-native identities are tracked separately from Heddle-local reconnect identifiers
-- `heddle actor ...` is the user-facing inspection surface over that registry
+- `heddle agent presence ...` inspects attribution without granting write authority
+- `heddle agent reserve|heartbeat|capture|ready|release` is the writer hot loop
+- `heddle agent provenance ...` records provider, model, and policy epochs
 
 The current harness integration logic lives in `cli`, not in `objects` or `repo`, because it is still CLI/runtime orchestration rather than a stable repository primitive.
 

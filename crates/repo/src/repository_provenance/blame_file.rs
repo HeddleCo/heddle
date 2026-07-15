@@ -59,7 +59,7 @@
 use std::{collections::HashMap, path::Path};
 
 use objects::{
-    object::{ChangeId, ContentHash, FileProvenance, Origin, State},
+    object::{ContentHash, FileProvenance, Origin, State, StateId},
     store::ObjectStore,
 };
 
@@ -116,12 +116,12 @@ impl Repository {
         // Cache state objects so the worklist doesn't re-fetch the
         // same parents repeatedly. Bounded by ancestry size of the
         // target state, same shape as the provenance memo cache.
-        let mut state_cache: HashMap<ChangeId, State> = HashMap::new();
-        state_cache.insert(state.change_id, state.clone());
+        let mut state_cache: HashMap<StateId, State> = HashMap::new();
+        state_cache.insert(state.id(), state.clone());
 
         // 3. Worklist of frontiers we still need to walk back from.
         let mut worklist: Vec<BlameFrontier> = vec![BlameFrontier {
-            state_id: state.change_id,
+            state_id: state.id(),
             blob_hash: target_blob_hash,
             // Clone target_lines once. Subsequent frontiers will own
             // the parent's lines after each LCS step.
@@ -134,7 +134,7 @@ impl Repository {
                 Some(s) => s.clone(),
                 None => match self.store.get_state(&entry.state_id)? {
                     Some(s) => {
-                        state_cache.insert(s.change_id, s.clone());
+                        state_cache.insert(s.id(), s.clone());
                         s
                     }
                     None => continue,
@@ -160,7 +160,7 @@ impl Repository {
                     Some(s) => s.clone(),
                     None => match self.store.get_state(parent_id)? {
                         Some(s) => {
-                            state_cache.insert(s.change_id, s.clone());
+                            state_cache.insert(s.id(), s.clone());
                             s
                         }
                         None => continue,
@@ -194,7 +194,7 @@ impl Repository {
                     }
                     if any_moved {
                         worklist.push(BlameFrontier {
-                            state_id: parent_state.change_id,
+                            state_id: parent_state.id(),
                             blob_hash: parent_blob_hash,
                             // Reuse entry.state_lines because the
                             // parent has byte-identical content.
@@ -235,7 +235,7 @@ impl Repository {
                 }
                 if any_moved {
                     worklist.push(BlameFrontier {
-                        state_id: parent_state.change_id,
+                        state_id: parent_state.id(),
                         blob_hash: parent_blob_hash,
                         state_lines: parent_lines,
                         state_to_target: parent_to_target,
@@ -289,7 +289,7 @@ impl Repository {
 /// tracked through this branch — they may have been claimed by a
 /// sibling parent or finalized at an earlier step.
 struct BlameFrontier {
-    state_id: ChangeId,
+    state_id: StateId,
     blob_hash: ContentHash,
     state_lines: Vec<String>,
     state_to_target: Vec<Option<usize>>,

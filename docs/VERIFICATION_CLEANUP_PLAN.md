@@ -111,7 +111,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 
 1. Establish the core verification shape: `MachineContractInput`, `ActionAudience`, structured actions, richer `PlainGitProbe`, `verification` naming, and command-catalog proof injection.
 2. Shipped for `status`, `verify`, and `doctor`: public JSON uses `verification`; legacy `git_overlay_health` / `git_overlay_import_hint` sidecars are internal render/advice data rather than JSON contract fields.
-3. Migrate remaining CLI callers from CLI-owned proof builders to the core proof interface: `diagnose`, `ready`, `thread`, remote commands, merge/rebase/operator preflights, and post-operation envelopes.
+3. Migrate remaining CLI callers from CLI-owned proof builders to the core proof interface: `doctor`, `ready`, `thread`, remote commands, merge/rebase/operator preflights, and post-operation envelopes.
 4. Split and rename modules by cohesive responsibility after ownership is stable.
 5. Delete old CLI proof builders by migrated slice. Temporary equivalence tests may exist during migration, then should be removed or inverted into reachability tests proving no CLI-owned proof builder remains reachable.
 
@@ -121,7 +121,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 2. Add replacement public command shells: `import git` and `export git` route to current internals first and establish parity. Shipped as top-level wrappers, legacy `bridge git import/export` is now removed.
 3. Route top-level Git remote `push` / `pull` / `sync` by remote capability.
 4. Teach checkout write-through, export, push, sync, clone, and reconstruction paths to compose reconstructed Heddle state plus residuals without requiring a persistent bare mirror.
-5. Replace mirror fsck with Git Projection Mapping and Raw Git Object Residual validation. First slice shipped: `fsck --repair git` performs explicit metadata-only Git Projection Mapping repair and reruns Git projection checks; residual validation remains follow-on work.
+5. Replace mirror fsck with Git Projection Mapping and Raw Git Object Residual validation. First slice shipped: `fsck repair git` performs explicit, authority-directed projection repair and reruns Git projection checks; residual validation remains follow-on work.
 6. Public `bridge git` commands are retired after replacement import/export and fsck diagnostics.
 7. Lazy-migrate old `.heddle/git` mirrors into residual storage and leave deletion to explicit maintenance cleanup.
 
@@ -135,11 +135,11 @@ Use the glossary terms in `CONTEXT.md` exactly.
 
 ## Git Repair Surface
 
-- The Git repair surface is `fsck --repair git`. The current implementation is metadata-only and does not import history, reconcile refs, or write the worktree.
+- The Git repair surface is `fsck repair git`. Git Overlay permits Git-to-Heddle metadata and ref repair; native repositories permit Heddle-to-Git repair for a named projection ref.
 - `verify` proves and recommends; it must not mutate Git Projection Mapping or Raw Git Object Residuals unless an explicit repair mode is requested.
 - `fsck` owns integrity checks and repair flows for Git Projection Mapping, Raw Git Object Residuals, and migrated Bridge Mirror state.
 - The Git repair mode may synthesize missing Git Projection Mapping only when a Heddle state match or Git note/provenance link proves the mapping unambiguously. It must not guess.
-- The Git repair mode does not import missing Git commits by default; history expansion belongs to `adopt`, `import git`, or `pull`.
+- Opposite-direction repair is refused without mutation and points to `adopt` or `import git`, which make the authority change or import explicit.
 - The Git repair mode may migrate needed residual bytes from an old `.heddle/git` Bridge Mirror into Raw Git Object Residual storage.
 - The Git repair mode reports when an old mirror is removable but does not delete it; deletion belongs to maintenance cleanup or an explicit cleanup flag.
 - Metadata-only Git repair is allowed in dirty worktrees. Any repair that would write real `.git` refs, index, or worktree state requires clean verification or explicit confirmation.
@@ -166,10 +166,21 @@ Use the glossary terms in `CONTEXT.md` exactly.
    - Dry-run JSON exists for both.
    - README and command docs no longer teach `bridge git`.
 4. Raw Git Object Residuals
-   - Residual durable object model exists.
+   - Residual durable object model exists. **Foundation shipped:**
+     `heddle_git_projection::ResidualStore` under `.heddle/git-residuals/`,
+     put/get/has/list + hash identity, lazy migrate-from-mirror helper, and
+     `bridge_mirror_retirement_status` (report-only). Checkout materialize and
+     export lossy paths prefer reconstruct → residual → Bridge Mirror, with a
+     hard fail when neither residual nor mirror can supply the object.
    - Fsck verifies mapped non-reconstructable objects have residuals.
+     (**Not yet** — residual validation remains follow-on.)
    - Export/write-through can use residuals instead of the mirror for lossy objects.
+     (**Partial** — residual install is hooked; full closure capture on lossy
+     import and mirror-free export are not complete.)
    - Old `.heddle/git` mirrors can lazily migrate needed residuals.
+     (**Partial** — migrate helper exists; automatic full-mirror migration and
+     explicit mirror deletion maintenance are not complete. Mirror is **not**
+     deleted.)
 5. Retire public bridge/mirror workflow (done for public bridge-git)
    - The public bridge-git workflow is removed; diagnostics, repair, and ingest behavior live on replacement surfaces.
    - Top-level `push`/`pull`/`sync` route Git remotes.

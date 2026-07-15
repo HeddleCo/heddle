@@ -4,11 +4,15 @@
 //! Walks every `heddle <verb> [<subverb>] [flags]` invocation embedded in a
 //! markdown file and reports any drift: verbs that no longer exist, long
 //! flags that aren't on that verb, or literal values for finite-valued
-//! flags that aren't in the valid set.
+//! flags that aren't in the valid set. Current guidance also receives a
+//! semantic policy pass for retired and authority-inconsistent commands.
 //!
 //! The check is built on top of clap's own `Cli::command()`, so it's
 //! always in sync with the binary you're running. Wire `heddle doctor
 //! docs --all --output json` into CI on every PR to catch doc drift.
+//!
+//! Pure invocation extraction/tokenization lives in
+//! `heddle_core::doctor_docs_plan`.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -17,6 +21,9 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use clap::{Command as ClapCommand, CommandFactory};
+use heddle_core::doctor_docs_plan::{
+    DocsInvocation, display_path, extract_invocations, looks_like_value,
+};
 use objects::worktree::should_ignore;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -55,6 +62,12 @@ pub enum IssueKind {
     /// A literal value passed to `--workspace`/`--scope`/`--kind` is not
     /// in the valid set for that flag.
     InvalidFlagValue,
+    /// A syntactically valid or historical command has been removed from the
+    /// supported product vocabulary.
+    RetiredCommand,
+    /// The recommendation sends a source operation through Heddle when durable
+    /// repository authority requires direct Git or a separate workflow step.
+    AuthorityConflict,
     /// The file referenced by `--path` (or enumerated by `--all`) could
     /// not be read. We surface this as a real issue, not a silent skip,
     /// so a typoed path or permission error fails CI instead of letting
@@ -336,13 +349,6 @@ fn walk_markdown(repo_root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result
     Ok(())
 }
 
-fn display_path(repo_root: &Path, file: &Path) -> String {
-    file.strip_prefix(repo_root)
-        .unwrap_or(file)
-        .to_string_lossy()
-        .into_owned()
-}
-
 fn find_repo_root(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     loop {
@@ -363,168 +369,174 @@ pub fn scan_markdown(
     out: &mut Vec<DocsIssue>,
 ) {
     let catalog = build_command_catalog();
+    let historical = is_historical_design_record(display_path);
+    if !historical {
+        scan_forbidden_prose(display_path, text, out);
+    }
     let invocations = extract_invocations(text);
     for inv in invocations {
+        if let Some(issue) = forbidden_invocation_issue(display_path, &inv) {
+            if !historical {
+                out.push(issue);
+            }
+            continue;
+        }
         check_invocation(display_path, &inv, cli_command, &catalog, out);
     }
 }
 
-#[derive(Debug, Clone)]
-struct Invocation {
-    line: usize,
-    raw: String,
-    tokens: Vec<String>,
+fn is_historical_design_record(display_path: &str) -> bool {
+    let normalized = display_path.replace('\\', "/");
+    normalized.starts_with("docs/adr/") || normalized.starts_with("docs/spikes/")
 }
 
-/// Pull `heddle <…>` invocations out of either inline backtick code
-/// (`` `heddle …` ``) or fenced code blocks. We deliberately ignore
-/// non-backticked prose so things like "we use heddle for VCS" aren't
-/// flagged.
-fn extract_invocations(text: &str) -> Vec<Invocation> {
-    let mut result = Vec::new();
+fn scan_forbidden_prose(file: &str, text: &str, out: &mut Vec<DocsIssue>) {
     let mut in_fence = false;
-    let mut planned_fence = false;
-    let mut skip_next_planned_line = false;
-    for (idx, line) in text.lines().enumerate() {
-        let line_no = idx + 1;
+    for (index, line) in text.lines().enumerate() {
         let trimmed = line.trim_start();
         if trimmed.starts_with("```") {
-            if in_fence {
-                in_fence = false;
-                planned_fence = false;
-            } else {
-                in_fence = true;
-                planned_fence = is_planned_docs_marker(trimmed) || skip_next_planned_line;
-                skip_next_planned_line = false;
-            }
+            in_fence = !in_fence;
             continue;
         }
-        if is_planned_docs_marker(line) {
-            skip_next_planned_line = true;
+        if line.contains('`') {
             continue;
         }
-        if skip_next_planned_line {
-            if trimmed.is_empty() {
-                continue;
-            }
-            skip_next_planned_line = false;
+        let lower = line.to_ascii_lowercase();
+        let machine_recommendation = lower.contains("recommended_action")
+            || lower.contains("next_action")
+            || lower.contains("primary_command");
+        let prose_recommendation = ["run heddle ", "use heddle ", "invoke heddle "]
+            .iter()
+            .any(|cue| lower.contains(cue));
+        if (in_fence && !machine_recommendation)
+            || (!in_fence && !machine_recommendation && !prose_recommendation)
+        {
             continue;
         }
-        if planned_fence {
+        let verb = [
+            "checkpoint",
+            "cherry-pick",
+            "git-overlay",
+            "support",
+            "spool",
+            "prove",
+            "presence",
+            "actor",
+            "session",
+            "switch",
+            "stash",
+            "clean",
+            "fetch",
+            "merge",
+            "rebase",
+        ]
+        .into_iter()
+        .find(|verb| contains_command_phrase(&lower, verb));
+        let land_publishes = contains_command_phrase(&lower, "land")
+            && ["--push", "--no-push", "--publish", "--no-publish"]
+                .iter()
+                .any(|flag| lower.contains(flag));
+        let Some(verb) = verb.or(land_publishes.then_some("land")) else {
             continue;
-        }
-        if in_fence {
-            // Inside a code fence: scan whole line for `heddle …`
-            // tokens, stopping at end of line.
-            let lower = line.trim_start();
-            // Strip a leading shell prompt or comment marker.
-            let cleaned = strip_shell_prefix(lower);
-            if let Some(rest) = cleaned.strip_prefix("heddle ")
-                && let Some(tokens) = tokenize(rest)
-            {
-                result.push(Invocation {
-                    line: line_no,
-                    raw: format!("heddle {}", rest.trim_end()),
-                    tokens,
-                });
-            }
+        };
+        let tokens = if verb == "land" {
+            vec!["land".to_string(), "--push".to_string()]
         } else {
-            // Outside a fence: pull out backticked snippets that begin
-            // with `heddle `.
-            let bytes = line.as_bytes();
-            let mut i = 0;
-            while i < bytes.len() {
-                if bytes[i] == b'`' {
-                    let start = i + 1;
-                    let mut end = start;
-                    while end < bytes.len() && bytes[end] != b'`' {
-                        end += 1;
-                    }
-                    if end <= bytes.len() {
-                        let snippet = &line[start..end];
-                        let cleaned = strip_shell_prefix(snippet);
-                        if let Some(rest) = cleaned.strip_prefix("heddle ")
-                            && let Some(tokens) = tokenize(rest)
-                        {
-                            result.push(Invocation {
-                                line: line_no,
-                                raw: format!("heddle {}", rest.trim_end()),
-                                tokens,
-                            });
-                        }
-                        i = end + 1;
-                        continue;
-                    }
-                }
-                i += 1;
-            }
+            vec![verb.to_string()]
+        };
+        let invocation = DocsInvocation {
+            line: index + 1,
+            raw: line.trim().to_string(),
+            tokens,
+        };
+        if let Some(issue) = forbidden_invocation_issue(file, &invocation) {
+            out.push(issue);
         }
     }
-    result
 }
 
-/// Explicit opt-out for planned or illustrative command surfaces.
-///
-/// Place `<!-- doctor-docs:planned -->` immediately before a markdown
-/// line or fence, or include `doctor-docs:planned` in the fence info
-/// string. The skip is deliberately local so shipped-command examples in
-/// the same document remain checked against the live CLI contract.
-fn is_planned_docs_marker(line: &str) -> bool {
-    line.contains("doctor-docs:planned") || line.contains("doctor-docs: planned")
+fn contains_command_phrase(line: &str, verb: &str) -> bool {
+    let phrase = format!("heddle {verb}");
+    line.match_indices(&phrase).any(|(index, _)| {
+        line[index + phrase.len()..]
+            .chars()
+            .next()
+            .is_none_or(|next| !next.is_ascii_alphanumeric() && next != '-' && next != '_')
+    })
 }
 
-fn strip_shell_prefix(s: &str) -> &str {
-    let s = s.trim_start();
-    s.strip_prefix("$ ")
-        .or_else(|| s.strip_prefix("# "))
-        .unwrap_or(s)
-}
+fn forbidden_invocation_issue(file: &str, inv: &DocsInvocation) -> Option<DocsIssue> {
+    let verb = inv.tokens.first()?.as_str();
+    let retired = matches!(
+        verb,
+        "checkpoint"
+            | "cherry-pick"
+            | "git-overlay"
+            | "support"
+            | "spool"
+            | "prove"
+            | "presence"
+            | "actor"
+            | "session"
+    );
+    if retired {
+        let suggestion = match verb {
+            "checkpoint" => "use `heddle capture`, then `heddle commit` in Git Overlay",
+            "actor" | "session" => "inspect the `heddle agent` command family",
+            _ => "remove the retired Heddle command recommendation",
+        };
+        return Some(DocsIssue {
+            file: file.to_string(),
+            line: inv.line,
+            invocation: inv.raw.clone(),
+            kind: IssueKind::RetiredCommand,
+            detail: format!("`heddle {verb}` is outside the contracted Heddle CLI"),
+            suggestion: Some(suggestion.to_string()),
+        });
+    }
 
-/// Best-effort word-splitter. We don't need full POSIX shell semantics;
-/// we only need verbs, subverbs, and `--flag` / `--flag=value` tokens.
-/// Anything inside `<…>` is treated as a placeholder and skipped.
-fn tokenize(s: &str) -> Option<Vec<String>> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    for c in s.chars() {
-        match c {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            ' ' | '\t' if !in_single && !in_double => {
-                if !current.is_empty() {
-                    out.push(std::mem::take(&mut current));
-                }
-            }
-            // Stop on shell control characters — these wreck token
-            // boundaries and signal "this is a longer pipeline" we
-            // probably can't reason about cleanly. `<…>` and `>…<`
-            // are NOT in this set: docs routinely use `<name>` and
-            // `<dir>` as placeholders, and those need to remain
-            // intact so the per-token placeholder check can skip
-            // them.
-            '|' | '&' | ';' if !in_single && !in_double => {
-                if !current.is_empty() {
-                    out.push(std::mem::take(&mut current));
-                }
-                break;
-            }
-            _ => current.push(c),
-        }
+    if matches!(
+        verb,
+        "switch" | "stash" | "clean" | "fetch" | "merge" | "rebase"
+    ) {
+        return Some(DocsIssue {
+            file: file.to_string(),
+            line: inv.line,
+            invocation: inv.raw.clone(),
+            kind: IssueKind::AuthorityConflict,
+            detail: format!(
+                "`heddle {verb}` is outside Heddle's narrow Git surface; use a compatible client if that operation is required"
+            ),
+            suggestion: Some(format!("use `git {verb}` in Git Overlay documentation")),
+        });
     }
-    if !current.is_empty() {
-        out.push(current);
+
+    if verb == "land"
+        && inv.tokens.iter().skip(1).any(|token| {
+            matches!(
+                token.as_str(),
+                "--push" | "--no-push" | "--publish" | "--no-publish"
+            )
+        })
+    {
+        return Some(DocsIssue {
+            file: file.to_string(),
+            line: inv.line,
+            invocation: inv.raw.clone(),
+            kind: IssueKind::AuthorityConflict,
+            detail: "`heddle land` is local integration and has no publication flags".to_string(),
+            suggestion: Some(
+                "land locally, then publish with the source-authority command".to_string(),
+            ),
+        });
     }
-    if out.is_empty() {
-        return None;
-    }
-    Some(out)
+
+    None
 }
 
 fn check_invocation(
     file: &str,
-    inv: &Invocation,
+    inv: &DocsInvocation,
     cli_command: &ClapCommand,
     catalog: &CommandCatalogOutput,
     out: &mut Vec<DocsIssue>,
@@ -685,12 +697,6 @@ fn check_invocation(
         }
         i += 1;
     }
-}
-
-fn looks_like_value(tok: &str) -> bool {
-    // Heuristic: paths, dotted slugs, or quoted strings are values; bare
-    // identifiers are likely subcommand names.
-    tok.contains('.') || tok.contains('/') || tok.starts_with('"')
 }
 
 fn find_subcommand<'a>(cmd: &'a ClapCommand, name: &str) -> Option<&'a ClapCommand> {
@@ -976,11 +982,100 @@ mod tests {
         let mut issues = Vec::new();
         scan_markdown(
             "test.md",
-            "Preview `heddle merge feature --preview main`.",
+            "Inspect `heddle log --graph main`.",
             &cli(),
             &mut issues,
         );
         assert!(issues.is_empty(), "expected no drift, got: {:?}", issues);
+    }
+
+    #[test]
+    fn rejects_retired_commands_even_if_a_stale_parser_variant_survives() {
+        for invocation in [
+            "`heddle checkpoint -m save`",
+            "`heddle actor list`",
+            "`heddle session start`",
+        ] {
+            let mut issues = Vec::new();
+            scan_markdown("test.md", invocation, &cli(), &mut issues);
+            assert!(
+                issues
+                    .iter()
+                    .any(|issue| matches!(issue.kind, IssueKind::RetiredCommand)),
+                "expected retired-command finding for {invocation}: {issues:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_retired_commands_in_plain_prose() {
+        let mut issues = Vec::new();
+        scan_markdown(
+            "test.md",
+            "Agents should run heddle checkpoint before review.",
+            &cli(),
+            &mut issues,
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| matches!(issue.kind, IssueKind::RetiredCommand)),
+            "plain prose must not bypass semantic certification: {issues:?}",
+        );
+    }
+
+    #[test]
+    fn historical_adr_may_name_retired_checkpoint_but_readme_guidance_may_not() {
+        let prose = "Migration history: run heddle checkpoint in the old interface.";
+        let mut adr_issues = Vec::new();
+        scan_markdown("docs/adr/0000-history.md", prose, &cli(), &mut adr_issues);
+        assert!(
+            adr_issues.is_empty(),
+            "historical design records preserve decision context: {adr_issues:?}",
+        );
+
+        let mut readme_issues = Vec::new();
+        scan_markdown("README.md", prose, &cli(), &mut readme_issues);
+        assert!(
+            readme_issues
+                .iter()
+                .any(|issue| matches!(issue.kind, IssueKind::RetiredCommand)),
+            "current guidance must reject the retired command: {readme_issues:?}",
+        );
+    }
+
+    #[test]
+    fn rejects_authority_inconsistent_recommendations() {
+        for invocation in [
+            "`heddle fetch origin`",
+            "`heddle switch main`",
+            "`heddle land feature --push`",
+            "`heddle land feature --publish`",
+        ] {
+            let mut issues = Vec::new();
+            scan_markdown("test.md", invocation, &cli(), &mut issues);
+            assert!(
+                issues
+                    .iter()
+                    .any(|issue| matches!(issue.kind, IssueKind::AuthorityConflict)),
+                "expected authority-conflict finding for {invocation}: {issues:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_native_thread_switch_recommendations() {
+        let mut issues = Vec::new();
+        scan_markdown(
+            "test.md",
+            "Resume work with `heddle thread switch main`.",
+            &cli(),
+            &mut issues,
+        );
+        assert!(
+            issues.is_empty(),
+            "thread switch is part of Heddle's native thread surface: {issues:?}",
+        );
     }
 
     #[test]
@@ -1171,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_client_feature_gated_support_verb() {
+    fn rejects_retired_support_verb() {
         let mut issues = Vec::new();
         scan_markdown(
             "test.md",
@@ -1179,7 +1274,12 @@ mod tests {
             &cli(),
             &mut issues,
         );
-        assert!(issues.is_empty(), "got: {:?}", issues);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| matches!(issue.kind, IssueKind::RetiredCommand)),
+            "got: {issues:?}"
+        );
     }
 
     #[test]

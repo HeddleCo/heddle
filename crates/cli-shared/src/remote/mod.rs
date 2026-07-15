@@ -42,6 +42,10 @@ pub type Result<T> = std::result::Result<T, RemoteError>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Remote {
     pub url: String,
+    /// Explicitly allow cleartext (non-TLS) connections to non-loopback hosts
+    /// for this remote. Equivalent to CLI `--insecure` for push/pull/clone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub insecure: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -153,6 +157,16 @@ pub fn resolve_remote_with_key(
     repo: &Repository,
     remote_arg: Option<&str>,
 ) -> Result<(RemoteTarget, Option<String>)> {
+    let (target, key, _insecure) = resolve_remote_with_key_and_insecure(repo, remote_arg)?;
+    Ok((target, key))
+}
+
+/// Resolve a remote argument into target, credential key, and the remote's
+/// configured `insecure` flag (false for ad-hoc URL specs).
+pub fn resolve_remote_with_key_and_insecure(
+    repo: &Repository,
+    remote_arg: Option<&str>,
+) -> Result<(RemoteTarget, Option<String>, bool)> {
     let cfg = RemoteConfig::open(repo)?;
 
     let spec = match remote_arg {
@@ -163,18 +177,35 @@ pub fn resolve_remote_with_key(
             .to_string(),
     };
 
+    // Named remote first so configured `insecure` applies even when the
+    // name also happens to parse as a bare host:port.
+    if let Ok(remote) = cfg.get(&spec)
+        && let Ok(target) = RemoteTarget::parse(&remote.url)
+    {
+        let key = credential_key_from_url(&remote.url);
+        return Ok((target, key, remote.insecure));
+    }
+
     if let Ok(target) = RemoteTarget::parse(&spec) {
         let key = credential_key_from_url(&spec);
-        return Ok((target, key));
+        return Ok((target, key, false));
     }
 
     let remote = cfg.get(&spec)?;
     if let Ok(target) = RemoteTarget::parse(&remote.url) {
         let key = credential_key_from_url(&remote.url);
-        return Ok((target, key));
+        return Ok((target, key, remote.insecure));
     }
 
     Err(RemoteError::InvalidUrl(remote.url))
+}
+
+/// Whether a named remote (or the default) has `insecure = true` in
+/// `.heddle/remotes.toml`. Returns false for URL specs / missing remotes.
+pub fn remote_allows_insecure(repo: &Repository, remote_arg: Option<&str>) -> bool {
+    resolve_remote_with_key_and_insecure(repo, remote_arg)
+        .map(|(_, _, insecure)| insecure)
+        .unwrap_or(false)
 }
 
 /// Extract the hostname (credential store key) from a remote URL string.
@@ -242,6 +273,7 @@ mod tests {
                 "origin",
                 Remote {
                     url: "http://heddle.example:8421/repo".to_string(),
+                    insecure: false,
                 },
             )
             .expect("add remote");

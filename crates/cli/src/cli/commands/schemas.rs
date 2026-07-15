@@ -68,19 +68,16 @@ fn report_contract_schema_verbs() -> &'static [&'static str] {
 }
 
 schema_registry! {
-    (&["fsck --repair git"], FsckReport),
+    (&["fsck repair git"], FsckReport),
     (&["init"], InitSchema),
     (&["adopt"], AdoptSchema),
     (&["capture"], CaptureSchema),
     (&["commit"], CommitSchema),
-    (&["checkpoint"], CheckpointSchema),
-    (&["undo", "undo --redo"], UndoSchema),
+    (&["undo", "undo --redo", "undo --recover"], UndoSchema),
     (&["undo --list"], UndoListSchema),
-    (&["clean"], CleanSchema),
-    (&["switch"], SwitchCheckoutSchema),
-    (&["merge --preview"], MergePreviewSchema),
     (&["ready"], ReadySchema),
     (&["land"], LandSchema),
+    (&["land --threads"], LandBatchSchema),
     (&["sync"], SyncSchema),
     (&["continue", "abort"], OperatorCommandSchema),
     (&["start"], ThreadStartSchema),
@@ -104,7 +101,6 @@ schema_registry! {
     (&["remote list"], RemoteListSchema),
     (&["remote show"], RemoteInfoSchema),
     (&["remote add", "remote remove", "remote set-default"], RemoteMutationSchema),
-    (&["fetch"], FetchSchema),
     (&["pull"], PullSchema),
     (&["push"], PushSchema),
     (&["expand"], ExpandSchema),
@@ -122,24 +118,21 @@ schema_registry! {
     (&["review next"], ReviewNextSchema),
     (&["review health"], ReviewHealthSchema),
     (&["retro"], RetroSchema),
-    (&["discuss open", "discuss append", "discuss resolve", "discuss show"], DiscussionEnvelopeSchema),
+    (&["discuss open", "discuss append", "discuss resolve", "discuss reopen"], DiscussionWriteSchema),
+    (&["discuss show"], DiscussionShowSchema),
     (&["discuss list"], DiscussionListSchema),
     (&["query --attribution"], BlameSchema),
-    (&["transaction commit"], TransactionCommitSchema),
     (&["export git"], ExportGitSchema),
     (&["import git"], ImportGitSchema),
     (&["sync git"], SyncGitSchema),
-    (&["stash push", "stash pop", "stash apply", "stash drop", "stash clear"], StashMutationSchema),
-    (&["stash list"], StashListSchema),
-    (&["stash show"], StashShowSchema),
     (&["revert"], RevertSchema),
-    (&["doctor"], DiagnoseSchema),
+    (&["doctor"], DoctorSchema),
     (&["doctor docs"], DoctorDocsSchema),
     (&["doctor schemas"], DoctorSchemasSchema),
-    (&["actor spawn", "actor show"], ActorSingleSchema),
-    (&["actor list"], ActorListSchema),
-    (&["actor done"], ActorDoneSchema),
-    (&["actor explain"], ActorExplainSchema),
+    (&["agent presence show"], AgentPresenceSingleSchema),
+    (&["agent presence list"], AgentPresenceListSchema),
+    (&["agent presence complete"], AgentPresenceCompleteSchema),
+    (&["agent presence explain"], AgentPresenceExplainSchema),
     (&["agent serve"], AgentServeSchema),
     (&["agent status"], AgentDaemonStatusSchema),
     (&["agent stop"], AgentStopSchema),
@@ -153,18 +146,15 @@ schema_registry! {
     (&["auth logout"], AuthLogoutSchema),
     (&["auth status"], AuthStatusSchema),
     (&["auth create-service-token"], AuthCreateServiceTokenSchema),
-    (&["session start", "session end", "session show"], SessionEnvelopeSchema),
-    (&["session segment"], SessionSegmentEnvelopeSchema),
-    (&["session list"], SessionListSchema),
-    (&["support grant"], SupportGrantSchema),
-    (&["support list"], SupportAccessListSchema),
-    (&["support revoke"], SupportRevokeSchema),
-    (&["git-overlay"], GitOverlayGuideSchema),
+    (&["agent provenance begin", "agent provenance end", "agent provenance show"], AgentProvenanceEnvelopeSchema),
+    (&["agent provenance segment"], AgentProvenanceSegmentEnvelopeSchema),
+    (&["agent provenance list"], AgentProvenanceListSchema),
     (&["watch"], WatchLineSchema),
     (&["integration list", "integration doctor"], IntegrationStatusListSchema),
     (&["try"], TrySchema),
     (&["resolve"], ResolveSchema),
-    (&["maintenance index"], IndexSchema),
+    (&["maintenance inspect"], MaintenanceInspectSchema),
+    (&["maintenance refresh"], MaintenanceRefreshSchema),
     (&["error"], ErrorEnvelopeSchema),
 }
 
@@ -653,17 +643,6 @@ pub struct ActorInfoSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct GitIndexInfoSchema {
-    pub commit_mode: String,
-    pub has_staged_changes: bool,
-    pub staged_paths: Vec<String>,
-    pub unstaged_paths: Vec<String>,
-    pub untracked_paths: Vec<String>,
-    pub will_commit: Vec<String>,
-    pub preserved_after_commit: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct GenericJsonObjectSchema {
     #[serde(flatten)]
     pub fields: BTreeMap<String, Value>,
@@ -682,6 +661,7 @@ pub struct AuthStatusSchema {
     pub output_kind: String,
     pub server: String,
     pub authenticated: bool,
+    pub proof_key_available: bool,
     pub subject: Option<String>,
     pub credential_id: Option<String>,
     pub expires_at: Option<String>,
@@ -695,52 +675,12 @@ pub struct AuthCreateServiceTokenSchema {
     pub namespace: String,
     pub scope: String,
     pub token: String,
-    pub private_key_pem: String,
+    /// Path to the private-key PEM written with mode 0600.
+    pub private_key_path: String,
+    /// Present only when `--show-secrets` was passed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_key_pem: Option<String>,
     pub expires_in_days: u32,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SupportAccessSchema {
-    pub id: String,
-    pub operator_email: String,
-    pub namespace_path: String,
-    pub repo_path: String,
-    pub role: String,
-    pub granted_by: String,
-    pub granted_at: u64,
-    pub expires_at: u64,
-    pub revoked_at: u64,
-    pub revoked_by: String,
-    pub reason: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SupportGrantSchema {
-    pub output_kind: String,
-    pub id: String,
-    pub operator_email: String,
-    pub namespace_path: String,
-    pub repo_path: String,
-    pub role: String,
-    pub granted_by: String,
-    pub granted_at: u64,
-    pub expires_at: u64,
-    pub revoked_at: u64,
-    pub revoked_by: String,
-    pub reason: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SupportAccessListSchema {
-    pub output_kind: String,
-    pub grants: Vec<SupportAccessSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SupportRevokeSchema {
-    pub output_kind: String,
-    pub id: String,
-    pub revoked: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -760,10 +700,30 @@ pub struct IntegrationStatusSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct IndexSchema {
+pub struct MaintenanceInspectSchema {
     pub output_kind: String,
+    pub commit_graph: CommitGraphInspectionSchema,
+    pub worktree_index: WorktreeIndexInspectionSchema,
+    pub change_monitor: ChangeMonitorInspectionSchema,
+    pub refs: RefCountsInspectionSchema,
+    pub ref_summary_index: RefSummaryIndexInspectionSchema,
+    pub pack_files: PackFilesInspectionSchema,
+    pub partial_fetch: PartialFetchInspectionSchema,
+    pub pull_planner_cache: PullPlannerCacheInspectionSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CommitGraphInspectionSchema {
     pub present: bool,
-    pub path: String,
+    pub node_count: usize,
+    pub bloom_covered_nodes: usize,
+    pub bytes: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WorktreeIndexInspectionSchema {
+    pub present: bool,
     pub file_entries: usize,
     pub directory_entries: usize,
     pub untracked_directory_entries: usize,
@@ -771,7 +731,104 @@ pub struct IndexSchema {
     pub journal_bytes: u64,
     pub journal_ops: usize,
     pub journal_replay_ms: u128,
-    pub dump: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ChangeMonitorInspectionSchema {
+    pub backend: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub changed_path_count: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RefCountsInspectionSchema {
+    pub total: usize,
+    pub threads: usize,
+    pub markers: usize,
+    pub remotes: usize,
+    pub remote_threads: usize,
+    pub packed_refs_present: bool,
+    pub packed_refs_bytes: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RefSummaryIndexInspectionSchema {
+    pub present: bool,
+    pub valid: bool,
+    pub bytes: u64,
+    pub threads: usize,
+    pub markers: usize,
+    pub remotes: usize,
+    pub remote_threads: usize,
+    pub packed_threads: usize,
+    pub packed_markers: usize,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PackFilesInspectionSchema {
+    pub pack_count: usize,
+    pub index_count: usize,
+    pub unpaired_pack_count: usize,
+    pub pending_install_intents: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PartialFetchInspectionSchema {
+    pub count: usize,
+    pub missing_blob_count: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PullPlannerCacheInspectionSchema {
+    pub status: String,
+    pub present: bool,
+    pub manifest_count: usize,
+    pub planner_entry_count: usize,
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MaintenanceRefreshSchema {
+    pub output_kind: String,
+    pub rebuilt_commit_graph: bool,
+    pub rebuilt_ref_summary_index: bool,
+    pub rebuilt_worktree_index: bool,
+    pub refreshed_change_monitor: bool,
+    pub rebuilt_pull_planner_cache: bool,
+    pub pruned_pull_planner_entries: usize,
+    pub pack_install_intents_recovered_completed: u64,
+    pub pack_install_intents_aborted: u64,
+    pub pack_install_intents_skipped_in_progress: u64,
+    pub pack_install_intents_quarantined: u64,
+    pub pack_install_metrics: PackInstallMetricsSchema,
+    pub unpaired_packs_pruned: u64,
+    pub unpaired_pack_bytes_freed: u64,
+    pub report: MaintenanceInspectReportSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PackInstallMetricsSchema {
+    pub installs_ok: u64,
+    pub installs_err: u64,
+    pub recover_completed: u64,
+    pub recover_aborted: u64,
+    pub recover_skipped_in_progress: u64,
+    pub recover_quarantined: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MaintenanceInspectReportSchema {
+    pub commit_graph: CommitGraphInspectionSchema,
+    pub worktree_index: WorktreeIndexInspectionSchema,
+    pub change_monitor: ChangeMonitorInspectionSchema,
+    pub refs: RefCountsInspectionSchema,
+    pub ref_summary_index: RefSummaryIndexInspectionSchema,
+    pub pack_files: PackFilesInspectionSchema,
+    pub partial_fetch: PartialFetchInspectionSchema,
+    pub pull_planner_cache: PullPlannerCacheInspectionSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -787,7 +844,7 @@ pub struct BlameSchema {
 pub struct BlameLineSchema {
     pub line_number: usize,
     pub content: String,
-    pub change_id: String,
+    pub state_id: String,
     pub principal: BlamePrincipalSchema,
     pub agent: Option<BlameAgentSchema>,
     pub timestamp: String,
@@ -796,7 +853,7 @@ pub struct BlameLineSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct BlameOriginSchema {
-    pub change_id: String,
+    pub state_id: String,
     pub principal: BlamePrincipalSchema,
     pub agent: Option<BlameAgentSchema>,
     pub timestamp: String,
@@ -868,7 +925,7 @@ pub struct RetroSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RetroStateEntrySchema {
-    pub change_id: String,
+    pub state_id: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
     pub agent: Option<String>,
@@ -957,29 +1014,28 @@ pub struct RetroOperationEntrySchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DiscussionSchema {
     pub id: String,
-    pub file: String,
-    pub symbol: String,
-    pub opened_against_state: String,
-    pub opened_at_secs: i64,
+    pub title: String,
+    pub anchor: DiscussionAnchorSchema,
     pub visibility: String,
-    pub body_changed_since_open: bool,
-    pub orphaned: bool,
-    pub resolution: DiscussionResolutionSchema,
+    pub status: String,
+    pub resolution: Option<DiscussionResolutionSchema>,
+    pub conflict_operation_ids: Vec<String>,
+    pub head_operation_ids: Vec<String>,
+    pub display_head_operation_id: String,
     pub turns: Vec<DiscussionTurnSchema>,
-    pub resolved_annotation_id: Option<String>,
 }
 
-/// Per-discussion verbs (`open`/`append`/`resolve`/`show`) emit the
-/// discussion payload flattened beneath an `output_kind` discriminator,
-/// mirroring `DiscussionEnvelope` in `discuss.rs`. `discuss list` reuses
-/// the bare [`DiscussionSchema`] for its inner items — those carry no
-/// per-item discriminator (the list envelope owns it), so the
-/// discriminator lives on this wrapper rather than on the shared inner
-/// struct.
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct DiscussionEnvelopeSchema {
+pub struct DiscussionWriteSchema {
     pub output_kind: String,
-    #[serde(flatten)]
+    pub operation_id: String,
+    pub disposition: String,
+    pub discussion: DiscussionSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DiscussionShowSchema {
+    pub output_kind: String,
     pub discussion: DiscussionSchema,
 }
 
@@ -987,30 +1043,35 @@ pub struct DiscussionEnvelopeSchema {
 pub struct DiscussionResolutionSchema {
     pub kind: String,
     pub annotation_id: Option<String>,
+    pub state_id: Option<String>,
     pub change_id: Option<String>,
     pub reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+pub struct DiscussionAnchorSchema {
+    pub kind: String,
+    pub state_id: Option<String>,
+    pub change_id: Option<String>,
+    pub path: Option<String>,
+    pub symbol: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct DiscussionTurnSchema {
+    pub operation_id: String,
     pub author_name: String,
     pub author_email: String,
+    pub agent: Option<String>,
+    pub occurred_at_ms: i64,
     pub body: String,
-    pub posted_at_secs: i64,
+    pub content_hash: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DiscussionListSchema {
     pub output_kind: String,
     pub discussions: Vec<DiscussionSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct OperationRecordSchema {
-    pub op_id: String,
-    pub command: String,
-    pub idempotency_status: String,
-    pub replayed: bool,
 }
 
 // ---- core loop write/read helpers -----------------------------------------
@@ -1047,7 +1108,7 @@ pub struct CaptureSchema {
     pub output_kind: Option<String>,
     pub status: String,
     pub action: String,
-    pub change_id: String,
+    pub state_id: String,
     pub content_hash: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
@@ -1062,30 +1123,6 @@ pub struct CaptureSchema {
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CommitSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: String,
-    pub change_id: String,
-    pub git_commit: Option<String>,
-    pub git_previous_commit: Option<String>,
-    pub summary: String,
-    pub confidence: Option<f32>,
-    pub git_index: Option<GitIndexInfoSchema>,
-    pub included_pending_capture: Option<String>,
-    pub principal: CommitPrincipalSchema,
-    pub agent: Option<CommitAgentSchema>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub op_id: Option<String>,
-    pub operation_record: Option<OperationRecordSchema>,
-    pub idempotency_status: Option<String>,
-    pub replayed: Option<bool>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1107,20 +1144,16 @@ pub struct CommitAgentSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct CheckpointSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
+pub struct CommitSchema {
+    pub output_kind: String,
     pub action: String,
-    pub change_id: String,
+    pub status: String,
+    pub state_id: String,
     pub git_commit: String,
     pub summary: String,
-    pub capability: String,
-    pub storage_model: String,
-    pub committed_at: String,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
+    pub verification: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1148,8 +1181,8 @@ pub struct UndoSchema {
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
-    /// heddle#305: the pre-undo state preserved for recovery, and the marker
-    /// pointing at it. Present only on a completed `undo`.
+    /// The checkout-local state preserved for recovery, and its internal
+    /// handle. Present on completed undo and recovery operations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1164,63 +1197,6 @@ pub struct UndoSchema {
 pub struct UndoListSchema {
     pub output_kind: Option<String>,
     pub batches: Vec<Value>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CleanSchema {
-    pub output_kind: String,
-    pub removed: Vec<String>,
-    pub dry_run: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SwitchCheckoutSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub action: Option<String>,
-    pub name: Option<String>,
-    pub message: String,
-    pub thread: Option<ThreadSummarySchema>,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
-    pub target: Option<String>,
-    pub intent: Option<String>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MergePreviewSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub action: Option<String>,
-    pub message: Option<String>,
-    pub would_merge: bool,
-    pub applied: bool,
-    pub blockers: Option<Vec<String>>,
-    pub warnings: Option<Vec<String>>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub fast_forward: Option<bool>,
-    pub preview_only: Option<bool>,
-    pub merge_state: Option<String>,
-    pub conflicts: Option<Vec<String>>,
-    pub preview_summary: Option<Vec<String>>,
-    pub thread_state: Option<String>,
-    pub freshness: Option<String>,
-    pub changed_paths: Option<Vec<String>>,
-    pub changed_path_count: Option<usize>,
-    pub impact_categories: Option<Vec<String>>,
-    pub promotion_suggested: Option<bool>,
-    pub heavy_impact_paths: Option<Vec<String>>,
-    pub merge_relation: Option<String>,
-    pub conflict_count: Option<usize>,
-    pub thread_health: Option<String>,
-    pub diff: Option<Value>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1295,12 +1271,48 @@ pub struct LandSchema {
     pub git_commit: Option<String>,
     pub synced: bool,
     pub integrated: bool,
-    pub pushed: bool,
-    pub pushed_remote: Option<String>,
     pub performed_steps: Vec<String>,
     pub skipped_steps: Vec<String>,
     pub merge_state: Option<String>,
     pub chosen_path: String,
+    pub siblings_restacked: Option<Vec<String>>,
+    pub siblings_restack_failed: Option<Vec<SiblingRestackFailureSchema>>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SiblingRestackFailureSchema {
+    pub thread: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LandBatchPeerSchema {
+    pub thread: String,
+    pub status: String,
+    pub message: String,
+    pub captured: bool,
+    pub checkpointed: bool,
+    pub git_commit: Option<String>,
+    pub integrated: bool,
+    pub synced: bool,
+    pub siblings_restacked: Option<Vec<String>>,
+    pub blockers: Option<Vec<String>>,
+    pub warnings: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LandBatchSchema {
+    pub output_kind: String,
+    pub status: String,
+    pub action: String,
+    pub message: String,
+    pub threads: Vec<String>,
+    pub landed: Vec<String>,
+    pub stopped_at: Option<String>,
+    pub peers: Vec<LandBatchPeerSchema>,
+    pub git_head: Option<String>,
+    pub recommended_action: Option<String>,
+    pub verification: Option<RepositoryVerificationStateSchema>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1339,7 +1351,7 @@ pub struct ThreadCapturesSchema(pub Vec<ThreadCaptureEntrySchema>);
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ThreadCaptureEntrySchema {
-    pub change_id: String,
+    pub state_id: String,
     pub created_at: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
@@ -1377,8 +1389,8 @@ pub struct ThreadMoveSchema {
     pub from_thread: String,
     pub to_thread: String,
     pub moved_paths: Vec<String>,
-    pub source_change_id: Option<String>,
-    pub target_change_id: String,
+    pub source_state_id: Option<String>,
+    pub target_state_id: String,
     pub message: String,
 }
 
@@ -1480,14 +1492,14 @@ pub struct ThreadMarkerListSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ThreadMarkerEntrySchema {
     pub name: String,
-    pub change_id: String,
+    pub state_id: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ThreadMarkerOpSchema {
     pub output_kind: String,
     pub name: Option<String>,
-    pub change_id: Option<String>,
+    pub state_id: Option<String>,
     pub deleted: Option<Vec<ThreadMarkerEntrySchema>>,
     pub count: Option<usize>,
     pub message: String,
@@ -1587,21 +1599,45 @@ pub struct ThreadTaskSummarySchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct CloneSchema {
-    pub output_kind: Option<String>,
-    pub action: Option<String>,
-    pub status: Option<String>,
-    pub success: Option<bool>,
-    pub cloned: Option<bool>,
-    pub transport: Option<String>,
-    pub remote: Option<String>,
-    pub local: Option<String>,
-    pub branch: Option<String>,
-    pub repository_capability: Option<String>,
-    pub commits_imported: Option<u64>,
-    pub states_created: Option<u64>,
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum CloneSchema {
+    Git(CloneGitSchema),
+    Heddle(CloneHeddleSchema),
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CloneGitSchema {
+    pub output_kind: String,
+    pub action: String,
+    pub status: String,
+    pub success: bool,
+    pub cloned: bool,
+    pub transport: GitTransportSchema,
+    pub remote: String,
+    pub local: String,
+    pub branch: String,
+    pub repository_capability: String,
+    pub commits_imported: usize,
+    pub states_created: usize,
+    pub verification: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CloneHeddleSchema {
+    pub output_kind: String,
+    pub action: String,
+    pub status: String,
+    pub success: bool,
+    pub cloned: bool,
+    pub transport: HeddleTransportSchema,
+    pub remote: String,
+    pub local: String,
+    pub branch: String,
+    pub repository_capability: String,
     pub objects: Option<usize>,
     pub state: Option<String>,
+    pub verification: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1649,27 +1685,28 @@ pub struct RemoteMutationSchema {
     pub url: Option<String>,
     pub default: Option<String>,
     pub message: String,
+    pub verification: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct ActorSingleSchema {
+pub struct AgentPresenceSingleSchema {
     pub output_kind: String,
-    pub actor: ActorEntrySchema,
+    pub presence: ActorEntrySchema,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct ActorListSchema {
+pub struct AgentPresenceListSchema {
     pub output_kind: String,
-    pub actors: Vec<ActorEntrySchema>,
+    pub presence: Vec<ActorEntrySchema>,
     pub active_only: bool,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct ActorDoneSchema {
+pub struct AgentPresenceCompleteSchema {
     pub output_kind: String,
     pub session_id: String,
     pub status: String,
@@ -1685,12 +1722,12 @@ pub struct ActorDoneSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct ActorExplainSchema {
+pub struct AgentPresenceExplainSchema {
     pub output_kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_actor: Option<Value>,
+    pub active_presence: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1825,6 +1862,9 @@ pub struct AgentStopSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AgentReservationEnvelopeSchema {
     pub reservation: AgentReservationSchema,
+    pub token: Option<String>,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1838,21 +1878,17 @@ pub struct AgentReservationListSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AgentReservationSchema {
-    pub session_id: String,
-    pub reservation_token: Option<String>,
+    pub lease_id: String,
+    pub actor_session_id: Option<String>,
     pub thread: String,
     pub anchor_state: Option<String>,
     pub anchor_root: Option<String>,
     pub task_assignment_id: Option<String>,
     pub status: String,
     pub path: Option<String>,
-    pub task: Option<String>,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub harness: Option<String>,
-    pub thinking_level: Option<String>,
-    pub probe_source: Option<String>,
-    pub probe_confidence: Option<f32>,
+    pub heartbeat_at: String,
+    pub lease_expires_at: String,
+    pub liveness: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1925,17 +1961,17 @@ pub struct AgentFanoutCommandSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct SessionEnvelopeSchema {
+pub struct AgentProvenanceEnvelopeSchema {
     pub session: SessionEntrySchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct SessionSegmentEnvelopeSchema {
+pub struct AgentProvenanceSegmentEnvelopeSchema {
     pub segment: SessionSegmentSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct SessionListSchema {
+pub struct AgentProvenanceListSchema {
     pub sessions: Vec<SessionEntrySchema>,
     pub active_only: bool,
     #[serde(rename = "verification")]
@@ -1964,101 +2000,123 @@ pub struct SessionSegmentSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct FetchSchema {
-    pub output_kind: Option<String>,
-    pub remote: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ref_scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tags_included: Option<bool>,
-    pub refs_fetched: usize,
-    pub objects_fetched: usize,
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum PullSchema {
+    Git(PullGitSchema),
+    Heddle(PullHeddleSchema),
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct PullSchema {
-    pub output_kind: Option<String>,
-    pub action: Option<String>,
-    pub status: Option<String>,
-    pub pulled: Option<bool>,
-    pub changed: Option<bool>,
-    pub success: Option<bool>,
-    pub transport: Option<String>,
-    pub remote: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+pub struct PullGitSchema {
+    pub output_kind: String,
+    pub action: String,
+    pub status: String,
+    pub pulled: bool,
+    pub changed: bool,
+    pub success: bool,
+    pub transport: GitTransportSchema,
+    pub remote: String,
+    pub branch: String,
     pub old_git_head: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_git_head: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_git_head: String,
     pub old_state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ref_scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread: Option<String>,
+    pub new_state: String,
+    pub states_created: usize,
+    pub commits_seen: usize,
+    pub commits_seen_scope: String,
+    pub materialized_checkout: bool,
+    pub changed_path_count: usize,
+    pub changed_paths: Vec<String>,
+    pub verification: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PullHeddleSchema {
+    pub output_kind: String,
+    pub action: String,
+    pub status: String,
+    pub pulled: bool,
+    pub changed: bool,
+    pub success: bool,
+    pub transport: HeddleTransportSchema,
+    pub remote: String,
+    pub thread: String,
     pub state: Option<String>,
     pub objects: Option<usize>,
-    pub states_created: Option<usize>,
-    pub commits_seen: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commits_seen_scope: Option<String>,
-    pub materialized_checkout: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub changed_path_count: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub changed_paths: Option<Vec<String>>,
+    pub verification: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct PushSchema {
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum PushSchema {
+    Git(PushGitSchema),
+    Heddle(PushHeddleSchema),
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PushGitSchema {
     pub output_kind: String,
     pub action: String,
     pub status: String,
     pub pushed: bool,
     pub changed: bool,
     pub success: bool,
-    pub transport: String,
-    pub remote: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub push_scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ref_scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_notes_ref: Option<String>,
-    /// Full ref names this push wrote at the destination (sorted; empty
-    /// for a no-op push). Present on the Git-overlay refs path; omitted
-    /// on the native Heddle transport. Verify with `git ls-remote`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refs_written: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_notes_visibility_warning: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: GitTransportSchema,
+    pub remote: String,
+    pub push_scope: String,
+    pub ref_scope: String,
+    pub refs_written: Vec<String>,
     pub git_tracking_remote: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_remote_configured: Option<GitRemoteConfiguredSchema>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_upstream_configured: Option<GitUpstreamConfiguredSchema>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tags_included: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub force: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags_included: bool,
+    pub force: bool,
     pub force_discard_warning: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<String>,
-    pub state: Option<String>,
-    pub objects: Option<usize>,
-    // Required AND nullable (the `#[schemars(required)]` shorthand strips
-    // the null variant from `Option<T>`, mis-declaring the wire contract —
-    // HeddleCo/heddle#645 conformance): push always emits these fields,
-    // serializing null for the no-action case.
     pub next_action: NullableStringSchema,
     pub next_action_template: NullableActionTemplateSchema,
     pub recommended_action: NullableStringSchema,
     pub recommended_action_template: NullableActionTemplateSchema,
+    pub verification: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PushHeddleSchema {
+    pub output_kind: String,
+    pub action: String,
+    pub status: String,
+    pub pushed: bool,
+    pub changed: bool,
+    pub success: bool,
+    pub transport: HeddleTransportSchema,
+    pub remote: Option<String>,
+    pub push_scope: Option<String>,
+    pub refs_written: Option<Vec<String>>,
+    pub force: Option<bool>,
+    pub thread: Option<String>,
+    pub state: Option<String>,
+    pub objects: Option<usize>,
+    pub next_action: NullableStringSchema,
+    pub next_action_template: NullableActionTemplateSchema,
+    pub recommended_action: NullableStringSchema,
+    pub recommended_action_template: NullableActionTemplateSchema,
+    pub verification: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[allow(dead_code)]
+pub enum GitTransportSchema {
+    Git,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[allow(dead_code)]
+pub enum HeddleTransportSchema {
+    Heddle,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2213,7 +2271,7 @@ pub struct LogSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct StateEntrySchema {
-    pub change_id: String,
+    pub state_id: String,
     pub content_hash: String,
     pub intent: Option<String>,
     pub principal: String,
@@ -2427,8 +2485,8 @@ pub struct ExpandSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ExpandedCollapseSchema {
-    pub change_id: String,
-    pub change_id_full: String,
+    pub state_id: String,
+    pub state_id_full: String,
     pub git_commit: Option<String>,
     pub thread: Option<String>,
     pub source_count: usize,
@@ -2436,8 +2494,8 @@ pub struct ExpandedCollapseSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ExpandedCaptureSchema {
-    pub change_id: String,
-    pub change_id_full: String,
+    pub state_id: String,
+    pub state_id_full: String,
     pub content_hash: String,
     pub intent: Option<String>,
     pub principal: String,
@@ -2474,8 +2532,8 @@ pub struct ShowSchema {
     pub output_kind: String,
     pub repository_capability: String,
     pub storage_model: String,
-    pub change_id: String,
-    pub change_id_full: String,
+    pub state_id: String,
+    pub state_id_full: String,
     pub content_hash: String,
     pub tree: String,
     pub parents: Vec<String>,
@@ -2539,7 +2597,7 @@ pub struct AvailableGitRefSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReviewShowSchema {
     pub output_kind: String,
-    pub change_id: String,
+    pub state_id: String,
     pub headline: String,
     pub agent_narrative: Option<String>,
     pub files_changed: usize,
@@ -2554,20 +2612,20 @@ pub struct ReviewShowSchema {
 pub struct ReviewSignSchema {
     pub output_kind: String,
     pub signature_id: String,
-    pub change_id: String,
+    pub state_id: String,
 }
 
 /// `heddle review next --output json` emits a stable envelope keyed by
 /// `output_kind: "review_next"`. When the scan window holds a pending
 /// review, the pending state's view is flattened alongside `output_kind`
-/// (`change_id`, `headline`, `existing_signatures`) and the same view is
+/// (`state_id`, `headline`, `existing_signatures`) and the same view is
 /// echoed under `next`. When no pending review is found, only
 /// `output_kind` and `next: null` are emitted — there is no top-level
 /// `null`. Mirrors the envelope built in `review::run_next`.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReviewNextSchema {
     pub output_kind: String,
-    pub change_id: Option<String>,
+    pub state_id: Option<String>,
     pub headline: Option<String>,
     pub existing_signatures: Option<u32>,
     pub next: RequiredNullableNextState,
@@ -2597,7 +2655,7 @@ impl JsonSchema for RequiredNullableNextState {
 /// The pending review state echoed under `review next`'s `next` field.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReviewNextStateSchema {
-    pub change_id: String,
+    pub state_id: String,
     pub headline: String,
     pub existing_signatures: u32,
 }
@@ -2614,14 +2672,6 @@ pub struct ReviewHealthEntrySchema {
     pub module_id: String,
     pub fire_rate: f64,
     pub warn: bool,
-}
-
-// ---- transaction commit ---------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TransactionCommitSchema {
-    pub change_id: String,
-    pub op_count: u32,
 }
 
 // ---- command/schema introspection ----------------------------------------
@@ -2737,18 +2787,11 @@ pub struct CommandContractSchemaCoverageSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct GitOverlayGuideSchema {
-    pub topic: String,
-    pub summary: String,
-    pub steps: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct WatchLineSchema {
     pub ts: String,
     pub thread: Option<String>,
     pub kind: String,
-    pub change_id: Option<String>,
+    pub state_id: Option<String>,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
     pub actor: Option<ActorInfoSchema>,
@@ -2837,39 +2880,10 @@ pub struct SyncGitSchema {
     pub recovery_commands: Vec<String>,
 }
 
-// ---- stash / revert -------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct StashMutationSchema {
-    pub message: String,
-    pub stash_index: Option<usize>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct StashListSchema {
-    pub output_kind: String,
-    pub stashes: Vec<StashListEntrySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct StashListEntrySchema {
-    pub index: usize,
-    pub message: Option<String>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct StashShowSchema {
-    pub output_kind: String,
-    pub modified: Vec<String>,
-    pub added: Vec<String>,
-    pub deleted: Vec<String>,
-}
-
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RevertSchema {
     pub output_kind: String,
-    pub change_id: Option<String>,
+    pub state_id: Option<String>,
     pub reverted_state: String,
     pub files_affected: Vec<String>,
     pub message: String,
@@ -2877,11 +2891,11 @@ pub struct RevertSchema {
 
 // ---- git overlay diagnostics ---------------------------------------------
 
-// ---- diagnose -------------------------------------------------------------
+// ---- doctor ---------------------------------------------------------------
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct DiagnoseSchema {
-    pub output_kind: Option<String>,
+pub struct DoctorSchema {
+    pub output_kind: String,
     pub repository: String,
     pub repository_capability: String,
     pub storage_model: String,
@@ -3188,7 +3202,7 @@ mod tests {
     /// discriminator from the catalog after deriving the struct schema,
     /// so `heddle schemas <verb>` already surfaces `output_kind`. That
     /// injection masks the fact that the Rust mirror struct (e.g.
-    /// `CleanSchema`, `DiffSchema`) never declares the field. The mirror
+    /// `DiffSchema`) never declares the field. The mirror
     /// is the source of truth a reader greps; it must be honest about the
     /// discriminator the runtime always emits. This check reads the
     /// *pre-injection* struct schema so a missing field fails CI rather
@@ -3574,45 +3588,87 @@ mod tests {
     #[test]
     fn push_schema_requires_stable_runtime_fields() {
         let schema = schema_for_verb("push").expect("push schema");
-        let required = required_fields(&schema);
-        for stable_field in [
-            "output_kind",
-            "action",
-            "status",
-            "pushed",
-            "changed",
-            "success",
-            "transport",
-            "next_action",
-            "next_action_template",
-            "recommended_action",
-            "recommended_action_template",
+        let variants = schema
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .expect("push schema has transport variants")
+            .iter()
+            .map(|variant| {
+                let reference = variant.get("$ref").and_then(Value::as_str).or_else(|| {
+                    variant
+                        .get("allOf")
+                        .and_then(Value::as_array)
+                        .and_then(|parts| {
+                            parts
+                                .iter()
+                                .find_map(|part| part.get("$ref").and_then(Value::as_str))
+                        })
+                });
+                reference
+                    .map(|reference| resolve_schema_ref(&schema, reference))
+                    .unwrap_or(variant)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(variants.len(), 2, "Git and Heddle push variants");
+
+        for variant in &variants {
+            let required = required_fields(variant);
+            for stable_field in [
+                "output_kind",
+                "action",
+                "status",
+                "pushed",
+                "changed",
+                "success",
+                "transport",
+                "next_action",
+                "next_action_template",
+                "recommended_action",
+                "recommended_action_template",
+                "verification",
+            ] {
+                assert!(
+                    required.contains(&stable_field),
+                    "every push variant must require `{stable_field}`: {variant}"
+                );
+            }
+        }
+
+        let git_required = variants
+            .iter()
+            .map(|variant| required_fields(variant))
+            .find(|required| required.contains(&"ref_scope"))
+            .expect("Git push variant");
+        for git_field in [
+            "remote",
+            "push_scope",
+            "refs_written",
+            "tags_included",
+            "force",
         ] {
             assert!(
-                required.contains(&stable_field),
-                "push schema must require stable emitted field `{stable_field}`: {schema}"
+                git_required.contains(&git_field),
+                "Git push requires `{git_field}`"
             );
         }
 
-        for skipped_when_none in [
+        let heddle_required = variants
+            .iter()
+            .map(|variant| required_fields(variant))
+            .find(|required| !required.contains(&"ref_scope"))
+            .expect("Heddle push variant");
+        for conditional in [
             "remote",
             "push_scope",
-            "ref_scope",
-            "git_notes_ref",
-            "git_notes_visibility_warning",
-            "git_tracking_remote",
-            "git_remote_configured",
-            "git_upstream_configured",
-            "tags_included",
+            "refs_written",
             "force",
-            "force_discard_warning",
             "thread",
             "state",
             "objects",
         ] {
             assert!(
-                !required.contains(&skipped_when_none),
-                "push schema must not require conditionally omitted field `{skipped_when_none}`: {schema}"
+                !heddle_required.contains(&conditional),
+                "Heddle push conditionally omits `{conditional}`"
             );
         }
     }
@@ -3686,6 +3742,7 @@ mod tests {
             "discuss open",
             "discuss append",
             "discuss resolve",
+            "discuss reopen",
             "discuss list",
             "discuss show",
             "query",
@@ -3700,21 +3757,6 @@ mod tests {
                 schema.get("additionalProperties"),
                 Some(&Value::Bool(true)),
                 "`{verb}` schema should not accept arbitrary top-level fields"
-            );
-        }
-    }
-
-    #[test]
-    fn commit_schema_declares_op_id_replay_fields() {
-        let schema = schema_for_verb("commit").expect("commit schema");
-        let properties = schema
-            .get("properties")
-            .and_then(|p| p.as_object())
-            .expect("commit schema has properties");
-        for required in OP_ID_REPLAY_FIELD_NAMES {
-            assert!(
-                properties.contains_key(*required),
-                "commit schema missing op-id replay property '{required}'"
             );
         }
     }
@@ -3742,7 +3784,7 @@ mod tests {
         }
         assert!(
             checked > 1,
-            "op-id schema coverage test should exercise more than commit"
+            "op-id schema coverage test should exercise multiple verbs"
         );
     }
 

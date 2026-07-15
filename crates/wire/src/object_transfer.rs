@@ -132,11 +132,20 @@ pub fn load_requested_object(store: &impl ObjectStore, req: &ObjectRequest) -> R
                 return Err(ProtocolError::ObjectNotFound(hash.to_hex()));
             }
         }
-        ObjectId::ChangeId(change_id) => {
+        ObjectId::StateId(state_id) => {
             let state = store
-                .get_state(change_id)?
-                .ok_or_else(|| ProtocolError::ObjectNotFound(change_id.to_string()))?;
+                .get_state(state_id)?
+                .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string()))?;
             (ObjectType::State, rmp_serde::to_vec_named(&state)?)
+        }
+        ObjectId::StateAttachment { state, id } => {
+            let attachment = store
+                .get_state_attachment(state, id)?
+                .ok_or_else(|| ProtocolError::ObjectNotFound(id.to_string()))?;
+            (
+                ObjectType::StateAttachment,
+                rmp_serde::to_vec_named(&attachment)?,
+            )
         }
     };
 
@@ -165,18 +174,24 @@ pub fn load_object_data(
                 .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
             rmp_serde::to_vec_named(&tree)?
         }
-        (ObjectId::ChangeId(change_id), ObjectType::State) => {
+        (ObjectId::StateId(state_id), ObjectType::State) => {
             let state = store
-                .get_state(change_id)?
-                .ok_or_else(|| ProtocolError::ObjectNotFound(change_id.to_string()))?;
+                .get_state(state_id)?
+                .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string()))?;
             rmp_serde::to_vec_named(&state)?
         }
         (ObjectId::Hash(hash), ObjectType::Redaction) => store
             .get_redactions_bytes_for_blob(hash)?
             .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?,
-        (ObjectId::ChangeId(change_id), ObjectType::StateVisibility) => store
-            .get_state_visibility_bytes_for_state(change_id)?
-            .ok_or_else(|| ProtocolError::ObjectNotFound(change_id.to_string_full()))?,
+        (ObjectId::StateId(state_id), ObjectType::StateVisibility) => store
+            .get_state_visibility_bytes_for_state(state_id)?
+            .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string_full()))?,
+        (ObjectId::StateAttachment { state, id }, ObjectType::StateAttachment) => {
+            let attachment = store
+                .get_state_attachment(state, id)?
+                .ok_or_else(|| ProtocolError::ObjectNotFound(id.to_string()))?;
+            rmp_serde::to_vec_named(&attachment)?
+        }
         _ => {
             return Err(ProtocolError::InvalidState(
                 "object id/type mismatch".to_string(),
@@ -209,15 +224,24 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
             }
             store.put_tree_serialized(&data.data, *hash)?;
         }
-        (ObjectId::ChangeId(change_id), ObjectType::State) => {
+        (ObjectId::StateId(state_id), ObjectType::State) => {
             let state: State = rmp_serde::from_slice(&data.data)?;
-            if state.change_id != *change_id {
+            if state.id() != *state_id {
                 return Err(ProtocolError::InvalidState(format!(
-                    "ChangeId mismatch: expected {}, got {}",
-                    change_id, state.change_id
+                    "StateId mismatch: expected {state_id}, computed {}",
+                    state.id()
                 )));
             }
-            store.put_state_serialized(&data.data, *change_id)?;
+            store.put_state_serialized(&data.data, *state_id)?;
+        }
+        (ObjectId::StateAttachment { state, id }, ObjectType::StateAttachment) => {
+            let attachment: objects::object::StateAttachment = rmp_serde::from_slice(&data.data)?;
+            if attachment.state_id != *state || attachment.id() != *id {
+                return Err(ProtocolError::InvalidState(
+                    "state attachment id mismatch".to_string(),
+                ));
+            }
+            store.put_state_attachment(&attachment)?;
         }
         (_, ObjectType::Redaction) => {
             // Redactions ship signed and need verification before any
@@ -253,7 +277,10 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
 #[cfg(test)]
 mod tests {
     use objects::{
-        object::{Attribution, Blob, ContentHash, Principal, State, Tree, TreeEntry},
+        object::{
+            Attribution, Blob, ContentHash, Principal, State, StateAttachment, StateAttachmentBody,
+            Tree, TreeEntry,
+        },
         store::{FsStore, ObjectStore},
     };
     use tempfile::TempDir;
@@ -319,20 +346,20 @@ mod tests {
         let state_data = load_requested_object(
             &source,
             &ObjectRequest {
-                id: ObjectId::ChangeId(state.change_id),
+                id: ObjectId::StateId(state.state_id),
                 have_base: None,
             },
         )
         .unwrap();
         assert_eq!(state_data.obj_type, ObjectType::State);
         assert_eq!(
-            rmp_serde::from_slice::<State>(&state_data.data).unwrap(),
+            objects::store::codec::decode_state(&state_data.data).unwrap(),
             state
         );
         store_received_object(&dest, &state_data).unwrap();
         assert_eq!(
-            dest.get_state(&state.change_id).unwrap().unwrap().change_id,
-            state.change_id
+            dest.get_state(&state.state_id).unwrap().unwrap().state_id,
+            state.state_id
         );
     }
 
@@ -340,7 +367,7 @@ mod tests {
     fn load_object_data_reports_missing_and_id_type_mismatch_errors() {
         let (_temp, store) = create_test_store();
         let missing_hash = ContentHash::from_bytes([7; 32]);
-        let missing_state = objects::object::ChangeId::from_bytes([9; 16]);
+        let missing_state = objects::object::StateId::from_bytes([9; 32]);
 
         let missing = load_requested_object(
             &store,
@@ -357,7 +384,7 @@ mod tests {
         let missing = load_requested_object(
             &store,
             &ObjectRequest {
-                id: ObjectId::ChangeId(missing_state),
+                id: ObjectId::StateId(missing_state),
                 have_base: None,
             },
         )
@@ -373,7 +400,7 @@ mod tests {
         );
 
         let mismatch =
-            load_object_data(&store, &ObjectId::ChangeId(missing_state), ObjectType::Blob)
+            load_object_data(&store, &ObjectId::StateId(missing_state), ObjectType::Blob)
                 .unwrap_err();
         assert!(
             matches!(mismatch, ProtocolError::InvalidState(message) if message == "object id/type mismatch")
@@ -404,11 +431,11 @@ mod tests {
         );
 
         let state = State::new(tree.hash(), Vec::new(), test_attribution());
-        let wrong_state_id = objects::object::ChangeId::from_bytes([5; 16]);
+        let wrong_state_id = objects::object::StateId::from_bytes([5; 32]);
         let error = store_received_object(
             &store,
             &ObjectData {
-                id: ObjectId::ChangeId(wrong_state_id),
+                id: ObjectId::StateId(wrong_state_id),
                 obj_type: ObjectType::State,
                 data: rmp_serde::to_vec_named(&state).unwrap(),
                 is_delta: false,
@@ -416,7 +443,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(error, ProtocolError::InvalidState(message) if message.contains("ChangeId mismatch"))
+            matches!(error, ProtocolError::InvalidState(message) if message.contains("StateId mismatch"))
         );
     }
 
@@ -424,7 +451,7 @@ mod tests {
     fn store_received_object_rejects_raw_sidecar_objects() {
         let (_temp, store) = create_test_store();
         let blob_hash = ContentHash::from_bytes([1; 32]);
-        let state_id = objects::object::ChangeId::from_bytes([2; 16]);
+        let state_id = objects::object::StateId::from_bytes([2; 32]);
 
         let redaction_error = store_received_object(
             &store,
@@ -443,7 +470,7 @@ mod tests {
         let visibility_error = store_received_object(
             &store,
             &ObjectData {
-                id: ObjectId::ChangeId(state_id),
+                id: ObjectId::StateId(state_id),
                 obj_type: ObjectType::StateVisibility,
                 data: b"raw visibility bytes".to_vec(),
                 is_delta: false,
@@ -512,5 +539,34 @@ mod tests {
             "state-visibility",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn state_attachment_roundtrips_through_wire_data() {
+        let (_source_temp, source) = create_test_store();
+        let (_dest_temp, dest) = create_test_store();
+        let tree = source.put_tree(&Tree::new()).unwrap();
+        let state = State::new(tree, vec![], test_attribution());
+        source.put_state(&state).unwrap();
+        dest.put_state(&state).unwrap();
+        let attachment = StateAttachment {
+            state_id: state.id(),
+            body: StateAttachmentBody::RiskSignals(ContentHash::compute(b"signals")),
+            attribution: test_attribution(),
+            created_at: chrono::Utc::now(),
+            supersedes: None,
+        };
+        source.put_state_attachment(&attachment).unwrap();
+        let id = ObjectId::StateAttachment {
+            state: state.id(),
+            id: attachment.id(),
+        };
+        let data = load_object_data(&source, &id, ObjectType::StateAttachment).unwrap();
+        store_received_object(&dest, &data).unwrap();
+        assert_eq!(
+            dest.get_state_attachment(&state.id(), &attachment.id())
+                .unwrap(),
+            Some(attachment)
+        );
     }
 }

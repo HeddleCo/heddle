@@ -99,7 +99,12 @@ fn default_shared_target_for_rust_solid_thread_without_flags() {
 
     let thread_path = temp.path().join("default-a");
     heddle(
-        &["start", "default-a", "--path", thread_path.to_str().unwrap()],
+        &[
+            "start",
+            "default-a",
+            "--path",
+            thread_path.to_str().unwrap(),
+        ],
         Some(temp.path()),
     )
     .expect("start without flags should succeed in a Rust workspace");

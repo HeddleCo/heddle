@@ -15,49 +15,46 @@ fn test_cli_json_output() {
 }
 
 #[test]
-fn test_cli_diagnose_reports_current_context() {
+fn test_cli_doctor_reports_current_context() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("diagnose.txt"), "pending work").unwrap();
+    std::fs::write(temp.path().join("doctor.txt"), "pending work").unwrap();
 
     let output = heddle(&["--output", "text", "doctor"], Some(temp.path())).unwrap();
-    assert!(
-        output.contains("Doctor"),
-        "diagnose header missing: {output}"
-    );
+    assert!(output.contains("Doctor"), "doctor header missing: {output}");
     assert!(
         output.contains("Thread: main"),
-        "diagnose should name current thread: {output}"
+        "doctor should name current thread: {output}"
     );
     assert!(
         output.contains("Changes: 0 modified, 1 added, 0 deleted"),
-        "diagnose should summarize dirty worktree: {output}"
+        "doctor should summarize dirty worktree: {output}"
     );
     assert!(
-        output.contains("Next step: heddle commit -m \"...\""),
-        "diagnose should recommend commit for dirty worktree: {output}"
+        output.contains("Next step: heddle capture -m \"...\""),
+        "doctor should recommend capture for dirty worktree: {output}"
     );
 }
 
 #[test]
-fn test_cli_diagnose_json_profile() {
+fn test_cli_doctor_json_profile() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("diagnose.json"), "pending json work").unwrap();
+    std::fs::write(temp.path().join("doctor.json"), "pending json work").unwrap();
 
     let output = heddle(
         &["doctor", "--profile", "--output", "json"],
         Some(temp.path()),
     )
     .unwrap();
-    let parsed: Value = serde_json::from_str(&output).expect("diagnose output should be JSON");
+    let parsed: Value = serde_json::from_str(&output).expect("doctor output should be JSON");
     assert_eq!(parsed["thread"]["name"], "main");
     assert_eq!(parsed["changes"]["added"].as_array().unwrap().len(), 1);
     assert_eq!(parsed["changes"]["total"], 1);
     assert_eq!(parsed["health"]["status"], "uncaptured");
     assert_eq!(
         parsed["health"]["recommended_action"],
-        "heddle commit -m \"...\""
+        "heddle capture -m \"...\""
     );
     assert!(
         parsed["profile"]["total_ms"].is_number(),

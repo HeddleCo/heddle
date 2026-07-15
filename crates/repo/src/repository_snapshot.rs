@@ -5,7 +5,10 @@ use std::collections::BTreeSet;
 
 use objects::{
     lock::RepositoryLockExt,
-    object::{Attribution, Blob, ChangeId, ContentHash, State, Tree, TreeEntry},
+    object::{
+        Attribution, Blob, ChangeLineage, ContentHash, State, StateAttachment, StateAttachmentBody,
+        StateId, Tree, TreeEntry,
+    },
     store::ObjectStore,
 };
 use oplog::{IsolationKey, OpRecord};
@@ -43,13 +46,18 @@ enum SnapshotSource {
     SuppliedTree(Tree),
 }
 
-struct SnapshotMutation<'a> {
-    repo: &'a Repository,
-    source: SnapshotSource,
+struct SnapshotDetails {
     intent: Option<String>,
     confidence: Option<f32>,
     attribution: Attribution,
-    prev_head: Option<ChangeId>,
+    lineage: Vec<ChangeLineage>,
+}
+
+struct SnapshotMutation<'a> {
+    repo: &'a Repository,
+    source: SnapshotSource,
+    details: SnapshotDetails,
+    prev_head: Option<StateId>,
     head: Head,
     transaction_id: String,
     /// Set by `apply` when the automatic capture-time default-visibility binding
@@ -57,34 +65,22 @@ struct SnapshotMutation<'a> {
     /// #529 P1): `(state, sidecar-before-the-binding)`. `rewind` restores the
     /// sidecar to that before-image if the batch fails to commit, so a rewound
     /// snapshot never leaves its auto-applied tier behind.
-    staged_visibility_rewind: Option<(ChangeId, Option<Vec<u8>>)>,
+    staged_visibility_rewind: Option<(StateId, Option<Vec<u8>>)>,
 }
 
 impl<'a> SnapshotMutation<'a> {
     fn new(
         repo: &'a Repository,
         source: SnapshotSource,
-        intent: Option<String>,
-        confidence: Option<f32>,
-        attribution: Attribution,
-        prev_head: Option<ChangeId>,
+        details: SnapshotDetails,
+        prev_head: Option<StateId>,
         head: Head,
     ) -> Self {
-        let transaction_id = snapshot_transaction_id(
-            repo,
-            &source,
-            intent.as_deref(),
-            confidence,
-            &attribution,
-            prev_head,
-            &head,
-        );
+        let transaction_id = snapshot_transaction_id(repo, &source, &details, &head);
         Self {
             repo,
             source,
-            intent,
-            confidence,
-            attribution,
+            details,
             prev_head,
             head,
             transaction_id,
@@ -131,9 +127,9 @@ impl AtomicMutation for SnapshotMutation<'_> {
         maybe_snapshot_fault(SnapshotFault::AfterStageBeforeAtomicCommit);
 
         let mut records = vec![OpRecord::Snapshot {
-            new_state: execution.state.change_id,
+            new_state: execution.state.id(),
             prev_head: self.prev_head,
-            head: self.thread().is_none().then_some(execution.state.change_id),
+            head: self.thread().is_none().then_some(execution.state.id()),
             thread: self.thread(),
         }];
 
@@ -146,11 +142,10 @@ impl AtomicMutation for SnapshotMutation<'_> {
         // true`); `rewind` restores the sidecar if this batch fails to commit.
         if let Some(binding) = self
             .repo
-            .stage_default_visibility_binding(&execution.state.change_id, true)
+            .stage_default_visibility_binding(&execution.state.id(), true)
             .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?
         {
-            self.staged_visibility_rewind =
-                Some((execution.state.change_id, binding.prior_sidecar));
+            self.staged_visibility_rewind = Some((execution.state.id(), binding.prior_sidecar));
             records.push(binding.record);
         }
 
@@ -236,22 +231,32 @@ impl SnapshotMutation<'_> {
             None => vec![],
         };
 
-        let mut state = State::new_snapshot(tree_hash, parents, self.attribution.clone());
+        let mut state = State::new_snapshot(tree_hash, parents, self.details.attribution.clone());
 
-        if let Some(intent) = self.intent.clone() {
+        if let Some(intent) = self.details.intent.clone() {
             state = state.with_intent(intent);
         }
 
-        if let Some(confidence) = self.confidence {
+        if let Some(confidence) = self.details.confidence {
             state = state.with_confidence(confidence);
         }
 
-        if let Some(parent_id) = self.prev_head
-            && let Some(parent_state) = self.repo.store.get_state(&parent_id)?
-            && let Some(inherited) = Repository::inherit_parent_context(&parent_state)
-        {
-            state = state.with_context(inherited);
+        if !self.details.lineage.is_empty() {
+            state = state.with_lineage(self.details.lineage.clone());
         }
+
+        let inherited_context = if let Some(parent_id) = self.prev_head
+            && let Some(parent_state) = self.repo.store.get_state(&parent_id)?
+        {
+            self.repo.inherit_parent_context(&parent_state)?
+        } else {
+            None
+        };
+
+        #[cfg(feature = "tree-sitter-symbols")]
+        let mut risk_signals = None;
+        #[cfg(feature = "tree-sitter-symbols")]
+        let mut discussions = None;
 
         #[cfg(feature = "tree-sitter-symbols")]
         {
@@ -263,9 +268,7 @@ impl SnapshotMutation<'_> {
                 .repo
                 .compute_and_persist_signals(prior_state.as_ref(), &state)
             {
-                Ok(Some(hash)) => {
-                    state = state.with_risk_signals(hash);
-                }
+                Ok(Some(hash)) => risk_signals = Some(hash),
                 Ok(None) => {}
                 Err(err) => {
                     tracing::warn!(error = %err, "risk signal computation failed; continuing without signals");
@@ -277,9 +280,7 @@ impl SnapshotMutation<'_> {
                     .repo
                     .compute_and_persist_discussion_anchor_travel(parent_state, &tree)
                 {
-                    Ok(Some(hash)) => {
-                        state = state.with_discussions(hash);
-                    }
+                    Ok(Some(hash)) => discussions = Some(hash),
                     Ok(None) => {}
                     Err(err) => {
                         tracing::warn!(error = %err, "discussion anchor travel failed; continuing without discussions");
@@ -288,13 +289,34 @@ impl SnapshotMutation<'_> {
             }
         }
 
-        // Auto-sign every captured state (heddle#482) via the capture-path
-        // chokepoint. Signing is the LAST mutation before the write: it covers
-        // `compute_hash()` over the fields enriched above, so any later change
-        // would invalidate it. Best-effort — a missing key leaves the state
-        // unsigned, never fails the capture.
+        // Persist the immutable state before its independently-addressed metadata.
         let state_ref_oplog_start = std::time::Instant::now();
-        self.repo.put_authored_state(&mut state)?;
+        self.repo.put_authored_state(&state)?;
+        if let Some(context) = inherited_context {
+            self.repo.put_state_attachment(&StateAttachment {
+                state_id: state.id(),
+                body: StateAttachmentBody::Context(context),
+                attribution: state.attribution.clone(),
+                created_at: chrono::Utc::now(),
+                supersedes: None,
+            })?;
+        }
+        #[cfg(feature = "tree-sitter-symbols")]
+        for body in [
+            risk_signals.map(StateAttachmentBody::RiskSignals),
+            discussions.map(StateAttachmentBody::Discussions),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.repo.put_state_attachment(&StateAttachment {
+                state_id: state.id(),
+                body,
+                attribution: state.attribution.clone(),
+                created_at: chrono::Utc::now(),
+                supersedes: None,
+            })?;
+        }
         self.repo.store.flush_snapshot_write_batch()?;
 
         Ok(SnapshotExecution {
@@ -460,10 +482,7 @@ impl WorktreeWalkPolicy for SnapshotFingerprintPolicy<'_> {
 fn snapshot_transaction_id(
     repo: &Repository,
     source: &SnapshotSource,
-    intent: Option<&str>,
-    confidence: Option<f32>,
-    attribution: &Attribution,
-    _prev_head: Option<ChangeId>,
+    details: &SnapshotDetails,
     head: &Head,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
@@ -485,16 +504,16 @@ fn snapshot_transaction_id(
     hasher.update(b"\0");
     hasher.update(head.to_text().as_bytes());
     hasher.update(b"\0");
-    hasher.update(intent.unwrap_or_default().as_bytes());
+    hasher.update(details.intent.as_deref().unwrap_or_default().as_bytes());
     hasher.update(b"\0");
-    if let Some(confidence) = confidence {
+    if let Some(confidence) = details.confidence {
         hasher.update(&confidence.to_bits().to_le_bytes());
     }
     hasher.update(b"\0");
-    hasher.update(attribution.principal.name.as_bytes());
+    hasher.update(details.attribution.principal.name.as_bytes());
     hasher.update(b"\0");
-    hasher.update(attribution.principal.email.as_bytes());
-    if let Some(agent) = &attribution.agent {
+    hasher.update(details.attribution.principal.email.as_bytes());
+    if let Some(agent) = &details.attribution.agent {
         hasher.update(b"\0agent\0");
         hasher.update(agent.provider.as_bytes());
         hasher.update(b"\0");
@@ -506,6 +525,10 @@ fn snapshot_transaction_id(
         hasher.update(b"\0");
         hasher.update(agent.policy_id.as_deref().unwrap_or_default().as_bytes());
     }
+    hasher.update(b"\0lineage\0");
+    hasher.update(
+        &rmp_serde::to_vec_named(&details.lineage).expect("lineage encoding is infallible"),
+    );
     format!("snapshot-{}", hasher.finalize().to_hex())
 }
 
@@ -590,7 +613,18 @@ impl Repository {
         confidence: Option<f32>,
         attribution: Attribution,
     ) -> Result<SnapshotExecution> {
-        self.snapshot_with_attribution_profiled_locked(intent, confidence, attribution)
+        self.snapshot_with_attribution_profiled_locked(intent, confidence, attribution, Vec::new())
+    }
+
+    pub fn snapshot_with_attribution_and_lineage(
+        &self,
+        intent: Option<String>,
+        confidence: Option<f32>,
+        attribution: Attribution,
+        lineage: Vec<ChangeLineage>,
+    ) -> Result<State> {
+        self.snapshot_with_attribution_profiled_locked(intent, confidence, attribution, lineage)
+            .map(|execution| execution.state)
     }
 
     #[instrument(skip(self, attribution), fields(intent = ?intent, confidence))]
@@ -599,6 +633,7 @@ impl Repository {
         intent: Option<String>,
         confidence: Option<f32>,
         attribution: Attribution,
+        lineage: Vec<ChangeLineage>,
     ) -> Result<SnapshotExecution> {
         let _lock = self
             .locker()
@@ -624,11 +659,14 @@ impl Repository {
             let theirs = merge_state.theirs;
             let base = merge_state.base;
             let intent = intent.or_else(|| Some(format!("Merge {}", theirs.short())));
-            let state = self.snapshot_merge_with_attribution(
+            let state = self.snapshot_merge_with_attribution_and_lineage(
                 &theirs,
-                intent,
-                confidence,
-                attribution,
+                SnapshotDetails {
+                    intent,
+                    confidence,
+                    attribution,
+                    lineage,
+                },
                 base,
                 // We hold the snapshot write lock here; fold the default-
                 // visibility binding into the merge's batch (heddle#317).
@@ -654,9 +692,12 @@ impl Repository {
             SnapshotMutation::new(
                 self,
                 SnapshotSource::Worktree { fingerprint },
-                intent,
-                confidence,
-                attribution,
+                SnapshotDetails {
+                    intent,
+                    confidence,
+                    attribution,
+                    lineage,
+                },
                 prev_head,
                 head.clone(),
             ),
@@ -732,9 +773,12 @@ impl Repository {
             SnapshotMutation::new(
                 self,
                 SnapshotSource::SuppliedTree(tree),
-                intent,
-                confidence,
-                attribution,
+                SnapshotDetails {
+                    intent,
+                    confidence,
+                    attribution,
+                    lineage: Vec::new(),
+                },
                 prev_head,
                 head,
             ),
@@ -762,11 +806,31 @@ impl Repository {
     /// no-auto-binding behavior.
     pub fn snapshot_merge_with_attribution(
         &self,
-        merge_parent: &ChangeId,
+        merge_parent: &StateId,
         intent: Option<String>,
         confidence: Option<f32>,
         attribution: Attribution,
-        merge_base: Option<ChangeId>,
+        merge_base: Option<StateId>,
+        fold_default_visibility: bool,
+    ) -> Result<State> {
+        self.snapshot_merge_with_attribution_and_lineage(
+            merge_parent,
+            SnapshotDetails {
+                intent,
+                confidence,
+                attribution,
+                lineage: Vec::new(),
+            },
+            merge_base,
+            fold_default_visibility,
+        )
+    }
+
+    fn snapshot_merge_with_attribution_and_lineage(
+        &self,
+        merge_parent: &StateId,
+        details: SnapshotDetails,
+        merge_base: Option<StateId>,
         fold_default_visibility: bool,
     ) -> Result<State> {
         let tree = self.build_tree(&self.root)?;
@@ -777,14 +841,18 @@ impl Repository {
             .ok_or_else(|| HeddleError::NotFound("No current state".to_string()))?;
         let parents = vec![first_parent, *merge_parent];
 
-        let mut state = State::new_merge(tree_hash, parents, attribution);
+        let mut state = State::new_merge(tree_hash, parents, details.attribution);
 
-        if let Some(intent) = intent {
+        if let Some(intent) = details.intent {
             state = state.with_intent(intent);
         }
 
-        if let Some(confidence) = confidence {
+        if let Some(confidence) = details.confidence {
             state = state.with_confidence(confidence);
+        }
+
+        if !details.lineage.is_empty() {
+            state = state.with_lineage(details.lineage);
         }
 
         let ours_state = self
@@ -811,16 +879,19 @@ impl Repository {
         // Union the parents' context trees so annotations from either side
         // ride forward. Same-id collisions resolve to the newest revision;
         // see `union_parent_contexts` for the merge rules.
-        if let Some(merged_context) = self.union_parent_contexts(&[&ours_state, &theirs_state])? {
-            state = state.with_context(merged_context);
-        }
+        let merged_context = self.union_parent_contexts(&[&ours_state, &theirs_state])?;
 
-        // Auto-sign the merge state (heddle#482) via the authored-state
-        // chokepoint: the merge author vouches for this merge of parents X and
-        // Y. Each parent keeps its own author signature — they are unchanged on
-        // disk, so they stay verifiable. Last mutation before the write, same
-        // ordering rule as capture.
-        self.put_authored_state(&mut state)?;
+        // Persist the immutable merge before its independently-addressed context.
+        self.put_authored_state(&state)?;
+        if let Some(context) = merged_context {
+            self.put_state_attachment(&StateAttachment {
+                state_id: state.id(),
+                body: StateAttachmentBody::Context(context),
+                attribution: state.attribution.clone(),
+                created_at: chrono::Utc::now(),
+                supersedes: None,
+            })?;
+        }
 
         let head = self.head_ref()?;
         let thread = match &head {
@@ -839,14 +910,14 @@ impl Repository {
         // behavior — a plain record-first commit (heddle#354 r8).
         if fold_default_visibility {
             self.commit_snapshot_atomic_with_capture_visibility(
-                &state.change_id,
+                &state.id(),
                 Some(first_parent),
                 thread.as_ref(),
                 true,
             )?;
         } else {
             self.commit_snapshot_atomic_with_records(
-                &state.change_id,
+                &state.id(),
                 Some(first_parent),
                 thread.as_ref(),
                 Vec::new(),
@@ -890,11 +961,8 @@ fn refresh_materialized_thread_manifest(
         return;
     }
 
-    let mut refreshed = crate::thread_manifest::ThreadManifest::new(
-        state.change_id,
-        state.tree,
-        original.worktree_path,
-    );
+    let mut refreshed =
+        crate::thread_manifest::ThreadManifest::new(state.id(), state.tree, original.worktree_path);
     if let Err(err) = super::repository_thread_materialize::populate_manifest_from_tree(
         repo,
         tree,

@@ -37,11 +37,9 @@ use std::{
     process::Command,
 };
 
-use cli::{
-    Repository,
-    git_projection_engine::{
-        git_core::GitProjection, git_reconstruct::commit_object_id, test_support,
-    },
+use cli::Repository;
+use heddle_git_projection::{
+    git_core::GitProjection, git_reconstruct::commit_object_id, test_support,
 };
 use sley::{ObjectId, Repository as SleyRepository};
 use tempfile::TempDir;
@@ -59,7 +57,7 @@ fn ingest_into_git_projection(
         .map_err(|error| error.to_string())?;
     let mirror_repo =
         test_support::open_git_repo(git_projection).map_err(|error| error.to_string())?;
-    test_support::seed_ingest_identity_mappings_from_mirror(git_projection, &mirror_repo)
+    test_support::seed_ingest_identity_mappings_from_repo(git_projection, &mirror_repo)
         .map_err(|error| error.to_string())
 }
 

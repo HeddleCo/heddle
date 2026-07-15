@@ -4,7 +4,7 @@
 //! `agent serve` runs a local-only gRPC daemon
 //! over a Unix-domain socket inside the repo's `.heddle/sockets/`. The
 //! daemon hosts agent services (state-review, discussion, signal,
-//! operation-log query, transaction, hook) so a tight agent loop avoids
+//! operation-log query, timeline, hook) so a tight agent loop avoids
 //! per-command process startup latency.
 //!
 //! `heddle agent serve` is intentionally distinct from `heddle daemon`,
@@ -17,13 +17,16 @@ use clap::Subcommand;
 
 use super::commands_args::{
     AgentApiListArgs, AgentCaptureArgs, AgentFanoutPlanArgs, AgentFanoutStartArgs,
-    AgentHeartbeatArgs, AgentReadyArgs, AgentReleaseArgs, AgentReserveArgs, AgentTaskCreateArgs,
-    AgentTaskListArgs, AgentTaskShowArgs, AgentTaskUpdateArgs,
+    AgentHeartbeatArgs, AgentPresenceCompleteArgs, AgentPresenceExplainArgs, AgentPresenceListArgs,
+    AgentPresenceShowArgs, AgentProvenanceBeginArgs, AgentProvenanceEndArgs,
+    AgentProvenanceListArgs, AgentProvenanceSegmentArgs, AgentProvenanceShowArgs, AgentReadyArgs,
+    AgentReleaseArgs, AgentReserveArgs, AgentTaskCreateArgs, AgentTaskListArgs, AgentTaskShowArgs,
+    AgentTaskUpdateArgs,
 };
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum AgentCommands {
-    /// Run the local agent gRPC daemon.
+    /// Run the local agent gRPC daemon in the foreground.
     ///
     /// The daemon binds a Unix socket inside the repo's `.heddle/sockets/`
     /// directory and serves local same-user CLI calls.
@@ -40,14 +43,14 @@ pub enum AgentCommands {
     // (Claude Code subagents, codex harnesses, etc.) call to
     // coordinate parallel writers on the same repo. Distinct from
     // the daemon-control variants above: these are one-shot CLI
-    // calls that mutate the repo's `.heddle/agents/` registry.
+    // calls that mutate writer leases and actor presence.
     /// Atomically reserve a thread for one writer.
     Reserve(AgentReserveArgs),
 
     /// Update reservation heartbeat.
     Heartbeat(AgentHeartbeatArgs),
 
-    /// Capture under a session-validated reservation.
+    /// Capture under a token-authenticated writer lease.
     Capture(AgentCaptureArgs),
 
     /// Mark a reservation's thread ready for integration.
@@ -66,6 +69,47 @@ pub enum AgentCommands {
     /// Plan and start native fan-out lanes.
     #[command(subcommand)]
     Fanout(AgentFanoutCommands),
+
+    /// Inspect attribution and work context for local agents.
+    #[command(subcommand)]
+    Presence(AgentPresenceCommands),
+
+    /// Record provider, model, and policy provenance across an agent run.
+    #[command(subcommand)]
+    Provenance(AgentProvenanceCommands),
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum AgentPresenceCommands {
+    /// List agent presence records known to this repository.
+    List(AgentPresenceListArgs),
+
+    /// Show the current or selected agent presence record.
+    Show(AgentPresenceShowArgs),
+
+    /// Explain why Heddle attached the current or selected presence record.
+    Explain(AgentPresenceExplainArgs),
+
+    /// Mark the current or selected presence record complete.
+    Complete(AgentPresenceCompleteArgs),
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum AgentProvenanceCommands {
+    /// Begin a provider/model provenance session.
+    Begin(AgentProvenanceBeginArgs),
+
+    /// Record a provider, model, or policy change within the current session.
+    Segment(AgentProvenanceSegmentArgs),
+
+    /// End the current or selected provenance session.
+    End(AgentProvenanceEndArgs),
+
+    /// Show the current or selected provenance session.
+    Show(AgentProvenanceShowArgs),
+
+    /// List provenance sessions.
+    List(AgentProvenanceListArgs),
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -97,8 +141,4 @@ pub struct AgentServeArgs {
     /// Override the default socket path (`<heddle_dir>/sockets/grpc.sock`).
     #[arg(long)]
     pub socket: Option<PathBuf>,
-    /// Run in the foreground; without this the daemon detaches and writes
-    /// its pidfile so the parent shell returns immediately.
-    #[arg(long)]
-    pub foreground: bool,
 }

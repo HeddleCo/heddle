@@ -4,6 +4,11 @@
 use std::process::{Command, Stdio};
 
 use anyhow::{Result, anyhow};
+use heddle_core::run_plan::{
+    plan_run_command_empty, run_command_required_example, run_command_required_hint,
+    run_command_required_kind, run_command_required_summary, run_failure_message, transcript_token,
+    transport_token,
+};
 use repo::SessionManager;
 
 use super::{
@@ -14,12 +19,12 @@ use super::{
 use crate::{cli::Cli, config::UserConfig};
 
 pub fn cmd_run(cli: &Cli, thread: Option<String>, command: Vec<String>) -> Result<()> {
-    if command.is_empty() {
+    if plan_run_command_empty(command.is_empty()) {
         return Err(anyhow!(RecoveryAdvice::invalid_usage(
-            "run_command_required",
-            "Usage: heddle run --thread <name> -- <cmd...>",
-            "Pass a command after `--` so Heddle knows what to execute in the thread checkout.",
-            "heddle run --thread <name> -- <cmd...>",
+            run_command_required_kind(),
+            run_command_required_summary(),
+            run_command_required_hint(),
+            run_command_required_example(),
         )));
     }
 
@@ -57,19 +62,19 @@ pub fn cmd_run(cli: &Cli, thread: Option<String>, command: Vec<String>) -> Resul
     let user_config = UserConfig::load_default().unwrap_or_default();
     child.env(
         "HEDDLE_HARNESS_TRANSPORT",
-        match user_config.harness.transport {
+        transport_token(match user_config.harness.transport {
             crate::config::HarnessTransport::Spool => "spool",
             crate::config::HarnessTransport::Direct => "direct",
             crate::config::HarnessTransport::End => "end",
-        },
+        }),
     );
     child.env(
         "HEDDLE_HARNESS_TRANSCRIPT",
-        match user_config.harness.transcript {
+        transcript_token(match user_config.harness.transcript {
             crate::config::HarnessTranscriptMode::Off => "off",
             crate::config::HarnessTranscriptMode::Summary => "summary",
             crate::config::HarnessTranscriptMode::Full => "full",
-        },
+        }),
     );
 
     let status = child.status()?;
@@ -77,14 +82,10 @@ pub fn cmd_run(cli: &Cli, thread: Option<String>, command: Vec<String>) -> Resul
     if status.success() {
         Ok(())
     } else {
-        Err(anyhow!(
-            "Command '{}' failed in thread '{}' with status {}",
+        Err(anyhow!(run_failure_message(
             program,
-            thread.id,
-            status
-                .code()
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "signal".to_string())
-        ))
+            &thread.id,
+            status.code()
+        )))
     }
 }

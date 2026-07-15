@@ -2,7 +2,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use objects::{object::ChangeId, store::ObjectStore};
+use objects::{object::StateId, store::ObjectStore};
 use repo::{AudienceTier, CheckoutMaterialization, Repository};
 
 use super::super::advice::RecoveryAdvice;
@@ -399,7 +399,7 @@ fn worktree_target_not_empty_advice(path: &Path) -> RecoveryAdvice {
 pub(crate) fn write_isolated_checkout(
     repo: &Repository,
     abs_path: &Path,
-    base_state: &ChangeId,
+    base_state: &StateId,
     thread: Option<&str>,
 ) -> Result<CheckoutMaterialization> {
     let heddle_dir = abs_path.join(".heddle");
@@ -408,16 +408,7 @@ pub(crate) fn write_isolated_checkout(
             abs_path
         )));
     }
-    let shared_galeed_dir = repo.heddle_dir();
-    std::fs::create_dir_all(&heddle_dir)?;
-    {
-        use std::io::Write as _;
-        let mut pointer_file = std::fs::File::create(heddle_dir.join("objectstore"))?;
-        pointer_file
-            .write_all(format!("objectstore: {}\n", shared_galeed_dir.display()).as_bytes())?;
-        pointer_file.sync_all()?;
-    }
-    std::fs::create_dir_all(heddle_dir.join("state"))?;
+    Repository::init_worktree(abs_path, repo.heddle_dir())?;
     // Fault point for the partial-materialize rollback test (heddle#356):
     // the checkout's `.heddle` metadata is already on disk here but no tree
     // bytes are, modeling a materialize that fails partway. The transaction's
@@ -492,7 +483,7 @@ mod gate_tests {
     // closed at this entry point too.
     const COURTESY_STUB_FILENAME: &str = "HEDDLE-EMBARGO.txt";
 
-    fn embargo_head(repo: &Repository) -> ChangeId {
+    fn embargo_head(repo: &Repository) -> StateId {
         let state_id = repo
             .refs()
             .get_thread(&ThreadName::new("main"))

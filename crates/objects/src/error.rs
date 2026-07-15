@@ -3,7 +3,7 @@
 
 use std::{error::Error, fmt, path::Path};
 
-use crate::object::{ChangeId, ContentHash, TreeError};
+use crate::object::{ContentHash, StateId, TreeError};
 
 /// Structured recovery details that can cross the embeddable facade boundary.
 #[derive(Debug, Clone, PartialEq)]
@@ -14,6 +14,11 @@ pub struct RecoveryDetails {
     pub unsafe_condition: String,
     pub would_change: String,
     pub preserved: String,
+    /// Explicit, path-specific recovery commands. When present these override
+    /// the `kind`-keyed fallback the CLI envelope would otherwise reconstruct
+    /// (the first entry is the primary command). `None` = use the generic
+    /// per-`kind` recovery mapping.
+    pub recovery_commands: Option<Vec<String>>,
 }
 
 impl RecoveryDetails {
@@ -32,7 +37,17 @@ impl RecoveryDetails {
             unsafe_condition: unsafe_condition.into(),
             would_change: would_change.into(),
             preserved: already_preserved.into(),
+            recovery_commands: None,
         }
+    }
+
+    /// Attach explicit, path-specific recovery commands (the first entry is the
+    /// primary command). Used where the callsite has context — e.g. a source
+    /// checkout path — that the `kind`-keyed CLI fallback cannot reconstruct.
+    #[must_use]
+    pub fn with_recovery_commands(mut self, commands: Vec<String>) -> Self {
+        self.recovery_commands = Some(commands);
+        self
     }
 
     pub fn invalid_usage(
@@ -131,7 +146,7 @@ pub enum HeddleError {
     #[error("No merge in progress")]
     NoMergeInProgress,
     #[error("state not found: {0}")]
-    StateNotFound(ChangeId),
+    StateNotFound(StateId),
     #[error("invalid object: {0}")]
     InvalidObject(String),
     #[error("repository not found at {0}")]
@@ -146,8 +161,34 @@ pub enum HeddleError {
         found: u32,
         supported: u32,
     },
+    #[error(
+        "repository at {path} predates format v{required} (found v{found}); recreate it or re-adopt its Git history with this Heddle version"
+    )]
+    RepositoryFormatMigrationRequired {
+        path: std::path::PathBuf,
+        found: u32,
+        required: u32,
+    },
+    #[error(
+        "{storage} uses format {found}, but this binary supports {supported}; upgrade Heddle before opening it"
+    )]
+    StorageFormatTooNew {
+        storage: String,
+        found: u32,
+        supported: u32,
+    },
+    #[error(
+        "{storage} predates required format {required} (found {found}); recreate the repository or re-adopt its Git history with this Heddle version"
+    )]
+    StorageFormatMigrationRequired {
+        storage: String,
+        found: u32,
+        required: u32,
+    },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("repository lock unavailable: {0}")]
+    Lock(#[from] crate::lock::LockError),
     #[error("serialization error: {0}")]
     Serialization(String),
     #[error("configuration error: {0}")]

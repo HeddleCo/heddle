@@ -24,7 +24,8 @@ use tracing::warn;
 use crate::{
     FsMonitorMode, FsMonitorSettings, WorktreeIndex,
     daemon::{
-        EndpointState, HELPER_HOST, persist_endpoint, remove_endpoint, send_json_request,
+        EndpointState, HELPER_HOST, persist_endpoint, pid_alive, remove_endpoint,
+        remove_endpoint_if_owned, send_json_request,
         server::{
             DaemonHandler, IdleDecision, default_idle_policy, handle_json_connection,
             run_server_loop,
@@ -198,6 +199,44 @@ impl ChangeMonitorSession {
     }
 }
 
+/// Rebuild the native change-monitor snapshot + cursor sidecars from a full
+/// worktree scan.
+///
+/// This is the deliberate, maintenance-time counterpart to the hot-path
+/// `prepare`/`persist_current_cursor` no-op: `heddle maintenance run` is where
+/// we are *supposed* to pay for a full `scan_snapshot_entries` walk to
+/// (re)materialize `monitor-native.bin` + `fsmonitor.toml`, so a subsequent
+/// live helper (or a later usable session) has a baseline to diff against.
+/// The status hot path must never call this — it exists solely so maintenance
+/// keeps refreshing the monitor sidecars it always has.
+///
+/// A live helper already owns the snapshot under its long-lived watcher, so
+/// when one answers we leave it alone. `Off`/`Watchman` modes have no native
+/// snapshot to build and are treated as no-ops.
+pub(crate) fn rebuild_local_monitor_snapshot(
+    repo_root: &Path,
+    settings: FsMonitorSettings,
+) -> Result<(), HeddleError> {
+    match settings.mode {
+        FsMonitorMode::Off | FsMonitorMode::Watchman => Ok(()),
+        FsMonitorMode::Native | FsMonitorMode::Auto => {
+            let state_path = repo_root.join(".heddle/state").join("fsmonitor.toml");
+            if try_local_helper_refresh(repo_root, &state_path)? {
+                return Ok(());
+            }
+            let previous = load_snapshot(&snapshot_path(&state_path)).unwrap_or_default();
+            let next_generation = previous.generation.saturating_add(1);
+            let snapshot = MonitorSnapshotState {
+                version: MONITOR_SNAPSHOT_VERSION,
+                generation: next_generation,
+                entries: scan_snapshot_entries(repo_root)?,
+            };
+            persist_snapshot(&snapshot_path(&state_path), &snapshot)?;
+            persist_cursor(&state_path, &next_generation.to_string())
+        }
+    }
+}
+
 pub(crate) fn persist_current_monitor_cursor(
     repo_root: &Path,
     settings: FsMonitorSettings,
@@ -230,6 +269,11 @@ pub(crate) fn persist_current_monitor_cursor(
 pub fn run_local_monitor_helper(repo_root: &Path) -> Result<(), HeddleError> {
     let state_path = repo_root.join(".heddle/state").join("fsmonitor.toml");
     let endpoint_path = helper_endpoint_path(&state_path);
+    let Some(_lifetime_lease) =
+        objects::lock::RepoLock::at(helper_lifetime_lock_path(&state_path)).try_write()?
+    else {
+        return Ok(());
+    };
     if let Some(parent) = endpoint_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -237,19 +281,17 @@ pub fn run_local_monitor_helper(repo_root: &Path) -> Result<(), HeddleError> {
     let listener = TcpListener::bind((HELPER_HOST, 0))?;
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
-    persist_endpoint(
-        &endpoint_path,
-        &EndpointState {
-            version: HELPER_PROTOCOL_VERSION,
-            host: HELPER_HOST.to_string(),
-            port,
-            pid: Some(std::process::id()),
-        },
-    )?;
+    let endpoint = EndpointState {
+        version: HELPER_PROTOCOL_VERSION,
+        host: HELPER_HOST.to_string(),
+        port,
+        pid: Some(std::process::id()),
+    };
+    persist_endpoint(&endpoint_path, &endpoint)?;
 
     let mut server = LocalMonitorServer::new(repo_root.to_path_buf(), state_path)?;
     let result = run_local_monitor_helper_loop(&listener, &mut server);
-    remove_endpoint(&endpoint_path);
+    remove_endpoint_if_owned(&endpoint_path, &endpoint);
     result
 }
 
@@ -283,64 +325,30 @@ impl DaemonHandler for LocalMonitorServer {
 
 impl ChangeMonitorBackend for LocalMonitor {
     fn prepare(repo_root: &Path, state_path: PathBuf) -> ChangeMonitorSession {
-        let previous = match load_snapshot(&snapshot_path(&state_path)) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                warn!(%error, root = %repo_root.display(), "local monitor snapshot unavailable; treating as fresh instance");
-                MonitorSnapshotState::default()
-            }
-        };
-        let current_entries = match scan_snapshot_entries(repo_root) {
-            Ok(entries) => entries,
-            Err(error) => {
-                warn!(%error, root = %repo_root.display(), "local monitor scan failed");
-                return ChangeMonitorSession {
-                    state_path,
-                    backend: Some("native"),
-                    reason: Some(format!("native_error:{error}")),
-                    status: MonitorStatus::Disabled,
-                    ..ChangeMonitorSession::default()
-                };
-            }
-        };
-
-        let next_generation = previous.generation.saturating_add(1);
-        let pending_snapshot = MonitorSnapshotState {
-            version: MONITOR_SNAPSHOT_VERSION,
-            generation: next_generation,
-            entries: current_entries,
-        };
-        let previous_present = !previous.entries.is_empty() || previous.generation > 0;
-        let status = if previous_present {
-            MonitorStatus::Usable
-        } else {
-            MonitorStatus::FreshInstance
-        };
-        let changed_paths = (status == MonitorStatus::Usable)
-            .then(|| diff_snapshot_entries(&previous.entries, &pending_snapshot.entries));
-
+        // In-process fallback when the helper daemon is unavailable.
+        // Never pay for a full-tree WalkBuilder `scan_snapshot_entries` on
+        // the status hot path: without a live watcher we cannot produce a
+        // reliable changed-paths set, so return a session that simply never
+        // skips directories (`can_skip_directory` requires `Usable`).
+        // `Disabled` also lets `FsMonitorMode::Auto` fall through to
+        // Watchman. See docs/perf/cli-core-loop-todo.md.
+        let _ = repo_root;
         ChangeMonitorSession {
-            changed_paths,
-            next_cursor: Some(next_generation.to_string()),
             state_path,
-            pending_snapshot: Some(pending_snapshot),
             backend: Some("native"),
-            reason: (status == MonitorStatus::FreshInstance)
-                .then_some("fresh_instance".to_string()),
-            status,
+            reason: Some("helper_unavailable_no_full_scan".to_string()),
+            status: MonitorStatus::Disabled,
+            ..ChangeMonitorSession::default()
         }
     }
 
     fn persist_current_cursor(repo_root: &Path, state_path: PathBuf) -> Result<(), HeddleError> {
-        let previous = load_snapshot(&snapshot_path(&state_path)).unwrap_or_default();
-        let next_generation = previous.generation.saturating_add(1);
-        let snapshot = MonitorSnapshotState {
-            version: MONITOR_SNAPSHOT_VERSION,
-            generation: next_generation,
-            entries: scan_snapshot_entries(repo_root)?,
-        };
-        persist_snapshot(&snapshot_path(&state_path), &snapshot)?;
-        persist_cursor(&state_path, &next_generation.to_string())
+        // Same policy as `prepare`: do not full-tree scan just to advance a
+        // cursor when the helper is down. A no-op keeps status cheap; the
+        // helper's own `refresh` path still rebuilds snapshots under the
+        // long-lived watcher.
+        let _ = (repo_root, state_path);
+        Ok(())
     }
 }
 
@@ -571,6 +579,14 @@ fn helper_endpoint_path(state_path: &Path) -> PathBuf {
     state_path.with_file_name("monitor-helper.json")
 }
 
+fn helper_start_lock_path(state_path: &Path) -> PathBuf {
+    state_path.with_file_name("monitor-helper-start.lock")
+}
+
+fn helper_lifetime_lock_path(state_path: &Path) -> PathBuf {
+    state_path.with_file_name("monitor-helper-lifetime.lock")
+}
+
 fn try_local_helper_query(
     repo_root: &Path,
     state_path: &Path,
@@ -579,12 +595,17 @@ fn try_local_helper_query(
     let endpoint = match crate::daemon::load_endpoint(&endpoint_path) {
         Ok(endpoint) => endpoint,
         Err(HeddleError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            spawn_local_helper_background(repo_root)?;
-            return Ok(None);
+            if !try_spawn_local_helper(repo_root, state_path)? {
+                return Ok(None);
+            }
+            crate::daemon::load_endpoint(&endpoint_path)?
         }
         Err(error) => {
             warn!(%error, path = %endpoint_path.display(), "Ignoring unreadable monitor helper endpoint");
-            return Ok(None);
+            if !try_spawn_local_helper(repo_root, state_path)? {
+                return Ok(None);
+            }
+            crate::daemon::load_endpoint(&endpoint_path)?
         }
     };
     let response: MonitorHelperResponse = match send_json_request(
@@ -597,8 +618,8 @@ fn try_local_helper_query(
     ) {
         Ok(response) => response,
         Err(error) => {
-            remove_endpoint(&endpoint_path);
-            spawn_local_helper_background(repo_root)?;
+            retire_failed_helper_endpoint(state_path, &endpoint)?;
+            let _ = try_spawn_local_helper(repo_root, state_path)?;
             warn!(%error, host = %endpoint.host, port = endpoint.port, "Local monitor helper query failed; falling back");
             return Ok(None);
         }
@@ -624,6 +645,9 @@ fn try_local_helper_refresh(repo_root: &Path, state_path: &Path) -> Result<bool,
             }
             Err(error) => {
                 warn!(%error, path = %endpoint_path.display(), "Ignoring unreadable monitor helper endpoint");
+                if attempt == 0 && try_spawn_local_helper(repo_root, state_path)? {
+                    continue;
+                }
                 return Ok(false);
             }
         };
@@ -637,7 +661,7 @@ fn try_local_helper_refresh(repo_root: &Path, state_path: &Path) -> Result<bool,
         ) {
             Ok(response) => response,
             Err(error) => {
-                remove_endpoint(&endpoint_path);
+                retire_failed_helper_endpoint(state_path, &endpoint)?;
                 if attempt == 0 && try_spawn_local_helper(repo_root, state_path)? {
                     continue;
                 }
@@ -659,29 +683,67 @@ fn try_local_helper_refresh(repo_root: &Path, state_path: &Path) -> Result<bool,
 }
 
 fn try_spawn_local_helper(repo_root: &Path, state_path: &Path) -> Result<bool, HeddleError> {
-    spawn_local_helper_background(repo_root)?;
+    try_spawn_local_helper_with(state_path, || spawn_local_helper_background(repo_root))
+}
+
+fn try_spawn_local_helper_with(
+    state_path: &Path,
+    spawn: impl FnOnce() -> Result<(), HeddleError>,
+) -> Result<bool, HeddleError> {
+    let _start_lease = objects::lock::RepoLock::at(helper_start_lock_path(state_path)).write()?;
     let endpoint_path = helper_endpoint_path(state_path);
+    if endpoint_is_current_and_live(&endpoint_path) {
+        return Ok(true);
+    }
+
+    let lifetime_lock = objects::lock::RepoLock::at(helper_lifetime_lock_path(state_path));
+    if let Some(lifetime_lease) = lifetime_lock.try_write()? {
+        match crate::daemon::load_endpoint(&endpoint_path) {
+            Ok(endpoint) => {
+                remove_endpoint_if_owned(&endpoint_path, &endpoint);
+            }
+            Err(HeddleError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => remove_endpoint(&endpoint_path),
+        }
+        drop(lifetime_lease);
+        spawn()?;
+    }
+
     for _ in 0..HELPER_SPAWN_RETRIES {
-        if endpoint_path.exists() {
+        if endpoint_is_current_and_live(&endpoint_path) {
             return Ok(true);
         }
         std::thread::sleep(std::time::Duration::from_millis(
             HELPER_SPAWN_RETRY_DELAY_MS,
         ));
     }
-    Ok(endpoint_path.exists())
+    Ok(endpoint_is_current_and_live(&endpoint_path))
+}
+
+fn endpoint_is_current_and_live(path: &Path) -> bool {
+    crate::daemon::load_endpoint(path).is_ok_and(|endpoint| {
+        endpoint.version == HELPER_PROTOCOL_VERSION && endpoint.pid.is_none_or(pid_alive)
+    })
+}
+
+fn retire_failed_helper_endpoint(
+    state_path: &Path,
+    expected: &EndpointState,
+) -> Result<(), HeddleError> {
+    let lifetime_lock = objects::lock::RepoLock::at(helper_lifetime_lock_path(state_path));
+    if let Some(_lease) = lifetime_lock.try_write()? {
+        remove_endpoint_if_owned(&helper_endpoint_path(state_path), expected);
+    }
+    Ok(())
 }
 
 fn spawn_local_helper_background(repo_root: &Path) -> Result<(), HeddleError> {
-    let current_exe = std::env::current_exe().map_err(|error| {
-        HeddleError::Config(format!("locate current heddle executable: {error}"))
-    })?;
-    if let Err(error) = Command::new(current_exe)
-        .arg("--repo")
+    let current_exe = std::env::current_exe()
+        .map_err(|error| HeddleError::Config(format!("locate heddle executable: {error}")))?;
+    let helper = local_helper_binary_for_executable(&current_exe);
+    if let Err(error) = Command::new(helper)
+        .arg("--repo-root")
         .arg(repo_root)
-        .arg("maintenance")
-        .arg("monitor")
-        .arg("--serve")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -690,6 +752,18 @@ fn spawn_local_helper_background(repo_root: &Path) -> Result<(), HeddleError> {
         warn!(%error, root = %repo_root.display(), "Failed to spawn local monitor helper");
     }
     Ok(())
+}
+
+fn local_helper_binary_for_executable(executable: &Path) -> PathBuf {
+    let helper_name = format!("heddle-fsmonitor-worker{}", std::env::consts::EXE_SUFFIX);
+    let adjacent = executable.with_file_name(&helper_name);
+    if adjacent.is_file() {
+        return adjacent;
+    }
+    executable
+        .canonicalize()
+        .map(|resolved| resolved.with_file_name(helper_name))
+        .unwrap_or(adjacent)
 }
 
 fn handle_local_helper_stream(
@@ -866,24 +940,6 @@ fn should_exclude_monitor_path(rel_path: &Path) -> bool {
         .is_some_and(|component| matches!(component.as_os_str().to_str(), Some(".heddle")))
 }
 
-fn diff_snapshot_entries(
-    previous: &BTreeMap<String, SnapshotEntry>,
-    current: &BTreeMap<String, SnapshotEntry>,
-) -> BTreeSet<String> {
-    let mut changed = BTreeSet::new();
-    for (path, entry) in current {
-        if previous.get(path) != Some(entry) {
-            changed.insert(path.clone());
-        }
-    }
-    for path in previous.keys() {
-        if !current.contains_key(path) {
-            changed.insert(path.clone());
-        }
-    }
-    changed
-}
-
 fn persist_cursor(state_path: &Path, clock: &str) -> Result<(), HeddleError> {
     if load_cursor_state(state_path).clock.as_deref() == Some(clock) {
         return Ok(());
@@ -1023,11 +1079,22 @@ fn optional_string(value: &Value, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{
+        collections::BTreeSet,
+        sync::{
+            Arc, Barrier,
+            atomic::{AtomicUsize, Ordering},
+        },
+        thread,
+    };
 
     use objects::object::ContentHash;
+    use tempfile::TempDir;
 
-    use super::subtree_has_changes;
+    use super::{
+        HELPER_HOST, HELPER_PROTOCOL_VERSION, helper_endpoint_path,
+        local_helper_binary_for_executable, subtree_has_changes, try_spawn_local_helper_with,
+    };
     use crate::{DirectoryCacheEntry, WorktreeIndex};
 
     #[test]
@@ -1062,5 +1129,63 @@ mod tests {
 
         let cached = index.get_directory("src").unwrap();
         assert_eq!(cached.clean_tree_hash, Some(tree_hash));
+    }
+
+    #[test]
+    fn concurrent_cold_start_spawns_one_worker() {
+        let temp = TempDir::new().unwrap();
+        let state_path = Arc::new(temp.path().join(".heddle/state/fsmonitor.toml"));
+        let barrier = Arc::new(Barrier::new(8));
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let mut threads = Vec::new();
+
+        for _ in 0..8 {
+            let state_path = Arc::clone(&state_path);
+            let barrier = Arc::clone(&barrier);
+            let spawns = Arc::clone(&spawns);
+            threads.push(thread::spawn(move || {
+                barrier.wait();
+                try_spawn_local_helper_with(&state_path, || {
+                    spawns.fetch_add(1, Ordering::SeqCst);
+                    thread::sleep(std::time::Duration::from_millis(20));
+                    crate::daemon::persist_endpoint(
+                        &helper_endpoint_path(&state_path),
+                        &crate::daemon::EndpointState {
+                            version: HELPER_PROTOCOL_VERSION,
+                            host: HELPER_HOST.to_string(),
+                            port: 9911,
+                            pid: Some(std::process::id()),
+                        },
+                    )
+                })
+                .unwrap()
+            }));
+        }
+
+        assert!(threads.into_iter().all(|thread| thread.join().unwrap()));
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_resolution_follows_a_symlinked_cli_to_its_package() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let package_bin = temp.path().join("Cellar/heddle/1.0/bin");
+        let linked_bin = temp.path().join("bin");
+        std::fs::create_dir_all(&package_bin).unwrap();
+        std::fs::create_dir_all(&linked_bin).unwrap();
+        let executable = package_bin.join("heddle");
+        let worker = package_bin.join("heddle-fsmonitor-worker");
+        std::fs::write(&executable, b"cli").unwrap();
+        std::fs::write(&worker, b"worker").unwrap();
+        let linked_executable = linked_bin.join("heddle");
+        symlink(&executable, &linked_executable).unwrap();
+
+        assert_eq!(
+            local_helper_binary_for_executable(&linked_executable),
+            worker.canonicalize().unwrap()
+        );
     }
 }

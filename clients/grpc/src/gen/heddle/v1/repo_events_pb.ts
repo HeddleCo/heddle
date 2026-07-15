@@ -4,6 +4,7 @@
 
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
 import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import { file_heddle_v1_options } from "./options_pb.js";
 import type { Timestamp } from "@bufbuild/protobuf/wkt";
 import { file_google_protobuf_timestamp } from "@bufbuild/protobuf/wkt";
 import type { Message } from "@bufbuild/protobuf";
@@ -12,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file heddle/v1/repo_events.proto.
  */
 export const file_heddle_v1_repo_events: GenFile = /*@__PURE__*/
-  fileDesc("ChtoZWRkbGUvdjEvcmVwb19ldmVudHMucHJvdG8SCWhlZGRsZS52MSJqChpTdWJzY3JpYmVSZXBvRXZlbnRzUmVxdWVzdBIPCgdyZXBvX2lkGAEgASgJEg4KBnRocmVhZBgCIAEoCRIWCg5hZnRlcl9ldmVudF9pZBgDIAEoAxITCgtldmVudF90eXBlcxgEIAMoCSL6AQoJUmVwb0V2ZW50EhAKCGV2ZW50X2lkGAEgASgDEg8KB3JlcG9faWQYAiABKAkSEgoKZXZlbnRfdHlwZRgDIAEoCRIOCgZ0aHJlYWQYBCABKAkSEAoIcmVmX25hbWUYBSABKAkSEQoJaXNfdGhyZWFkGAYgASgIEhEKCW9sZF9zdGF0ZRgHIAEoCRIRCgluZXdfc3RhdGUYCCABKAkSFQoNYWN0b3Jfc3ViamVjdBgJIAEoCRIUCgxwYXlsb2FkX2pzb24YCiABKAkSLgoKY3JlYXRlZF9hdBgLIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAyaAoQUmVwb0V2ZW50U2VydmljZRJUChNTdWJzY3JpYmVSZXBvRXZlbnRzEiUuaGVkZGxlLnYxLlN1YnNjcmliZVJlcG9FdmVudHNSZXF1ZXN0GhQuaGVkZGxlLnYxLlJlcG9FdmVudDABYgZwcm90bzM", [file_google_protobuf_timestamp]);
+  fileDesc("ChtoZWRkbGUvdjEvcmVwb19ldmVudHMucHJvdG8SCWhlZGRsZS52MSJqChpTdWJzY3JpYmVSZXBvRXZlbnRzUmVxdWVzdBIPCgdyZXBvX2lkGAEgASgJEg4KBnRocmVhZBgCIAEoCRIWCg5hZnRlcl9ldmVudF9pZBgDIAEoAxITCgtldmVudF90eXBlcxgEIAMoCSJaCh9TdWJzY3JpYmVSZXBvRXZlbnRzTXVsdGlSZXF1ZXN0EhIKCnJlcG9fcGF0aHMYASADKAkSDgoGdGhyZWFkGAIgASgJEhMKC2V2ZW50X3R5cGVzGAMgAygJIo0CCglSZXBvRXZlbnQSEAoIZXZlbnRfaWQYASABKAMSDwoHcmVwb19pZBgCIAEoCRISCgpldmVudF90eXBlGAMgASgJEg4KBnRocmVhZBgEIAEoCRIQCghyZWZfbmFtZRgFIAEoCRIRCglpc190aHJlYWQYBiABKAgSEQoJb2xkX3N0YXRlGAcgASgJEhEKCW5ld19zdGF0ZRgIIAEoCRIVCg1hY3Rvcl9zdWJqZWN0GAkgASgJEhQKDHBheWxvYWRfanNvbhgKIAEoCRIuCgpjcmVhdGVkX2F0GAsgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIRCglyZXBvX3BhdGgYDCABKAky3AEKEFJlcG9FdmVudFNlcnZpY2USXgoTU3Vic2NyaWJlUmVwb0V2ZW50cxIlLmhlZGRsZS52MS5TdWJzY3JpYmVSZXBvRXZlbnRzUmVxdWVzdBoULmhlZGRsZS52MS5SZXBvRXZlbnQiCIq1GAQIARABMAESaAoYU3Vic2NyaWJlUmVwb0V2ZW50c011bHRpEiouaGVkZGxlLnYxLlN1YnNjcmliZVJlcG9FdmVudHNNdWx0aVJlcXVlc3QaFC5oZWRkbGUudjEuUmVwb0V2ZW50IgiKtRgECAEQATABYgZwcm90bzM", [file_heddle_v1_options, file_google_protobuf_timestamp]);
 
 /**
  * @generated from message heddle.v1.SubscribeRepoEventsRequest
@@ -45,6 +46,33 @@ export type SubscribeRepoEventsRequest = Message<"heddle.v1.SubscribeRepoEventsR
  */
 export const SubscribeRepoEventsRequestSchema: GenMessage<SubscribeRepoEventsRequest> = /*@__PURE__*/
   messageDesc(file_heddle_v1_repo_events, 0);
+
+/**
+ * @generated from message heddle.v1.SubscribeRepoEventsMultiRequest
+ */
+export type SubscribeRepoEventsMultiRequest = Message<"heddle.v1.SubscribeRepoEventsMultiRequest"> & {
+  /**
+   * @generated from field: repeated string repo_paths = 1;
+   */
+  repoPaths: string[];
+
+  /**
+   * @generated from field: string thread = 2;
+   */
+  thread: string;
+
+  /**
+   * @generated from field: repeated string event_types = 3;
+   */
+  eventTypes: string[];
+};
+
+/**
+ * Describes the message heddle.v1.SubscribeRepoEventsMultiRequest.
+ * Use `create(SubscribeRepoEventsMultiRequestSchema)` to create a new message.
+ */
+export const SubscribeRepoEventsMultiRequestSchema: GenMessage<SubscribeRepoEventsMultiRequest> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_repo_events, 1);
 
 /**
  * @generated from message heddle.v1.RepoEvent
@@ -104,6 +132,13 @@ export type RepoEvent = Message<"heddle.v1.RepoEvent"> & {
    * @generated from field: google.protobuf.Timestamp created_at = 11;
    */
   createdAt?: Timestamp | undefined;
+
+  /**
+   * Visible path of repo_id, for multi-repo client routing.
+   *
+   * @generated from field: string repo_path = 12;
+   */
+  repoPath: string;
 };
 
 /**
@@ -111,7 +146,7 @@ export type RepoEvent = Message<"heddle.v1.RepoEvent"> & {
  * Use `create(RepoEventSchema)` to create a new message.
  */
 export const RepoEventSchema: GenMessage<RepoEvent> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_repo_events, 1);
+  messageDesc(file_heddle_v1_repo_events, 2);
 
 /**
  * @generated from service heddle.v1.RepoEventService
@@ -123,6 +158,14 @@ export const RepoEventService: GenService<{
   subscribeRepoEvents: {
     methodKind: "server_streaming";
     input: typeof SubscribeRepoEventsRequestSchema;
+    output: typeof RepoEventSchema;
+  },
+  /**
+   * @generated from rpc heddle.v1.RepoEventService.SubscribeRepoEventsMulti
+   */
+  subscribeRepoEventsMulti: {
+    methodKind: "server_streaming";
+    input: typeof SubscribeRepoEventsMultiRequestSchema;
     output: typeof RepoEventSchema;
   },
 }> = /*@__PURE__*/

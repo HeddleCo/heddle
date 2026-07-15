@@ -2,10 +2,11 @@
 //! ObjectStore implementation for FsStore.
 
 use std::{
-    fs,
+    fs::{self, OpenOptions},
     path::{Path, PathBuf},
 };
 
+use fs2::FileExt;
 use heddle_format::compression::{header_uncompressed_size, is_compressed};
 use tracing::{debug, instrument, trace};
 
@@ -13,12 +14,17 @@ use super::{
     FsStore,
     fs_io::{list_hashes_from_dir, read_file_bytes, read_file_header},
     fs_paths::{
-        action_path, actions_dir, blobs_dir, hash_path, redaction_path, redactions_dir, state_path,
-        state_visibility_dir, state_visibility_path, states_dir, trees_dir,
+        action_path, actions_dir, blobs_dir, hash_path, redaction_path, redactions_dir,
+        state_attachment_index_lock_path, state_attachment_index_path, state_attachment_path,
+        state_attachments_dir, state_path, state_visibility_dir, state_visibility_path, states_dir,
+        trees_dir,
     },
 };
 use crate::{
-    object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree},
+    object::{
+        Action, ActionId, Blob, ContentHash, State, StateAttachment, StateAttachmentId, StateId,
+        Tree,
+    },
     store::{
         HeddleError, ObjectStore, Result, codec,
         pack::{ObjectType, PackManager, PackObjectId},
@@ -67,18 +73,18 @@ fn validate_tree_serialized(data: &[u8], hash: ContentHash) -> Result<Tree> {
     Ok(tree)
 }
 
-fn validate_loaded_state(requested_id: &ChangeId, state: State) -> Result<State> {
-    if state.change_id != *requested_id {
+fn validate_loaded_state(requested_id: &StateId, mut state: State) -> Result<State> {
+    let computed = state.id();
+    if computed != *requested_id {
         return Err(HeddleError::InvalidObject(format!(
-            "state change_id mismatch: requested {}, found {}",
-            requested_id, state.change_id
+            "state id mismatch: requested {requested_id}, computed {computed}"
         )));
     }
-
+    state.state_id = computed;
     Ok(state)
 }
 
-fn validate_state_serialized(data: &[u8], id: ChangeId) -> Result<State> {
+fn validate_state_serialized(data: &[u8], id: StateId) -> Result<State> {
     let state: State = rmp_serde::from_slice(data)?;
     validate_loaded_state(&id, state)
 }
@@ -98,6 +104,71 @@ fn validate_loaded_action(requested_id: &ActionId, action: Action) -> Result<Act
 fn validate_action_serialized(data: &[u8], id: ActionId) -> Result<Action> {
     let action: Action = rmp_serde::from_slice(data)?;
     validate_loaded_action(&id, action)
+}
+
+impl FsStore {
+    fn with_state_attachment_index_lock<T>(
+        &self,
+        state: &StateId,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let path = state_attachment_index_lock_path(&self.root, state);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        file.lock_exclusive()?;
+        let result = operation();
+        file.unlock()?;
+        result
+    }
+
+    fn rebuild_state_attachment_index(&self, state: &StateId) -> Result<Vec<StateAttachmentId>> {
+        #[cfg(test)]
+        fs::write(
+            state_attachment_index_path(&self.root, state).with_extension("rebuild-marker"),
+            b"rebuilt",
+        )?;
+        let mut ids = Vec::new();
+        let dir = state_attachments_dir(&self.root, state);
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries {
+                let attachment: StateAttachment = rmp_serde::from_slice(&fs::read(entry?.path())?)?;
+                if attachment.state_id != *state {
+                    return Err(HeddleError::InvalidObject(
+                        "state attachment stored under wrong state".to_string(),
+                    ));
+                }
+                ids.push(attachment.id());
+            }
+        }
+        if let Ok(manager) = self.pack_manager().read() {
+            for pack_id in manager.list_all_ids()? {
+                let PackObjectId::Hash(hash) = pack_id else {
+                    continue;
+                };
+                let Some((ObjectType::StateAttachment, bytes)) =
+                    manager.get_hashed_object(&hash)?
+                else {
+                    continue;
+                };
+                let attachment: StateAttachment = rmp_serde::from_slice(&bytes)?;
+                if attachment.state_id == *state {
+                    ids.push(attachment.id());
+                }
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        let path = state_attachment_index_path(&self.root, state);
+        self.write_loose_object_atomic(&path, &rmp_serde::to_vec_named(&ids)?)?;
+        Ok(ids)
+    }
 }
 
 /// Validate every entry in a pack against its tagged id (checksum
@@ -121,10 +192,10 @@ fn validate_and_list_pack(reader: &crate::store::pack::PackReader) -> Result<Vec
 fn state_entries_from_pack(
     reader: &crate::store::pack::PackReader,
     ids: &[PackObjectId],
-) -> Result<Vec<(ChangeId, Vec<u8>)>> {
+) -> Result<Vec<(StateId, Vec<u8>)>> {
     let mut states = Vec::new();
     for id in ids {
-        let PackObjectId::ChangeId(change_id) = id else {
+        let PackObjectId::StateId(change_id) = id else {
             continue;
         };
         let Some((obj_type, data)) = reader.get_object(id)? else {
@@ -143,6 +214,20 @@ fn state_entries_from_pack(
     Ok(states)
 }
 
+fn attachment_entries_from_pack(
+    reader: &crate::store::pack::PackReader,
+    ids: &[PackObjectId],
+) -> Result<Vec<StateAttachment>> {
+    let mut attachments = Vec::new();
+    for id in ids {
+        let Some((ObjectType::StateAttachment, data)) = reader.get_object(id)? else {
+            continue;
+        };
+        attachments.push(rmp_serde::from_slice(&data)?);
+    }
+    Ok(attachments)
+}
+
 fn validate_pack_entry(id: &PackObjectId, obj_type: ObjectType, data: &[u8]) -> Result<()> {
     match (id, obj_type) {
         (PackObjectId::Hash(hash), ObjectType::Blob) => validate_blob_bytes(data, *hash),
@@ -152,8 +237,17 @@ fn validate_pack_entry(id: &PackObjectId, obj_type: ObjectType, data: &[u8]) -> 
         (PackObjectId::Hash(hash), ObjectType::Action) => {
             validate_action_serialized(data, ActionId::from_hash(*hash)).map(|_| ())
         }
-        (PackObjectId::ChangeId(change_id), ObjectType::State) => {
+        (PackObjectId::StateId(change_id), ObjectType::State) => {
             validate_state_serialized(data, *change_id).map(|_| ())
+        }
+        (PackObjectId::Hash(hash), ObjectType::StateAttachment) => {
+            let attachment: StateAttachment = rmp_serde::from_slice(data)?;
+            if attachment.id().as_hash() != hash {
+                return Err(HeddleError::InvalidObject(
+                    "state attachment pack id mismatch".to_string(),
+                ));
+            }
+            Ok(())
         }
         _ => Err(HeddleError::InvalidObject(format!(
             "unsupported native pack object: {:?} {:?}",
@@ -163,20 +257,22 @@ fn validate_pack_entry(id: &PackObjectId, obj_type: ObjectType, data: &[u8]) -> 
 }
 
 impl FsStore {
+    /// Insert into the recent-blob cache when the payload fits the size gate.
+    fn cache_recent_blob(&self, hash: ContentHash, blob: &Blob) {
+        if blob.content().len() > super::fs_store::RECENT_BLOB_CACHE_MAX_BYTES {
+            return;
+        }
+        if let Ok(mut cache) = self.recent_blobs.write() {
+            cache.insert(hash, blob.clone());
+        }
+    }
+
     /// Single-pass blob lookup. The wrapper in `ObjectStore::get_blob`
     /// retries this once after a stale-reload on miss.
     fn try_get_blob_once(&self, hash: &ContentHash) -> Result<Option<Blob>> {
-        let path = hash_path(&blobs_dir(&self.root), hash);
-        let loose_exists = path.exists();
-        let pack_has = if loose_exists {
-            false
-        } else if let Ok(manager) = self.pack_manager().read() {
-            manager.has_object(hash)
-        } else {
-            false
-        };
-        if (loose_exists || pack_has)
-            && let Ok(cache) = self.recent_blobs.read()
+        // Cache first — avoid `path.exists()` / pack probes on warm hits.
+        // Write lock: LRU promotion mutates the order list.
+        if let Ok(mut cache) = self.recent_blobs.write()
             && let Some(blob) = cache.get(hash)
         {
             trace!("Found blob in recent object cache");
@@ -195,9 +291,12 @@ impl FsStore {
             // hash check can't recover from cleanly. For multi-MB
             // blobs the verify was the dominant tail of the cold
             // read (~3GB/s × 10MB ≈ 3.3ms per call).
-            return Ok(Some(Blob::new(data)));
+            let blob = Blob::new(data);
+            self.cache_recent_blob(*hash, &blob);
+            return Ok(Some(blob));
         }
 
+        let path = hash_path(&blobs_dir(&self.root), hash);
         match read_file_bytes(&path)? {
             Some(data) => {
                 trace!(size = data.as_slice().len(), "Blob data read");
@@ -215,6 +314,7 @@ impl FsStore {
                         found: blob.hash(),
                     });
                 }
+                self.cache_recent_blob(*hash, &blob);
                 Ok(Some(blob))
             }
             None => Ok(None),
@@ -240,6 +340,15 @@ impl FsStore {
     }
 
     fn try_has_blob_once(&self, hash: &ContentHash) -> Result<bool> {
+        // Keep `has_blob` coherent with cache-first `get_blob`. A pure
+        // existence check needs no LRU promotion, so take the *read*
+        // lock and use `contains` — concurrent `has_blob` calls in
+        // heddled/mount don't serialize on the exclusive write lock.
+        if let Ok(cache) = self.recent_blobs.read()
+            && cache.contains(hash)
+        {
+            return Ok(true);
+        }
         let path = hash_path(&blobs_dir(&self.root), hash);
         self.loose_or_packed(&path, |m| m.has_object(hash))
     }
@@ -259,7 +368,7 @@ impl FsStore {
     /// pure in-memory varint decode for packed blobs. *No*
     /// decompression.
     fn try_get_blob_size_once(&self, hash: &ContentHash) -> Result<Option<u64>> {
-        if let Ok(cache) = self.recent_blobs.read()
+        if let Ok(mut cache) = self.recent_blobs.write()
             && let Some(blob) = cache.get(hash)
         {
             return Ok(Some(blob.content().len() as u64));
@@ -286,8 +395,8 @@ impl FsStore {
     fn try_get_tree_once(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         // Cache first. The recent-object cache only ever holds trees we
         // wrote or read this process, so a hit is authoritative for a
-        // read.
-        if let Ok(cache) = self.recent_trees.read()
+        // read. Write lock: LRU promotion mutates the order list.
+        if let Ok(mut cache) = self.recent_trees.write()
             && let Some(tree) = cache.get(hash)
         {
             trace!("Found tree in recent object cache");
@@ -327,6 +436,9 @@ impl FsStore {
                     found: tree.hash(),
                 });
             }
+            if let Ok(mut cache) = self.recent_trees.write() {
+                cache.insert(*hash, tree.clone());
+            }
             return Ok(Some(tree));
         }
         Ok(None)
@@ -351,42 +463,31 @@ impl FsStore {
     }
 
     fn try_has_tree_once(&self, hash: &ContentHash) -> Result<bool> {
+        // Read-lock `contains`: an existence check needs no LRU
+        // promotion, so it must not serialize on the write lock.
+        if let Ok(cache) = self.recent_trees.read()
+            && cache.contains(hash)
+        {
+            return Ok(true);
+        }
         let path = hash_path(&trees_dir(&self.root), hash);
         self.loose_or_packed(&path, |m| m.has_object(hash))
     }
 
-    fn try_get_state_once(&self, id: &ChangeId) -> Result<Option<State>> {
-        let path = state_path(&self.root, id);
-        let loose_exists = path.exists();
-        let pack_has = if loose_exists {
-            false
-        } else if let Ok(manager) = self.pack_manager().read() {
-            manager.has_object_id(&PackObjectId::ChangeId(*id))
-        } else {
-            false
-        };
-        if (loose_exists || pack_has)
-            && let Ok(cache) = self.recent_states.read()
+    fn try_get_state_once(&self, id: &StateId) -> Result<Option<State>> {
+        // Cache first — avoid `path.exists()` / pack probes on warm hits.
+        // Write lock: LRU promotion mutates the order list. Put paths and
+        // successful reads below keep this coherent for the process.
+        if let Ok(mut cache) = self.recent_states.write()
             && let Some(state) = cache.get(id)
         {
             trace!("Found state in recent object cache");
             return Ok(Some(state.clone()));
         }
 
-        // States are addressed by `change_id`, NOT by content hash, so the same
-        // id can resolve to two different bodies: a copy packed at adopt/import
-        // time and a newer LOOSE copy written by an authorized rewrite (the #570
-        // fidelity backfill re-hashes + rewrites adopted states loose). The
-        // loose object MUST shadow the packed one — read it FIRST and only
-        // consult the pack when no loose object exists, or a cold read (cache
-        // miss) returns the stale packed body. (Trees/blobs are
-        // content-addressed and can't go stale this way, so their read paths
-        // deliberately keep pack-first ordering.)
-        if loose_exists && let Some(data) = read_file_bytes(&path)? {
-            trace!(
-                size = data.as_slice().len(),
-                "State read from loose object (shadows any packed copy)"
-            );
+        let path = state_path(&self.root, id);
+        if let Some(data) = read_file_bytes(&path)? {
+            trace!(size = data.as_slice().len(), "State read from loose object");
             let state = validate_loaded_state(id, codec::decode_state(data.as_slice())?)?;
             if let Ok(mut cache) = self.recent_states.write() {
                 cache.insert(*id, state.clone());
@@ -395,7 +496,7 @@ impl FsStore {
         }
 
         if let Ok(manager) = self.pack_manager().read()
-            && let Some((obj_type, data)) = manager.get_object(&PackObjectId::ChangeId(*id))?
+            && let Some((obj_type, data)) = manager.get_object(&PackObjectId::StateId(*id))?
             && obj_type == ObjectType::State
         {
             trace!("Found state in packfile");
@@ -409,9 +510,16 @@ impl FsStore {
         Ok(None)
     }
 
-    fn try_has_state_once(&self, id: &ChangeId) -> Result<bool> {
+    fn try_has_state_once(&self, id: &StateId) -> Result<bool> {
+        // Read-lock `contains`: an existence check needs no LRU
+        // promotion, so it must not serialize on the write lock.
+        if let Ok(cache) = self.recent_states.read()
+            && cache.contains(id)
+        {
+            return Ok(true);
+        }
         let path = state_path(&self.root, id);
-        self.loose_or_packed(&path, |m| m.has_object_id(&PackObjectId::ChangeId(*id)))
+        self.loose_or_packed(&path, |m| m.has_object_id(&PackObjectId::StateId(*id)))
     }
 }
 
@@ -468,9 +576,7 @@ impl ObjectStore for FsStore {
         } else {
             trace!("Blob already exists, skipping write");
         }
-        if let Ok(mut cache) = self.recent_blobs.write() {
-            cache.insert(hash, blob.clone());
-        }
+        self.cache_recent_blob(hash, blob);
 
         Ok(hash)
     }
@@ -494,9 +600,7 @@ impl ObjectStore for FsStore {
             );
             self.write_loose_object_atomic(&path, &data)?;
         }
-        if let Ok(mut cache) = self.recent_blobs.write() {
-            cache.insert(hash, blob.clone());
-        }
+        self.cache_recent_blob(hash, blob);
 
         Ok(hash)
     }
@@ -513,9 +617,7 @@ impl ObjectStore for FsStore {
             );
             self.write_loose_object_atomic(&path, data)?;
         }
-        if let Ok(mut cache) = self.recent_blobs.write() {
-            cache.insert(hash, Blob::from_slice(data));
-        }
+        self.cache_recent_blob(hash, &Blob::from_slice(data));
 
         Ok(hash)
     }
@@ -554,7 +656,7 @@ impl ObjectStore for FsStore {
         // Trust without re-hashing — `path.exists()` is the only
         // I/O we need.
         if let Ok(verified) = self.verified_loose_blobs.read()
-            && verified.get(hash).is_some()
+            && verified.contains(hash)
             && path.exists()
         {
             return Some(path);
@@ -741,7 +843,7 @@ impl ObjectStore for FsStore {
     }
 
     #[instrument(skip(self), fields(id = %id.short()))]
-    fn get_state(&self, id: &ChangeId) -> Result<Option<State>> {
+    fn get_state(&self, id: &StateId) -> Result<Option<State>> {
         if let Some(state) = self.try_get_state_once(id)? {
             return Ok(Some(state));
         }
@@ -754,20 +856,23 @@ impl ObjectStore for FsStore {
         Ok(None)
     }
 
-    #[instrument(skip(self, state), fields(id = %state.change_id.short()))]
+    #[instrument(skip(self, state), fields(id = %state.id().short()))]
     fn put_state(&self, state: &State) -> Result<()> {
-        let path = state_path(&self.root, &state.change_id);
+        let state_id = state.id();
+        let path = state_path(&self.root, &state_id);
         let data = codec::encode_state(state, &self.compression)?;
         trace!(compressed_size = data.len(), "Writing state");
         self.write_loose_object_atomic(&path, &data)?;
         if let Ok(mut cache) = self.recent_states.write() {
-            cache.insert(state.change_id, state.clone());
+            let mut cached = state.clone();
+            cached.state_id = state_id;
+            cache.insert(state_id, cached);
         }
         Ok(())
     }
 
     #[instrument(skip(self, data), fields(id = %id.short(), size = data.len()))]
-    fn put_state_serialized(&self, data: &[u8], id: ChangeId) -> Result<()> {
+    fn put_state_serialized(&self, data: &[u8], id: StateId) -> Result<()> {
         let state = validate_state_serialized(data, id)?;
         let path = state_path(&self.root, &id);
         trace!(size = data.len(), "Writing raw serialized state");
@@ -779,7 +884,7 @@ impl ObjectStore for FsStore {
     }
 
     #[instrument(skip(self), fields(id = %id.short()))]
-    fn has_state(&self, id: &ChangeId) -> Result<bool> {
+    fn has_state(&self, id: &StateId) -> Result<bool> {
         if self.try_has_state_once(id)? {
             return Ok(true);
         }
@@ -790,7 +895,7 @@ impl ObjectStore for FsStore {
     }
 
     #[instrument(skip(self))]
-    fn list_states(&self) -> Result<Vec<ChangeId>> {
+    fn list_states(&self) -> Result<Vec<StateId>> {
         self.reload_packs_if_stale()?;
 
         let dir = states_dir(&self.root);
@@ -804,14 +909,14 @@ impl ObjectStore for FsStore {
             let path = entry.path();
             if let Some(name) = path.file_stem()
                 && let Some(name_str) = name.to_str()
-                && let Ok(id) = ChangeId::parse(name_str)
+                && let Ok(id) = StateId::parse(name_str)
             {
                 states.push(id);
             }
         }
         if let Ok(manager) = self.pack_manager().read() {
             for id in manager.list_all_ids()? {
-                if let PackObjectId::ChangeId(change_id) = id
+                if let PackObjectId::StateId(change_id) = id
                     && !states.contains(&change_id)
                 {
                     states.push(change_id);
@@ -820,6 +925,81 @@ impl ObjectStore for FsStore {
         }
         debug!(count = states.len(), "Listed states");
         Ok(states)
+    }
+
+    fn get_state_attachment(
+        &self,
+        state: &StateId,
+        id: &StateAttachmentId,
+    ) -> Result<Option<StateAttachment>> {
+        let path = state_attachment_path(&self.root, state, id);
+        let bytes = if let Some(bytes) = read_file_bytes(&path)? {
+            bytes.as_slice().to_vec()
+        } else if let Ok(manager) = self.pack_manager().read()
+            && let Some((ObjectType::StateAttachment, bytes)) =
+                manager.get_hashed_object(id.as_hash())?
+        {
+            bytes
+        } else {
+            return Ok(None);
+        };
+        let attachment: StateAttachment = rmp_serde::from_slice(&bytes)?;
+        if attachment.state_id != *state || attachment.id() != *id {
+            return Err(HeddleError::InvalidObject(
+                "state attachment address does not match content".to_string(),
+            ));
+        }
+        Ok(Some(attachment))
+    }
+
+    fn put_state_attachment(&self, attachment: &StateAttachment) -> Result<StateAttachmentId> {
+        let id = attachment.id();
+        self.with_state_attachment_index_lock(&attachment.state_id, || {
+            let index_path = state_attachment_index_path(&self.root, &attachment.state_id);
+            let mut ids: Vec<StateAttachmentId> = match read_file_bytes(&index_path)? {
+                Some(bytes) => rmp_serde::from_slice(bytes.as_slice())?,
+                None => self.rebuild_state_attachment_index(&attachment.state_id)?,
+            };
+            if !ids.contains(&id) {
+                ids.push(id);
+                ids.sort();
+                self.write_loose_object_atomic(&index_path, &rmp_serde::to_vec_named(&ids)?)?;
+            }
+            let path = state_attachment_path(&self.root, &attachment.state_id, &id);
+            self.write_loose_object_atomic(&path, &rmp_serde::to_vec_named(attachment)?)?;
+            Ok(id)
+        })
+    }
+
+    fn list_state_attachments(&self, state: &StateId) -> Result<Vec<StateAttachment>> {
+        self.with_state_attachment_index_lock(state, || {
+            let index_path = state_attachment_index_path(&self.root, state);
+            let mut ids: Vec<StateAttachmentId> = match read_file_bytes(&index_path)? {
+                Some(bytes) => rmp_serde::from_slice(bytes.as_slice())?,
+                None => self.rebuild_state_attachment_index(state)?,
+            };
+            let mut attachments = Vec::new();
+            let mut stale = false;
+            for id in &ids {
+                match self.get_state_attachment(state, id)? {
+                    Some(attachment) => attachments.push(attachment),
+                    None => stale = true,
+                }
+            }
+            if stale {
+                ids = self.rebuild_state_attachment_index(state)?;
+                attachments.clear();
+                for id in ids {
+                    let attachment = self.get_state_attachment(state, &id)?.ok_or_else(|| {
+                        HeddleError::InvalidObject(format!(
+                            "rebuilt state attachment index references missing {id}"
+                        ))
+                    })?;
+                    attachments.push(attachment);
+                }
+            }
+            Ok(attachments)
+        })
     }
 
     #[instrument(skip(self), fields(id = %id))]
@@ -957,7 +1137,7 @@ impl ObjectStore for FsStore {
                 }
                 Ok(None)
             }
-            PackObjectId::ChangeId(change_id) => {
+            PackObjectId::StateId(change_id) => {
                 if let Some(state) = self.get_state(change_id)? {
                     Ok(Some((ObjectType::State, rmp_serde::to_vec_named(&state)?)))
                 } else {
@@ -975,6 +1155,13 @@ impl ObjectStore for FsStore {
         self.install_pack_files(pack_data, index_data)?;
         for (id, data) in state_entries {
             self.put_state_serialized(&data, id)?;
+        }
+        for id in &ids {
+            let Some((ObjectType::StateAttachment, data)) = reader.get_object(id)? else {
+                continue;
+            };
+            let attachment: StateAttachment = rmp_serde::from_slice(&data)?;
+            self.put_state_attachment(&attachment)?;
         }
         self.clear_recent_object_caches();
         Ok(ids)
@@ -1004,9 +1191,16 @@ impl ObjectStore for FsStore {
             let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;
             state_entries_from_pack(&reader, &ids)?
         };
+        let attachment_entries = {
+            let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;
+            attachment_entries_from_pack(&reader, &ids)?
+        };
         self.install_pack_files_streaming(pack_path, index_path)?;
         for (id, data) in state_entries {
             self.put_state_serialized(&data, id)?;
+        }
+        for attachment in attachment_entries {
+            self.put_state_attachment(&attachment)?;
         }
         Ok(ids)
     }
@@ -1047,7 +1241,7 @@ impl ObjectStore for FsStore {
     fn put_redactions_bytes_for_blob(&self, blob: &ContentHash, bytes: &[u8]) -> Result<()> {
         let dir = redactions_dir(&self.root);
         if !dir.exists() {
-            fs::create_dir_all(&dir)?;
+            crate::fs_atomic::create_dir_all_durable(&dir)?;
         }
         let path = redaction_path(&self.root, blob);
         crate::fs_atomic::write_file_atomic(&path, bytes)?;
@@ -1076,11 +1270,11 @@ impl ObjectStore for FsStore {
         Ok(out)
     }
 
-    fn has_state_visibility_for_state(&self, state: &ChangeId) -> Result<bool> {
+    fn has_state_visibility_for_state(&self, state: &StateId) -> Result<bool> {
         Ok(state_visibility_path(&self.root, state).exists())
     }
 
-    fn get_state_visibility_bytes_for_state(&self, state: &ChangeId) -> Result<Option<Vec<u8>>> {
+    fn get_state_visibility_bytes_for_state(&self, state: &StateId) -> Result<Option<Vec<u8>>> {
         let path = state_visibility_path(&self.root, state);
         match fs::read(&path) {
             Ok(bytes) => Ok(Some(bytes)),
@@ -1089,17 +1283,17 @@ impl ObjectStore for FsStore {
         }
     }
 
-    fn put_state_visibility_bytes_for_state(&self, state: &ChangeId, bytes: &[u8]) -> Result<()> {
+    fn put_state_visibility_bytes_for_state(&self, state: &StateId, bytes: &[u8]) -> Result<()> {
         let dir = state_visibility_dir(&self.root);
         if !dir.exists() {
-            fs::create_dir_all(&dir)?;
+            crate::fs_atomic::create_dir_all_durable(&dir)?;
         }
         let path = state_visibility_path(&self.root, state);
         crate::fs_atomic::write_file_atomic(&path, bytes)?;
         Ok(())
     }
 
-    fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
+    fn list_states_with_visibility(&self) -> Result<Vec<StateId>> {
         let dir = state_visibility_dir(&self.root);
         if !dir.exists() {
             return Ok(Vec::new());
@@ -1114,10 +1308,102 @@ impl ObjectStore for FsStore {
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            if let Ok(state) = ChangeId::parse(stem) {
+            if let Ok(state) = StateId::parse(stem) {
                 out.push(state);
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod state_attachment_tests {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+
+    use super::*;
+    use crate::object::{Attribution, Principal, StateAttachmentBody};
+    use crate::store::{CompressionConfig, pack::PackBuilder};
+
+    fn fixture(store: &FsStore) -> (State, StateAttachment) {
+        let tree = store.put_tree(&Tree::new()).unwrap();
+        let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
+        let state = State::new(tree, vec![], attribution.clone());
+        store.put_state(&state).unwrap();
+        let attachment = StateAttachment {
+            state_id: state.id(),
+            body: StateAttachmentBody::Context(ContentHash::compute(b"context")),
+            attribution,
+            created_at: Utc::now(),
+            supersedes: None,
+        };
+        (state, attachment)
+    }
+
+    #[test]
+    fn concurrent_attachment_writes_keep_every_index_entry() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(FsStore::new(temp.path()));
+        let (state, base) = fixture(&store);
+        let mut threads = Vec::new();
+        for byte in 0..16u8 {
+            let store = Arc::clone(&store);
+            let mut attachment = base.clone();
+            attachment.body = StateAttachmentBody::Context(ContentHash::compute(&[byte]));
+            threads.push(std::thread::spawn(move || {
+                store.put_state_attachment(&attachment).unwrap();
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(store.list_state_attachments(&state.id()).unwrap().len(), 16);
+    }
+
+    #[test]
+    fn missing_index_rebuilds_from_loose_objects() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = FsStore::new(temp.path());
+        let (state, attachment) = fixture(&store);
+        store.put_state_attachment(&attachment).unwrap();
+        fs::remove_file(state_attachment_index_path(&store.root, &state.id())).unwrap();
+        assert_eq!(
+            store.list_state_attachments(&state.id()).unwrap(),
+            vec![attachment]
+        );
+    }
+
+    #[test]
+    fn packed_attachment_uses_state_index_for_lookup() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = FsStore::new(temp.path());
+        let (state, attachment) = fixture(&store);
+        let mut builder = PackBuilder::new(CompressionConfig::default());
+        builder.add(
+            *attachment.id().as_hash(),
+            ObjectType::StateAttachment,
+            rmp_serde::to_vec_named(&attachment).unwrap(),
+        );
+        let (pack, index, _) = builder.build().unwrap();
+        store.install_pack(&pack, &index).unwrap();
+        fs::remove_file(state_attachment_path(
+            &store.root,
+            &state.id(),
+            &attachment.id(),
+        ))
+        .unwrap();
+        let rebuild_marker =
+            state_attachment_index_path(&store.root, &state.id()).with_extension("rebuild-marker");
+        let _ = fs::remove_file(&rebuild_marker);
+        assert_eq!(
+            store.list_state_attachments(&state.id()).unwrap(),
+            vec![attachment.clone()]
+        );
+        assert_eq!(
+            store.list_state_attachments(&state.id()).unwrap(),
+            vec![attachment]
+        );
+        assert!(!rebuild_marker.exists());
     }
 }

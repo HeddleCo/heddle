@@ -4,8 +4,7 @@
 //! This is the *only* place that turns a [`ProgressSnapshot`] into bytes on a
 //! terminal. Domain crates drive a `Progress` handle; the CLI installs a
 //! [`TerminalSink`] via the JSON-guarded factory ([`progress_for`]) so progress
-//! never leaks into machine-readable stdout (#550) and never repaints when
-//! output is piped away from a TTY.
+//! is written to stderr and never leaks into result-only stdout (#550).
 //!
 //! # Throttling lives here
 //!
@@ -29,6 +28,21 @@ use crate::cli::{Cli, should_output_json, style};
 /// operation doesn't spend its time flushing the terminal. Matches the historic
 /// import cadence.
 pub(crate) const COMMIT_TICK_INTERVAL: usize = 64;
+
+pub(crate) fn format_transfer_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    if bytes < KIB {
+        format!("{bytes} B")
+    } else if bytes < MIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else if bytes < GIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    }
+}
 
 /// Build a [`Progress`] handle for a command, applying the single JSON guard
 /// (#550) exactly once at construction: JSON output → a null handle that
@@ -106,13 +120,13 @@ impl TerminalSink {
     }
 
     fn paint(line: &str) {
-        if io::stdout().is_terminal() {
+        if io::stderr().is_terminal() {
             // `\r` to column 0, `\x1b[K` clears to end of line so a shorter line
             // doesn't leave stale trailing characters.
-            print!("\r{}\x1b[K", style::dim(line));
-            io::stdout().flush().ok();
+            eprint!("\r{}\x1b[K", style::dim(line));
+            io::stderr().flush().ok();
         } else {
-            println!("{}", style::dim(line));
+            eprintln!("{}", style::dim(line));
         }
     }
 }
@@ -135,18 +149,15 @@ impl Sink for TerminalSink {
     }
 }
 
-/// Clear the live progress line without printing a completion message. No-op
-/// for a null (inactive) handle or off a TTY (where each tick was already a
-/// standalone line, not a `\r`-overwritten one). Used by consumers that print
-/// their own final output right after the operation (e.g. `switch` printing
-/// `Now at: …`, or the hosted push path clearing the transient upload line).
+/// Clear an active TTY progress line before rendering command output.
+#[cfg(feature = "client")]
 pub(crate) fn clear_line(progress: &Progress) {
     if !progress.is_active() {
         return;
     }
-    if io::stdout().is_terminal() {
-        print!("\r\x1b[K");
-        io::stdout().flush().ok();
+    if io::stderr().is_terminal() {
+        eprint!("\r\x1b[K");
+        io::stderr().flush().ok();
     }
 }
 
@@ -157,11 +168,11 @@ pub(crate) fn finish_line(progress: &Progress, message: &str) {
     if !progress.is_active() {
         return;
     }
-    if io::stdout().is_terminal() {
-        print!("\r\x1b[K{}\n", style::accent(message));
-        io::stdout().flush().ok();
+    if io::stderr().is_terminal() {
+        eprintln!("\r\x1b[K{}", style::accent(message));
+        io::stderr().flush().ok();
     } else {
-        println!("{}", style::accent(message));
+        eprintln!("{}", style::accent(message));
     }
 }
 

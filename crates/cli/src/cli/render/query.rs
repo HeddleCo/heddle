@@ -29,8 +29,8 @@ pub fn query_text(report: &QueryReport) -> Result<()> {
             if let Some(thread) = &hit.thread {
                 text.push_str(&format!(" thread={thread}"));
             }
-            if let Some(change_id) = &hit.change_id {
-                text.push_str(&format!(" -> {change_id}"));
+            if let Some(state_id) = &hit.state_id {
+                text.push_str(&format!(" -> {state_id}"));
             }
             text.push('\n');
         }

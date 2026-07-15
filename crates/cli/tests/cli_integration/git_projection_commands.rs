@@ -32,6 +32,20 @@ fn init_colocated_git_repo(path: &std::path::Path) {
         .unwrap();
 }
 
+fn init_direct_git_overlay(path: &std::path::Path) {
+    heddle(
+        &[
+            "init",
+            "--principal-name",
+            "Heddle Test",
+            "--principal-email",
+            "heddle@example.com",
+        ],
+        Some(path),
+    )
+    .expect("initialize direct Git Overlay");
+}
+
 fn git_commit_all_in(path: &std::path::Path, message: &str) {
     assert!(
         Command::new("git")
@@ -113,6 +127,69 @@ fn seed_unrepresentable_tree_name_repo(path: &std::path::Path) {
 const EMPTY_BLOB_OID: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
 
 #[test]
+fn git_overlay_commit_recovers_checkpoint_intent_without_bridge_mirror() {
+    use oplog::{OpLogBackend, OpRecord};
+
+    for fault in [
+        "git_checkpoint_after_publish_before_phase",
+        "git_checkpoint_after_metadata_before_oplog",
+        "git_checkpoint_after_oplog_before_finalize",
+    ] {
+        let repo = TempDir::new().unwrap();
+        init_colocated_git_repo(repo.path());
+        std::fs::write(repo.path().join("tracked.txt"), "base\n").unwrap();
+        git_commit_all_in(repo.path(), "base");
+        heddle(&["init"], Some(repo.path())).expect("initialize Git Overlay");
+
+        std::fs::write(repo.path().join("tracked.txt"), format!("{fault}\n")).unwrap();
+        heddle(&["capture", "-m", fault], Some(repo.path())).expect("capture state");
+        let crashed = heddle_output_with_env(
+            &["commit"],
+            Some(repo.path()),
+            &[("HEDDLE_FAULT_INJECT", fault)],
+        )
+        .expect("run faulted commit");
+        assert!(
+            !crashed.status.success(),
+            "fault point {fault} must stop commit"
+        );
+        assert!(
+            repo.path()
+                .join(".heddle/state/git-checkpoint-intent.json")
+                .is_file(),
+            "fault point {fault} must leave a durable recovery intent"
+        );
+
+        heddle(&["commit"], Some(repo.path())).expect("retry checkpoint recovery");
+        assert!(
+            !repo
+                .path()
+                .join(".heddle/state/git-checkpoint-intent.json")
+                .exists(),
+            "retry after {fault} must finalize the intent"
+        );
+        assert!(
+            !repo.path().join(".heddle/git").exists(),
+            "commit must write through Sley to the checkout .git"
+        );
+        assert_eq!(git_status_porcelain(repo.path()), "");
+        let reopened = Repository::open(repo.path()).expect("open recovered repository");
+        assert_eq!(reopened.list_git_checkpoints().unwrap().len(), 1);
+        let checkpoint_ops = reopened
+            .oplog()
+            .recent(100)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| matches!(entry.operation, OpRecord::GitCheckpoint { .. }))
+            .count();
+        assert_eq!(
+            checkpoint_ops, 1,
+            "recovery after {fault} must finalize the checkpoint oplog exactly once"
+        );
+    }
+}
+
+#[test]
 fn import_git_refuses_unrepresentable_tree_name_by_default_and_lossy_summarizes() {
     let source = TempDir::new().unwrap();
     seed_unrepresentable_tree_name_repo(source.path());
@@ -186,8 +263,7 @@ fn capture_marks_new_file_intent_to_add_in_colocated_index() {
     std::fs::write(source.path().join("tracked.txt"), "already tracked\n").unwrap();
     git_commit_all_in(source.path(), "initial");
 
-    heddle(&["adopt", "--ref", "main"], Some(source.path()))
-        .expect("adopt should import Git history into Heddle");
+    init_direct_git_overlay(source.path());
 
     std::fs::write(source.path().join("new_file.txt"), "brand new content\n").unwrap();
     heddle(&["capture", "-m", "add new file"], Some(source.path()))
@@ -243,8 +319,7 @@ fn recapture_prunes_stale_intent_to_add_for_removed_file() {
     std::fs::write(source.path().join("tracked.txt"), "already tracked\n").unwrap();
     git_commit_all_in(source.path(), "initial");
 
-    heddle(&["adopt", "--ref", "main"], Some(source.path()))
-        .expect("adopt should import Git history into Heddle");
+    init_direct_git_overlay(source.path());
 
     // Capture a new file: it becomes intent-to-add in the colocated index.
     std::fs::write(source.path().join("new_file.txt"), "brand new content\n").unwrap();
@@ -298,8 +373,7 @@ fn recapture_to_empty_tree_prunes_stale_intent_to_add() {
     std::fs::write(source.path().join("tracked.txt"), "already tracked\n").unwrap();
     git_commit_all_in(source.path(), "initial");
 
-    heddle(&["adopt", "--ref", "main"], Some(source.path()))
-        .expect("adopt should import Git history into Heddle");
+    init_direct_git_overlay(source.path());
 
     // Capture a new file: it becomes intent-to-add in the colocated index.
     std::fs::write(source.path().join("new_file.txt"), "brand new content\n").unwrap();
@@ -364,8 +438,7 @@ fn recapture_skips_intent_to_add_that_conflicts_with_tracked_file() {
     std::fs::write(source.path().join("foo"), "i am a file\n").unwrap();
     git_commit_all_in(source.path(), "initial");
 
-    heddle(&["adopt", "--ref", "main"], Some(source.path()))
-        .expect("adopt should import Git history into Heddle");
+    init_direct_git_overlay(source.path());
 
     // Replace the tracked file `foo` with a directory `foo/` containing
     // `foo/bar`. The captured state now has `foo/bar`, but the real
@@ -411,8 +484,7 @@ fn recapture_skips_intent_to_add_that_conflicts_with_tracked_dir() {
     std::fs::write(source.path().join("foo").join("bar"), "i am under a dir\n").unwrap();
     git_commit_all_in(source.path(), "initial");
 
-    heddle(&["adopt", "--ref", "main"], Some(source.path()))
-        .expect("adopt should import Git history into Heddle");
+    init_direct_git_overlay(source.path());
 
     // Replace the directory `foo/` with a file `foo`. The captured state
     // now has `foo`, but the real index entry `foo/bar` is still present.
@@ -565,441 +637,4 @@ fn test_cli_bridge_git_push_pull_leaves_removed() {
             "bridge git {leaf} should be removed in favor of top-level {leaf}"
         );
     }
-}
-
-/// `heddle push --mirror=<git-remote>` performs the primary push to the
-/// heddle remote AND a Git projection push to the configured mirror, in one
-/// invocation.
-#[test]
-fn test_cli_push_mirror_dual_push_to_weft_and_git_remote() {
-    let source = TempDir::new().unwrap();
-    let weft_target = TempDir::new().unwrap();
-    let git_remote = TempDir::new().unwrap();
-    let mirror_repo = SleyRepository::init_bare(git_remote.path()).unwrap();
-
-    heddle(&["init"], Some(source.path())).unwrap();
-    heddle(&["init"], Some(weft_target.path())).unwrap();
-    std::fs::write(source.path().join("file.txt"), "dual push").unwrap();
-    heddle(&["capture", "-m", "Initial"], Some(source.path())).unwrap();
-
-    let weft_path = weft_target.path().to_string_lossy().to_string();
-    let git_path = git_remote.path().to_string_lossy().to_string();
-    let mirror_arg = format!("--mirror={}", git_path);
-    // `--output text` forces the text branch of `render_mirror_outcome`.
-    // Default `auto` resolves to JSON when stdout is piped (which it is
-    // under `cargo test`), so without this flag the text-success path
-    // would never execute and codecov/patch would miss it.
-    let stdout = heddle(
-        &[
-            "--output",
-            "text",
-            "push",
-            &weft_path,
-            "--thread",
-            "main",
-            &mirror_arg,
-        ],
-        Some(source.path()),
-    )
-    .expect("dual push (--mirror=<remote>) should succeed");
-
-    // Text branch on success emits a "mirrored to <remote>" line.
-    assert!(
-        stdout.contains("mirrored to") && stdout.contains(&git_path),
-        "text-mode success line missing: {}",
-        stdout
-    );
-
-    // Primary push landed at the heddle target.
-    let threads = heddle(&["thread", "list"], Some(weft_target.path())).unwrap();
-    assert!(
-        threads.contains("main"),
-        "weft target should have main thread after primary push: {}",
-        threads
-    );
-
-    // Mirror push landed at the bare git remote.
-    assert!(
-        find_reference(&mirror_repo, "refs/heads/main").is_ok(),
-        "git mirror remote should have refs/heads/main after mirror push"
-    );
-}
-
-/// Mirror push failure is reported as a warning but does NOT cause the
-/// primary push to fail. The user still sees the primary push succeed.
-#[test]
-fn test_cli_push_mirror_failure_does_not_abort_primary_push() {
-    let source = TempDir::new().unwrap();
-    let weft_target = TempDir::new().unwrap();
-
-    heddle(&["init"], Some(source.path())).unwrap();
-    heddle(&["init"], Some(weft_target.path())).unwrap();
-    std::fs::write(source.path().join("file.txt"), "warn on mirror fail").unwrap();
-    heddle(&["capture", "-m", "Initial"], Some(source.path())).unwrap();
-
-    let weft_path = weft_target.path().to_string_lossy().to_string();
-    // Pointing the mirror at a nonexistent path is a failure.
-    let bogus_mirror = source
-        .path()
-        .join("does-not-exist-mirror")
-        .to_string_lossy()
-        .to_string();
-    let mirror_arg = format!("--mirror={}", bogus_mirror);
-    // `--output text` forces the text branch of `render_mirror_outcome`
-    // on the failure path. The warning lands on stderr, so this test
-    // proves the primary push still succeeds and leaves separate
-    // stderr-checking to the JSON variant (which captures the structured
-    // failure on stdout).
-    let result = heddle(
-        &[
-            "--output",
-            "text",
-            "push",
-            &weft_path,
-            "--thread",
-            "main",
-            &mirror_arg,
-        ],
-        Some(source.path()),
-    );
-    assert!(
-        result.is_ok(),
-        "primary push must still succeed even when mirror push fails: {:?}",
-        result.err()
-    );
-
-    // Primary push still landed.
-    let threads = heddle(&["thread", "list"], Some(weft_target.path())).unwrap();
-    assert!(
-        threads.contains("main"),
-        "primary push should land even if mirror push fails: {}",
-        threads
-    );
-}
-
-/// `--mirror` MUST require `=` to take an explicit value. Without
-/// `require_equals = true`, clap would consume the next token (the
-/// positional primary remote) as the mirror value, silently pushing
-/// the primary to the configured default and the mirror to the
-/// intended primary target.
-///
-/// Pins the behavior: `heddle push --mirror <PRIMARY>` parses
-/// `<PRIMARY>` as the positional remote, and `--mirror` takes its
-/// `default_missing_value` ("origin"). Since no `origin` git remote
-/// is configured here, the mirror push warns but does not abort.
-#[test]
-fn test_cli_push_mirror_requires_equals_does_not_swallow_positional() {
-    let source = TempDir::new().unwrap();
-    let weft_target = TempDir::new().unwrap();
-
-    heddle(&["init"], Some(source.path())).unwrap();
-    heddle(&["init"], Some(weft_target.path())).unwrap();
-    std::fs::write(source.path().join("file.txt"), "require equals").unwrap();
-    heddle(&["capture", "-m", "Initial"], Some(source.path())).unwrap();
-
-    let weft_path = weft_target.path().to_string_lossy().to_string();
-    // Space form with the positional remote immediately after
-    // `--mirror`. Without `require_equals=true`, clap consumes
-    // `weft_path` as the mirror's value, leaving the primary remote
-    // unspecified — silently inverting the user's intent. With
-    // `require_equals=true`, `--mirror` takes its
-    // `default_missing_value` and `weft_path` parses as the
-    // positional primary remote.
-    let result = heddle(
-        &["push", "--mirror", &weft_path, "--thread", "main"],
-        Some(source.path()),
-    );
-    assert!(
-        result.is_ok(),
-        "push must succeed; primary should land at <PRIMARY> and mirror default (origin) is best-effort: {:?}",
-        result.err()
-    );
-
-    // Primary push landed at the heddle target — proving the
-    // positional was NOT swallowed by --mirror.
-    let threads = heddle(&["thread", "list"], Some(weft_target.path())).unwrap();
-    assert!(
-        threads.contains("main"),
-        "primary push should land at the positional remote, not be swallowed by --mirror: {}",
-        threads
-    );
-}
-
-/// `--mirror=<name>` parses the explicit value and `--mirror` alone
-/// takes the `default_missing_value`. Pins both forms in one test
-/// so the parse table is asserted from end to end.
-#[test]
-fn test_cli_push_mirror_explicit_equals_form_parses_value() {
-    let source = TempDir::new().unwrap();
-    let weft_target = TempDir::new().unwrap();
-    let git_remote = TempDir::new().unwrap();
-    let mirror_repo = SleyRepository::init_bare(git_remote.path()).unwrap();
-
-    heddle(&["init"], Some(source.path())).unwrap();
-    heddle(&["init"], Some(weft_target.path())).unwrap();
-    std::fs::write(source.path().join("file.txt"), "explicit eq").unwrap();
-    heddle(&["capture", "-m", "Initial"], Some(source.path())).unwrap();
-
-    let weft_path = weft_target.path().to_string_lossy().to_string();
-    let git_path = git_remote.path().to_string_lossy().to_string();
-    let mirror_arg = format!("--mirror={}", git_path);
-    // Flag-before-positional ordering — the form Codex's finding said
-    // the original parse table mishandled.
-    let result = heddle(
-        &["push", &mirror_arg, "--thread", "main", &weft_path],
-        Some(source.path()),
-    );
-    assert!(
-        result.is_ok(),
-        "--mirror=<remote> followed by positional must parse cleanly: {:?}",
-        result.err()
-    );
-
-    let threads = heddle(&["thread", "list"], Some(weft_target.path())).unwrap();
-    assert!(threads.contains("main"));
-    assert!(
-        find_reference(&mirror_repo, "refs/heads/main").is_ok(),
-        "mirror push should land at the explicit <git_path>"
-    );
-}
-
-/// JSON output path on mirror success: covers the `mirrored:true`
-/// branch of `render_mirror_outcome`.
-#[test]
-fn test_cli_push_mirror_json_success_emits_mirrored_true() {
-    let source = TempDir::new().unwrap();
-    let weft_target = TempDir::new().unwrap();
-    let git_remote = TempDir::new().unwrap();
-    SleyRepository::init_bare(git_remote.path()).unwrap();
-
-    heddle(&["init"], Some(source.path())).unwrap();
-    heddle(&["init"], Some(weft_target.path())).unwrap();
-    std::fs::write(source.path().join("file.txt"), "json ok").unwrap();
-    heddle(&["capture", "-m", "Initial"], Some(source.path())).unwrap();
-
-    let weft_path = weft_target.path().to_string_lossy().to_string();
-    let git_path = git_remote.path().to_string_lossy().to_string();
-    let mirror_arg = format!("--mirror={}", git_path);
-    let output = heddle_output(
-        &[
-            "--output",
-            "json",
-            "push",
-            &weft_path,
-            "--thread",
-            "main",
-            &mirror_arg,
-        ],
-        Some(source.path()),
-    )
-    .expect("push --output json --mirror=<remote> must invoke");
-    let stderr = std::str::from_utf8(&output.stderr).unwrap_or("");
-    assert!(
-        output.status.success(),
-        "primary push must succeed: stderr={stderr}"
-    );
-
-    // Mirror diagnostics land on stderr to keep `heddle push --output json`
-    // a single JSON object on stdout (PR #251 contract).
-    assert!(
-        stderr.contains("\"mirrored\":true"),
-        "JSON mirror success line missing on stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains(&git_path),
-        "stderr should echo the mirror remote: {stderr}"
-    );
-}
-
-/// `heddle push --mirror=<git-remote>` in a Git-overlay (non-hosted)
-/// repo must push to BOTH the primary and the mirror. The cmd_push
-/// early-return for the `GitOverlay && !hosted_enabled` branch
-/// previously skipped the mirror block entirely, silently ignoring
-/// `--mirror` for the overlay drop-in case.
-#[test]
-fn test_cli_push_mirror_in_git_overlay_pushes_to_both_remotes() {
-    let source = TempDir::new().unwrap();
-    let primary_remote = TempDir::new().unwrap();
-    let mirror_remote = TempDir::new().unwrap();
-    let primary_repo = SleyRepository::init_bare(primary_remote.path()).unwrap();
-    let mirror_repo = SleyRepository::init_bare(mirror_remote.path()).unwrap();
-
-    // Plain `git init` → RepositoryCapability::GitOverlay,
-    // hosted_enabled() == false. This is the drop-in case the
-    // early-return in cmd_push handles.
-    assert!(
-        Command::new("git")
-            .arg("init")
-            .current_dir(source.path())
-            .status()
-            .unwrap()
-            .success()
-    );
-    for (k, v) in [
-        ("user.name", "Heddle Test"),
-        ("user.email", "heddle@example.com"),
-        ("init.defaultBranch", "main"),
-    ] {
-        Command::new("git")
-            .args(["config", k, v])
-            .current_dir(source.path())
-            .status()
-            .unwrap();
-    }
-    Command::new("git")
-        .args(["checkout", "-B", "main"])
-        .current_dir(source.path())
-        .status()
-        .unwrap();
-    std::fs::write(source.path().join("file.txt"), "overlay dual push").unwrap();
-    Command::new("git")
-        .args(["add", "."])
-        .current_dir(source.path())
-        .status()
-        .unwrap();
-    Command::new("git")
-        .args(["commit", "-m", "initial"])
-        .current_dir(source.path())
-        .status()
-        .unwrap();
-
-    // Bootstrap the heddle overlay sidecar so Git projection has content
-    // to push. Without an imported state, `push` silently
-    // succeeds but copies nothing — masking the real --mirror bug.
-    heddle(&["import", "git", "--ref", "main"], Some(source.path()))
-        .expect("import git should bootstrap the overlay sidecar");
-
-    let primary_path = primary_remote.path().to_string_lossy().to_string();
-    let mirror_path = mirror_remote.path().to_string_lossy().to_string();
-    let mirror_arg = format!("--mirror={}", mirror_path);
-    heddle(&["push", &primary_path, &mirror_arg], Some(source.path()))
-        .expect("push --mirror in GitOverlay repo should succeed");
-
-    assert!(
-        find_reference(&primary_repo, "refs/heads/main").is_ok(),
-        "primary remote should have refs/heads/main after overlay push"
-    );
-    assert!(
-        find_reference(&mirror_repo, "refs/heads/main").is_ok(),
-        "mirror remote MUST ALSO have refs/heads/main — the GitOverlay early-return previously bypassed --mirror"
-    );
-}
-
-/// `render_mirror_outcome` JSON must use RFC 8259 escaping — not
-/// Rust's `Debug` format. A remote name containing U+2028
-/// (LINE SEPARATOR) round-trips through `{:?}` as `"\u{2028}"`
-/// (Rust syntax), which is NOT valid JSON. With proper serde
-/// serialization the output parses and the field round-trips.
-#[test]
-fn test_cli_push_mirror_json_uses_rfc8259_escaping_for_unicode() {
-    let source = TempDir::new().unwrap();
-    let weft_target = TempDir::new().unwrap();
-    let mirror_parent = TempDir::new().unwrap();
-    // A real bare git repo at a path containing U+2028, so the mirror
-    // push succeeds and the `"remote"` field carries the bad codepoint.
-    let mirror_dir = mirror_parent.path().join("mirror\u{2028}suffix");
-    std::fs::create_dir_all(&mirror_dir).unwrap();
-    let mirror_repo = SleyRepository::init_bare(&mirror_dir).unwrap();
-
-    heddle(&["init"], Some(source.path())).unwrap();
-    heddle(&["init"], Some(weft_target.path())).unwrap();
-    std::fs::write(source.path().join("file.txt"), "u+2028").unwrap();
-    heddle(&["capture", "-m", "Initial"], Some(source.path())).unwrap();
-
-    let weft_path = weft_target.path().to_string_lossy().to_string();
-    let mirror_path = mirror_dir.to_string_lossy().to_string();
-    let mirror_arg = format!("--mirror={}", mirror_path);
-    let output = heddle_output(
-        &[
-            "--output",
-            "json",
-            "push",
-            &weft_path,
-            "--thread",
-            "main",
-            &mirror_arg,
-        ],
-        Some(source.path()),
-    )
-    .expect("push --output json --mirror=<U+2028> must invoke");
-    let stderr = std::str::from_utf8(&output.stderr).unwrap_or("");
-    assert!(
-        output.status.success(),
-        "primary push must succeed: stderr={stderr}"
-    );
-
-    // Mirror outcome JSON now lives on stderr (PR #251 contract — stdout
-    // stays a single JSON object).
-    let mirror_line = stderr
-        .lines()
-        .find(|line| line.contains("\"mirrored\""))
-        .unwrap_or_else(|| panic!("mirror outcome JSON line missing on stderr: {stderr}"));
-
-    // The Debug-format bug emits `"\u{2028}"` (literal braces), which
-    // is not valid JSON — `serde_json::from_str` rejects it.
-    let parsed: serde_json::Value = serde_json::from_str(mirror_line).unwrap_or_else(|err| {
-        panic!(
-            "mirror outcome must be RFC 8259 JSON, got {}: {:?}",
-            err, mirror_line
-        )
-    });
-    assert_eq!(
-        parsed["remote"].as_str(),
-        Some(mirror_path.as_str()),
-        "remote field must round-trip the U+2028 codepoint exactly"
-    );
-    // Sanity: mirror push landed too.
-    assert!(
-        find_reference(&mirror_repo, "refs/heads/main").is_ok(),
-        "mirror push should have landed at the U+2028 path"
-    );
-}
-
-/// JSON output path on mirror failure: covers the `mirrored:false`
-/// + `error` branch of `render_mirror_outcome`.
-#[test]
-fn test_cli_push_mirror_json_failure_emits_mirrored_false_with_error() {
-    let source = TempDir::new().unwrap();
-    let weft_target = TempDir::new().unwrap();
-
-    heddle(&["init"], Some(source.path())).unwrap();
-    heddle(&["init"], Some(weft_target.path())).unwrap();
-    std::fs::write(source.path().join("file.txt"), "json err").unwrap();
-    heddle(&["capture", "-m", "Initial"], Some(source.path())).unwrap();
-
-    let weft_path = weft_target.path().to_string_lossy().to_string();
-    let bogus = source
-        .path()
-        .join("nope-mirror")
-        .to_string_lossy()
-        .to_string();
-    let mirror_arg = format!("--mirror={}", bogus);
-    let output = heddle_output(
-        &[
-            "--output",
-            "json",
-            "push",
-            &weft_path,
-            "--thread",
-            "main",
-            &mirror_arg,
-        ],
-        Some(source.path()),
-    )
-    .expect("primary push must invoke even when mirror push fails");
-    let stderr = std::str::from_utf8(&output.stderr).unwrap_or("");
-    assert!(
-        output.status.success(),
-        "primary push must succeed even when mirror push fails: stderr={stderr}"
-    );
-
-    // Mirror failure JSON lives on stderr (PR #251 contract).
-    assert!(
-        stderr.contains("\"mirrored\":false"),
-        "JSON mirror-failure line missing on stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("\"error\""),
-        "JSON mirror failure must include error field: {stderr}"
-    );
 }

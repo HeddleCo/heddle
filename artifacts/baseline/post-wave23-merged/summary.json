@@ -1,0 +1,64 @@
+{
+  "jobs": 7,
+  "counts": {
+    "pass": 7
+  },
+  "results": [
+    {
+      "id": "commit-conformance",
+      "status": "pass",
+      "duration_ms": 4743,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "facade-render-free",
+      "status": "pass",
+      "duration_ms": 34,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "fmt-check",
+      "status": "pass",
+      "duration_ms": 3076,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "formal-specs",
+      "status": "pass",
+      "duration_ms": 4758,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "git-process-lint",
+      "status": "pass",
+      "duration_ms": 116225,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-core",
+      "status": "pass",
+      "duration_ms": 68658,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "roundtrip-fidelity",
+      "status": "pass",
+      "duration_ms": 48782,
+      "oracle": true,
+      "exit_code": 0
+    }
+  ],
+  "certification": {
+    "label": "post-wave23-high-signal",
+    "commit": "b748bfd4af575d9563437592213a5582de5e0f4d",
+    "branch": "codex/correctness-architecture-performance-program",
+    "note": "Re-cert after Wave 2/3 + nightly fmt; fmt-check green via cargo +nightly fmt",
+    "cargo_target_dir": "/tmp/heddle-cert-target"
+  }
+}

@@ -1,14 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::{
-    cell::RefCell,
-    collections::HashSet,
-    fs,
-    path::PathBuf,
-};
+use std::{cell::RefCell, collections::HashSet, fs, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::{
+    AutoLandPolicyInput, auto_land_policy_blockers as core_auto_land_policy_blockers,
+    integrated_land_next_action as core_integrated_land_next_action,
+    integration_blocker_recommended_action as core_integration_blocker_recommended_action,
+    integration_blockers as core_integration_blockers,
+    land_blockers_for_preview as core_land_blockers_for_preview,
+    land_checkpoint_message as core_land_checkpoint_message,
+    land_performed_steps as core_land_performed_steps,
+    land_skipped_steps as core_land_skipped_steps, land_text_step as core_land_text_step,
+    land_warnings_for_preview as core_land_warnings_for_preview,
+    non_staleness_blockers as core_non_staleness_blockers,
+    op_targets_merge_state as core_op_targets_merge_state,
+    recovery_scope_checkout as core_recovery_scope_checkout,
+    should_squash_land as core_should_squash_land,
+};
+use heddle_git_projection::GitProjection;
 use objects::{
-    object::{ChangeId, State, ThreadName},
+    object::{State, StateId, ThreadName},
     store::ObjectStore,
 };
 use oplog::{OpBatch, OpLogBackend, OpRecord};
@@ -18,18 +29,18 @@ use serde::{Deserialize, Serialize};
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    checkpoint::create_git_checkpoint,
+    checkpoint::{GitCheckpointRequest, create_git_checkpoint},
     collapse::{CollapsePublishedRef, collapse_resolved_states},
     git_overlay_txn,
     merge::{build_thread_preview_report, merge_thread_into_current},
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{
         OperatorAction, OperatorCommandOutput, VerificationClaimPolicy,
-        exit_if_blocked_operator_status,
+        fail_if_blocked_operator_status,
     },
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
-    snapshot::{SnapshotAgentOverrides, create_snapshot},
+    snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
     thread_cmd::{
         current_thread, load_thread, refresh_thread, refresh_thread_freshness, thread_manager,
         thread_not_found_advice,
@@ -48,7 +59,6 @@ use crate::{
         output_is_compact, should_output_json, style, worktree_status_options,
     },
     config::UserConfig,
-    git_projection_engine::GitProjection,
 };
 
 #[derive(Serialize)]
@@ -63,8 +73,6 @@ struct SyncOutput {
     chosen_path: String,
 }
 
-/// Best-effort post-land restack of a peer that shares the landed
-/// thread's `target_thread`. Failures never undo the land.
 #[derive(Debug, Clone, Serialize)]
 struct SiblingRestackFailure {
     thread: String,
@@ -87,17 +95,11 @@ struct LandOutput {
     git_commit: Option<String>,
     synced: bool,
     integrated: bool,
-    pushed: bool,
-    pushed_remote: Option<String>,
     performed_steps: Vec<String>,
     skipped_steps: Vec<String>,
     merge_state: Option<String>,
-    /// Peer threads with the same `target_thread` that were auto-refreshed
-    /// onto the post-land tip (best-effort; empty when none or not integrated).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     siblings_restacked: Vec<String>,
-    /// Peer restacks that failed after a successful land. Land itself is
-    /// not rolled back; operators refresh the named threads manually.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     siblings_restack_failed: Vec<SiblingRestackFailure>,
     #[serde(skip_serializing)]
@@ -106,7 +108,6 @@ struct LandOutput {
     chosen_path: String,
 }
 
-/// One peer's result inside a multi-land batch (`land --threads a,b`).
 #[derive(Debug, Clone, Serialize)]
 struct MultiLandPeerResult {
     thread: String,
@@ -125,7 +126,6 @@ struct MultiLandPeerResult {
     warnings: Vec<String>,
 }
 
-/// Unified envelope for `land --threads a,b,c` (one JSON object, not N).
 #[derive(Serialize)]
 struct MultiLandOutput {
     output_kind: &'static str,
@@ -139,7 +139,8 @@ struct MultiLandOutput {
     peers: Vec<MultiLandPeerResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     git_head: Option<String>,
-    recommended_action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recommended_action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "verification")]
     trust: Option<RepositoryVerificationState>,
 }
@@ -148,8 +149,7 @@ impl super::compact::CompactProjection for MultiLandOutput {
     fn compact(&self) -> super::compact::CompactOutput {
         let mut out = super::compact::CompactOutput::new(self.output_kind);
         out.status = Some(self.status.clone());
-        out.next_action = (!self.recommended_action.is_empty())
-            .then(|| self.recommended_action.clone());
+        out.next_action = self.recommended_action.clone();
         if let Some(stop) = &self.stopped_at {
             out.blockers = vec![format!("stopped at {stop}")];
         }
@@ -158,8 +158,6 @@ impl super::compact::CompactProjection for MultiLandOutput {
 }
 
 thread_local! {
-    /// When set, individual `write_land_output` calls record into the batch
-    /// instead of printing (used by `land --threads`).
     static MULTI_LAND_COLLECTOR: RefCell<Option<Vec<MultiLandPeerResult>>> =
         const { RefCell::new(None) };
 }
@@ -328,8 +326,6 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
 }
 
 pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
-    // Multi-peer fan-in: land each listed thread in order against the live
-    // target tip (post-land restack of siblings still runs inside each land).
     if !args.threads.is_empty() {
         return cmd_land_many(cli, args).await;
     }
@@ -347,8 +343,6 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     } else {
         Repository::open(&target_path)?
     };
-    // Crash recovery: if a previous land integrated Heddle then died before
-    // Git checkpoint, roll that incomplete integration back now.
     recover_incomplete_land_if_present(&repo)?;
     let user_config = UserConfig::load_default().unwrap_or_default();
     let thread = resolve_thread(
@@ -371,7 +365,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         let land_command = land_local_command(&thread.id);
         // `heddle start` would refuse here — the thread still holds an active
         // reservation, so it returns `active_reservation_advice` and the
-        // operator is stuck. `heddle switch` rebuilds the dedicated worktree at
+        // operator is stuck. `heddle thread switch` rebuilds the dedicated worktree at
         // the recorded `execution_path` from the thread's current state (see
         // `cmd_thread_switch`), which is exactly the path this `land` reads, so
         // the rebuild clears the blocker and the follow-up `land` succeeds.
@@ -391,35 +385,6 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             switch_command.clone(),
             vec![switch_command, land_command],
         )));
-    };
-    if args.push && args.no_push {
-        return Err(anyhow!(RecoveryAdvice::land_push_option_conflict(
-            &thread.id
-        )));
-    }
-    if let Some(remote) = args.remote.as_deref()
-        && !args.push
-    {
-        return Err(anyhow!(RecoveryAdvice::land_remote_requires_push(
-            &thread.id, remote,
-        )));
-    }
-    let should_push = args.push;
-    let planned_push_remote = if should_push {
-        match args
-            .remote
-            .clone()
-            .or(super::remote::resolved_default_remote_name(&repo)?)
-        {
-            Some(remote) => Some(remote),
-            None => {
-                return Err(anyhow!(RecoveryAdvice::land_push_remote_missing(
-                    &thread.id
-                )));
-            }
-        }
-    } else {
-        None
     };
     let remote_synced = sync_remote_before_land_if_needed(&repo, &thread.id)?;
     git_overlay_txn::preflight_land_checkpoint(&repo, &thread.id)?;
@@ -500,15 +465,13 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                     git_commit: None,
                     synced: false,
                     integrated: false,
-                    pushed: false,
-                    pushed_remote: None,
                     merge_state: None,
                     siblings_restacked: Vec::new(),
                     siblings_restack_failed: Vec::new(),
                     trust: build_repository_verification_state(&repo),
                     chosen_path: "blocked".to_string(),
-                    performed_steps: land_performed_steps(captured, false, false, false, false),
-                    skipped_steps: land_skipped_steps(captured, false, false, false, false),
+                    performed_steps: land_performed_steps(captured, false, false, false),
+                    skipped_steps: land_skipped_steps(captured, false, false, false),
                 },
             );
         }
@@ -557,17 +520,13 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                         git_commit: None,
                         synced: false,
                         integrated: false,
-                        pushed: false,
-                        pushed_remote: None,
                         merge_state: None,
                         siblings_restacked: Vec::new(),
                         siblings_restack_failed: Vec::new(),
                         trust: build_repository_verification_state(&repo),
                         chosen_path: "blocked".to_string(),
-                        performed_steps: land_performed_steps(
-                            captured, synced, false, false, false,
-                        ),
-                        skipped_steps: land_skipped_steps(captured, synced, false, false, false),
+                        performed_steps: land_performed_steps(captured, synced, false, false),
+                        skipped_steps: land_skipped_steps(captured, synced, false, false),
                     },
                 );
             }
@@ -581,10 +540,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         "heddle land --thread <name>",
     )?;
     let preview = build_thread_preview_report(&repo, &mut merge_thread, true)?;
-    let mut preview_warnings = land_warnings_for_preview(&preview);
-    preview_warnings.extend(auto_land_policy_warnings(&repo, &merge_thread));
-    preview_warnings.sort();
-    preview_warnings.dedup();
+    let preview_warnings = land_warnings_for_preview(&preview);
     let integration_blockers = integration_blockers(&repo, &merge_thread, &preview);
     let manual_resolution_current = manual_resolution_current(&repo, &merge_thread);
     let squash_land = should_squash_land(&args, &user_config);
@@ -614,36 +570,45 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             "accepted manually resolved integration state",
         )?;
         if repo.capability() == repo::RepositoryCapability::GitOverlay {
-            write_incomplete_land_marker(
+            if let Err(error) = write_incomplete_land_marker(
                 &repo,
                 &merge_thread.id,
-                Some(merge_state.as_str()),
+                Some(&merge_state),
                 land_collapse_state.as_ref(),
-            )?;
+            ) {
+                return Err(land_checkpoint_failure_after_heddle(
+                    &repo,
+                    &merge_thread.id,
+                    error,
+                    Some(&merge_state),
+                    land_collapse_state.as_ref(),
+                    land_performed_steps(captured, synced, true, false),
+                ));
+            }
             let checkpoint_message = land_checkpoint_message(
                 &repo,
                 &merge_thread,
                 args.message.as_deref(),
                 land_collapse_state.is_some(),
             );
-            let record = create_git_checkpoint(
+            let checkpoint = create_git_checkpoint(
                 &repo,
-                Some(&checkpoint_message),
+                GitCheckpointRequest {
+                    action: "land",
+                    message: Some(&checkpoint_message),
+                    retry_command: "heddle land --thread <name>",
+                    linearize_git_parent: multi_land_has_checkpointed_peer(),
+                },
                 worktree_status_options(Some(repo.config())),
-            )
-            .map_err(|error| {
-                let err = land_checkpoint_failure_after_heddle(
-                    &repo,
-                    &merge_thread.id,
-                    error,
-                    Some(&merge_state),
-                    land_collapse_state.as_ref(),
-                    land_performed_steps(captured, synced, true, false, false),
-                );
-                clear_incomplete_land_marker(&repo);
-                err
-            })?;
-            clear_incomplete_land_marker(&repo);
+            );
+            let record = finish_land_git_checkpoint(
+                &repo,
+                &merge_thread.id,
+                Some(&merge_state),
+                land_collapse_state.as_ref(),
+                land_performed_steps(captured, synced, true, false),
+                checkpoint,
+            )?;
             checkpointed = true;
             git_commit = Some(record.git_commit);
         }
@@ -656,34 +621,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         .context(
             "land completed but failed to record manual integration and Git checkpoint as one undo batch",
         )?;
-        let mut pushed = false;
-        let mut pushed_remote = None;
-        if should_push {
-            let remote_name = push_after_land(
-                cli,
-                &repo,
-                planned_push_remote.clone(),
-                Some(merge_state.clone()),
-            )
-            .await
-            .map_err(|error| {
-                anyhow!(RecoveryAdvice::land_push_partial_failure(
-                    &merge_thread.id,
-                    error,
-                    land_performed_steps(captured, synced, true, checkpointed, false),
-                    git_commit.as_deref(),
-                    planned_push_remote.as_deref(),
-                ))
-            })?;
-            pushed = true;
-            pushed_remote = Some(remote_name);
-        }
         let resolved_manually = merge_thread
             .integration_policy_result
             .conflicts_resolved_manually;
         clear_manual_resolution_state(&repo, &merge_thread.id)?;
         let trust = git_overlay_txn::post_verify(&repo);
-        let post_land_action = integrated_land_next_action(true, pushed, &trust);
+        let post_land_action = integrated_land_next_action(true, &trust);
         let mut operator = OperatorCommandOutput {
             status: "landed".to_string(),
             action: OperatorAction::Land,
@@ -728,20 +671,14 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 git_commit,
                 synced,
                 integrated: true,
-                pushed,
-                pushed_remote,
                 merge_state: Some(merge_state),
                 siblings_restacked: sibling_restack.restacked,
                 siblings_restack_failed: sibling_restack.failed,
                 trust,
-                performed_steps: land_performed_steps(captured, synced, true, checkpointed, pushed),
-                skipped_steps: land_skipped_steps(captured, synced, true, checkpointed, pushed),
+                performed_steps: land_performed_steps(captured, synced, true, checkpointed),
+                skipped_steps: land_skipped_steps(captured, synced, true, checkpointed),
                 chosen_path: if checkpointed {
-                    if pushed {
-                        "capture_sync_manual_resolution_checkpoint_push".to_string()
-                    } else {
-                        "capture_sync_manual_resolution_checkpoint".to_string()
-                    }
+                    "capture_sync_manual_resolution_checkpoint".to_string()
                 } else {
                     "capture_sync_manual_resolution".to_string()
                 },
@@ -786,15 +723,13 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                     git_commit: None,
                     synced: false,
                     integrated: false,
-                    pushed: false,
-                    pushed_remote: None,
                     merge_state: None,
                     siblings_restacked: Vec::new(),
                     siblings_restack_failed: Vec::new(),
                     trust: build_repository_verification_state(&repo),
                     chosen_path: "blocked".to_string(),
-                    performed_steps: land_performed_steps(captured, synced, false, false, false),
-                    skipped_steps: land_skipped_steps(captured, synced, false, false, false),
+                    performed_steps: land_performed_steps(captured, synced, false, false),
+                    skipped_steps: land_skipped_steps(captured, synced, false, false),
                 },
             );
         }
@@ -825,15 +760,13 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 git_commit: None,
                 synced,
                 integrated: false,
-                pushed: false,
-                pushed_remote: None,
                 merge_state: None,
                 siblings_restacked: Vec::new(),
                 siblings_restack_failed: Vec::new(),
                 trust: build_repository_verification_state(&repo),
                 chosen_path: "blocked".to_string(),
-                performed_steps: land_performed_steps(captured, synced, false, false, false),
-                skipped_steps: land_skipped_steps(captured, synced, false, false, false),
+                performed_steps: land_performed_steps(captured, synced, false, false),
+                skipped_steps: land_skipped_steps(captured, synced, false, false),
             },
         );
     }
@@ -853,6 +786,16 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         )?;
     }
 
+    // Bootstrap missing current state (freshly-adopted git-overlay repos) so
+    // the core merge facade has a base to merge into instead of hard-erroring.
+    let _ = ensure_current_state(
+        &repo,
+        &user_config,
+        Some(format!(
+            "Bootstrap git-overlay before landing {}",
+            merge_thread.id
+        )),
+    )?;
     let merge_output = merge_thread_into_current(
         &repo,
         &merge_thread.id,
@@ -882,38 +825,45 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     )?;
 
     if integrated && repo.capability() == repo::RepositoryCapability::GitOverlay {
-        // Durable journal: Heddle has advanced; if we crash before checkpoint
-        // clears this, next land recovers via auto-undo (R2).
-        write_incomplete_land_marker(
+        if let Err(error) = write_incomplete_land_marker(
             &repo,
             &merge_thread.id,
             merge_output.merge_state.as_deref(),
             land_collapse_state.as_ref(),
-        )?;
+        ) {
+            return Err(land_checkpoint_failure_after_heddle(
+                &repo,
+                &merge_thread.id,
+                error,
+                merge_output.merge_state.as_deref(),
+                land_collapse_state.as_ref(),
+                land_performed_steps(captured, synced, integrated, false),
+            ));
+        }
         let checkpoint_message = land_checkpoint_message(
             &repo,
             &merge_thread,
             args.message.as_deref(),
             land_collapse_state.is_some(),
         );
-        let record = create_git_checkpoint(
+        let checkpoint = create_git_checkpoint(
             &repo,
-            Some(&checkpoint_message),
+            GitCheckpointRequest {
+                action: "land",
+                message: Some(&checkpoint_message),
+                retry_command: "heddle land --thread <name>",
+                linearize_git_parent: multi_land_has_checkpointed_peer(),
+            },
             worktree_status_options(Some(repo.config())),
-        )
-        .map_err(|error| {
-            let err = land_checkpoint_failure_after_heddle(
-                &repo,
-                &merge_thread.id,
-                error,
-                merge_output.merge_state.as_deref(),
-                land_collapse_state.as_ref(),
-                land_performed_steps(captured, synced, integrated, false, false),
-            );
-            clear_incomplete_land_marker(&repo);
-            err
-        })?;
-        clear_incomplete_land_marker(&repo);
+        );
+        let record = finish_land_git_checkpoint(
+            &repo,
+            &merge_thread.id,
+            merge_output.merge_state.as_deref(),
+            land_collapse_state.as_ref(),
+            land_performed_steps(captured, synced, integrated, false),
+            checkpoint,
+        )?;
         checkpointed = true;
         git_commit = Some(record.git_commit);
     }
@@ -925,35 +875,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     )
     .context("land completed but failed to record merge and Git checkpoint as one undo batch")?;
 
-    let mut pushed = false;
-    let mut pushed_remote = None;
-    if integrated && should_push {
-        let remote_name = push_after_land(
-            cli,
-            &repo,
-            planned_push_remote.clone(),
-            merge_output.merge_state.clone(),
-        )
-        .await
-        .map_err(|error| {
-            anyhow!(RecoveryAdvice::land_push_partial_failure(
-                &merge_thread.id,
-                error,
-                land_performed_steps(captured, synced, integrated, checkpointed, false),
-                git_commit.as_deref(),
-                planned_push_remote.as_deref(),
-            ))
-        })?;
-        pushed = true;
-        pushed_remote = Some(remote_name);
-    }
-
     if integrated {
         clear_manual_resolution_state(&repo, &merge_thread.id)?;
     }
 
     let trust = git_overlay_txn::post_verify(&repo);
-    let integrated_next_action = integrated_land_next_action(integrated, pushed, &trust);
+    let integrated_next_action = integrated_land_next_action(integrated, &trust);
     let mut operator = OperatorCommandOutput {
         status: if integrated { "landed" } else { "blocked" }.to_string(),
         action: OperatorAction::Land,
@@ -994,24 +921,14 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             git_commit,
             synced,
             integrated,
-            pushed,
-            pushed_remote,
             merge_state: merge_output.merge_state.clone(),
             siblings_restacked: sibling_restack.restacked,
             siblings_restack_failed: sibling_restack.failed,
             trust,
-            performed_steps: land_performed_steps(
-                captured,
-                synced,
-                integrated,
-                checkpointed,
-                pushed,
-            ),
-            skipped_steps: land_skipped_steps(captured, synced, integrated, checkpointed, pushed),
+            performed_steps: land_performed_steps(captured, synced, integrated, checkpointed),
+            skipped_steps: land_skipped_steps(captured, synced, integrated, checkpointed),
             chosen_path: if integrated {
-                if pushed {
-                    "capture_sync_merge_checkpoint_push"
-                } else if checkpointed {
+                if checkpointed {
                     "capture_sync_merge_checkpoint"
                 } else {
                     "capture_sync_merge"
@@ -1025,7 +942,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
 }
 
 fn should_squash_land(args: &LandArgs, user_config: &UserConfig) -> bool {
-    !args.no_squash && user_config.land.squash
+    core_should_squash_land(args.no_squash, user_config.land.squash)
 }
 
 fn sync_remote_before_land_if_needed(repo: &Repository, thread_id: &str) -> Result<bool> {
@@ -1069,135 +986,6 @@ fn sync_remote_before_land_if_needed(repo: &Repository, thread_id: &str) -> Resu
     Ok(true)
 }
 
-fn materialize_land_conflict_for_thread(repo: &Repository, thread: &Thread) -> Result<bool> {
-    let Some(target_thread) = thread.target_thread.as_deref() else {
-        return Ok(false);
-    };
-
-    if thread.execution_path.as_os_str().is_empty() {
-        if repo.current_lane()?.as_deref() != Some(thread.thread.as_str()) {
-            return Ok(false);
-        }
-        return materialize_land_conflict_in_repo(repo, target_thread);
-    }
-
-    if !thread.execution_path.exists() {
-        return Ok(false);
-    }
-    let thread_repo = Repository::open(&thread.execution_path).with_context(|| {
-        format!(
-            "opening thread '{}' worktree at {} to materialize land conflict",
-            thread.id,
-            thread.execution_path.display()
-        )
-    })?;
-    materialize_land_conflict_in_repo(&thread_repo, target_thread)
-}
-
-fn materialize_land_conflict_in_repo(repo: &Repository, target_thread: &str) -> Result<bool> {
-    let output =
-        merge_thread_into_current(repo, target_thread, None, false, false, false, false, false)?;
-    Ok(!output.conflicts.is_empty() && repo.merge_state_manager().is_merge_in_progress())
-}
-
-fn collapse_thread_for_land(
-    repo: &Repository,
-    user_config: &UserConfig,
-    thread: &Thread,
-    message: Option<&str>,
-) -> Result<Option<ChangeId>> {
-    let sources = thread_source_states(repo, thread)?;
-    if sources.len() <= 1 {
-        return Ok(None);
-    }
-    let intent = message
-        .filter(|message| !message.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("Land {}", thread.id));
-    let result = collapse_resolved_states(
-        repo,
-        user_config,
-        &sources,
-        intent,
-        None,
-        CollapsePublishedRef::Thread(ThreadName::new(&thread.id)),
-    )?;
-    Ok(Some(result.change_id))
-}
-
-fn thread_source_states(repo: &Repository, thread: &Thread) -> Result<Vec<State>> {
-    let Some(tip) = repo.refs().get_thread(&ThreadName::new(&thread.id))? else {
-        return Ok(Vec::new());
-    };
-    let base = repo.resolve_state(&thread.base_state)?;
-    let base_reachable = match base {
-        Some(base) => reachable_state_set(repo, base)?,
-        None => HashSet::new(),
-    };
-    let mut visited = HashSet::new();
-    let mut ordered = Vec::new();
-    collect_thread_sources(repo, tip, &base_reachable, &mut visited, &mut ordered)?;
-    Ok(ordered)
-}
-
-fn collect_thread_sources(
-    repo: &Repository,
-    state_id: ChangeId,
-    excluded: &HashSet<ChangeId>,
-    visited: &mut HashSet<ChangeId>,
-    ordered: &mut Vec<State>,
-) -> Result<()> {
-    if excluded.contains(&state_id) || !visited.insert(state_id) {
-        return Ok(());
-    }
-    let Some(state) = repo.store().get_state(&state_id)? else {
-        return Ok(());
-    };
-    for parent in &state.parents {
-        collect_thread_sources(repo, *parent, excluded, visited, ordered)?;
-    }
-    ordered.push(state);
-    Ok(())
-}
-
-fn reachable_state_set(repo: &Repository, root: ChangeId) -> Result<HashSet<ChangeId>> {
-    let mut reachable = HashSet::new();
-    let mut stack = vec![root];
-    while let Some(state_id) = stack.pop() {
-        if !reachable.insert(state_id) {
-            continue;
-        }
-        if let Some(state) = repo.store().get_state(&state_id)? {
-            stack.extend(state.parents.iter().copied());
-        }
-    }
-    Ok(reachable)
-}
-
-async fn push_after_land(
-    cli: &Cli,
-    repo: &Repository,
-    remote: Option<String>,
-    state: Option<String>,
-) -> Result<String> {
-    if repo.capability() == repo::RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
-        let (remote_name, _, _, _, _, _) =
-            super::remote::push_git_overlay_refs(repo, remote.as_deref(), false, false)?;
-        Ok(remote_name)
-    } else {
-        let pushed_remote = remote
-            .clone()
-            .or(super::remote::resolved_default_remote_name(repo)?)
-            .unwrap_or_else(|| "default".to_string());
-        super::remote::cmd_push(cli, remote, None, state, false, false, None).await?;
-        Ok(pushed_remote)
-    }
-}
-
-/// After a successful land into target `T`, best-effort restack other
-/// active threads that also target `T` and are now stale. Uses existing
-/// `refresh_thread` (no multi-parent CRDT merge). Failures are reported
-/// but never undo the land.
 fn restack_sibling_threads_after_land(
     repo: &Repository,
     landed: &Thread,
@@ -1207,11 +995,9 @@ fn restack_sibling_threads_after_land(
         return SiblingRestackReport::default();
     };
 
-    let manager = thread_manager(repo);
-    let Ok(threads) = manager.list() else {
+    let Ok(threads) = thread_manager(repo).list() else {
         return SiblingRestackReport::default();
     };
-
     let mut candidates: Vec<Thread> = threads
         .into_iter()
         .filter(|thread| {
@@ -1227,7 +1013,6 @@ fn restack_sibling_threads_after_land(
                 )
         })
         .collect();
-    // Deterministic agent-facing output order.
     candidates.sort_by(|a, b| a.id.cmp(&b.id));
 
     let mut report = SiblingRestackReport::default();
@@ -1254,23 +1039,18 @@ fn restack_sibling_threads_after_land(
 }
 
 fn sibling_restack_error_message(error: &anyhow::Error) -> String {
-    // Prefer the recovery-advice error string when present; fall back to
-    // the chain root so agent JSON stays readable without a full dump.
     if let Some(advice) = error.downcast_ref::<RecoveryAdvice>()
         && !advice.error.is_empty()
     {
         return advice.error.clone();
     }
-    let rendered = format!("{error:#}");
-    rendered
+    format!("{error:#}")
         .lines()
         .next()
         .unwrap_or("refresh failed")
         .to_string()
 }
 
-/// Run post-land sibling restack when integration succeeded, folding
-/// failures into operator warnings (land itself is not rolled back).
 fn apply_sibling_restack_after_land(
     repo: &Repository,
     landed: &Thread,
@@ -1291,24 +1071,128 @@ fn apply_sibling_restack_after_land(
     report
 }
 
+fn materialize_land_conflict_for_thread(repo: &Repository, thread: &Thread) -> Result<bool> {
+    let Some(target_thread) = thread.target_thread.as_deref() else {
+        return Ok(false);
+    };
+
+    if thread.execution_path.as_os_str().is_empty() {
+        if repo.current_lane()?.as_deref() != Some(thread.thread.as_str()) {
+            return Ok(false);
+        }
+        return materialize_land_conflict_in_repo(repo, target_thread);
+    }
+
+    if !thread.execution_path.exists() {
+        return Ok(false);
+    }
+    let thread_repo = Repository::open(&thread.execution_path).with_context(|| {
+        format!(
+            "opening thread '{}' worktree at {} to materialize land conflict",
+            thread.id,
+            thread.execution_path.display()
+        )
+    })?;
+    materialize_land_conflict_in_repo(&thread_repo, target_thread)
+}
+
+fn materialize_land_conflict_in_repo(repo: &Repository, target_thread: &str) -> Result<bool> {
+    // Bootstrap missing current state so freshly-adopted overlay repos have a
+    // base for the conflict-materializing merge instead of hard-erroring.
+    let _ = ensure_current_state(
+        repo,
+        &UserConfig::load_default().unwrap_or_default(),
+        Some(format!(
+            "Bootstrap git-overlay before materializing land conflict for {}",
+            target_thread
+        )),
+    )?;
+    let output =
+        merge_thread_into_current(repo, target_thread, None, false, false, false, false, false)?;
+    Ok(!output.conflicts.is_empty() && repo.merge_state_manager().is_merge_in_progress())
+}
+
+fn collapse_thread_for_land(
+    repo: &Repository,
+    user_config: &UserConfig,
+    thread: &Thread,
+    message: Option<&str>,
+) -> Result<Option<StateId>> {
+    let sources = thread_source_states(repo, thread)?;
+    if sources.len() <= 1 {
+        return Ok(None);
+    }
+    let intent = message
+        .filter(|message| !message.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("Land {}", thread.id));
+    let result = collapse_resolved_states(
+        repo,
+        user_config,
+        &sources,
+        intent,
+        None,
+        CollapsePublishedRef::Thread(ThreadName::new(&thread.id)),
+    )?;
+    Ok(Some(result.state_id))
+}
+
+fn thread_source_states(repo: &Repository, thread: &Thread) -> Result<Vec<State>> {
+    let Some(tip) = repo.refs().get_thread(&ThreadName::new(&thread.id))? else {
+        return Ok(Vec::new());
+    };
+    let base = repo.resolve_state(&thread.base_state)?;
+    let base_reachable = match base {
+        Some(base) => reachable_state_set(repo, base)?,
+        None => HashSet::new(),
+    };
+    let mut visited = HashSet::new();
+    let mut ordered = Vec::new();
+    collect_thread_sources(repo, tip, &base_reachable, &mut visited, &mut ordered)?;
+    Ok(ordered)
+}
+
+fn collect_thread_sources(
+    repo: &Repository,
+    state_id: StateId,
+    excluded: &HashSet<StateId>,
+    visited: &mut HashSet<StateId>,
+    ordered: &mut Vec<State>,
+) -> Result<()> {
+    if excluded.contains(&state_id) || !visited.insert(state_id) {
+        return Ok(());
+    }
+    let Some(state) = repo.store().get_state(&state_id)? else {
+        return Ok(());
+    };
+    for parent in &state.parents {
+        collect_thread_sources(repo, *parent, excluded, visited, ordered)?;
+    }
+    ordered.push(state);
+    Ok(())
+}
+
+fn reachable_state_set(repo: &Repository, root: StateId) -> Result<HashSet<StateId>> {
+    let mut reachable = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(state_id) = stack.pop() {
+        if !reachable.insert(state_id) {
+            continue;
+        }
+        if let Some(state) = repo.store().get_state(&state_id)? {
+            stack.extend(state.parents.iter().copied());
+        }
+    }
+    Ok(reachable)
+}
+
 fn land_performed_steps(
     captured: bool,
     synced: bool,
     integrated: bool,
     checkpointed: bool,
-    pushed: bool,
 ) -> Vec<String> {
-    [
-        (captured, "capture"),
-        (synced, "sync"),
-        (integrated, "merge"),
-        (checkpointed, "checkpoint"),
-        (pushed, "push"),
-    ]
-    .into_iter()
-    .filter(|&(done, _step)| done)
-    .map(|(_done, step)| step.to_string())
-    .collect()
+    core_land_performed_steps(captured, synced, integrated, checkpointed)
 }
 
 fn land_skipped_steps(
@@ -1316,36 +1200,15 @@ fn land_skipped_steps(
     synced: bool,
     integrated: bool,
     checkpointed: bool,
-    pushed: bool,
 ) -> Vec<String> {
-    [
-        (!captured, "capture(no changes)"),
-        (!synced, "sync(current)"),
-        (!integrated, "merge(blocked)"),
-        (!checkpointed && integrated, "checkpoint(not needed)"),
-        (!checkpointed && !integrated, "checkpoint(not reached)"),
-        (!pushed && integrated, "push(not requested)"),
-        (!pushed && !integrated, "push(not reached)"),
-    ]
-    .into_iter()
-    .filter(|&(skipped, _step)| skipped)
-    .map(|(_skipped, step)| step.to_string())
-    .collect()
+    core_land_skipped_steps(captured, synced, integrated, checkpointed)
 }
 
 fn integrated_land_next_action(
     integrated: bool,
-    pushed: bool,
     trust: &RepositoryVerificationState,
 ) -> Option<String> {
-    if !integrated {
-        return None;
-    }
-    if !pushed && trust.recommended_action == "heddle push" {
-        Some(trust.recommended_action.clone())
-    } else {
-        Some("heddle thread cleanup --merged --dry-run".to_string())
-    }
+    core_integrated_land_next_action(integrated, &trust.recommended_action)
 }
 
 fn land_checkpoint_message(
@@ -1354,30 +1217,19 @@ fn land_checkpoint_message(
     explicit: Option<&str>,
     prefer_land_subject: bool,
 ) -> String {
-    if let Some(message) = explicit.filter(|message| !message.trim().is_empty()) {
-        return message.to_string();
-    }
-    if prefer_land_subject {
-        return format!("Land {}", thread.id);
-    }
-    if let Some(intent) = thread
+    let intent = thread
         .current_state
         .as_deref()
         .and_then(|state| repo.resolve_state(state).ok().flatten())
         .and_then(|state_id| repo.store().get_state(&state_id).ok().flatten())
-        .and_then(|state| state.intent)
-        .filter(|intent| !intent.trim().is_empty())
-    {
-        return intent;
-    }
-    if let Some(task) = thread
-        .task
-        .as_deref()
-        .filter(|task| !task.trim().is_empty())
-    {
-        return task.to_string();
-    }
-    format!("Land {}", thread.id)
+        .and_then(|state| state.intent);
+    core_land_checkpoint_message(
+        explicit,
+        prefer_land_subject,
+        &thread.id,
+        intent.as_deref(),
+        thread.task.as_deref(),
+    )
 }
 
 fn resolve_thread(
@@ -1450,7 +1302,7 @@ fn coalesce_land_integration_and_checkpoint(
     repo: &Repository,
     merge_state: Option<&str>,
     git_commit: Option<&str>,
-    collapse_state: Option<&ChangeId>,
+    collapse_state: Option<&StateId>,
 ) -> Result<()> {
     let Some(merge_state) = merge_state else {
         return Ok(());
@@ -1471,21 +1323,15 @@ fn coalesce_land_integration_and_checkpoint(
     Ok(())
 }
 
-/// After Heddle land steps succeeded and Git checkpoint failed, auto-undo the
-/// land-owned integration (and squash collapse if any) so we do not leave a
-/// durable Heddle tip ahead of Git. Capture/sync on the source thread are left
-/// alone — they are not the dual-write tip consistency problem.
 fn land_checkpoint_failure_after_heddle(
     repo: &Repository,
     thread_id: &str,
     checkpoint_error: anyhow::Error,
     merge_state: Option<&str>,
-    collapse_state: Option<&ChangeId>,
+    collapse_state: Option<&StateId>,
     performed_steps: Vec<String>,
 ) -> anyhow::Error {
     if merge_state.is_none() && collapse_state.is_none() {
-        // Nothing land-owned to roll back (should be rare); surface the legacy
-        // partial-failure advice that points at manual `heddle undo`.
         return anyhow!(RecoveryAdvice::land_checkpoint_partial_failure(
             thread_id,
             &checkpoint_error,
@@ -1493,11 +1339,21 @@ fn land_checkpoint_failure_after_heddle(
         ));
     }
     match auto_undo_land_integration(repo, thread_id, merge_state, collapse_state) {
-        Ok(()) => anyhow!(RecoveryAdvice::land_checkpoint_rolled_back(
-            thread_id,
-            &checkpoint_error,
-            performed_steps,
-        )),
+        Ok(()) => match clear_incomplete_land_marker(repo) {
+            Ok(()) => anyhow!(RecoveryAdvice::land_checkpoint_rolled_back(
+                thread_id,
+                &checkpoint_error,
+                performed_steps,
+            )),
+            Err(cleanup_error) => anyhow!(
+                RecoveryAdvice::land_checkpoint_rollback_marker_cleanup_failed(
+                    thread_id,
+                    &checkpoint_error,
+                    cleanup_error,
+                    performed_steps,
+                )
+            ),
+        },
         Err(undo_error) => anyhow!(RecoveryAdvice::land_checkpoint_partial_failure_undo_failed(
             thread_id,
             &checkpoint_error,
@@ -1507,15 +1363,61 @@ fn land_checkpoint_failure_after_heddle(
     }
 }
 
+fn finish_land_git_checkpoint(
+    repo: &Repository,
+    thread_id: &str,
+    merge_state: Option<&str>,
+    collapse_state: Option<&StateId>,
+    performed_steps: Vec<String>,
+    checkpoint: Result<repo::GitCheckpointRecord>,
+) -> Result<repo::GitCheckpointRecord> {
+    let record = match checkpoint {
+        Ok(record) => record,
+        Err(checkpoint_error) => {
+            let recovered = match merge_state {
+                Some(state) => match repo.resolve_state(state) {
+                    Ok(Some(state_id)) => {
+                        heddle_core::recover_published_git_checkpoint(repo, &state_id)
+                    }
+                    Ok(None) => Ok(None),
+                    Err(error) => Err(error.into()),
+                },
+                None => Ok(None),
+            };
+            match recovered {
+                Ok(Some(record)) => record,
+                Ok(None) => {
+                    return Err(land_checkpoint_failure_after_heddle(
+                        repo,
+                        thread_id,
+                        checkpoint_error,
+                        merge_state,
+                        collapse_state,
+                        performed_steps,
+                    ));
+                }
+                Err(recovery_error) => {
+                    return Err(anyhow!(RecoveryAdvice::land_checkpoint_recovery_required(
+                        thread_id,
+                        checkpoint_error,
+                        recovery_error,
+                        performed_steps,
+                    )));
+                }
+            }
+        }
+    };
+    clear_incomplete_land_marker(repo)?;
+    Ok(record)
+}
+
 fn auto_undo_land_integration(
     repo: &Repository,
     thread_id: &str,
     merge_state: Option<&str>,
-    collapse_state: Option<&ChangeId>,
+    collapse_state: Option<&StateId>,
 ) -> Result<()> {
     let mut batches = Vec::new();
-    // Newest-first: integration (merge/adopt) then collapse, matching
-    // `undo_batches_scoped` order (collapse runs before merge during land).
     if let Some(merge_state) = merge_state
         && let Ok(batch) = find_recent_land_integration_batch(repo, merge_state)
     {
@@ -1533,8 +1435,6 @@ fn auto_undo_land_integration(
         ));
     }
     undo_batches_quiet(repo, batches)?;
-    // Policy was set to auto_integrated before checkpoint; clear that claim
-    // now that the merge is undone so status/ready do not lie.
     let _ = update_integration_policy(
         repo,
         thread_id,
@@ -1544,10 +1444,7 @@ fn auto_undo_land_integration(
     Ok(())
 }
 
-fn find_recent_land_collapse_batch(
-    repo: &Repository,
-    collapse_state: &ChangeId,
-) -> Result<OpBatch> {
+fn find_recent_land_collapse_batch(repo: &Repository, collapse_state: &StateId) -> Result<OpBatch> {
     repo.oplog()
         .recent_batches_scoped(12, Some(&repo.op_scope()))?
         .into_iter()
@@ -1591,41 +1488,7 @@ fn find_recent_land_git_checkpoint_batch(repo: &Repository, git_commit: &str) ->
 }
 
 fn op_targets_merge_state(op: &OpRecord, merge_state: &str) -> bool {
-    match op {
-        OpRecord::Snapshot { new_state, .. } => change_id_matches_display(new_state, merge_state),
-        OpRecord::Checkpoint { state, .. } => change_id_matches_display(state, merge_state),
-        OpRecord::Goto { target, .. } => change_id_matches_display(target, merge_state),
-        OpRecord::FastForward { post_target_id, .. } => {
-            change_id_matches_display(post_target_id, merge_state)
-        }
-        // These records don't advance HEAD/thread to a merge target the land
-        // flow tracks. Enumerated explicitly (no wildcard) so a new
-        // state-advancing variant must be considered as a possible merge
-        // target here (heddle#354 r9).
-        OpRecord::ThreadCreate { .. }
-        | OpRecord::ThreadDelete { .. }
-        | OpRecord::ThreadUpdate { .. }
-        | OpRecord::Fork { .. }
-        | OpRecord::Collapse { .. }
-        | OpRecord::MarkerCreate { .. }
-        | OpRecord::MarkerDelete { .. }
-        | OpRecord::TransactionAbort { .. }
-        | OpRecord::EphemeralThreadCollapse { .. }
-        | OpRecord::ConflictResolved { .. }
-        | OpRecord::TransactionCommit { .. }
-        | OpRecord::Redact { .. }
-        | OpRecord::Purge { .. }
-        | OpRecord::GitCheckpoint { .. }
-        | OpRecord::RemoteThreadUpdate { .. }
-        | OpRecord::RemoteThreadDelete { .. }
-        | OpRecord::UndoRecoveryUpdate { .. }
-        | OpRecord::StateVisibilitySet { .. }
-        | OpRecord::StateVisibilityPromote { .. } => false,
-    }
-}
-
-fn change_id_matches_display(id: &ChangeId, display: &str) -> bool {
-    id.short() == display || id.to_string_full() == display
+    core_op_targets_merge_state(op, merge_state)
 }
 
 fn adopt_manual_resolution(repo: &Repository, thread_id: &str) -> Result<String> {
@@ -1655,79 +1518,35 @@ fn adopt_manual_resolution(repo: &Repository, thread_id: &str) -> Result<String>
     Ok(target.short())
 }
 
-/// Highlight threshold for agent self-reported confidence. Below this,
-/// ready/land **warn** (do not block) so humans can still ship draft work.
-const AGENT_CONFIDENCE_HIGHLIGHT_THRESHOLD: f32 = 0.75;
-const AGENT_CONFIDENCE_RECAPTURE_ACTION: &str =
-    "heddle commit -m \"...\" --confidence <confidence>";
-
 pub(crate) fn integration_blockers(
     repo: &Repository,
     thread: &Thread,
     preview: &super::merge::ThreadPreviewReport,
 ) -> Vec<String> {
-    let manual_resolution_current = manual_resolution_current(repo, thread);
-    let mut blockers = if manual_resolution_current {
-        Vec::new()
-    } else {
-        non_staleness_blockers(&preview.blockers)
-    };
-    blockers.extend(auto_land_policy_blockers(repo, thread));
-    blockers
+    core_integration_blockers(
+        manual_resolution_current(repo, thread),
+        &preview.blockers,
+        auto_land_policy_input(repo, thread),
+    )
 }
 
-/// Hard policy gates that block land/ready. Confidence is **not** included —
-/// it is an honesty signal for humans (see [`auto_land_policy_warnings`]).
 pub(crate) fn auto_land_policy_blockers(repo: &Repository, thread: &Thread) -> Vec<String> {
-    let mut blockers = Vec::new();
-    let _ = repo; // kept for signature stability with call sites
-    if matches!(thread.verification_summary.tests_passed, Some(false)) {
-        blockers.push("verification summary reports failing tests".to_string());
-    }
-    blockers
+    core_auto_land_policy_blockers(auto_land_policy_input(repo, thread))
 }
 
-/// Soft highlights for humans/agents. Low agent confidence never blocks land.
-pub(crate) fn auto_land_policy_warnings(repo: &Repository, thread: &Thread) -> Vec<String> {
-    let mut warnings = Vec::new();
-    if thread_is_agent_authored(repo, thread)
-        && let Some(confidence) = thread.confidence_summary.value
-        && confidence < AGENT_CONFIDENCE_HIGHLIGHT_THRESHOLD
-    {
-        warnings.push(format!(
-            "agent confidence {:.2} is below {:.2} — review carefully before shipping (does not block land)",
-            confidence, AGENT_CONFIDENCE_HIGHLIGHT_THRESHOLD
-        ));
+fn auto_land_policy_input(repo: &Repository, thread: &Thread) -> AutoLandPolicyInput {
+    AutoLandPolicyInput {
+        agent_authored: thread_is_agent_authored(repo, thread),
+        confidence: thread.confidence_summary.value,
+        tests_passed: thread.verification_summary.tests_passed,
     }
-    warnings
 }
 
 pub(crate) fn integration_blocker_recommended_action(
     blockers: &[String],
     scope_to_checkout: Option<&std::path::Path>,
 ) -> Option<String> {
-    // Only hard policy (failing tests) yields a recapture recovery breadcrumb.
-    // Low confidence is advisory and must not rewrite recommended_action.
-    blockers
-        .iter()
-        .any(|blocker| blocker == "verification summary reports failing tests")
-        .then(|| auto_land_tests_failed_recovery_action(scope_to_checkout))
-}
-
-/// Recapture breadcrumb when verification summary reports failing tests.
-/// Scoped with `--repo` when the thread checkout differs from the current one
-/// (heddle#464).
-fn auto_land_tests_failed_recovery_action(scope_to_checkout: Option<&std::path::Path>) -> String {
-    match scope_to_checkout {
-        Some(path) => format!(
-            "heddle --repo {} {}",
-            crate::cli::render::shell_quote(&path.display().to_string()),
-            AGENT_CONFIDENCE_RECAPTURE_ACTION
-                .strip_prefix("heddle ")
-                .expect("recovery action is a heddle command"),
-        ),
-        None => AGENT_CONFIDENCE_RECAPTURE_ACTION.to_string(),
-    }
+    core_integration_blocker_recommended_action(blockers, scope_to_checkout)
 }
 
 /// Returns the thread's recorded checkout iff it is a real, distinct path from
@@ -1739,57 +1558,18 @@ pub(crate) fn recovery_scope_checkout(
     thread: &Thread,
     current_checkout: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    let execution_path = &thread.execution_path;
-    if execution_path.as_os_str().is_empty() {
-        return None;
-    }
-    let canonical =
-        |path: &std::path::Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    (canonical(execution_path) != canonical(current_checkout)).then(|| execution_path.clone())
+    core_recovery_scope_checkout(&thread.execution_path, current_checkout)
 }
 
 fn land_blockers_for_preview(
     preview: &super::merge::ThreadPreviewReport,
     blockers: &[String],
 ) -> Vec<String> {
-    let mut out = blockers.to_vec();
-    if preview.conflict_count > 0 {
-        out.push(format!(
-            "{} path conflict(s) need manual resolution",
-            preview.conflict_count
-        ));
-        out.extend(
-            preview
-                .conflicts
-                .iter()
-                .map(|path| format!("conflict: {path}")),
-        );
-    }
-    out.sort();
-    out.dedup();
-    out
+    core_land_blockers_for_preview(preview, blockers)
 }
 
 fn land_warnings_for_preview(preview: &super::merge::ThreadPreviewReport) -> Vec<String> {
-    let mut warnings = preview
-        .blockers
-        .iter()
-        .filter(|blocker| is_heavy_impact_advisory(blocker))
-        .cloned()
-        .collect::<Vec<_>>();
-    if warnings.is_empty() && !preview.heavy_impact_paths.is_empty() {
-        warnings.push(format!(
-            "Heavy-impact change: {} — review broader impact before merging",
-            preview.heavy_impact_paths.join(", ")
-        ));
-    }
-    warnings.sort();
-    warnings.dedup();
-    warnings
-}
-
-fn is_heavy_impact_advisory(blocker: &str) -> bool {
-    blocker.to_lowercase().contains("heavy-impact change")
+    core_land_warnings_for_preview(preview)
 }
 
 fn manual_resolution_current(repo: &Repository, thread: &Thread) -> bool {
@@ -1826,13 +1606,7 @@ fn thread_is_agent_authored(repo: &Repository, thread: &Thread) -> bool {
 }
 
 pub(crate) fn non_staleness_blockers(blockers: &[String]) -> Vec<String> {
-    blockers
-        .iter()
-        .filter(|blocker| {
-            !blocker.contains(" is stale against ") && !is_heavy_impact_advisory(blocker)
-        })
-        .cloned()
-        .collect()
+    core_non_staleness_blockers(blockers)
 }
 
 impl super::compact::CompactProjection for SyncOutput {
@@ -1897,12 +1671,9 @@ fn scoped_resolve_list_command(thread: &Thread) -> String {
 }
 
 fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Result<()> {
-    // Multi-land batch mode: collect peer results; emit one envelope at the end.
-    // Do not process::exit here — return Err so cmd_land_many can finish the batch
-    // envelope then stop.
-    if MULTI_LAND_COLLECTOR.with(|c| c.borrow().is_some()) {
-        MULTI_LAND_COLLECTOR.with(|c| {
-            if let Some(peers) = c.borrow_mut().as_mut() {
+    if MULTI_LAND_COLLECTOR.with(|collector| collector.borrow().is_some()) {
+        MULTI_LAND_COLLECTOR.with(|collector| {
+            if let Some(peers) = collector.borrow_mut().as_mut() {
                 peers.push(MultiLandPeerResult {
                     thread: output.thread.clone(),
                     status: output.operator.status.clone(),
@@ -1918,13 +1689,7 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
                 });
             }
         });
-        if matches!(
-            output.operator.status.as_str(),
-            "blocked" | "failed"
-        ) {
-            return Err(anyhow!(output.operator.message.clone()));
-        }
-        return Ok(());
+        return fail_if_blocked_operator_status(&output.operator.status);
     }
     if should_output_json(cli, None) {
         write_command_json(
@@ -1942,16 +1707,6 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
         println!("  {}", style::field("thread", &style::bold(&output.thread)));
         if output.integrated {
             println!("  {}", style::field("landed", "on parent"));
-            let push_status = if output.pushed {
-                output
-                    .pushed_remote
-                    .as_deref()
-                    .map(|remote| format!("pushed to {remote}"))
-                    .unwrap_or_else(|| "pushed".to_string())
-            } else {
-                "not pushed".to_string()
-            };
-            println!("  {}", style::field("push", &push_status));
         } else {
             if !output.performed_steps.is_empty() {
                 println!(
@@ -1994,10 +1749,7 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
         if !output.siblings_restacked.is_empty() {
             println!(
                 "  {}",
-                style::field(
-                    "siblings restacked",
-                    &output.siblings_restacked.join(", ")
-                )
+                style::field("siblings restacked", &output.siblings_restacked.join(", "))
             );
         }
         for blocker in &output.operator.blockers {
@@ -2023,31 +1775,12 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
             print_next(next);
         }
     }
-    exit_if_blocked_operator_status(&output.operator.status);
-    Ok(())
+    fail_if_blocked_operator_status(&output.operator.status)
 }
 
 fn land_text_step(step: &str) -> String {
-    match step {
-        "capture" => "saved".to_string(),
-        "sync" => "refreshed".to_string(),
-        "merge" => "merged".to_string(),
-        "checkpoint" => "committed".to_string(),
-        "push" => "pushed".to_string(),
-        "capture(no changes)" => "no unsaved changes".to_string(),
-        "sync(current)" => "already refreshed".to_string(),
-        "merge(blocked)" => "merge blocked".to_string(),
-        "checkpoint(not needed)" => "no Git commit needed".to_string(),
-        "checkpoint(not reached)" => "Git commit not reached".to_string(),
-        "push(not requested)" => "push not requested".to_string(),
-        "push(not reached)" => "push not reached".to_string(),
-        other => other.to_string(),
-    }
+    core_land_text_step(step)
 }
-
-// ---------------------------------------------------------------------------
-// R2: incomplete-land journal (crash between Heddle integrate and Git write)
-// ---------------------------------------------------------------------------
 
 const INCOMPLETE_LAND_MARKER: &str = "incomplete-land.json";
 
@@ -2066,53 +1799,66 @@ fn write_incomplete_land_marker(
     repo: &Repository,
     thread_id: &str,
     merge_state: Option<&str>,
-    collapse_state: Option<&ChangeId>,
+    collapse_state: Option<&StateId>,
 ) -> Result<()> {
     let marker = IncompleteLandMarker {
         thread_id: thread_id.to_string(),
         merge_state: merge_state.map(str::to_string),
-        collapse_state: collapse_state.map(|id| id.to_string()),
+        collapse_state: collapse_state.map(StateId::to_string_full),
     };
     let path = incomplete_land_marker_path(repo);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
-    }
     let body = serde_json::to_vec_pretty(&marker).context("serialize incomplete-land marker")?;
-    fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
+    objects::fs_atomic::write_file_atomic(&path, &body)
+        .with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
-fn clear_incomplete_land_marker(repo: &Repository) {
+fn clear_incomplete_land_marker(repo: &Repository) -> Result<()> {
     let path = incomplete_land_marker_path(repo);
-    let _ = fs::remove_file(path);
+    match fs::remove_file(&path) {
+        Ok(()) => {
+            if let Some(parent) = path.parent() {
+                objects::fs_atomic::sync_directory(parent)?;
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
 }
 
 fn load_incomplete_land_marker(repo: &Repository) -> Result<Option<IncompleteLandMarker>> {
     let path = incomplete_land_marker_path(repo);
     match fs::read_to_string(&path) {
-        Ok(raw) => {
-            let marker: IncompleteLandMarker =
-                serde_json::from_str(&raw).with_context(|| {
-                    format!("parse incomplete-land marker at {}", path.display())
-                })?;
-            Ok(Some(marker))
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+        Ok(raw) => serde_json::from_str(&raw)
+            .with_context(|| format!("parse incomplete-land marker at {}", path.display()))
+            .map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
     }
 }
 
-/// If a prior land integrated Heddle then crashed before clearing the
-/// journal, roll back that integration so the next land/status starts clean.
 pub(crate) fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()> {
     let Some(marker) = load_incomplete_land_marker(repo)? else {
         return Ok(());
     };
+
+    // A crash may happen after the Git checkpoint is durably recorded but
+    // before the marker is removed. In that case the dual write completed and
+    // recovery must only discard the stale journal.
+    if let Some(merge_state) = marker.merge_state.as_deref()
+        && let Some(state_id) = repo.resolve_state(merge_state)?
+        && (repo.latest_git_checkpoint_for_state(&state_id)?.is_some()
+            || heddle_core::recover_published_git_checkpoint(repo, &state_id)?.is_some())
+    {
+        clear_incomplete_land_marker(repo)?;
+        return Ok(());
+    }
+
     let collapse = marker
         .collapse_state
         .as_deref()
-        .and_then(|s| ChangeId::parse(s).ok());
+        .and_then(|state| StateId::parse(state).ok());
     match auto_undo_land_integration(
         repo,
         &marker.thread_id,
@@ -2120,79 +1866,79 @@ pub(crate) fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()
         collapse.as_ref(),
     ) {
         Ok(()) => {
-            clear_incomplete_land_marker(repo);
+            clear_incomplete_land_marker(repo)?;
             eprintln!(
                 "note: recovered incomplete land of '{}': rolled back Heddle integration left without a Git checkpoint",
                 marker.thread_id
             );
             Ok(())
         }
-        Err(err) => {
-            // Leave the marker so the operator can inspect / undo manually.
-            Err(anyhow!(
-                "incomplete land of '{}' needs recovery but auto-undo failed: {err:#}. \
-                 Inspect `.heddle/{INCOMPLETE_LAND_MARKER}` and run `heddle undo` if the tip is still advanced.",
-                marker.thread_id
-            ))
-        }
+        Err(error) => Err(anyhow!(
+            "incomplete land of '{}' needs recovery but auto-undo failed: {error:#}. Inspect `.heddle/{INCOMPLETE_LAND_MARKER}` and run `heddle undo` if the tip is still advanced.",
+            marker.thread_id
+        )),
     }
 }
 
-// ---------------------------------------------------------------------------
-// R3: land --threads a,b,c (serial multi-peer fan-in)
-// ---------------------------------------------------------------------------
-
 async fn cmd_land_many(cli: &Cli, args: LandArgs) -> Result<()> {
-    let mut ordered: Vec<String> = Vec::new();
+    let mut ordered = Vec::new();
     if let Some(primary) = args.thread.clone() {
         ordered.push(primary);
     }
-    for t in &args.threads {
-        let t = t.trim();
-        if t.is_empty() {
-            continue;
-        }
-        if !ordered.iter().any(|existing| existing == t) {
-            ordered.push(t.to_string());
+    for thread in &args.threads {
+        let thread = thread.trim();
+        if !thread.is_empty() && !ordered.iter().any(|existing| existing == thread) {
+            ordered.push(thread.to_string());
         }
     }
     if ordered.is_empty() {
         return Err(anyhow!("--threads requires at least one thread name"));
     }
 
-    MULTI_LAND_COLLECTOR.with(|c| {
-        *c.borrow_mut() = Some(Vec::with_capacity(ordered.len()));
+    MULTI_LAND_COLLECTOR.with(|collector| {
+        *collector.borrow_mut() = Some(Vec::with_capacity(ordered.len()));
     });
 
-    let mut landed: Vec<String> = Vec::new();
-    let mut stopped_at: Option<String> = None;
-    let mut stop_error: Option<anyhow::Error> = None;
-    for (idx, thread_name) in ordered.iter().enumerate() {
+    let mut landed = Vec::new();
+    let mut stopped_at = None;
+    for thread_name in &ordered {
         let mut one = args.clone();
         one.thread = Some(thread_name.clone());
-        one.threads = Vec::new();
-        // Only the last peer inherits push (if requested); intermediate lands
-        // stay local so a mid-list failure does not half-push.
-        if idx + 1 < ordered.len() {
-            one.push = false;
-            one.no_push = true;
+        one.threads.clear();
+        let result = Box::pin(cmd_land(cli, one)).await;
+        let recorded_peer = MULTI_LAND_COLLECTOR.with(|collector| {
+            collector
+                .borrow()
+                .as_ref()
+                .and_then(|peers| peers.last())
+                .is_some_and(|peer| peer.thread == *thread_name)
+        });
+        if !recorded_peer && let Err(error) = &result {
+            MULTI_LAND_COLLECTOR.with(|collector| {
+                if let Some(peers) = collector.borrow_mut().as_mut() {
+                    peers.push(multi_land_error_peer(thread_name, error));
+                }
+            });
         }
-        // Box the recursive async call to avoid infinitely sized futures.
-        match Box::pin(cmd_land(cli, one)).await {
-            Ok(()) => landed.push(thread_name.clone()),
-            Err(err) => {
-                stopped_at = Some(thread_name.clone());
-                stop_error = Some(err);
-                break;
-            }
+        let peer_integrated = MULTI_LAND_COLLECTOR.with(|collector| {
+            collector
+                .borrow()
+                .as_ref()
+                .and_then(|peers| peers.last())
+                .is_some_and(|peer| peer.thread == *thread_name && peer.integrated)
+        });
+        if result.is_ok() || peer_integrated {
+            landed.push(thread_name.clone());
+        }
+        if result.is_err() {
+            stopped_at = Some(thread_name.clone());
+            break;
         }
     }
 
     let peers = MULTI_LAND_COLLECTOR
-        .with(|c| c.borrow_mut().take())
+        .with(|collector| collector.borrow_mut().take())
         .unwrap_or_default();
-
-    // Always emit a single batch envelope when any peer was attempted.
     let repo = cli.open_repo().ok();
     write_multi_land_output(
         cli,
@@ -2201,16 +1947,40 @@ async fn cmd_land_many(cli: &Cli, args: LandArgs) -> Result<()> {
         &landed,
         stopped_at.as_deref(),
         peers,
-    )?;
+    )
+}
 
-    if let Some(err) = stop_error {
-        return Err(anyhow!(
-            "multi-land stopped at '{}' after successfully landing [{}]: {err:#}",
-            stopped_at.as_deref().unwrap_or("?"),
-            landed.join(", ")
-        ));
+fn multi_land_has_checkpointed_peer() -> bool {
+    MULTI_LAND_COLLECTOR.with(|collector| {
+        collector
+            .borrow()
+            .as_ref()
+            .is_some_and(|peers| peers.iter().any(|peer| peer.checkpointed))
+    })
+}
+
+fn multi_land_error_peer(thread: &str, error: &anyhow::Error) -> MultiLandPeerResult {
+    let (message, blockers, warnings) = match error.downcast_ref::<RecoveryAdvice>() {
+        Some(advice) => (
+            advice.error.clone(),
+            vec![advice.unsafe_condition.clone()],
+            vec![advice.hint.clone()],
+        ),
+        None => (format!("{error:#}"), vec![format!("{error:#}")], Vec::new()),
+    };
+    MultiLandPeerResult {
+        thread: thread.to_string(),
+        status: "blocked".to_string(),
+        message,
+        captured: false,
+        checkpointed: false,
+        git_commit: None,
+        integrated: false,
+        synced: false,
+        siblings_restacked: Vec::new(),
+        blockers,
+        warnings,
     }
-    Ok(())
 }
 
 fn write_multi_land_output(
@@ -2230,11 +2000,7 @@ fn write_multi_land_output(
         "partial"
     };
     let message = if all_ok {
-        format!(
-            "Landed {} thread(s): {}",
-            landed.len(),
-            landed.join(", ")
-        )
+        format!("Landed {} thread(s): {}", landed.len(), landed.join(", "))
     } else if let Some(stop) = stopped_at {
         format!(
             "Landed {} of {} thread(s); stopped at '{stop}'",
@@ -2244,28 +2010,13 @@ fn write_multi_land_output(
     } else {
         format!("Landed {} of {} thread(s)", landed.len(), ordered.len())
     };
-    let git_head = repo.and_then(|r| {
-        sley::Repository::discover(r.root())
+    let git_head = repo.and_then(|repo| {
+        sley::Repository::discover(repo.root())
             .ok()
             .and_then(|git| git.head().ok())
-            .and_then(|h| h.oid.map(|o| o.to_string()))
+            .and_then(|head| head.oid.map(|oid| oid.to_string()))
     });
-    let recommended_action = if all_ok {
-        if repo
-            .map(|r| r.capability() == repo::RepositoryCapability::GitOverlay)
-            .unwrap_or(false)
-        {
-            "heddle push".to_string()
-        } else {
-            String::new()
-        }
-    } else if let Some(stop) = stopped_at {
-        format!("heddle land --thread {stop} --no-push")
-    } else {
-        String::new()
-    };
-    let trust = repo.map(build_repository_verification_state);
-
+    let recommended_action = stopped_at.map(|_| "heddle status".to_string());
     let output = MultiLandOutput {
         output_kind: "land_batch",
         status: status.to_string(),
@@ -2277,7 +2028,7 @@ fn write_multi_land_output(
         peers,
         git_head,
         recommended_action: recommended_action.clone(),
-        trust,
+        trust: repo.map(build_repository_verification_state),
     };
 
     if should_output_json(cli, None) {
@@ -2294,48 +2045,42 @@ fn write_multi_land_output(
         };
         println!("{marker} {}", output.message);
         if let Some(head) = &output.git_head {
-            println!("  {}", style::field("git head", &head[..head.len().min(12)]));
+            println!(
+                "  {}",
+                style::field("git head", &head[..head.len().min(12)])
+            );
         }
         for peer in &output.peers {
-            let peer_mark = if peer.status == "landed" {
+            let peer_marker = if peer.status == "landed" {
                 style::ok_marker()
             } else {
                 style::warn_marker()
             };
             println!(
-                "  {peer_mark} {} — {}",
+                "  {peer_marker} {} — {}",
                 style::bold(&peer.thread),
                 peer.status
             );
-            if let Some(gc) = &peer.git_commit {
-                println!("      git {}", &gc[..gc.len().min(12)]);
-            }
-            if !peer.siblings_restacked.is_empty() {
-                println!(
-                    "      siblings restacked: {}",
-                    peer.siblings_restacked.join(", ")
-                );
-            }
-            for b in &peer.blockers {
-                println!("      blocker: {}", style::warn(b));
+            for blocker in &peer.blockers {
+                println!("      blocker: {}", style::warn(blocker));
             }
         }
-        if !recommended_action.is_empty() {
-            print_next(&recommended_action);
+        if let Some(recommended_action) = recommended_action.as_deref() {
+            print_next(recommended_action);
         }
     }
-    if !all_ok {
-        // partial | blocked — use operator blocked exit (1) when applicable
-        let code = crate::cli::commands::operator_core::blocked_operator_exit_code(status)
-            .unwrap_or(1);
-        std::process::exit(code);
+    if all_ok {
+        Ok(())
+    } else {
+        Err(anyhow!(crate::exit::OutcomeExit::data_err()))
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+
+    use heddle_core::AUTO_LAND_CONFIDENCE_RECOVERY_ACTION;
 
     use super::*;
     use crate::cli::commands::command_catalog::validate_recommended_action;
@@ -2371,8 +2116,22 @@ mod tests {
         }
     }
 
-    // heddle#464: failing-tests policy recovery must scope recapture to the
-    // thread checkout when land runs from the parent.
+    #[test]
+    fn confidence_blocker_recovery_scopes_to_thread_checkout() {
+        let blockers = vec!["confidence 0.40 is below the auto-land threshold of 0.75".to_string()];
+        let action = integration_blocker_recommended_action(
+            &blockers,
+            Some(Path::new("/work/threads/agent-thread")),
+        )
+        .expect("a confidence blocker must yield a recovery action");
+        assert_eq!(
+            action,
+            "heddle --repo /work/threads/agent-thread capture -m \"...\" --confidence <confidence>"
+        );
+        validate_recommended_action(&action)
+            .unwrap_or_else(|e| panic!("scoped recovery must validate: {e}"));
+    }
+
     #[test]
     fn verification_blocker_recovery_scopes_to_thread_checkout() {
         let blockers = vec!["verification summary reports failing tests".to_string()];
@@ -2383,31 +2142,21 @@ mod tests {
         .expect("a verification blocker must yield a recovery action");
         assert_eq!(
             action,
-            "heddle --repo /work/threads/agent-thread commit -m \"...\" --confidence <confidence>"
+            "heddle --repo /work/threads/agent-thread capture -m \"...\" --confidence <confidence>"
         );
         validate_recommended_action(&action)
             .unwrap_or_else(|e| panic!("scoped recovery must validate: {e}"));
     }
 
+    // The in-thread case (recovery run from inside the thread's own checkout)
+    // must stay unscoped — a `--repo` pointing back at the current checkout is
+    // noise, and the bare command already targets the right state.
     #[test]
-    fn low_confidence_is_not_a_hard_blocker_recovery() {
-        // Confidence is advisory; it must not drive integration_blocker recovery.
-        let blockers = vec![
-            "agent confidence 0.40 is below 0.75 — review carefully before shipping (does not block land)"
-                .to_string(),
-        ];
-        assert!(
-            integration_blocker_recommended_action(&blockers, None).is_none(),
-            "confidence highlights must not rewrite recommended_action"
-        );
-    }
-
-    #[test]
-    fn verification_blocker_recovery_stays_unscoped_in_thread() {
-        let blockers = vec!["verification summary reports failing tests".to_string()];
+    fn confidence_blocker_recovery_stays_unscoped_in_thread() {
+        let blockers = vec!["confidence 0.40 is below the auto-land threshold of 0.75".to_string()];
         let action = integration_blocker_recommended_action(&blockers, None)
-            .expect("a verification blocker must yield a recovery action");
-        assert_eq!(action, AGENT_CONFIDENCE_RECAPTURE_ACTION);
+            .expect("a confidence blocker must yield a recovery action");
+        assert_eq!(action, AUTO_LAND_CONFIDENCE_RECOVERY_ACTION);
         validate_recommended_action(&action)
             .unwrap_or_else(|e| panic!("unscoped recovery must validate: {e}"));
     }
@@ -2424,11 +2173,12 @@ mod tests {
             "Thread 'agent-thread' is stale against 'main'".to_string(),
             "Heavy-impact change: crates/wire/src/lib.rs — review broader impact before merging"
                 .to_string(),
+            "confidence 0.40 is below the auto-land threshold of 0.75".to_string(),
         ];
 
-        assert!(
-            non_staleness_blockers(&blockers).is_empty(),
-            "staleness and heavy-impact must not remain hard non-staleness blockers"
+        assert_eq!(
+            non_staleness_blockers(&blockers),
+            vec!["confidence 0.40 is below the auto-land threshold of 0.75".to_string()]
         );
     }
 
@@ -2451,7 +2201,7 @@ mod tests {
                 "Heavy-impact change: crates/wire/src/lib.rs — review broader impact before merging"
                     .to_string(),
             ],
-            recommended_action: "heddle land --thread agent-thread --no-push".to_string(),
+            recommended_action: "heddle land --thread agent-thread".to_string(),
             recommended_action_template: None,
             thread_health: "review".to_string(),
         };

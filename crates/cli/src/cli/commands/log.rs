@@ -9,9 +9,15 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use heddle_core::status::next_action::canonical_adopt_ref_command;
+use heddle_core::{
+    parse_reflog_line, short_oid, status::next_action::canonical_git_import_ref_command,
+    summarize_paths, timeline_branch_reason as core_timeline_branch_reason,
+    timeline_cursor_reason as core_timeline_cursor_reason, timeline_label as core_timeline_label,
+    timeline_recovery_status as core_timeline_recovery_status,
+    timeline_tool_status as core_timeline_tool_status, yes_no,
+};
 use objects::object::{
-    Agent, ChangeId, State, TimelineBranchReason, TimelineCursorMoveReason, TimelineLabel,
+    Agent, State, StateId, TimelineBranchReason, TimelineCursorMoveReason, TimelineLabel,
     TimelineToolCallStatus,
 };
 use repo::{
@@ -79,7 +85,7 @@ struct LogImportGuidanceOutput {
 
 #[derive(Serialize)]
 struct StateEntry {
-    change_id: String,
+    state_id: String,
     content_hash: String,
     intent: Option<String>,
     principal: String,
@@ -220,10 +226,24 @@ struct ReflogEntry {
     message: String,
 }
 
+impl From<heddle_core::ReflogLine> for ReflogEntry {
+    fn from(line: heddle_core::ReflogLine) -> Self {
+        Self {
+            source: line.source,
+            reference: line.reference,
+            old_oid: line.old_oid,
+            new_oid: line.new_oid,
+            actor: line.actor,
+            timestamp: line.timestamp,
+            message: line.message,
+        }
+    }
+}
+
 impl From<&State> for StateEntry {
     fn from(state: &State) -> Self {
         Self {
-            change_id: state.change_id.short(),
+            state_id: state.state_id.short(),
             content_hash: state.compute_hash().short(),
             intent: state.intent.clone(),
             principal: state.attribution.principal.to_string(),
@@ -232,7 +252,7 @@ impl From<&State> for StateEntry {
             agent: state.attribution.agent.as_ref().map(Agent::to_string),
             confidence: state.confidence,
             created_at: state.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-            parents: state.parents.iter().map(ChangeId::short).collect(),
+            parents: state.parents.iter().map(StateId::short).collect(),
             git_checkpoint: None,
             collapsed: None,
         }
@@ -320,10 +340,8 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
         .iter()
         .filter(|state| !is_synthetic_root(state))
         .collect::<Vec<_>>();
-    let collapsed_annotations = collapse_annotations_for_states(
-        &repo,
-        visible_states.iter().map(|state| &state.change_id),
-    )?;
+    let collapsed_annotations =
+        collapse_annotations_for_states(&repo, visible_states.iter().map(|state| &state.state_id))?;
 
     let output = LogOutput {
         output_kind: "log",
@@ -343,12 +361,12 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
             .map(|state| {
                 let mut entry = StateEntry::from(state);
                 entry.git_checkpoint = repo
-                    .latest_git_checkpoint_for_change(&state.change_id)
+                    .latest_git_checkpoint_for_state(&state.state_id)
                     .ok()
                     .flatten()
                     .map(|record| record.git_commit);
                 entry.collapsed = collapsed_annotations
-                    .get(&state.change_id)
+                    .get(&state.state_id)
                     .copied()
                     .map(CollapsedEntry::from);
                 entry
@@ -412,7 +430,7 @@ fn render_plain_git_log(cli: &Cli, probe: &PlainGitVerificationProbe, oneline: b
         if let Some(branch) = &probe.git_branch {
             println!(
                 "Then: {}",
-                style::bold(&canonical_adopt_ref_command(branch))
+                style::bold(&canonical_git_import_ref_command(branch))
             );
         }
     }
@@ -659,7 +677,7 @@ fn timeline_step_line(step: &TimelineStepOutput, verbose: bool) -> String {
         format!(
             "{} {} {} {} {} {} {}",
             marker,
-            style::change_id(&step.step_id),
+            style::state_id(&step.step_id),
             style::dim(&step.branch_id),
             style::bold(tool),
             style::dim(status),
@@ -670,7 +688,7 @@ fn timeline_step_line(step: &TimelineStepOutput, verbose: bool) -> String {
         format!(
             "{} {} {} {} {}",
             marker,
-            style::change_id(&step.step_id),
+            style::state_id(&step.step_id),
             style::bold(tool),
             style::dim(&native),
             style::dim(&format!("{state} {paths}"))
@@ -678,66 +696,24 @@ fn timeline_step_line(step: &TimelineStepOutput, verbose: bool) -> String {
     }
 }
 
-fn summarize_paths(paths: &[String]) -> String {
-    match paths {
-        [] => String::new(),
-        [one] => one.clone(),
-        [one, two] => format!("{one}, {two}"),
-        [one, two, rest @ ..] => format!("{one}, {two} +{}", rest.len()),
-    }
-}
-
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
-}
-
 fn timeline_label(label: &TimelineLabel) -> String {
-    match label {
-        TimelineLabel::RepoReversible => "repo-reversible",
-        TimelineLabel::ExternalSideEffectsUnknown => "external-side-effects-unknown",
-        TimelineLabel::IgnoredPathTouched => "ignored-path-touched",
-        TimelineLabel::OutsideRepoTouched => "outside-repo-touched",
-        TimelineLabel::PurgeBoundary => "purge-boundary",
-        TimelineLabel::CaptureFailed => "capture-failed",
-    }
-    .to_string()
+    core_timeline_label(label).to_string()
 }
 
 fn timeline_tool_status(status: &TimelineToolCallStatus) -> String {
-    match status {
-        TimelineToolCallStatus::Succeeded => "succeeded",
-        TimelineToolCallStatus::Failed => "failed",
-        TimelineToolCallStatus::Cancelled => "cancelled",
-    }
-    .to_string()
+    core_timeline_tool_status(status).to_string()
 }
 
 fn timeline_branch_reason(reason: &TimelineBranchReason) -> String {
-    match reason {
-        TimelineBranchReason::EditFromRewoundCursor => "edit-from-rewound-cursor",
-        TimelineBranchReason::ExplicitFork => "explicit-fork",
-        TimelineBranchReason::Retry => "retry",
-        TimelineBranchReason::FanOut => "fan-out",
-    }
-    .to_string()
+    core_timeline_branch_reason(reason).to_string()
 }
 
 fn timeline_cursor_reason(reason: &TimelineCursorMoveReason) -> &'static str {
-    match reason {
-        TimelineCursorMoveReason::SeekToolCall => "seek-tool-call",
-        TimelineCursorMoveReason::Undo => "undo",
-        TimelineCursorMoveReason::Redo => "redo",
-        TimelineCursorMoveReason::Reset => "reset",
-        TimelineCursorMoveReason::AutoAdvance => "auto-advance",
-    }
+    core_timeline_cursor_reason(reason)
 }
 
 fn timeline_recovery_status(status: TimelineNavigationRecoveryStatus) -> &'static str {
-    match status {
-        TimelineNavigationRecoveryStatus::PendingCursorRecord => "pending-cursor-record",
-        TimelineNavigationRecoveryStatus::Blocked => "blocked",
-        TimelineNavigationRecoveryStatus::AlreadyApplied => "already-applied",
-    }
+    core_timeline_recovery_status(status)
 }
 
 fn collect_reflog_entries(root: &Path, limit: usize) -> Result<Vec<ReflogEntry>> {
@@ -827,38 +803,15 @@ fn read_reflog_file(
 ) -> Result<()> {
     let file = fs::File::open(path)?;
     for line in io::BufReader::new(file).lines() {
-        if let Some(entry) = parse_reflog_line(source, reference, &line?) {
+        if let Some(entry) = parse_reflog_entry(source, reference, &line?) {
             entries.push(entry);
         }
     }
     Ok(())
 }
 
-fn parse_reflog_line(source: &str, reference: &str, line: &str) -> Option<ReflogEntry> {
-    let (metadata, message) = line.split_once('\t').unwrap_or((line, ""));
-    let mut parts = metadata.split_whitespace();
-    let old_oid = parts.next()?.to_string();
-    let new_oid = parts.next()?.to_string();
-    let mut actor_parts = Vec::new();
-    let mut timestamp = None;
-
-    for part in parts {
-        if part.parse::<i64>().is_ok() {
-            timestamp = Some(part.to_string());
-            break;
-        }
-        actor_parts.push(part);
-    }
-
-    Some(ReflogEntry {
-        source: source.to_string(),
-        reference: reference.to_string(),
-        old_oid,
-        new_oid,
-        actor: actor_parts.join(" "),
-        timestamp,
-        message: message.to_string(),
-    })
+fn parse_reflog_entry(source: &str, reference: &str, line: &str) -> Option<ReflogEntry> {
+    parse_reflog_line(source, reference, line).map(ReflogEntry::from)
 }
 
 fn write_reflog_oneline<W: std::io::Write>(
@@ -870,7 +823,7 @@ fn write_reflog_oneline<W: std::io::Write>(
             out,
             "{} {} {} {}",
             style::dim(&entry.source),
-            style::change_id(short_oid(&entry.new_oid)),
+            style::state_id(short_oid(&entry.new_oid)),
             style::dim(&entry.reference),
             style::bold(&entry.message)
         )?;
@@ -890,7 +843,7 @@ fn write_reflog_full<W: std::io::Write>(out: &mut W, output: &ReflogOutput) -> s
     writeln!(out, "Reflog: {} entrie(s)", output.entries.len())?;
     if output.entries.is_empty() {
         if let Some(line) = format_next_step_dim(
-            "make a checkpoint, fetch, pull, push, or run `heddle adopt`",
+            "run `heddle commit` after capturing work, `heddle pull`, or `heddle import git`",
             0,
         ) {
             writeln!(out, "{line}")?;
@@ -931,10 +884,6 @@ fn write_reflog_full<W: std::io::Write>(out: &mut W, output: &ReflogOutput) -> s
     Ok(())
 }
 
-fn short_oid(oid: &str) -> &str {
-    oid.get(..12).unwrap_or(oid)
-}
-
 fn write_oneline<W: std::io::Write>(
     out: &mut W,
     output: &LogOutput,
@@ -960,7 +909,7 @@ fn write_oneline<W: std::io::Write>(
             writeln!(
                 out,
                 "{} {} {}{}{}",
-                style::change_id(&entry.change_id),
+                style::state_id(&entry.state_id),
                 style::dim(&entry.content_hash),
                 style::bold(intent),
                 checkpoint,
@@ -970,7 +919,7 @@ fn write_oneline<W: std::io::Write>(
             writeln!(
                 out,
                 "{} {}{}",
-                style::change_id(&entry.change_id),
+                style::state_id(&entry.state_id),
                 style::bold(intent),
                 style::dim(&collapsed),
             )?;
@@ -1030,7 +979,7 @@ fn write_full<W: std::io::Write>(
             writeln!(
                 out,
                 "{} ({}) {}",
-                style::change_id(&entry.change_id),
+                style::state_id(&entry.state_id),
                 style::dim(&entry.content_hash),
                 style::dim(&entry.created_at),
             )?;
@@ -1038,7 +987,7 @@ fn write_full<W: std::io::Write>(
             writeln!(
                 out,
                 "{} {}",
-                style::change_id(&entry.change_id),
+                style::state_id(&entry.state_id),
                 style::dim(&entry.created_at),
             )?;
         }
@@ -1053,7 +1002,7 @@ fn write_full<W: std::io::Write>(
                 "  {}",
                 style::dim(&format!(
                     "Collapsed: expandable with `heddle expand {}` ({} captures)",
-                    entry.change_id, collapsed.source_count
+                    entry.state_id, collapsed.source_count
                 ))
             )?;
         }
@@ -1115,7 +1064,7 @@ mod tests {
 
     fn sample_entry() -> StateEntry {
         StateEntry {
-            change_id: "hd-abc123".to_string(),
+            state_id: "hs-abc123".to_string(),
             content_hash: "deadbeef".to_string(),
             intent: Some("Capture audit pipeline".to_string()),
             principal: "Ada <ada@example.com>".to_string(),
@@ -1140,8 +1089,8 @@ mod tests {
             cursor: TimelineCursorOutput {
                 branch_id: Some("tlb-main".to_string()),
                 step_id: Some("tls-two".to_string()),
-                state: Some("hd-cursor".to_string()),
-                state_full: Some("hd-cursor-full".to_string()),
+                state: Some("hs-cursor".to_string()),
+                state_full: Some("hs-cursor-full".to_string()),
             },
             branches: vec![TimelineBranchOutput {
                 branch_id: "tlb-main".to_string(),
@@ -1170,11 +1119,11 @@ mod tests {
                     changed: Some(true),
                     touched_paths: vec!["src/one.rs".to_string()],
                     labels: vec!["repo-reversible".to_string()],
-                    before_state: Some("hd-before".to_string()),
-                    after_state: Some("hd-one".to_string()),
-                    capture_state: Some("hd-one".to_string()),
-                    cursor_state: Some("hd-one".to_string()),
-                    cursor_state_full: Some("hd-one-full".to_string()),
+                    before_state: Some("hs-before".to_string()),
+                    after_state: Some("hs-one".to_string()),
+                    capture_state: Some("hs-one".to_string()),
+                    cursor_state: Some("hs-one".to_string()),
+                    cursor_state_full: Some("hs-one-full".to_string()),
                     payload_summary: Some("first call".to_string()),
                     payload_hash: None,
                     capture_oplog_batch_id: Some(1),
@@ -1204,11 +1153,11 @@ mod tests {
                     changed: Some(true),
                     touched_paths: vec!["src/two.rs".to_string()],
                     labels: vec!["repo-reversible".to_string()],
-                    before_state: Some("hd-one".to_string()),
-                    after_state: Some("hd-cursor".to_string()),
-                    capture_state: Some("hd-cursor".to_string()),
-                    cursor_state: Some("hd-cursor".to_string()),
-                    cursor_state_full: Some("hd-cursor-full".to_string()),
+                    before_state: Some("hs-one".to_string()),
+                    after_state: Some("hs-cursor".to_string()),
+                    capture_state: Some("hs-cursor".to_string()),
+                    cursor_state: Some("hs-cursor".to_string()),
+                    cursor_state_full: Some("hs-cursor-full".to_string()),
                     payload_summary: Some("second call".to_string()),
                     payload_hash: None,
                     capture_oplog_batch_id: Some(2),
@@ -1256,7 +1205,7 @@ mod tests {
         write_oneline(&mut buf, &output, false).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(!s.contains('\x1b'), "oneline leaked ANSI: {s:?}");
-        assert!(s.contains("hd-abc123"));
+        assert!(s.contains("hs-abc123"));
         assert!(s.contains("Capture audit pipeline"));
 
         let mut buf = Vec::new();

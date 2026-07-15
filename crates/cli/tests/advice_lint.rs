@@ -168,10 +168,6 @@ fn remote_recovery_policy_uses_typed_advice_constructors() {
             ][..],
         ),
         (
-            "cli/commands/fetch.rs",
-            &["fetch_remote_required_advice"][..],
-        ),
-        (
             "cli/commands/clone.rs",
             &["network_clone_failed_advice"][..],
         ),
@@ -307,7 +303,7 @@ fn git_overlay_mutation_preflight_stays_shared() {
     let mut violations = Vec::new();
     for (file, forbidden) in [
         (
-            "cli/commands/git_projection.rs",
+            "cli/commands/commit.rs",
             &[
                 "plain_git_mutation_advice(",
                 "detached_git_head_mutation_advice(",
@@ -353,19 +349,9 @@ fn git_overlay_checkpoint_mutations_use_transaction_seam() {
     for (file, required) in [
         (
             "cli/commands/checkpoint.rs",
-            &[
-                "git_overlay_txn::preflight_plain_git_mutation(",
-                "git_overlay_txn::preflight_checkpoint",
-            ][..],
+            &["git_overlay_txn::preflight_checkpoint"][..],
         ),
-        (
-            "cli/commands/git_projection.rs",
-            &[
-                "git_overlay_txn::preflight_plain_git_mutation(",
-                "git_overlay_txn::preflight_commit(",
-                "git_overlay_txn::preflight_commit_checkpoint_ref_update(",
-            ][..],
-        ),
+        ("cli/commands/commit.rs", &["create_git_checkpoint("][..]),
         (
             "cli/commands/workflow.rs",
             &["git_overlay_txn::preflight_land_checkpoint("][..],
@@ -383,7 +369,7 @@ fn git_overlay_checkpoint_mutations_use_transaction_seam() {
 
     for file in [
         "cli/commands/checkpoint.rs",
-        "cli/commands/git_projection.rs",
+        "cli/commands/commit.rs",
         "cli/commands/workflow.rs",
     ] {
         let path = src_dir.join(file);

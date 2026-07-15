@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::Result;
 use heddle_core::status::next_action::{NextActionInput, effective_next_action, non_empty_action};
+use heddle_git_projection::GitProjection;
 use repo::{GitImportGuidance, GitRemoteTrackingStatus, RepositoryOperationStatus};
 
 use super::{
@@ -9,7 +10,7 @@ use super::{
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{
         ABORT_OPERATOR_EMISSION, CONTINUE_OPERATOR_EMISSION, OperatorAction, OperatorCommandOutput,
-        OperatorEmission, SYNC_OPERATOR_EMISSION, abort_operator, exit_if_blocked_operator_status,
+        OperatorEmission, SYNC_OPERATOR_EMISSION, abort_operator, fail_if_blocked_operator_status,
         open_operator_repo_from_path, recommend_next_action,
     },
     remote::resolve_default_remote_name,
@@ -20,7 +21,6 @@ use super::{
 use crate::{
     cli::{Cli, cli_args::SyncArgs, output_is_compact, should_output_json, style},
     config::UserConfig,
-    git_projection_engine::GitProjection,
 };
 
 pub async fn cmd_continue(cli: &Cli) -> Result<()> {
@@ -30,8 +30,7 @@ pub async fn cmd_continue(cli: &Cli) -> Result<()> {
     let output = super::operator_core::continue_operator(&repo)?;
     let status = output.status.clone();
     emit(cli, &repo, output, CONTINUE_OPERATOR_EMISSION)?;
-    exit_if_blocked_operator_status(&status);
-    Ok(())
+    fail_if_blocked_operator_status(&status)
 }
 
 pub fn cmd_abort(cli: &Cli) -> Result<()> {

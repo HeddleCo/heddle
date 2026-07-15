@@ -7,7 +7,6 @@ mod p256;
 mod pem_loader;
 pub mod pop;
 mod state_signature;
-mod state_signing;
 
 #[cfg(test)]
 mod behavior_tests;
@@ -24,7 +23,6 @@ pub use state_signature::{
     StateSignatureError, public_key_bytes, signature_bytes, state_signature_from_signer,
     verify_state_signature_bytes,
 };
-pub use state_signing::StateSigningExt;
 
 /// Trait for cryptographic signers.
 pub trait Signer: Send + Sync {

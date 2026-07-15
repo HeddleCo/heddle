@@ -7,17 +7,15 @@ pub mod monorepo;
 pub mod request_signing;
 mod session;
 mod sync;
-mod tree_edit;
 mod user;
 
-use cli_shared::ClientConfig;
+use cli_shared::{ClientConfig, cleartext_connect_allowed, cleartext_refused_message};
 use crypto::{Ed25519Signer, Signer};
 use grpc::heddle::v1::{
     KeypairProof, MintBiscuitRequest, auth_service_client::AuthServiceClient,
     content_service_client::ContentServiceClient,
     hosted_user_service_client::HostedUserServiceClient, mint_biscuit_request::Proof,
     repo_sync_service_client::RepoSyncServiceClient,
-    tree_edit_service_client::TreeEditServiceClient,
 };
 use objects::{object::MarkerName, store::ObjectStore};
 use repo::Repository;
@@ -35,7 +33,6 @@ pub struct HostedGrpcClient {
     pub(super) user: HostedUserServiceClient<Channel>,
     pub(super) auth: AuthServiceClient<Channel>,
     pub(super) content: ContentServiceClient<Channel>,
-    pub(super) tree_edit: TreeEditServiceClient<Channel>,
     pub(super) token_header: Option<MetadataValue<tonic::metadata::Ascii>>,
     transport: helpers::HostedTransportPolicy,
     pub(super) auth_proof_key_pem: Option<String>,
@@ -55,6 +52,12 @@ impl HostedGrpcClient {
         addr: std::net::SocketAddr,
         config: &ClientConfig,
     ) -> Result<Self, ProtocolError> {
+        // Production remotes require TLS. Cleartext is allowed only for
+        // loopback or when the user explicitly opts in (`allow_insecure` /
+        // `--insecure` / remote.insecure / HEDDLE_REMOTE_INSECURE).
+        if !cleartext_connect_allowed(addr, config.tls_enabled, config.allow_insecure) {
+            return Err(ProtocolError::InvalidState(cleartext_refused_message(addr)));
+        }
         let scheme = if config.tls_enabled { "https" } else { "http" };
         let mut endpoint = Endpoint::from_shared(format!("{scheme}://{addr}"))
             .map_err(|err| ProtocolError::InvalidState(err.to_string()))?;
@@ -92,8 +95,7 @@ impl HostedGrpcClient {
                 .max_decoding_message_size(wire::MAX_PULL_DECODE_MESSAGE_SIZE),
             user: HostedUserServiceClient::new(channel.clone()),
             auth: AuthServiceClient::new(channel.clone()),
-            content: ContentServiceClient::new(channel.clone()),
-            tree_edit: TreeEditServiceClient::new(channel),
+            content: ContentServiceClient::new(channel),
             token_header,
             transport,
             auth_proof_key_pem: config.auth_proof_key_pem.clone(),
@@ -412,30 +414,30 @@ impl HostedGrpcClient {
         &mut self,
         repo: &Repository,
         repo_path: &str,
-        pushed_state: objects::object::ChangeId,
+        pushed_state: objects::object::StateId,
     ) -> Result<(), ProtocolError> {
         let remote_markers = self
             .list_refs(repo_path)
             .await?
             .into_iter()
             .filter(|entry| !entry.is_thread)
-            .map(|entry| (entry.name, entry.change_id))
+            .map(|entry| (entry.name, entry.state_id))
             .collect::<std::collections::HashMap<_, _>>();
         for marker in repo.refs().list_markers()? {
-            let Some(change_id) = repo.refs().get_marker(&marker)? else {
+            let Some(state_id) = repo.refs().get_marker(&marker)? else {
                 continue;
             };
-            if !wire::is_ancestor(repo.store(), change_id, pushed_state)? {
+            if !wire::is_ancestor(repo.store(), state_id, pushed_state)? {
                 continue;
             }
 
             let old_value = remote_markers.get(marker.as_str()).copied();
-            if old_value == Some(change_id) {
+            if old_value == Some(state_id) {
                 continue;
             }
 
             let result = self
-                .update_ref(repo_path, &marker, false, old_value, change_id, true, None)
+                .update_ref(repo_path, &marker, false, old_value, state_id, true, None)
                 .await?;
             if !result.success {
                 return Err(ProtocolError::InvalidState(
@@ -455,18 +457,18 @@ impl HostedGrpcClient {
     ) -> Result<(), ProtocolError> {
         let remote_markers = self.list_refs(repo_path).await?;
         for marker in remote_markers.into_iter().filter(|entry| !entry.is_thread) {
-            if !repo.store().has_state(&marker.change_id)? {
+            if !repo.store().has_state(&marker.state_id)? {
                 continue;
             }
             let marker_name = MarkerName::from(marker.name.as_str());
             match repo.refs().get_marker(&marker_name)? {
-                Some(existing) if existing == marker.change_id => {}
+                Some(existing) if existing == marker.state_id => {}
                 Some(existing) => repo.refs().set_marker_cas(
                     &marker_name,
                     refs::RefExpectation::Value(existing),
-                    &marker.change_id,
+                    &marker.state_id,
                 )?,
-                None => repo.refs().create_marker(&marker_name, &marker.change_id)?,
+                None => repo.refs().create_marker(&marker_name, &marker.state_id)?,
             }
         }
         Ok(())
@@ -492,8 +494,7 @@ mod tests {
                 .max_decoding_message_size(wire::MAX_PULL_DECODE_MESSAGE_SIZE),
             user: HostedUserServiceClient::new(channel.clone()),
             auth: AuthServiceClient::new(channel.clone()),
-            content: ContentServiceClient::new(channel.clone()),
-            tree_edit: TreeEditServiceClient::new(channel),
+            content: ContentServiceClient::new(channel),
             token_header: Some(
                 MetadataValue::try_from(format!("Bearer {token}")).expect("valid bearer header"),
             ),

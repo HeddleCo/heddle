@@ -13,7 +13,7 @@ mod tests;
 use std::{collections::HashMap, path::Path};
 
 use objects::{
-    object::{ChangeId, ContentHash, FileProvenance, State},
+    object::{ContentHash, FileProvenance, State, StateId},
     store::ObjectStore,
 };
 
@@ -37,13 +37,13 @@ use super::{HeddleError, Repository, Result};
 /// when we have measured workloads to size it against.
 #[derive(Debug, Default)]
 pub(crate) struct ProvenanceCache {
-    roots: HashMap<ChangeId, Option<ContentHash>>,
+    roots: HashMap<StateId, Option<ContentHash>>,
 }
 
 impl Repository {
     pub fn state_origin(&self, state: &State) -> objects::object::Origin {
         objects::object::Origin {
-            state_id: state.change_id,
+            state_id: state.id(),
             attribution: state.attribution.clone(),
             created_at: state.created_at,
             // Forward `authored_at` from the state into the
@@ -74,7 +74,7 @@ impl Repository {
         state: &State,
         cache: &mut ProvenanceCache,
     ) -> Result<Option<ContentHash>> {
-        if let Some(cached) = cache.roots.get(&state.change_id) {
+        if let Some(cached) = cache.roots.get(&state.id()) {
             return Ok(*cached);
         }
 
@@ -82,7 +82,7 @@ impl Repository {
         // merge UX) short-circuits the walk entirely. Cache it so we
         // don't pay the field read again on a sibling-branch query.
         if let Some(root) = state.provenance {
-            cache.roots.insert(state.change_id, Some(root));
+            cache.roots.insert(state.id(), Some(root));
             return Ok(Some(root));
         }
 
@@ -106,7 +106,7 @@ impl Repository {
             // fall through to the current-state attribution rather
             // than crediting an arbitrary surviving parent.
             tracing::debug!(
-                state = %state.change_id,
+                state = %state.id(),
                 missing = state.parents.len() - parent_states.len(),
                 "some parent states unavailable while building provenance"
             );
@@ -131,7 +131,7 @@ impl Repository {
         }
 
         let result = self.build_provenance_from_parents(state, &parent_refs)?;
-        cache.roots.insert(state.change_id, result);
+        cache.roots.insert(state.id(), result);
         Ok(result)
     }
 

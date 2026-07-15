@@ -20,9 +20,10 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use crypto::{Signer, load_signer, verify_payload_signature};
+use heddle_core::{redaction_signature_status, short_public_key};
 use objects::{
     object::{
-        ChangeId, ContentHash, LeafPolicy, Redaction, RedactionsBlob, StateSignature,
+        ContentHash, LeafPolicy, Redaction, RedactionsBlob, StateId, StateSignature,
         TreePathResolveError, resolve_tree_path,
     },
     worktree::should_ignore,
@@ -371,13 +372,10 @@ fn cmd_redact_show(cli: &Cli, repo: &Repository, args: RedactShowArgs) -> Result
     // three-state — verified / unsigned / tampered — instead of a
     // simple boolean so auditors can distinguish "operator chose not
     // to sign" from "someone forged the file".
-    let signature_status: SignatureStatus =
-        match (&redaction.signature, verify_redaction_signature(&redaction)) {
-            (None, _) => SignatureStatus::Unsigned,
-            (Some(_), Ok(true)) => SignatureStatus::Verified,
-            (Some(_), Ok(false)) => SignatureStatus::Unsigned, // unreachable in practice
-            (Some(_), Err(_)) => SignatureStatus::Tampered,
-        };
+    let signature_status = redaction_signature_status(
+        redaction.signature.is_some(),
+        verify_redaction_signature(&redaction).map_err(|_| ()),
+    );
     let signature_algorithm = redaction.signature.as_ref().map(|s| s.algorithm.clone());
 
     #[derive(Serialize)]
@@ -447,25 +445,6 @@ fn cmd_redact_show(cli: &Cli, repo: &Repository, args: RedactShowArgs) -> Result
 }
 
 /// Three-state signature audit result. Distinct from the upstream
-/// `crypto::SignatureStatus` enum because that one is wired to states,
-/// not redactions, but the verb mapping is the same.
-#[derive(Copy, Clone, Debug)]
-enum SignatureStatus {
-    Unsigned,
-    Verified,
-    Tampered,
-}
-
-impl SignatureStatus {
-    fn label(self) -> &'static str {
-        match self {
-            SignatureStatus::Unsigned => "unsigned",
-            SignatureStatus::Verified => "verified",
-            SignatureStatus::Tampered => "tampered",
-        }
-    }
-}
-
 fn emit_apply(cli: &Cli, output: &RedactApplyOutput) -> Result<()> {
     // We open the repo above and have `&Cli` here; `Repository::config`
     // requires a borrow, so emit JSON via the local `cli` flags. The
@@ -488,9 +467,9 @@ fn emit_apply(cli: &Cli, output: &RedactApplyOutput) -> Result<()> {
     Ok(())
 }
 
-fn resolve_state(repo: &Repository, spec: &str) -> Result<ChangeId> {
+fn resolve_state(repo: &Repository, spec: &str) -> Result<StateId> {
     repo::resolve_state_for_command(repo, spec, repo::ResolvePolicy::minimal())
-        .map(|resolved| resolved.change_id)
+        .map(|resolved| resolved.state_id)
         .map_err(|error| match error {
             repo::StateResolveError::Repository(err) => err.into(),
             repo::StateResolveError::Failure(repo::StateResolveFailure::NotFound { spec }) => {
@@ -501,7 +480,7 @@ fn resolve_state(repo: &Repository, spec: &str) -> Result<ChangeId> {
         .with_context(|| format!("resolve state '{}'", spec))
 }
 
-pub(crate) fn blob_at_path(repo: &Repository, state: &ChangeId, path: &str) -> Result<ContentHash> {
+pub(crate) fn blob_at_path(repo: &Repository, state: &StateId, path: &str) -> Result<ContentHash> {
     let tree = repo
         .get_tree_for_state(state)
         .with_context(|| format!("load tree for state {}", state.short()))?
@@ -540,7 +519,7 @@ pub(crate) fn blob_at_path(repo: &Repository, state: &ChangeId, path: &str) -> R
 /// listing is small in practice; a flat index can be added if needed.
 pub(crate) fn resolve_redaction_id(repo: &Repository, spec: &str) -> Result<ContentHash> {
     let listing = repo.list_all_redactions()?;
-    let normalised = spec.trim_start_matches("hd-").to_ascii_lowercase();
+    let normalised = spec.trim_start_matches("hs-").to_ascii_lowercase();
     let mut candidates: Vec<ContentHash> = Vec::new();
     for (_blob, redactions_blob) in &listing {
         for redaction in &redactions_blob.redactions {
@@ -741,7 +720,7 @@ fn cmd_redact_trust_add(cli: &Cli, repo: &Repository, args: RedactTrustAddArgs) 
         println!(
             "trusted {} key {} ({})",
             output.entry.algorithm,
-            short_key(&output.entry.public_key),
+            short_public_key(&output.entry.public_key),
             output.entry.label.as_deref().unwrap_or("unlabeled"),
         );
     }
@@ -776,7 +755,7 @@ fn cmd_redact_trust_list(cli: &Cli, repo: &Repository, _args: RedactTrustListArg
             println!(
                 "  {} {} ({})",
                 k.algorithm,
-                short_key(&k.public_key),
+                short_public_key(&k.public_key),
                 k.label.as_deref().unwrap_or("unlabeled"),
             );
         }
@@ -870,17 +849,6 @@ fn redact_trust_nothing_to_remove_advice(
     )
 }
 
-/// Short-form display for a hex-encoded public key. Same length as
-/// the redaction-id shortener: first 16 chars, which is plenty to
-/// disambiguate within a single repo's trust list.
-fn short_key(hex: &str) -> String {
-    if hex.len() <= 16 {
-        hex.to_string()
-    } else {
-        format!("{}…", &hex[..16])
-    }
-}
-
 #[cfg(test)]
 mod tree_path_tests {
     use objects::{
@@ -892,14 +860,14 @@ mod tree_path_tests {
 
     use super::blob_at_path;
 
-    fn state_with_tree(repo: &Repository, root_hash: ContentHash) -> objects::object::ChangeId {
+    fn state_with_tree(repo: &Repository, root_hash: ContentHash) -> objects::object::StateId {
         let state = State::new(
             root_hash,
             Vec::new(),
             Attribution::human(Principal::new("tester".to_string(), "tester@example.com")),
         );
         repo.store().put_state(&state).unwrap();
-        state.change_id
+        state.state_id
     }
 
     #[test]

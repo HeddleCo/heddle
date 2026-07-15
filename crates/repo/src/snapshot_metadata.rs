@@ -18,7 +18,7 @@ use std::path::Path;
 use chrono::Utc;
 use objects::{
     error::HeddleError,
-    object::{ChangeId, State, ThreadName, Tree, Verification},
+    object::{State, StateId, ThreadName, Tree, Verification},
     store::ObjectStore,
 };
 
@@ -85,7 +85,7 @@ pub fn refresh_active_thread_metadata(
 /// state's verification + confidence into the thread record's
 /// summaries so callers don't have to reload the state object.
 pub fn update_thread_state_from_state(thread: &mut Thread, state: &State) {
-    thread.current_state = Some(state.change_id.short());
+    thread.current_state = Some(state.id().short());
     thread.verification_summary = summarize_verification(state.verification.as_ref());
     thread.confidence_summary = summarize_confidence(state.confidence);
 }
@@ -311,13 +311,13 @@ fn is_public_api_path(path: &str) -> bool {
         || path.ends_with("/public.rs")
 }
 
-/// Translate `ChangeId` short-strings into `ChangeId`s if the thread
+/// Translate `StateId` short-strings into `StateId`s if the thread
 /// references one. `Repository::resolve_state` already handles the
 /// alias forms; this just flattens the option for callers.
-pub fn resolve_short_change_id(
+pub fn resolve_short_state_id(
     repo: &Repository,
     short: &str,
-) -> Result<Option<ChangeId>, HeddleError> {
+) -> Result<Option<StateId>, HeddleError> {
     repo.resolve_state(short)
 }
 

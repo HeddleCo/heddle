@@ -142,13 +142,13 @@ fn session_show_without_active_session_uses_typed_advice() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let envelope = json_failure(&["--output", "json", "session", "show"], temp.path());
+    let envelope = json_failure(&["--output", "json", "agent", "provenance", "show"], temp.path());
     assert_eq!(envelope["kind"], "no_current_session");
-    assert_eq!(envelope["primary_command"], "heddle session start");
+    assert_eq!(envelope["primary_command"], "heddle agent provenance begin");
     assert!(
         envelope["hint"]
             .as_str()
-            .is_some_and(|hint| hint.contains("heddle session start")),
+            .is_some_and(|hint| hint.contains("heddle agent provenance begin")),
         "session advice should point at session start: {envelope}"
     );
 }
@@ -162,7 +162,8 @@ fn session_segment_without_active_session_uses_typed_advice() {
         &[
             "--output",
             "json",
-            "session",
+            "agent",
+            "provenance",
             "segment",
             "--provider",
             "codex",
@@ -172,7 +173,7 @@ fn session_segment_without_active_session_uses_typed_advice() {
         temp.path(),
     );
     assert_eq!(envelope["kind"], "no_current_session");
-    assert_eq!(envelope["primary_command"], "heddle session start");
+    assert_eq!(envelope["primary_command"], "heddle agent provenance begin");
     assert!(
         envelope["error"]
             .as_str()

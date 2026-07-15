@@ -431,8 +431,8 @@ pub fn new_function() {}
         .unwrap();
 
     // Verify both states exist
-    assert!(repo.store().has_state(&state1.change_id).unwrap());
-    assert!(repo.store().has_state(&state2.change_id).unwrap());
+    assert!(repo.store().has_state(&state1.state_id).unwrap());
+    assert!(repo.store().has_state(&state2.state_id).unwrap());
 
     // The trees should be different
     assert_ne!(state1.tree, state2.tree);

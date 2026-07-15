@@ -18,8 +18,8 @@ Usage:
         --threshold 0.20
 
 Exits 0 if every measurement is within budget; exits 1 with a
-human-readable diff otherwise. Designed for the `fuse-bench` CI job;
-output also works as a local smoke check.
+human-readable diff otherwise. Used by the manual `Benchmarks` workflow and
+available as a local smoke check.
 
 Baseline file shape (committed, hand-edited when intentional):
 

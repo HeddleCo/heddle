@@ -7,7 +7,10 @@
 use std::{collections::HashMap, sync::RwLock};
 
 use crate::{
-    object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree},
+    object::{
+        Action, ActionId, Blob, ContentHash, State, StateAttachment, StateAttachmentId, StateId,
+        Tree,
+    },
     store::{HeddleError, ObjectStore, Result},
     sync::RwLockExt,
 };
@@ -33,10 +36,11 @@ use crate::{
 pub struct InMemoryStore {
     blobs: RwLock<HashMap<ContentHash, Vec<u8>>>,
     trees: RwLock<HashMap<ContentHash, Vec<u8>>>,
-    states: RwLock<HashMap<ChangeId, Vec<u8>>>,
+    states: RwLock<HashMap<StateId, Vec<u8>>>,
+    state_attachments: RwLock<HashMap<StateAttachmentId, Vec<u8>>>,
     actions: RwLock<HashMap<ActionId, Vec<u8>>>,
     redactions: RwLock<HashMap<ContentHash, Vec<u8>>>,
-    state_visibility: RwLock<HashMap<ChangeId, Vec<u8>>>,
+    state_visibility: RwLock<HashMap<StateId, Vec<u8>>>,
 }
 
 impl InMemoryStore {
@@ -108,9 +112,19 @@ impl ObjectStore for InMemoryStore {
         Ok(self.trees.read_or_poisoned().keys().copied().collect())
     }
 
-    fn get_state(&self, id: &ChangeId) -> Result<Option<State>> {
+    fn get_state(&self, id: &StateId) -> Result<Option<State>> {
         match self.states.read_or_poisoned().get(id) {
-            Some(bytes) => Ok(Some(rmp_serde::from_slice(bytes)?)),
+            Some(bytes) => {
+                let mut state: State = rmp_serde::from_slice(bytes)?;
+                if state.id() != *id {
+                    return Err(crate::error::HeddleError::InvalidObject(format!(
+                        "state id mismatch: requested {id}, computed {}",
+                        state.id()
+                    )));
+                }
+                state.state_id = *id;
+                Ok(Some(state))
+            }
             None => Ok(None),
         }
     }
@@ -118,16 +132,49 @@ impl ObjectStore for InMemoryStore {
     fn put_state(&self, state: &State) -> Result<()> {
         self.states
             .write_or_poisoned()
-            .insert(state.change_id, rmp_serde::to_vec(state)?);
+            .insert(state.id(), rmp_serde::to_vec(state)?);
         Ok(())
     }
 
-    fn has_state(&self, id: &ChangeId) -> Result<bool> {
+    fn has_state(&self, id: &StateId) -> Result<bool> {
         Ok(self.states.read_or_poisoned().contains_key(id))
     }
 
-    fn list_states(&self) -> Result<Vec<ChangeId>> {
+    fn list_states(&self) -> Result<Vec<StateId>> {
         Ok(self.states.read_or_poisoned().keys().copied().collect())
+    }
+
+    fn get_state_attachment(
+        &self,
+        state: &StateId,
+        id: &StateAttachmentId,
+    ) -> Result<Option<StateAttachment>> {
+        let attachment = self
+            .state_attachments
+            .read_or_poisoned()
+            .get(id)
+            .map(|bytes| rmp_serde::from_slice::<StateAttachment>(bytes))
+            .transpose()?;
+        Ok(attachment.filter(|attachment: &StateAttachment| attachment.state_id == *state))
+    }
+
+    fn put_state_attachment(&self, attachment: &StateAttachment) -> Result<StateAttachmentId> {
+        let id = attachment.id();
+        self.state_attachments
+            .write_or_poisoned()
+            .insert(id, rmp_serde::to_vec_named(attachment)?);
+        Ok(id)
+    }
+
+    fn list_state_attachments(&self, state: &StateId) -> Result<Vec<StateAttachment>> {
+        let mut attachments = Vec::new();
+        for bytes in self.state_attachments.read_or_poisoned().values() {
+            let attachment: StateAttachment = rmp_serde::from_slice(bytes)?;
+            if attachment.state_id == *state {
+                attachments.push(attachment);
+            }
+        }
+        Ok(attachments)
     }
 
     fn get_action(&self, id: &ActionId) -> Result<Option<Action>> {
@@ -178,22 +225,22 @@ impl ObjectStore for InMemoryStore {
         Ok(self.redactions.read_or_poisoned().keys().copied().collect())
     }
 
-    fn has_state_visibility_for_state(&self, state: &ChangeId) -> Result<bool> {
+    fn has_state_visibility_for_state(&self, state: &StateId) -> Result<bool> {
         Ok(self.state_visibility.read_or_poisoned().contains_key(state))
     }
 
-    fn get_state_visibility_bytes_for_state(&self, state: &ChangeId) -> Result<Option<Vec<u8>>> {
+    fn get_state_visibility_bytes_for_state(&self, state: &StateId) -> Result<Option<Vec<u8>>> {
         Ok(self.state_visibility.read_or_poisoned().get(state).cloned())
     }
 
-    fn put_state_visibility_bytes_for_state(&self, state: &ChangeId, bytes: &[u8]) -> Result<()> {
+    fn put_state_visibility_bytes_for_state(&self, state: &StateId, bytes: &[u8]) -> Result<()> {
         self.state_visibility
             .write_or_poisoned()
             .insert(*state, bytes.to_vec());
         Ok(())
     }
 
-    fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
+    fn list_states_with_visibility(&self) -> Result<Vec<StateId>> {
         Ok(self
             .state_visibility
             .read_or_poisoned()
