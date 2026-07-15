@@ -1652,7 +1652,7 @@
           "evidence": [
             {
               "path": "crates/cli/src/cli/commands/remote/remote_ops.rs",
-              "contains": "pull"
+              "contains": ".pull_with_depth_and_materialization("
             }
           ],
           "follow_up": null
@@ -1667,7 +1667,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/client/src/grpc_hosted/session.rs",
+              "path": "crates/client/src/grpc_hosted/sync.rs",
               "contains": "push"
             }
           ],
@@ -1677,7 +1677,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/client/src/auth_cmd.rs",
+              "path": "crates/cli/src/cli/commands/remote/mod.rs",
               "contains": ".push("
             }
           ],
@@ -2438,14 +2438,10 @@
           "reason": "No Heddle hosted-client mapping is shipped."
         },
         "cli": {
-          "status": "shipped",
-          "evidence": [
-            {
-              "path": "crates/cli/src/cli/commands/thread.rs",
-              "contains": "list_threads"
-            }
-          ],
-          "follow_up": null
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The local thread-list command does not call the hosted WorkflowService RPC."
         }
       }
     },

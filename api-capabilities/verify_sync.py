@@ -18,7 +18,7 @@ REPOSITORY_ROOT = ROOT.parent
 CONSUMER = "heddle"
 LOCAL_DECLARATION = "heddle.json"
 API_REPOSITORY = "HeddleCo/api"
-API_REVISION = "653ad2ed134b8a9ceb7ae7ec11cb8d18a571d26c"
+API_REVISION = "a162624fe2eaf6e43b7f5f6a17a53a1e31da8c50"
 API_SNAPSHOT = "capabilities/declarations/heddle.json"
 LAYERS = ("client", "cli")
 STATUSES = {
@@ -38,7 +38,7 @@ def _snake_case(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
-def _source_text(repository_root: Path, evidence: object, rpc: str) -> str:
+def _source_text(repository_root: Path, evidence: object, rpc: str) -> tuple[str, str]:
     if not isinstance(evidence, dict) or set(evidence) != {"path", "contains"}:
         raise SystemExit(f"invalid source evidence for {rpc}")
     relative = evidence["path"]
@@ -54,7 +54,33 @@ def _source_text(repository_root: Path, evidence: object, rpc: str) -> str:
     text = source.read_text(errors="replace")
     if needle not in text:
         raise SystemExit(f"evidence symbol/call edge is missing for {rpc}: {needle}")
-    return needle
+    return needle, text
+
+
+def _validate_rust_binding(
+    repository_root: Path,
+    evidence: object,
+    rpc: str,
+    layer_name: str,
+) -> None:
+    """Require an actual Rust function definition or call, never a name substring."""
+    needle, text = _source_text(repository_root, evidence, rpc)
+    method = rpc.rsplit("/", 1)[-1]
+    canonical = _snake_case(method)
+    if needle == canonical:
+        binding = re.compile(
+            rf"(?:\basync\s+fn\s+{re.escape(canonical)}\s*\(|\.{re.escape(canonical)}\s*\()"
+        )
+    else:
+        symbol = re.search(r"\.([a-z][a-z0-9_]*)\s*\($", needle)
+        if symbol is None or not (
+            symbol.group(1) == canonical
+            or symbol.group(1).startswith(canonical + "_")
+        ):
+            raise SystemExit(f"{layer_name} evidence is not bound to RPC method {method}")
+        binding = re.compile(re.escape(needle))
+    if binding.search(text) is None:
+        raise SystemExit(f"structural {layer_name} binding is missing for {rpc}")
 
 
 def sanitize(declaration: object, repository_root: Path) -> dict[str, object]:
@@ -87,8 +113,6 @@ def sanitize(declaration: object, repository_root: Path) -> dict[str, object]:
         if not isinstance(layers, dict) or set(layers) != set(LAYERS):
             raise SystemExit(f"invalid layer set for {rpc}")
         sanitized_layers: dict[str, dict[str, str]] = {}
-        method = rpc.rsplit("/", 1)[-1]
-        expected_tokens = (method, _snake_case(method))
         for layer_name in LAYERS:
             layer = layers[layer_name]
             if not isinstance(layer, dict) or layer.get("status") not in STATUSES:
@@ -101,11 +125,7 @@ def sanitize(declaration: object, repository_root: Path) -> dict[str, object]:
                 if not evidence:
                     raise SystemExit(f"missing {layer_name} evidence for {rpc}")
                 for item in evidence:
-                    needle = _source_text(repository_root, item, rpc)
-                    if not any(token in needle for token in expected_tokens):
-                        raise SystemExit(
-                            f"{layer_name} evidence is not bound to RPC method {method}"
-                        )
+                    _validate_rust_binding(repository_root, item, rpc, layer_name)
             sanitized_layers[layer_name] = {"status": status}
         sanitized_rows.append(
             {"rpc": rpc, "capability": capability, "layers": sanitized_layers}

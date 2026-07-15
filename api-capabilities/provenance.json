@@ -2,9 +2,9 @@
   "schema_version": 2,
   "consumer": "heddle",
   "api_repository": "HeddleCo/api",
-  "api_revision": "653ad2ed134b8a9ceb7ae7ec11cb8d18a571d26c",
+  "api_revision": "a162624fe2eaf6e43b7f5f6a17a53a1e31da8c50",
   "api_snapshot": "capabilities/declarations/heddle.json",
   "local_declaration": "heddle.json",
-  "local_sha256": "ac8e3b635871d2d9741b4b0a0a381e5464c6be0da8978105a8bd550f1e8234b7",
-  "sanitized_sha256": "714711dcf80a2bd5bb5782d8d8c4743e1cf7d3444a7161e9ab27a7b37f60a153"
+  "local_sha256": "a665f190e860fc15a9583c097bfb2c2ecfcc8be3ca25627b1ea433d03cef5135",
+  "sanitized_sha256": "30074ef9daf3ee29b8c85532d878ee33b28b3968f3627d8620eb6e3c4587155a"
 }

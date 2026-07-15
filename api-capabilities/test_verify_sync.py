@@ -32,7 +32,7 @@ class VerifySyncTests(unittest.TestCase):
         root.mkdir()
         source = Path(temporary.name) / "src" / "mapping.rs"
         source.parent.mkdir()
-        source.write_text("fn get_compare() { client.get_compare(); }\n")
+        source.write_text("async fn get_compare() { client.get_compare(); }\n")
         declaration = {
             "schema_version": 2,
             "consumer": CONSUMER,
@@ -108,7 +108,32 @@ class VerifySyncTests(unittest.TestCase):
         with temporary:
             source = root.parent / "src" / "mapping.rs"
             source.write_text("fn get_compare() {}\n")
-            with self.assertRaisesRegex(SystemExit, "symbol/call edge is missing"):
+            with self.assertRaisesRegex(SystemExit, "structural client binding is missing"):
+                verify(root, snapshot)
+
+    def test_comment_only_name_does_not_count_as_client_binding(self) -> None:
+        temporary, root, snapshot = self.fixture()
+        with temporary:
+            source = root.parent / "src" / "mapping.rs"
+            source.write_text("// get_compare is planned\nclient.other_method();\n")
+            with self.assertRaisesRegex(SystemExit, "structural client binding is missing"):
+                verify(root, snapshot)
+
+    def test_unrelated_call_name_does_not_bind_an_rpc(self) -> None:
+        temporary, root, snapshot = self.fixture()
+        with temporary:
+            declaration_path = root / LOCAL_DECLARATION
+            declaration = json.loads(declaration_path.read_text())
+            declaration["rpc_mappings"][0]["layers"]["cli"]["evidence"][0]["contains"] = ".other_method("
+            (root.parent / "src" / "mapping.rs").write_text(
+                "async fn get_compare() { client.other_method(); }\n"
+            )
+            local = (json.dumps(declaration, indent=2) + "\n").encode()
+            declaration_path.write_bytes(local)
+            provenance = json.loads((root / "provenance.json").read_text())
+            provenance["local_sha256"] = hashlib.sha256(local).hexdigest()
+            (root / "provenance.json").write_text(json.dumps(provenance))
+            with self.assertRaisesRegex(SystemExit, "not bound to RPC method GetCompare"):
                 verify(root, snapshot)
 
     def test_mismatched_snapshot_fails(self) -> None:
