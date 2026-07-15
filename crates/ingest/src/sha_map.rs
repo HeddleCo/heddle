@@ -280,6 +280,19 @@ impl ShaMap {
         self.insert_raw(MapKind::Commit, git_sha, heddle.to_string_full())
     }
 
+    /// Remove one commit identity inside the caller's active import batch.
+    ///
+    /// Full adoption uses this to replace a lazy descriptor's parentless state
+    /// with the canonical state produced while walking complete Git history.
+    pub(crate) fn remove_commit(&mut self, git_sha: &str) -> Result<(), ShaMapError> {
+        let git_sha = normalize_git_sha(git_sha)?;
+        self.conn.execute(
+            "DELETE FROM sha_map WHERE git_sha = ? AND kind = ?",
+            params![git_sha, MapKind::Commit.as_i64()],
+        )?;
+        Ok(())
+    }
+
     /// Insert a tree mapping.
     pub fn insert_tree(&mut self, git_sha: &str, heddle: ContentHash) -> Result<(), ShaMapError> {
         self.insert_tree_with_lossy_entries(git_sha, heddle, &[])

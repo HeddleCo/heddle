@@ -1,0 +1,17 @@
+name: API capability sync
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 api-capabilities/test_verify_sync.py
+      - run: python3 api-capabilities/verify_sync.py

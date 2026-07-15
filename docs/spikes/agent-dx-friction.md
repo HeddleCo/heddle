@@ -20,6 +20,11 @@ and points the matching Heddle thread at the mapped state. The binding stores
 Git-to-Heddle mappings and reads mapped objects through the checkout's Git
 object database instead of copying the tip into Heddle's native object store.
 It creates a worktree bootstrap state only for an empty or unborn Git checkout.
+Descriptor-backed states are included in object-store state enumeration, so a
+short state ID printed by `log` or `show` resolves before full adoption. When
+`heddle adopt` later imports the reachable history, it replaces any lazy
+parentless commit identity inside the SHA-map transaction and emits the mapped
+state/tree/blob closure into native storage before changing source authority.
 
 If the Git tip exists but cannot be bound, the command returns
 `git_overlay_tip_bind_failed` and recommends the explicit `heddle adopt`
@@ -32,6 +37,9 @@ Key implementation:
 - `crates/repo/src/repository.rs`
 
 Regression: `init_then_start_binds_git_tip_not_orphan_bootstrap`.
+
+Additional regression:
+`lazy_tip_short_id_resolves_and_adopt_materializes_native_closure`.
 
 Before a mutating command binds that tip, `log`, `show`, and
 `query --attribution` construct an in-memory state graph from the reachable Git
@@ -70,12 +78,18 @@ it refuses to discard unowned worktree changes.
 `land` and `ready` recover a surviving marker; observe-only `status` reports the
 pending recovery and its retry action without mutating it. Recovery verifies
 the marker's target branch and the checkpoint intent's previous and published
-OIDs, covering a crash after checkpoint publication but before marker removal
-without mistaking an older mapping for this publication. Otherwise it rolls the
+OIDs. If checkpoint publication has already finalized its intent but the marker
+has not yet recorded the expected OID, recovery accepts only the durable
+checkpoint for the recorded merge state when it also matches the current Git
+tip. This covers both publication crash windows without mistaking an older
+mapping for the current publication. Recovered land also clears manual
+resolution metadata before removing the marker. Otherwise recovery rolls the
 incomplete integration back. `rollback_started` / `rollback_complete` phases
-make cleanup retries idempotent after an undo has already run. Every command
+make cleanup retries idempotent after an undo has already run. Commands
 registered as both mutating and targeting the current repository in the command
-catalog passes through this recovery check before dispatch.
+catalog pass through this recovery check before dispatch. Positional
+`init <path>` defers the check until it has resolved that destination, so it
+recovers an existing target rather than an unrelated current checkout.
 
 Local and remote non-fast-forward failures remain distinct:
 `NonFastForwardRef.remote_destination` selects either
@@ -94,6 +108,9 @@ Regressions:
 - `git_overlay_matrix_land_checkpoint_failure_auto_undoes_heddle_integration`
 - `git_overlay_matrix_automatic_land_recovers_each_transaction_boundary`
 - `git_overlay_matrix_manual_resolution_land_recovers_each_transaction_boundary`
+- `git_overlay_matrix_recovers_checkpoint_before_marker_oid_update`
+- `recovered_manual_land_clears_resolution_metadata_before_journal`
+- `destination_init_does_not_recover_unrelated_cwd_repository`
 - `prepared_land_recovery_refuses_unowned_worktree_changes`
 
 ### Land peers serially with one machine envelope

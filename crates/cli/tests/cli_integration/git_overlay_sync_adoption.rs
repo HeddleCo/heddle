@@ -382,6 +382,67 @@ fn init_then_start_binds_git_tip_not_orphan_bootstrap() {
 }
 
 #[test]
+fn lazy_tip_short_id_resolves_and_adopt_materializes_native_closure() {
+    let temp = TempDir::new().unwrap();
+    let work = temp.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git(&work, &["init", "-b", "main"]);
+    configure_git_identity(&work);
+    commit_file(&work, "story.txt", "one\n", "seed main");
+    let main_tip = commit_file(&work, "story.txt", "one\ntwo\n", "advance main");
+
+    heddle(&["init"], Some(&work)).unwrap();
+    heddle(
+        &["start", "feature/lazy-adopt", "--workspace", "solid"],
+        Some(&work),
+    )
+    .unwrap();
+
+    let lazy_state = ingest_mapped_change(&work, &main_tip).expect("lazy tip mapping");
+    let short = &lazy_state[..12];
+    let shown: Value = serde_json::from_str(
+        &heddle(&["show", short, "--output", "json"], Some(&work))
+            .expect("descriptor-backed short state id must resolve"),
+    )
+    .expect("show json");
+    assert!(
+        shown["state_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with(short)),
+        "short-id show should return the lazy descriptor state: {shown}"
+    );
+
+    heddle(&["adopt"], Some(&work)).expect("full adoption after lazy bind");
+    let native_state = ingest_mapped_change(&work, &main_tip).expect("native tip mapping");
+    std::fs::rename(work.join(".git"), work.join(".git-disabled")).unwrap();
+
+    let repo = repo::Repository::open(&work).expect("open adopted native repository");
+    let state_id = objects::object::StateId::parse(&native_state).unwrap();
+    let state = repo
+        .store()
+        .get_state(&state_id)
+        .unwrap()
+        .expect("adopted tip state must be native without Git read-through");
+    let tree = repo
+        .store()
+        .get_tree(&state.tree)
+        .unwrap()
+        .expect("adopted tip tree must be native without Git read-through");
+    let story = tree
+        .entries()
+        .iter()
+        .find(|entry| entry.name() == "story.txt")
+        .and_then(|entry| entry.blob_hash())
+        .expect("story blob hash");
+    let blob = repo
+        .store()
+        .get_blob(&story)
+        .unwrap()
+        .expect("adopted tip blob must be native without Git read-through");
+    assert_eq!(blob.content(), b"one\ntwo\n");
+}
+
+#[test]
 fn tip_bind_distinguishes_unborn_head_from_corrupt_head() {
     let temp = TempDir::new().unwrap();
     let unborn = temp.path().join("unborn");

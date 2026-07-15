@@ -370,9 +370,29 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
         let pack_path = staging_dir.join(format!("{run_id}.pack"));
         let index_path = staging_dir.join(format!("{run_id}.idx"));
         let bucket_dir = staging_dir.join(format!("{run_id}-buckets"));
+        let overlay_descriptor_dir = staging_dir
+            .parent()
+            .map(|parent| parent.join("overlay-states"));
+        let descriptor_commits = commits
+            .iter()
+            .filter_map(|commit| {
+                let state = self.map.get_commit(&commit.sha)?;
+                overlay_descriptor_dir
+                    .as_ref()
+                    .is_some_and(|dir| {
+                        dir.join(format!("{}.state", state.to_string_full()))
+                            .is_file()
+                    })
+                    .then(|| (commit.sha.clone(), state))
+            })
+            .collect::<Vec<_>>();
+        let repair_mapped_objects = !descriptor_commits.is_empty();
 
         self.map.begin_append_batch()?;
         let write_result = (|| -> crate::Result<PackedImportStats> {
+            for (git_sha, _) in &descriptor_commits {
+                self.map.remove_commit(git_sha)?;
+            }
             let pack_file = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -396,7 +416,8 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
                 bucket_dir.clone(),
             )
             .map_err(IngestError::from)?;
-            let mut packed = PackedImport::new(self.git, self.map, builder, self.options.clone());
+            let mut packed = PackedImport::new(self.git, self.map, builder, self.options.clone())
+                .repair_mapped_objects(repair_mapped_objects);
             let mut last_log = 0usize;
             for (idx, commit) in commits.iter().enumerate() {
                 // Canonical lossy marker (#567): translating this commit's tree
@@ -456,7 +477,18 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             }
         };
 
+        let descriptor_state_remaps = descriptor_commits
+            .iter()
+            .filter_map(|(git_sha, old_state)| {
+                self.map
+                    .get_commit(git_sha)
+                    .filter(|new_state| new_state != old_state)
+                    .map(|new_state| (*old_state, new_state))
+            })
+            .collect::<Vec<_>>();
+
         let ref_stats = RefEmitter::new(self.refs, self.store, self.map)
+            .with_state_remaps(descriptor_state_remaps)
             .emit(&heads)
             .await?;
         info!(
@@ -519,6 +551,7 @@ struct PackedImport<'a, W: std::io::Write + std::io::Read + std::io::Seek + Sync
     stats: PackedImportStats,
     options: ImportOptions,
     emit_objects: bool,
+    repair_mapped_objects: bool,
 }
 
 impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImport<'a, W> {
@@ -535,11 +568,17 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
             stats: PackedImportStats::default(),
             options,
             emit_objects: true,
+            repair_mapped_objects: false,
         }
     }
 
     fn mapping_only(mut self) -> Self {
         self.emit_objects = false;
+        self
+    }
+
+    fn repair_mapped_objects(mut self, repair: bool) -> Self {
+        self.repair_mapped_objects = repair;
         self
     }
 
@@ -552,7 +591,9 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
         git_tree_sha: &str,
         path_prefix: &str,
     ) -> crate::Result<ContentHash> {
-        if let Some(hash) = self.map.get_tree(git_tree_sha) {
+        if let Some(hash) = self.map.get_tree(git_tree_sha)
+            && !self.repair_mapped_objects
+        {
             let entries = self
                 .map
                 .get_tree_lossy_entries(git_tree_sha)
@@ -677,7 +718,9 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
     }
 
     fn translate_blob(&mut self, git_blob_sha: &str) -> crate::Result<ContentHash> {
-        if let Some(hash) = self.map.get_blob(git_blob_sha) {
+        if let Some(hash) = self.map.get_blob(git_blob_sha)
+            && !self.repair_mapped_objects
+        {
             return Ok(hash);
         }
 

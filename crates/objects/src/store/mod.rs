@@ -58,6 +58,7 @@ pub trait ExternalObjectSource: Send + Sync {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>>;
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>>;
     fn get_state(&self, id: &StateId) -> Result<Option<State>>;
+    fn list_states(&self) -> Result<Vec<StateId>>;
 }
 
 pub use crate::error::{HeddleError as StoreError, HeddleError, Result};

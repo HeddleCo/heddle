@@ -18,6 +18,7 @@ use tracing::{debug, info};
 use super::{
     RecoveryAdvice,
     action_line::print_next,
+    recover_incomplete_land_if_present,
     snapshot::{is_placeholder_principal, placeholder_principal_warning},
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
@@ -60,6 +61,7 @@ struct InitPrincipalOutput {
 }
 
 pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
+    let destination_scoped = args.path.is_some();
     let path = match (args.path.clone(), cli.repo.clone()) {
         (Some(positional), Some(repo_path)) => {
             if absolute_path(&positional)? != absolute_path(&repo_path)? {
@@ -107,6 +109,9 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     } else {
         None
     };
+    if destination_scoped && let Some(repo) = &existing_repo {
+        recover_incomplete_land_if_present(repo)?;
+    }
     let heddle_mode = existing_repo.as_ref().map(|repo| match repo.capability() {
         RepositoryCapability::GitOverlay => OnboardingMode::GitOverlay,
         RepositoryCapability::NativeHeddle => OnboardingMode::Native,

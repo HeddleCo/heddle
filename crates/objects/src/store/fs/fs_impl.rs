@@ -953,19 +953,17 @@ impl ObjectStore for FsStore {
         self.reload_packs_if_stale()?;
 
         let dir = states_dir(&self.root);
-        if !dir.exists() {
-            return Ok(Vec::new());
-        }
-
         let mut states = Vec::new();
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if let Some(name) = path.file_stem()
-                && let Some(name_str) = name.to_str()
-                && let Ok(id) = StateId::parse(name_str)
-            {
-                states.push(id);
+        if dir.exists() {
+            for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if let Some(name) = path.file_stem()
+                    && let Some(name_str) = name.to_str()
+                    && let Ok(id) = StateId::parse(name_str)
+                {
+                    states.push(id);
+                }
             }
         }
         if let Ok(manager) = self.pack_manager().read() {
@@ -974,6 +972,13 @@ impl ObjectStore for FsStore {
                     && !states.contains(&change_id)
                 {
                     states.push(change_id);
+                }
+            }
+        }
+        if let Some(source) = &self.external_source {
+            for id in source.list_states()? {
+                if !states.contains(&id) {
+                    states.push(id);
                 }
             }
         }

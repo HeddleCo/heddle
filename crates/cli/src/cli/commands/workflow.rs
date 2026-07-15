@@ -1566,6 +1566,7 @@ fn finish_land_git_checkpoint(
             }
         }
     };
+    objects::fault_inject::maybe_fail_at("land_after_checkpoint_before_marker_update")?;
     record_land_checkpoint_in_marker(repo, &record)?;
     Ok(record)
 }
@@ -2369,10 +2370,14 @@ pub fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()> {
     if current_oid == marker.pre_git_oid {
         return rollback_incomplete_land(repo, &marker);
     }
-    let expected_oid = marker.expected_git_oid.as_deref().ok_or_else(|| {
-        anyhow!("integrated incomplete land has no checkpoint intent or recorded expected Git OID")
-    })?;
     let checkpoint = repo.latest_git_checkpoint_for_state(&merge_state)?;
+    let expected_oid = marker
+        .expected_git_oid
+        .as_deref()
+        .or_else(|| checkpoint.as_ref().map(|record| record.git_commit.as_str()))
+        .ok_or_else(|| {
+            anyhow!("integrated incomplete land has no checkpoint intent or durable Git checkpoint")
+        })?;
     if current_oid.as_deref() != Some(expected_oid)
         || checkpoint.as_ref().map(|record| record.git_commit.as_str()) != Some(expected_oid)
     {
@@ -2504,6 +2509,7 @@ fn finish_recovered_land(
         Some(git_oid),
         collapse.as_ref(),
     )?;
+    clear_manual_resolution_state(repo, &marker.thread_id)?;
     clear_incomplete_land_marker(repo)
 }
 

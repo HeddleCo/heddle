@@ -4066,6 +4066,63 @@ fn git_overlay_matrix_land_recovers_checkpoint_published_before_crash() {
 }
 
 #[test]
+fn git_overlay_matrix_recovers_checkpoint_before_marker_oid_update() {
+    let fixture = GitOverlayFixture::imported_main()
+        .with_ready_materialized_thread("feature/checkpoint-marker-gap");
+    let before_git = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    let failed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/checkpoint-marker-gap",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "land_after_checkpoint_before_marker_update",
+        )],
+    )
+    .expect("invoke land in checkpoint/marker crash window");
+    assert!(!failed.status.success());
+    let marker_path = fixture.path().join(".heddle/incomplete-land.json");
+    let marker: Value = serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+    assert!(marker["expected_git_oid"].is_null(), "{marker}");
+    assert!(
+        !fixture
+            .path()
+            .join(".heddle/state/git-checkpoint-intent.json")
+            .exists(),
+        "checkpoint intent is finalized before the injected failure"
+    );
+    let published = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    assert_ne!(published, before_git);
+
+    let retry = heddle_output(
+        &[
+            "--output",
+            "json",
+            "ready",
+            "--thread",
+            "feature/checkpoint-marker-gap",
+        ],
+        Some(fixture.path()),
+    )
+    .unwrap();
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        published
+    );
+    assert!(!marker_path.exists());
+}
+
+#[test]
 fn git_overlay_matrix_old_state_checkpoint_does_not_complete_unpublished_land() {
     let fixture =
         GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/land-old-map");
@@ -4164,6 +4221,87 @@ fn git_overlay_matrix_recovery_is_idempotent_after_coalesce() {
     assert!(
         !marker.exists(),
         "recovery must tolerate already-coalesced batches"
+    );
+}
+
+#[test]
+fn recovered_manual_land_clears_resolution_metadata_before_journal() {
+    let thread = "feature/manual-recovery-cleanup";
+    let fixture = GitOverlayFixture::imported_main().with_ready_materialized_thread(thread);
+    let resolved = json(
+        fixture.path(),
+        &["--output", "json", "thread", "resolve", thread],
+    );
+    assert_eq!(resolved["status"], "completed", "{resolved}");
+    let failed = heddle_output_with_env(
+        &["--output", "json", "land", "--thread", thread],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "land_after_coalesce_before_journal_clear",
+        )],
+    )
+    .unwrap();
+    assert!(!failed.status.success());
+    let marker = fixture.path().join(".heddle/incomplete-land.json");
+    assert!(marker.exists());
+
+    let retry = heddle_output(&["--output", "json", "init"], Some(fixture.path())).unwrap();
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    let repo = repo::Repository::open(fixture.path()).unwrap();
+    let record = repo::ThreadManager::new(repo.heddle_dir())
+        .load(thread)
+        .unwrap()
+        .expect("landed thread metadata");
+    assert_eq!(
+        record.integration_policy_result.manual_resolution_state,
+        None
+    );
+    assert!(!record.integration_policy_result.conflicts_resolved_manually);
+    assert!(!marker.exists());
+}
+
+#[test]
+fn destination_init_does_not_recover_unrelated_cwd_repository() {
+    let temp = TempDir::new().unwrap();
+    let current = temp.path().join("current");
+    let destination = temp.path().join("destination");
+    std::fs::create_dir(&current).unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    init_git_repo_with_branch(&current, "main");
+    std::fs::write(current.join("README.md"), "current\n").unwrap();
+    git_commit_all(&current, "current base");
+    heddle(&["init"], Some(&current)).unwrap();
+    let marker = current.join(".heddle/incomplete-land.json");
+    std::fs::write(&marker, b"{}\n").unwrap();
+
+    let destination_arg = destination.to_string_lossy().into_owned();
+    let output = heddle_output(&["init", &destination_arg], Some(&current)).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(destination.join(".heddle").is_dir());
+    assert!(
+        marker.exists(),
+        "destination init must not consume cwd recovery state"
+    );
+
+    let current_arg = current.to_string_lossy().into_owned();
+    let targeted = heddle_output(&["init", &current_arg], Some(&destination)).unwrap();
+    assert!(
+        !targeted.status.success(),
+        "positional init of an existing target must recover that target"
+    );
+    assert!(
+        String::from_utf8_lossy(&targeted.stderr).contains("parse incomplete-land marker"),
+        "target recovery error should remain actionable: {}",
+        String::from_utf8_lossy(&targeted.stderr)
     );
 }
 

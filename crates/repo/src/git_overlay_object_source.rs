@@ -187,6 +187,31 @@ impl ExternalObjectSource for GitOverlayObjectSource {
         state.state_id = actual;
         Ok(Some(state))
     }
+
+    fn list_states(&self) -> Result<Vec<StateId>> {
+        let dir = self.heddle_dir.join("ingest").join("overlay-states");
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut states = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "state")
+                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+                && let Ok(id) = StateId::parse(stem)
+                && self
+                    .git_for_heddle(&id.to_string_full(), KIND_COMMIT)?
+                    .is_some()
+            {
+                states.push(id);
+            }
+        }
+        Ok(states)
+    }
 }
 
 fn parse_hash(value: &str) -> Result<ContentHash> {

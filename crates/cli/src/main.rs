@@ -290,7 +290,12 @@ async fn async_main() -> Result<()> {
     // surviving land transaction. Commands that do not require an existing
     // repository simply have nothing to recover here and keep their normal
     // initialization/error behavior in the command body.
-    if command_contract.mutates && command_contract.targets_current_repository {
+    let initializes_positional_destination =
+        matches!(&cli.command, Commands::Init(args) if args.path.is_some());
+    if command_contract.mutates
+        && command_contract.targets_current_repository
+        && !initializes_positional_destination
+    {
         let cwd;
         let start = match cli.repo.as_deref() {
             Some(path) => path,
