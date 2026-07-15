@@ -28,6 +28,66 @@ use wire::ProtocolError;
 
 use crate::credentials;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RenewableAuthorityCredential {
+    token: String,
+    credential_id: String,
+}
+
+impl RenewableAuthorityCredential {
+    pub(super) fn from_stored(credential: &credentials::ServerCredential) -> Option<Self> {
+        let credential_id = credential.credential_id.clone()?;
+        let signer = Ed25519Signer::from_pem(credential.private_key_pem.as_ref()?).ok()?;
+        let biscuit =
+            biscuit_auth::UnverifiedBiscuit::from_base64(credential.token.as_bytes()).ok()?;
+        if biscuit.block_count() != 1 {
+            return None;
+        }
+        let authority = biscuit_auth::builder::BlockBuilder::new()
+            .code(&biscuit.print_block_source(0).ok()?)
+            .ok()?;
+        let credential_ids = authority
+            .facts
+            .iter()
+            .filter_map(|fact| {
+                match (
+                    fact.predicate.name.as_str(),
+                    fact.predicate.terms.as_slice(),
+                ) {
+                    ("credential_id", [biscuit_auth::builder::Term::Str(id)]) => Some(id),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let [token_credential_id] = credential_ids.as_slice() else {
+            return None;
+        };
+        if token_credential_id.as_str() != credential_id.as_str()
+            || !crate::device_flow::effective_pop_public_key_hex(&credential.token)
+                .is_ok_and(|key| key.eq_ignore_ascii_case(&hex::encode(signer.public_key())))
+        {
+            return None;
+        }
+        Some(Self {
+            token: credential.token.clone(),
+            credential_id,
+        })
+    }
+
+    fn matches_active_client(
+        &self,
+        credential: &credentials::ServerCredential,
+        token_header: Option<&MetadataValue<tonic::metadata::Ascii>>,
+    ) -> bool {
+        credential.token == self.token
+            && credential.credential_id.as_deref() == Some(self.credential_id.as_str())
+            && token_header
+                .and_then(|header| header.to_str().ok())
+                .and_then(|header| header.strip_prefix("Bearer "))
+                == Some(self.token.as_str())
+    }
+}
+
 pub struct HostedGrpcClient {
     pub(super) inner: RepoSyncServiceClient<Channel>,
     pub(super) user: HostedUserServiceClient<Channel>,
@@ -37,8 +97,9 @@ pub struct HostedGrpcClient {
     transport: helpers::HostedTransportPolicy,
     pub(super) auth_proof_key_pem: Option<String>,
     /// The key used to look up this server's credential in the credential
-    /// store.  When set, `auto_rotate_if_needed` will use it to read and
-    /// update `~/.heddle/credentials.toml` transparently.
+    /// store. When the session also carries an exact renewable-authority
+    /// binding, `auto_rotate_if_needed` uses this key to re-read and update
+    /// `~/.heddle/credentials.toml` transparently.
     server_key: Option<String>,
     /// App-registered WebAuthn signer invoked when a `human`-tier RPC is
     /// rejected with `x-weft-sig-required: human`. `None` => human-tier RPCs
@@ -253,18 +314,30 @@ impl HostedGrpcClient {
 
     /// Transparently rotate the credential for this client if it is near expiry.
     ///
-    /// No-ops if `server_key` was not set on `ClientConfig` at construction
-    /// time, or if no credential is stored for the server, or if the token is
-    /// not within 10 minutes of expiry.
-    pub async fn auto_rotate_if_needed(&mut self) {
+    /// No-ops unless session construction proved that the active bearer is the
+    /// exact authority credential loaded from this server's credential-store
+    /// row. Explicit config/env tokens and attenuated tokens never enter this
+    /// renewal path.
+    pub(super) async fn auto_rotate_if_needed(
+        &mut self,
+        renewable: Option<&RenewableAuthorityCredential>,
+    ) {
+        let Some(renewable) = renewable else {
+            return;
+        };
         let server_key = match &self.server_key {
             Some(k) => k.clone(),
             None => return,
         };
-        self.rotate_credential_for_server(&server_key).await;
+        self.rotate_credential_for_server(&server_key, renewable)
+            .await;
     }
 
-    async fn rotate_credential_for_server(&mut self, server_key: &str) {
+    async fn rotate_credential_for_server(
+        &mut self,
+        server_key: &str,
+        renewable: &RenewableAuthorityCredential,
+    ) {
         // Load the stored credential.
         let cred = match credentials::resolve_credential_for_server(server_key) {
             Ok(Some(c)) => c,
@@ -274,6 +347,16 @@ impl HostedGrpcClient {
                 return;
             }
         };
+
+        // The store may have changed after session construction. Renewal is
+        // permitted only while both the active bearer and the current row are
+        // still the exact token + credential id that were selected together.
+        if !renewable.matches_active_client(&cred, self.token_header.as_ref()) {
+            tracing::debug!(
+                "credential rotation: active bearer no longer matches the selected stored credential"
+            );
+            return;
+        }
 
         // Check whether the Biscuit's stored expiry is within the
         // rotation window.
@@ -483,6 +566,7 @@ pub use sync::HostedRefEntry;
 #[cfg(test)]
 mod tests {
     use base64::Engine as _;
+    use biscuit_auth::{Biscuit, KeyPair};
 
     use super::*;
 
@@ -503,6 +587,69 @@ mod tests {
             server_key: None,
             on_human_signature: None,
         }
+    }
+
+    #[test]
+    fn renewable_authority_binding_requires_exact_token_and_credential_id() {
+        let signer = Ed25519Signer::generate().expect("proof signer");
+        let token = Biscuit::builder()
+            .fact(r#"user("alice")"#)
+            .expect("user fact")
+            .fact(r#"credential_id("cred-1")"#)
+            .expect("credential fact")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
+            .expect("proof key fact")
+            .build(&KeyPair::new())
+            .expect("mint authority token")
+            .to_base64()
+            .expect("encode authority token");
+        let credential = credentials::ServerCredential {
+            token: token.clone(),
+            subject: "alice".to_string(),
+            device_id: Some("device-1".to_string()),
+            credential_id: Some("cred-1".to_string()),
+            private_key_pem: Some(signer.to_pem().expect("proof PEM")),
+            expires_at: None,
+        };
+        let binding = RenewableAuthorityCredential::from_stored(&credential)
+            .expect("valid stored authority credential");
+        let mut mismatched_claim = credential.clone();
+        mismatched_claim.credential_id = Some("cred-2".to_string());
+        assert!(
+            RenewableAuthorityCredential::from_stored(&mismatched_claim).is_none(),
+            "the stored credential id must match the authority token claim"
+        );
+        let attenuated_token = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
+            .expect("parse authority token")
+            .append(
+                biscuit_auth::builder::BlockBuilder::new()
+                    .fact(r#"agent("child")"#)
+                    .expect("child fact"),
+            )
+            .expect("append child block")
+            .to_base64()
+            .expect("encode attenuated token");
+        let mut attenuated_credential = credential.clone();
+        attenuated_credential.token = attenuated_token;
+        assert!(
+            RenewableAuthorityCredential::from_stored(&attenuated_credential).is_none(),
+            "an attenuated token is never an authority-renewal source"
+        );
+        let matching_header =
+            MetadataValue::try_from(format!("Bearer {token}")).expect("matching bearer header");
+        assert!(binding.matches_active_client(&credential, Some(&matching_header)));
+
+        let wrong_header =
+            MetadataValue::try_from("Bearer explicit-child").expect("different bearer header");
+        assert!(!binding.matches_active_client(&credential, Some(&wrong_header)));
+
+        let mut wrong_id = credential.clone();
+        wrong_id.credential_id = Some("cred-2".to_string());
+        assert!(!binding.matches_active_client(&wrong_id, Some(&matching_header)));
+
+        let mut wrong_token = credential;
+        wrong_token.token = "different-stored-token".to_string();
+        assert!(!binding.matches_active_client(&wrong_token, Some(&matching_header)));
     }
 
     #[tokio::test]
