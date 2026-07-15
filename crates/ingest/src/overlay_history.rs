@@ -80,7 +80,7 @@ impl OverlayHistory {
             .map(|revision| git.resolve_history_revision(revision))
             .transpose()?;
         if let (Some(stop_at), Some(since_revision)) = (stop_at.as_ref(), since)
-            && !commit_is_reachable(&git, &tip, stop_at)?
+            && !commit_is_on_first_parent_chain(&git, &tip, stop_at)?
         {
             return Err(IngestError::Other(format!(
                 "canonical Git history revision '{since_revision}' is outside the projected graph"
@@ -99,7 +99,7 @@ impl OverlayHistory {
                 break;
             }
             let commit = git.read_commit(&git_oid)?;
-            current = commit.parents.first().cloned();
+            current = first_parent_oid(&commit);
             if !paths.is_empty() && !commit_touches_paths(&git, &commit, paths)? {
                 continue;
             }
@@ -291,17 +291,25 @@ impl OverlayHistory {
     }
 }
 
-fn commit_is_reachable(git: &GitSource, tip: &str, target: &str) -> crate::Result<bool> {
-    let mut pending = vec![tip.to_string()];
+fn first_parent_oid(commit: &CommitEntry) -> Option<String> {
+    commit.parents.first().cloned()
+}
+
+fn commit_is_on_first_parent_chain(
+    git: &GitSource,
+    tip: &str,
+    target: &str,
+) -> crate::Result<bool> {
+    let mut current = Some(tip.to_string());
     let mut seen = HashSet::new();
-    while let Some(git_oid) = pending.pop() {
+    while let Some(git_oid) = current {
         if git_oid == target {
             return Ok(true);
         }
         if !seen.insert(git_oid.clone()) {
-            continue;
+            return Ok(false);
         }
-        pending.extend(git.read_commit(&git_oid)?.parents);
+        current = first_parent_oid(&git.read_commit(&git_oid)?);
     }
     Ok(false)
 }
@@ -551,6 +559,65 @@ mod tests {
         assert!(
             OverlayHistory::open(repo.path(), "HEAD").is_err(),
             "the full-history control must reach the unrepresentable grandparent"
+        );
+    }
+
+    #[test]
+    fn log_rejects_since_bound_reachable_only_through_merge_parent() {
+        let repo = TempDir::new().unwrap();
+        git(repo.path(), &["init", "-q", "-b", "main"], None);
+        let blob = git(
+            repo.path(),
+            &["hash-object", "-w", "--stdin"],
+            Some(b"content\n"),
+        );
+        let tree = git(
+            repo.path(),
+            &["mktree"],
+            Some(format!("100644 blob {blob}\tfile.txt\n").as_bytes()),
+        );
+        let base = git(repo.path(), &["commit-tree", &tree, "-m", "base"], None);
+        let main = git(
+            repo.path(),
+            &["commit-tree", &tree, "-p", &base, "-m", "main"],
+            None,
+        );
+        let side = git(
+            repo.path(),
+            &["commit-tree", &tree, "-p", &base, "-m", "side"],
+            None,
+        );
+        let merge = git(
+            repo.path(),
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &main,
+                "-p",
+                &side,
+                "-m",
+                "merge",
+            ],
+            None,
+        );
+        git(
+            repo.path(),
+            &["update-ref", "refs/heads/main", &merge],
+            None,
+        );
+        git(repo.path(), &["update-ref", "refs/heads/side", &side], None);
+
+        let error =
+            match OverlayHistory::project_log(repo.path(), "HEAD", 10, Some("side"), None, &[]) {
+                Ok(_) => panic!("a side-parent bound must be outside first-parent log history"),
+                Err(error) => error,
+            };
+        assert!(
+            error
+                .to_string()
+                .contains("canonical Git history revision 'side' is outside the projected graph"),
+            "unexpected error: {error}"
         );
     }
 }

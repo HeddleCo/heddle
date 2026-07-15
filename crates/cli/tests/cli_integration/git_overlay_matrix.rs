@@ -202,6 +202,24 @@ fn unbound_overlay_history_preserves_filters_and_canonical_revision_semantics() 
         .collect::<Vec<_>>();
     assert_eq!(intents, vec!["merge side", "main change", "base"]);
 
+    let side_parent_bound = heddle_output(
+        &["--output", "json", "log", "--since", "side", "-n", "10"],
+        Some(temp.path()),
+    )
+    .expect("invoke log with side-parent bound");
+    assert!(!side_parent_bound.status.success());
+    assert!(
+        side_parent_bound.stdout.is_empty(),
+        "an invalid side-parent bound must not emit older first-parent states: {}",
+        String::from_utf8_lossy(&side_parent_bound.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&side_parent_bound.stderr)
+            .contains("canonical Git history revision 'side' is outside the projected graph"),
+        "side-parent refusal must retain the canonical history error: {}",
+        String::from_utf8_lossy(&side_parent_bound.stderr)
+    );
+
     let zero = json(temp.path(), &["log", "-n", "0"]);
     assert_eq!(zero["states"].as_array().map(Vec::len), Some(0));
 
