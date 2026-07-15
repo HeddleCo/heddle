@@ -34,6 +34,34 @@ use anyhow::{Context, Result, anyhow};
 use repo::{Repository, ThreadManager, ThreadMode};
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+thread_local! {
+    static TEST_FAIL_BEFORE_EXCLUDE_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SharedTargetFilesSnapshot {
+    config: Option<Vec<u8>>,
+    exclude: Option<Vec<u8>>,
+}
+
+impl SharedTargetFilesSnapshot {
+    pub(crate) fn capture(checkout: &Path) -> Result<Self> {
+        Ok(Self {
+            config: read_optional_file(&checkout.join(".cargo/config.toml"))?,
+            exclude: read_optional_file(&super::hydrate::hydrate_exclude_path(checkout))?,
+        })
+    }
+
+    pub(crate) fn restore(&self, checkout: &Path) -> Result<()> {
+        restore_optional_file(&checkout.join(".cargo/config.toml"), self.config.as_deref())?;
+        restore_optional_file(
+            &super::hydrate::hydrate_exclude_path(checkout),
+            self.exclude.as_deref(),
+        )
+    }
+}
+
 /// Maximum width of the fingerprint hex string. Long enough that
 /// collisions across distinct workspaces on one machine are not a
 /// realistic concern; short enough to keep the on-disk path readable.
@@ -148,6 +176,7 @@ pub(crate) fn write_cargo_config(checkout: &Path, target_dir: &Path) -> Result<b
     if cargo_dir.join("config").exists() || config_path.exists() {
         return Ok(false);
     }
+    let prior = SharedTargetFilesSnapshot::capture(checkout)?;
 
     std::fs::create_dir_all(&cargo_dir)
         .with_context(|| format!("create '{}'", cargo_dir.display()))?;
@@ -232,7 +261,14 @@ pub(crate) fn write_cargo_config(checkout: &Path, target_dir: &Path) -> Result<b
     // an ignore rule, `.cargo/config.toml` surfaces as untracked dirt and
     // blocks post-land sibling restack (full rematerialize refuses dirty
     // trees). Mirror hydrate's local-exclude pattern — never captured.
-    preserve_shared_cargo_ignores(checkout)?;
+    if let Err(error) = preserve_shared_cargo_ignores(checkout) {
+        if let Err(rollback) = prior.restore(checkout) {
+            return Err(error).context(format!(
+                "install shared-target files; rollback also failed: {rollback:#}"
+            ));
+        }
+        return Err(error);
+    }
     Ok(true)
 }
 
@@ -275,9 +311,51 @@ fn preserve_shared_cargo_ignores(checkout: &Path) -> Result<()> {
     }
     out.push_str(rule);
     out.push('\n');
+    maybe_fail_before_exclude_write().map_err(anyhow::Error::from)?;
     objects::fs_atomic::write_file_atomic(&exclude_path, out.as_bytes())
         .with_context(|| format!("atomically write '{}'", exclude_path.display()))?;
     Ok(())
+}
+
+fn maybe_fail_before_exclude_write() -> std::io::Result<()> {
+    #[cfg(test)]
+    if TEST_FAIL_BEFORE_EXCLUDE_WRITE.get() {
+        return Err(std::io::Error::other(
+            "test failure before shared-target exclude write",
+        ));
+    }
+    objects::fault_inject::maybe_fail_at("shared_target_before_exclude_write")
+}
+
+fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read '{}'", path.display())),
+    }
+}
+
+fn restore_optional_file(path: &Path, bytes: Option<&[u8]>) -> Result<()> {
+    match bytes {
+        Some(bytes) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create '{}'", parent.display()))?;
+            }
+            objects::fs_atomic::write_file_atomic(path, bytes)
+                .with_context(|| format!("restore '{}'", path.display()))
+        }
+        None => match std::fs::remove_file(path) {
+            Ok(()) => {
+                if let Some(parent) = path.parent() {
+                    objects::fs_atomic::sync_directory(parent)?;
+                }
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("remove '{}'", path.display())),
+        },
+    }
 }
 
 /// Write `body` to `writer`; on failure drop the writer (closing any
@@ -452,6 +530,25 @@ mod tests {
             after, user,
             "shared-target writer must not overwrite user-managed config",
         );
+    }
+
+    #[test]
+    fn write_cargo_config_restores_config_and_exclude_after_second_write_failure() {
+        let temp = TempDir::new().unwrap();
+        let target = temp.path().join("shared");
+        std::fs::create_dir_all(&target).unwrap();
+        let exclude = super::super::hydrate::hydrate_exclude_path(temp.path());
+        std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+        let original_exclude = b"user-owned\n";
+        std::fs::write(&exclude, original_exclude).unwrap();
+
+        TEST_FAIL_BEFORE_EXCLUDE_WRITE.set(true);
+        let result = write_cargo_config(temp.path(), &target);
+        TEST_FAIL_BEFORE_EXCLUDE_WRITE.set(false);
+
+        assert!(result.is_err());
+        assert!(!temp.path().join(".cargo/config.toml").exists());
+        assert_eq!(std::fs::read(&exclude).unwrap(), original_exclude);
     }
 
     #[test]

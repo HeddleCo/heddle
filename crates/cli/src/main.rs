@@ -12,7 +12,7 @@ use cli::cli::commands::cmd_semantic;
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
     ExportCommands, ImportCommands,
-    cli_args::SyncCommands,
+    cli_args::{SyncArgs, SyncCommands},
     commands::{cmd_export_git, cmd_import_git, cmd_sync_git},
 };
 use cli::{
@@ -20,7 +20,7 @@ use cli::{
         AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands, DaemonCommands,
         DiffArgs, ExpandArgs, IntegrationCommands, LogArgs, ResolveArgs, RetroArgs, RevertArgs,
         RunArgs, UndoArgs,
-        cli_args::{LandArgs, SyncArgs},
+        cli_args::LandArgs,
         commands::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
             cmd_abort, cmd_adopt, cmd_agent, cmd_capture_split, cmd_clone, cmd_collapse,
@@ -35,7 +35,7 @@ use cli::{
             cmd_shell, cmd_show, cmd_snapshot, cmd_start, cmd_status, cmd_sync_smart, cmd_thread,
             cmd_timeline, cmd_try, cmd_undo, cmd_undo_recover, cmd_verify, cmd_watch,
             command_runtime_contract_for_command, print_error_with_hint,
-            print_parse_error_json_envelope,
+            print_parse_error_json_envelope, recover_incomplete_land_if_present,
         },
         render::write_json_stdout,
     },
@@ -284,6 +284,28 @@ async fn async_main() -> Result<()> {
 
     if command_supports_op_id {
         resolve_operation_id(&cli)?;
+    }
+
+    // One command-dispatch chokepoint protects every mutating surface from a
+    // surviving land transaction. Commands that do not require an existing
+    // repository simply have nothing to recover here and keep their normal
+    // initialization/error behavior in the command body.
+    if command_contract.mutates && command_contract.targets_current_repository {
+        let cwd;
+        let start = match cli.repo.as_deref() {
+            Some(path) => path,
+            None => {
+                cwd = std::env::current_dir()?;
+                &cwd
+            }
+        };
+        if start
+            .ancestors()
+            .any(|ancestor| ancestor.join(".heddle").exists())
+        {
+            let repo = cli.open_repo()?;
+            recover_incomplete_land_if_present(&repo)?;
+        }
     }
 
     let command_start = Instant::now();

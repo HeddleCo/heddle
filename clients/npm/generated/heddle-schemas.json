@@ -19084,6 +19084,18 @@
             "message": {
               "type": "string"
             },
+            "primary_command": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "recovery_commands": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "siblings_restack_failed": {
               "items": {
                 "$ref": "#/$defs/SiblingRestackFailureSchema"
@@ -19123,7 +19135,9 @@
             "siblings_restacked",
             "siblings_restack_failed",
             "blockers",
-            "warnings"
+            "warnings",
+            "recovery_commands",
+            "primary_command"
           ],
           "type": "object"
         },

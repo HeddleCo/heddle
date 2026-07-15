@@ -829,10 +829,23 @@ impl ObjectStore for FsStore {
         let hash = tree.hash();
         let path = hash_path(&trees_dir(&self.root), &hash);
 
-        if !path.exists() {
+        // Overlay snapshots rebuild the worktree shape through this shared
+        // chokepoint. If the exact tree is already authoritative in Git,
+        // retain only its content identity and keep the native store sparse.
+        let externally_available = if !path.exists() {
+            match &self.external_source {
+                Some(source) => source.get_tree(&hash)?.is_some(),
+                None => false,
+            }
+        } else {
+            false
+        };
+        if !path.exists() && !externally_available {
             let (_, data) = codec::encode_tree(tree, &self.compression)?;
             trace!(compressed_size = data.len(), "Writing tree");
             self.write_loose_object_atomic(&path, &data)?;
+        } else if externally_available {
+            trace!("Tree remains in authoritative external object source");
         } else {
             trace!("Tree already exists, skipping write");
         }

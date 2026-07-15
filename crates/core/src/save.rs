@@ -675,17 +675,39 @@ pub fn recover_published_git_checkpoint(
     if intent.state_id != state_id.to_string_full() {
         return Ok(None);
     }
+    let current_branch = repo.git_overlay_current_branch()?;
+    if current_branch.as_deref() != Some(intent.branch.as_str()) {
+        return Err(anyhow!(
+            "pending Git checkpoint targets branch '{}' but the checkout is on '{}'",
+            intent.branch,
+            current_branch.as_deref().unwrap_or("detached HEAD")
+        ));
+    }
+    let current_oid = git_rev_parse_head(repo.root());
     if intent.phase == repo::GitCheckpointIntentPhase::Prepared {
-        if repo.git_overlay_current_branch()?.as_deref() != Some(intent.branch.as_str())
-            || git_rev_parse_head(repo.root()).as_deref() != Some(intent.new_git_oid.as_str())
-        {
+        if current_oid == intent.previous_git_oid {
             return Ok(None);
+        }
+        if current_oid.as_deref() != Some(intent.new_git_oid.as_str()) {
+            return Err(anyhow!(
+                "prepared Git checkpoint expected HEAD at {} or {}, found {}",
+                intent.previous_git_oid.as_deref().unwrap_or("<unborn>"),
+                intent.new_git_oid,
+                current_oid.as_deref().unwrap_or("<unborn>")
+            ));
         }
         let git_oid = intent.new_git_oid.clone();
         intent = repo.mark_git_checkpoint_published(state_id, &git_oid)?;
     }
     if intent.phase != repo::GitCheckpointIntentPhase::Published {
         return Ok(None);
+    }
+    if current_oid.as_deref() != Some(intent.new_git_oid.as_str()) {
+        return Err(anyhow!(
+            "published Git checkpoint expected HEAD at {}, found {}",
+            intent.new_git_oid,
+            current_oid.as_deref().unwrap_or("<unborn>")
+        ));
     }
     let git_commit = intent.new_git_oid.clone();
     let summary = intent.summary.clone();

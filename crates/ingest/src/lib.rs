@@ -36,6 +36,7 @@ pub mod git_walk;
 pub mod import_options;
 pub mod importer;
 pub mod oplog_emit;
+pub mod overlay_history;
 pub mod reasoning;
 pub mod reasoning_emit;
 pub mod reasoning_extract;
@@ -55,6 +56,7 @@ pub use importer::{
     import_single_git_commit_into,
 };
 pub use oplog_emit::{OplogEmitStats, OplogEmitter};
+pub use overlay_history::OverlayHistory;
 pub use reasoning::{ReasoningEvidence, ReasoningPoint, ReasoningTarget};
 pub use reasoning_emit::{ReasoningEmitStats, ReasoningEmitter};
 pub use reasoning_extract::{

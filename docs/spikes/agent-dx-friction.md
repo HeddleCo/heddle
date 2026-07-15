@@ -33,21 +33,38 @@ Key implementation:
 
 Regression: `init_then_start_binds_git_tip_not_orphan_bootstrap`.
 
+Before a mutating command binds that tip, `log`, `show`, and
+`query --attribution` construct an in-memory state graph from the reachable Git
+commits. `diff HEAD` reads the Git-backed worktree status. These observe-only
+paths do not create mappings, object files, state descriptors, or Heddle refs;
+the in-memory graph preserves the reachable Git parent relationships.
+
+Key implementation: `crates/ingest/src/overlay_history.rs`.
+
+Regression:
+`initialized_overlay_observe_commands_project_full_git_history_without_writes`.
+
 ### Keep land and Git checkpoint state consistent
 
 Land writes `.heddle/incomplete-land.json` atomically before the first
 land-owned collapse or integration mutation, advances it through integration
 and rollback phases, and clears it only after Git write-through and oplog-batch
 coalescing complete. A checkpoint error automatically undoes the land-owned
-integration and any land-owned collapse batch.
+integration and any land-owned collapse batch. The marker records the pre-land
+and expected Git OIDs plus the exact integration and collapse oplog batch IDs.
+Recovery validates those identities before undoing them; a prepared marker
+never infers ownership from whichever state or ref happens to differ at
+recovery time.
 
 `land` and `ready` recover a surviving marker; observe-only `status` reports the
 pending recovery and its retry action without mutating it. Recovery verifies
-the marker's target branch and the checkpoint intent's exact published OID,
-covering a crash after checkpoint publication but before marker removal without
-mistaking an older mapping for this publication. Otherwise it rolls the
+the marker's target branch and the checkpoint intent's previous and published
+OIDs, covering a crash after checkpoint publication but before marker removal
+without mistaking an older mapping for this publication. Otherwise it rolls the
 incomplete integration back. `rollback_started` / `rollback_complete` phases
-make cleanup retries idempotent after an undo has already run.
+make cleanup retries idempotent after an undo has already run. Every command
+registered as both mutating and targeting the current repository in the command
+catalog passes through this recovery check before dispatch.
 
 Local and remote non-fast-forward failures remain distinct:
 `NonFastForwardRef.remote_destination` selects either
@@ -69,7 +86,10 @@ Regression:
 `heddle land --threads alpha,beta` lands peers in argument order against the
 live target tip and stops at the first blocked peer. JSON output is one
 `land_batch` object containing the requested order, successful prefix, and one
-result for each attempted peer.
+result for each attempted peer. A blocked peer retains the structured primary
+command and recovery-command list from its error; the batch promotes that
+primary command as its recommended action. The batch Git head and verification
+state are read from the resolved landing target repository.
 
 The first peer keeps its ordinary Heddle-derived Git parents. For each later
 peer with an unmapped write-through state, the multi-peer checkpoint path asks
@@ -90,7 +110,8 @@ After a successful land, sibling threads in draft, active, ready, or blocked
 state with the same `target_thread` are freshness-checked and stale siblings
 are refreshed in deterministic thread-id order. This is best effort: failures
 appear in `siblings_restack_failed` and operator warnings, but do not undo the
-successful land.
+successful land. Human single-peer and batch output print the warnings and each
+recorded restack failure.
 
 Key implementation: `crates/cli/src/cli/commands/workflow.rs`.
 
@@ -105,6 +126,11 @@ default through, and a pre-existing `.cargo/config.toml` or legacy
 Only the generated `/.cargo/config.toml` is locally excluded from status;
 tracked `.cargo` content remains visible. Active shared-target setup skips
 hydrating a copied `target` directory.
+
+The generated Cargo config and the checkout-local Git exclude file are one
+atomic setup unit: failure while updating either file restores the exact prior
+bytes (or prior absence), and a later `start` transaction rollback restores the
+same pair.
 
 Key implementation:
 

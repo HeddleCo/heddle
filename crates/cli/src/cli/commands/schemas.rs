@@ -245,6 +245,8 @@ fn stabilize_land_output_shapes(verb: &str, schema: &mut Value) {
                         "siblings_restack_failed",
                         "blockers",
                         "warnings",
+                        "primary_command",
+                        "recovery_commands",
                     ],
                 );
             }
@@ -1350,6 +1352,8 @@ pub struct LandBatchPeerSchema {
     pub siblings_restack_failed: Vec<SiblingRestackFailureSchema>,
     pub blockers: Vec<String>,
     pub warnings: Vec<String>,
+    pub primary_command: Option<String>,
+    pub recovery_commands: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

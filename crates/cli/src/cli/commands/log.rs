@@ -291,6 +291,18 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
         return cmd_log_reflog(cli, &repo, options.limit, options.oneline);
     }
 
+    if repo.capability() == repo::RepositoryCapability::GitOverlay
+        && repo.current_state()?.is_none()
+    {
+        let revision = options.state.as_deref().unwrap_or("HEAD");
+        if ingest::GitSource::open(repo.root())?
+            .resolve_revision(revision)
+            .is_ok()
+        {
+            return render_unbound_overlay_log(cli, &repo, &options);
+        }
+    }
+
     // Get starting state
     let start_id = if let Some(ref spec) = options.state {
         if matches!(spec.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
@@ -400,6 +412,64 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
         cli.quiet,
     );
 
+    Ok(())
+}
+
+fn render_unbound_overlay_log(
+    cli: &Cli,
+    repo: &Repository,
+    options: &LogCommandOptions,
+) -> Result<()> {
+    let revision = options.state.as_deref().unwrap_or("HEAD");
+    let history = ingest::OverlayHistory::open(repo.root(), revision)?;
+    let since_git = options
+        .since
+        .as_deref()
+        .map(|revision| ingest::GitSource::open(repo.root())?.resolve_revision(revision))
+        .transpose()?;
+    let mut entries = Vec::new();
+    for (git_oid, state) in history.states() {
+        if since_git.as_deref() == Some(git_oid.as_str()) {
+            break;
+        }
+        if let Some(agent) = options.agent.as_deref()
+            && !state.attribution.to_string().contains(agent)
+        {
+            continue;
+        }
+        let mut entry = StateEntry::from(state);
+        entry.git_checkpoint = Some(git_oid.clone());
+        entries.push(entry);
+        if entries.len() == options.limit {
+            break;
+        }
+    }
+    let output = LogOutput {
+        output_kind: "log",
+        status: "completed",
+        repository_capability: repo.capability_label().to_string(),
+        storage_model: repo.storage_model_label().to_string(),
+        import_guidance: repo
+            .git_import_guidance()?
+            .map(|hint| LogImportGuidanceOutput {
+                current_branch: hint.current_branch,
+                missing_branch_count: hint.missing_branch_count,
+                missing_branches: hint.missing_branches,
+                recommended_command: hint.recommended_command,
+            }),
+        states: entries,
+    };
+    if should_output_json(cli, Some(repo.config())) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        if options.oneline {
+            let _ = write_oneline(&mut handle, &output, cli.verbose > 0);
+        } else {
+            let _ = write_full(&mut handle, &output, cli.verbose > 0);
+        }
+    }
     Ok(())
 }
 

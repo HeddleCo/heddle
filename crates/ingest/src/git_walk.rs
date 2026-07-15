@@ -220,6 +220,15 @@ impl std::fmt::Debug for GitSource {
 }
 
 impl GitSource {
+    /// Resolve a Git revision without changing refs, the index, or Heddle metadata.
+    pub fn resolve_revision(&self, revision: &str) -> crate::Result<String> {
+        self.repo
+            .rev_parse(revision)
+            .map(|oid| oid.to_string())
+            .map_err(|error| {
+                IngestError::Git(format!("resolve Git revision '{revision}': {error}"))
+            })
+    }
     /// Open a repo at `path`. Uses sley's discovery first (works from a
     /// worktree subdirectory), falling back to direct open for explicit
     /// `.git` dirs.

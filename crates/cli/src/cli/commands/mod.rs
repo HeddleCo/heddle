@@ -170,4 +170,5 @@ pub use undo::{cmd_redo, cmd_undo, cmd_undo_recover};
 pub use verify::cmd_verify;
 pub use visibility::cmd_visibility;
 pub use watch::cmd_watch;
+pub use workflow::recover_incomplete_land_if_present;
 pub use workflow::{cmd_land, cmd_sync};

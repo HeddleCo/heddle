@@ -2215,6 +2215,16 @@ fn parsed_command_runtime_contract_exposes_catalog_fields() {
 }
 
 #[test]
+fn clone_mutation_is_destination_scoped() {
+    let cli = Cli::try_parse_from(["heddle", "clone", "source", "destination"])
+        .expect("clone should parse");
+    let runtime = command_runtime_contract_for_command(&cli.command);
+
+    assert!(runtime.mutates);
+    assert!(!runtime.targets_current_repository);
+}
+
+#[test]
 fn op_id_persistence_reads_contract_table() {
     let catalog = build_command_catalog();
     for (display, persists, store_scope) in [

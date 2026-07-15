@@ -75,6 +75,29 @@ fn git_ref_snapshot(path: &std::path::Path) -> String {
     )
 }
 
+fn directory_bytes_snapshot(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    fn visit(root: &std::path::Path, path: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
+        let mut entries = std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        for entry in entries {
+            if entry.is_dir() {
+                visit(root, &entry, out);
+            } else {
+                out.push((
+                    entry.strip_prefix(root).unwrap().display().to_string(),
+                    std::fs::read(&entry).unwrap(),
+                ));
+            }
+        }
+    }
+    let mut snapshot = Vec::new();
+    visit(root, root, &mut snapshot);
+    snapshot
+}
+
 fn git_commit_all(path: &std::path::Path, message: &str) {
     git(&["add", "."], path);
     git(&["commit", "-m", message], path);
@@ -82,6 +105,64 @@ fn git_commit_all(path: &std::path::Path, message: &str) {
 
 fn initialize_git_overlay(path: &std::path::Path) {
     heddle(&["init"], Some(path)).unwrap();
+}
+
+#[test]
+fn initialized_overlay_observe_commands_project_full_git_history_without_writes() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("story.txt"), "one\n").unwrap();
+    git_commit_all(temp.path(), "first");
+    git(&["config", "user.name", "Second Author"], temp.path());
+    std::fs::write(temp.path().join("story.txt"), "one\ntwo\n").unwrap();
+    git_commit_all(temp.path(), "second");
+    initialize_git_overlay(temp.path());
+    std::fs::write(temp.path().join("dirty.txt"), "visible diff\n").unwrap();
+
+    let before_files = directory_bytes_snapshot(&temp.path().join(".heddle"));
+    let before_refs = git_ref_snapshot(temp.path());
+
+    let log: Value =
+        serde_json::from_str(&heddle(&["log", "--output", "json"], Some(temp.path())).unwrap())
+            .unwrap();
+    assert!(
+        log["states"]
+            .as_array()
+            .is_some_and(|states| states.len() == 2)
+    );
+    assert!(
+        log["states"][0]["parents"]
+            .as_array()
+            .is_some_and(|parents| !parents.is_empty()),
+        "lazy log must retain Git ancestry: {log}"
+    );
+    let show: Value = serde_json::from_str(
+        &heddle(&["show", "HEAD", "--output", "json"], Some(temp.path())).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        show["parents"]
+            .as_array()
+            .is_some_and(|parents| !parents.is_empty())
+    );
+    let blame: Value = serde_json::from_str(
+        &heddle(
+            &["query", "--attribution", "story.txt", "--output", "json"],
+            Some(temp.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(blame["lines"].as_array().map(Vec::len), Some(2));
+    assert_eq!(blame["lines"][0]["principal"]["name"], "Heddle Test");
+    assert_eq!(blame["lines"][1]["principal"]["name"], "Second Author");
+    heddle(&["diff", "HEAD", "--output", "json"], Some(temp.path())).unwrap();
+
+    assert_eq!(
+        directory_bytes_snapshot(&temp.path().join(".heddle")),
+        before_files
+    );
+    assert_eq!(git_ref_snapshot(temp.path()), before_refs);
 }
 
 fn raw_git_preservation_action() -> &'static str {
@@ -3570,6 +3651,87 @@ fn git_overlay_matrix_land_prepared_journal_recovers_pre_publish_crash() {
 }
 
 #[test]
+fn prepared_land_recovery_refuses_unrelated_git_divergence_at_mutation_chokepoint() {
+    let fixture = GitOverlayFixture::imported_main()
+        .with_ready_materialized_thread("feature/prepared-divergence");
+    let crashed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/prepared-divergence",
+        ],
+        Some(fixture.path()),
+        &[("HEDDLE_FAULT_INJECT", "land_after_prepared_journal")],
+    )
+    .unwrap();
+    assert!(!crashed.status.success());
+    let marker = fixture.path().join(".heddle/incomplete-land.json");
+    assert!(marker.exists());
+
+    std::fs::write(fixture.path().join("unrelated.txt"), "unrelated\n").unwrap();
+    git_commit_all(fixture.path(), "unrelated external mutation");
+    let unrelated_head = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    let capture = heddle_output(
+        &["capture", "-m", "must not consume unrelated work"],
+        Some(fixture.path()),
+    )
+    .unwrap();
+
+    assert!(!capture.status.success());
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        unrelated_head
+    );
+    assert!(marker.exists(), "failed recovery must preserve its journal");
+    assert!(
+        String::from_utf8_lossy(&capture.stderr)
+            .contains("refusing to infer or undo unrelated work"),
+        "mutation chokepoint must fail closed: {}",
+        String::from_utf8_lossy(&capture.stderr)
+    );
+}
+
+#[test]
+fn published_land_recovery_validates_branch_before_finalizing() {
+    let fixture = GitOverlayFixture::imported_main()
+        .with_ready_materialized_thread("feature/published-wrong-branch");
+    let crashed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/published-wrong-branch",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "git_checkpoint_after_publish_before_phase",
+        )],
+    )
+    .unwrap();
+    assert!(!crashed.status.success());
+    let published = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    git(
+        &["checkout", "-b", "unrelated-recovery-branch"],
+        fixture.path(),
+    );
+
+    let ready = heddle_output(&["ready"], Some(fixture.path())).unwrap();
+    assert!(!ready.status.success());
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        published
+    );
+    assert!(
+        fixture.path().join(".heddle/incomplete-land.json").exists(),
+        "wrong-branch recovery must retain the journal"
+    );
+}
+
+#[test]
 fn git_overlay_matrix_rollback_started_phase_prevents_double_undo() {
     let fixture =
         GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/rollback-phase");
@@ -3613,6 +3775,13 @@ fn git_overlay_matrix_rollback_started_phase_prevents_double_undo() {
     .expect("retry must finalize rollback without applying the undo twice");
     let retry: Value = serde_json::from_str(&retry).unwrap();
     assert_eq!(retry["status"], "landed", "{retry}");
+    assert!(
+        !fixture
+            .path()
+            .join(".heddle/state/git-checkpoint-intent.json")
+            .exists(),
+        "idempotent rollback recovery must remove its matching unpublished checkpoint intent"
+    );
 }
 
 #[test]
@@ -3927,9 +4096,30 @@ fn git_overlay_matrix_land_threads_reports_failed_peer_in_batch() {
     assert_eq!(batch["output_kind"], "land_batch", "{batch}");
     assert_eq!(batch["status"], "blocked", "{batch}");
     assert_eq!(batch["stopped_at"], "feature/batch-fail", "{batch}");
+    assert_eq!(
+        batch["git_head"],
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        "batch envelope Git state must come from the resolved target repository"
+    );
+    assert!(
+        batch["verification"].is_object(),
+        "batch envelope trust must come from the resolved target repository: {batch}"
+    );
     assert_eq!(batch["peers"].as_array().map(Vec::len), Some(1));
     assert_eq!(batch["peers"][0]["thread"], "feature/batch-fail");
     assert_eq!(batch["peers"][0]["status"], "blocked");
+    assert_eq!(
+        batch["peers"][0]["primary_command"],
+        "heddle land --thread feature/batch-fail"
+    );
+    assert_eq!(
+        batch["peers"][0]["recovery_commands"],
+        serde_json::json!(["heddle verify", "heddle land --thread feature/batch-fail"])
+    );
+    assert_eq!(
+        batch["recommended_action"],
+        "heddle land --thread feature/batch-fail"
+    );
     assert!(
         batch["peers"][0]["message"]
             .as_str()
@@ -3967,6 +4157,34 @@ fn git_overlay_matrix_land_reports_sibling_enumeration_failure() {
             .as_array()
             .is_some_and(|warnings| !warnings.is_empty()),
         "enumeration failure must be loud: {land}"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_human_land_batch_prints_peer_warnings_and_restack_failures() {
+    let fixture = GitOverlayFixture::imported_main()
+        .with_ready_materialized_thread("feature/human-batch-warning");
+    let out = heddle_output_with_env(
+        &[
+            "--output",
+            "text",
+            "land",
+            "--threads",
+            "feature/human-batch-warning",
+        ],
+        Some(fixture.path()),
+        &[("HEDDLE_FAULT_INJECT", "land_sibling_enumeration")],
+    )
+    .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("warning:"),
+        "peer warnings must be visible: {stdout}"
+    );
+    assert!(
+        stdout.contains("restack failed:"),
+        "each peer restack failure must be visible: {stdout}"
     );
 }
 

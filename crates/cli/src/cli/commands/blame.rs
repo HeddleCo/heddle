@@ -138,6 +138,18 @@ fn cmd_blame_with_output_kind(
 ) -> Result<()> {
     let repo = cli.open_repo()?;
 
+    if repo.capability() == repo::RepositoryCapability::GitOverlay
+        && repo.current_state()?.is_none()
+    {
+        return render_unbound_overlay_blame(
+            cli,
+            &repo,
+            &file,
+            state.as_deref().unwrap_or("HEAD"),
+            output_kind,
+        );
+    }
+
     let target_state_id = if let Some(state_id) = state {
         if matches!(state_id.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
             ensure_current_state(
@@ -259,6 +271,66 @@ fn cmd_blame_with_output_kind(
         }
     }
 
+    Ok(())
+}
+
+fn render_unbound_overlay_blame(
+    cli: &Cli,
+    repo: &Repository,
+    file: &str,
+    revision: &str,
+    output_kind: &'static str,
+) -> Result<()> {
+    let history = ingest::OverlayHistory::open(repo.root(), revision)?;
+    let states = history
+        .states()
+        .iter()
+        .map(|(git_oid, state)| (git_oid.as_str(), state))
+        .collect::<HashMap<_, _>>();
+    let mut lines = Vec::new();
+    for line in history.blame_file(file)? {
+        let state = states.get(line.git_oid.as_str()).ok_or_else(|| {
+            anyhow!(
+                "Git blame referenced commit {} outside the selected history",
+                line.git_oid
+            )
+        })?;
+        let (principal, agent) = attribution_parts(&state.attribution);
+        lines.push(BlameLine {
+            line_number: lines.len() + 1,
+            content: line.content,
+            state_id: state.state_id.to_string_full(),
+            principal: principal.clone(),
+            agent: agent.clone(),
+            timestamp: state.authored_at.unwrap_or(state.created_at).to_rfc3339(),
+            origins: Some(vec![BlameOrigin {
+                state_id: state.state_id.to_string_full(),
+                principal,
+                agent,
+                timestamp: state.authored_at.unwrap_or(state.created_at).to_rfc3339(),
+            }]),
+        });
+    }
+    let output = BlameOutput {
+        output_kind,
+        status: "completed",
+        file: file.to_string(),
+        context: Vec::new(),
+        lines,
+    };
+    if should_output_json(cli, Some(repo.config())) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        for line in &output.lines {
+            let author = format!("{} <{}>", line.principal.name, line.principal.email);
+            println!(
+                "{:12} {:20} {}",
+                &line.state_id[..line.state_id.len().min(12)],
+                fit_author(&author, 20),
+                line.content
+            );
+        }
+    }
     Ok(())
 }
 

@@ -55,6 +55,87 @@ fn native_mapped_object_files(path: &std::path::Path, state_id: &str) -> Vec<std
 }
 
 #[test]
+fn capture_reuses_unchanged_git_subtree_without_native_copy() {
+    let temp = TempDir::new().unwrap();
+    let work = temp.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git(&work, &["init", "-b", "main"]);
+    configure_git_identity(&work);
+    std::fs::create_dir(work.join("stable")).unwrap();
+    std::fs::write(work.join("stable/kept.txt"), "unchanged\n").unwrap();
+    git(&work, &["add", "stable/kept.txt"]);
+    commit_file(&work, "changed.txt", "before\n", "seed");
+    let stable_git_tree = git(&work, &["rev-parse", "HEAD:stable"]);
+    heddle(&["init"], Some(&work)).unwrap();
+    heddle(
+        &["start", "feature/tree-reuse", "--workspace", "solid"],
+        Some(&work),
+    )
+    .unwrap();
+
+    std::fs::write(work.join("changed.txt"), "after\n").unwrap();
+    heddle(&["capture", "-m", "change one file"], Some(&work)).unwrap();
+
+    let map = ingest::ShaMap::open(work.join(".heddle/ingest/sha_map.sqlite")).unwrap();
+    let stable_hash = map
+        .get_tree(&stable_git_tree)
+        .expect("unchanged Git subtree must retain its identity mapping");
+    let hex = stable_hash.to_hex();
+    assert!(
+        !work
+            .join(".heddle/objects/trees")
+            .join(&hex[..2])
+            .join(&hex[2..])
+            .exists(),
+        "capture must reuse an unchanged Git-backed tree instead of copying it into native storage"
+    );
+    assert!(
+        repo::Repository::open(&work)
+            .unwrap()
+            .store()
+            .get_tree(&stable_hash)
+            .unwrap()
+            .is_some(),
+        "the unchanged subtree remains readable from the explicit overlay source"
+    );
+}
+
+#[test]
+fn native_adoption_does_not_fall_back_to_git_when_native_objects_are_missing() {
+    let temp = TempDir::new().unwrap();
+    let work = temp.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git(&work, &["init", "-b", "main"]);
+    configure_git_identity(&work);
+    commit_file(&work, "story.txt", "native truth\n", "seed");
+    heddle(&["init"], Some(&work)).unwrap();
+    heddle(&["adopt"], Some(&work)).unwrap();
+
+    let native = repo::Repository::open(&work).unwrap();
+    let state_id = native
+        .current_state()
+        .unwrap()
+        .expect("adopted current state")
+        .state_id
+        .to_string_full();
+    for path in native_mapped_object_files(&work, &state_id) {
+        std::fs::remove_file(path).unwrap();
+    }
+
+    for entry in std::fs::read_dir(work.join(".heddle/packs")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    let output = heddle_output(&["show", "HEAD", "--output", "json"], Some(&work)).unwrap();
+    assert!(
+        !output.status.success(),
+        "native authority must report missing native state/tree/blob storage as corruption instead of reading through the retained SHA map into Git"
+    );
+}
+
+#[test]
 fn git_overlay_sync_adopts_fast_forward_upstream_tip() {
     let temp = TempDir::new().unwrap();
     let seed = temp.path().join("seed");
