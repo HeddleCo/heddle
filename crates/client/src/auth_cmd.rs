@@ -19,7 +19,9 @@ use tonic::{
 };
 use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
-use crate::device_flow::{AgentAttenuation, SAFE_AGENT_OPERATIONS, attenuate_for_agent};
+use crate::device_flow::{
+    AgentAttenuation, SAFE_AGENT_OPERATIONS, attenuate_for_agent, effective_pop_public_key_hex,
+};
 use crate::{auth_requests::AuthCommand, credentials, credentials::ServerCredential};
 
 /// Top-level dispatch for `heddle auth <subcommand>`. `_ctx` is
@@ -73,7 +75,7 @@ struct AgentTokenExportMetadata<'a> {
     scopes: Vec<String>,
 }
 
-const DERIVED_TOKEN_SECURITY_NOTE: &str = "Derived token is operation/TTL-limited and enforced server-side; declared scopes await W3 enforcement. It uses this host's device key for hosted-write proofs (same-host only); it is not a portable credential -- cross-host delegation lands in W2.";
+const DERIVED_TOKEN_SECURITY_NOTE: &str = "Derived credential has its own proof key and is operation/TTL-limited server-side; declared scopes await W3 enforcement. Keep the token and child key together; the parent device key is not exported.";
 
 const SERVICE_TOKEN_TTL_DAYS: u32 = 30;
 const SERVICE_TOKEN_TTL_SECS: i64 = SERVICE_TOKEN_TTL_DAYS as i64 * 24 * 3600;
@@ -114,7 +116,6 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             scopes,
             allowed_operations,
             out,
-            stdout,
         } => cmd_auth_derive_agent(
             &server,
             agent_id,
@@ -122,7 +123,6 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             scopes,
             allowed_operations,
             out.as_deref(),
-            stdout,
         ),
         AuthCommand::CreateServiceToken {
             name,
@@ -144,8 +144,8 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
     }
 }
 
-/// Derive an offline child Biscuit and either install it as the active token,
-/// write a token-only export, or emit the token.
+/// Derive an offline child credential with a fresh PoP key, then either install
+/// it as the active credential or write a portable token + child-key bundle.
 fn cmd_auth_derive_agent(
     server: &str,
     agent_id: Option<String>,
@@ -153,7 +153,6 @@ fn cmd_auth_derive_agent(
     scopes: Vec<String>,
     requested_operations: Vec<String>,
     out: Option<&Path>,
-    stdout: bool,
 ) -> Result<()> {
     if ttl_secs == 0 {
         bail!("--ttl must be greater than zero seconds");
@@ -197,6 +196,8 @@ fn cmd_auth_derive_agent(
     let allowed_operations = select_agent_operations(requested_operations)?;
     let declared_scopes = parse_agent_scopes(scopes)?;
     validate_scope_narrowing(&parent.token, &declared_scopes)?;
+    let child_signer = Ed25519Signer::generate()
+        .map_err(|error| anyhow::anyhow!("failed to generate child proof key: {error}"))?;
     let child_token = attenuate_for_agent(
         &parent.token,
         AgentAttenuation {
@@ -208,13 +209,12 @@ fn cmd_auth_derive_agent(
             allowed_resources: None,
             declared_scopes: declared_scopes.clone(),
         },
+        &signer,
+        child_signer.public_key(),
     )?;
-
-    if stdout {
-        println!("{child_token}");
-        eprintln!("{DERIVED_TOKEN_SECURITY_NOTE}");
-        return Ok(());
-    }
+    let child_private_key_pem = child_signer
+        .to_pem()
+        .map_err(|error| anyhow::anyhow!("failed to export child proof key: {error}"))?;
     if let Some(out) = out {
         let export_metadata = AgentTokenExportMetadata {
             server,
@@ -225,7 +225,7 @@ fn cmd_auth_derive_agent(
                 .map(|(kind, path)| format!("{kind}:{path}"))
                 .collect(),
         };
-        write_agent_bundle(out, &child_token, &export_metadata)?;
+        write_agent_bundle(out, &child_token, &child_private_key_pem, &export_metadata)?;
         println!("Agent token {agent_id} written to {}.", out.display());
         println!("{DERIVED_TOKEN_SECURITY_NOTE}");
         return Ok(());
@@ -240,9 +240,9 @@ fn cmd_auth_derive_agent(
         ServerCredential {
             token: child_token,
             subject: parent.subject,
-            device_id: parent.device_id,
+            device_id: None,
             credential_id: None,
-            private_key_pem: Some(private_key_pem.to_string()),
+            private_key_pem: Some(child_private_key_pem),
             expires_at: Some(expires_at.to_rfc3339()),
         },
     )?;
@@ -383,35 +383,97 @@ fn scope_is_within(child: &(String, String), parent: &(String, String)) -> bool 
 fn write_agent_bundle(
     directory: &Path,
     token: &str,
+    child_private_key_pem: &str,
     metadata: &AgentTokenExportMetadata<'_>,
 ) -> Result<()> {
-    objects::fs_atomic::create_private_dir_all(directory).with_context(|| {
-        format!(
-            "creating agent token export directory {}",
-            directory.display()
-        )
-    })?;
-    let legacy_key_path = directory.join("device-key.pem");
-    match std::fs::remove_file(&legacy_key_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("removing legacy key {}", legacy_key_path.display()));
-        }
-    }
-    objects::fs_atomic::write_file_atomic_secret(&directory.join("token"), token.as_bytes())
-        .with_context(|| format!("writing agent token under {}", directory.display()))?;
     let mut metadata_json =
         serde_json::to_vec_pretty(metadata).context("serializing agent token metadata")?;
     metadata_json.push(b'\n');
-    objects::fs_atomic::write_file_atomic_secret(&directory.join("metadata.json"), &metadata_json)
-        .with_context(|| format!("writing agent token metadata under {}", directory.display()))?;
-    Ok(())
+
+    match std::fs::symlink_metadata(directory) {
+        Ok(_) => bail!(
+            "agent bundle destination {} already exists; choose a new --out directory",
+            directory.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("checking agent bundle destination {}", directory.display())
+            });
+        }
+    }
+
+    let parent = directory
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    objects::fs_atomic::create_private_dir_all(parent)
+        .with_context(|| format!("creating agent bundle parent {}", parent.display()))?;
+    let bundle_name = directory
+        .file_name()
+        .context("--out must name an agent bundle directory")?
+        .to_string_lossy();
+    let staging = parent.join(format!(
+        ".{bundle_name}.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+
+    let write_result = (|| -> Result<()> {
+        objects::fs_atomic::create_private_dir_all(&staging).with_context(|| {
+            format!(
+                "creating private agent bundle staging directory {}",
+                staging.display()
+            )
+        })?;
+        objects::fs_atomic::write_file_atomic_secret(
+            &staging.join("device-key.pem"),
+            child_private_key_pem.as_bytes(),
+        )
+        .with_context(|| format!("writing child proof key under {}", staging.display()))?;
+        objects::fs_atomic::write_file_atomic_secret(&staging.join("token"), token.as_bytes())
+            .with_context(|| format!("writing agent token under {}", staging.display()))?;
+        objects::fs_atomic::write_file_atomic_secret(
+            &staging.join("metadata.json"),
+            &metadata_json,
+        )
+        .with_context(|| format!("writing agent metadata under {}", staging.display()))?;
+        publish_agent_bundle(&staging, directory, parent)?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    write_result
+}
+
+fn publish_agent_bundle(staging: &Path, directory: &Path, parent: &Path) -> Result<()> {
+    publish_agent_bundle_with_sync(
+        staging,
+        directory,
+        parent,
+        objects::fs_atomic::sync_directory,
+    )
+}
+
+fn publish_agent_bundle_with_sync(
+    staging: &Path,
+    directory: &Path,
+    parent: &Path,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<()> {
+    std::fs::rename(staging, directory).with_context(|| {
+        format!(
+            "publishing completed agent bundle at {}",
+            directory.display()
+        )
+    })?;
+    sync_parent(parent).with_context(|| format!("syncing agent bundle parent {}", parent.display()))
 }
 
 struct HeadlessTokenMetadata {
     subject: String,
+    is_derived: bool,
     credential_id: Option<String>,
     expires_at: Option<String>,
     proof_public_key_hex: String,
@@ -452,8 +514,10 @@ pub(crate) fn install_headless_credential(
         expires_at: metadata.expires_at,
     };
     credentials::store_server_credential(server, credential)?;
-    repo::identity::link_device_key(signer.public_key(), &private_key_pem, server)
-        .with_context(|| format!("registering device identity for {server}"))?;
+    if !metadata.is_derived {
+        repo::identity::link_device_key(signer.public_key(), &private_key_pem, server)
+            .with_context(|| format!("registering device identity for {server}"))?;
+    }
 
     Ok(metadata.subject)
 }
@@ -500,13 +564,7 @@ fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetadata> {
     } else {
         string_fact("credential_id")?
     };
-    let proof_public_key_hex = string_fact("device_pop_key")?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Biscuit is not device-bound: authority block is missing device_pop_key(key)"
-        )
-    })?;
-    hex::decode(&proof_public_key_hex)
-        .context("Biscuit device_pop_key is not valid hexadecimal")?;
+    let proof_public_key_hex = effective_pop_public_key_hex(token)?;
 
     let mut expiries = authority.facts.iter().filter_map(|fact| {
         if fact.predicate.name != "expires_at" || fact.predicate.terms.len() != 1 {
@@ -562,6 +620,7 @@ fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetadata> {
 
     Ok(HeadlessTokenMetadata {
         subject,
+        is_derived: block_count > 1,
         credential_id,
         expires_at,
         proof_public_key_hex,
@@ -1824,7 +1883,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_agent_installs_inherited_pop_child_and_supports_narrower_subderivation() {
+    fn derive_agent_installs_fresh_pop_child_and_supports_narrower_subderivation() {
         with_isolated_home(|| {
             let server = "grpc.S";
             let (parent, private_key_pem) = stored_device_parent();
@@ -1837,18 +1896,25 @@ mod tests {
                 vec!["repo:acme/heddle".to_string()],
                 vec!["Push".to_string()],
                 None,
-                false,
             )
             .expect("derive and install parent agent");
             let installed = credentials::get_server_credential(server)
                 .expect("load installed child")
                 .expect("installed child");
-            assert_eq!(
-                installed.private_key_pem.as_deref(),
-                Some(private_key_pem.as_str()),
-                "W1 child inherits the parent PoP key"
+            let installed_private_key = installed
+                .private_key_pem
+                .as_deref()
+                .expect("derived child stores its own PoP key");
+            assert_ne!(
+                installed_private_key, private_key_pem,
+                "the parent device private key must never be handed to a derived child"
             );
-            assert_eq!(installed.device_id.as_deref(), Some("device-root"));
+            let installed_signer =
+                Ed25519Signer::from_pem(installed_private_key).expect("parse child PoP key");
+            assert!(
+                installed.device_id.is_none(),
+                "a derived PoP key is not the registered root device key"
+            );
             assert!(
                 installed.credential_id.is_none(),
                 "derived tokens must not auto-rotate into an unattenuated token"
@@ -1862,6 +1928,13 @@ mod tests {
                     .expect("child block")
                     .contains("agent_scope(\"repo\", \"acme/heddle\")")
             );
+            assert!(
+                parsed
+                    .print_block_source(1)
+                    .expect("child block")
+                    .contains(&hex::encode(installed_signer.public_key())),
+                "the child attenuation block must bind the child's PoP public key"
+            );
 
             cmd_auth_derive_agent(
                 server,
@@ -1870,18 +1943,34 @@ mod tests {
                 vec!["repo:acme/heddle/subtree".to_string()],
                 vec!["Push".to_string()],
                 None,
-                false,
             )
             .expect("derive narrower subagent");
             let subagent = credentials::get_server_credential(server)
                 .expect("load subagent")
                 .expect("installed subagent");
+            let subagent_private_key = subagent
+                .private_key_pem
+                .as_deref()
+                .expect("subagent stores its own PoP key");
+            assert_ne!(
+                subagent_private_key, installed_private_key,
+                "each delegation hop must generate a fresh private key"
+            );
+            let subagent_signer =
+                Ed25519Signer::from_pem(subagent_private_key).expect("parse subagent PoP key");
             let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(subagent.token.as_bytes())
                 .expect("parse subagent");
             assert_eq!(
                 parsed.block_count(),
                 3,
                 "delegation tree adds one block per hop"
+            );
+            assert!(
+                parsed
+                    .print_block_source(2)
+                    .expect("subagent block")
+                    .contains(&hex::encode(subagent_signer.public_key())),
+                "the subagent attenuation block must bind the subagent's PoP public key"
             );
 
             let error = cmd_auth_derive_agent(
@@ -1891,7 +1980,6 @@ mod tests {
                 vec!["repo:acme".to_string()],
                 vec!["Push".to_string()],
                 None,
-                false,
             )
             .expect_err("subagent scope widening must be rejected");
             assert!(error.to_string().contains("would widen"));
@@ -1899,19 +1987,12 @@ mod tests {
     }
 
     #[test]
-    fn derive_agent_export_contains_token_and_metadata_but_no_device_key() {
+    fn derive_agent_export_contains_token_metadata_and_a_fresh_child_key() {
         with_isolated_home(|| {
             let server = "grpc.S";
             let (parent, private_key_pem) = stored_device_parent();
             credentials::store_server_credential(server, parent).expect("store parent");
             let export_dir = repo::identity::heddle_home_dir().join("agent-export");
-            objects::fs_atomic::create_private_dir_all(&export_dir)
-                .expect("create legacy export directory");
-            objects::fs_atomic::write_file_atomic_secret(
-                &export_dir.join("device-key.pem"),
-                private_key_pem.as_bytes(),
-            )
-            .expect("seed legacy exported device key");
 
             cmd_auth_derive_agent(
                 server,
@@ -1920,9 +2001,8 @@ mod tests {
                 vec!["repo:acme/heddle".to_string()],
                 vec!["Push".to_string()],
                 Some(&export_dir),
-                false,
             )
-            .expect("derive token-only export");
+            .expect("derive portable child credential");
 
             let mut entries = std::fs::read_dir(&export_dir)
                 .expect("read export directory")
@@ -1935,24 +2015,19 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             entries.sort();
-            assert_eq!(entries, ["metadata.json", "token"]);
+            assert_eq!(entries, ["device-key.pem", "metadata.json", "token"]);
 
             let token = std::fs::read(export_dir.join("token")).expect("read exported token");
+            let child_private_key = std::fs::read_to_string(export_dir.join("device-key.pem"))
+                .expect("read exported child key");
             let metadata =
                 std::fs::read(export_dir.join("metadata.json")).expect("read export metadata");
-            let export_bytes = [token.as_slice(), metadata.as_slice()].concat();
-            assert!(
-                !export_bytes
-                    .windows(private_key_pem.len())
-                    .any(|window| window == private_key_pem.as_bytes()),
-                "portable export must not contain the device private key"
+            assert_ne!(
+                child_private_key, private_key_pem,
+                "portable export must contain a fresh child key, never the parent device key"
             );
-            assert!(
-                !export_bytes
-                    .windows(b"-----BEGIN PRIVATE KEY-----".len())
-                    .any(|window| window == b"-----BEGIN PRIVATE KEY-----"),
-                "portable export must not contain a PEM private-key header"
-            );
+            let child_signer =
+                Ed25519Signer::from_pem(&child_private_key).expect("parse exported child key");
 
             let metadata: serde_json::Value =
                 serde_json::from_slice(&metadata).expect("parse export metadata");
@@ -1960,9 +2035,56 @@ mod tests {
             assert_eq!(metadata["subject"], "alice");
             assert_eq!(metadata["scopes"], serde_json::json!(["repo:acme/heddle"]));
             assert!(metadata["expires_at"].as_str().is_some());
-            biscuit_auth::UnverifiedBiscuit::from_base64(&token)
+            let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(&token)
                 .expect("exported token is a Biscuit");
+            assert!(
+                parsed
+                    .print_block_source(1)
+                    .expect("exported child block")
+                    .contains(&hex::encode(child_signer.public_key())),
+                "the exported token must bind the key exported beside it"
+            );
+
+            let error = cmd_auth_derive_agent(
+                server,
+                Some("agent-export-again".to_string()),
+                3600,
+                vec!["repo:acme/heddle".to_string()],
+                vec!["Push".to_string()],
+                Some(&export_dir),
+            )
+            .expect_err("an existing bundle must not be replaced piecemeal");
+            assert!(error.to_string().contains("already exists"));
+            assert_eq!(
+                std::fs::read(export_dir.join("token")).expect("re-read original token"),
+                token,
+                "a refused replacement must leave the completed bundle unchanged"
+            );
         });
+    }
+
+    #[test]
+    fn publishing_agent_bundle_syncs_the_parent_after_rename_and_reports_sync_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let parent = temp.path();
+        let staging = parent.join(".agent.tmp");
+        let destination = parent.join("agent");
+        std::fs::create_dir(&staging).expect("create staging directory");
+        std::fs::write(staging.join("token"), b"token").expect("write staged token");
+
+        let error =
+            publish_agent_bundle_with_sync(&staging, &destination, parent, |synced_parent| {
+                assert_eq!(synced_parent, parent);
+                assert!(
+                    destination.join("token").is_file(),
+                    "the completed rename must precede the parent sync"
+                );
+                Err(std::io::Error::other("injected parent sync failure"))
+            })
+            .expect_err("a parent sync failure must not be reported as success");
+
+        assert!(error.to_string().contains("syncing agent bundle parent"));
+        assert!(format!("{error:#}").contains("injected parent sync failure"));
     }
 
     #[test]

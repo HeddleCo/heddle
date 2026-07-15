@@ -60,13 +60,9 @@ pub enum AuthCommands {
         #[arg(long = "allow")]
         allowed_operations: Vec<String>,
 
-        /// Write `token` and `metadata.json` files to this directory without exporting the device key.
-        #[arg(long, value_name = "DIR", conflicts_with = "stdout")]
+        /// Write `token`, child `device-key.pem`, and `metadata.json` files to this directory.
+        #[arg(long, value_name = "DIR")]
         out: Option<std::path::PathBuf>,
-
-        /// Print only the child token instead of installing it (security note goes to stderr).
-        #[arg(long, conflicts_with = "out")]
-        stdout: bool,
     },
 
     /// Create a service token for CI/scripts, scoped to a namespace
@@ -111,7 +107,6 @@ impl From<AuthCommands> for heddle_client::AuthCommand {
                 scopes,
                 allowed_operations,
                 out,
-                stdout,
             } => heddle_client::AuthCommand::DeriveAgent {
                 server,
                 agent_id,
@@ -119,7 +114,6 @@ impl From<AuthCommands> for heddle_client::AuthCommand {
                 scopes,
                 allowed_operations,
                 out,
-                stdout,
             },
             AuthCommands::CreateServiceToken {
                 name,
@@ -251,5 +245,18 @@ mod tests {
         assert_eq!(ttl_secs, 900);
         assert_eq!(scopes, ["repo:acme/api", "namespace:acme"]);
         assert_eq!(allowed_operations, ["Push", "GetState"]);
+
+        assert!(
+            Cli::try_parse_from([
+                "heddle",
+                "auth",
+                "derive-agent",
+                "--server",
+                "grpc.heddle.test",
+                "--stdout",
+            ])
+            .is_err(),
+            "token-only child export is unsafe because it cannot carry its proof key"
+        );
     }
 }
