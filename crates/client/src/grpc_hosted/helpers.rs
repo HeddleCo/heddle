@@ -188,10 +188,11 @@ pub(super) fn repository_ref(path: &str) -> Option<RepositoryRef> {
     })
 }
 
-pub(super) fn repository_ref_path(repository: &RepositoryRef) -> Option<&str> {
+pub(crate) fn repository_ref_path(repository: &RepositoryRef) -> Option<&str> {
     match repository.reference.as_ref() {
-        Some(Reference::HostedId(id) | Reference::CanonicalPath(id)) => Some(id),
+        Some(Reference::HostedId(id) | Reference::CanonicalPath(id)) if !id.is_empty() => Some(id),
         None => None,
+        _ => None,
     }
 }
 

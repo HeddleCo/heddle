@@ -9,14 +9,14 @@ use cli_shared::{
 };
 use grpc::heddle::api::v1alpha1::{
     HostedRole, SupportAccessGrant as ProtoSupportAccessGrant,
-    grant_target_ref::Target as GrantTargetKind, repository_ref::Reference,
+    grant_target_ref::Target as GrantTargetKind,
 };
 use repo::Repository;
 use serde::Serialize;
 use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
 use crate::{
-    grpc_hosted::{HostedAuthMode, HostedGrpcClient},
+    grpc_hosted::{HostedAuthMode, HostedGrpcClient, helpers::repository_ref_path},
     support_requests::{SupportCommand, SupportGrant, SupportList, SupportRevoke},
 };
 
@@ -61,10 +61,7 @@ impl From<ProtoSupportAccessGrant> for SupportAccessOutput {
             Some(GrantTargetKind::NamespacePath(p)) => (p, String::new()),
             Some(GrantTargetKind::RepoPath(p)) => (
                 String::new(),
-                match p.reference {
-                    Some(Reference::CanonicalPath(path)) => path,
-                    _ => String::new(),
-                },
+                repository_ref_path(&p).unwrap_or_default().to_string(),
             ),
             None => (String::new(), String::new()),
         };
@@ -102,6 +99,16 @@ impl From<ProtoSupportAccessGrant> for SupportAccessOutput {
             revoked_by: g.revoked_by,
             reason: g.reason,
         }
+    }
+}
+
+fn support_target_text(output: &SupportAccessOutput) -> String {
+    if !output.namespace_path.is_empty() {
+        format!("namespace {}", output.namespace_path)
+    } else if !output.repo_path.is_empty() {
+        format!("repo {}", output.repo_path)
+    } else {
+        "unknown target".to_string()
     }
 }
 
@@ -226,11 +233,7 @@ async fn run_grant(ctx: &dyn CliContext, args: SupportGrant) -> Result<()> {
         };
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        let target = if !out.namespace_path.is_empty() {
-            format!("namespace {}", out.namespace_path)
-        } else {
-            format!("repo {}", out.repo_path)
-        };
+        let target = support_target_text(&out);
         let expires = chrono::DateTime::from_timestamp(out.expires_at as i64, 0)
             .map(|d| d.to_rfc3339())
             .unwrap_or_else(|| out.expires_at.to_string());
@@ -274,11 +277,7 @@ async fn run_list(ctx: &dyn CliContext, args: SupportList) -> Result<()> {
     } else {
         println!("{} grant(s):", entries.len());
         for g in entries {
-            let target = if !g.namespace_path.is_empty() {
-                g.namespace_path.as_str()
-            } else {
-                g.repo_path.as_str()
-            };
+            let target = support_target_text(&g);
             let status = if g.revoked_at > 0 {
                 let revoked_by = if g.revoked_by.is_empty() {
                     "?".to_string()
@@ -323,7 +322,12 @@ async fn run_revoke(ctx: &dyn CliContext, args: SupportRevoke) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_ttl;
+    use grpc::heddle::api::v1alpha1::{
+        GrantTargetRef, RepositoryRef, SupportAccessGrant, grant_target_ref::Target,
+        repository_ref::Reference,
+    };
+
+    use super::{SupportAccessOutput, parse_ttl, support_target_text};
 
     #[test]
     fn parse_ttl_round_trips_canonical_suffixes() {
@@ -340,5 +344,44 @@ mod tests {
         assert!(parse_ttl("1y").is_err());
         assert!(parse_ttl("h").is_err());
         assert!(parse_ttl("").is_err());
+    }
+
+    fn repository_grant(reference: Option<Reference>) -> SupportAccessGrant {
+        SupportAccessGrant {
+            target: Some(GrantTargetRef {
+                target: Some(Target::RepoPath(RepositoryRef { reference })),
+            }),
+            ..SupportAccessGrant::default()
+        }
+    }
+
+    #[test]
+    fn support_json_and_text_preserve_both_repository_reference_variants() {
+        for reference in [
+            Reference::CanonicalPath("acme/widgets".to_string()),
+            Reference::HostedId("repo_123".to_string()),
+        ] {
+            let expected = match &reference {
+                Reference::CanonicalPath(value) | Reference::HostedId(value) => value.clone(),
+            };
+            let output: SupportAccessOutput = repository_grant(Some(reference)).into();
+            let json = serde_json::to_value(&output).expect("serialize support output");
+
+            assert_eq!(json["repo_path"], expected);
+            assert_eq!(json["namespace_path"], "");
+            assert_eq!(support_target_text(&output), format!("repo {expected}"));
+        }
+    }
+
+    #[test]
+    fn unknown_or_unspecified_repository_targets_fail_closed_in_json_and_text() {
+        for grant in [repository_grant(None), SupportAccessGrant::default()] {
+            let output: SupportAccessOutput = grant.into();
+            let json = serde_json::to_value(&output).expect("serialize support output");
+
+            assert_eq!(json["repo_path"], "");
+            assert_eq!(json["namespace_path"], "");
+            assert_eq!(support_target_text(&output), "unknown target");
+        }
     }
 }

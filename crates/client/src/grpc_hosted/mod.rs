@@ -1,9 +1,10 @@
 //! Hosted gRPC client for the transport rewrite.
 
 mod content;
-mod helpers;
+pub(crate) mod helpers;
 mod hydration;
 pub mod monorepo;
+pub(crate) mod operation_id;
 pub mod request_signing;
 mod session;
 mod sync;
@@ -140,6 +141,13 @@ impl HostedGrpcClient {
             .connect()
             .await
             .map_err(|err| ProtocolError::Io(std::io::Error::other(err.to_string())))?;
+        Self::from_channel(channel, config)
+    }
+
+    pub(super) fn from_channel(
+        channel: Channel,
+        config: &ClientConfig,
+    ) -> Result<Self, ProtocolError> {
         let token_header = config
             .token
             .as_ref()
@@ -523,7 +531,19 @@ impl HostedGrpcClient {
             }
 
             let result = self
-                .update_ref(repo_path, &marker, false, old_value, state_id, true, None)
+                .update_ref(
+                    repo_path,
+                    &marker,
+                    false,
+                    old_value,
+                    state_id,
+                    true,
+                    None,
+                    operation_id::ClientOperationId::fresh(
+                        "heddle.api.v1alpha1.RepoSyncService/UpdateRef",
+                    )
+                    .to_wire(),
+                )
                 .await?;
             if !result.success {
                 return Err(ProtocolError::InvalidState(
@@ -689,5 +709,56 @@ mod tests {
         let canonical = crypto::pop::pop_canonical_payload(token, proof_ts, "POST", path, nonce);
         crypto::verify_payload_signature(&canonical, "ed25519", signer.public_key(), &sig)
             .expect("proof verifies against device public key");
+    }
+
+    #[tokio::test]
+    async fn service_account_issue_preserves_custom_proof_and_adds_full_hosted_auth_chain() {
+        use grpc::heddle::api::v1alpha1::IssueServiceAccountCredentialRequest;
+
+        let signer = Ed25519Signer::generate().expect("generate signer");
+        let pem = signer.to_pem().expect("export signer pem");
+        let client = test_client(pem, "stored-biscuit");
+        let mut request = Request::new(IssueServiceAccountCredentialRequest {
+            service_account_id: "sa-1".to_string(),
+            public_key: vec![7; 32],
+            scope: "repo:acme/*".to_string(),
+            ttl_secs: None,
+            client_operation_id: "stable-op-1".to_string(),
+        });
+        request
+            .metadata_mut()
+            .insert("x-heddle-issue-sa-proof-ts", "1700000000".parse().unwrap());
+        request.metadata_mut().insert_bin(
+            "x-heddle-issue-sa-proof-sig-bin",
+            tonic::metadata::MetadataValue::from_bytes(b"service-account-proof"),
+        );
+
+        let request = client
+            .prepare_issue_service_account_credential_request(request)
+            .expect("prepare signed request");
+        let metadata = request.metadata();
+        assert!(metadata.get("authorization").is_some());
+        assert!(metadata.get(crypto::pop::HDR_PROOF).is_some());
+        assert!(metadata.get(crypto::pop::HDR_PROOF_TS).is_some());
+        assert!(metadata.get(crypto::pop::HDR_PROOF_NONCE).is_some());
+        assert!(metadata.get(request_signing::HDR_SIG_TS).is_some());
+        assert!(metadata.get_bin(request_signing::HDR_SIG_BIN).is_some());
+        assert!(
+            metadata
+                .get_bin(request_signing::HDR_SIG_NONCE_BIN)
+                .is_some()
+        );
+        assert_eq!(
+            metadata
+                .get("x-heddle-issue-sa-proof-ts")
+                .and_then(|value| value.to_str().ok()),
+            Some("1700000000")
+        );
+        assert!(
+            metadata
+                .get_bin("x-heddle-issue-sa-proof-sig-bin")
+                .is_some()
+        );
+        assert_eq!(request.get_ref().client_operation_id, "stable-op-1");
     }
 }

@@ -46,6 +46,7 @@ weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim",
 
 [dev-dependencies]
 grpc = { git = "https://github.com/HeddleCo/api", rev = "e3b3e6d0e70c88e571b404f068e893842c02ac6f", package = "heddle-api", version = "=0.1.0", features = ["client", "server", "reflection"] }
+prost-reflect.workspace = true
 tempfile.workspace = true
 
 [lib]

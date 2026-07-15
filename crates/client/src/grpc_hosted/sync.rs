@@ -46,6 +46,7 @@ use super::{
         parse_descriptor_to_info, status_to_protocol_error, to_proto_object_info,
         transport_mode_name,
     },
+    operation_id::ClientOperationId,
 };
 
 #[derive(Clone, Copy)]
@@ -79,7 +80,7 @@ struct GitLanePushPlan {
     /// `checkpoint: None` — the discriminator the weft server uses to admit
     /// checkpoint-less multi-ref pushes. Per-ref compare-and-set expectations
     /// are pre-applied from the server `ListRefs` response.
-    ref_updates: Vec<PushClientFrame>,
+    ref_updates: Vec<GitRefUpdateTransfer>,
 }
 
 #[derive(Clone)]
@@ -260,7 +261,12 @@ impl HostedGrpcClient {
         new_value: StateId,
         force: bool,
         thread_metadata: Option<&SyncedThreadMetadata>,
+        client_operation_id: String,
     ) -> Result<RefUpdated, ProtocolError> {
+        let operation_id = ClientOperationId::for_required_method(
+            "heddle.api.v1alpha1.RepoSyncService/UpdateRef",
+            client_operation_id,
+        )?;
         let mut request = Request::new(UpdateRefRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             name: name.to_string(),
@@ -275,7 +281,7 @@ impl HostedGrpcClient {
                 .map(|value| RevisionAddress::heddle(value).to_string())
                 .unwrap_or_default(),
             new_revision_address: RevisionAddress::heddle(new_value).to_string(),
-            client_operation_id: String::new(),
+            client_operation_id: operation_id.to_wire(),
         });
         self.apply_signed_auth(
             &mut request,
@@ -418,6 +424,10 @@ impl HostedGrpcClient {
             .as_ref()
             .map_or(object_plan.stats.total_objects, std::vec::Vec::len);
         let transfer_id = push_transfer_id(repo_path, local_state, target_thread);
+        let operation_id = ClientOperationId::for_required_method(
+            "heddle.api.v1alpha1.RepoSyncService/Push",
+            transfer_id.clone(),
+        )?;
         let transport_mode = preferred_transport_mode(&self.transport, object_count);
         let thread_metadata = load_thread_metadata(repo, target_thread, local_state)?;
         let request_message = PushClientFrame {
@@ -450,7 +460,7 @@ impl HostedGrpcClient {
                     .map(|metadata| to_proto_thread_metadata(&metadata)),
                 local_revision_address,
             }))),
-            client_operation_id: transfer_id.clone(),
+            client_operation_id: operation_id.to_wire(),
         };
 
         let (tx, rx) = mpsc::channel(self.transport.max_inflight_objects.max(4));
@@ -461,7 +471,7 @@ impl HostedGrpcClient {
                 repo_path,
                 "",
             )?)),
-            client_operation_id: transfer_id.clone(),
+            client_operation_id: operation_id.to_wire(),
         })
         .await
         .map_err(|_| ProtocolError::InvalidState("failed to open push stream".to_string()))?;
@@ -538,7 +548,7 @@ impl HostedGrpcClient {
         }
 
         for info in wanted_plan.partitions.sidecar_objects {
-            let message = sidecar_push_message(repo, info)?;
+            let message = sidecar_push_message(repo, info, operation_id.as_str())?;
             tx.send(message).await.map_err(|_| {
                 ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
             })?;
@@ -556,6 +566,7 @@ impl HostedGrpcClient {
                     pack,
                     self.transport.chunk_size.max(1),
                     progress,
+                    operation_id.as_str(),
                 )
                 .await?;
             } else {
@@ -563,7 +574,12 @@ impl HostedGrpcClient {
             }
             progress.set_phase(format!("writing {} refs", git_lane.ref_updates.len()));
             for ref_update in git_lane.ref_updates {
-                tx.send(ref_update).await.map_err(|_| {
+                tx.send(git_lane_push_message(
+                    git_lane_transfer::Body::RefUpdate(ref_update),
+                    operation_id.as_str(),
+                ))
+                .await
+                .map_err(|_| {
                     ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
                 })?;
             }
@@ -1290,6 +1306,7 @@ impl HostedGrpcClient {
 fn redaction_push_message(
     repo: &Repository,
     info: wire::ObjectInfo,
+    client_operation_id: &str,
 ) -> Result<PushClientFrame, ProtocolError> {
     let wire::ObjectId::Hash(blob) = info.id else {
         return Err(ProtocolError::InvalidState(
@@ -1318,7 +1335,7 @@ fn redaction_push_message(
             blob_hash: hex,
             redactions_blob: bytes,
         })),
-        client_operation_id: String::new(),
+        client_operation_id: client_operation_id.to_string(),
     })
 }
 
@@ -1373,10 +1390,13 @@ fn wanted_packable_type(wanted_types: &WantedTypes, pack_id: &PackObjectId) -> O
 fn sidecar_push_message(
     repo: &Repository,
     info: wire::ObjectInfo,
+    client_operation_id: &str,
 ) -> Result<PushClientFrame, ProtocolError> {
     match info.obj_type {
-        ObjectType::Redaction => redaction_push_message(repo, info),
-        ObjectType::StateVisibility => state_visibility_push_message(repo, info),
+        ObjectType::Redaction => redaction_push_message(repo, info, client_operation_id),
+        ObjectType::StateVisibility => {
+            state_visibility_push_message(repo, info, client_operation_id)
+        }
         obj_type => Err(ProtocolError::InvalidState(format!(
             "{obj_type:?} is not an out-of-pack sidecar object"
         ))),
@@ -1386,6 +1406,7 @@ fn sidecar_push_message(
 fn state_visibility_push_message(
     repo: &Repository,
     info: wire::ObjectInfo,
+    client_operation_id: &str,
 ) -> Result<PushClientFrame, ProtocolError> {
     let wire::ObjectId::StateId(state) = info.id else {
         return Err(ProtocolError::InvalidState(
@@ -1414,7 +1435,7 @@ fn state_visibility_push_message(
                 state_visibility_blob: bytes,
             },
         )),
-        client_operation_id: String::new(),
+        client_operation_id: client_operation_id.to_string(),
     })
 }
 
@@ -1887,7 +1908,7 @@ fn build_git_mirror_plan_from_sley(
         .map_err(|err| ProtocolError::InvalidState(format!("list git-overlay refs: {err}")))?;
 
     let mut roots: Vec<GitObjectId> = Vec::new();
-    let mut ref_updates: Vec<PushClientFrame> = Vec::new();
+    let mut ref_updates: Vec<GitRefUpdateTransfer> = Vec::new();
     let mut newest_root: Option<GitObjectId> = None;
 
     for reference in refs {
@@ -1954,7 +1975,7 @@ fn build_git_mirror_plan_from_sley(
         let kind = grpc_git_ref_kind(GitRefName::new(&reference.name).wire_kind());
         let mut message =
             git_ref_update_message(&reference.name, kind, target_oid, peeled_oid, None);
-        apply_git_ref_expectation_value(&mut message, &expectation)?;
+        apply_git_ref_expectation_value(&mut message, &expectation);
         ref_updates.push(message);
     }
 
@@ -2075,12 +2096,14 @@ async fn send_git_pack_streaming_messages(
     pack: &GitPackPushPlan,
     chunk_size: usize,
     progress: &Progress,
+    client_operation_id: &str,
 ) -> Result<(), ProtocolError> {
     let tx = tx.clone();
     let pack = pack.clone();
     let progress = progress.clone();
+    let client_operation_id = client_operation_id.to_string();
     tokio::task::spawn_blocking(move || {
-        stream_git_pack_messages_blocking(tx, pack, chunk_size, progress)
+        stream_git_pack_messages_blocking(tx, pack, chunk_size, progress, client_operation_id)
     })
     .await
     .map_err(|err| ProtocolError::InvalidState(format!("Git pack streaming task failed: {err}")))?
@@ -2091,6 +2114,7 @@ fn stream_git_pack_messages_blocking(
     pack: GitPackPushPlan,
     chunk_size: usize,
     progress: Progress,
+    client_operation_id: String,
 ) -> Result<(), ProtocolError> {
     let mut writer = GitPackPushMessageWriter::new(
         tx,
@@ -2099,6 +2123,7 @@ fn stream_git_pack_messages_blocking(
         pack.pack_size,
         chunk_size,
         progress,
+        client_operation_id,
     );
     let mut pack_file = pack
         .pack_file
@@ -2130,6 +2155,7 @@ struct GitPackPushMessageWriter {
     buffer: Vec<u8>,
     offset: u64,
     chunk_index: u32,
+    client_operation_id: String,
     /// Live "uploading N/M bytes" progress, driven per flushed chunk. A null
     /// handle (`--output json` / non-TTY) makes every update a no-op.
     progress: Progress,
@@ -2147,6 +2173,7 @@ impl GitPackPushMessageWriter {
         pack_size: u64,
         chunk_size: usize,
         progress: Progress,
+        client_operation_id: String,
     ) -> Self {
         let chunk_size = chunk_size.max(1);
         Self {
@@ -2158,6 +2185,7 @@ impl GitPackPushMessageWriter {
             buffer: Vec::with_capacity(chunk_size),
             offset: 0,
             chunk_index: 0,
+            client_operation_id,
             progress,
             last_progress_pct: u64::MAX,
         }
@@ -2182,8 +2210,8 @@ impl GitPackPushMessageWriter {
         }
         let is_final_chunk = next_offset == self.pack_size;
         self.tx
-            .blocking_send(git_lane_push_message(git_lane_transfer::Body::Pack(
-                GitPackTransfer {
+            .blocking_send(git_lane_push_message(
+                git_lane_transfer::Body::Pack(GitPackTransfer {
                     transfer_id: self.transfer_id.clone(),
                     offset: self.offset,
                     chunk_index: self.chunk_index,
@@ -2191,8 +2219,9 @@ impl GitPackPushMessageWriter {
                     pack_size: self.pack_size,
                     pack_chunk: chunk,
                     pack_id: self.pack_id.clone(),
-                },
-            )))
+                }),
+                &self.client_operation_id,
+            ))
             .map_err(|_| {
                 io::Error::new(io::ErrorKind::BrokenPipe, "push stream closed unexpectedly")
             })?;
@@ -2280,8 +2309,8 @@ fn git_ref_update_message(
     target_oid: GitObjectId,
     peeled_oid: Option<GitObjectId>,
     checkpoint: Option<GitCheckpointTransfer>,
-) -> PushClientFrame {
-    git_lane_push_message(git_lane_transfer::Body::RefUpdate(GitRefUpdateTransfer {
+) -> GitRefUpdateTransfer {
+    GitRefUpdateTransfer {
         name: name.to_string(),
         kind: kind as i32,
         target_oid: proto_git_oid(&target_oid),
@@ -2289,21 +2318,13 @@ fn git_ref_update_message(
         expected_missing: false,
         expected_target_oid: None,
         checkpoint,
-    }))
+    }
 }
 
 fn apply_git_ref_expectation_value(
-    message: &mut PushClientFrame,
+    update: &mut GitRefUpdateTransfer,
     expectation: &GitRefRemoteExpectation,
-) -> Result<(), ProtocolError> {
-    let Some(push_client_frame::Frame::GitLane(GitLaneTransfer {
-        body: Some(git_lane_transfer::Body::RefUpdate(update)),
-    })) = message.frame.as_mut()
-    else {
-        return Err(ProtocolError::InvalidState(
-            "Git lane push plan missing ref update message".to_string(),
-        ));
-    };
+) {
     match expectation {
         GitRefRemoteExpectation::Missing => {
             update.expected_missing = true;
@@ -2314,7 +2335,6 @@ fn apply_git_ref_expectation_value(
             update.expected_target_oid = proto_git_oid_bytes(oid);
         }
     }
-    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2345,12 +2365,15 @@ fn parse_git_ref_expectation(
     }
 }
 
-fn git_lane_push_message(body: git_lane_transfer::Body) -> PushClientFrame {
+fn git_lane_push_message(
+    body: git_lane_transfer::Body,
+    client_operation_id: &str,
+) -> PushClientFrame {
     PushClientFrame {
         frame: Some(push_client_frame::Frame::GitLane(GitLaneTransfer {
             body: Some(body),
         })),
-        client_operation_id: String::new(),
+        client_operation_id: client_operation_id.to_string(),
     }
 }
 
@@ -2958,7 +2981,7 @@ async fn send_pack_chunk(
             chunk_length,
             is_final_chunk,
         })),
-        client_operation_id: String::new(),
+        client_operation_id: transfer_id.to_string(),
     })
     .await
     .map_err(|_| ProtocolError::InvalidState("push stream closed unexpectedly".to_string()))
@@ -3105,11 +3128,18 @@ mod tests {
                 .expect("non-empty pack plan");
         assert_eq!(pack.pack_id.len(), git.object_format().raw_len());
         let (tx, mut rx) = mpsc::channel(8);
-        stream_git_pack_messages_blocking(tx, pack.clone(), 64 * 1024, Progress::null())
-            .expect("stream git lane pack");
+        stream_git_pack_messages_blocking(
+            tx,
+            pack.clone(),
+            64 * 1024,
+            Progress::null(),
+            "test-push-op".to_string(),
+        )
+        .expect("stream git lane pack");
         let mut pack_bytes = Vec::new();
         let mut chunks = Vec::new();
         while let Some(chunk) = rx.blocking_recv() {
+            assert_eq!(chunk.client_operation_id, "test-push-op");
             let Some(push_client_frame::Frame::GitLane(GitLaneTransfer {
                 body: Some(git_lane_transfer::Body::Pack(pack)),
             })) = chunk.frame
@@ -3140,12 +3170,7 @@ mod tests {
                 metadata_json: String::new(),
             }),
         );
-        let Some(push_client_frame::Frame::GitLane(GitLaneTransfer {
-            body: Some(git_lane_transfer::Body::RefUpdate(update)),
-        })) = ref_message.frame
-        else {
-            panic!("expected git ref update message");
-        };
+        let update = ref_message;
         assert_eq!(update.name, "refs/heads/main");
         assert_eq!(update.kind, GrpcGitRefKind::Branch as i32);
         assert_eq!(
@@ -3171,17 +3196,20 @@ mod tests {
     }
 
     fn sample_ref_update_message(commit_oid: GitObjectId) -> PushClientFrame {
-        git_ref_update_message(
-            "refs/heads/main",
-            GrpcGitRefKind::Branch,
-            commit_oid,
-            None,
-            Some(GitCheckpointTransfer {
-                heddle_state_id: proto_state_id(StateId::from_bytes([9u8; 32])),
-                git_commit_oid: proto_git_oid(&commit_oid),
-                thread: "main".to_string(),
-                metadata_json: String::new(),
-            }),
+        git_lane_push_message(
+            git_lane_transfer::Body::RefUpdate(git_ref_update_message(
+                "refs/heads/main",
+                GrpcGitRefKind::Branch,
+                commit_oid,
+                None,
+                Some(GitCheckpointTransfer {
+                    heddle_state_id: proto_state_id(StateId::from_bytes([9u8; 32])),
+                    git_commit_oid: proto_git_oid(&commit_oid),
+                    thread: "main".to_string(),
+                    metadata_json: String::new(),
+                }),
+            )),
+            "test-push-op",
         )
     }
 
@@ -3226,11 +3254,7 @@ mod tests {
     }
 
     fn mirror_ref_updates(plan: &GitLanePushPlan) -> Vec<GitRefUpdateTransfer> {
-        plan.ref_updates
-            .iter()
-            .map(git_ref_update_from_message)
-            .cloned()
-            .collect()
+        plan.ref_updates.clone()
     }
 
     /// A commit that reuses `parent`'s tree/blob closure and only adds one new
@@ -3469,8 +3493,14 @@ mod tests {
         // The single pack must actually contain the whole closure: main,
         // feature, tag object + tagged commit, plus their trees/blobs.
         let (tx, mut rx) = mpsc::channel(64);
-        stream_git_pack_messages_blocking(tx, plan_pack.clone(), 64 * 1024, Progress::null())
-            .expect("stream mirror pack");
+        stream_git_pack_messages_blocking(
+            tx,
+            plan_pack.clone(),
+            64 * 1024,
+            Progress::null(),
+            "test-push-op".to_string(),
+        )
+        .expect("stream mirror pack");
         let mut pack_bytes = Vec::new();
         while let Some(message) = rx.blocking_recv() {
             if let Some(push_client_frame::Frame::GitLane(GitLaneTransfer {
@@ -3633,7 +3663,7 @@ mod tests {
         let names: Vec<&str> = plan
             .ref_updates
             .iter()
-            .map(|m| git_ref_update_from_message(m).name.as_str())
+            .map(|update| update.name.as_str())
             .collect();
 
         assert!(
@@ -3687,7 +3717,7 @@ mod tests {
         let names: Vec<&str> = plan
             .ref_updates
             .iter()
-            .map(|m| git_ref_update_from_message(m).name.as_str())
+            .map(|update| update.name.as_str())
             .collect();
         assert_eq!(
             names,
@@ -3703,11 +3733,12 @@ mod tests {
             "0123456789abcdef0123456789abcdef01234567",
         )
         .expect("oid");
-        let mut message = sample_ref_update_message(commit_oid);
+        let message = sample_ref_update_message(commit_oid);
 
         let expectation = parse_git_ref_expectation("").expect("missing expectation");
-        apply_git_ref_expectation_value(&mut message, &expectation).expect("apply expectation");
         let update = git_ref_update_from_message(&message);
+        let mut update = update.clone();
+        apply_git_ref_expectation_value(&mut update, &expectation);
         assert!(update.expected_missing);
         assert!(update.expected_target_oid.is_none());
     }
@@ -3720,12 +3751,13 @@ mod tests {
         )
         .expect("oid");
         let remote_oid = "89abcdef012345670123456789abcdef01234567";
-        let mut message = sample_ref_update_message(commit_oid);
+        let message = sample_ref_update_message(commit_oid);
 
         let expectation =
             parse_git_ref_expectation(&format!("git:{remote_oid}")).expect("git expectation");
-        apply_git_ref_expectation_value(&mut message, &expectation).expect("apply expectation");
         let update = git_ref_update_from_message(&message);
+        let mut update = update.clone();
+        apply_git_ref_expectation_value(&mut update, &expectation);
         assert!(!update.expected_missing);
         assert_eq!(
             hex::encode(proto_oid_bytes(&update.expected_target_oid).expect("expected oid")),
@@ -3743,12 +3775,14 @@ mod tests {
             10,
             4,
             Progress::null(),
+            "test-push-op".to_string(),
         );
         writer.write_all(b"abcdefghij").expect("write pack bytes");
         writer.finish().expect("finish pack stream");
 
         let mut chunks = Vec::new();
         while let Some(message) = rx.blocking_recv() {
+            assert_eq!(message.client_operation_id, "test-push-op");
             let Some(push_client_frame::Frame::GitLane(GitLaneTransfer {
                 body: Some(git_lane_transfer::Body::Pack(pack)),
             })) = message.frame
@@ -3820,8 +3854,14 @@ mod tests {
         let progress = Progress::with_sink(Box::new(Forward(std::sync::Arc::clone(&sink))));
 
         let (tx, mut rx) = mpsc::channel(1024);
-        stream_git_pack_messages_blocking(tx, pack.clone(), 64, progress.clone())
-            .expect("stream pack");
+        stream_git_pack_messages_blocking(
+            tx,
+            pack.clone(),
+            64,
+            progress.clone(),
+            "test-push-op".to_string(),
+        )
+        .expect("stream pack");
         while rx.blocking_recv().is_some() {}
 
         let phases = sink.phases();
@@ -4862,7 +4902,9 @@ mod tests {
             .expect("load sidecar")
             .expect("sidecar exists");
 
-        let message = redaction_push_message(&repo, redaction_info(blob)).expect("message");
+        let message =
+            redaction_push_message(&repo, redaction_info(blob), "test-push-op").expect("message");
+        assert_eq!(message.client_operation_id, "test-push-op");
 
         let Some(push_client_frame::Frame::Redaction(transfer)) = message.frame else {
             panic!("expected redaction transfer");
@@ -4876,7 +4918,8 @@ mod tests {
         let (_dir, repo) = temp_repo();
         let blob = sample_blob();
 
-        let err = redaction_push_message(&repo, redaction_info(blob)).expect_err("missing sidecar");
+        let err = redaction_push_message(&repo, redaction_info(blob), "test-push-op")
+            .expect_err("missing sidecar");
 
         assert!(matches!(err, ProtocolError::InvalidState(_)));
         assert!(
@@ -4898,7 +4941,8 @@ mod tests {
             .join(format!("{}.bin", blob.to_hex()));
         std::fs::create_dir_all(&redaction_path).expect("directory at redaction path");
 
-        let err = redaction_push_message(&repo, redaction_info(blob)).expect_err("load error");
+        let err = redaction_push_message(&repo, redaction_info(blob), "test-push-op")
+            .expect_err("load error");
 
         assert!(matches!(err, ProtocolError::InvalidState(_)));
         assert!(
@@ -4920,7 +4964,9 @@ mod tests {
             .expect("sidecar exists");
 
         let message =
-            state_visibility_push_message(&repo, state_visibility_info(state)).expect("message");
+            state_visibility_push_message(&repo, state_visibility_info(state), "test-push-op")
+                .expect("message");
+        assert_eq!(message.client_operation_id, "test-push-op");
 
         let Some(push_client_frame::Frame::StateVisibility(transfer)) = message.frame else {
             panic!("expected state visibility transfer");

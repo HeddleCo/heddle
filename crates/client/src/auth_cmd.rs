@@ -3,6 +3,7 @@
 use std::{collections::BTreeSet, path::Path};
 
 use anyhow::{Context, Result, bail};
+use cli_shared::UserConfig;
 use crypto::{Ed25519Signer, Signer};
 use grpc::heddle::api::v1alpha1::{
     CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, DeviceAuthProof,
@@ -22,12 +23,16 @@ use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 use crate::device_flow::{
     AgentAttenuation, SAFE_AGENT_OPERATIONS, attenuate_for_agent, effective_pop_public_key_hex,
 };
-use crate::{auth_requests::AuthCommand, credentials, credentials::ServerCredential};
+use crate::{
+    auth_requests::AuthCommand,
+    credentials,
+    credentials::ServerCredential,
+    grpc_hosted::{HostedSession, operation_id::ClientOperationId},
+};
 
-/// Top-level dispatch for `heddle auth <subcommand>`. `_ctx` is
-/// reserved for future hosted commands that need repo path / output
-/// mode — today's auth subcommands all operate on global credential
-/// state and don't read it.
+/// Top-level dispatch for `heddle auth <subcommand>`. The CLI context supplies
+/// output mode and the caller-owned operation ID for hosted mutations; auth
+/// credential state itself remains global rather than repository-local.
 #[derive(Serialize)]
 struct AuthLogoutOutput {
     output_kind: &'static str,
@@ -860,9 +865,20 @@ async fn cmd_create_service_token(
     let server = resolve_server(server)?;
     let scope = format!("repo:{namespace}/*");
 
-    // Load the calling user's token to authenticate with the server.
-    let cred = credentials::get_server_credential(&server)?
-        .ok_or_else(|| anyhow::anyhow!(HostedRecoveryAdvice::auth_required(&server)))?;
+    // Select and validate the exact stored bearer + matching device proof key
+    // before generating or writing the new service-account key.
+    let user_config = UserConfig::load_default()?;
+    let session = HostedSession::build_stored_credential(&user_config, &server)?;
+    let channel = connect_channel(&server).await?;
+    let mut auth_client = session.connect_channel(channel).await?;
+    let create_operation_id = ClientOperationId::caller_or_fresh(
+        "heddle.api.v1alpha1.IdentityService/CreateServiceAccount",
+        ctx.operation_id_wire(),
+    );
+    let issue_operation_id = ClientOperationId::for_required_method(
+        "heddle.api.v1alpha1.IdentityService/IssueServiceAccountCredential",
+        create_operation_id.to_wire(),
+    )?;
 
     // Generate a fresh Ed25519 keypair for the service account credential.
     let signer = Ed25519Signer::generate()
@@ -884,30 +900,16 @@ async fn cmd_create_service_token(
         .with_context(|| format!("writing private key to {}", key_path.display()))?;
     let key_path_display = key_path.display().to_string();
 
-    let channel = connect_channel(&server).await?;
-
-    // Attach the caller's token as a Bearer header on every request.
-    let bearer: MetadataValue<_> = format!("Bearer {}", cred.token)
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid token format: {e}"))?;
-
-    let mut auth_client =
-        IdentityServiceClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
-            req.metadata_mut().insert("authorization", bearer.clone());
-            Ok(req)
-        });
-
     // 1. Create the service account.
     let sa_response = auth_client
         .create_service_account(CreateServiceAccountRequest {
             subject: name.clone(),
             display_name: name.clone(),
             scope: scope.clone(),
-            client_operation_id: String::new(),
+            client_operation_id: create_operation_id.to_wire(),
         })
         .await
-        .map_err(|status| anyhow::anyhow!("create_service_account failed: {}", status.message()))?
-        .into_inner();
+        .map_err(|error| anyhow::anyhow!("create_service_account failed: {error}"))?;
 
     tracing::info!(
         service_account_id = %sa_response.service_account_id,
@@ -928,19 +930,13 @@ async fn cmd_create_service_token(
             seconds: SERVICE_TOKEN_TTL_SECS,
             nanos: 0,
         }),
-        client_operation_id: String::new(),
+        client_operation_id: issue_operation_id.to_wire(),
     };
     let credential_request = issue_service_account_credential_request(credential_request, &signer)?;
     let issued = auth_client
         .issue_service_account_credential(credential_request)
         .await
-        .map_err(|status| {
-            anyhow::anyhow!(
-                "issue_service_account_credential failed: {}",
-                status.message()
-            )
-        })?
-        .into_inner();
+        .map_err(|error| anyhow::anyhow!("issue_service_account_credential failed: {error}"))?;
 
     if ctx.should_output_json(None) {
         let output = ServiceTokenOutput {
@@ -1754,6 +1750,22 @@ mod tests {
         assert_eq!(body.service_account_id, "sa-123");
         assert_eq!(body.public_key, public_key);
         assert_eq!(body.scope, "repo:heddle/platform/*");
+    }
+
+    #[test]
+    fn authenticated_identity_mutations_cannot_use_a_direct_bearer_interceptor() {
+        let source = include_str!("auth_cmd.rs");
+        assert!(
+            !source.contains(concat!("IdentityServiceClient", "::with_interceptor")),
+            "authenticated IdentityService mutations must route through HostedGrpcClient signed auth"
+        );
+        assert_eq!(
+            source
+                .matches(concat!("IdentityServiceClient", "::new("))
+                .count(),
+            1,
+            "the only direct IdentityService client is the bootstrap-login connector"
+        );
     }
 
     #[test]

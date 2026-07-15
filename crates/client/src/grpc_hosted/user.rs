@@ -1,13 +1,14 @@
 use grpc::heddle::api::v1alpha1::{
     ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, CheckMergeEligibilityRequest,
     CheckMergeEligibilityResponse, CreateGrantRequest, CreateInvitationRequest,
-    CreateRepositoryRequest, DeleteGrantRequest, DeleteNamespaceRequest, DeleteRepositoryRequest,
-    GetCurrentUserNamespaceRequest, GrantSupportAccessRequest, GrantTargetRef,
-    Invitation as ProtoInvitation, ListGrantsRequest, ListSpoolsRequest,
-    ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
-    ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest, SpoolSummary,
-    SupportAccessGrant, ThreadApproval, UpdateGrantRequest, UpdateNamespaceRequest,
-    UpdateRepositoryRequest, grant_target_ref::Target as GrantTargetKind,
+    CreateRepositoryRequest, CreateServiceAccountRequest, DeleteGrantRequest,
+    DeleteNamespaceRequest, DeleteRepositoryRequest, GetCurrentUserNamespaceRequest,
+    GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
+    IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
+    ListSpoolsRequest, ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
+    ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
+    ServiceAccountResponse, SpoolSummary, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
+    UpdateNamespaceRequest, UpdateRepositoryRequest, grant_target_ref::Target as GrantTargetKind,
 };
 use tonic::Request;
 use wire::ProtocolError;
@@ -17,6 +18,7 @@ use super::{
     helpers::{
         status_to_protocol_error, to_protocol_grant, to_protocol_namespace, to_protocol_repository,
     },
+    operation_id::ClientOperationId,
 };
 
 /// Dispatch an authenticated unary RPC on `self.user`: wrap the message in a
@@ -129,6 +131,42 @@ fn default_spool_settings_request() -> grpc::heddle::api::v1alpha1::SpoolSetting
 }
 
 impl HostedGrpcClient {
+    pub(crate) async fn create_service_account(
+        &mut self,
+        request: CreateServiceAccountRequest,
+    ) -> Result<ServiceAccountResponse, ProtocolError> {
+        Ok(signed_call!(
+            self,
+            auth,
+            create_service_account,
+            "/heddle.api.v1alpha1.IdentityService/CreateServiceAccount",
+            request
+        ))
+    }
+
+    pub(crate) async fn issue_service_account_credential(
+        &mut self,
+        request: Request<IssueServiceAccountCredentialRequest>,
+    ) -> Result<IssuedCredentialResponse, ProtocolError> {
+        let request = self.prepare_issue_service_account_credential_request(request)?;
+        self.auth
+            .issue_service_account_credential(request)
+            .await
+            .map_err(status_to_protocol_error)
+            .map(|response| response.into_inner())
+    }
+
+    pub(super) fn prepare_issue_service_account_credential_request(
+        &self,
+        mut request: Request<IssueServiceAccountCredentialRequest>,
+    ) -> Result<Request<IssueServiceAccountCredentialRequest>, ProtocolError> {
+        self.apply_signed_auth(
+            &mut request,
+            "/heddle.api.v1alpha1.IdentityService/IssueServiceAccountCredential",
+        )?;
+        Ok(request)
+    }
+
     pub async fn begin_login(
         &mut self,
         username: &str,
@@ -182,6 +220,8 @@ impl HostedGrpcClient {
         parent_path: Option<&str>,
         display_name: Option<String>,
     ) -> Result<wire::HostedNamespaceInfo, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateNamespace");
         let namespace = authed_call!(
             self,
             create_namespace,
@@ -192,7 +232,7 @@ impl HostedGrpcClient {
                 parent_path: parent_path.unwrap_or_default().to_string(),
                 display_name: display_name.unwrap_or_default(),
                 settings: Some(default_spool_settings_request()),
-                client_operation_id: String::new(),
+                client_operation_id: operation_id.to_wire(),
             }
         );
         Ok(to_protocol_namespace(namespace))
@@ -203,6 +243,8 @@ impl HostedGrpcClient {
         namespace_path: &str,
         slug: &str,
     ) -> Result<wire::HostedRepositoryInfo, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateRepository");
         let repo = authed_call!(
             self,
             create_repository,
@@ -210,7 +252,7 @@ impl HostedGrpcClient {
             CreateRepositoryRequest {
                 namespace_path: namespace_path.to_string(),
                 slug: slug.to_string(),
-                client_operation_id: String::new(),
+                client_operation_id: operation_id.to_wire(),
             }
         );
         Ok(to_protocol_repository(repo))
@@ -222,6 +264,8 @@ impl HostedGrpcClient {
         new_slug: Option<&str>,
         display_name: Option<Option<String>>,
     ) -> Result<wire::HostedNamespaceInfo, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/UpdateNamespace");
         let (display_name, clear_display_name) = match display_name {
             Some(Some(value)) => (value, false),
             Some(None) => (String::new(), true),
@@ -236,20 +280,22 @@ impl HostedGrpcClient {
                 new_slug: new_slug.unwrap_or_default().to_string(),
                 display_name,
                 clear_display_name,
-                client_operation_id: String::new(),
+                client_operation_id: operation_id.to_wire(),
             }
         );
         Ok(to_protocol_namespace(namespace))
     }
 
     pub async fn delete_namespace(&mut self, full_path: &str) -> Result<(), ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/DeleteNamespace");
         authed_call!(
             self,
             delete_namespace,
             "DeleteNamespace",
             DeleteNamespaceRequest {
                 full_path: full_path.to_string(),
-                client_operation_id: String::new(),
+                client_operation_id: operation_id.to_wire(),
             }
         );
         Ok(())
@@ -260,6 +306,8 @@ impl HostedGrpcClient {
         full_path: &str,
         new_slug: &str,
     ) -> Result<wire::HostedRepositoryInfo, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/UpdateRepository");
         let repo = authed_call!(
             self,
             update_repository,
@@ -267,20 +315,22 @@ impl HostedGrpcClient {
             UpdateRepositoryRequest {
                 full_path: full_path.to_string(),
                 new_slug: new_slug.to_string(),
-                client_operation_id: String::new(),
+                client_operation_id: operation_id.to_wire(),
             }
         );
         Ok(to_protocol_repository(repo))
     }
 
     pub async fn delete_repository(&mut self, full_path: &str) -> Result<(), ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/DeleteRepository");
         authed_call!(
             self,
             delete_repository,
             "DeleteRepository",
             DeleteRepositoryRequest {
                 full_path: full_path.to_string(),
-                client_operation_id: String::new(),
+                client_operation_id: operation_id.to_wire(),
             }
         );
         Ok(())
@@ -293,6 +343,8 @@ impl HostedGrpcClient {
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
     ) -> Result<wire::HostedGrantInfo, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateGrant");
         let target = build_target_ref(namespace_path, repo_path)?;
         let grant = authed_call!(
             self,
@@ -302,7 +354,7 @@ impl HostedGrpcClient {
                 subject: subject.to_string(),
                 role: parse_hosted_role_arg(role)? as i32,
                 target,
-                client_operation_id: String::new(),
+                client_operation_id: operation_id.to_wire(),
             }
         );
         Ok(to_protocol_grant(grant))
@@ -330,6 +382,8 @@ impl HostedGrpcClient {
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
     ) -> Result<wire::HostedGrantInfo, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/UpdateGrant");
         let target = build_target_ref(namespace_path, repo_path)?;
         let grant = authed_call!(
             self,
@@ -339,7 +393,7 @@ impl HostedGrpcClient {
                 subject: subject.to_string(),
                 role: parse_hosted_role_arg(role)? as i32,
                 target,
-                client_operation_id: String::new(),
+                client_operation_id: operation_id.to_wire(),
             }
         );
         Ok(to_protocol_grant(grant))
@@ -351,6 +405,8 @@ impl HostedGrpcClient {
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
     ) -> Result<(), ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/DeleteGrant");
         let target = build_target_ref(namespace_path, repo_path)?;
         authed_call!(
             self,
@@ -359,7 +415,7 @@ impl HostedGrpcClient {
             DeleteGrantRequest {
                 subject: subject.to_string(),
                 target,
-                client_operation_id: String::new(),
+                client_operation_id: operation_id.to_wire(),
             }
         );
         Ok(())
@@ -373,6 +429,8 @@ impl HostedGrpcClient {
         namespace_path: &str,
         role: &str,
     ) -> Result<ProtoInvitation, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateInvitation");
         let invitation = authed_call!(
             self,
             create_invitation,
@@ -383,7 +441,7 @@ impl HostedGrpcClient {
                 role: parse_hosted_role_arg(role)? as i32,
                 expires_at: None,
                 metadata: String::new(),
-                client_operation_id: String::new(),
+                client_operation_id: operation_id.to_wire(),
             }
         );
         Ok(invitation)
@@ -401,6 +459,8 @@ impl HostedGrpcClient {
         source_state: &str,
         note: Option<&str>,
     ) -> Result<ThreadApproval, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.WorkflowService/ApproveThread");
         Ok(workflow_call!(
             self,
             approve_thread,
@@ -413,19 +473,21 @@ impl HostedGrpcClient {
                     .ok()
                     .and_then(super::helpers::proto_state_id),
                 note: note.unwrap_or_default().to_string(),
-                client_operation_id: String::new(),
+                client_operation_id: operation_id.to_wire(),
             }
         ))
     }
 
     pub async fn revoke_approval(&mut self, id: &str) -> Result<(), ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.WorkflowService/RevokeApproval");
         workflow_call!(
             self,
             revoke_approval,
             "RevokeApproval",
             RevokeApprovalRequest {
                 id: id.to_string(),
-                client_operation_id: String::new(),
+                client_operation_id: operation_id.to_wire(),
             }
         );
         Ok(())
@@ -495,6 +557,10 @@ impl HostedGrpcClient {
         reason: &str,
         client_operation_id: String,
     ) -> Result<SupportAccessGrant, ProtocolError> {
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.RegistryService/GrantSupportAccess",
+            client_operation_id,
+        );
         let target = build_target_ref(namespace_path, repo_path)?;
         Ok(authed_call!(
             self,
@@ -508,7 +574,7 @@ impl HostedGrpcClient {
                     nanos: 0,
                 }),
                 reason: reason.to_string(),
-                client_operation_id,
+                client_operation_id: operation_id.to_wire(),
             }
         ))
     }
@@ -537,13 +603,17 @@ impl HostedGrpcClient {
         id: &str,
         client_operation_id: String,
     ) -> Result<(), ProtocolError> {
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.RegistryService/RevokeSupportAccess",
+            client_operation_id,
+        );
         authed_call!(
             self,
             revoke_support_access,
             "RevokeSupportAccess",
             RevokeSupportAccessRequest {
                 id: id.to_string(),
-                client_operation_id,
+                client_operation_id: operation_id.to_wire(),
             }
         );
         Ok(())
