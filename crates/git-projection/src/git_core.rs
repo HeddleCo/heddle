@@ -1864,6 +1864,7 @@ impl<'a> GitProjection<'a> {
                 phase: GitCheckpointIntentPhase::Prepared,
             };
             self.heddle_repo.begin_git_checkpoint_intent(&intent)?;
+            objects::fault_inject::maybe_panic_at("git_checkpoint_after_intent_before_publish");
         }
 
         checkout.publish(git_oid)?;

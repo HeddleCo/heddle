@@ -518,6 +518,7 @@ struct PackedImport<'a, W: std::io::Write + std::io::Read + std::io::Seek + Sync
     builder: StreamingPackBuilder<W>,
     stats: PackedImportStats,
     options: ImportOptions,
+    emit_objects: bool,
 }
 
 impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImport<'a, W> {
@@ -533,7 +534,13 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
             builder,
             stats: PackedImportStats::default(),
             options,
+            emit_objects: true,
         }
+    }
+
+    fn mapping_only(mut self) -> Self {
+        self.emit_objects = false;
+        self
     }
 
     fn translate_tree(&mut self, git_tree_sha: &str) -> crate::Result<ContentHash> {
@@ -590,8 +597,10 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
         // "invalid type: integer N, expected struct Tree".
         let data = rmp_serde::to_vec_named(&tree)
             .map_err(|e| IngestError::Other(format!("serialize tree for import pack: {e}")))?;
-        self.builder.add(hash, PackObjectType::Tree, data)?;
-        self.stats.object_count += 1;
+        if self.emit_objects {
+            self.builder.add(hash, PackObjectType::Tree, data)?;
+            self.stats.object_count += 1;
+        }
         self.stats.trees += 1;
 
         self.map
@@ -675,8 +684,10 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
         let bytes = self.git.read_blob(git_blob_sha)?;
         let blob = Blob::from_slice(&bytes);
         let hash = blob.hash();
-        self.builder.add(hash, PackObjectType::Blob, bytes)?;
-        self.stats.object_count += 1;
+        if self.emit_objects {
+            self.builder.add(hash, PackObjectType::Blob, bytes)?;
+            self.stats.object_count += 1;
+        }
         self.stats.blobs += 1;
 
         self.map
@@ -732,12 +743,14 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
         // explanation in `translate_tree`.
         let data = rmp_serde::to_vec_named(&state)
             .map_err(|e| IngestError::Other(format!("serialize state for import pack: {e}")))?;
-        self.builder.add_id(
-            PackObjectId::StateId(state.id()),
-            PackObjectType::State,
-            data,
-        )?;
-        self.stats.object_count += 1;
+        if self.emit_objects {
+            self.builder.add_id(
+                PackObjectId::StateId(state.id()),
+                PackObjectType::State,
+                data,
+            )?;
+            self.stats.object_count += 1;
+        }
         self.stats.states += 1;
 
         self.map
@@ -969,6 +982,106 @@ pub fn import_single_git_commit_into(
             map.abort_append_batch();
             let _ = std::fs::remove_file(&pack_path);
             let _ = std::fs::remove_dir_all(&bucket_dir);
+            Err(error)
+        }
+    }
+}
+
+/// Bind one Git commit as an overlay-native Heddle state without copying its
+/// source tree or blobs into the native object store.
+///
+/// Translation reuses the full importer's canonical tree/blob mapping logic,
+/// but emits only identity rows plus a compact state descriptor. Object reads
+/// subsequently resolve through the authoritative `.git` database.
+pub fn bind_single_git_commit_overlay(
+    git_path: impl AsRef<Path>,
+    heddle_path: impl AsRef<Path>,
+    git_sha: &str,
+    options: ImportOptions,
+) -> crate::Result<objects::object::StateId> {
+    let git = GitSource::open(git_path)?;
+    let root = strip_trailing_heddle(heddle_path.as_ref());
+    let repo = repo::Repository::open(root)?;
+    let map_path = repo.heddle_dir().join("ingest").join("sha_map.sqlite");
+    let mut map = ShaMap::open(&map_path)?;
+    if let Some(existing) = map.get_commit(git_sha) {
+        if repo.store().get_state(&existing)?.is_some() {
+            return Ok(existing);
+        }
+        return Err(IngestError::Other(format!(
+            "Git commit {git_sha} maps to unreadable Heddle state {}",
+            existing.to_string_full()
+        )));
+    }
+
+    let commit = git.read_commit(git_sha)?;
+    let staging_dir = repo.heddle_dir().join("ingest").join("staging");
+    std::fs::create_dir_all(&staging_dir)?;
+    let run_id = format!(
+        "overlay-tip-{}-{}",
+        std::process::id(),
+        IMPORT_RUN_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let pack_path = staging_dir.join(format!("{run_id}.pack"));
+    let index_path = staging_dir.join(format!("{run_id}.idx"));
+    let bucket_dir = staging_dir.join(format!("{run_id}-buckets"));
+    let pack_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&pack_path)?;
+    let builder = StreamingPackBuilder::new(
+        pack_file,
+        index_path.clone(),
+        CompressionConfig {
+            max_delta_size: 0,
+            ..CompressionConfig::default()
+        },
+        bucket_dir.clone(),
+    )
+    .map_err(IngestError::from)?;
+
+    map.begin_append_batch()?;
+    let mut state_path = None;
+    let result = (|| -> crate::Result<objects::object::StateId> {
+        let mut packed = PackedImport::new(&git, &mut map, builder, options).mapping_only();
+        let lossy_before = packed.stats.lossy_entries.len();
+        let tree_hash = packed.translate_tree(&commit.tree_sha)?;
+        let git_lossy = packed.stats.lossy_entries.len() > lossy_before;
+        let state = state_from_commit(&commit, tree_hash, Vec::new(), git_lossy)?;
+        packed
+            .map
+            .insert_commit(&commit.sha, state.state_id)
+            .map_err(IngestError::from)?;
+        let descriptor_dir = repo.heddle_dir().join("ingest").join("overlay-states");
+        objects::fs_atomic::create_private_dir_all(&descriptor_dir)?;
+        let path = descriptor_dir.join(format!("{}.state", state.state_id.to_string_full()));
+        let bytes = rmp_serde::to_vec_named(&state)
+            .map_err(|error| IngestError::Other(format!("serialize overlay state: {error}")))?;
+        objects::fs_atomic::write_file_atomic(&path, &bytes)?;
+        state_path = Some(path);
+        Ok(state.state_id)
+    })();
+
+    let _ = std::fs::remove_file(&pack_path);
+    let _ = std::fs::remove_file(&index_path);
+    let _ = std::fs::remove_dir_all(&bucket_dir);
+    match result {
+        Ok(state_id) => {
+            if let Err(error) = map.flush_append_batch() {
+                if let Some(path) = state_path {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(error.into());
+            }
+            Ok(state_id)
+        }
+        Err(error) => {
+            map.abort_append_batch();
+            if let Some(path) = state_path {
+                let _ = std::fs::remove_file(path);
+            }
             Err(error)
         }
     }

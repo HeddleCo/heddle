@@ -49,9 +49,10 @@ pub mod transcript;
 pub use git_walk::{CommitEntry, GitSource, RefHead, RefNamespace, ReflogEntry};
 pub use import_options::{ImportOptions, LossyImportAction, LossyImportEntry};
 pub use importer::{
-    ImportProgressEvent, ImportScope, ImportStats, Importer, import_git_into,
-    import_git_into_scoped_with_options, import_git_into_scoped_with_options_and_progress,
-    import_git_into_with_options, import_single_git_commit_into,
+    ImportProgressEvent, ImportScope, ImportStats, Importer, bind_single_git_commit_overlay,
+    import_git_into, import_git_into_scoped_with_options,
+    import_git_into_scoped_with_options_and_progress, import_git_into_with_options,
+    import_single_git_commit_into,
 };
 pub use oplog_emit::{OplogEmitStats, OplogEmitter};
 pub use reasoning::{ReasoningEvidence, ReasoningPoint, ReasoningTarget};
@@ -66,7 +67,7 @@ pub use reasoning_pipeline::{
 };
 pub use ref_emit::{RefEmitStats, RefEmitter};
 pub use semantic_cache::{IngestSemanticCache, IngestSemanticCacheStats};
-pub use sha_map::{ShaMap, ShaMapError};
+pub use sha_map::{MapKind, ShaMap, ShaMapError};
 pub use state_writer::parse_attribution;
 pub use transcript::{
     FileTouch, Match, MatchParams, Provider, TouchKind, Transcript, TranscriptMatcher,

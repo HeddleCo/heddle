@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Backend-neutral object storage abstractions and concrete implementations.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use crate::object::{
     Action, ActionId, Blob, ContentHash, State, StateAttachment, StateAttachmentId, StateId, Tree,
@@ -50,6 +50,15 @@ pub use writer_lease::{
     WriterLeaseReserveOutcome, WriterLeaseStatus, WriterLeaseStore, generate_writer_lease_id,
     generate_writer_lease_token,
 };
+
+/// Read-only objects whose authoritative representation lives outside the
+/// native Heddle object directory. Git-overlay repositories use this seam to
+/// translate objects directly from `.git` without importing a second copy.
+pub trait ExternalObjectSource: Send + Sync {
+    fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>>;
+    fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>>;
+    fn get_state(&self, id: &StateId) -> Result<Option<State>>;
+}
 
 pub use crate::error::{HeddleError as StoreError, HeddleError, Result};
 
@@ -249,6 +258,15 @@ impl ObjectStore for AnyStore {
     }
     fn list_states_with_visibility(&self) -> Result<Vec<StateId>> {
         any_store_dispatch!(self, list_states_with_visibility())
+    }
+}
+
+impl AnyStore {
+    /// Attach a read-only external source to the local filesystem store.
+    pub fn set_external_source(&mut self, source: Arc<dyn ExternalObjectSource>) {
+        match self {
+            Self::Fs(store) => store.set_external_source(source),
+        }
     }
 }
 

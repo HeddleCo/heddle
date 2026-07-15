@@ -130,16 +130,24 @@ pub(crate) fn shared_target_dir(repo: &Repository) -> Result<PathBuf> {
 /// Write a `.cargo/config.toml` inside `checkout` that redirects the
 /// build target directory to `target_dir`.
 ///
-/// If `<checkout>/.cargo/config.toml` already exists, this function
-/// leaves it alone and returns `Ok(false)`: a user-managed config takes
-/// precedence over the redirect, which matches cargo's own merge
-/// semantics. Returns `Ok(true)` when the redirect was actually
-/// written. Callers use this to decide whether to record the
-/// `shared_target_dir` on the thread record — surfacing one when the
-/// redirect didn't apply would lie to `heddle thread show`.
+/// If `<checkout>/.cargo/config.toml` or Cargo's legacy
+/// `<checkout>/.cargo/config` already exists, this function leaves it alone
+/// and returns `Ok(false)`: a user-managed config takes precedence over the
+/// redirect. Returns `Ok(true)` when the redirect was actually written.
+/// Callers use this to decide whether to record the `shared_target_dir` on the
+/// thread record — surfacing one when the redirect didn't apply would lie to
+/// `heddle thread show`.
 pub(crate) fn write_cargo_config(checkout: &Path, target_dir: &Path) -> Result<bool> {
     let cargo_dir = checkout.join(".cargo");
     let config_path = cargo_dir.join("config.toml");
+
+    // Cargo accepts both the modern `config.toml` name and the legacy
+    // `.cargo/config` name, preferring `config` when both exist. Never write a
+    // redirect beside either user-managed form: doing so would report sharing
+    // even though Cargo may read the legacy file instead.
+    if cargo_dir.join("config").exists() || config_path.exists() {
+        return Ok(false);
+    }
 
     std::fs::create_dir_all(&cargo_dir)
         .with_context(|| format!("create '{}'", cargo_dir.display()))?;
@@ -213,6 +221,13 @@ pub(crate) fn write_cargo_config(checkout: &Path, target_dir: &Path) -> Result<b
         let _ = std::fs::remove_file(&config_path);
         return Err(err).with_context(|| format!("sync '{}'", config_path.display()));
     }
+    drop(file);
+    if cargo_dir.join("config").exists() {
+        std::fs::remove_file(&config_path)
+            .with_context(|| format!("remove generated '{}'", config_path.display()))?;
+        objects::fs_atomic::sync_directory(&cargo_dir)?;
+        return Ok(false);
+    }
     // Isolated checkouts are reopened as native Heddle worktrees. Without
     // an ignore rule, `.cargo/config.toml` surfaces as untracked dirt and
     // blocks post-land sibling restack (full rematerialize refuses dirty
@@ -233,11 +248,13 @@ fn preserve_shared_cargo_ignores(checkout: &Path) -> Result<()> {
             return Err(err).with_context(|| format!("read '{}'", exclude_path.display()));
         }
     };
-    // Dir-only rule covers the config file and any cargo-created siblings.
-    let rule = ".cargo/";
+    // Ignore only the generated redirect. A directory-wide `.cargo/` rule is
+    // unsafe because the canonical walker may prune the directory before it
+    // discovers tracked Cargo configuration or other tracked content.
+    let rule = "/.cargo/config.toml";
     let already = existing.lines().any(|l| {
         let t = l.trim();
-        t == rule || t == ".cargo" || t == "/.cargo/" || t == "/.cargo"
+        t == rule
     });
     if already {
         return Ok(());
@@ -258,8 +275,8 @@ fn preserve_shared_cargo_ignores(checkout: &Path) -> Result<()> {
     }
     out.push_str(rule);
     out.push('\n');
-    std::fs::write(&exclude_path, out)
-        .with_context(|| format!("write '{}'", exclude_path.display()))?;
+    objects::fs_atomic::write_file_atomic(&exclude_path, out.as_bytes())
+        .with_context(|| format!("atomically write '{}'", exclude_path.display()))?;
     Ok(())
 }
 
@@ -333,15 +350,20 @@ pub(crate) fn print_advisory(name: &str) {
     );
 }
 
-/// Loud stderr warning when a pre-existing `.cargo/config.toml` blocked
-/// the shared-target redirect. Must not be silent: callers previously
+/// Loud stderr warning when a pre-existing `.cargo/config.toml` or legacy
+/// `.cargo/config` blocked the shared-target redirect. Must not be silent: callers previously
 /// treated the no-op as success and agents would burn GB on per-thread
 /// `target/` trees without noticing.
 pub(crate) fn print_blocked_warning(checkout: &Path) {
-    let config = checkout.join(".cargo").join("config.toml");
+    let cargo_dir = checkout.join(".cargo");
+    let config = if cargo_dir.join("config").exists() {
+        cargo_dir.join("config")
+    } else {
+        cargo_dir.join("config.toml")
+    };
     eprintln!(
         "warning: shared cargo target redirect not applied: '{}' already exists; \
-         leaving the existing config in place (threads will not share target/). \
+         leaving the existing config in place (Cargo target behavior follows that file). \
          Remove or rename that file to allow the redirect, or pass `--no-shared-target` \
          to opt out explicitly.",
         config.display(),
@@ -396,15 +418,17 @@ mod tests {
         assert!(written.contains("[build]"));
         assert!(written.contains(&format!("target-dir = \"{}\"", target.display(),)));
 
-        // Redirect must not dirt capture/restack: local exclude covers .cargo/.
+        // Redirect must not dirt capture/restack, without hiding other
+        // tracked `.cargo` content.
         let exclude = std::fs::read_to_string(
             crate::cli::commands::worktree_cmd::hydrate::hydrate_exclude_path(temp.path()),
         )
-        .expect("local exclude written for shared-target .cargo/");
+        .expect("local exclude written for shared-target config");
         assert!(
-            exclude.lines().any(|l| l.trim() == ".cargo/"),
-            "expected .cargo/ ignore rule, got:\n{exclude}"
+            exclude.lines().any(|l| l.trim() == "/.cargo/config.toml"),
+            "expected narrow config ignore rule, got:\n{exclude}"
         );
+        assert!(!exclude.lines().any(|l| l.trim() == ".cargo/"));
     }
 
     #[test]
@@ -428,6 +452,24 @@ mod tests {
             after, user,
             "shared-target writer must not overwrite user-managed config",
         );
+    }
+
+    #[test]
+    fn write_cargo_config_preserves_legacy_cargo_config() {
+        let temp = TempDir::new().unwrap();
+        let cargo_dir = temp.path().join(".cargo");
+        std::fs::create_dir_all(&cargo_dir).unwrap();
+        let user = "[net]\noffline = true\n";
+        std::fs::write(cargo_dir.join("config"), user).unwrap();
+
+        let target = temp.path().join("shared");
+        std::fs::create_dir_all(&target).unwrap();
+        assert!(!write_cargo_config(temp.path(), &target).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(cargo_dir.join("config")).unwrap(),
+            user
+        );
+        assert!(!cargo_dir.join("config.toml").exists());
     }
 
     /// `Write` impl whose `write` always errors. Used to drive the

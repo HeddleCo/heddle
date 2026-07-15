@@ -199,7 +199,58 @@ pub fn schema_for_verb(verb: &str) -> Option<Value> {
         })?;
     add_op_id_replay_fields_if_supported(verb, &mut schema);
     add_json_discriminator_if_advertised(verb, &mut schema);
+    stabilize_land_output_shapes(verb, &mut schema);
     Some(schema)
+}
+
+fn require_object_fields(schema: &mut Value, fields: &[&str]) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    let required = object
+        .entry("required".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(required) = required.as_array_mut() else {
+        return;
+    };
+    for field in fields {
+        if !required.iter().any(|value| value.as_str() == Some(field)) {
+            required.push(Value::String((*field).to_string()));
+        }
+    }
+}
+
+fn stabilize_land_output_shapes(verb: &str, schema: &mut Value) {
+    match verb {
+        "land" => require_object_fields(schema, &["siblings_restacked", "siblings_restack_failed"]),
+        "land --threads" => {
+            require_object_fields(
+                schema,
+                &[
+                    "stopped_at",
+                    "git_head",
+                    "recommended_action",
+                    "verification",
+                ],
+            );
+            if let Some(peer) = schema
+                .get_mut("$defs")
+                .and_then(Value::as_object_mut)
+                .and_then(|defs| defs.get_mut("LandBatchPeerSchema"))
+            {
+                require_object_fields(
+                    peer,
+                    &[
+                        "siblings_restacked",
+                        "siblings_restack_failed",
+                        "blockers",
+                        "warnings",
+                    ],
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 fn schema_for_report_contract_verb(verb: &str) -> Option<Value> {
@@ -1275,8 +1326,8 @@ pub struct LandSchema {
     pub skipped_steps: Vec<String>,
     pub merge_state: Option<String>,
     pub chosen_path: String,
-    pub siblings_restacked: Option<Vec<String>>,
-    pub siblings_restack_failed: Option<Vec<SiblingRestackFailureSchema>>,
+    pub siblings_restacked: Vec<String>,
+    pub siblings_restack_failed: Vec<SiblingRestackFailureSchema>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1295,9 +1346,10 @@ pub struct LandBatchPeerSchema {
     pub git_commit: Option<String>,
     pub integrated: bool,
     pub synced: bool,
-    pub siblings_restacked: Option<Vec<String>>,
-    pub blockers: Option<Vec<String>>,
-    pub warnings: Option<Vec<String>>,
+    pub siblings_restacked: Vec<String>,
+    pub siblings_restack_failed: Vec<SiblingRestackFailureSchema>,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

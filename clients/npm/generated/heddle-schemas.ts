@@ -1241,22 +1241,23 @@ export interface IntegrationUpgradeSchema {
 }
 
 export interface LandBatchPeerSchema {
-  blockers?: string[] | null;
+  blockers: string[];
   captured: boolean;
   checkpointed: boolean;
   git_commit?: string | null;
   integrated: boolean;
   message: string;
-  siblings_restacked?: string[] | null;
+  siblings_restack_failed: SiblingRestackFailureSchema[];
+  siblings_restacked: string[];
   status: string;
   synced: boolean;
   thread: string;
-  warnings?: string[] | null;
+  warnings: string[];
 }
 
 export interface LandBatchSchema {
   action: string;
-  git_head?: string | null;
+  git_head: string | null;
   idempotency_status?: string | null;
   landed: string[];
   message: string;
@@ -1264,12 +1265,12 @@ export interface LandBatchSchema {
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   output_kind: "land_batch";
   peers: LandBatchPeerSchema[];
-  recommended_action?: string | null;
+  recommended_action: string | null;
   replayed?: boolean | null;
   status: string;
-  stopped_at?: string | null;
+  stopped_at: string | null;
   threads: string[];
-  verification?: RepositoryVerificationStateSchema | null;
+  verification: RepositoryVerificationStateSchema | null;
 }
 
 export interface LandSchema {
@@ -1292,8 +1293,8 @@ export interface LandSchema {
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   replayed?: boolean | null;
-  siblings_restack_failed?: SiblingRestackFailureSchema[] | null;
-  siblings_restacked?: string[] | null;
+  siblings_restack_failed: SiblingRestackFailureSchema[];
+  siblings_restacked: string[];
   skipped_steps: string[];
   status: string;
   synced: boolean;

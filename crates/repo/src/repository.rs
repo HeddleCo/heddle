@@ -9,6 +9,9 @@ pub(crate) mod commit_graph;
 mod commit_graph_persistence;
 #[path = "context_suggestions.rs"]
 mod context_suggestions;
+#[cfg(feature = "git-overlay")]
+#[path = "git_overlay_object_source.rs"]
+mod git_overlay_object_source;
 #[path = "repo_config.rs"]
 pub(crate) mod repo_config;
 #[path = "repository_context.rs"]
@@ -555,9 +558,35 @@ impl Repository {
     ///
     /// Returns the local [`FsStore`] wrapped in the [`AnyStore`] enum so object
     /// access stays statically dispatched.
-    fn build_store(config: &RepoConfig, heddle_dir: &Path) -> Result<AnyStore> {
-        let _ = config;
-        Ok(AnyStore::Fs(FsStore::new(heddle_dir)))
+    fn build_store(config: &RepoConfig, root: &Path, heddle_dir: &Path) -> Result<AnyStore> {
+        let store = AnyStore::Fs(FsStore::new(heddle_dir));
+        #[cfg(feature = "git-overlay")]
+        let mut store = store;
+        #[cfg(not(feature = "git-overlay"))]
+        let _ = (config, root);
+        #[cfg(feature = "git-overlay")]
+        let overlay_source_root =
+            if config.repository.source_authority == RepositorySourceAuthority::GitOverlay {
+                Some(root.to_path_buf())
+            } else if heddle_dir.join("ingest").join("sha_map.sqlite").is_file() {
+                // A native isolated checkout can share an object store whose base
+                // state is an overlay-native descriptor. The authoritative Git
+                // database belongs to the main checkout beside that shared
+                // `.heddle`, not to the isolated worktree itself.
+                heddle_dir.parent().map(Path::to_path_buf)
+            } else {
+                None
+            };
+        #[cfg(feature = "git-overlay")]
+        if let Some(source_root) = overlay_source_root {
+            store.set_external_source(Arc::new(
+                git_overlay_object_source::GitOverlayObjectSource::new(
+                    source_root,
+                    heddle_dir.to_path_buf(),
+                ),
+            ));
+        }
+        Ok(store)
     }
 
     /// Initialize a new bare repository at the given path.
@@ -587,6 +616,8 @@ impl Repository {
         objects::fs_atomic::create_private_dir_all(&heddle_dir)?;
 
         let store = FsStore::new(&heddle_dir);
+        #[cfg(feature = "git-overlay")]
+        let mut store = store;
         store.init()?;
 
         let refs = RefManager::new(&heddle_dir);
@@ -602,6 +633,16 @@ impl Repository {
         let mut config = RepoConfig::default();
         config.repository.source_authority = source_authority;
         config.save(&heddle_dir.join("config.toml"))?;
+
+        #[cfg(feature = "git-overlay")]
+        if source_authority == RepositorySourceAuthority::GitOverlay {
+            store.set_external_source(Arc::new(
+                git_overlay_object_source::GitOverlayObjectSource::new(
+                    root.clone(),
+                    heddle_dir.clone(),
+                ),
+            ));
+        }
 
         refs.write_head(&Head::Attached {
             thread: ThreadName::from("main"),
@@ -783,7 +824,7 @@ impl Repository {
                     let mut config = RepoConfig::load_for_repository(&config_path)?;
                     ensure_supported_repo_format(&config_path, &config)?;
                     config.repository.source_authority = pointer.source_authority;
-                    let store = Self::build_store(&config, &shared_galeed_dir)?;
+                    let store = Self::build_store(&config, dir, &shared_galeed_dir)?;
                     let local_head_path = heddle_path.join("HEAD");
                     let refs = RefManager::new(&shared_galeed_dir).with_local_head(local_head_path);
                     let repo =
@@ -797,7 +838,7 @@ impl Repository {
                     let config_path = heddle_path.join("config.toml");
                     let config = RepoConfig::load_for_repository(&config_path)?;
                     ensure_supported_repo_format(&config_path, &config)?;
-                    let store = Self::build_store(&config, &heddle_path)?;
+                    let store = Self::build_store(&config, dir, &heddle_path)?;
                     let refs = RefManager::new(&heddle_path);
                     let repo = Self::open_raw(dir.to_path_buf(), heddle_path, store, config, refs)?;
                     repo.run_open_hooks()?;

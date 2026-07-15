@@ -3516,6 +3516,106 @@ fn git_overlay_matrix_land_checkpoint_failure_auto_undoes_heddle_integration() {
 }
 
 #[test]
+fn git_overlay_matrix_land_prepared_journal_recovers_pre_publish_crash() {
+    let fixture =
+        GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/land-prepared");
+    let before_git = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    let crashed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/land-prepared",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "land_after_integration_before_journal_update",
+        )],
+    )
+    .expect("invoke land with pre-publication crash injection");
+    assert!(!crashed.status.success());
+    let marker = fixture.path().join(".heddle/incomplete-land.json");
+    assert!(
+        marker.is_file(),
+        "prepared journal must precede integration"
+    );
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        before_git
+    );
+
+    let status = json(fixture.path(), &["--output", "json", "status"]);
+    assert!(
+        marker.is_file(),
+        "observe-only status must retain the journal"
+    );
+    assert_eq!(status["coordination_status"], "blocked");
+
+    let retry = heddle(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/land-prepared",
+        ],
+        Some(fixture.path()),
+    )
+    .expect("retry should idempotently roll back the prepared phase and land");
+    let retry: Value = serde_json::from_str(&retry).unwrap();
+    assert_eq!(retry["status"], "landed", "{retry}");
+    assert!(!marker.exists());
+}
+
+#[test]
+fn git_overlay_matrix_rollback_started_phase_prevents_double_undo() {
+    let fixture =
+        GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/rollback-phase");
+    let before_state =
+        json(fixture.path(), &["--output", "json", "status"])["current_state"].clone();
+    let failed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/rollback-phase",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "git_checkpoint_before_write_through,land_after_rollback_before_journal_update",
+        )],
+    )
+    .unwrap();
+    assert!(!failed.status.success());
+    let marker_path = fixture.path().join(".heddle/incomplete-land.json");
+    let marker: Value = serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+    assert_eq!(marker["phase"], "rollback_started", "{marker}");
+    assert_eq!(
+        json(fixture.path(), &["--output", "json", "status"])["current_state"],
+        before_state,
+        "first undo already restored the target"
+    );
+
+    let retry = heddle(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/rollback-phase",
+        ],
+        Some(fixture.path()),
+    )
+    .expect("retry must finalize rollback without applying the undo twice");
+    let retry: Value = serde_json::from_str(&retry).unwrap();
+    assert_eq!(retry["status"], "landed", "{retry}");
+}
+
+#[test]
 fn git_overlay_matrix_land_recovers_checkpoint_published_before_crash() {
     let fixture =
         GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/land-recover");
@@ -3550,6 +3650,29 @@ fn git_overlay_matrix_land_recovers_checkpoint_published_before_crash() {
     std::fs::create_dir(&nested).unwrap();
     let status = json(&nested, &["--output", "json", "status"]);
     assert!(status["current_state"].as_str().is_some());
+    assert!(
+        status["blockers"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item
+                .as_str()
+                .is_some_and(|text| text.contains("recovery work pending")))),
+        "observe-only status must report, not execute, durable recovery: {status}"
+    );
+    assert!(
+        marker.exists(),
+        "status must not mutate the recovery journal"
+    );
+
+    let _ = heddle(
+        &[
+            "--output",
+            "json",
+            "ready",
+            "--thread",
+            "feature/land-recover",
+        ],
+        Some(fixture.path()),
+    );
     assert_eq!(
         git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
         after_publish,
@@ -3565,6 +3688,108 @@ fn git_overlay_matrix_land_recovers_checkpoint_published_before_crash() {
             .join(".heddle/state/git-checkpoint-intent.json")
             .exists(),
         "recovery must finalize the durable checkpoint intent"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_old_state_checkpoint_does_not_complete_unpublished_land() {
+    let fixture =
+        GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/land-old-map");
+    let before_git = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    let crashed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/land-old-map",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "git_checkpoint_after_intent_before_publish",
+        )],
+    )
+    .expect("invoke land with pre-publish crash");
+    assert!(!crashed.status.success());
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        before_git
+    );
+
+    let marker_path = fixture.path().join(".heddle/incomplete-land.json");
+    let marker: Value = serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+    let merge_state = marker["merge_state"].as_str().unwrap();
+    let repo = repo::Repository::open(fixture.path()).unwrap();
+    let state = repo.resolve_state(merge_state).unwrap().unwrap();
+    repo.record_git_checkpoint(&state, before_git.clone(), "pre-existing export")
+        .unwrap();
+
+    let _ = heddle(
+        &[
+            "--output",
+            "json",
+            "ready",
+            "--thread",
+            "feature/land-old-map",
+        ],
+        Some(fixture.path()),
+    );
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        before_git,
+        "an old state mapping must not masquerade as this land's publication"
+    );
+    assert!(
+        !marker_path.exists(),
+        "ready should roll the incomplete land back"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_recovery_is_idempotent_after_coalesce() {
+    let fixture = GitOverlayFixture::imported_main()
+        .with_ready_materialized_thread("feature/coalesced-recovery");
+    let crashed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/coalesced-recovery",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "land_after_coalesce_before_journal_clear",
+        )],
+    )
+    .unwrap();
+    assert!(!crashed.status.success());
+    let marker = fixture.path().join(".heddle/incomplete-land.json");
+    assert!(marker.exists());
+    let published = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    let status = json(fixture.path(), &["--output", "json", "status"]);
+    assert_eq!(status["coordination_status"], "blocked");
+    assert!(marker.exists(), "status remains observe-only");
+
+    let _ = heddle(
+        &[
+            "--output",
+            "json",
+            "ready",
+            "--thread",
+            "feature/coalesced-recovery",
+        ],
+        Some(fixture.path()),
+    );
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        published
+    );
+    assert!(
+        !marker.exists(),
+        "recovery must tolerate already-coalesced batches"
     );
 }
 
@@ -3710,6 +3935,38 @@ fn git_overlay_matrix_land_threads_reports_failed_peer_in_batch() {
             .as_str()
             .is_some_and(|message| message.contains("rolled back")),
         "{batch}"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_land_reports_sibling_enumeration_failure() {
+    let fixture = GitOverlayFixture::imported_main()
+        .with_ready_materialized_thread("feature/sibling-enumeration");
+    let out = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/sibling-enumeration",
+        ],
+        Some(fixture.path()),
+        &[("HEDDLE_FAULT_INJECT", "land_sibling_enumeration")],
+    )
+    .unwrap();
+    assert!(out.status.success());
+    let land: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(land["status"], "landed", "{land}");
+    assert_eq!(
+        land["siblings_restack_failed"].as_array().map(Vec::len),
+        Some(1),
+        "enumeration failure must remain structured: {land}"
+    );
+    assert!(
+        land["warnings"]
+            .as_array()
+            .is_some_and(|warnings| !warnings.is_empty()),
+        "enumeration failure must be loud: {land}"
     );
 }
 

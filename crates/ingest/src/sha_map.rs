@@ -478,6 +478,29 @@ impl ShaMap {
             };
         rows.filter_map(|r| r.ok()).collect()
     }
+
+    /// Every mapped Heddle content hash of the requested source kind.
+    /// Used by overlay integrity checks to prove source objects were not
+    /// copied into native storage.
+    pub fn content_hashes(&self, kind: MapKind) -> Vec<ContentHash> {
+        if kind == MapKind::Commit {
+            return Vec::new();
+        }
+        let mut stmt = match self
+            .conn
+            .prepare_cached("SELECT heddle_repr FROM sha_map WHERE kind = ?")
+        {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map(params![kind.as_i64()], |row| row.get::<_, String>(0)) {
+            Ok(rows) => rows,
+            Err(_) => return Vec::new(),
+        };
+        rows.filter_map(|row| row.ok())
+            .filter_map(|value| ContentHash::from_hex(&value).ok())
+            .collect()
+    }
 }
 
 fn initialize_schema(conn: &Connection) -> Result<(), ShaMapError> {

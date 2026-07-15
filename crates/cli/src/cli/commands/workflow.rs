@@ -98,9 +98,9 @@ struct LandOutput {
     performed_steps: Vec<String>,
     skipped_steps: Vec<String>,
     merge_state: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     siblings_restacked: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     siblings_restack_failed: Vec<SiblingRestackFailure>,
     #[serde(skip_serializing)]
     #[serde(rename = "verification")]
@@ -118,11 +118,13 @@ struct MultiLandPeerResult {
     git_commit: Option<String>,
     integrated: bool,
     synced: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     siblings_restacked: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
+    siblings_restack_failed: Vec<SiblingRestackFailure>,
+    #[serde(default)]
     blockers: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     warnings: Vec<String>,
 }
 
@@ -134,14 +136,11 @@ struct MultiLandOutput {
     message: String,
     threads: Vec<String>,
     landed: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     stopped_at: Option<String>,
     peers: Vec<MultiLandPeerResult>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     git_head: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     recommended_action: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "verification")]
+    #[serde(rename = "verification")]
     trust: Option<RepositoryVerificationState>,
 }
 
@@ -545,6 +544,10 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     let manual_resolution_current = manual_resolution_current(&repo, &merge_thread);
     let squash_land = should_squash_land(&args, &user_config);
     if manual_resolution_current {
+        if repo.capability() == repo::RepositoryCapability::GitOverlay {
+            write_prepared_land_marker(&repo, &merge_thread)?;
+            objects::fault_inject::maybe_fail_at("land_after_prepared_journal")?;
+        }
         let land_collapse_state = if squash_land
             && repo.capability() == repo::RepositoryCapability::GitOverlay
         {
@@ -552,6 +555,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         } else {
             None
         };
+        objects::fault_inject::maybe_fail_at("land_after_collapse_before_integration")?;
         if land_collapse_state.is_some() {
             merge_thread = resolve_thread(
                 &repo,
@@ -561,6 +565,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             )?;
         }
         let merge_state = adopt_manual_resolution(&repo, &merge_thread.id)?;
+        objects::fault_inject::maybe_fail_at("land_after_integration_before_journal_update")?;
         let mut checkpointed = false;
         let mut git_commit = None;
         update_integration_policy(
@@ -612,6 +617,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             checkpointed = true;
             git_commit = Some(record.git_commit);
         }
+        objects::fault_inject::maybe_panic_at("land_after_checkpoint_before_coalesce");
         coalesce_land_integration_and_checkpoint(
             &repo,
             Some(&merge_state),
@@ -621,6 +627,10 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         .context(
             "land completed but failed to record manual integration and Git checkpoint as one undo batch",
         )?;
+        objects::fault_inject::maybe_panic_at("land_after_coalesce_before_journal_clear");
+        if repo.capability() == repo::RepositoryCapability::GitOverlay {
+            clear_incomplete_land_marker(&repo)?;
+        }
         let resolved_manually = merge_thread
             .integration_policy_result
             .conflicts_resolved_manually;
@@ -771,12 +781,17 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         );
     }
 
+    if repo.capability() == repo::RepositoryCapability::GitOverlay {
+        write_prepared_land_marker(&repo, &merge_thread)?;
+        objects::fault_inject::maybe_fail_at("land_after_prepared_journal")?;
+    }
     let land_collapse_state =
         if squash_land && repo.capability() == repo::RepositoryCapability::GitOverlay {
             collapse_thread_for_land(&repo, &user_config, &merge_thread, args.message.as_deref())?
         } else {
             None
         };
+    objects::fault_inject::maybe_fail_at("land_after_collapse_before_integration")?;
     if land_collapse_state.is_some() {
         merge_thread = resolve_thread(
             &repo,
@@ -806,6 +821,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         false,
         false,
     )?;
+    objects::fault_inject::maybe_fail_at("land_after_integration_before_journal_update")?;
     let integrated = merge_output.conflicts.is_empty() && merge_output.merge_state.is_some();
     let mut checkpointed = false;
     let mut git_commit = None;
@@ -823,6 +839,10 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             "merge produced conflicts"
         },
     )?;
+
+    if !integrated && repo.capability() == repo::RepositoryCapability::GitOverlay {
+        clear_incomplete_land_marker(&repo)?;
+    }
 
     if integrated && repo.capability() == repo::RepositoryCapability::GitOverlay {
         if let Err(error) = write_incomplete_land_marker(
@@ -867,6 +887,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         checkpointed = true;
         git_commit = Some(record.git_commit);
     }
+    objects::fault_inject::maybe_panic_at("land_after_checkpoint_before_coalesce");
     coalesce_land_integration_and_checkpoint(
         &repo,
         merge_output.merge_state.as_deref(),
@@ -874,6 +895,10 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         land_collapse_state.as_ref(),
     )
     .context("land completed but failed to record merge and Git checkpoint as one undo batch")?;
+    objects::fault_inject::maybe_panic_at("land_after_coalesce_before_journal_clear");
+    if integrated && repo.capability() == repo::RepositoryCapability::GitOverlay {
+        clear_incomplete_land_marker(&repo)?;
+    }
 
     if integrated {
         clear_manual_resolution_state(&repo, &merge_thread.id)?;
@@ -995,8 +1020,27 @@ fn restack_sibling_threads_after_land(
         return SiblingRestackReport::default();
     };
 
-    let Ok(threads) = thread_manager(repo).list() else {
-        return SiblingRestackReport::default();
+    if let Err(error) = objects::fault_inject::maybe_fail_at("land_sibling_enumeration") {
+        return SiblingRestackReport {
+            restacked: Vec::new(),
+            failed: vec![SiblingRestackFailure {
+                thread: landed.id.clone(),
+                message: format!("could not enumerate sibling threads: {error}"),
+            }],
+        };
+    }
+
+    let threads = match thread_manager(repo).list() {
+        Ok(threads) => threads,
+        Err(error) => {
+            return SiblingRestackReport {
+                restacked: Vec::new(),
+                failed: vec![SiblingRestackFailure {
+                    thread: landed.id.clone(),
+                    message: format!("could not enumerate sibling threads: {error}"),
+                }],
+            };
+        }
     };
     let mut candidates: Vec<Thread> = threads
         .into_iter()
@@ -1338,22 +1382,64 @@ fn land_checkpoint_failure_after_heddle(
             performed_steps,
         ));
     }
+    if let Err(journal_error) =
+        mark_incomplete_land_phase(repo, IncompleteLandPhase::RollbackStarted)
+    {
+        return anyhow!(RecoveryAdvice::land_checkpoint_partial_failure_undo_failed(
+            thread_id,
+            &checkpoint_error,
+            journal_error,
+            performed_steps,
+        ));
+    }
     match auto_undo_land_integration(repo, thread_id, merge_state, collapse_state) {
-        Ok(()) => match clear_incomplete_land_marker(repo) {
-            Ok(()) => anyhow!(RecoveryAdvice::land_checkpoint_rolled_back(
-                thread_id,
-                &checkpoint_error,
-                performed_steps,
-            )),
-            Err(cleanup_error) => anyhow!(
-                RecoveryAdvice::land_checkpoint_rollback_marker_cleanup_failed(
+        Ok(()) => {
+            if let Err(fault) =
+                objects::fault_inject::maybe_fail_at("land_after_rollback_before_journal_update")
+            {
+                return anyhow!(RecoveryAdvice::land_checkpoint_partial_failure_undo_failed(
                     thread_id,
                     &checkpoint_error,
-                    cleanup_error,
+                    fault,
                     performed_steps,
-                )
-            ),
-        },
+                ));
+            }
+            let intent_cleanup =
+                load_incomplete_land_marker(repo).and_then(|marker| match marker {
+                    Some(marker) => {
+                        restore_pre_land_thread(repo, &marker)?;
+                        discard_unpublished_land_checkpoint_intent(repo, &marker)
+                    }
+                    None => Ok(()),
+                });
+            if let Err(cleanup_error) = intent_cleanup {
+                return anyhow!(
+                    RecoveryAdvice::land_checkpoint_rollback_marker_cleanup_failed(
+                        thread_id,
+                        &checkpoint_error,
+                        cleanup_error,
+                        performed_steps,
+                    )
+                );
+            }
+            let cleanup = mark_incomplete_land_phase(repo, IncompleteLandPhase::RollbackComplete)
+                .and_then(|()| clear_incomplete_land_marker(repo));
+            match cleanup {
+                Ok(()) => anyhow!(RecoveryAdvice::land_checkpoint_rolled_back(
+                    thread_id,
+                    &checkpoint_error,
+                    performed_steps,
+                )),
+                Err(cleanup_error) => anyhow!(
+                    RecoveryAdvice::land_checkpoint_rollback_marker_cleanup_failed(
+                        thread_id,
+                        &checkpoint_error,
+                        cleanup_error,
+                        performed_steps,
+                    )
+                ),
+            }
+        }
         Err(undo_error) => anyhow!(RecoveryAdvice::land_checkpoint_partial_failure_undo_failed(
             thread_id,
             &checkpoint_error,
@@ -1407,13 +1493,12 @@ fn finish_land_git_checkpoint(
             }
         }
     };
-    clear_incomplete_land_marker(repo)?;
     Ok(record)
 }
 
 fn auto_undo_land_integration(
     repo: &Repository,
-    thread_id: &str,
+    _thread_id: &str,
     merge_state: Option<&str>,
     collapse_state: Option<&StateId>,
 ) -> Result<()> {
@@ -1435,12 +1520,6 @@ fn auto_undo_land_integration(
         ));
     }
     undo_batches_quiet(repo, batches)?;
-    let _ = update_integration_policy(
-        repo,
-        thread_id,
-        "blocked",
-        "land rolled back after Git checkpoint failure",
-    );
     Ok(())
 }
 
@@ -1684,6 +1763,7 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
                     integrated: output.integrated,
                     synced: output.synced,
                     siblings_restacked: output.siblings_restacked.clone(),
+                    siblings_restack_failed: output.siblings_restack_failed.clone(),
                     blockers: output.operator.blockers.clone(),
                     warnings: output.operator.warnings.clone(),
                 });
@@ -1789,6 +1869,26 @@ struct IncompleteLandMarker {
     thread_id: String,
     merge_state: Option<String>,
     collapse_state: Option<String>,
+    #[serde(default)]
+    target_branch: Option<String>,
+    #[serde(default)]
+    phase: IncompleteLandPhase,
+    #[serde(default)]
+    pre_target_state: Option<String>,
+    #[serde(default)]
+    pre_source_state: Option<String>,
+    #[serde(default)]
+    pre_thread: Option<Thread>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+enum IncompleteLandPhase {
+    Prepared,
+    #[default]
+    Integrated,
+    RollbackStarted,
+    RollbackComplete,
 }
 
 fn incomplete_land_marker_path(repo: &Repository) -> PathBuf {
@@ -1801,16 +1901,48 @@ fn write_incomplete_land_marker(
     merge_state: Option<&str>,
     collapse_state: Option<&StateId>,
 ) -> Result<()> {
+    let prepared = load_incomplete_land_marker(repo)?;
     let marker = IncompleteLandMarker {
         thread_id: thread_id.to_string(),
         merge_state: merge_state.map(str::to_string),
         collapse_state: collapse_state.map(StateId::to_string_full),
+        target_branch: repo.git_overlay_current_branch()?,
+        phase: IncompleteLandPhase::Integrated,
+        pre_target_state: prepared
+            .as_ref()
+            .and_then(|marker| marker.pre_target_state.clone()),
+        pre_source_state: prepared
+            .as_ref()
+            .and_then(|marker| marker.pre_source_state.clone()),
+        pre_thread: prepared.and_then(|marker| marker.pre_thread),
     };
     let path = incomplete_land_marker_path(repo);
     let body = serde_json::to_vec_pretty(&marker).context("serialize incomplete-land marker")?;
     objects::fs_atomic::write_file_atomic(&path, &body)
         .with_context(|| format!("write {}", path.display()))?;
     Ok(())
+}
+
+fn write_prepared_land_marker(repo: &Repository, thread: &Thread) -> Result<()> {
+    let marker = IncompleteLandMarker {
+        thread_id: thread.id.clone(),
+        merge_state: None,
+        collapse_state: None,
+        target_branch: repo.git_overlay_current_branch()?,
+        phase: IncompleteLandPhase::Prepared,
+        pre_target_state: repo
+            .current_state()?
+            .map(|state| state.state_id.to_string_full()),
+        pre_source_state: repo
+            .refs()
+            .get_thread(&ThreadName::new(&thread.id))?
+            .map(|state| state.to_string_full()),
+        pre_thread: Some(thread.clone()),
+    };
+    let path = incomplete_land_marker_path(repo);
+    let body = serde_json::to_vec_pretty(&marker).context("serialize incomplete-land marker")?;
+    objects::fs_atomic::write_file_atomic(&path, &body)
+        .with_context(|| format!("write {}", path.display()))
 }
 
 fn clear_incomplete_land_marker(repo: &Repository) -> Result<()> {
@@ -1838,27 +1970,173 @@ fn load_incomplete_land_marker(repo: &Repository) -> Result<Option<IncompleteLan
     }
 }
 
+fn mark_incomplete_land_phase(repo: &Repository, phase: IncompleteLandPhase) -> Result<()> {
+    let Some(mut marker) = load_incomplete_land_marker(repo)? else {
+        return Ok(());
+    };
+    marker.phase = phase;
+    let path = incomplete_land_marker_path(repo);
+    let body = serde_json::to_vec_pretty(&marker).context("serialize incomplete-land marker")?;
+    objects::fs_atomic::write_file_atomic(&path, &body)
+        .with_context(|| format!("write {}", path.display()))
+}
+
+fn restore_pre_land_thread(repo: &Repository, marker: &IncompleteLandMarker) -> Result<()> {
+    if let Some(thread) = marker.pre_thread.as_ref() {
+        thread_manager(repo).save(thread)?;
+    }
+    Ok(())
+}
+
+fn discard_unpublished_land_checkpoint_intent(
+    repo: &Repository,
+    marker: &IncompleteLandMarker,
+) -> Result<()> {
+    let Some(intent) = repo.pending_git_checkpoint_intent()? else {
+        return Ok(());
+    };
+    let marker_state = match marker.merge_state.as_deref() {
+        Some(state) => repo.resolve_state(state)?,
+        None => None,
+    };
+    if let Some(state) = marker_state.as_ref()
+        && intent.phase == repo::GitCheckpointIntentPhase::Prepared
+        && state.to_string_full() == intent.state_id
+        && marker.target_branch.as_deref() == Some(intent.branch.as_str())
+    {
+        repo.finish_git_checkpoint_intent(state, &intent.new_git_oid)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn pending_incomplete_land_thread(repo: &Repository) -> Result<Option<String>> {
+    Ok(load_incomplete_land_marker(repo)?.map(|marker| marker.thread_id))
+}
+
 pub(crate) fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()> {
     let Some(marker) = load_incomplete_land_marker(repo)? else {
         return Ok(());
     };
+    if marker.phase == IncompleteLandPhase::RollbackComplete {
+        clear_incomplete_land_marker(repo)?;
+        return Ok(());
+    }
+    if let Some(target_branch) = marker.target_branch.as_deref() {
+        let current_branch = repo.git_overlay_current_branch()?;
+        if current_branch.as_deref() != Some(target_branch) {
+            return Err(anyhow!(
+                "incomplete land of '{}' targets Git branch '{}' but the checkout is on '{}'; switch back to '{}' before retrying recovery",
+                marker.thread_id,
+                target_branch,
+                current_branch.as_deref().unwrap_or("detached HEAD"),
+                target_branch,
+            ));
+        }
+    }
+    if marker.phase == IncompleteLandPhase::RollbackStarted {
+        let target_rolled_back = repo
+            .current_state()?
+            .map(|state| state.state_id.to_string_full())
+            == marker.pre_target_state;
+        let source_rolled_back = repo
+            .refs()
+            .get_thread(&ThreadName::new(&marker.thread_id))?
+            .map(|state| state.to_string_full())
+            == marker.pre_source_state;
+        if !(target_rolled_back && source_rolled_back) {
+            let collapse = marker
+                .collapse_state
+                .as_deref()
+                .and_then(|state| StateId::parse(state).ok());
+            auto_undo_land_integration(
+                repo,
+                &marker.thread_id,
+                marker.merge_state.as_deref(),
+                collapse.as_ref(),
+            )?;
+        }
+        restore_pre_land_thread(repo, &marker)?;
+        discard_unpublished_land_checkpoint_intent(repo, &marker)?;
+        mark_incomplete_land_phase(repo, IncompleteLandPhase::RollbackComplete)?;
+        clear_incomplete_land_marker(repo)?;
+        return Ok(());
+    }
+    if marker.phase == IncompleteLandPhase::Prepared {
+        let current_target = repo.current_state()?.map(|state| state.state_id);
+        let current_source = repo
+            .refs()
+            .get_thread(&ThreadName::new(&marker.thread_id))?;
+        let merge_state = current_target
+            .filter(|state| marker.pre_target_state.as_ref() != Some(&state.to_string_full()));
+        let collapse_state = current_source
+            .filter(|state| marker.pre_source_state.as_ref() != Some(&state.to_string_full()));
+        if merge_state.is_none() && collapse_state.is_none() {
+            clear_incomplete_land_marker(repo)?;
+            return Ok(());
+        }
+        auto_undo_land_integration(
+            repo,
+            &marker.thread_id,
+            merge_state.as_ref().map(StateId::short).as_deref(),
+            collapse_state.as_ref(),
+        )?;
+        restore_pre_land_thread(repo, &marker)?;
+        discard_unpublished_land_checkpoint_intent(repo, &marker)?;
+        mark_incomplete_land_phase(repo, IncompleteLandPhase::RollbackComplete)?;
+        clear_incomplete_land_marker(repo)?;
+        return Ok(());
+    }
 
     // A crash may happen after the Git checkpoint is durably recorded but
     // before the marker is removed. In that case the dual write completed and
     // recovery must only discard the stale journal.
-    if let Some(merge_state) = marker.merge_state.as_deref()
-        && let Some(state_id) = repo.resolve_state(merge_state)?
-        && (repo.latest_git_checkpoint_for_state(&state_id)?.is_some()
-            || heddle_core::recover_published_git_checkpoint(repo, &state_id)?.is_some())
+    if let (Some(merge_state), Some(target_branch)) = (
+        marker.merge_state.as_deref(),
+        marker.target_branch.as_deref(),
+    ) && let Some(state_id) = repo.resolve_state(merge_state)?
     {
-        clear_incomplete_land_marker(repo)?;
-        return Ok(());
+        let current_branch = repo.git_overlay_current_branch()?;
+        let pending_intent = repo
+            .pending_git_checkpoint_intent()?
+            .filter(|intent| intent.state_id == state_id.to_string_full());
+        let recovered = heddle_core::recover_published_git_checkpoint(repo, &state_id)?;
+        let checkpoint = if pending_intent.is_some() {
+            recovered
+        } else {
+            recovered.or(repo.latest_git_checkpoint_for_state(&state_id)?)
+        };
+        let current_oid = repo
+            .git_overlay_sley_repository()?
+            .and_then(|git| git.head().ok().and_then(|head| head.oid))
+            .map(|oid| oid.to_string());
+        let expected_oid = pending_intent
+            .as_ref()
+            .map(|intent| intent.new_git_oid.as_str())
+            .or_else(|| checkpoint.as_ref().map(|record| record.git_commit.as_str()));
+        if current_branch.as_deref() == Some(target_branch)
+            && expected_oid == current_oid.as_deref()
+            && checkpoint.is_some()
+        {
+            let collapse = marker
+                .collapse_state
+                .as_deref()
+                .and_then(|state| StateId::parse(state).ok());
+            coalesce_land_integration_and_checkpoint(
+                repo,
+                Some(merge_state),
+                expected_oid,
+                collapse.as_ref(),
+            )?;
+            clear_incomplete_land_marker(repo)?;
+            return Ok(());
+        }
     }
 
     let collapse = marker
         .collapse_state
         .as_deref()
         .and_then(|state| StateId::parse(state).ok());
+    mark_incomplete_land_phase(repo, IncompleteLandPhase::RollbackStarted)?;
     match auto_undo_land_integration(
         repo,
         &marker.thread_id,
@@ -1866,6 +2144,10 @@ pub(crate) fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()
         collapse.as_ref(),
     ) {
         Ok(()) => {
+            objects::fault_inject::maybe_fail_at("land_after_rollback_before_journal_update")?;
+            restore_pre_land_thread(repo, &marker)?;
+            discard_unpublished_land_checkpoint_intent(repo, &marker)?;
+            mark_incomplete_land_phase(repo, IncompleteLandPhase::RollbackComplete)?;
             clear_incomplete_land_marker(repo)?;
             eprintln!(
                 "note: recovered incomplete land of '{}': rolled back Heddle integration left without a Git checkpoint",
@@ -1978,6 +2260,7 @@ fn multi_land_error_peer(thread: &str, error: &anyhow::Error) -> MultiLandPeerRe
         integrated: false,
         synced: false,
         siblings_restacked: Vec::new(),
+        siblings_restack_failed: Vec::new(),
         blockers,
         warnings,
     }
@@ -2017,6 +2300,17 @@ fn write_multi_land_output(
             .and_then(|head| head.oid.map(|oid| oid.to_string()))
     });
     let recommended_action = stopped_at.map(|_| "heddle status".to_string());
+    let trust = repo
+        .map(build_repository_verification_state)
+        .map(|mut trust| {
+            if stopped_at.is_some() {
+                super::verification_health::override_trust_recommended_action(
+                    &mut trust,
+                    "heddle status",
+                );
+            }
+            trust
+        });
     let output = MultiLandOutput {
         output_kind: "land_batch",
         status: status.to_string(),
@@ -2028,7 +2322,7 @@ fn write_multi_land_output(
         peers,
         git_head,
         recommended_action: recommended_action.clone(),
-        trust: repo.map(build_repository_verification_state),
+        trust,
     };
 
     if should_output_json(cli, None) {

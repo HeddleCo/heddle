@@ -36,7 +36,7 @@ use tracing::debug;
 use super::{
     action_line::print_command,
     next_action::{NextActionValidationContext, write_command_json},
-    verification_health::repository_setup_guidance,
+    verification_health::{action_template, action_templates, repository_setup_guidance},
 };
 #[cfg(feature = "client")]
 use crate::config::UserConfig;
@@ -96,10 +96,6 @@ pub async fn cmd_status(
     watch_iterations: Option<usize>,
     watch_interval_ms: Option<u64>,
 ) -> Result<()> {
-    if let Some(start) = existing_heddle_repository_start(cli)? {
-        let repo = Repository::open(start)?;
-        super::workflow::recover_incomplete_land_if_present(&repo)?;
-    }
     if watch {
         return watch_status(cli, short, watch_iterations, watch_interval_ms).await;
     }
@@ -118,27 +114,6 @@ pub async fn cmd_status(
     let output = build_status_command_output(cli, short)?;
     render_status(cli, &output.report, short, output.render_json)?;
     Ok(())
-}
-
-/// Locate an already-initialized Heddle checkout without invoking
-/// `Repository::open` on a plain Git tree (that API intentionally bootstraps
-/// mutating callers). Stop at the first Git boundary so a nested plain Git
-/// repository is never mistaken for its parent's Heddle checkout.
-fn existing_heddle_repository_start(cli: &Cli) -> Result<Option<std::path::PathBuf>> {
-    let start = match cli.repo.as_ref() {
-        Some(path) => path.clone(),
-        None => std::env::current_dir()?,
-    };
-    let start = start.canonicalize()?;
-    for ancestor in start.ancestors() {
-        if ancestor.join(".heddle").is_dir() {
-            return Ok(Some(start));
-        }
-        if ancestor.join(".git").exists() {
-            return Ok(None);
-        }
-    }
-    Ok(None)
 }
 
 fn try_fast_short_status_report(cli: &Cli) -> Result<Option<FastShortStatusReport>> {
@@ -303,7 +278,7 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
         StatusDetail::ShortText
     } else if compact_json || (short && as_json) {
         StatusDetail::CompactMachine
-    } else if cli.verbose > 0 {
+    } else if cli.verbose > 0 || as_json {
         StatusDetail::Full
     } else {
         StatusDetail::DefaultText
@@ -321,6 +296,26 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
                 super::verification_health::machine_contract_coverage(),
             )),
     )?;
+    if let Some(thread) = ctx
+        .repo()
+        .map(super::workflow::pending_incomplete_land_thread)
+        .transpose()?
+        .flatten()
+    {
+        let action = super::command_catalog::heddle_action(["land", "--thread", thread.as_str()]);
+        output.blockers.push(format!(
+            "land of '{thread}' has durable recovery work pending"
+        ));
+        if !output.recovery_commands.contains(&action) {
+            output.recovery_commands.push(action.clone());
+        }
+        output.recovery_action_templates = action_templates(&output.recovery_commands);
+        output.coordination_status = CoordinationStatus::Blocked;
+        if output.recommended_action.is_empty() {
+            output.recommended_action = action.clone();
+            output.recommended_action_template = action_template(&action);
+        }
+    }
     // Core reports 0 for injected repos; fold the shell open into the profile
     // so `repo_open_ms` reflects real work on this path.
     output.profile.repo_open_ms += cli_repo_open_ms;

@@ -15,9 +15,11 @@ multi-parent or CRDT fan-in operation.
 
 When `ensure_current_state` runs in a Git Overlay checkout with a commit-pointing
 Git `HEAD`, it binds that commit through
-`ingest::import_single_git_commit_into`, records its Git checkpoint identity,
-and points the matching Heddle thread at the mapped state. It creates a
-worktree bootstrap state only for an empty or unborn Git checkout.
+`ingest::bind_single_git_commit_overlay`, records its Git checkpoint identity,
+and points the matching Heddle thread at the mapped state. The binding stores
+Git-to-Heddle mappings and reads mapped objects through the checkout's Git
+object database instead of copying the tip into Heddle's native object store.
+It creates a worktree bootstrap state only for an empty or unborn Git checkout.
 
 If the Git tip exists but cannot be bound, the command returns
 `git_overlay_tip_bind_failed` and recommends the explicit `heddle adopt`
@@ -33,16 +35,19 @@ Regression: `init_then_start_binds_git_tip_not_orphan_bootstrap`.
 
 ### Keep land and Git checkpoint state consistent
 
-Land writes `.heddle/incomplete-land.json` after the Heddle integration and
-before Git write-through. The marker is written atomically. A successful Git
-checkpoint clears it; a checkpoint error automatically undoes the land-owned
+Land writes `.heddle/incomplete-land.json` atomically before the first
+land-owned collapse or integration mutation, advances it through integration
+and rollback phases, and clears it only after Git write-through and oplog-batch
+coalescing complete. A checkpoint error automatically undoes the land-owned
 integration and any land-owned collapse batch.
 
-`land`, `status`, and `ready` recover a surviving marker. Recovery first checks
-whether the integrated state already has a recorded Git checkpoint, covering a
-crash after checkpoint publication but before marker removal. It removes that
-stale marker without undoing completed work. Otherwise it rolls the incomplete
-integration back and leaves a marker in place if rollback itself fails.
+`land` and `ready` recover a surviving marker; observe-only `status` reports the
+pending recovery and its retry action without mutating it. Recovery verifies
+the marker's target branch and the checkpoint intent's exact published OID,
+covering a crash after checkpoint publication but before marker removal without
+mistaking an older mapping for this publication. Otherwise it rolls the
+incomplete integration back. `rollback_started` / `rollback_complete` phases
+make cleanup retries idempotent after an undo has already run.
 
 Local and remote non-fast-forward failures remain distinct:
 `NonFastForwardRef.remote_destination` selects either
@@ -94,11 +99,12 @@ Key implementation: `crates/cli/src/cli/commands/workflow.rs`.
 For a solid or materialized thread rooted in a Rust workspace, `start` writes a
 thread-local Cargo configuration that points to the repository's shared target
 directory. `--no-shared-target` opts out. Agent fan-out and `try` pass the same
-default through, and a pre-existing Cargo configuration that prevents the
-redirect produces a warning.
+default through, and a pre-existing `.cargo/config.toml` or legacy
+`.cargo/config` that prevents the redirect produces a warning.
 
-The generated `.cargo/` path is excluded from Git Overlay status, and active
-shared-target setup skips hydrating a copied `target` directory.
+Only the generated `/.cargo/config.toml` is locally excluded from status;
+tracked `.cargo` content remains visible. Active shared-target setup skips
+hydrating a copied `target` directory.
 
 Key implementation:
 
@@ -112,9 +118,10 @@ Key implementation:
 index intent from one Sley short-status stream. Core status consumes both
 results together, so `git_index_ms` represents no second scan.
 
-Plain `status --output json` uses `StatusDetail::DefaultText`; only verbose
-status requests the all-thread `Full` shape. Compact and short machine output
-keep their smaller shape, and skipped verification remains `not_checked`.
+Plain `status --output json` and verbose status use the all-thread
+`StatusDetail::Full` shape so required machine fields remain truthful. Compact
+and short machine output keep their smaller shape, and skipped verification
+remains `not_checked`.
 
 Key implementation:
 

@@ -676,7 +676,9 @@ pub fn recover_published_git_checkpoint(
         return Ok(None);
     }
     if intent.phase == repo::GitCheckpointIntentPhase::Prepared {
-        if git_rev_parse_head(repo.root()).as_deref() != Some(intent.new_git_oid.as_str()) {
+        if repo.git_overlay_current_branch()?.as_deref() != Some(intent.branch.as_str())
+            || git_rev_parse_head(repo.root()).as_deref() != Some(intent.new_git_oid.as_str())
+        {
             return Ok(None);
         }
         let git_oid = intent.new_git_oid.clone();

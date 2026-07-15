@@ -18974,19 +18974,13 @@
           "items": {
             "$ref": "#/$defs/SiblingRestackFailureSchema"
           },
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
         },
         "siblings_restacked": {
           "items": {
             "type": "string"
           },
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
         },
         "skipped_steps": {
           "items": {
@@ -19025,6 +19019,8 @@
         "performed_steps",
         "skipped_steps",
         "chosen_path",
+        "siblings_restacked",
+        "siblings_restack_failed",
         "output_kind"
       ],
       "title": "LandSchema",
@@ -19068,10 +19064,7 @@
               "items": {
                 "type": "string"
               },
-              "type": [
-                "array",
-                "null"
-              ]
+              "type": "array"
             },
             "captured": {
               "type": "boolean"
@@ -19091,14 +19084,17 @@
             "message": {
               "type": "string"
             },
+            "siblings_restack_failed": {
+              "items": {
+                "$ref": "#/$defs/SiblingRestackFailureSchema"
+              },
+              "type": "array"
+            },
             "siblings_restacked": {
               "items": {
                 "type": "string"
               },
-              "type": [
-                "array",
-                "null"
-              ]
+              "type": "array"
             },
             "status": {
               "type": "string"
@@ -19113,10 +19109,7 @@
               "items": {
                 "type": "string"
               },
-              "type": [
-                "array",
-                "null"
-              ]
+              "type": "array"
             }
           },
           "required": [
@@ -19126,7 +19119,11 @@
             "captured",
             "checkpointed",
             "integrated",
-            "synced"
+            "synced",
+            "siblings_restacked",
+            "siblings_restack_failed",
+            "blockers",
+            "warnings"
           ],
           "type": "object"
         },
@@ -19523,6 +19520,21 @@
           ],
           "type": "object"
         },
+        "SiblingRestackFailureSchema": {
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "thread": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "thread",
+            "message"
+          ],
+          "type": "object"
+        },
         "VerificationCheckSchema": {
           "properties": {
             "clean": {
@@ -19703,7 +19715,11 @@
         "message",
         "threads",
         "landed",
-        "peers"
+        "peers",
+        "stopped_at",
+        "git_head",
+        "recommended_action",
+        "verification"
       ],
       "title": "LandBatchSchema",
       "type": "object"

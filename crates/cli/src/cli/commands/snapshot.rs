@@ -612,7 +612,7 @@ fn bind_git_overlay_active_tip(repo: &Repository) -> Result<Option<StateId>> {
     heddle_git_projection::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(
         repo.root(),
     );
-    let state_id = ingest::import_single_git_commit_into(
+    let state_id = ingest::bind_single_git_commit_overlay(
         repo.root(),
         repo.root(),
         &tip_sha,
@@ -663,10 +663,9 @@ fn resolve_active_git_tip_sha(repo: &Repository) -> Result<Option<String>> {
     };
     match git.head() {
         Ok(head) => Ok(head.oid.map(|oid| oid.to_string())),
-        Err(error) => {
-            debug!(error = %error, "Git HEAD not resolvable; no tip to bind");
-            Ok(None)
-        }
+        Err(error) => Err(anyhow!(RecoveryAdvice::git_overlay_tip_bind_failed(
+            format!("failed to resolve Git HEAD: {error}")
+        ))),
     }
 }
 

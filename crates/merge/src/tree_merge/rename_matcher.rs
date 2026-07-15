@@ -6,9 +6,10 @@ use std::collections::HashMap;
 use anyhow::Result;
 use heddle_format::delta::DeltaEncoder;
 use objects::{
-    object::{ContentHash, EntryType, Tree},
+    object::{ContentHash, EntryType, SpoolId, StateId, Tree},
     store::ObjectStore,
 };
+use sley::ObjectId as GitObjectId;
 use tracing::debug;
 
 use super::SemanticSimilarityFn;
@@ -57,12 +58,22 @@ pub(crate) struct RenameDetection {
 ///
 /// Rename-path rebuilds must not invent `executable: false` / file-only
 /// leaves — that dropped +x and flattened symlinks on refresh/land.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FlatLeaf {
     pub hash: ContentHash,
     pub entry_type: EntryType,
     /// Meaningful for [`EntryType::Blob`] only; always `false` for symlinks.
     pub executable: bool,
+    pub opaque: Option<OpaqueLeaf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OpaqueLeaf {
+    Gitlink(GitObjectId),
+    Spoollink {
+        spool_id: SpoolId,
+        state_id: StateId,
+    },
 }
 
 impl FlatLeaf {
@@ -71,6 +82,7 @@ impl FlatLeaf {
             hash,
             entry_type: EntryType::Blob,
             executable,
+            opaque: None,
         }
     }
 
@@ -79,6 +91,27 @@ impl FlatLeaf {
             hash,
             entry_type: EntryType::Symlink,
             executable: false,
+            opaque: None,
+        }
+    }
+
+    fn gitlink(target: GitObjectId) -> Self {
+        Self {
+            hash: ContentHash::compute_typed("flat-gitlink", target.as_bytes()),
+            entry_type: EntryType::Gitlink,
+            executable: false,
+            opaque: Some(OpaqueLeaf::Gitlink(target)),
+        }
+    }
+
+    fn spoollink(spool_id: SpoolId, state_id: StateId) -> Self {
+        let mut identity = spool_id.as_str().as_bytes().to_vec();
+        identity.extend_from_slice(state_id.as_bytes());
+        Self {
+            hash: ContentHash::compute_typed("flat-spoollink", &identity),
+            entry_type: EntryType::Spoollink,
+            executable: false,
+            opaque: Some(OpaqueLeaf::Spoollink { spool_id, state_id }),
         }
     }
 }
@@ -166,9 +199,16 @@ pub(crate) fn flatten_tree(
                     result.extend(flatten_tree(store, &subtree, &path)?);
                 }
             }
-            // Gitlinks and native child-spool edges carry no comparable
-            // content hash, so they take no part in rename detection.
-            EntryType::Gitlink | EntryType::Spoollink => {}
+            EntryType::Gitlink => {
+                if let Some(target) = entry.gitlink_target() {
+                    result.insert(path, FlatLeaf::gitlink(target));
+                }
+            }
+            EntryType::Spoollink => {
+                if let Some((spool_id, state_id)) = entry.spoollink_target() {
+                    result.insert(path, FlatLeaf::spoollink(spool_id.clone(), state_id));
+                }
+            }
         }
     }
 

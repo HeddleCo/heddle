@@ -36,6 +36,24 @@ fn ingest_mapped_change(path: &std::path::Path, git_sha: &str) -> Option<String>
         .map(|state_id| state_id.to_string_full())
 }
 
+fn native_mapped_object_files(path: &std::path::Path, state_id: &str) -> Vec<std::path::PathBuf> {
+    let map = ingest::ShaMap::open(path.join(".heddle").join("ingest").join("sha_map.sqlite"))
+        .expect("open overlay identity map");
+    let objects = path.join(".heddle").join("objects");
+    let mut files = vec![objects.join("states").join(format!("{state_id}.state"))];
+    for (kind, directory) in [
+        (ingest::MapKind::Blob, "blobs"),
+        (ingest::MapKind::Tree, "trees"),
+    ] {
+        for hash in map.content_hashes(kind) {
+            let hex = hash.to_hex();
+            files.push(objects.join(directory).join(&hex[..2]).join(&hex[2..]));
+        }
+    }
+    files.retain(|path| path.exists());
+    files
+}
+
 #[test]
 fn git_overlay_sync_adopts_fast_forward_upstream_tip() {
     let temp = TempDir::new().unwrap();
@@ -182,9 +200,10 @@ fn adopt_all_uses_ingest_mapping_without_internal_mirror() {
     );
 }
 
-/// P0-A: `heddle init` on an existing Git repo + `start` must bind the active
-/// Git tip instead of inventing a parentless "Bootstrap git-overlay…" root.
-/// The first export/write-through must share a merge-base with the base tip.
+/// P0-A: `heddle init` on an existing Git repo + `start` binds the active Git
+/// tip through the authoritative `.git` database rather than copying its
+/// state/tree/blob closure into native storage. The first export/write-through
+/// must still share a merge-base with the base tip.
 #[test]
 fn init_then_start_binds_git_tip_not_orphan_bootstrap() {
     let temp = TempDir::new().unwrap();
@@ -209,6 +228,26 @@ fn init_then_start_binds_git_tip_not_orphan_bootstrap() {
     assert!(
         !mapped.is_empty(),
         "lazy tip bind should map the active Git tip"
+    );
+    let copied = native_mapped_object_files(&work, &mapped);
+    assert!(
+        copied.is_empty(),
+        "lazy Git-tip binding must not copy mapped state, tree, or blob objects into the native store: {copied:?}"
+    );
+    assert_eq!(
+        std::fs::read_dir(work.join(".heddle").join("packs"))
+            .expect("native pack directory")
+            .count(),
+        0,
+        "lazy Git-tip binding must not install a native object pack"
+    );
+    assert!(
+        work.join(".heddle")
+            .join("ingest")
+            .join("overlay-states")
+            .join(format!("{mapped}.state"))
+            .is_file(),
+        "the durable overlay identity descriptor should exist outside native object storage"
     );
 
     let log_json = heddle(&["log", "--output", "json"], Some(&work)).unwrap();
@@ -258,6 +297,51 @@ fn init_then_start_binds_git_tip_not_orphan_bootstrap() {
     assert_eq!(
         merge_base, main_tip,
         "exported tip must share merge-base with the original main tip"
+    );
+}
+
+#[test]
+fn tip_bind_distinguishes_unborn_head_from_corrupt_head() {
+    let temp = TempDir::new().unwrap();
+    let unborn = temp.path().join("unborn");
+    std::fs::create_dir(&unborn).unwrap();
+    git(&unborn, &["init", "-b", "main"]);
+    configure_git_identity(&unborn);
+    heddle(&["init"], Some(&unborn)).unwrap();
+    heddle(
+        &["start", "feature/unborn", "--workspace", "solid"],
+        Some(&unborn),
+    )
+    .expect("a genuine unborn HEAD may bootstrap");
+
+    let corrupt = temp.path().join("corrupt");
+    std::fs::create_dir(&corrupt).unwrap();
+    git(&corrupt, &["init", "-b", "main"]);
+    configure_git_identity(&corrupt);
+    commit_file(&corrupt, "story.txt", "seed\n", "seed");
+    heddle(&["init"], Some(&corrupt)).unwrap();
+    std::fs::write(corrupt.join(".git").join("HEAD"), "not a valid HEAD\n").unwrap();
+
+    let output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "start",
+            "feature/corrupt",
+            "--workspace",
+            "solid",
+        ],
+        Some(&corrupt),
+    )
+    .expect("invoke start against corrupt HEAD");
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stderr).expect("typed JSON failure");
+    assert_eq!(error["kind"], "git_overlay_tip_bind_failed", "{error}");
+    assert!(
+        error["unsafe_condition"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("failed to resolve Git HEAD")),
+        "unexpected error: {error}"
     );
 }
 

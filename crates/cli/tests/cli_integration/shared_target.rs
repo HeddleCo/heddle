@@ -407,6 +407,52 @@ fn shared_target_dir_unset_when_user_config_preserved() {
 }
 
 #[test]
+fn shared_target_preserves_legacy_and_other_tracked_cargo_content() {
+    let temp = TempDir::new().unwrap();
+    init_rust_workspace(temp.path());
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let cargo_dir = temp.path().join(".cargo");
+    std::fs::create_dir_all(&cargo_dir).unwrap();
+    std::fs::write(cargo_dir.join("config"), "[net]\noffline = true\n").unwrap();
+    std::fs::write(cargo_dir.join("tracked.txt"), "tracked\n").unwrap();
+    heddle(&["capture", "-m", "tracked cargo files"], Some(temp.path())).unwrap();
+
+    let thread_path = temp.path().join("legacy-config");
+    let out = heddle_output(
+        &[
+            "start",
+            "legacy-config",
+            "--path",
+            thread_path.to_str().unwrap(),
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains(".cargo/config"));
+    assert_eq!(
+        std::fs::read_to_string(thread_path.join(".cargo/config")).unwrap(),
+        "[net]\noffline = true\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(thread_path.join(".cargo/tracked.txt")).unwrap(),
+        "tracked\n"
+    );
+    assert!(!thread_path.join(".cargo/config.toml").exists());
+
+    std::fs::write(thread_path.join(".cargo/tracked.txt"), "changed\n").unwrap();
+    let status: serde_json::Value =
+        serde_json::from_str(&heddle(&["status", "--output", "json"], Some(&thread_path)).unwrap())
+            .unwrap();
+    assert!(
+        status["changes"]["modified"]
+            .as_array()
+            .is_some_and(|paths| paths.iter().any(|path| path == ".cargo/tracked.txt")),
+        "narrow generated-file exclude must not hide tracked `.cargo` changes: {status}"
+    );
+}
+
+#[test]
 fn shared_target_dir_surfaces_in_thread_show_json() {
     let temp = TempDir::new().unwrap();
     init_rust_workspace(temp.path());
