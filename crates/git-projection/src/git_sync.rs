@@ -264,6 +264,7 @@ fn ensure_commit_update_fast_forward(
             name: ref_name.to_string(),
             old,
             new,
+            remote_destination: false,
         })
     }
 }

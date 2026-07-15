@@ -499,6 +499,14 @@ impl OpLog {
             .committed_batch_records(transaction_id)
     }
 
+    /// Return the exact batch carrying a committed transaction sentinel.
+    /// The indexed lookup is unbounded by recency, so delayed land recovery
+    /// cannot confuse an unrelated newer integration with its own batch.
+    pub fn committed_batch(&self, transaction_id: &str) -> Result<Option<OpBatch>> {
+        let guard = self.refresh_cached()?;
+        guard.as_ref().unwrap().committed_batch(transaction_id)
+    }
+
     fn update_batch_undone_state(&self, batch: &OpBatch, undone: bool) -> Result<OpBatch> {
         let _lock = self.write_lock()?;
         let mut packed = self.load_fresh_for_write()?;

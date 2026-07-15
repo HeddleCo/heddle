@@ -10,10 +10,13 @@ use heddle_core::{
 };
 use heddle_git_projection::GitProjection;
 use objects::{
-    object::{Agent, Attribution, Principal, StateId, Tree},
+    lock::RepositoryLockExt,
+    object::{Agent, Attribution, Principal, StateId, ThreadName, Tree},
+    store::ObjectStore,
     worktree::WorktreeStatus,
 };
-use repo::{Repository, SessionManager, SnapshotProfile, format_confidence};
+use refs::Head;
+use repo::{Repository, RepositoryCapability, SessionManager, SnapshotProfile, format_confidence};
 // Re-export the helper derivations so existing CLI call sites
 // (`thread.rs`, `harness/mod.rs`) keep `super::snapshot::summarize_*`
 // imports working without churn. The implementations live in
@@ -564,6 +567,21 @@ pub(crate) fn ensure_current_state(
         return Ok(state.state_id);
     }
 
+    // Lazy binding represents the committed Git tip only. A dirty overlay must
+    // take the native snapshot path so capture-oriented callers (notably
+    // `ready -m`) preserve the worktree bytes they already classified as work.
+    if repo.capability() == RepositoryCapability::GitOverlay
+        // Preserve the typed corrupt/unreadable-HEAD failure before status
+        // inspection; a genuine unborn HEAD still falls through to bootstrap.
+        && resolve_active_git_tip_sha(repo)?.is_some()
+        && repo
+            .git_overlay_worktree_status()?
+            .is_some_and(|status| status.is_clean())
+        && let Some(state_id) = bind_git_overlay_active_tip(repo)?
+    {
+        return Ok(state_id);
+    }
+
     create_snapshot(
         repo,
         user_config,
@@ -582,6 +600,121 @@ pub(crate) fn ensure_current_state(
 
     repo.head()?
         .ok_or_else(|| anyhow::anyhow!("Failed to establish initial current state"))
+}
+
+fn bind_git_overlay_active_tip(repo: &Repository) -> Result<Option<StateId>> {
+    // Git HEAD is the authority for an unbound overlay. Hold the canonical
+    // repository lock from the first authoritative read through sha-map,
+    // checkpoint, and Heddle ref publication so concurrent bootstraps cannot
+    // publish a stale tip or lose a checkpoint read-modify-write. The lock is
+    // same-thread reentrant, so nested repository writers remain deadlock-free.
+    let _lock = repo
+        .locker()
+        .write()
+        .map_err(|error| anyhow!("failed to lock repository while binding Git HEAD: {error}"))?;
+    let Some(tip_sha) = resolve_active_git_tip_sha(repo)? else {
+        return Ok(None);
+    };
+
+    if let Some(existing) = repo.git_overlay_mapped_state_for_git_commit(&tip_sha)? {
+        if repo.latest_git_checkpoint_for_state(&existing)?.is_none() {
+            repo.record_git_checkpoint(
+                &existing,
+                tip_sha.clone(),
+                format!("Bound active Git tip {}", &tip_sha[..tip_sha.len().min(12)]),
+            )?;
+        }
+        point_overlay_head_at_mapped_tip(repo, &existing)?;
+        return Ok(Some(existing));
+    }
+
+    heddle_git_projection::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(
+        repo.root(),
+    );
+    let state_id = ingest::bind_single_git_commit_overlay(
+        repo.root(),
+        repo.root(),
+        &tip_sha,
+        ingest::ImportOptions::default(),
+    )
+    .map_err(|error| {
+        anyhow!(RecoveryAdvice::git_overlay_tip_bind_failed(format!(
+            "failed to map Git tip {tip_sha}: {error}"
+        )))
+    })?;
+    if repo.store().get_state(&state_id)?.is_none() {
+        return Err(anyhow!(RecoveryAdvice::git_overlay_tip_bind_failed(
+            format!(
+                "mapped Git tip {tip_sha} to {} but the state object is not readable",
+                state_id.short()
+            )
+        )));
+    }
+    if repo.latest_git_checkpoint_for_state(&state_id)?.is_none() {
+        repo.record_git_checkpoint(
+            &state_id,
+            tip_sha.clone(),
+            format!("Bound active Git tip {}", &tip_sha[..tip_sha.len().min(12)]),
+        )?;
+    }
+    point_overlay_head_at_mapped_tip(repo, &state_id)?;
+    info!(
+        git_tip = %tip_sha,
+        state_id = %state_id.short(),
+        "bound active Git tip as first Heddle state"
+    );
+    Ok(Some(state_id))
+}
+
+fn resolve_active_git_tip_sha(repo: &Repository) -> Result<Option<String>> {
+    let git = match repo.git_overlay_sley_repository() {
+        Ok(Some(git)) => git,
+        Ok(None) => {
+            return Err(anyhow!(RecoveryAdvice::git_overlay_tip_bind_failed(
+                "repository is marked git-overlay but no Git worktree was found"
+            )));
+        }
+        Err(error) => {
+            return Err(anyhow!(RecoveryAdvice::git_overlay_tip_bind_failed(
+                format!("failed to open Git repository: {error}")
+            )));
+        }
+    };
+    match git.head() {
+        Ok(head) => Ok(head.oid.map(|oid| oid.to_string())),
+        Err(error) => Err(anyhow!(RecoveryAdvice::git_overlay_tip_bind_failed(
+            format!("failed to resolve Git HEAD: {error}")
+        ))),
+    }
+}
+
+fn point_overlay_head_at_mapped_tip(repo: &Repository, state_id: &StateId) -> Result<()> {
+    // Publication follows Git HEAD's physical attachment state. In
+    // particular, a freshly-created sidecar's default attached `main` HEAD
+    // must never turn a detached Git commit into a `main` ref update. Check
+    // detachment before `git_overlay_current_branch`, whose in-progress
+    // fallback can name a branch while Git itself is detached.
+    if !repo.git_overlay_head_is_detached()?
+        && let Some(branch) = repo.git_overlay_current_branch()?
+    {
+        let thread = ThreadName::from(branch.as_str());
+        if repo.refs().get_thread(&thread)?.as_ref() != Some(state_id) {
+            repo.refs().set_thread(&thread, state_id)?;
+        }
+        let expected = Head::Attached {
+            thread: thread.clone(),
+        };
+        if repo.refs().read_head()? != expected {
+            repo.refs().write_head(&expected)?;
+        }
+        return Ok(());
+    }
+
+    let expected = Head::Detached { state: *state_id };
+    if repo.refs().read_head()? != expected {
+        repo.refs().write_head(&expected)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn create_snapshot_profiled(
@@ -662,6 +795,7 @@ fn create_snapshot_profiled_inner(
         run_hooks: true,
         commit_safe_post_verify: false,
         coalesce_snapshot_and_checkpoint: false,
+        linearize_git_parent: false,
         precomputed_worktree_status: None,
     };
     if let Some(status) = worktree_status {
@@ -710,6 +844,7 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         run_hooks: true,
         commit_safe_post_verify: false,
         coalesce_snapshot_and_checkpoint: false,
+        linearize_git_parent: false,
         precomputed_worktree_status: None,
     };
     let report = execute_save(repo, plan)?;
@@ -1126,6 +1261,12 @@ fn is_disk_full_anyhow(err: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        process::Command,
+        sync::{Arc, Barrier},
+        thread,
+    };
+
     use super::*;
 
     fn user_config_with_principal() -> UserConfig {
@@ -1236,6 +1377,139 @@ mod tests {
             .expect("detected harness actor should set agent");
         assert_eq!(agent.provider, "anthropic");
         assert_eq!(agent.model, "claude-opus-4-8[1m]");
+    }
+
+    #[test]
+    fn concurrent_overlay_bootstraps_bind_latest_locked_git_tip_once() {
+        let temp = tempfile::TempDir::new().expect("create Git fixture");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("Git output is UTF-8")
+                .trim()
+                .to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Overlay Test"]);
+        git(&["config", "user.email", "overlay@example.com"]);
+        std::fs::write(temp.path().join("README.md"), "old\n").expect("write old tip");
+        git(&["add", "README.md"]);
+        git(&["commit", "-m", "old tip"]);
+        let old_tip = git(&["rev-parse", "HEAD"]);
+
+        let repo = Repository::bootstrap_git_overlay(temp.path()).expect("bootstrap overlay");
+        let authoritative_update = repo.locker().write().expect("hold repository lock");
+        let ready = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let root = temp.path().to_path_buf();
+            let ready = Arc::clone(&ready);
+            workers.push(thread::spawn(move || {
+                let repo = Repository::open(root).expect("open worker repository");
+                ready.wait();
+                bind_git_overlay_active_tip(&repo).expect("bind authoritative Git tip")
+            }));
+        }
+        ready.wait();
+
+        // Both simulated commands are now contending on the repository lock.
+        // Advance authoritative Git while holding it; neither command may have
+        // resolved the stale tip before the publication transaction begins.
+        std::fs::write(temp.path().join("README.md"), "new\n").expect("write new tip");
+        git(&["add", "README.md"]);
+        git(&["commit", "-m", "new tip"]);
+        let new_tip = git(&["rev-parse", "HEAD"]);
+        drop(authoritative_update);
+
+        let states = workers
+            .into_iter()
+            .map(|worker| {
+                worker
+                    .join()
+                    .expect("join bootstrap worker")
+                    .expect("state")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(states[0], states[1]);
+        let repo = Repository::open(temp.path()).expect("reopen repository");
+        assert_eq!(
+            repo.current_state()
+                .expect("read current state")
+                .expect("bound state")
+                .state_id,
+            states[0]
+        );
+        assert!(
+            repo.git_overlay_mapped_state_for_git_commit(&old_tip)
+                .expect("read old mapping")
+                .is_none(),
+            "no contender may publish the Git tip observed before lock acquisition"
+        );
+        let checkpoints = repo.list_git_checkpoints().expect("read checkpoints");
+        assert_eq!(
+            checkpoints.len(),
+            1,
+            "checkpoint RMW must not lose or duplicate"
+        );
+        assert_eq!(checkpoints[0].git_commit, new_tip);
+        assert_eq!(checkpoints[0].state_id, states[0].to_string_full());
+    }
+
+    #[test]
+    fn detached_overlay_bootstrap_detaches_heddle_without_moving_default_thread() {
+        let temp = tempfile::TempDir::new().expect("create Git fixture");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("Git output is UTF-8")
+                .trim()
+                .to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Overlay Test"]);
+        git(&["config", "user.email", "overlay@example.com"]);
+        std::fs::write(temp.path().join("README.md"), "detached\n").expect("write tip");
+        git(&["add", "README.md"]);
+        git(&["commit", "-m", "detached tip"]);
+        let tip = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "--detach", &tip]);
+
+        let repo = Repository::bootstrap_git_overlay(temp.path()).expect("bootstrap overlay");
+        let state = bind_git_overlay_active_tip(&repo)
+            .expect("bind detached tip")
+            .expect("mapped state");
+
+        assert_eq!(
+            repo.refs().read_head().expect("read raw Heddle HEAD"),
+            Head::Detached { state }
+        );
+        assert!(
+            repo.refs()
+                .get_thread(&ThreadName::new("main"))
+                .expect("read default thread")
+                .is_none(),
+            "detached Git bootstrap must not publish through the sidecar's default attached thread"
+        );
     }
 
     #[test]

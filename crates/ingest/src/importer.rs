@@ -370,9 +370,29 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
         let pack_path = staging_dir.join(format!("{run_id}.pack"));
         let index_path = staging_dir.join(format!("{run_id}.idx"));
         let bucket_dir = staging_dir.join(format!("{run_id}-buckets"));
+        let overlay_descriptor_dir = staging_dir
+            .parent()
+            .map(|parent| parent.join("overlay-states"));
+        let descriptor_commits = commits
+            .iter()
+            .filter_map(|commit| {
+                let state = self.map.get_commit(&commit.sha)?;
+                overlay_descriptor_dir
+                    .as_ref()
+                    .is_some_and(|dir| {
+                        dir.join(format!("{}.state", state.to_string_full()))
+                            .is_file()
+                    })
+                    .then(|| (commit.sha.clone(), state))
+            })
+            .collect::<Vec<_>>();
+        let repair_mapped_objects = !descriptor_commits.is_empty();
 
         self.map.begin_append_batch()?;
         let write_result = (|| -> crate::Result<PackedImportStats> {
+            for (git_sha, _) in &descriptor_commits {
+                self.map.remove_commit(git_sha)?;
+            }
             let pack_file = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -396,7 +416,8 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
                 bucket_dir.clone(),
             )
             .map_err(IngestError::from)?;
-            let mut packed = PackedImport::new(self.git, self.map, builder, self.options.clone());
+            let mut packed = PackedImport::new(self.git, self.map, builder, self.options.clone())
+                .repair_mapped_objects(repair_mapped_objects);
             let mut last_log = 0usize;
             for (idx, commit) in commits.iter().enumerate() {
                 // Canonical lossy marker (#567): translating this commit's tree
@@ -408,7 +429,12 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
                 let lossy_before = packed.stats.lossy_entries.len();
                 let tree_hash = packed.translate_tree(&commit.tree_sha)?;
                 let git_lossy = packed.stats.lossy_entries.len() > lossy_before;
-                packed.write_commit(commit, tree_hash, git_lossy)?;
+                packed.write_commit_with_parent_policy(
+                    commit,
+                    tree_hash,
+                    git_lossy,
+                    ParentMapPolicy::RequireMapped,
+                )?;
                 if let Some(progress) = self.progress.as_deref_mut() {
                     progress(ImportProgressEvent {
                         commits_imported: idx + 1,
@@ -451,7 +477,18 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             }
         };
 
+        let descriptor_state_remaps = descriptor_commits
+            .iter()
+            .filter_map(|(git_sha, old_state)| {
+                self.map
+                    .get_commit(git_sha)
+                    .filter(|new_state| new_state != old_state)
+                    .map(|new_state| (*old_state, new_state))
+            })
+            .collect::<Vec<_>>();
+
         let ref_stats = RefEmitter::new(self.refs, self.store, self.map)
+            .with_state_remaps(descriptor_state_remaps)
             .emit(&heads)
             .await?;
         info!(
@@ -513,6 +550,10 @@ struct PackedImport<'a, W: std::io::Write + std::io::Read + std::io::Seek + Sync
     builder: StreamingPackBuilder<W>,
     stats: PackedImportStats,
     options: ImportOptions,
+    emit_objects: bool,
+    repair_mapped_objects: bool,
+    materialized_trees: HashSet<String>,
+    materialized_blobs: HashSet<String>,
 }
 
 impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImport<'a, W> {
@@ -528,7 +569,21 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
             builder,
             stats: PackedImportStats::default(),
             options,
+            emit_objects: true,
+            repair_mapped_objects: false,
+            materialized_trees: HashSet::new(),
+            materialized_blobs: HashSet::new(),
         }
+    }
+
+    fn mapping_only(mut self) -> Self {
+        self.emit_objects = false;
+        self
+    }
+
+    fn repair_mapped_objects(mut self, repair: bool) -> Self {
+        self.repair_mapped_objects = repair;
+        self
     }
 
     fn translate_tree(&mut self, git_tree_sha: &str) -> crate::Result<ContentHash> {
@@ -540,7 +595,10 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
         git_tree_sha: &str,
         path_prefix: &str,
     ) -> crate::Result<ContentHash> {
-        if let Some(hash) = self.map.get_tree(git_tree_sha) {
+        if let Some(hash) = self.map.get_tree(git_tree_sha)
+            && (!self.repair_mapped_objects
+                || !self.materialized_trees.insert(git_tree_sha.to_string()))
+        {
             let entries = self
                 .map
                 .get_tree_lossy_entries(git_tree_sha)
@@ -561,6 +619,7 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
             }
             return Ok(hash);
         }
+        self.materialized_trees.insert(git_tree_sha.to_string());
 
         let before_lossy = self.stats.lossy_entries.len();
         let children = self.git.read_tree(git_tree_sha)?;
@@ -585,8 +644,10 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
         // "invalid type: integer N, expected struct Tree".
         let data = rmp_serde::to_vec_named(&tree)
             .map_err(|e| IngestError::Other(format!("serialize tree for import pack: {e}")))?;
-        self.builder.add(hash, PackObjectType::Tree, data)?;
-        self.stats.object_count += 1;
+        if self.emit_objects {
+            self.builder.add(hash, PackObjectType::Tree, data)?;
+            self.stats.object_count += 1;
+        }
         self.stats.trees += 1;
 
         self.map
@@ -663,15 +724,21 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
     }
 
     fn translate_blob(&mut self, git_blob_sha: &str) -> crate::Result<ContentHash> {
-        if let Some(hash) = self.map.get_blob(git_blob_sha) {
+        if let Some(hash) = self.map.get_blob(git_blob_sha)
+            && (!self.repair_mapped_objects
+                || !self.materialized_blobs.insert(git_blob_sha.to_string()))
+        {
             return Ok(hash);
         }
+        self.materialized_blobs.insert(git_blob_sha.to_string());
 
         let bytes = self.git.read_blob(git_blob_sha)?;
         let blob = Blob::from_slice(&bytes);
         let hash = blob.hash();
-        self.builder.add(hash, PackObjectType::Blob, bytes)?;
-        self.stats.object_count += 1;
+        if self.emit_objects {
+            self.builder.add(hash, PackObjectType::Blob, bytes)?;
+            self.stats.object_count += 1;
+        }
         self.stats.blobs += 1;
 
         self.map
@@ -689,28 +756,36 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
         Ok(hash)
     }
 
-    fn write_commit(
+    /// Write a commit state and return its physical Heddle state id (existing or new).
+    fn write_commit_with_parent_policy(
         &mut self,
         commit: &CommitEntry,
         tree: ContentHash,
         git_lossy: bool,
-    ) -> crate::Result<bool> {
+        parent_policy: ParentMapPolicy,
+    ) -> crate::Result<objects::object::StateId> {
         if let Some(cid) = self.map.get_commit(&commit.sha) {
-            let _ = cid;
-            return Ok(false);
+            return Ok(cid);
         }
 
         let mut parents = Vec::with_capacity(commit.parents.len());
         for p in &commit.parents {
             match self.map.get_commit(p) {
                 Some(cid) => parents.push(cid),
-                None => {
-                    return Err(IngestError::Other(format!(
-                        "commit {} has parent {} that hasn't been translated yet — \
-                         feed commits in topological order",
-                        commit.sha, p
-                    )));
-                }
+                None => match parent_policy {
+                    ParentMapPolicy::RequireMapped => {
+                        return Err(IngestError::Other(format!(
+                            "commit {} has parent {} that hasn't been translated yet — \
+                             feed commits in topological order",
+                            commit.sha, p
+                        )));
+                    }
+                    // Single-tip bind: treat unmapped git parents as absent so
+                    // the tip becomes a Heddle root while remaining mapped to
+                    // the real git OID (export of children still parents onto
+                    // that OID).
+                    ParentMapPolicy::OrphanUnmapped => {}
+                },
             }
         }
 
@@ -719,19 +794,30 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
         // explanation in `translate_tree`.
         let data = rmp_serde::to_vec_named(&state)
             .map_err(|e| IngestError::Other(format!("serialize state for import pack: {e}")))?;
-        self.builder.add_id(
-            PackObjectId::StateId(state.id()),
-            PackObjectType::State,
-            data,
-        )?;
-        self.stats.object_count += 1;
+        if self.emit_objects {
+            self.builder.add_id(
+                PackObjectId::StateId(state.id()),
+                PackObjectType::State,
+                data,
+            )?;
+            self.stats.object_count += 1;
+        }
         self.stats.states += 1;
 
         self.map
             .insert_commit(&commit.sha, state.state_id)
             .map_err(IngestError::from)?;
-        Ok(true)
+        Ok(state.state_id)
     }
+}
+
+/// How [`PackedImport::write_commit_with_parent_policy`] resolves git parents.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParentMapPolicy {
+    /// Full history import: every parent must already be in the sha map.
+    RequireMapped,
+    /// Single-tip lazy bind: drop unmapped parents (tip becomes a Heddle root).
+    OrphanUnmapped,
 }
 
 /// Strip a trailing `.heddle` component if present, otherwise return
@@ -834,6 +920,224 @@ pub fn import_git_into_scoped_with_options_and_progress(
         pollster::block_on(importer.run())?
     };
     Ok((stats, map))
+}
+
+/// Lazily bind a single Git commit tip into Heddle without walking ancestors.
+///
+/// For ordinary Git commits the tip is translated as a Heddle root because its
+/// Git parents have not been mapped. A portable Heddle export note instead
+/// preserves its embedded source State and parent identities exactly; a later
+/// full [`import_git_into`] / `heddle adopt` validates and materializes that
+/// graph. The mapping always records the real Git OID for later export.
+///
+/// Returns the mapped Heddle state id for `git_sha`. Idempotent when the tip
+/// is already mapped.
+pub fn import_single_git_commit_into(
+    git_path: impl AsRef<Path>,
+    heddle_path: impl AsRef<Path>,
+    git_sha: &str,
+    options: ImportOptions,
+) -> crate::Result<objects::object::StateId> {
+    let git = GitSource::open(git_path)?;
+    let heddle_path = heddle_path.as_ref();
+    let root = strip_trailing_heddle(heddle_path);
+
+    let repo = match repo::Repository::init(root) {
+        Ok(r) => r,
+        Err(objects::error::HeddleError::RepositoryExists(_)) => repo::Repository::open(root)?,
+        Err(e) => return Err(e.into()),
+    };
+
+    let map_path = repo.heddle_dir().join("ingest").join("sha_map.sqlite");
+    let mut map = ShaMap::open(&map_path)?;
+    if let Some(existing) = map.get_commit(git_sha) {
+        // Already bound — still verify the state object is present.
+        if repo.store().get_state(&existing)?.is_some() {
+            return Ok(existing);
+        }
+        return Err(IngestError::Other(format!(
+            "Git commit {git_sha} is mapped to missing Heddle state {}; run a full Git adoption to repair the mapping",
+            existing.to_string_full()
+        )));
+    }
+
+    let commit = git.read_commit(git_sha)?;
+    let staging_dir = repo.heddle_dir().join("ingest").join("staging");
+    std::fs::create_dir_all(&staging_dir).map_err(|e| {
+        IngestError::Other(format!(
+            "creating pack staging dir {}: {e}",
+            staging_dir.display()
+        ))
+    })?;
+    let run_id = format!(
+        "tip-{}-{}-{}",
+        std::process::id(),
+        IMPORT_RUN_COUNTER.fetch_add(1, Ordering::Relaxed),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    );
+    let pack_path = staging_dir.join(format!("{run_id}.pack"));
+    let index_path = staging_dir.join(format!("{run_id}.idx"));
+    let bucket_dir = staging_dir.join(format!("{run_id}-buckets"));
+
+    map.begin_append_batch()?;
+    let write_result = (|| -> crate::Result<objects::object::StateId> {
+        let pack_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&pack_path)
+            .map_err(|e| {
+                IngestError::Other(format!(
+                    "opening pack staging file {}: {e}",
+                    pack_path.display()
+                ))
+            })?;
+        let compression = CompressionConfig {
+            max_delta_size: 0,
+            ..CompressionConfig::default()
+        };
+        let builder = StreamingPackBuilder::new(
+            pack_file,
+            index_path.clone(),
+            compression,
+            bucket_dir.clone(),
+        )
+        .map_err(IngestError::from)?;
+        let mut packed = PackedImport::new(&git, &mut map, builder, options);
+        let lossy_before = packed.stats.lossy_entries.len();
+        let tree_hash = packed.translate_tree(&commit.tree_sha)?;
+        let git_lossy = packed.stats.lossy_entries.len() > lossy_before;
+        let change_id = packed.write_commit_with_parent_policy(
+            &commit,
+            tree_hash,
+            git_lossy,
+            ParentMapPolicy::OrphanUnmapped,
+        )?;
+        if packed.stats.object_count > 0 {
+            let (_file, _) = packed.builder.finalize()?;
+            repo.store()
+                .install_pack_streaming(&pack_path, &index_path)?;
+        } else {
+            let _ = std::fs::remove_file(&pack_path);
+            let _ = std::fs::remove_dir_all(&bucket_dir);
+        }
+        Ok(change_id)
+    })();
+
+    match write_result {
+        Ok(change_id) => {
+            map.flush_append_batch()?;
+            Ok(change_id)
+        }
+        Err(error) => {
+            map.abort_append_batch();
+            let _ = std::fs::remove_file(&pack_path);
+            let _ = std::fs::remove_dir_all(&bucket_dir);
+            Err(error)
+        }
+    }
+}
+
+/// Bind one Git commit as an overlay-native Heddle state without copying its
+/// source tree or blobs into the native object store.
+///
+/// Translation reuses the full importer's canonical tree/blob mapping logic,
+/// but emits only identity rows plus a compact state descriptor. Object reads
+/// subsequently resolve through the authoritative `.git` database.
+pub fn bind_single_git_commit_overlay(
+    git_path: impl AsRef<Path>,
+    heddle_path: impl AsRef<Path>,
+    git_sha: &str,
+    options: ImportOptions,
+) -> crate::Result<objects::object::StateId> {
+    let git = GitSource::open(git_path)?;
+    let root = strip_trailing_heddle(heddle_path.as_ref());
+    let repo = repo::Repository::open(root)?;
+    let map_path = repo.heddle_dir().join("ingest").join("sha_map.sqlite");
+    let mut map = ShaMap::open(&map_path)?;
+    if let Some(existing) = map.get_commit(git_sha) {
+        if repo.store().get_state(&existing)?.is_some() {
+            return Ok(existing);
+        }
+        return Err(IngestError::Other(format!(
+            "Git commit {git_sha} maps to unreadable Heddle state {}",
+            existing.to_string_full()
+        )));
+    }
+
+    let commit = git.read_commit(git_sha)?;
+    let staging_dir = repo.heddle_dir().join("ingest").join("staging");
+    std::fs::create_dir_all(&staging_dir)?;
+    let run_id = format!(
+        "overlay-tip-{}-{}",
+        std::process::id(),
+        IMPORT_RUN_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let pack_path = staging_dir.join(format!("{run_id}.pack"));
+    let index_path = staging_dir.join(format!("{run_id}.idx"));
+    let bucket_dir = staging_dir.join(format!("{run_id}-buckets"));
+    let pack_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&pack_path)?;
+    let builder = StreamingPackBuilder::new(
+        pack_file,
+        index_path.clone(),
+        CompressionConfig {
+            max_delta_size: 0,
+            ..CompressionConfig::default()
+        },
+        bucket_dir.clone(),
+    )
+    .map_err(IngestError::from)?;
+
+    map.begin_append_batch()?;
+    let mut state_path = None;
+    let result = (|| -> crate::Result<objects::object::StateId> {
+        let mut packed = PackedImport::new(&git, &mut map, builder, options).mapping_only();
+        let lossy_before = packed.stats.lossy_entries.len();
+        let tree_hash = packed.translate_tree(&commit.tree_sha)?;
+        let git_lossy = packed.stats.lossy_entries.len() > lossy_before;
+        let state =
+            crate::state_writer::descriptor_state_from_commit(&commit, tree_hash, git_lossy)?;
+        packed
+            .map
+            .insert_commit(&commit.sha, state.state_id)
+            .map_err(IngestError::from)?;
+        let descriptor_dir = repo.heddle_dir().join("ingest").join("overlay-states");
+        objects::fs_atomic::create_private_dir_all(&descriptor_dir)?;
+        let path = descriptor_dir.join(format!("{}.state", state.state_id.to_string_full()));
+        let bytes = rmp_serde::to_vec_named(&state)
+            .map_err(|error| IngestError::Other(format!("serialize overlay state: {error}")))?;
+        objects::fs_atomic::write_file_atomic(&path, &bytes)?;
+        state_path = Some(path);
+        Ok(state.state_id)
+    })();
+
+    let _ = std::fs::remove_file(&pack_path);
+    let _ = std::fs::remove_file(&index_path);
+    let _ = std::fs::remove_dir_all(&bucket_dir);
+    match result {
+        Ok(state_id) => {
+            if let Err(error) = map.flush_append_batch() {
+                if let Some(path) = state_path {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(error.into());
+            }
+            Ok(state_id)
+        }
+        Err(error) => {
+            map.abort_append_batch();
+            if let Some(path) = state_path {
+                let _ = std::fs::remove_file(path);
+            }
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1266,6 +1570,169 @@ mod tests {
     }
 
     #[test]
+    fn overlay_repair_materializes_each_mapped_object_once() {
+        let gitdir = TempDir::new().unwrap();
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(gitdir.path())
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .expect("git command");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+
+        run(&["init", "-q", "--initial-branch=main"]);
+        std::fs::write(gitdir.path().join("shared.txt"), "shared\n").unwrap();
+        std::fs::write(gitdir.path().join("evolving.txt"), "one\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "one"]);
+        for (content, message) in [("two\n", "two"), ("three\n", "three")] {
+            std::fs::write(gitdir.path().join("evolving.txt"), content).unwrap();
+            run(&["add", "evolving.txt"]);
+            run(&["commit", "-q", "-m", message]);
+        }
+        let tip = run(&["rev-parse", "HEAD"]);
+
+        repo::Repository::init(gitdir.path()).expect("initialize overlay repository");
+        bind_single_git_commit_overlay(
+            gitdir.path(),
+            gitdir.path(),
+            &tip,
+            ImportOptions::default(),
+        )
+        .expect("bind lazy overlay tip");
+
+        let (stats, _) = import_git_into(gitdir.path(), gitdir.path())
+            .expect("full import repairs the descriptor-backed closure");
+        assert_eq!(
+            stats.trees_imported, 3,
+            "each root tree is materialized once"
+        );
+        assert_eq!(
+            stats.blobs_imported, 4,
+            "the unchanged shared blob must not be appended once per commit"
+        );
+    }
+
+    #[test]
+    fn fresh_overlay_clone_binds_non_root_export_note_then_full_import_preserves_graph() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source");
+        let native = temp.path().join("native");
+        let clone = temp.path().join("clone");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&native).unwrap();
+        git_output(&source, &["init", "-q", "--initial-branch=main"], None);
+        std::fs::write(source.join("story.txt"), "one\n").unwrap();
+        git_output(&source, &["add", "story.txt"], None);
+        git_output(&source, &["commit", "-q", "-m", "root"], None);
+        std::fs::write(source.join("story.txt"), "one\ntwo\n").unwrap();
+        git_output(&source, &["add", "story.txt"], None);
+        git_output(&source, &["commit", "-q", "-m", "child"], None);
+        let tip = git_output(&source, &["rev-parse", "HEAD"], None);
+
+        let (_, source_map) = import_git_into(&source, &native).expect("import source graph");
+        let source_id = source_map.get_commit(&tip).expect("mapped source tip");
+        let source_repo = repo::Repository::open(&native).expect("open source Heddle repo");
+        let source_state = source_repo
+            .store()
+            .get_state(&source_id)
+            .expect("read source state")
+            .expect("source state");
+        assert_eq!(
+            source_state.parents.len(),
+            1,
+            "fixture tip must be non-root"
+        );
+        let note = serde_json::json!({
+            "state_id": source_state.id().to_string_full(),
+            "change_id": source_state.change_id.to_string_full(),
+            "source_state": source_state.clone(),
+            "status": "draft"
+        })
+        .to_string();
+        git_output(
+            &source,
+            &["notes", "--ref=heddle", "add", "-f", "-F", "-", &tip],
+            Some(note.as_bytes()),
+        );
+
+        let clone_output = Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                "--no-local",
+                source.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("clone exported Git repository");
+        assert!(
+            clone_output.status.success(),
+            "clone failed: {}",
+            String::from_utf8_lossy(&clone_output.stderr)
+        );
+        git_output(
+            &clone,
+            &[
+                "fetch",
+                "-q",
+                "origin",
+                "refs/notes/heddle:refs/notes/heddle",
+            ],
+            None,
+        );
+
+        repo::Repository::bootstrap_git_overlay(&clone).expect("initialize fresh overlay clone");
+        let bound = bind_single_git_commit_overlay(&clone, &clone, &tip, ImportOptions::default())
+            .expect("bind exported non-root tip lazily");
+        assert_eq!(bound, source_id);
+        let clone_repo = repo::Repository::open(&clone).expect("open overlay clone");
+        assert_eq!(
+            clone_repo
+                .store()
+                .get_state(&bound)
+                .expect("read descriptor")
+                .expect("descriptor state"),
+            source_state,
+            "lazy bind must retain the exact portable source State"
+        );
+        drop(clone_repo);
+
+        let (_, repaired_map) =
+            import_git_into(&clone, &clone).expect("materialize full noted parent graph");
+        assert_eq!(repaired_map.get_commit(&tip), Some(source_id));
+        let repaired = repo::Repository::open(&clone).expect("open repaired clone");
+        let repaired_state = repaired
+            .store()
+            .get_state(&source_id)
+            .expect("read repaired state")
+            .expect("repaired state");
+        assert_eq!(repaired_state, source_state);
+        assert!(
+            repaired
+                .store()
+                .get_state(&source_state.parents[0])
+                .expect("read materialized parent")
+                .is_some(),
+            "full import must materialize the exact parent graph retained by the note"
+        );
+    }
+
+    #[test]
     fn progress_reports_total_and_new_state_count() {
         let gitdir = TempDir::new().unwrap();
         let heddledir = TempDir::new().unwrap();
@@ -1525,6 +1992,74 @@ mod tests {
         assert!(
             !gitdir.path().join(".heddle").join("git").exists(),
             "ingest-backed import must not create the legacy Bridge Mirror"
+        );
+    }
+
+    #[test]
+    fn import_single_git_commit_binds_tip_without_ancestors() {
+        let gitdir = TempDir::new().unwrap();
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(gitdir.path())
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .status()
+                .expect("git cmd");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-q", "--initial-branch=main"]);
+        std::fs::write(gitdir.path().join("a.txt"), "one").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-q", "-m", "first"]);
+        std::fs::write(gitdir.path().join("a.txt"), "two").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-q", "-m", "second"]);
+        let tip = git_output(gitdir.path(), &["rev-parse", "HEAD"], None);
+
+        let change_id = import_single_git_commit_into(
+            gitdir.path(),
+            gitdir.path(),
+            &tip,
+            ImportOptions::default(),
+        )
+        .expect("single-tip import");
+
+        let map = ShaMap::open(gitdir.path().join(".heddle/ingest/sha_map.sqlite")).unwrap();
+        assert_eq!(map.get_commit(&tip), Some(change_id));
+        // Only the tip — not the parent commit.
+        assert_eq!(map.commit_shas().len(), 1);
+
+        let repo = repo::Repository::open(gitdir.path()).unwrap();
+        let state = repo
+            .store()
+            .get_state(&change_id)
+            .unwrap()
+            .expect("tip state present");
+        assert!(
+            state.parents.is_empty(),
+            "single-tip bind is a Heddle root mapped to the git tip"
+        );
+
+        // Idempotent re-bind.
+        let again = import_single_git_commit_into(
+            gitdir.path(),
+            gitdir.path(),
+            &tip,
+            ImportOptions::default(),
+        )
+        .expect("re-bind");
+        assert_eq!(again, change_id);
+        assert_eq!(
+            ShaMap::open(gitdir.path().join(".heddle/ingest/sha_map.sqlite"))
+                .unwrap()
+                .commit_shas()
+                .len(),
+            1
         );
     }
 

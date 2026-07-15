@@ -81,6 +81,7 @@ pub fn cmd_commit(cli: &Cli, args: CommitArgs) -> Result<()> {
             action: "commit",
             message: args.message.as_deref(),
             retry_command: "heddle commit -m \"...\"",
+            linearize_git_parent: false,
         },
         worktree_status_options(Some(repo.config())),
     )?;

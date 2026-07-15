@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! End-to-end coverage of `heddle start --shared-target` (item 2.1
-//! of the heddle 6→8 plan).
+//! End-to-end coverage of shared cargo `target/` redirect for
+//! solid/materialized threads (default-on for Rust workspaces; P1-A).
 //!
 //! These tests run the built `heddle` binary inside temp dirs and
 //! inspect what `start` writes to disk. They never actually invoke
@@ -11,10 +11,10 @@
 use super::*;
 
 /// Initialize a tiny Rust workspace inside `dir`. Just enough that
-/// `start --shared-target` finds a `Cargo.toml` to fingerprint and
-/// the advisory heuristic recognizes the workspace as Rust. We
-/// intentionally don't write a `Cargo.lock` for the first test; one
-/// of the subsequent tests covers the lock-bias fingerprint path.
+/// shared-target finds a `Cargo.toml` to fingerprint and the default-on
+/// heuristic recognizes the workspace as Rust. We intentionally don't
+/// write a `Cargo.lock` for the first test; one of the subsequent
+/// tests covers the lock-bias fingerprint path.
 fn init_rust_workspace(dir: &std::path::Path) {
     std::fs::write(
         dir.join("Cargo.toml"),
@@ -90,6 +90,40 @@ fn shared_target_writes_cargo_config_pointing_to_shared_dir() {
 }
 
 #[test]
+fn default_shared_target_for_rust_solid_thread_without_flags() {
+    let temp = TempDir::new().unwrap();
+    init_rust_workspace(temp.path());
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("main.txt"), "main").unwrap();
+    heddle(&["capture", "-m", "main"], Some(temp.path())).unwrap();
+
+    let thread_path = temp.path().join("default-a");
+    heddle(
+        &[
+            "start",
+            "default-a",
+            "--path",
+            thread_path.to_str().unwrap(),
+        ],
+        Some(temp.path()),
+    )
+    .expect("start without flags should succeed in a Rust workspace");
+
+    let cargo_config = thread_path.join(".cargo").join("config.toml");
+    assert!(
+        cargo_config.is_file(),
+        "Rust solid/materialized threads should default shared-target on; \
+         expected `.cargo/config.toml` at {}",
+        cargo_config.display()
+    );
+    let body = std::fs::read_to_string(&cargo_config).unwrap();
+    assert!(
+        body.contains("[build]") && body.contains("target-dir"),
+        "default shared-target config should set [build].target-dir: {body}"
+    );
+}
+
+#[test]
 fn shared_target_uses_same_dir_for_two_threads_in_one_workspace() {
     let temp = TempDir::new().unwrap();
     init_rust_workspace(temp.path());
@@ -100,25 +134,14 @@ fn shared_target_uses_same_dir_for_two_threads_in_one_workspace() {
     let path_a = temp.path().join("probe-a");
     let path_b = temp.path().join("probe-b");
 
+    // Default-on: no flags required for second+ threads to share.
     heddle(
-        &[
-            "start",
-            "probe-a",
-            "--path",
-            path_a.to_str().unwrap(),
-            "--shared-target",
-        ],
+        &["start", "probe-a", "--path", path_a.to_str().unwrap()],
         Some(temp.path()),
     )
     .unwrap();
     heddle(
-        &[
-            "start",
-            "probe-b",
-            "--path",
-            path_b.to_str().unwrap(),
-            "--shared-target",
-        ],
+        &["start", "probe-b", "--path", path_b.to_str().unwrap()],
         Some(temp.path()),
     )
     .unwrap();
@@ -137,7 +160,7 @@ fn shared_target_uses_same_dir_for_two_threads_in_one_workspace() {
 }
 
 #[test]
-fn no_flag_means_no_cargo_config() {
+fn no_shared_target_opts_out_of_cargo_config() {
     let temp = TempDir::new().unwrap();
     init_rust_workspace(temp.path());
     heddle(&["init"], Some(temp.path())).unwrap();
@@ -146,27 +169,32 @@ fn no_flag_means_no_cargo_config() {
 
     let thread_path = temp.path().join("plain");
     heddle(
-        &["start", "plain", "--path", thread_path.to_str().unwrap()],
+        &[
+            "start",
+            "plain",
+            "--path",
+            thread_path.to_str().unwrap(),
+            "--no-shared-target",
+        ],
         Some(temp.path()),
     )
     .unwrap();
 
     assert!(
         !thread_path.join(".cargo").join("config.toml").exists(),
-        "without --shared-target, no .cargo/config.toml should be written",
+        "with --no-shared-target, no .cargo/config.toml should be written",
     );
 }
 
 #[test]
-fn advisory_fires_on_second_thread_without_shared_target() {
+fn advisory_fires_on_second_thread_with_no_shared_target() {
     let temp = TempDir::new().unwrap();
     init_rust_workspace(temp.path());
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("main.txt"), "main").unwrap();
     heddle(&["capture", "-m", "main"], Some(temp.path())).unwrap();
 
-    // First thread: no advisory expected (no prior materialized
-    // threads in the workspace).
+    // First thread: default shared-target on; no advisory.
     let path_a = temp.path().join("first");
     let out_a = heddle_output(
         &["start", "first", "--path", path_a.to_str().unwrap()],
@@ -176,28 +204,33 @@ fn advisory_fires_on_second_thread_without_shared_target() {
     assert!(out_a.status.success());
     let stderr_a = std::str::from_utf8(&out_a.stderr).unwrap_or("");
     assert!(
-        !stderr_a.contains("--shared-target"),
-        "first thread should not advise; got stderr: {stderr_a}"
+        !stderr_a.contains("without a shared cargo target"),
+        "first thread with default shared-target should not advise; got stderr: {stderr_a}"
     );
 
-    // Second thread: advisory should fire, since one materialized
-    // thread already exists and the workspace looks Rust-y.
+    // Second thread with opt-out: advisory should fire.
     let path_b = temp.path().join("second");
     let out_b = heddle_output(
-        &["start", "second", "--path", path_b.to_str().unwrap()],
+        &[
+            "start",
+            "second",
+            "--path",
+            path_b.to_str().unwrap(),
+            "--no-shared-target",
+        ],
         Some(temp.path()),
     )
     .unwrap();
     assert!(out_b.status.success());
     let stderr_b = std::str::from_utf8(&out_b.stderr).unwrap_or("");
     assert!(
-        stderr_b.contains("--shared-target") && stderr_b.contains("second"),
-        "second thread should advise the flag in stderr; got stderr: {stderr_b}"
+        stderr_b.contains("shared cargo target") && stderr_b.contains("second"),
+        "second thread with --no-shared-target should advise sharing; got stderr: {stderr_b}"
     );
 }
 
 #[test]
-fn no_advisory_when_starting_with_shared_target() {
+fn no_advisory_when_default_shared_target_applies() {
     let temp = TempDir::new().unwrap();
     init_rust_workspace(temp.path());
     heddle(&["init"], Some(temp.path())).unwrap();
@@ -213,25 +246,19 @@ fn no_advisory_when_starting_with_shared_target() {
     )
     .unwrap();
 
-    // Now start a second one *with* --shared-target. Stderr should
-    // not nag us about a flag we already passed.
+    // Second thread with default shared-target: no nudge.
     let path_b = temp.path().join("warm-b");
     let out = heddle_output(
-        &[
-            "start",
-            "warm-b",
-            "--path",
-            path_b.to_str().unwrap(),
-            "--shared-target",
-        ],
+        &["start", "warm-b", "--path", path_b.to_str().unwrap()],
         Some(temp.path()),
     )
     .unwrap();
     assert!(out.status.success());
     let stderr = std::str::from_utf8(&out.stderr).unwrap_or("");
     assert!(
-        !stderr.contains("consider `heddle start --shared-target"),
-        "passing --shared-target should suppress the nudge; got stderr: {stderr}"
+        !stderr.contains("without a shared cargo target")
+            && !stderr.contains("consider `heddle start --shared-target"),
+        "default shared-target should suppress the nudge; got stderr: {stderr}"
     );
 }
 
@@ -260,7 +287,7 @@ fn no_advisory_in_non_rust_workspace() {
     assert!(out.status.success());
     let stderr = std::str::from_utf8(&out.stderr).unwrap_or("");
     assert!(
-        !stderr.contains("--shared-target"),
+        !stderr.contains("shared cargo target") && !stderr.contains("--shared-target"),
         "non-Rust workspaces should never see the advisory; got stderr: {stderr}"
     );
 }
@@ -315,9 +342,7 @@ fn shared_target_is_noop_in_non_rust_repo() {
 
 /// When the materialized checkout already contains a
 /// `.cargo/config.toml` (because the source tree captured one),
-/// `write_cargo_config` preserves it. Previously `start
-/// --shared-target` still recorded `shared_target_dir` on the thread
-/// even though no redirect was applied, so `thread show` lied. Fixed:
+/// `write_cargo_config` preserves it and emits a loud warning.
 /// `shared_target_dir` is `None` when the writer was a no-op.
 #[test]
 fn shared_target_dir_unset_when_user_config_preserved() {
@@ -337,17 +362,23 @@ fn shared_target_dir_unset_when_user_config_preserved() {
     heddle(&["capture", "-m", "main"], Some(temp.path())).unwrap();
 
     let thread_path = temp.path().join("preconfigured");
-    heddle(
+    let out = heddle_output(
         &[
             "start",
             "preconfigured",
             "--path",
             thread_path.to_str().unwrap(),
-            "--shared-target",
         ],
         Some(temp.path()),
     )
-    .expect("start --shared-target should succeed when materialized config exists");
+    .expect("start should succeed when materialized config exists");
+    assert!(out.status.success());
+    let stderr = std::str::from_utf8(&out.stderr).unwrap_or("");
+    assert!(
+        stderr.contains("shared cargo target redirect not applied")
+            && stderr.contains("config.toml"),
+        "blocked redirect must warn loudly on stderr; got: {stderr}"
+    );
 
     // The user's config must survive verbatim — write_cargo_config
     // must NOT clobber it.
@@ -376,6 +407,52 @@ fn shared_target_dir_unset_when_user_config_preserved() {
 }
 
 #[test]
+fn shared_target_preserves_legacy_and_other_tracked_cargo_content() {
+    let temp = TempDir::new().unwrap();
+    init_rust_workspace(temp.path());
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let cargo_dir = temp.path().join(".cargo");
+    std::fs::create_dir_all(&cargo_dir).unwrap();
+    std::fs::write(cargo_dir.join("config"), "[net]\noffline = true\n").unwrap();
+    std::fs::write(cargo_dir.join("tracked.txt"), "tracked\n").unwrap();
+    heddle(&["capture", "-m", "tracked cargo files"], Some(temp.path())).unwrap();
+
+    let thread_path = temp.path().join("legacy-config");
+    let out = heddle_output(
+        &[
+            "start",
+            "legacy-config",
+            "--path",
+            thread_path.to_str().unwrap(),
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains(".cargo/config"));
+    assert_eq!(
+        std::fs::read_to_string(thread_path.join(".cargo/config")).unwrap(),
+        "[net]\noffline = true\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(thread_path.join(".cargo/tracked.txt")).unwrap(),
+        "tracked\n"
+    );
+    assert!(!thread_path.join(".cargo/config.toml").exists());
+
+    std::fs::write(thread_path.join(".cargo/tracked.txt"), "changed\n").unwrap();
+    let status: serde_json::Value =
+        serde_json::from_str(&heddle(&["status", "--output", "json"], Some(&thread_path)).unwrap())
+            .unwrap();
+    assert!(
+        status["changes"]["modified"]
+            .as_array()
+            .is_some_and(|paths| paths.iter().any(|path| path == ".cargo/tracked.txt")),
+        "narrow generated-file exclude must not hide tracked `.cargo` changes: {status}"
+    );
+}
+
+#[test]
 fn shared_target_dir_surfaces_in_thread_show_json() {
     let temp = TempDir::new().unwrap();
     init_rust_workspace(temp.path());
@@ -384,14 +461,9 @@ fn shared_target_dir_surfaces_in_thread_show_json() {
     heddle(&["capture", "-m", "main"], Some(temp.path())).unwrap();
 
     let thread_path = temp.path().join("inspect");
+    // Default-on: no flag required.
     heddle(
-        &[
-            "start",
-            "inspect",
-            "--path",
-            thread_path.to_str().unwrap(),
-            "--shared-target",
-        ],
+        &["start", "inspect", "--path", thread_path.to_str().unwrap()],
         Some(temp.path()),
     )
     .unwrap();

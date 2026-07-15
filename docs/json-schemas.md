@@ -555,9 +555,43 @@ saves a Heddle state without recommending a Git checkpoint.
   "performed_steps": ["merge", "checkpoint"],
   "skipped_steps": ["capture(no changes)", "sync(current)"],
   "merge_state": "hd-land123",
-  "chosen_path": "capture_sync_merge_checkpoint"
+  "chosen_path": "capture_sync_merge_checkpoint",
+  "siblings_restacked": ["feature/peer-b"],
+  "siblings_restack_failed": []
 }
 ```
+
+When no peers share the landed thread's `target_thread` (or none needed a
+restack), `siblings_restacked` / `siblings_restack_failed` are empty arrays.
+Failed peer restacks do not undo the land;
+entries look like `{ "thread": "feature/peer-c", "message": "..." }` and are
+also mirrored into operator `warnings`.
+
+`heddle land --threads` emits one batch envelope (for example,
+`heddle land --threads alpha,beta --output json`):
+
+```json
+{
+  "output_kind": "land_batch",
+  "status": "landed",
+  "action": "land",
+  "message": "Landed 2 thread(s): alpha, beta",
+  "threads": ["alpha", "beta"],
+  "landed": ["alpha", "beta"],
+  "peers": [
+    {"thread":"alpha","status":"landed","message":"Landed thread 'alpha'","captured":false,"checkpointed":true,"git_commit":"abc123","integrated":true,"synced":false,"siblings_restacked":[],"siblings_restack_failed":[],"blockers":[],"warnings":[]},
+    {"thread":"beta","status":"landed","message":"Landed thread 'beta'","captured":false,"checkpointed":true,"git_commit":"def456","integrated":true,"synced":true,"siblings_restacked":[],"siblings_restack_failed":[],"blockers":[],"warnings":[]}
+  ],
+  "stopped_at": null,
+  "git_head": "def456",
+  "recommended_action": null,
+  "verification": {"verified":true,"status":"clean","repository_mode":"git-overlay","heddle_initialized":true,"git_branch":"main","heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"clean","mapping_state":"clean","remote_drift":"clean","active_operation":null,"default_remote":null,"clone_verification":"verified","machine_contract":"available","workflow_status":"clean","workflow_summary":"no ready thread actions require attention","summary":"Git overlay and Heddle agree","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}
+}
+```
+
+The command stops at the first blocked peer. A partial batch reports
+`status: "partial"`, includes the successful prefix in `landed`, and names the
+blocked peer in `stopped_at`.
 
 ### Fields
 
@@ -580,6 +614,10 @@ saves a Heddle state without recommending a Git checkpoint.
 | `thread_state`, `readiness`, `report` | string \| null / object / object | required for `ready` | Readiness result, stable human/machine summary, and structured preview report. `readiness` always carries the same fields; non-applicable checks/integration/freshness/merge details are represented with explicit `not_run`, `not checked`, or `n/a` values and reasons rather than omitted. |
 | `thread`, `captured`, `checkpointed`, `synced`, `integrated` | string / bool | required for `land` | Thread landed and which local integration steps completed. |
 | `performed_steps`, `skipped_steps`, `merge_state`, `chosen_path` | array<string> / string \| null / string | required for `land` | Machine-readable path through the land loop and the merge state landed, when one exists. |
+| `siblings_restacked` | array<string> | required for `land` | Peer threads with the same `target_thread` that were auto-refreshed onto the post-land tip. Empty when none. |
+| `siblings_restack_failed` | array<object> | required for `land` | Best-effort peer restacks that failed after a successful land (`thread` + `message`). Empty when none; land is not rolled back. |
+| `threads`, `landed`, `peers` | array<string> / array<string> / array<object> | required for `land_batch` | Deduplicated execution order, successful prefix, and one result per attempted peer. |
+| `stopped_at`, `git_head` | string \| null | required for `land_batch` | First blocked peer and the resulting checkout Git tip. |
 | `verification` | object \| null | required | Post-operation verification proof. `null` only for undo / undo --redo paths that cannot compute it. |
 
 ---

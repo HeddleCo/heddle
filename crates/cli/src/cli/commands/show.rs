@@ -91,12 +91,22 @@ fn cmd_show_with_output_kind(
     }
 
     let repo = Repository::open(start)?;
-    if matches!(state_spec.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
-        ensure_current_state(
-            &repo,
-            &UserConfig::load_default()?,
-            Some("Bootstrap git-overlay before showing HEAD".to_string()),
-        )?;
+    if repo.capability() == repo::RepositoryCapability::GitOverlay
+        && repo.current_state()?.is_none()
+    {
+        if ingest::GitSource::open(repo.root())?
+            .resolve_history_revision(&state_spec)
+            .is_ok()
+        {
+            return render_unbound_overlay_show(cli, &repo, &state_spec, output_kind);
+        }
+        if matches!(state_spec.as_str(), "HEAD" | "@") {
+            ensure_current_state(
+                &repo,
+                &UserConfig::load_default()?,
+                Some("Bootstrap git-overlay before showing HEAD".to_string()),
+            )?;
+        }
     }
     let id = resolve_state_id(&repo, &state_spec)?;
 
@@ -153,6 +163,70 @@ fn cmd_show_with_output_kind(
         render_state(&output, cli.verbose > 0);
     }
 
+    Ok(())
+}
+
+fn render_unbound_overlay_show(
+    cli: &Cli,
+    repo: &Repository,
+    revision: &str,
+    output_kind: &'static str,
+) -> Result<()> {
+    let projection = ingest::OverlayHistory::project_tip(repo.root(), revision)?;
+    let git_oid = projection.git_oid;
+    let state = projection.state;
+    let output = ShowOutput {
+        output_kind,
+        repository_capability: repo.capability_label().to_string(),
+        storage_model: repo.storage_model_label().to_string(),
+        import_guidance: repo
+            .git_import_guidance()?
+            .map(|hint| ShowImportGuidanceOutput {
+                current_branch: hint.current_branch,
+                missing_branch_count: hint.missing_branch_count,
+                missing_branches: hint.missing_branches,
+                recommended_command: hint.recommended_command,
+            }),
+        state_id: state.state_id.short(),
+        state_id_full: state.state_id.to_string_full(),
+        content_hash: state.compute_hash().to_hex(),
+        tree: state.tree.to_hex(),
+        parents: projection
+            .parent_ids
+            .iter()
+            .map(|parent| parent.short())
+            .collect(),
+        intent: state.intent.clone(),
+        confidence: state.confidence,
+        principal: PrincipalInfo {
+            name: state.attribution.principal.name.clone(),
+            email: state.attribution.principal.email.clone(),
+        },
+        agent: state.attribution.agent.as_ref().map(|agent| AgentInfo {
+            provider: agent.provider.clone(),
+            model: agent.model.clone(),
+            session_id: agent.session_id.clone(),
+            policy_id: agent.policy_id.clone(),
+        }),
+        created_at: state.created_at.to_rfc3339(),
+        status: format!("{:?}", state.status),
+        verification: state
+            .verification
+            .as_ref()
+            .map(|verification| VerificationInfo {
+                tests_passed: verification.tests_passed,
+                tests_failed: verification.tests_failed,
+                coverage_pct: verification.coverage_pct,
+                coverage_delta: verification.coverage_delta,
+                lint_warnings: verification.lint_warnings,
+            }),
+        git_checkpoint: Some(git_oid),
+    };
+    if should_output_json(cli, Some(repo.config())) {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        render_state(&output, cli.verbose > 0);
+    }
     Ok(())
 }
 

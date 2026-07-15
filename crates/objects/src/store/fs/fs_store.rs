@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     hash::Hash,
     path::{Path, PathBuf},
-    sync::{Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use heddle_format::compression::CompressionConfig;
@@ -238,6 +238,7 @@ pub struct FsStore {
     pub(super) recent_blobs: RwLock<RecentObjectCache<ContentHash, Blob>>,
     pub(super) recent_trees: RwLock<RecentObjectCache<ContentHash, Tree>>,
     pub(super) recent_states: RwLock<RecentObjectCache<StateId, State>>,
+    pub(super) external_source: Option<Arc<dyn super::super::ExternalObjectSource>>,
     loose_object_write_mode: LooseObjectWriteMode,
     snapshot_write_batch_depth: Mutex<usize>,
     pending_directory_syncs: Mutex<BTreeSet<PathBuf>>,
@@ -268,6 +269,7 @@ impl Clone for FsStore {
     fn clone(&self) -> Self {
         let mut cloned = Self::with_compression(&self.root, self.compression);
         cloned.loose_object_write_mode = self.loose_object_write_mode;
+        cloned.external_source = self.external_source.clone();
         cloned
     }
 }
@@ -292,6 +294,7 @@ impl FsStore {
             recent_states: RwLock::new(RecentObjectCache::with_capacity(
                 RECENT_TREE_CACHE_CAPACITY,
             )),
+            external_source: None,
             loose_object_write_mode: LooseObjectWriteMode::Durable,
             snapshot_write_batch_depth: Mutex::new(0),
             pending_directory_syncs: Mutex::new(BTreeSet::new()),
@@ -318,6 +321,7 @@ impl FsStore {
             recent_states: RwLock::new(RecentObjectCache::with_capacity(
                 RECENT_TREE_CACHE_CAPACITY,
             )),
+            external_source: None,
             loose_object_write_mode: LooseObjectWriteMode::Durable,
             snapshot_write_batch_depth: Mutex::new(0),
             pending_directory_syncs: Mutex::new(BTreeSet::new()),
@@ -360,6 +364,12 @@ impl FsStore {
 
     pub fn set_loose_object_write_mode(&mut self, mode: LooseObjectWriteMode) {
         self.loose_object_write_mode = mode;
+    }
+
+    /// Configure a read-through source for objects not present in the native
+    /// store. Writes always remain native.
+    pub fn set_external_source(&mut self, source: Arc<dyn super::super::ExternalObjectSource>) {
+        self.external_source = Some(source);
     }
 
     fn flush_pending_directory_syncs(&self) -> Result<usize> {

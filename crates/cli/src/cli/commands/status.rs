@@ -36,7 +36,7 @@ use tracing::debug;
 use super::{
     action_line::print_command,
     next_action::{NextActionValidationContext, write_command_json},
-    verification_health::repository_setup_guidance,
+    verification_health::{action_template, action_templates, repository_setup_guidance},
 };
 #[cfg(feature = "client")]
 use crate::config::UserConfig;
@@ -119,11 +119,31 @@ pub async fn cmd_status(
 fn try_fast_short_status_report(cli: &Cli) -> Result<Option<FastShortStatusReport>> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
+    if pending_incomplete_land_marker_exists(start) {
+        // The fast report deliberately avoids opening Heddle metadata, so it
+        // cannot carry durable recovery state. Fall through to the complete
+        // read-only report whenever the selected repository has a journal.
+        return Ok(None);
+    }
     let repo_config = fast_short_repo_config(start)?;
     if should_output_json(cli, repo_config.as_ref()) {
         return Ok(None);
     }
     Ok(fast_short_status_report(start)?)
+}
+
+fn pending_incomplete_land_marker_exists(start: &Path) -> bool {
+    let canonical = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+    if let Ok(git) = SleyRepository::discover(&canonical)
+        && let Some(workdir) = git.workdir()
+    {
+        // A nested plain-Git repository under a Heddle checkout is its own
+        // prospective overlay target. Do not inherit the ancestor journal.
+        return workdir.join(".heddle/incomplete-land.json").is_file();
+    }
+    canonical
+        .ancestors()
+        .any(|ancestor| ancestor.join(".heddle/incomplete-land.json").is_file())
 }
 
 fn fast_short_repo_config(start: &Path) -> Result<Option<RepoConfig>> {
@@ -276,7 +296,7 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
     let compact_json = as_json && output_is_compact(cli);
     let detail = if short && !as_json {
         StatusDetail::ShortText
-    } else if compact_json {
+    } else if compact_json || (short && as_json) {
         StatusDetail::CompactMachine
     } else if cli.verbose > 0 || as_json {
         StatusDetail::Full
@@ -296,6 +316,26 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
                 super::verification_health::machine_contract_coverage(),
             )),
     )?;
+    if let Some(thread) = ctx
+        .repo()
+        .map(super::workflow::pending_incomplete_land_thread)
+        .transpose()?
+        .flatten()
+    {
+        let action = super::command_catalog::heddle_action(["land", "--thread", thread.as_str()]);
+        output.blockers.push(format!(
+            "land of '{thread}' has durable recovery work pending"
+        ));
+        if !output.recovery_commands.contains(&action) {
+            output.recovery_commands.push(action.clone());
+        }
+        output.recovery_action_templates = action_templates(&output.recovery_commands);
+        output.coordination_status = CoordinationStatus::Blocked;
+        if output.recommended_action.is_empty() {
+            output.recommended_action = action.clone();
+            output.recommended_action_template = action_template(&action);
+        }
+    }
     // Core reports 0 for injected repos; fold the shell open into the profile
     // so `repo_open_ms` reflects real work on this path.
     output.profile.repo_open_ms += cli_repo_open_ms;
@@ -613,6 +653,9 @@ fn render_short_status(output: &StatusOutput) {
             style::bold(short_status_subject(output)),
             style::thread_state(&short_status_health(output))
         );
+    }
+    for blocker in &output.blockers {
+        println!("{}  {}", style::warn("!"), blocker);
     }
     render_materialized_advisory(output);
 }

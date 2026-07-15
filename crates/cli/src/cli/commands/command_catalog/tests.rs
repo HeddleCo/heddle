@@ -1667,6 +1667,9 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "review next",
             "review health",
             "schemas",
+            // `land` advertises the single-peer and `--threads` batch
+            // envelope discriminators.
+            "land",
             "land",
             "show",
             "start",
@@ -2209,6 +2212,16 @@ fn parsed_command_runtime_contract_exposes_catalog_fields() {
     assert_eq!(runtime.help_visibility, entry.help_visibility);
     assert_eq!(runtime.help_rank, entry.help_rank);
     assert_eq!(runtime.surface, entry.surface);
+}
+
+#[test]
+fn clone_mutation_is_destination_scoped() {
+    let cli = Cli::try_parse_from(["heddle", "clone", "source", "destination"])
+        .expect("clone should parse");
+    let runtime = command_runtime_contract_for_command(&cli.command);
+
+    assert!(runtime.mutates);
+    assert!(!runtime.targets_current_repository);
 }
 
 #[test]

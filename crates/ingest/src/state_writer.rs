@@ -47,6 +47,47 @@ pub(crate) fn state_from_commit(
     parents: Vec<StateId>,
     git_lossy: bool,
 ) -> crate::Result<State> {
+    state_from_commit_with_source_policy(
+        commit,
+        tree,
+        parents,
+        git_lossy,
+        SourceStateParentPolicy::Validate,
+    )
+}
+
+/// Build a lazy Git-overlay descriptor. A portable export note embeds the
+/// exact source State, including its original parent IDs. Lazy binding has not
+/// walked/materialized that graph yet, so an empty descriptor parent input is
+/// not evidence that the note is invalid. Preserve the embedded State exactly;
+/// a later full import validates it against the real mapped parent graph.
+pub(crate) fn descriptor_state_from_commit(
+    commit: &CommitEntry,
+    tree: ContentHash,
+    git_lossy: bool,
+) -> crate::Result<State> {
+    state_from_commit_with_source_policy(
+        commit,
+        tree,
+        Vec::new(),
+        git_lossy,
+        SourceStateParentPolicy::PreserveEmbedded,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum SourceStateParentPolicy {
+    Validate,
+    PreserveEmbedded,
+}
+
+fn state_from_commit_with_source_policy(
+    commit: &CommitEntry,
+    tree: ContentHash,
+    parents: Vec<StateId>,
+    git_lossy: bool,
+    source_parent_policy: SourceStateParentPolicy,
+) -> crate::Result<State> {
     // A lossy string view, derived once for the parsers that need text
     // (attribution trailers, the one-line intent). The verbatim bytes still
     // reach `with_raw_message` below, so a non-UTF8 message is preserved even
@@ -60,7 +101,8 @@ pub(crate) fn state_from_commit(
         if source_id.to_string_full() != note.state_id
             || source_state.change_id.to_string_full() != note.change_id
             || source_state.tree != tree
-            || source_state.parents != parents
+            || (matches!(source_parent_policy, SourceStateParentPolicy::Validate)
+                && source_state.parents != parents)
         {
             return Err(IngestError::Git(format!(
                 "embedded Heddle state for commit {} does not match its note, tree, or parents",
@@ -523,5 +565,46 @@ mod tests {
         );
         // `intent` stays the trimmed first line, distinct from `raw_message`.
         assert_eq!(state.intent.as_deref(), Some("feat: thing"));
+    }
+
+    #[test]
+    fn descriptor_preserves_non_root_exported_source_state_until_full_parent_validation() {
+        let tree = empty_tree_hash();
+        let parent = StateId::from_bytes([0x31; 32]);
+        let source = State::new(
+            tree,
+            vec![parent],
+            Attribution::human(Principal::new("Exported", "exported@example.com")),
+        )
+        .with_change_id(ChangeId::from_bytes([0x52; 16]))
+        .with_intent("exported child");
+        let mut commit = make_commit(
+            "34".repeat(20).as_str(),
+            vec!["12".repeat(20)],
+            "exported child\n",
+        );
+        commit.heddle_note = Some(
+            serde_json::json!({
+                "state_id": source.id().to_string_full(),
+                "change_id": source.change_id.to_string_full(),
+                "source_state": source,
+                "status": "draft"
+            })
+            .to_string()
+            .into_bytes(),
+        );
+
+        let descriptor = descriptor_state_from_commit(&commit, tree, false)
+            .expect("lazy descriptor preserves the portable source state");
+        assert_eq!(descriptor, source);
+        assert!(
+            state_from_commit(&commit, tree, Vec::new(), false).is_err(),
+            "full import must still reject a source state against the wrong parent graph"
+        );
+        assert_eq!(
+            state_from_commit(&commit, tree, vec![parent], false)
+                .expect("full import validates the real parent graph"),
+            source
+        );
     }
 }

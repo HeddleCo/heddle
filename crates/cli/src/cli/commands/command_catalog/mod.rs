@@ -285,6 +285,10 @@ struct CommandContract {
     supports_json: bool,
     supports_json_compact: bool,
     mutates: bool,
+    /// Whether the command's mutation target is the current/`--repo`
+    /// repository. Destination-scoped commands such as `clone` must not run
+    /// current-repository recovery before their own destination preflight.
+    targets_current_repository: bool,
     supports_op_id: bool,
     persists_op_id: bool,
     observe_only: bool,
@@ -362,6 +366,8 @@ pub struct CommandRuntimeContract {
     pub supports_json_compact: bool,
     pub supports_op_id: bool,
     pub persists_op_id: bool,
+    pub mutates: bool,
+    pub targets_current_repository: bool,
     pub uses_bootstrap_op_id_store: bool,
     pub help_visibility: &'static str,
     pub help_rank: u16,
@@ -657,6 +663,7 @@ const READ_JSON: CommandContract = CommandContract {
     supports_json: true,
     supports_json_compact: false,
     mutates: false,
+    targets_current_repository: true,
     supports_op_id: false,
     persists_op_id: false,
     observe_only: true,
@@ -1552,6 +1559,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 json_discriminators(
                     documented_schemas(
                         CommandContract {
+                            targets_current_repository: false,
                             may_initialize: true,
                             may_import_git: true,
                             may_write_worktree: true,
@@ -2471,9 +2479,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
                         network_io: true,
                         ..compact_json(REF_MUTATION)
                     },
-                    &["land"],
+                    &["land", "land --threads"],
                 ),
-                &[json_discriminator(Some("land"), "output_kind", "land")],
+                &[
+                    json_discriminator(Some("land"), "output_kind", "land"),
+                    json_discriminator(Some("land --threads"), "output_kind", "land_batch"),
+                ],
             ),
             70,
         ),
@@ -3829,6 +3840,8 @@ fn runtime_contract(
         display: path.join(" "),
         supports_json: contract.supports_json,
         supports_json_compact: contract.supports_json_compact,
+        mutates: contract.mutates,
+        targets_current_repository: contract.targets_current_repository,
         supports_op_id: contract.supports_op_id,
         persists_op_id: contract.persists_op_id,
         uses_bootstrap_op_id_store: uses_bootstrap_op_id_store(contract),
@@ -4388,6 +4401,8 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                     return vec!["sync", "git"];
                 }
             }
+            #[cfg(not(feature = "git-overlay"))]
+            let _ = args;
             vec!["sync"]
         }
         Commands::Continue => vec!["continue"],

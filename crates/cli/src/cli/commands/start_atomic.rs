@@ -73,7 +73,11 @@ use repo::{
 
 use super::{
     mount_lifecycle::{self, MountOwnership},
-    worktree_cmd::{helpers::write_isolated_checkout, hydrate, shared_target::write_cargo_config},
+    worktree_cmd::{
+        helpers::write_isolated_checkout,
+        hydrate,
+        shared_target::{SharedTargetFilesSnapshot, print_blocked_warning, write_cargo_config},
+    },
 };
 
 /// Classify an `anyhow` error from a materialize/hydrate helper into the
@@ -950,9 +954,8 @@ impl StartThread {
 
     /// Apply the `--shared-target` cargo-config redirect (inside the checkout),
     /// returning whether it landed (a pre-staged `.cargo/config.toml` is left
-    /// untouched). Capture-restore on the config file so a later failure
-    /// restores the pre-write state precisely even though the checkout rewind
-    /// would also reach it.
+    /// untouched). Capture-restore both the config and its local exclude rule
+    /// so a later failure restores their exact prior bytes or absence.
     fn stage_cargo_config(
         &self,
         tx: &mut Tx<'_>,
@@ -968,24 +971,12 @@ impl StartThread {
         tx.step_nonatomic(
             move || {
                 let checkout_root = claimed_worktree_path(claim_from_cell(&cap_claim), &cap_abs)?;
-                Ok(std::fs::read(checkout_root.join(".cargo").join("config.toml")).ok())
+                SharedTargetFilesSnapshot::capture(&checkout_root).map_err(apply_error)
             },
-            move |prior| match prior {
-                Some(bytes) => {
-                    let checkout_root =
-                        claimed_worktree_path(claim_from_cell(&restore_claim), &restore_abs)?;
-                    std::fs::write(checkout_root.join(".cargo").join("config.toml"), bytes)
-                        .map_err(HeddleError::from)
-                }
-                None => {
-                    let checkout_root =
-                        claimed_worktree_path(claim_from_cell(&restore_claim), &restore_abs)?;
-                    match std::fs::remove_file(checkout_root.join(".cargo").join("config.toml")) {
-                        Ok(()) => Ok(()),
-                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                        Err(err) => Err(HeddleError::from(err)),
-                    }
-                }
+            move |prior| {
+                let checkout_root =
+                    claimed_worktree_path(claim_from_cell(&restore_claim), &restore_abs)?;
+                prior.restore(&checkout_root).map_err(apply_error)
             },
             move || {
                 let checkout_root =
@@ -1009,10 +1000,14 @@ impl StartThread {
         let sources = hydrate::hydratable_ignored_dirs(repo).map_err(apply_error)?;
         let mut linked: Vec<String> = Vec::new();
         let checkout_root = claimed_worktree_path(claim_from_cell(&target_claim), &self.abs_path)?;
+        let skip_target_hydrate = self.record.shared_target_dir.is_some();
         for source in &sources {
             let Some((dest, link_name)) = hydrate::plan_link(&checkout_root, source) else {
                 continue;
             };
+            if skip_target_hydrate && link_name == "target" {
+                continue;
+            }
             let src = source.clone();
             let dest_fwd = dest.clone();
             let inv_checkout = checkout_root.clone();
@@ -1224,6 +1219,7 @@ impl AtomicMutation for StartThread {
                             // Writer no-ops on a pre-staged config; don't advertise
                             // a redirect that isn't in effect (`thread show` would lie).
                             if !cargo_applied {
+                                print_blocked_warning(&self.abs_path);
                                 self.record.shared_target_dir = None;
                             }
                         })
@@ -1417,6 +1413,7 @@ mod tests {
             no_daemon: true,
             interactive_setup: false,
             shared_target: false,
+            no_shared_target: false,
             hydrate,
         }
     }

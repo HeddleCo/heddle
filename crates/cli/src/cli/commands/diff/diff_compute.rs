@@ -114,13 +114,10 @@ pub fn cmd_diff(
         );
     }
 
-    let git_overlay_head_worktree_diff = repo.current_state()?.is_none()
-        && to.is_none()
-        && matches!(from.as_deref(), Some("HEAD" | "@"));
-    if !git_overlay_head_worktree_diff
-        && repo.current_state()?.is_none()
+    if repo.current_state()?.is_none()
         && (matches!(from.as_deref(), Some("HEAD" | "@"))
             || matches!(to.as_deref(), Some("HEAD" | "@")))
+        && repo.capability() == RepositoryCapability::GitOverlay
     {
         crate::cli::commands::snapshot::ensure_current_state(
             &repo,

@@ -14,7 +14,6 @@ use objects::{
 };
 use tracing::{instrument, trace};
 
-#[cfg(feature = "async-source")]
 use crate::repository::commit_graph_persistence::NullCommitGraphCache;
 use crate::{
     HeddleError, Repository, Result,
@@ -66,6 +65,13 @@ impl ChangedPathFilters {
     /// Returns true when no changed-path filtering is active.
     pub fn is_empty(&self) -> bool {
         self.filters.is_empty()
+    }
+
+    /// Iterate over the canonical repository-relative path spellings used by
+    /// history filtering. Projection callers must pass these values onward
+    /// rather than reusing raw CLI strings with platform-specific separators.
+    pub fn normalized_paths(&self) -> impl Iterator<Item = &str> {
+        self.filters.iter().map(|filter| filter.path.as_str())
     }
 
     fn matches(&self, candidate: &str) -> bool {
@@ -238,6 +244,15 @@ where
     Ok(result)
 }
 
+/// Run the canonical history query against an arbitrary read-only object
+/// source without creating or warming a filesystem commit-graph cache.
+pub fn query_history_from_source<S>(source: &S, query: &HistoryQuery) -> Result<Vec<State>>
+where
+    S: ObjectSource + ?Sized,
+{
+    query_history_with_cache(source, query, NullCommitGraphCache)
+}
+
 pub(crate) fn state_matches_changed_paths<S>(
     source: &S,
     state: &State,
@@ -382,7 +397,11 @@ where
 }
 
 fn normalize_repo_relative_path(path: &str) -> Result<String> {
-    let input = Path::new(path);
+    // History paths are a portable repository contract, not host-native
+    // filesystem paths. Accept either common separator so CLI spellings have
+    // identical behavior before and after Git-overlay adoption.
+    let portable = path.replace('\\', "/");
+    let input = Path::new(&portable);
     if input.is_absolute() {
         return Err(HeddleError::Config(format!(
             "changed-path filter must be repository-relative: '{path}'"
@@ -456,6 +475,18 @@ mod tests {
         let filters = ChangedPathFilters::try_from_paths(["./src/lib.rs"]).unwrap();
 
         assert!(filters.matches("src/lib.rs"));
+    }
+
+    #[test]
+    fn changed_path_filters_normalize_windows_separators() {
+        let forward = ChangedPathFilters::try_from_paths(["src/lib.rs"]).unwrap();
+        let windows = ChangedPathFilters::try_from_paths([r"src\lib.rs"]).unwrap();
+
+        assert_eq!(
+            forward.normalized_paths().collect::<Vec<_>>(),
+            windows.normalized_paths().collect::<Vec<_>>()
+        );
+        assert!(windows.matches("src/lib.rs"));
     }
 
     #[test]

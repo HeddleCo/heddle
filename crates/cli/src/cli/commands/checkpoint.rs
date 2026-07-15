@@ -17,6 +17,7 @@ pub(crate) struct GitCheckpointRequest<'a> {
     pub(crate) action: &'a str,
     pub(crate) message: Option<&'a str>,
     pub(crate) retry_command: &'a str,
+    pub(crate) linearize_git_parent: bool,
 }
 
 pub(crate) fn create_git_checkpoint(
@@ -95,6 +96,7 @@ pub(crate) fn create_git_checkpoint(
         run_hooks: true,
         commit_safe_post_verify: false,
         coalesce_snapshot_and_checkpoint: false,
+        linearize_git_parent: request.linearize_git_parent,
         precomputed_worktree_status: None,
     };
 

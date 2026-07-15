@@ -561,7 +561,10 @@ impl ObjectStore for FsStore {
             return Ok(Some(blob));
         }
         trace!("Blob not found");
-        Ok(None)
+        match &self.external_source {
+            Some(source) => source.get_blob(hash),
+            None => Ok(None),
+        }
     }
 
     #[instrument(skip(self, blob), fields(size = blob.content().len()))]
@@ -624,13 +627,20 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self), fields(hash = %hash.short()))]
     fn has_blob(&self, hash: &ContentHash) -> Result<bool> {
+        if ObjectStore::has_blob_locally(self, hash)? {
+            return Ok(true);
+        }
+        match &self.external_source {
+            Some(source) => Ok(source.get_blob(hash)?.is_some()),
+            None => Ok(false),
+        }
+    }
+
+    fn has_blob_locally(&self, hash: &ContentHash) -> Result<bool> {
         if self.try_has_blob_once(hash)? {
             return Ok(true);
         }
-        if self.reload_packs_if_stale()? {
-            return self.try_has_blob_once(hash);
-        }
-        Ok(false)
+        Ok(self.reload_packs_if_stale()? && self.try_has_blob_once(hash)?)
     }
 
     /// Loose blob path safe for clonefile/copy materialization.
@@ -708,6 +718,17 @@ impl ObjectStore for FsStore {
     fn promote_to_loose_uncompressed(&self, hash: &ContentHash) -> Result<bool> {
         let path = hash_path(&blobs_dir(&self.root), hash);
 
+        // An external Git-overlay blob must stay external: materialization can
+        // read its bytes through `get_blob_bytes`, but promotion would turn a
+        // read-through into an accidental native copy and violate the source-
+        // authority boundary.
+        if !self.try_has_blob_once(hash)?
+            && let Some(source) = &self.external_source
+            && source.get_blob(hash)?.is_some()
+        {
+            return Ok(false);
+        }
+
         // Idempotent fast path: already loose AND uncompressed.
         if let Some((header, _)) = read_file_header(&path, 9)?
             && !is_compressed(&header)
@@ -762,7 +783,12 @@ impl ObjectStore for FsStore {
         {
             return Ok(Some(size));
         }
-        Ok(None)
+        match &self.external_source {
+            Some(source) => Ok(source
+                .get_blob(hash)?
+                .map(|blob| blob.content().len() as u64)),
+            None => Ok(None),
+        }
     }
 
     #[instrument(skip(self), fields(hash = %hash.short()))]
@@ -776,7 +802,10 @@ impl ObjectStore for FsStore {
             return Ok(Some(tree));
         }
         trace!("Tree not found");
-        Ok(None)
+        match &self.external_source {
+            Some(source) => source.get_tree(hash),
+            None => Ok(None),
+        }
     }
 
     #[instrument(skip(self), fields(hash = %hash.short()))]
@@ -789,7 +818,14 @@ impl ObjectStore for FsStore {
         {
             return Ok(Some(data));
         }
-        Ok(None)
+        match &self.external_source {
+            Some(source) => source
+                .get_tree(hash)?
+                .map(|tree| rmp_serde::to_vec_named(&tree))
+                .transpose()
+                .map_err(|error| HeddleError::InvalidObject(error.to_string())),
+            None => Ok(None),
+        }
     }
 
     #[instrument(skip(self, tree), fields(entry_count = tree.entries().len()))]
@@ -797,7 +833,11 @@ impl ObjectStore for FsStore {
         let hash = tree.hash();
         let path = hash_path(&trees_dir(&self.root), &hash);
 
-        if !path.exists() {
+        // `put_tree` is an ownership boundary: a native state that references
+        // this tree must survive loss or pruning of an overlay read-through
+        // source. Descriptor-only states do not call this method; they retain
+        // their explicit external-source semantics.
+        if !ObjectStore::has_tree_locally(self, &hash)? {
             let (_, data) = codec::encode_tree(tree, &self.compression)?;
             trace!(compressed_size = data.len(), "Writing tree");
             self.write_loose_object_atomic(&path, &data)?;
@@ -833,13 +873,20 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self), fields(hash = %hash.short()))]
     fn has_tree(&self, hash: &ContentHash) -> Result<bool> {
+        if ObjectStore::has_tree_locally(self, hash)? {
+            return Ok(true);
+        }
+        match &self.external_source {
+            Some(source) => Ok(source.get_tree(hash)?.is_some()),
+            None => Ok(false),
+        }
+    }
+
+    fn has_tree_locally(&self, hash: &ContentHash) -> Result<bool> {
         if self.try_has_tree_once(hash)? {
             return Ok(true);
         }
-        if self.reload_packs_if_stale()? {
-            return self.try_has_tree_once(hash);
-        }
-        Ok(false)
+        Ok(self.reload_packs_if_stale()? && self.try_has_tree_once(hash)?)
     }
 
     #[instrument(skip(self), fields(id = %id.short()))]
@@ -853,7 +900,10 @@ impl ObjectStore for FsStore {
             return Ok(Some(state));
         }
         trace!("State not found");
-        Ok(None)
+        match &self.external_source {
+            Some(source) => source.get_state(id),
+            None => Ok(None),
+        }
     }
 
     #[instrument(skip(self, state), fields(id = %state.id().short()))]
@@ -888,10 +938,13 @@ impl ObjectStore for FsStore {
         if self.try_has_state_once(id)? {
             return Ok(true);
         }
-        if self.reload_packs_if_stale()? {
-            return self.try_has_state_once(id);
+        if self.reload_packs_if_stale()? && self.try_has_state_once(id)? {
+            return Ok(true);
         }
-        Ok(false)
+        match &self.external_source {
+            Some(source) => Ok(source.get_state(id)?.is_some()),
+            None => Ok(false),
+        }
     }
 
     #[instrument(skip(self))]
@@ -899,19 +952,17 @@ impl ObjectStore for FsStore {
         self.reload_packs_if_stale()?;
 
         let dir = states_dir(&self.root);
-        if !dir.exists() {
-            return Ok(Vec::new());
-        }
-
         let mut states = Vec::new();
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if let Some(name) = path.file_stem()
-                && let Some(name_str) = name.to_str()
-                && let Ok(id) = StateId::parse(name_str)
-            {
-                states.push(id);
+        if dir.exists() {
+            for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if let Some(name) = path.file_stem()
+                    && let Some(name_str) = name.to_str()
+                    && let Ok(id) = StateId::parse(name_str)
+                {
+                    states.push(id);
+                }
             }
         }
         if let Ok(manager) = self.pack_manager().read() {
@@ -920,6 +971,13 @@ impl ObjectStore for FsStore {
                     && !states.contains(&change_id)
                 {
                     states.push(change_id);
+                }
+            }
+        }
+        if let Some(source) = &self.external_source {
+            for id in source.list_states()? {
+                if !states.contains(&id) {
+                    states.push(id);
                 }
             }
         }
@@ -1323,8 +1381,10 @@ mod state_attachment_tests {
     use chrono::Utc;
 
     use super::*;
-    use crate::object::{Attribution, Principal, StateAttachmentBody};
-    use crate::store::{CompressionConfig, pack::PackBuilder};
+    use crate::{
+        object::{Attribution, Principal, StateAttachmentBody},
+        store::{CompressionConfig, pack::PackBuilder},
+    };
 
     fn fixture(store: &FsStore) -> (State, StateAttachment) {
         let tree = store.put_tree(&Tree::new()).unwrap();

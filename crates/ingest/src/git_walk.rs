@@ -220,6 +220,68 @@ impl std::fmt::Debug for GitSource {
 }
 
 impl GitSource {
+    /// Resolve a Git revision without changing refs, the index, or Heddle metadata.
+    pub fn resolve_revision(&self, revision: &str) -> crate::Result<String> {
+        self.repo
+            .rev_parse(revision)
+            .map(|oid| oid.to_string())
+            .map_err(|error| {
+                IngestError::Git(format!("resolve Git revision '{revision}': {error}"))
+            })
+    }
+
+    /// Resolve the commit-oriented revision language shared by unbound overlay
+    /// history commands. This intentionally accepts only canonical history
+    /// targets: `HEAD`/`@`, their numeric first-parent ancestors, and exact
+    /// local branch/tag names (short or fully qualified). Tree-path, reflog,
+    /// range, and other general rev-parse expressions are not state targets.
+    pub fn resolve_history_revision(&self, revision: &str) -> crate::Result<String> {
+        let is_head = matches!(revision, "HEAD" | "@");
+        let is_head_ancestor = revision
+            .strip_prefix("HEAD~")
+            .or_else(|| revision.strip_prefix("@~"))
+            .is_some_and(|steps| !steps.is_empty() && steps.parse::<usize>().is_ok());
+        if is_head || is_head_ancestor {
+            return self.resolve_commit_revision(revision);
+        }
+
+        let candidates =
+            if revision.starts_with("refs/heads/") || revision.starts_with("refs/tags/") {
+                vec![revision.to_string()]
+            } else if !revision.is_empty() && !revision.starts_with("refs/") {
+                vec![
+                    format!("refs/heads/{revision}"),
+                    format!("refs/tags/{revision}"),
+                ]
+            } else {
+                Vec::new()
+            };
+        for candidate in candidates {
+            let exists = self.repo.find_reference(&candidate).map_err(|error| {
+                IngestError::Git(format!("resolve Git reference '{candidate}': {error}"))
+            })?;
+            if exists.is_some() {
+                return self.resolve_commit_revision(&candidate);
+            }
+        }
+        Err(IngestError::Git(format!(
+            "resolve canonical Git history revision '{revision}': no matching HEAD, branch, or tag"
+        )))
+    }
+
+    fn resolve_commit_revision(&self, revision: &str) -> crate::Result<String> {
+        let oid = self.repo.rev_parse(revision).map_err(|error| {
+            IngestError::Git(format!("resolve Git revision '{revision}': {error}"))
+        })?;
+        self.repo
+            .peel_to_commit_oid(oid)
+            .map(|commit| commit.to_string())
+            .map_err(|error| {
+                IngestError::Git(format!(
+                    "resolve Git history revision '{revision}' to a commit: {error}"
+                ))
+            })
+    }
     /// Open a repo at `path`. Uses sley's discovery first (works from a
     /// worktree subdirectory), falling back to direct open for explicit
     /// `.git` dirs.
