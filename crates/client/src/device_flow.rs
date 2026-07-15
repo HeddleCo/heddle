@@ -136,11 +136,16 @@ pub fn attenuate_for_agent(
     parent_signer: &Ed25519Signer,
     child_public_key: &[u8],
 ) -> Result<String> {
-    let unverified = biscuit_auth::UnverifiedBiscuit::from_base64(parent_token_b64.as_bytes())
-        .context("parse parent biscuit (unverified)")?;
     if child_public_key.len() != 32 {
         bail!("child PoP public key must be 32 bytes");
     }
+    let effective_parent_key = effective_pop_public_key_hex(parent_token_b64)
+        .context("resolve parent token's effective PoP key")?;
+    if !effective_parent_key.eq_ignore_ascii_case(&hex::encode(parent_signer.public_key())) {
+        bail!("parent signer does not match the parent token's effective PoP key");
+    }
+    let unverified = biscuit_auth::UnverifiedBiscuit::from_base64(parent_token_b64.as_bytes())
+        .context("parse parent biscuit (unverified)")?;
     let parent_revocation_id = unverified
         .revocation_identifiers()
         .last()
@@ -476,11 +481,21 @@ mod tests {
     /// pulling `weft_server::biscuit::mint` because that would force
     /// server into the regular dep graph; the goal here is to
     /// keep the CLI small.
-    fn fresh_parent_token() -> (String, KeyPair) {
+    fn fresh_parent_token() -> (String, KeyPair, Ed25519Signer) {
         let kp = KeyPair::new();
+        let parent_pop = Ed25519Signer::generate().expect("parent PoP key");
         let mut builder = biscuit_auth::Biscuit::builder();
         builder = builder.fact(r#"user("alice")"#).expect("user fact");
         builder = builder.fact(r#"session("sess-1")"#).expect("session fact");
+        builder = builder
+            .fact(
+                format!(
+                    "device_pop_key(\"{}\")",
+                    hex::encode(parent_pop.public_key())
+                )
+                .as_str(),
+            )
+            .expect("device PoP fact");
         let exp = chrono::Utc::now() + chrono::Duration::hours(2);
         builder = builder
             .fact(format!("expires_at({})", exp.to_rfc3339()).as_str())
@@ -489,14 +504,7 @@ mod tests {
             .check(format!("check if time($now), $now < {}", exp.to_rfc3339()).as_str())
             .expect("expiry check");
         let biscuit = builder.build(&kp).expect("build parent biscuit");
-        (biscuit.to_base64().expect("to_base64"), kp)
-    }
-
-    fn pop_keypair() -> (Ed25519Signer, Ed25519Signer) {
-        (
-            Ed25519Signer::generate().expect("parent PoP key"),
-            Ed25519Signer::generate().expect("child PoP key"),
-        )
+        (biscuit.to_base64().expect("to_base64"), kp, parent_pop)
     }
 
     #[test]
@@ -544,6 +552,56 @@ mod tests {
         assert!(error.to_string().contains("exactly one pop_delegation"));
     }
 
+    #[test]
+    fn every_public_derivation_entrypoint_rejects_the_wrong_parent_signer() {
+        let (parent, _root, _parent_pop) = fresh_parent_token();
+        let wrong_parent_pop = Ed25519Signer::generate().expect("wrong parent PoP key");
+        let child_pop = Ed25519Signer::generate().expect("child PoP key");
+        let expires_at = Utc::now() + chrono::Duration::hours(1);
+
+        let direct_error = attenuate_for_agent(
+            &parent,
+            AgentAttenuation::time_bounded("direct", expires_at),
+            &wrong_parent_pop,
+            child_pop.public_key(),
+        )
+        .expect_err("direct derivation must reject a non-matching parent signer");
+        assert!(
+            direct_error
+                .to_string()
+                .contains("parent signer does not match")
+        );
+
+        let time_bounded_error = time_bounded(
+            &parent,
+            "time-bounded",
+            expires_at,
+            &wrong_parent_pop,
+            child_pop.public_key(),
+        )
+        .expect_err("time-bounded derivation must use the validated chokepoint");
+        assert!(
+            time_bounded_error
+                .to_string()
+                .contains("parent signer does not match")
+        );
+
+        let read_only_error = read_only_repo_agent(
+            &parent,
+            "read-only",
+            "acme/heddle",
+            1,
+            &wrong_parent_pop,
+            child_pop.public_key(),
+        )
+        .expect_err("read-only derivation must use the validated chokepoint");
+        assert!(
+            read_only_error
+                .to_string()
+                .contains("parent signer does not match")
+        );
+    }
+
     /// Exercise the same Biscuit chain verification and request-fact shape as
     /// the hosted server (`time` + bare gRPC `operation`).
     fn server_authorizes(
@@ -569,8 +627,8 @@ mod tests {
 
     #[test]
     fn attenuate_appends_a_block_with_agent_marker() {
-        let (parent, _kp) = fresh_parent_token();
-        let (parent_pop, child_pop) = pop_keypair();
+        let (parent, _kp, parent_pop) = fresh_parent_token();
+        let child_pop = Ed25519Signer::generate().expect("child PoP key");
         let attenuated = time_bounded(
             &parent,
             "agent-1",
@@ -593,8 +651,8 @@ mod tests {
         // gets rejected at verify time. This test just guards
         // against the helper accidentally rejecting timestamps it
         // doesn't like.
-        let (parent, _kp) = fresh_parent_token();
-        let (parent_pop, child_pop) = pop_keypair();
+        let (parent, _kp, parent_pop) = fresh_parent_token();
+        let child_pop = Ed25519Signer::generate().expect("child PoP key");
         let result = time_bounded(
             &parent,
             "agent-1",
@@ -607,8 +665,8 @@ mod tests {
 
     #[test]
     fn read_only_repo_agent_builds_with_op_and_resource_restrictions() {
-        let (parent, _kp) = fresh_parent_token();
-        let (parent_pop, child_pop) = pop_keypair();
+        let (parent, _kp, parent_pop) = fresh_parent_token();
+        let child_pop = Ed25519Signer::generate().expect("child PoP key");
         let attenuated = read_only_repo_agent(
             &parent,
             "agent-r",
@@ -629,8 +687,8 @@ mod tests {
 
     #[test]
     fn rejects_injection_in_allowed_operations() {
-        let (parent, _kp) = fresh_parent_token();
-        let (parent_pop, child_pop) = pop_keypair();
+        let (parent, _kp, parent_pop) = fresh_parent_token();
+        let child_pop = Ed25519Signer::generate().expect("child PoP key");
         let err = attenuate_for_agent(
             &parent,
             AgentAttenuation {
@@ -653,8 +711,8 @@ mod tests {
 
     #[test]
     fn accepts_normal_operation_names() {
-        let (parent, _kp) = fresh_parent_token();
-        let (parent_pop, child_pop) = pop_keypair();
+        let (parent, _kp, parent_pop) = fresh_parent_token();
+        let child_pop = Ed25519Signer::generate().expect("child PoP key");
         attenuate_for_agent(
             &parent,
             AgentAttenuation {
@@ -672,8 +730,8 @@ mod tests {
 
     #[test]
     fn server_accepts_allowed_operation_and_rejects_credential_issuance_and_delete_floor() {
-        let (parent, root) = fresh_parent_token();
-        let (parent_pop, child_pop) = pop_keypair();
+        let (parent, root, parent_pop) = fresh_parent_token();
+        let child_pop = Ed25519Signer::generate().expect("child PoP key");
         let child = attenuate_for_agent(
             &parent,
             AgentAttenuation {
@@ -718,8 +776,8 @@ mod tests {
 
     #[test]
     fn server_rejects_child_after_attenuation_ttl() {
-        let (parent, root) = fresh_parent_token();
-        let (parent_pop, child_pop) = pop_keypair();
+        let (parent, root, parent_pop) = fresh_parent_token();
+        let child_pop = Ed25519Signer::generate().expect("child PoP key");
         let expires_at = Utc::now() + chrono::Duration::minutes(5);
         let child = attenuate_for_agent(
             &parent,
@@ -751,8 +809,7 @@ mod tests {
 
     #[test]
     fn sub_derivation_intersects_every_operation_block() {
-        let (parent, root) = fresh_parent_token();
-        let root_pop = Ed25519Signer::generate().expect("root PoP key");
+        let (parent, root, root_pop) = fresh_parent_token();
         let parent_agent_pop = Ed25519Signer::generate().expect("parent-agent PoP key");
         let subagent_pop = Ed25519Signer::generate().expect("subagent PoP key");
         let parent_agent = attenuate_for_agent(
@@ -768,6 +825,28 @@ mod tests {
             parent_agent_pop.public_key(),
         )
         .expect("derive parent agent");
+        assert_eq!(
+            effective_pop_public_key_hex(&parent_agent).expect("resolve parent-agent PoP key"),
+            hex::encode(parent_agent_pop.public_key())
+        );
+        let wrong_signer_error = attenuate_for_agent(
+            &parent_agent,
+            AgentAttenuation {
+                agent_id: "agent-wrong-signer".to_string(),
+                expires_at: Utc::now() + chrono::Duration::minutes(30),
+                allowed_operations: Some(vec!["Push".to_string()]),
+                allowed_resources: None,
+                declared_scopes: Vec::new(),
+            },
+            &root_pop,
+            subagent_pop.public_key(),
+        )
+        .expect_err("an attenuated parent requires its current leaf signer");
+        assert!(
+            wrong_signer_error
+                .to_string()
+                .contains("parent signer does not match")
+        );
         let subagent = attenuate_for_agent(
             &parent_agent,
             AgentAttenuation {

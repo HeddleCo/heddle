@@ -437,12 +437,7 @@ fn write_agent_bundle(
             &metadata_json,
         )
         .with_context(|| format!("writing agent metadata under {}", staging.display()))?;
-        std::fs::rename(&staging, directory).with_context(|| {
-            format!(
-                "publishing completed agent bundle at {}",
-                directory.display()
-            )
-        })?;
+        publish_agent_bundle(&staging, directory, parent)?;
         Ok(())
     })();
 
@@ -450,6 +445,30 @@ fn write_agent_bundle(
         let _ = std::fs::remove_dir_all(&staging);
     }
     write_result
+}
+
+fn publish_agent_bundle(staging: &Path, directory: &Path, parent: &Path) -> Result<()> {
+    publish_agent_bundle_with_sync(
+        staging,
+        directory,
+        parent,
+        objects::fs_atomic::sync_directory,
+    )
+}
+
+fn publish_agent_bundle_with_sync(
+    staging: &Path,
+    directory: &Path,
+    parent: &Path,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<()> {
+    std::fs::rename(staging, directory).with_context(|| {
+        format!(
+            "publishing completed agent bundle at {}",
+            directory.display()
+        )
+    })?;
+    sync_parent(parent).with_context(|| format!("syncing agent bundle parent {}", parent.display()))
 }
 
 struct HeadlessTokenMetadata {
@@ -2042,6 +2061,30 @@ mod tests {
                 "a refused replacement must leave the completed bundle unchanged"
             );
         });
+    }
+
+    #[test]
+    fn publishing_agent_bundle_syncs_the_parent_after_rename_and_reports_sync_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let parent = temp.path();
+        let staging = parent.join(".agent.tmp");
+        let destination = parent.join("agent");
+        std::fs::create_dir(&staging).expect("create staging directory");
+        std::fs::write(staging.join("token"), b"token").expect("write staged token");
+
+        let error =
+            publish_agent_bundle_with_sync(&staging, &destination, parent, |synced_parent| {
+                assert_eq!(synced_parent, parent);
+                assert!(
+                    destination.join("token").is_file(),
+                    "the completed rename must precede the parent sync"
+                );
+                Err(std::io::Error::other("injected parent sync failure"))
+            })
+            .expect_err("a parent sync failure must not be reported as success");
+
+        assert!(error.to_string().contains("syncing agent bundle parent"));
+        assert!(format!("{error:#}").contains("injected parent sync failure"));
     }
 
     #[test]
