@@ -888,14 +888,10 @@
       "capability": "identity and credentials",
       "layers": {
         "client": {
-          "status": "shipped",
-          "evidence": [
-            {
-              "path": "crates/client/src/grpc_hosted/mod.rs",
-              "contains": "WhoAmI"
-            }
-          ],
-          "follow_up": null
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The hosted client has no callable WhoAmI wrapper; the only method-path occurrence is test data."
         },
         "cli": {
           "status": "intentionally-unsupported",
