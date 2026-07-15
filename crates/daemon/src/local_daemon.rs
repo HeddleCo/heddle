@@ -546,8 +546,13 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(process_global)]
     fn bind_private_unix_listener_creates_socket_0600_before_chmod() {
+        const TEST_NAME: &str =
+            "local_daemon::tests::bind_private_unix_listener_creates_socket_0600_before_chmod";
+        if !run_umask_test_in_isolated_process(TEST_NAME) {
+            return;
+        }
+
         use std::os::unix::fs::PermissionsExt;
 
         let temp = TempDir::new().unwrap();
@@ -572,8 +577,13 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(process_global)]
     fn bind_private_unix_listener_restores_umask_after_bind_error() {
+        const TEST_NAME: &str =
+            "local_daemon::tests::bind_private_unix_listener_restores_umask_after_bind_error";
+        if !run_umask_test_in_isolated_process(TEST_NAME) {
+            return;
+        }
+
         let temp = TempDir::new().unwrap();
         let socket = temp.path().join("missing").join("grpc.sock");
         let before = current_umask();
@@ -585,9 +595,38 @@ mod tests {
         assert_eq!(after, before, "bind errors must restore the prior umask");
     }
 
+    /// Re-run an umask-sensitive assertion as the only selected test in a
+    /// child process. `umask(2)` is process-global, so a mutex or serial-test
+    /// group cannot protect unrelated tests running on other harness threads.
+    /// Keeping the mutation in a one-test child makes the isolation boundary
+    /// structural: the parent workspace test process never observes the
+    /// temporary `PRIVATE_SOCKET_UMASK`.
+    fn run_umask_test_in_isolated_process(test_name: &str) -> bool {
+        const CHILD_TEST_ENV: &str = "HEDDLE_DAEMON_UMASK_TEST_CHILD";
+
+        if std::env::var_os(CHILD_TEST_ENV).as_deref() == Some(std::ffi::OsStr::new(test_name)) {
+            return true;
+        }
+
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("resolve daemon unit-test executable"),
+        )
+        .args(["--exact", test_name, "--nocapture"])
+        .env(CHILD_TEST_ENV, test_name)
+        .output()
+        .expect("spawn isolated daemon umask test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "isolated umask test {test_name} did not run successfully\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        false
+    }
+
     fn current_umask() -> libc::mode_t {
         // SAFETY: reading umask requires the standard set-then-restore
-        // sequence; tests that call this are serialized with the bind tests.
+        // sequence. This helper only runs in the isolated one-test child.
         unsafe {
             let current = libc::umask(0);
             libc::umask(current);
