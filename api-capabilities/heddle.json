@@ -1527,11 +1527,10 @@
           "follow_up": null
         },
         "cli": {
-          "status": "shipped",
-          "evidence": [
-            "crates/cli/src/cli/commands/remote/remote_ops.rs:ListRefs"
-          ],
-          "follow_up": null
+          "status": "unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No direct Heddle CLI surface is shipped for this transport primitive."
         }
       }
     },
@@ -1587,11 +1586,10 @@
           "follow_up": null
         },
         "cli": {
-          "status": "shipped",
-          "evidence": [
-            "crates/cli/src/cli/commands/remote/remote_ops.rs:UpdateRef"
-          ],
-          "follow_up": null
+          "status": "unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No direct Heddle CLI surface is shipped for this transport primitive."
         }
       }
     },
