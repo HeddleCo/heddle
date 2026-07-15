@@ -552,6 +552,8 @@ struct PackedImport<'a, W: std::io::Write + std::io::Read + std::io::Seek + Sync
     options: ImportOptions,
     emit_objects: bool,
     repair_mapped_objects: bool,
+    materialized_trees: HashSet<String>,
+    materialized_blobs: HashSet<String>,
 }
 
 impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImport<'a, W> {
@@ -569,6 +571,8 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
             options,
             emit_objects: true,
             repair_mapped_objects: false,
+            materialized_trees: HashSet::new(),
+            materialized_blobs: HashSet::new(),
         }
     }
 
@@ -592,7 +596,8 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
         path_prefix: &str,
     ) -> crate::Result<ContentHash> {
         if let Some(hash) = self.map.get_tree(git_tree_sha)
-            && !self.repair_mapped_objects
+            && (!self.repair_mapped_objects
+                || !self.materialized_trees.insert(git_tree_sha.to_string()))
         {
             let entries = self
                 .map
@@ -614,6 +619,7 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
             }
             return Ok(hash);
         }
+        self.materialized_trees.insert(git_tree_sha.to_string());
 
         let before_lossy = self.stats.lossy_entries.len();
         let children = self.git.read_tree(git_tree_sha)?;
@@ -719,10 +725,12 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImp
 
     fn translate_blob(&mut self, git_blob_sha: &str) -> crate::Result<ContentHash> {
         if let Some(hash) = self.map.get_blob(git_blob_sha)
-            && !self.repair_mapped_objects
+            && (!self.repair_mapped_objects
+                || !self.materialized_blobs.insert(git_blob_sha.to_string()))
         {
             return Ok(hash);
         }
+        self.materialized_blobs.insert(git_blob_sha.to_string());
 
         let bytes = self.git.read_blob(git_blob_sha)?;
         let blob = Blob::from_slice(&bytes);
@@ -1556,6 +1564,62 @@ mod tests {
         assert_eq!(
             states_after_first, states_after_second,
             "second run minted new states — import is not idempotent"
+        );
+    }
+
+    #[test]
+    fn overlay_repair_materializes_each_mapped_object_once() {
+        let gitdir = TempDir::new().unwrap();
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(gitdir.path())
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .expect("git command");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+
+        run(&["init", "-q", "--initial-branch=main"]);
+        std::fs::write(gitdir.path().join("shared.txt"), "shared\n").unwrap();
+        std::fs::write(gitdir.path().join("evolving.txt"), "one\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "one"]);
+        for (content, message) in [("two\n", "two"), ("three\n", "three")] {
+            std::fs::write(gitdir.path().join("evolving.txt"), content).unwrap();
+            run(&["add", "evolving.txt"]);
+            run(&["commit", "-q", "-m", message]);
+        }
+        let tip = run(&["rev-parse", "HEAD"]);
+
+        repo::Repository::init(gitdir.path()).expect("initialize overlay repository");
+        bind_single_git_commit_overlay(
+            gitdir.path(),
+            gitdir.path(),
+            &tip,
+            ImportOptions::default(),
+        )
+        .expect("bind lazy overlay tip");
+
+        let (stats, _) = import_git_into(gitdir.path(), gitdir.path())
+            .expect("full import repairs the descriptor-backed closure");
+        assert_eq!(
+            stats.trees_imported, 3,
+            "each root tree is materialized once"
+        );
+        assert_eq!(
+            stats.blobs_imported, 4,
+            "the unchanged shared blob must not be appended once per commit"
         );
     }
 

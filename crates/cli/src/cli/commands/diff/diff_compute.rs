@@ -118,9 +118,6 @@ pub fn cmd_diff(
         && (matches!(from.as_deref(), Some("HEAD" | "@"))
             || matches!(to.as_deref(), Some("HEAD" | "@")))
         && repo.capability() == RepositoryCapability::GitOverlay
-        && ingest::GitSource::open(repo.root())?
-            .resolve_revision("HEAD")
-            .is_err()
     {
         crate::cli::commands::snapshot::ensure_current_state(
             &repo,

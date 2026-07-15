@@ -3671,6 +3671,107 @@ fn git_overlay_matrix_land_checkpoint_failure_auto_undoes_heddle_integration() {
 }
 
 #[test]
+fn git_overlay_matrix_integrated_marker_write_failure_uses_committed_batch_for_rollback() {
+    let fixture = GitOverlayFixture::imported_main()
+        .with_ready_materialized_thread("feature/integrated-marker-rollback");
+    let before_state =
+        json(fixture.path(), &["--output", "json", "status"])["current_state"].clone();
+    let before_git = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+
+    let land = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/integrated-marker-rollback",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "land_before_integrated_marker_update",
+        )],
+    )
+    .expect("invoke land with integrated marker fault injection");
+    assert!(!land.status.success());
+    let envelope: Value = serde_json::from_slice(&land.stderr).expect("typed rollback error");
+    assert_eq!(
+        envelope["kind"], "land_checkpoint_rolled_back",
+        "{envelope}"
+    );
+    assert_eq!(
+        json(fixture.path(), &["--output", "json", "status"])["current_state"],
+        before_state,
+        "rollback must use the committed integration transaction even while the durable marker is still Prepared"
+    );
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        before_git
+    );
+    assert!(
+        !fixture.path().join(".heddle/incomplete-land.json").exists(),
+        "successful rollback must consume the prepared marker"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_prepared_marker_recovers_unrecorded_owned_collapse() {
+    let thread = "feature/collapse-marker-recovery";
+    let fixture = GitOverlayFixture::imported_main().with_ready_materialized_thread(thread);
+    std::fs::write(fixture.ready_thread_path().join("second.txt"), "second\n").unwrap();
+    let second = json(
+        fixture.ready_thread_path(),
+        &["--output", "json", "ready", "-m", "second ready state"],
+    );
+    assert_eq!(second["status"], "completed", "{second}");
+
+    let repo = repo::Repository::open(fixture.path()).unwrap();
+    let before_source = repo
+        .refs()
+        .get_thread(&objects::object::ThreadName::new(thread))
+        .unwrap()
+        .expect("ready thread source");
+    drop(repo);
+
+    let failed = heddle_output_with_env(
+        &["--output", "json", "land", "--thread", thread],
+        Some(fixture.path()),
+        &[("HEDDLE_FAULT_INJECT", "land_before_collapse_marker_update")],
+    )
+    .expect("invoke land with collapse marker fault injection");
+    assert!(!failed.status.success());
+    let marker_path = fixture.path().join(".heddle/incomplete-land.json");
+    let marker: Value = serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+    assert_eq!(marker["phase"], "prepared", "{marker}");
+    assert!(marker["collapse_state"].is_null(), "{marker}");
+
+    let repo = repo::Repository::open(fixture.path()).unwrap();
+    let collapsed_source = repo
+        .refs()
+        .get_thread(&objects::object::ThreadName::new(thread))
+        .unwrap()
+        .expect("collapsed source");
+    assert_ne!(collapsed_source, before_source);
+    drop(repo);
+
+    let recovery = heddle_output(&["--output", "json", "init"], Some(fixture.path())).unwrap();
+    assert!(
+        recovery.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovery.stderr)
+    );
+    let repo = repo::Repository::open(fixture.path()).unwrap();
+    assert_eq!(
+        repo.refs()
+            .get_thread(&objects::object::ThreadName::new(thread))
+            .unwrap(),
+        Some(before_source),
+        "recovery must infer and undo only the exact collapse from the recorded thread transition"
+    );
+    assert!(!marker_path.exists());
+}
+
+#[test]
 fn git_overlay_matrix_land_prepared_journal_recovers_pre_publish_crash() {
     let fixture =
         GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/land-prepared");

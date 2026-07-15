@@ -245,7 +245,6 @@ fn stabilize_land_output_shapes(verb: &str, schema: &mut Value) {
                         "siblings_restack_failed",
                         "blockers",
                         "warnings",
-                        "primary_command",
                         "recovery_commands",
                     ],
                 );
@@ -3638,6 +3637,24 @@ mod tests {
         assert!(
             properties.contains_key("captured_state"),
             "ready schema should document captured_state even though schemars models nullable Option fields as optional"
+        );
+    }
+
+    #[test]
+    fn land_batch_peer_primary_command_remains_optional() {
+        let schema = schema_for_verb("land --threads").expect("land batch schema");
+        let peer = schema
+            .get("$defs")
+            .and_then(Value::as_object)
+            .and_then(|defs| defs.get("LandBatchPeerSchema"))
+            .expect("land batch peer schema");
+        assert!(
+            property_schema(peer, "primary_command").is_object(),
+            "peer schema must still describe primary_command: {peer}"
+        );
+        assert!(
+            !required_fields(peer).contains(&"primary_command"),
+            "successful peers omit None primary_command values: {peer}"
         );
     }
 

@@ -1436,17 +1436,7 @@ fn land_checkpoint_failure_after_heddle(
             performed_steps,
         ));
     }
-    if let Err(journal_error) =
-        mark_incomplete_land_phase(repo, IncompleteLandPhase::RollbackStarted)
-    {
-        return anyhow!(RecoveryAdvice::land_checkpoint_partial_failure_undo_failed(
-            thread_id,
-            &checkpoint_error,
-            journal_error,
-            performed_steps,
-        ));
-    }
-    let marker = match load_incomplete_land_marker(repo) {
+    let mut marker = match load_incomplete_land_marker(repo) {
         Ok(Some(marker)) => marker,
         Ok(None) => {
             return anyhow!(RecoveryAdvice::land_checkpoint_partial_failure_undo_failed(
@@ -1465,6 +1455,23 @@ fn land_checkpoint_failure_after_heddle(
             ));
         }
     };
+    if marker.phase == IncompleteLandPhase::Prepared
+        && let Err(error) = hydrate_land_integration_identity_in_memory(repo, &mut marker)
+    {
+        return anyhow!(RecoveryAdvice::land_checkpoint_partial_failure_undo_failed(
+            thread_id,
+            &checkpoint_error,
+            error,
+            performed_steps,
+        ));
+    }
+    // The marker write that led here may have failed because the journal is
+    // temporarily unwritable. Keep the hydrated operation identity in memory
+    // and attempt the owned rollback even if persisting RollbackStarted fails;
+    // a surviving Prepared marker can re-hydrate the same committed
+    // transaction on the next recovery pass.
+    marker.phase = IncompleteLandPhase::RollbackStarted;
+    let _ = write_land_marker(repo, &marker);
     match auto_undo_land_integration(repo, &marker) {
         Ok(()) => {
             if let Err(fault) =
@@ -2033,6 +2040,7 @@ fn write_incomplete_land_marker(
     merge_state: Option<&str>,
     collapse_state: Option<&StateId>,
 ) -> Result<()> {
+    objects::fault_inject::maybe_fail_at("land_before_integrated_marker_update")?;
     let prepared = load_incomplete_land_marker(repo)?;
     let integration_batch_id = match merge_state {
         Some(state) => {
@@ -2128,6 +2136,7 @@ fn record_land_collapse_in_marker(repo: &Repository, collapse_state: &StateId) -
     };
     marker.collapse_state = Some(collapse_state.to_string_full());
     marker.collapse_batch_id = Some(find_recent_land_collapse_batch(repo, collapse_state)?.id);
+    objects::fault_inject::maybe_fail_at("land_before_collapse_marker_update")?;
     write_land_marker(repo, &marker)
 }
 
@@ -2393,6 +2402,106 @@ fn hydrate_land_integration_identity(
     repo: &Repository,
     marker: &mut IncompleteLandMarker,
 ) -> Result<()> {
+    let collapse_hydrated = hydrate_land_collapse_identity(repo, marker)?;
+    let integration_hydrated = hydrate_land_integration_identity_in_memory(repo, marker)?;
+    if integration_hydrated {
+        let current_target = repo
+            .current_state()?
+            .map(|state| state.state_id.to_string_full());
+        let current_source = repo
+            .refs()
+            .get_thread(&ThreadName::new(&marker.thread_id))?
+            .map(|state| state.to_string_full());
+        marker.phase = if current_target == marker.pre_target_state
+            && current_source == marker.pre_source_state
+            && current_git_oid(repo)? == marker.pre_git_oid
+        {
+            IncompleteLandPhase::RollbackComplete
+        } else if current_target == marker.pre_target_state
+            && marker.collapse_state.is_some()
+            && current_source == marker.collapse_state
+        {
+            IncompleteLandPhase::Prepared
+        } else {
+            IncompleteLandPhase::Integrated
+        };
+    }
+    if collapse_hydrated || integration_hydrated {
+        write_land_marker(repo, marker)?;
+    }
+    Ok(())
+}
+
+fn hydrate_land_collapse_identity(
+    repo: &Repository,
+    marker: &mut IncompleteLandMarker,
+) -> Result<bool> {
+    let pre_source = marker
+        .pre_source_state
+        .as_deref()
+        .and_then(|state| StateId::parse(state).ok());
+    let matches_marker = |batch: &OpBatch, result: &StateId| {
+        batch.entries.iter().any(|entry| {
+            matches!(
+                &entry.operation,
+                OpRecord::Collapse {
+                    result: operation_result,
+                    thread: Some(thread),
+                    pre_thread_state,
+                    ..
+                } if operation_result == result
+                    && thread == &marker.thread_id
+                    && *pre_thread_state == pre_source
+            )
+        })
+    };
+
+    match (&marker.collapse_state, marker.collapse_batch_id) {
+        (Some(state), Some(batch_id)) => {
+            let state = StateId::parse(state)
+                .map_err(|_| anyhow!("incomplete-land marker has an invalid collapse state"))?;
+            let batch = find_land_batch_by_id(repo, batch_id)?;
+            if !matches_marker(&batch, &state) {
+                return Err(anyhow!(
+                    "incomplete-land collapse identity does not match its recorded thread transition"
+                ));
+            }
+            return Ok(false);
+        }
+        (None, None) => {}
+        _ => {
+            return Err(anyhow!(
+                "incomplete-land marker records an incomplete collapse identity"
+            ));
+        }
+    }
+
+    let Some(current_source) = repo
+        .refs()
+        .get_thread(&ThreadName::new(&marker.thread_id))?
+    else {
+        return Ok(false);
+    };
+    if Some(current_source) == pre_source {
+        return Ok(false);
+    }
+    let Some(batch) = repo
+        .oplog()
+        .recent_batches_scoped(1024, Some(&repo.op_scope()))?
+        .into_iter()
+        .find(|batch| matches_marker(batch, &current_source))
+    else {
+        return Ok(false);
+    };
+    marker.collapse_state = Some(current_source.to_string_full());
+    marker.collapse_batch_id = Some(batch.id);
+    Ok(true)
+}
+
+fn hydrate_land_integration_identity_in_memory(
+    repo: &Repository,
+    marker: &mut IncompleteLandMarker,
+) -> Result<bool> {
     let transaction_id = marker
         .integration_transaction_id
         .as_deref()
@@ -2403,7 +2512,7 @@ fn hydrate_land_integration_identity(
                 "incomplete-land marker records integration state without its committed transaction"
             ));
         }
-        return Ok(());
+        return Ok(false);
     };
     if marker
         .integration_batch_id
@@ -2467,10 +2576,7 @@ fn hydrate_land_integration_identity(
     }
     marker.integration_batch_id = Some(batch.id);
     marker.merge_state = Some(merge_state.to_string_full());
-    if marker.phase == IncompleteLandPhase::Prepared {
-        marker.phase = IncompleteLandPhase::Integrated;
-    }
-    write_land_marker(repo, marker)
+    Ok(true)
 }
 
 fn required_marker_state(repo: &Repository, value: Option<&str>, label: &str) -> Result<StateId> {

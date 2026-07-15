@@ -443,6 +443,30 @@ fn lazy_tip_short_id_resolves_and_adopt_materializes_native_closure() {
 }
 
 #[test]
+fn initialized_overlay_two_sided_head_diff_binds_git_tip() {
+    let temp = TempDir::new().unwrap();
+    let work = temp.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git(&work, &["init", "-b", "main"]);
+    configure_git_identity(&work);
+    commit_file(&work, "story.txt", "one\n", "seed main");
+
+    heddle(&["init"], Some(&work)).unwrap();
+    let diff: Value = serde_json::from_str(
+        &heddle(&["diff", "HEAD", "HEAD", "--output", "json"], Some(&work))
+            .expect("two-sided HEAD diff must lazily bind the Git tip"),
+    )
+    .expect("diff json");
+    assert_eq!(diff["stats"]["files_changed"], 0, "{diff}");
+
+    let repo = repo::Repository::open(&work).unwrap();
+    assert!(
+        repo.current_state().unwrap().is_some(),
+        "two-sided HEAD resolution must bind the authoritative Git tip"
+    );
+}
+
+#[test]
 fn tip_bind_distinguishes_unborn_head_from_corrupt_head() {
     let temp = TempDir::new().unwrap();
     let unborn = temp.path().join("unborn");
