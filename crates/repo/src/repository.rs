@@ -81,7 +81,9 @@ pub use repo_config::{
 };
 #[cfg(feature = "async-source")]
 pub use repository_history::query_history_async;
-pub use repository_history::{ChangedPathFilter, ChangedPathFilters, HistoryQuery};
+pub use repository_history::{
+    ChangedPathFilter, ChangedPathFilters, HistoryQuery, query_history_from_source,
+};
 pub use repository_maintenance::{
     ChangeMonitorInspection, CommitGraphInspection, PackFilesInspection, PartialFetchInspection,
     PullPlannerCacheInspection, RefCountsInspection, RepositoryMaintenanceRunReport,

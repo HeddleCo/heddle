@@ -671,6 +671,7 @@ impl Repository {
                 // We hold the snapshot write lock here; fold the default-
                 // visibility binding into the merge's batch (heddle#317).
                 true,
+                None,
             )?;
             self.merge_state_manager().finish()?;
             let tree = self
@@ -813,6 +814,32 @@ impl Repository {
         merge_base: Option<StateId>,
         fold_default_visibility: bool,
     ) -> Result<State> {
+        self.snapshot_merge_with_attribution_transaction(
+            merge_parent,
+            intent,
+            confidence,
+            attribution,
+            merge_base,
+            fold_default_visibility,
+            None,
+        )
+    }
+
+    /// Transaction-bound merge snapshot. When `transaction_id` is present its
+    /// commit sentinel is folded into the same record-first batch as the
+    /// snapshot ref update, allowing recovery to identify the exact integration
+    /// batch even if the caller crashes before persisting the resulting state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn snapshot_merge_with_attribution_transaction(
+        &self,
+        merge_parent: &StateId,
+        intent: Option<String>,
+        confidence: Option<f32>,
+        attribution: Attribution,
+        merge_base: Option<StateId>,
+        fold_default_visibility: bool,
+        transaction_id: Option<&str>,
+    ) -> Result<State> {
         self.snapshot_merge_with_attribution_and_lineage(
             merge_parent,
             SnapshotDetails {
@@ -823,6 +850,7 @@ impl Repository {
             },
             merge_base,
             fold_default_visibility,
+            transaction_id,
         )
     }
 
@@ -832,6 +860,7 @@ impl Repository {
         details: SnapshotDetails,
         merge_base: Option<StateId>,
         fold_default_visibility: bool,
+        transaction_id: Option<&str>,
     ) -> Result<State> {
         let tree = self.build_tree(&self.root)?;
         let tree_hash = self.store.put_tree(&tree)?;
@@ -909,6 +938,11 @@ impl Repository {
         // `fold_default_visibility = false` and keep their no-auto-binding
         // behavior — a plain record-first commit (heddle#354 r8).
         if fold_default_visibility {
+            if transaction_id.is_some() {
+                return Err(HeddleError::Config(
+                    "transaction-bound merge snapshots cannot fold capture visibility".to_string(),
+                ));
+            }
             self.commit_snapshot_atomic_with_capture_visibility(
                 &state.id(),
                 Some(first_parent),
@@ -916,11 +950,18 @@ impl Repository {
                 true,
             )?;
         } else {
+            let extra = transaction_id
+                .map(|transaction_id| OpRecord::TransactionCommit {
+                    transaction_id: transaction_id.to_string(),
+                    op_count: 1,
+                })
+                .into_iter()
+                .collect();
             self.commit_snapshot_atomic_with_records(
                 &state.id(),
                 Some(first_parent),
                 thread.as_ref(),
-                Vec::new(),
+                extra,
             )?;
         }
 

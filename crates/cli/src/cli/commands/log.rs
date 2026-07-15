@@ -296,7 +296,7 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
     {
         let revision = options.state.as_deref().unwrap_or("HEAD");
         if ingest::GitSource::open(repo.root())?
-            .resolve_revision(revision)
+            .resolve_history_revision(revision)
             .is_ok()
         {
             return render_unbound_overlay_log(cli, &repo, &options);
@@ -422,28 +422,28 @@ fn render_unbound_overlay_log(
 ) -> Result<()> {
     let revision = options.state.as_deref().unwrap_or("HEAD");
     let history = ingest::OverlayHistory::open(repo.root(), revision)?;
-    let since_git = options
+    let start_id = history.tip().map(|(_, state)| state.state_id);
+    let since_id = options
         .since
         .as_deref()
-        .map(|revision| ingest::GitSource::open(repo.root())?.resolve_revision(revision))
+        .map(|revision| history.state_id_for_revision(revision))
         .transpose()?;
-    let mut entries = Vec::new();
-    for (git_oid, state) in history.states() {
-        if since_git.as_deref() == Some(git_oid.as_str()) {
-            break;
-        }
-        if let Some(agent) = options.agent.as_deref()
-            && !state.attribution.to_string().contains(agent)
-        {
-            continue;
-        }
-        let mut entry = StateEntry::from(state);
-        entry.git_checkpoint = Some(git_oid.clone());
-        entries.push(entry);
-        if entries.len() == options.limit {
-            break;
-        }
-    }
+    let changed_paths = ChangedPathFilters::try_from_paths(options.paths.clone())?;
+    let query = HistoryQuery::new(start_id)
+        .with_limit(options.limit)
+        .with_agent_filter(options.agent.clone())
+        .with_changed_paths(changed_paths)
+        .with_stop_at(since_id);
+    let entries = repo::query_history_from_source(history.source(), &query)?
+        .into_iter()
+        .map(|state| {
+            let mut entry = StateEntry::from(&state);
+            entry.git_checkpoint = history
+                .git_oid_for_state(&state.state_id)
+                .map(str::to_string);
+            entry
+        })
+        .collect();
     let output = LogOutput {
         output_kind: "log",
         status: "completed",

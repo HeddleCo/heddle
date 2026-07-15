@@ -35,26 +35,37 @@ Regression: `init_then_start_binds_git_tip_not_orphan_bootstrap`.
 
 Before a mutating command binds that tip, `log`, `show`, and
 `query --attribution` construct an in-memory state graph from the reachable Git
-commits. `diff HEAD` reads the Git-backed worktree status. These observe-only
-paths do not create mappings, object files, state descriptors, or Heddle refs;
-the in-memory graph preserves the reachable Git parent relationships.
+commits. The overlay `log` path passes that graph through the repository's
+normal `HistoryQuery` implementation, including first-parent traversal, limit,
+path, agent/model, and stop-at filtering. `show` resolves `HEAD` / `@`, their
+numeric first-parent forms, and exact local branch or tag refs through Sley.
+`diff HEAD` reads the Git-backed worktree status. These observe-only paths do
+not create mappings, object files, state descriptors, or Heddle refs; the
+in-memory graph preserves the reachable Git parent relationships.
 
 Key implementation: `crates/ingest/src/overlay_history.rs`.
 
-Regression:
-`initialized_overlay_observe_commands_project_full_git_history_without_writes`.
+Regressions:
+
+- `initialized_overlay_observe_commands_project_full_git_history_without_writes`
+- `unbound_overlay_history_uses_native_query_and_canonical_revision_semantics`
 
 ### Keep land and Git checkpoint state consistent
 
 Land writes `.heddle/incomplete-land.json` atomically before the first
-land-owned collapse or integration mutation, advances it through integration
-and rollback phases, and clears it only after Git write-through and oplog-batch
-coalescing complete. A checkpoint error automatically undoes the land-owned
-integration and any land-owned collapse batch. The marker records the pre-land
-and expected Git OIDs plus the exact integration and collapse oplog batch IDs.
-Recovery validates those identities before undoing them; a prepared marker
-never infers ownership from whichever state or ref happens to differ at
-recovery time.
+land-owned collapse or integration mutation. The prepared marker contains a
+unique integration transaction identity; the fast-forward and merge-snapshot
+commit paths fold that identity into the same oplog batch as the target-moving
+operation. Recovery uses the oplog transaction index to recover that exact
+batch even when the command stops after integration but before the marker is
+enriched. It advances the marker through integration and rollback phases and
+clears it only after Git write-through and oplog-batch coalescing complete. A
+checkpoint error automatically undoes the land-owned integration and any
+land-owned collapse batch. The marker also records the pre-land and expected
+Git OIDs plus the exact integration and collapse oplog batch IDs. Recovery
+validates those identities before undoing them; a prepared marker never infers
+ownership from whichever state or ref happens to differ at recovery time, and
+it refuses to discard unowned worktree changes.
 
 `land` and `ready` recover a surviving marker; observe-only `status` reports the
 pending recovery and its retry action without mutating it. Recovery verifies
@@ -78,8 +89,12 @@ Key implementation:
 - `crates/core/src/save.rs`
 - `crates/git-projection/src/git_core.rs`
 
-Regression:
-`git_overlay_matrix_land_checkpoint_failure_auto_undoes_heddle_integration`.
+Regressions:
+
+- `git_overlay_matrix_land_checkpoint_failure_auto_undoes_heddle_integration`
+- `git_overlay_matrix_automatic_land_recovers_each_transaction_boundary`
+- `git_overlay_matrix_manual_resolution_land_recovers_each_transaction_boundary`
+- `prepared_land_recovery_refuses_unowned_worktree_changes`
 
 ### Land peers serially with one machine envelope
 

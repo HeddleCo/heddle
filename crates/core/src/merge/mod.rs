@@ -575,6 +575,36 @@ pub fn merge_thread_into_current_with_machine_contract(
     git_commit: bool,
     machine_contract: &MachineContractInput,
 ) -> Result<MergeReport> {
+    merge_thread_into_current_transactional(
+        repo,
+        track_name,
+        message,
+        no_commit,
+        preview,
+        with_diff,
+        no_semantic,
+        git_commit,
+        machine_contract,
+        None,
+    )
+}
+
+/// Merge entrypoint with an optional caller-provided transaction identity.
+/// Land persists this identity before integration so the exact committed batch
+/// remains discoverable across every crash boundary.
+#[allow(clippy::too_many_arguments)]
+pub fn merge_thread_into_current_transactional(
+    repo: &Repository,
+    track_name: &str,
+    message: Option<String>,
+    no_commit: bool,
+    preview: bool,
+    with_diff: bool,
+    no_semantic: bool,
+    git_commit: bool,
+    machine_contract: &MachineContractInput,
+    transaction_id: Option<&str>,
+) -> Result<MergeReport> {
     // Strategy + diff-semantics decided ONCE per merge attempt
     // (HeddleCo/heddle#503). Preview, refresh, apply, and diff all read
     // their strategy back off this single plan instead of re-deriving it
@@ -860,29 +890,34 @@ pub fn merge_thread_into_current_with_machine_contract(
             // `post_target_id` so redo replays the recorded SHA instead
             // of re-resolving `source_thread → tip` at apply time —
             // closes Codex's non-determinism finding on PR #109.
-            let head_before_ff = repo.head_ref()?;
-            repo.fast_forward_attached_without_record(&merge_target_id)?;
-            match &head_before_ff {
-                Head::Attached {
-                    thread: target_thread,
-                } => {
-                    repo.oplog().record_fast_forward(
-                        &ThreadName::new(track_name),
-                        target_thread,
-                        &current_state.state_id,
-                        &merge_target_id,
-                        Some(&repo.op_scope()),
-                    )?;
-                }
-                Head::Detached { state } => {
-                    // No attached thread to restore on undo. The generic
-                    // `Goto` inverse is sufficient — preserve historic
-                    // behavior for detached HEAD.
-                    repo.oplog().record_goto(
-                        &merge_target_id,
-                        Some(state),
-                        Some(&repo.op_scope()),
-                    )?;
+            if let Some(transaction_id) = transaction_id {
+                repo.fast_forward_attached_transactional(
+                    track_name,
+                    &merge_target_id,
+                    transaction_id,
+                )?;
+            } else {
+                let head_before_ff = repo.head_ref()?;
+                repo.fast_forward_attached_without_record(&merge_target_id)?;
+                match &head_before_ff {
+                    Head::Attached {
+                        thread: target_thread,
+                    } => {
+                        repo.oplog().record_fast_forward(
+                            &ThreadName::new(track_name),
+                            target_thread,
+                            &current_state.state_id,
+                            &merge_target_id,
+                            Some(&repo.op_scope()),
+                        )?;
+                    }
+                    Head::Detached { state } => {
+                        repo.oplog().record_goto(
+                            &merge_target_id,
+                            Some(state),
+                            Some(&repo.op_scope()),
+                        )?;
+                    }
                 }
             }
             if let Some(entry) = &thread_entry {
@@ -1335,13 +1370,14 @@ pub fn merge_thread_into_current_with_machine_contract(
         None
     };
 
-    let new_state = repo.snapshot_merge_with_attribution(
+    let new_state = repo.snapshot_merge_with_attribution_transaction(
         &merge_target_id,
         Some(merge_message.clone()),
         None,
         attribution.clone(),
         Some(merge_base_id),
         false,
+        transaction_id,
     )?;
 
     if let Some(entry) = &thread_entry {

@@ -3,7 +3,8 @@ use std::{cell::RefCell, collections::HashSet, fs, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use heddle_core::{
-    AutoLandPolicyInput, auto_land_policy_blockers as core_auto_land_policy_blockers,
+    AutoLandPolicyInput, MachineContractInput,
+    auto_land_policy_blockers as core_auto_land_policy_blockers,
     integrated_land_next_action as core_integrated_land_next_action,
     integration_blocker_recommended_action as core_integration_blocker_recommended_action,
     integration_blockers as core_integration_blockers,
@@ -32,7 +33,10 @@ use super::{
     checkpoint::{GitCheckpointRequest, create_git_checkpoint},
     collapse::{CollapsePublishedRef, collapse_resolved_states},
     git_overlay_txn,
-    merge::{build_thread_preview_report, merge_thread_into_current},
+    merge::{
+        build_thread_preview_report, merge_thread_into_current,
+        merge_thread_into_current_transactional,
+    },
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{
         OperatorAction, OperatorCommandOutput, VerificationClaimPolicy,
@@ -559,8 +563,13 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     let manual_resolution_current = manual_resolution_current(&repo, &merge_thread);
     let squash_land = should_squash_land(&args, &user_config);
     if manual_resolution_current {
-        if repo.capability() == repo::RepositoryCapability::GitOverlay {
-            write_prepared_land_marker(&repo, &merge_thread)?;
+        let integration_transaction_id =
+            if repo.capability() == repo::RepositoryCapability::GitOverlay {
+                Some(write_prepared_land_marker(&repo, &merge_thread)?)
+            } else {
+                None
+            };
+        if integration_transaction_id.is_some() {
             objects::fault_inject::maybe_fail_at("land_after_prepared_journal")?;
         }
         let land_collapse_state = if squash_land
@@ -582,7 +591,11 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 "heddle land --thread <name>",
             )?;
         }
-        let merge_state = adopt_manual_resolution(&repo, &merge_thread.id)?;
+        let merge_state = adopt_manual_resolution(
+            &repo,
+            &merge_thread.id,
+            integration_transaction_id.as_deref(),
+        )?;
         let mut checkpointed = false;
         let mut git_commit = None;
         update_integration_policy(
@@ -592,6 +605,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             "accepted manually resolved integration state",
         )?;
         if repo.capability() == repo::RepositoryCapability::GitOverlay {
+            objects::fault_inject::maybe_fail_at("land_after_integration_before_journal_update")?;
             if let Err(error) = write_incomplete_land_marker(
                 &repo,
                 &merge_thread.id,
@@ -607,7 +621,6 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                     land_performed_steps(captured, synced, true, false),
                 ));
             }
-            objects::fault_inject::maybe_fail_at("land_after_integration_before_journal_update")?;
             let checkpoint_message = land_checkpoint_message(
                 &repo,
                 &merge_thread,
@@ -799,8 +812,13 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         );
     }
 
-    if repo.capability() == repo::RepositoryCapability::GitOverlay {
-        write_prepared_land_marker(&repo, &merge_thread)?;
+    let integration_transaction_id = if repo.capability() == repo::RepositoryCapability::GitOverlay
+    {
+        Some(write_prepared_land_marker(&repo, &merge_thread)?)
+    } else {
+        None
+    };
+    if integration_transaction_id.is_some() {
         objects::fault_inject::maybe_fail_at("land_after_prepared_journal")?;
     }
     let land_collapse_state =
@@ -832,16 +850,31 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             merge_thread.id
         )),
     )?;
-    let merge_output = merge_thread_into_current(
-        &repo,
-        &merge_thread.id,
-        None,
-        false,
-        false,
-        false,
-        false,
-        false,
-    )?;
+    let merge_output = if let Some(transaction_id) = integration_transaction_id.as_deref() {
+        merge_thread_into_current_transactional(
+            &repo,
+            &merge_thread.id,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &MachineContractInput::default(),
+            Some(transaction_id),
+        )?
+    } else {
+        merge_thread_into_current(
+            &repo,
+            &merge_thread.id,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+        )?
+    };
     let integrated = merge_output.conflicts.is_empty() && merge_output.merge_state.is_some();
     let mut checkpointed = false;
     let mut git_commit = None;
@@ -865,6 +898,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     }
 
     if integrated && repo.capability() == repo::RepositoryCapability::GitOverlay {
+        objects::fault_inject::maybe_fail_at("land_after_integration_before_journal_update")?;
         if let Err(error) = write_incomplete_land_marker(
             &repo,
             &merge_thread.id,
@@ -880,7 +914,6 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 land_performed_steps(captured, synced, integrated, false),
             ));
         }
-        objects::fault_inject::maybe_fail_at("land_after_integration_before_journal_update")?;
         let checkpoint_message = land_checkpoint_message(
             &repo,
             &merge_thread,
@@ -1642,7 +1675,11 @@ fn op_targets_merge_state(op: &OpRecord, merge_state: &str) -> bool {
     core_op_targets_merge_state(op, merge_state)
 }
 
-fn adopt_manual_resolution(repo: &Repository, thread_id: &str) -> Result<String> {
+fn adopt_manual_resolution(
+    repo: &Repository,
+    thread_id: &str,
+    transaction_id: Option<&str>,
+) -> Result<String> {
     let manager = thread_manager(repo);
     let mut thread = manager.load(thread_id)?.ok_or_else(|| {
         anyhow!(thread_not_found_advice(
@@ -1659,7 +1696,11 @@ fn adopt_manual_resolution(repo: &Repository, thread_id: &str) -> Result<String>
                 thread.thread
             )
         })?;
-    super::ff_record::record_ff_advance(repo, &thread.thread, &target)?;
+    if let Some(transaction_id) = transaction_id {
+        repo.fast_forward_attached_transactional(&thread.thread, &target, transaction_id)?;
+    } else {
+        super::ff_record::record_ff_advance(repo, &thread.thread, &target)?;
+    }
     thread.state = repo::ThreadState::Merged;
     thread.merged_state = Some(target.short());
     thread.current_state = Some(target.short());
@@ -1958,6 +1999,8 @@ struct IncompleteLandMarker {
     #[serde(default)]
     integration_batch_id: Option<u64>,
     #[serde(default)]
+    integration_transaction_id: Option<String>,
+    #[serde(default)]
     collapse_batch_id: Option<u64>,
     #[serde(default)]
     phase: IncompleteLandPhase,
@@ -1991,7 +2034,26 @@ fn write_incomplete_land_marker(
 ) -> Result<()> {
     let prepared = load_incomplete_land_marker(repo)?;
     let integration_batch_id = match merge_state {
-        Some(state) => Some(find_recent_land_integration_batch(repo, state)?.id),
+        Some(state) => {
+            let transaction_id = prepared
+                .as_ref()
+                .and_then(|marker| marker.integration_transaction_id.as_deref())
+                .ok_or_else(|| anyhow!("prepared land marker has no integration transaction"))?;
+            let batch = repo
+                .oplog()
+                .committed_batch(transaction_id)?
+                .ok_or_else(|| anyhow!("land integration transaction was not committed"))?;
+            if !batch
+                .entries
+                .iter()
+                .any(|entry| op_targets_merge_state(&entry.operation, state))
+            {
+                return Err(anyhow!(
+                    "land integration transaction does not target recorded merge state {state}"
+                ));
+            }
+            Some(batch.id)
+        }
         None => None,
     };
     let marker = IncompleteLandMarker {
@@ -2006,6 +2068,9 @@ fn write_incomplete_land_marker(
             .as_ref()
             .and_then(|marker| marker.expected_git_oid.clone()),
         integration_batch_id,
+        integration_transaction_id: prepared
+            .as_ref()
+            .and_then(|marker| marker.integration_transaction_id.clone()),
         collapse_batch_id: prepared
             .as_ref()
             .and_then(|marker| marker.collapse_batch_id),
@@ -2025,7 +2090,8 @@ fn write_incomplete_land_marker(
     Ok(())
 }
 
-fn write_prepared_land_marker(repo: &Repository, thread: &Thread) -> Result<()> {
+fn write_prepared_land_marker(repo: &Repository, thread: &Thread) -> Result<String> {
+    let integration_transaction_id = format!("land-integration/{}", uuid::Uuid::new_v4());
     let marker = IncompleteLandMarker {
         thread_id: thread.id.clone(),
         merge_state: None,
@@ -2034,6 +2100,7 @@ fn write_prepared_land_marker(repo: &Repository, thread: &Thread) -> Result<()> 
         pre_git_oid: current_git_oid(repo)?,
         expected_git_oid: None,
         integration_batch_id: None,
+        integration_transaction_id: Some(integration_transaction_id.clone()),
         collapse_batch_id: None,
         phase: IncompleteLandPhase::Prepared,
         pre_target_state: repo
@@ -2048,7 +2115,8 @@ fn write_prepared_land_marker(repo: &Repository, thread: &Thread) -> Result<()> 
     let path = incomplete_land_marker_path(repo);
     let body = serde_json::to_vec_pretty(&marker).context("serialize incomplete-land marker")?;
     objects::fs_atomic::write_file_atomic(&path, &body)
-        .with_context(|| format!("write {}", path.display()))
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(integration_transaction_id)
 }
 
 fn record_land_collapse_in_marker(repo: &Repository, collapse_state: &StateId) -> Result<()> {
@@ -2156,14 +2224,14 @@ pub(crate) fn pending_incomplete_land_thread(repo: &Repository) -> Result<Option
 }
 
 pub fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()> {
-    let Some(marker) = load_incomplete_land_marker(repo)? else {
+    let Some(mut marker) = load_incomplete_land_marker(repo)? else {
         return Ok(());
     };
-    let target_branch = marker.target_branch.as_deref().ok_or_else(|| {
+    let target_branch = marker.target_branch.clone().ok_or_else(|| {
         anyhow!("incomplete-land marker is missing its target Git branch; refusing recovery")
     })?;
     let current_branch = repo.git_overlay_current_branch()?;
-    if current_branch.as_deref() != Some(target_branch) {
+    if current_branch.as_deref() != Some(target_branch.as_str()) {
         return Err(anyhow!(
             "incomplete land of '{}' targets Git branch '{}' but the checkout is on '{}'; switch back to '{}' before retrying recovery",
             marker.thread_id,
@@ -2171,6 +2239,10 @@ pub fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()> {
             current_branch.as_deref().unwrap_or("detached HEAD"),
             target_branch,
         ));
+    }
+
+    if marker.phase == IncompleteLandPhase::Prepared {
+        hydrate_land_integration_identity(repo, &mut marker)?;
     }
 
     let current_target = repo
@@ -2198,6 +2270,31 @@ pub fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()> {
 
     if marker.phase == IncompleteLandPhase::Prepared {
         if pre_matches {
+            if let Some(pre_target) = marker
+                .pre_target_state
+                .as_deref()
+                .and_then(|state| StateId::parse(state).ok())
+            {
+                if repo.worktree_matches_state(&pre_target)? {
+                    clear_incomplete_land_marker(repo)?;
+                    return Ok(());
+                }
+                let owned_source = marker
+                    .pre_source_state
+                    .as_deref()
+                    .and_then(|state| StateId::parse(state).ok());
+                let source_matches = match owned_source {
+                    Some(source) => repo.worktree_matches_state(&source)?,
+                    None => false,
+                };
+                if !source_matches {
+                    return Err(anyhow!(
+                        "prepared incomplete land of '{}' found unowned worktree changes; refusing to discard them",
+                        marker.thread_id
+                    ));
+                }
+                repo.restore_worktree_state_only(&pre_target, owned_source.as_ref())?;
+            }
             clear_incomplete_land_marker(repo)?;
             return Ok(());
         }
@@ -2285,6 +2382,90 @@ pub fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()> {
         ));
     }
     finish_recovered_land(repo, &marker, expected_oid)
+}
+
+fn hydrate_land_integration_identity(
+    repo: &Repository,
+    marker: &mut IncompleteLandMarker,
+) -> Result<()> {
+    let transaction_id = marker
+        .integration_transaction_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("incomplete-land marker has no integration transaction identity"))?;
+    let Some(batch) = repo.oplog().committed_batch(transaction_id)? else {
+        if marker.integration_batch_id.is_some() || marker.merge_state.is_some() {
+            return Err(anyhow!(
+                "incomplete-land marker records integration state without its committed transaction"
+            ));
+        }
+        return Ok(());
+    };
+    if marker
+        .integration_batch_id
+        .is_some_and(|batch_id| batch_id != batch.id)
+    {
+        return Err(anyhow!(
+            "incomplete-land marker batch does not match its integration transaction"
+        ));
+    }
+    let pre_target = marker
+        .pre_target_state
+        .as_deref()
+        .and_then(|state| StateId::parse(state).ok())
+        .ok_or_else(|| anyhow!("incomplete-land marker has no valid pre-target state"))?;
+    let mut targets = batch.entries.iter().filter_map(|entry| {
+        if let OpRecord::Snapshot {
+            new_state,
+            prev_head: Some(previous),
+            ..
+        } = &entry.operation
+            && *previous == pre_target
+        {
+            return Some(*new_state);
+        }
+        if let OpRecord::FastForward {
+            pre_target_id,
+            post_target_id,
+            ..
+        } = &entry.operation
+            && *pre_target_id == pre_target
+        {
+            return Some(*post_target_id);
+        }
+        if let OpRecord::Goto {
+            target,
+            prev_head: Some(previous),
+            ..
+        } = &entry.operation
+            && *previous == pre_target
+        {
+            return Some(*target);
+        }
+        None
+    });
+    let merge_state = targets.next().ok_or_else(|| {
+        anyhow!("integration transaction contains no operation from its recorded pre-target")
+    })?;
+    if targets.next().is_some() {
+        return Err(anyhow!(
+            "integration transaction contains multiple target-changing operations"
+        ));
+    }
+    if marker.merge_state.as_deref().is_some_and(|state| {
+        StateId::parse(state)
+            .map(|state| state != merge_state)
+            .unwrap_or(true)
+    }) {
+        return Err(anyhow!(
+            "incomplete-land marker merge state does not match its integration transaction"
+        ));
+    }
+    marker.integration_batch_id = Some(batch.id);
+    marker.merge_state = Some(merge_state.to_string_full());
+    if marker.phase == IncompleteLandPhase::Prepared {
+        marker.phase = IncompleteLandPhase::Integrated;
+    }
+    write_land_marker(repo, marker)
 }
 
 fn required_marker_state(repo: &Repository, value: Option<&str>, label: &str) -> Result<StateId> {

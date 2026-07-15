@@ -5,6 +5,7 @@ use std::{collections::HashMap, path::Path};
 
 use objects::{
     object::{Blob, ContentHash, State, StateId, Tree, TreeEntry},
+    store::{InMemoryStore, ObjectStore},
     util::{GitTreeNameClassification, classify_git_tree_name, lcs_line_matches, split_text_lines},
 };
 
@@ -18,8 +19,10 @@ use crate::{
 /// Constructing it performs no Heddle writes and moves no Git references.
 pub struct OverlayHistory {
     git: GitSource,
+    store: InMemoryStore,
     commits: HashMap<String, CommitEntry>,
     states: Vec<(String, State)>,
+    git_by_state: HashMap<StateId, String>,
 }
 
 /// One target-file line and the Git commit that last introduced it.
@@ -31,29 +34,35 @@ pub struct OverlayBlameLine {
 impl OverlayHistory {
     pub fn open(root: &Path, revision: &str) -> crate::Result<Self> {
         let git = GitSource::open(root)?;
-        let tip = git.resolve_revision(revision)?;
+        let tip = git.resolve_history_revision(revision)?;
         let commits = git.commits_topo([tip])?;
+        let store = InMemoryStore::new();
         let mut trees = HashMap::new();
         let mut commits_by_git = HashMap::with_capacity(commits.len());
         let mut states_by_git = HashMap::<String, StateId>::new();
+        let mut git_by_state = HashMap::with_capacity(commits.len());
         let mut states = Vec::with_capacity(commits.len());
         for commit in commits {
-            let tree = translate_tree(&git, &commit.tree_sha, &mut trees)?;
+            let tree = translate_tree(&git, &store, &commit.tree_sha, &mut trees)?;
             let parents = commit
                 .parents
                 .iter()
                 .filter_map(|parent| states_by_git.get(parent).copied())
                 .collect();
             let state = state_from_commit(&commit, tree, parents, false)?;
+            store.put_state(&state)?;
             states_by_git.insert(commit.sha.clone(), state.state_id);
+            git_by_state.insert(state.state_id, commit.sha.clone());
             states.push((commit.sha.clone(), state));
             commits_by_git.insert(commit.sha.clone(), commit);
         }
         states.reverse();
         Ok(Self {
             git,
+            store,
             commits: commits_by_git,
             states,
+            git_by_state,
         })
     }
 
@@ -63,6 +72,26 @@ impl OverlayHistory {
 
     pub fn tip(&self) -> Option<&(String, State)> {
         self.states.first()
+    }
+
+    pub fn source(&self) -> &InMemoryStore {
+        &self.store
+    }
+
+    pub fn state_id_for_revision(&self, revision: &str) -> crate::Result<StateId> {
+        let git_oid = self.git.resolve_history_revision(revision)?;
+        self.states
+            .iter()
+            .find_map(|(candidate, state)| (candidate == &git_oid).then_some(state.state_id))
+            .ok_or_else(|| {
+                IngestError::Other(format!(
+                    "canonical Git history revision '{revision}' is outside the projected graph"
+                ))
+            })
+    }
+
+    pub fn git_oid_for_state(&self, state: &StateId) -> Option<&str> {
+        self.git_by_state.get(state).map(String::as_str)
     }
 
     /// Attribute a UTF-8 file using the same path-targeted, merge-aware LCS
@@ -212,6 +241,7 @@ struct GitBlameFrontier {
 
 fn translate_tree(
     git: &GitSource,
+    store: &InMemoryStore,
     git_sha: &str,
     cache: &mut HashMap<String, ContentHash>,
 ) -> crate::Result<ContentHash> {
@@ -220,15 +250,16 @@ fn translate_tree(
     }
     let mut entries = Vec::new();
     for child in git.read_tree(git_sha)? {
-        entries.push(translate_child(git, &child, cache)?);
+        entries.push(translate_child(git, store, &child, cache)?);
     }
-    let hash = Tree::from_entries(entries).hash();
+    let hash = store.put_tree(&Tree::from_entries(entries))?;
     cache.insert(git_sha.to_string(), hash);
     Ok(hash)
 }
 
 fn translate_child(
     git: &GitSource,
+    store: &InMemoryStore,
     child: &TreeChild,
     cache: &mut HashMap<String, ContentHash>,
 ) -> crate::Result<TreeEntry> {
@@ -242,14 +273,16 @@ fn translate_child(
         }
     };
     match child.kind {
-        TreeChildKind::Blob { executable } => TreeEntry::file(
-            name,
-            Blob::from_slice(&git.read_blob(&child.sha)?).hash(),
-            executable,
-        ),
-        TreeChildKind::Tree => TreeEntry::directory(name, translate_tree(git, &child.sha, cache)?),
+        TreeChildKind::Blob { executable } => {
+            let hash = store.put_blob(&Blob::from_slice(&git.read_blob(&child.sha)?))?;
+            TreeEntry::file(name, hash, executable)
+        }
+        TreeChildKind::Tree => {
+            TreeEntry::directory(name, translate_tree(git, store, &child.sha, cache)?)
+        }
         TreeChildKind::Symlink => {
-            TreeEntry::symlink(name, Blob::from_slice(&git.read_blob(&child.sha)?).hash())
+            let hash = store.put_blob(&Blob::from_slice(&git.read_blob(&child.sha)?))?;
+            TreeEntry::symlink(name, hash)
         }
         TreeChildKind::Gitlink => {
             let target =

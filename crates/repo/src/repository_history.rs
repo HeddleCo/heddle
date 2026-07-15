@@ -14,7 +14,6 @@ use objects::{
 };
 use tracing::{instrument, trace};
 
-#[cfg(feature = "async-source")]
 use crate::repository::commit_graph_persistence::NullCommitGraphCache;
 use crate::{
     HeddleError, Repository, Result,
@@ -236,6 +235,15 @@ where
         }
     }
     Ok(result)
+}
+
+/// Run the canonical history query against an arbitrary read-only object
+/// source without creating or warming a filesystem commit-graph cache.
+pub fn query_history_from_source<S>(source: &S, query: &HistoryQuery) -> Result<Vec<State>>
+where
+    S: ObjectSource + ?Sized,
+{
+    query_history_with_cache(source, query, NullCommitGraphCache)
 }
 
 pub(crate) fn state_matches_changed_paths<S>(

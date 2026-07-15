@@ -92,20 +92,21 @@ fn cmd_show_with_output_kind(
 
     let repo = Repository::open(start)?;
     if repo.capability() == repo::RepositoryCapability::GitOverlay
-        && matches!(state_spec.as_str(), "HEAD" | "@")
         && repo.current_state()?.is_none()
     {
         if ingest::GitSource::open(repo.root())?
-            .resolve_revision(&state_spec)
+            .resolve_history_revision(&state_spec)
             .is_ok()
         {
             return render_unbound_overlay_show(cli, &repo, &state_spec, output_kind);
         }
-        ensure_current_state(
-            &repo,
-            &UserConfig::load_default()?,
-            Some("Bootstrap git-overlay before showing HEAD".to_string()),
-        )?;
+        if matches!(state_spec.as_str(), "HEAD" | "@") {
+            ensure_current_state(
+                &repo,
+                &UserConfig::load_default()?,
+                Some("Bootstrap git-overlay before showing HEAD".to_string()),
+            )?;
+        }
     }
     let id = resolve_state_id(&repo, &state_spec)?;
 
