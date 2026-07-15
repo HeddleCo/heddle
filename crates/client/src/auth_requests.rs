@@ -21,7 +21,6 @@ pub enum AuthCommand {
         scopes: Vec<String>,
         allowed_operations: Vec<String>,
         out: Option<std::path::PathBuf>,
-        stdout: bool,
     },
     CreateServiceToken {
         name: String,
