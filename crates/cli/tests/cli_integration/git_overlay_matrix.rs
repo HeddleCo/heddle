@@ -178,6 +178,44 @@ fn initialized_overlay_observe_commands_project_full_git_history_without_writes(
 }
 
 #[test]
+fn unbound_overlay_blame_routes_explicit_heddle_state_through_native_provenance() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("story.txt"), "mapped line\n").unwrap();
+    git_commit_all(temp.path(), "mapped main");
+    let mapped_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+    initialize_git_overlay(temp.path());
+    let mapped_state = ingest::bind_single_git_commit_overlay(
+        temp.path(),
+        temp.path(),
+        &mapped_git,
+        ingest::ImportOptions::default(),
+    )
+    .expect("bind explicit Heddle state fixture");
+
+    git(&["checkout", "-b", "unbound"], temp.path());
+    std::fs::write(temp.path().join("unbound.txt"), "unbound\n").unwrap();
+    git_commit_all(temp.path(), "unbound tip");
+    let repo = repo::Repository::open(temp.path()).expect("open unbound overlay branch");
+    assert!(repo.current_state().unwrap().is_none());
+    drop(repo);
+
+    let state_spec = mapped_state.to_string_full();
+    let blame = json(
+        temp.path(),
+        &[
+            "query",
+            "--attribution",
+            "story.txt",
+            "--state",
+            &state_spec,
+        ],
+    );
+    assert_eq!(blame["lines"][0]["content"], "mapped line");
+    assert_eq!(blame["lines"][0]["state_id"], mapped_state.short());
+}
+
+#[test]
 fn unbound_overlay_history_preserves_filters_and_canonical_revision_semantics() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
@@ -4449,6 +4487,52 @@ fn destination_init_does_not_recover_unrelated_cwd_repository() {
         String::from_utf8_lossy(&targeted.stderr).contains("parse incomplete-land marker"),
         "target recovery error should remain actionable: {}",
         String::from_utf8_lossy(&targeted.stderr)
+    );
+}
+
+#[test]
+fn recovery_dispatch_respects_observe_only_modes_and_adopt_destination() {
+    let temp = TempDir::new().unwrap();
+    let current = temp.path().join("current");
+    let destination = temp.path().join("destination");
+    std::fs::create_dir(&current).unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    for (path, content) in [(&current, "current\n"), (&destination, "destination\n")] {
+        init_git_repo_with_branch(path, "main");
+        std::fs::write(path.join("README.md"), content).unwrap();
+        git_commit_all(path, "base");
+    }
+    heddle(&["init"], Some(&current)).unwrap();
+    let marker = current.join(".heddle/incomplete-land.json");
+    std::fs::write(&marker, b"{}\n").unwrap();
+
+    let listed = heddle_output(&["undo", "--list"], Some(&current)).unwrap();
+    assert!(
+        listed.status.success(),
+        "observe-only undo must not parse land recovery state: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(marker.exists(), "observe-only mode must retain the journal");
+
+    let mutating = heddle_output(&["undo"], Some(&current)).unwrap();
+    assert!(!mutating.status.success());
+    assert!(
+        String::from_utf8_lossy(&mutating.stderr).contains("parse incomplete-land marker"),
+        "mutating sibling must still enter recovery: {}",
+        String::from_utf8_lossy(&mutating.stderr)
+    );
+
+    let destination_arg = destination.to_string_lossy().into_owned();
+    let adopted = heddle_output(&["adopt", &destination_arg], Some(&current)).unwrap();
+    assert!(
+        adopted.status.success(),
+        "destination adopt must not recover cwd: {}",
+        String::from_utf8_lossy(&adopted.stderr)
+    );
+    assert!(marker.exists(), "destination adopt must retain cwd journal");
+    assert_eq!(
+        repo::Repository::open(&destination).unwrap().capability(),
+        repo::RepositoryCapability::NativeHeddle
     );
 }
 

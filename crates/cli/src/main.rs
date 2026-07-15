@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Heddle: An AI-native version control system.
 
-use std::{any::Any, time::Instant};
+use std::{any::Any, path::PathBuf, time::Instant};
 
 use anyhow::Result;
 use clap::{Arg, ArgAction, CommandFactory, Parser, error::ErrorKind};
@@ -18,8 +18,8 @@ use cli::cli::{
 use cli::{
     cli::{
         AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands, DaemonCommands,
-        DiffArgs, ExpandArgs, IntegrationCommands, LogArgs, ResolveArgs, RetroArgs, RevertArgs,
-        RunArgs, UndoArgs,
+        DiffArgs, ExpandArgs, FsckCommands, FsckRepairCommands, IntegrationCommands, LogArgs,
+        MaintenanceCommands, ResolveArgs, RetroArgs, RevertArgs, RunArgs, ThreadCommands, UndoArgs,
         cli_args::LandArgs,
         commands::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
@@ -286,31 +286,17 @@ async fn async_main() -> Result<()> {
         resolve_operation_id(&cli)?;
     }
 
-    // One command-dispatch chokepoint protects every mutating surface from a
-    // surviving land transaction. Commands that do not require an existing
-    // repository simply have nothing to recover here and keep their normal
-    // initialization/error behavior in the command body.
-    let initializes_positional_destination =
-        matches!(&cli.command, Commands::Init(args) if args.path.is_some());
-    if command_contract.mutates
-        && command_contract.targets_current_repository
-        && !initializes_positional_destination
-    {
-        let cwd;
-        let start = match cli.repo.as_deref() {
-            Some(path) => path,
-            None => {
-                cwd = std::env::current_dir()?;
-                &cwd
-            }
-        };
-        if start
+    // Recover only for an invocation that will mutate the selected repository.
+    // The resolver accounts for flag-controlled observe-only modes and
+    // destination-scoped commands before any repository is opened, so a command
+    // aimed at another path can never consume cwd recovery state.
+    if let Some(start) = incomplete_land_recovery_start(&cli, &command_contract)?
+        && start
             .ancestors()
             .any(|ancestor| ancestor.join(".heddle").exists())
-        {
-            let repo = cli.open_repo()?;
-            recover_incomplete_land_if_present(&repo)?;
-        }
+    {
+        let repo = repo::Repository::open(&start)?;
+        recover_incomplete_land_if_present(&repo)?;
     }
 
     let command_start = Instant::now();
@@ -1032,6 +1018,75 @@ fn is_daemon_invocation(command: &Commands) -> bool {
     )
 }
 
+/// Resolve the repository whose incomplete land journal this exact invocation
+/// may mutate. `None` means either the command is observe-only or its mutation
+/// is not scoped to an existing Heddle repository.
+fn incomplete_land_recovery_start(
+    cli: &Cli,
+    contract: &cli::cli::commands::CommandRuntimeContract,
+) -> Result<Option<PathBuf>> {
+    if !contract.mutates || invocation_is_observe_only(&cli.command) {
+        return Ok(None);
+    }
+
+    match &cli.command {
+        // Positional init resolves conflicts/canonicalization in cmd_init and
+        // recovers the selected existing target there. Opening cwd here would
+        // violate destination isolation.
+        Commands::Init(args) if args.path.is_some() => Ok(None),
+        Commands::Adopt(args) => {
+            let cwd = std::env::current_dir()?;
+            let plan = heddle_core::plan_adopt(&heddle_core::AdoptPlanOptions {
+                path: args.path.clone(),
+                repo_flag: cli.repo.clone(),
+                cwd,
+                refs: args.refs.clone(),
+            })
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            Ok(Some(plan.start_path))
+        }
+        _ if !contract.targets_current_repository => Ok(None),
+        _ => Ok(Some(match &cli.repo {
+            Some(path) => path.clone(),
+            None => std::env::current_dir()?,
+        })),
+    }
+}
+
+/// Flag-controlled submodes whose root command contract is mutating but whose
+/// selected operation is a pure preview/list. This is the complete set of such
+/// booleans in the current CLI argument model; the table-driven parser test
+/// below covers each mode and its mutating sibling.
+fn invocation_is_observe_only(command: &Commands) -> bool {
+    match command {
+        Commands::Undo(args) => args.list || args.preview,
+        Commands::Resolve(args) => args.list,
+        Commands::Fsck(args) => matches!(
+            &args.command,
+            Some(FsckCommands::Repair {
+                target: FsckRepairCommands::Git(args)
+            }) if args.preview
+        ),
+        Commands::Thread {
+            command: ThreadCommands::Absorb(args),
+        } => args.preview,
+        Commands::Thread {
+            command: ThreadCommands::Cleanup(args),
+        } => args.dry_run,
+        Commands::Maintenance {
+            command: MaintenanceCommands::Gc { dry_run, .. },
+        } => *dry_run,
+        #[cfg(all(feature = "git-overlay", feature = "ingest"))]
+        Commands::Context {
+            command:
+                ContextCommands::Reason {
+                    command: cli::cli::cli_args::ContextReasonCommands::Git(args),
+                },
+        } => args.dry_run,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1075,5 +1130,60 @@ mod tests {
         assert!(!raw_wants_json(&args(&["--output", "text"])));
         assert!(!raw_wants_json(&args(&["--output=text"])));
         assert!(!raw_wants_json(&args(&["--output", "--no-color"])));
+    }
+
+    #[test]
+    fn recovery_gate_covers_every_flag_controlled_observe_only_mode_and_mutating_sibling() {
+        let cases: &[(&[&str], bool)] = &[
+            (&["heddle", "undo", "--list"], true),
+            (&["heddle", "undo", "--preview"], true),
+            (&["heddle", "undo"], false),
+            (&["heddle", "undo", "--redo", "--preview"], true),
+            (&["heddle", "undo", "--redo"], false),
+            (&["heddle", "resolve", "--list"], true),
+            (&["heddle", "resolve", "--all"], false),
+            (&["heddle", "fsck", "repair", "git", "--preview"], true),
+            (
+                &["heddle", "fsck", "repair", "git", "--prefer", "git"],
+                false,
+            ),
+            (&["heddle", "thread", "absorb", "child", "--preview"], true),
+            (&["heddle", "thread", "absorb", "child"], false),
+            (
+                &["heddle", "thread", "cleanup", "--merged", "--dry-run"],
+                true,
+            ),
+            (&["heddle", "thread", "cleanup", "--merged"], false),
+            (&["heddle", "maintenance", "gc", "--dry-run"], true),
+            (&["heddle", "maintenance", "gc"], false),
+            #[cfg(all(feature = "git-overlay", feature = "ingest"))]
+            (
+                &[
+                    "heddle",
+                    "context",
+                    "reason",
+                    "git",
+                    "--path",
+                    ".",
+                    "--dry-run",
+                ],
+                true,
+            ),
+            #[cfg(all(feature = "git-overlay", feature = "ingest"))]
+            (
+                &["heddle", "context", "reason", "git", "--path", "."],
+                false,
+            ),
+        ];
+
+        for (argv, expected) in cases {
+            let cli = Cli::try_parse_from(*argv)
+                .unwrap_or_else(|error| panic!("parse {argv:?}: {error}"));
+            assert_eq!(
+                invocation_is_observe_only(&cli.command),
+                *expected,
+                "effective recovery mode for {argv:?}"
+            );
+        }
     }
 }

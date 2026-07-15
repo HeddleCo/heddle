@@ -15,7 +15,7 @@ use objects::{
 use crate::{
     GitSource, IngestError,
     git_walk::{CommitEntry, TreeChild, TreeChildKind},
-    state_writer::state_from_commit,
+    state_writer::descriptor_state_from_commit,
 };
 
 /// A deterministic, in-memory Heddle view of a Git revision and its ancestry.
@@ -163,7 +163,7 @@ impl OverlayHistory {
         let mut states = Vec::with_capacity(commits.len());
         for commit in commits {
             let tree = translate_tree(&git, &store, &commit.tree_sha, &mut trees)?;
-            let state = state_from_commit(&commit, tree, Vec::new(), false)?;
+            let state = descriptor_state_from_commit(&commit, tree, false)?;
             states.push((commit.sha.clone(), state));
         }
         states.reverse();
@@ -366,7 +366,7 @@ fn project_descriptor_state(
         return Ok(state.clone());
     }
     let tree = translate_tree(git, store, &commit.tree_sha, trees)?;
-    let state = state_from_commit(commit, tree, Vec::new(), false)?;
+    let state = descriptor_state_from_commit(commit, tree, false)?;
     states.insert(commit.sha.clone(), state.clone());
     Ok(state)
 }

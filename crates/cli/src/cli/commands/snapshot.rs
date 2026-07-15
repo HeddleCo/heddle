@@ -680,7 +680,14 @@ fn resolve_active_git_tip_sha(repo: &Repository) -> Result<Option<String>> {
 }
 
 fn point_overlay_head_at_mapped_tip(repo: &Repository, state_id: &StateId) -> Result<()> {
-    if let Some(branch) = repo.git_overlay_current_branch()? {
+    // Publication follows Git HEAD's physical attachment state. In
+    // particular, a freshly-created sidecar's default attached `main` HEAD
+    // must never turn a detached Git commit into a `main` ref update. Check
+    // detachment before `git_overlay_current_branch`, whose in-progress
+    // fallback can name a branch while Git itself is detached.
+    if !repo.git_overlay_head_is_detached()?
+        && let Some(branch) = repo.git_overlay_current_branch()?
+    {
         let thread = ThreadName::from(branch.as_str());
         if repo.refs().get_thread(&thread)?.as_ref() != Some(state_id) {
             repo.refs().set_thread(&thread, state_id)?;
@@ -694,16 +701,9 @@ fn point_overlay_head_at_mapped_tip(repo: &Repository, state_id: &StateId) -> Re
         return Ok(());
     }
 
-    match repo.head_ref()? {
-        Head::Attached { thread } => {
-            if repo.refs().get_thread(&thread)?.as_ref() != Some(state_id) {
-                repo.refs().set_thread(&thread, state_id)?;
-            }
-        }
-        Head::Detached { state } if state == *state_id => {}
-        Head::Detached { .. } => repo
-            .refs()
-            .write_head(&Head::Detached { state: *state_id })?,
+    let expected = Head::Detached { state: *state_id };
+    if repo.refs().read_head()? != expected {
+        repo.refs().write_head(&expected)?;
     }
     Ok(())
 }
@@ -1454,6 +1454,53 @@ mod tests {
         );
         assert_eq!(checkpoints[0].git_commit, new_tip);
         assert_eq!(checkpoints[0].state_id, states[0].to_string_full());
+    }
+
+    #[test]
+    fn detached_overlay_bootstrap_detaches_heddle_without_moving_default_thread() {
+        let temp = tempfile::TempDir::new().expect("create Git fixture");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("Git output is UTF-8")
+                .trim()
+                .to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Overlay Test"]);
+        git(&["config", "user.email", "overlay@example.com"]);
+        std::fs::write(temp.path().join("README.md"), "detached\n").expect("write tip");
+        git(&["add", "README.md"]);
+        git(&["commit", "-m", "detached tip"]);
+        let tip = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "--detach", &tip]);
+
+        let repo = Repository::bootstrap_git_overlay(temp.path()).expect("bootstrap overlay");
+        let state = bind_git_overlay_active_tip(&repo)
+            .expect("bind detached tip")
+            .expect("mapped state");
+
+        assert_eq!(
+            repo.refs().read_head().expect("read raw Heddle HEAD"),
+            Head::Detached { state }
+        );
+        assert!(
+            repo.refs()
+                .get_thread(&ThreadName::new("main"))
+                .expect("read default thread")
+                .is_none(),
+            "detached Git bootstrap must not publish through the sidecar's default attached thread"
+        );
     }
 
     #[test]

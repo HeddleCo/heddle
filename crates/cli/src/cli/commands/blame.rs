@@ -141,13 +141,13 @@ fn cmd_blame_with_output_kind(
     if repo.capability() == repo::RepositoryCapability::GitOverlay
         && repo.current_state()?.is_none()
     {
-        return render_unbound_overlay_blame(
-            cli,
-            &repo,
-            &file,
-            state.as_deref().unwrap_or("HEAD"),
-            output_kind,
-        );
+        let revision = state.as_deref().unwrap_or("HEAD");
+        if ingest::GitSource::open(repo.root())?
+            .resolve_history_revision(revision)
+            .is_ok()
+        {
+            return render_unbound_overlay_blame(cli, &repo, &file, revision, output_kind);
+        }
     }
 
     let target_state_id = if let Some(state_id) = state {

@@ -924,10 +924,11 @@ pub fn import_git_into_scoped_with_options_and_progress(
 
 /// Lazily bind a single Git commit tip into Heddle without walking ancestors.
 ///
-/// The tip is translated as a Heddle root (unmapped git parents are dropped)
-/// and recorded in the ingest SHA map so subsequent exports parent onto the
-/// real Git OID. Use full [`import_git_into`] / `heddle adopt` when the full
-/// history is needed.
+/// For ordinary Git commits the tip is translated as a Heddle root because its
+/// Git parents have not been mapped. A portable Heddle export note instead
+/// preserves its embedded source State and parent identities exactly; a later
+/// full [`import_git_into`] / `heddle adopt` validates and materializes that
+/// graph. The mapping always records the real Git OID for later export.
 ///
 /// Returns the mapped Heddle state id for `git_sha`. Idempotent when the tip
 /// is already mapped.
@@ -1100,7 +1101,8 @@ pub fn bind_single_git_commit_overlay(
         let lossy_before = packed.stats.lossy_entries.len();
         let tree_hash = packed.translate_tree(&commit.tree_sha)?;
         let git_lossy = packed.stats.lossy_entries.len() > lossy_before;
-        let state = state_from_commit(&commit, tree_hash, Vec::new(), git_lossy)?;
+        let state =
+            crate::state_writer::descriptor_state_from_commit(&commit, tree_hash, git_lossy)?;
         packed
             .map
             .insert_commit(&commit.sha, state.state_id)
@@ -1620,6 +1622,113 @@ mod tests {
         assert_eq!(
             stats.blobs_imported, 4,
             "the unchanged shared blob must not be appended once per commit"
+        );
+    }
+
+    #[test]
+    fn fresh_overlay_clone_binds_non_root_export_note_then_full_import_preserves_graph() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source");
+        let native = temp.path().join("native");
+        let clone = temp.path().join("clone");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&native).unwrap();
+        git_output(&source, &["init", "-q", "--initial-branch=main"], None);
+        std::fs::write(source.join("story.txt"), "one\n").unwrap();
+        git_output(&source, &["add", "story.txt"], None);
+        git_output(&source, &["commit", "-q", "-m", "root"], None);
+        std::fs::write(source.join("story.txt"), "one\ntwo\n").unwrap();
+        git_output(&source, &["add", "story.txt"], None);
+        git_output(&source, &["commit", "-q", "-m", "child"], None);
+        let tip = git_output(&source, &["rev-parse", "HEAD"], None);
+
+        let (_, source_map) = import_git_into(&source, &native).expect("import source graph");
+        let source_id = source_map.get_commit(&tip).expect("mapped source tip");
+        let source_repo = repo::Repository::open(&native).expect("open source Heddle repo");
+        let source_state = source_repo
+            .store()
+            .get_state(&source_id)
+            .expect("read source state")
+            .expect("source state");
+        assert_eq!(
+            source_state.parents.len(),
+            1,
+            "fixture tip must be non-root"
+        );
+        let note = serde_json::json!({
+            "state_id": source_state.id().to_string_full(),
+            "change_id": source_state.change_id.to_string_full(),
+            "source_state": source_state.clone(),
+            "status": "draft"
+        })
+        .to_string();
+        git_output(
+            &source,
+            &["notes", "--ref=heddle", "add", "-f", "-F", "-", &tip],
+            Some(note.as_bytes()),
+        );
+
+        let clone_output = Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                "--no-local",
+                source.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("clone exported Git repository");
+        assert!(
+            clone_output.status.success(),
+            "clone failed: {}",
+            String::from_utf8_lossy(&clone_output.stderr)
+        );
+        git_output(
+            &clone,
+            &[
+                "fetch",
+                "-q",
+                "origin",
+                "refs/notes/heddle:refs/notes/heddle",
+            ],
+            None,
+        );
+
+        repo::Repository::bootstrap_git_overlay(&clone).expect("initialize fresh overlay clone");
+        let bound = bind_single_git_commit_overlay(&clone, &clone, &tip, ImportOptions::default())
+            .expect("bind exported non-root tip lazily");
+        assert_eq!(bound, source_id);
+        let clone_repo = repo::Repository::open(&clone).expect("open overlay clone");
+        assert_eq!(
+            clone_repo
+                .store()
+                .get_state(&bound)
+                .expect("read descriptor")
+                .expect("descriptor state"),
+            source_state,
+            "lazy bind must retain the exact portable source State"
+        );
+        drop(clone_repo);
+
+        let (_, repaired_map) =
+            import_git_into(&clone, &clone).expect("materialize full noted parent graph");
+        assert_eq!(repaired_map.get_commit(&tip), Some(source_id));
+        let repaired = repo::Repository::open(&clone).expect("open repaired clone");
+        let repaired_state = repaired
+            .store()
+            .get_state(&source_id)
+            .expect("read repaired state")
+            .expect("repaired state");
+        assert_eq!(repaired_state, source_state);
+        assert!(
+            repaired
+                .store()
+                .get_state(&source_state.parents[0])
+                .expect("read materialized parent")
+                .is_some(),
+            "full import must materialize the exact parent graph retained by the note"
         );
     }
 
