@@ -118,6 +118,47 @@ class VerifySyncTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "structural client binding is missing"):
                 verify(root, snapshot)
 
+    def test_comment_only_structural_evidence_does_not_count(self) -> None:
+        temporary, root, snapshot = self.fixture()
+        with temporary:
+            source = root.parent / "src" / "mapping.rs"
+            source.write_text(
+                "// async fn get_compare() {}\n"
+                "/* outer /* nested */ client.get_compare(); */\n"
+            )
+            with self.assertRaisesRegex(SystemExit, "structural client binding is missing"):
+                verify(root, snapshot)
+
+    def test_rust_string_and_character_literals_do_not_count(self) -> None:
+        for forged in (
+            '"async fn get_compare("',
+            'b"client.get_compare("',
+            'r###"async fn get_compare("###',
+            'br###"client.get_compare("###',
+            "'x'",
+            "b'x'",
+        ):
+            with self.subTest(forged=forged):
+                temporary, root, snapshot = self.fixture()
+                with temporary:
+                    source = root.parent / "src" / "mapping.rs"
+                    source.write_text(f"const FORGED: &str = {forged};\n")
+                    with self.assertRaisesRegex(SystemExit, "structural client binding is missing"):
+                        verify(root, snapshot)
+
+    def test_comment_markers_inside_literals_preserve_real_bindings(self) -> None:
+        temporary, root, snapshot = self.fixture()
+        with temporary:
+            source = root.parent / "src" / "mapping.rs"
+            source.write_text(
+                'const NORMAL: &str = "// not a comment /* either */";\n'
+                'const RAW: &str = br###"/* still data */ // still data"###;\n'
+                "const QUOTE: char = '\"';\n"
+                "const SLASH: u8 = b'/';\n"
+                "async fn get_compare() { client.get_compare(); }\n"
+            )
+            verify(root, snapshot)
+
     def test_unrelated_call_name_does_not_bind_an_rpc(self) -> None:
         temporary, root, snapshot = self.fixture()
         with temporary:

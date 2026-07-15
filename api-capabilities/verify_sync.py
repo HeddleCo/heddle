@@ -9,6 +9,7 @@ import json
 import re
 import urllib.error
 import urllib.request
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
@@ -18,7 +19,7 @@ REPOSITORY_ROOT = ROOT.parent
 CONSUMER = "heddle"
 LOCAL_DECLARATION = "heddle.json"
 API_REPOSITORY = "HeddleCo/api"
-API_REVISION = "2d64784862f9dea3d2df7e0a15b30f215d10ce3e"
+API_REVISION = "461099c41cea91357c022ea0b21a88c8bf08aa60"
 API_SNAPSHOT = "capabilities/declarations/heddle.json"
 LAYERS = ("client", "cli")
 STATUSES = {
@@ -28,6 +29,10 @@ STATUSES = {
     "intentionally-unsupported",
     "blocked",
 }
+RAW_RUST_STRING = re.compile(r'(?:br|cr|r)(?P<hashes>#{0,255})"')
+RUST_CHAR = re.compile(
+    r"'(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]{1,6}\}|[^\n])|[^\\'\n])'"
+)
 
 
 def _sha256(content: bytes) -> str:
@@ -36,6 +41,68 @@ def _sha256(content: bytes) -> str:
 
 def _snake_case(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+@lru_cache(maxsize=64)
+def _rust_code(text: str) -> str:
+    """Mask Rust comments and literals while preserving source positions."""
+    output: list[str] = []
+    index = 0
+    length = len(text)
+
+    def mask(start: int, end: int) -> None:
+        output.extend("\n" if char == "\n" else " " for char in text[start:end])
+
+    while index < length:
+        raw = RAW_RUST_STRING.match(text, index)
+        if raw is not None:
+            closing = '"' + raw.group("hashes")
+            end = text.find(closing, raw.end())
+            end = length if end < 0 else end + len(closing)
+            mask(index, end)
+            index = end
+            continue
+        if text[index] == '"':
+            start = index
+            index += 1
+            while index < length:
+                if text[index] == "\\":
+                    index = min(index + 2, length)
+                    continue
+                index += 1
+                if text[index - 1] == '"':
+                    break
+            mask(start, index)
+            continue
+        char = RUST_CHAR.match(text, index)
+        if char is not None:
+            mask(index, char.end())
+            index = char.end()
+            continue
+        if text.startswith("//", index):
+            end = text.find("\n", index + 2)
+            end = length if end < 0 else end
+            mask(index, end)
+            index = end
+            continue
+        if text.startswith("/*", index):
+            start = index
+            depth = 1
+            index += 2
+            while index < length and depth:
+                if text.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif text.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            mask(start, index)
+            continue
+        output.append(text[index])
+        index += 1
+    return "".join(output)
 
 
 def _source_text(repository_root: Path, evidence: object, rpc: str) -> tuple[str, str]:
@@ -51,10 +118,7 @@ def _source_text(repository_root: Path, evidence: object, rpc: str) -> tuple[str
     source = repository_root / path
     if not source.is_file():
         raise SystemExit(f"evidence path does not exist for {rpc}: {relative}")
-    text = source.read_text(errors="replace")
-    if needle not in text:
-        raise SystemExit(f"evidence symbol/call edge is missing for {rpc}: {needle}")
-    return needle, text
+    return needle, source.read_text(errors="replace")
 
 
 def _validate_rust_binding(
@@ -64,7 +128,8 @@ def _validate_rust_binding(
     layer_name: str,
 ) -> None:
     """Require an actual Rust function definition or call, never a name substring."""
-    needle, text = _source_text(repository_root, evidence, rpc)
+    needle, source_text = _source_text(repository_root, evidence, rpc)
+    text = _rust_code(source_text)
     method = rpc.rsplit("/", 1)[-1]
     canonical = _snake_case(method)
     if needle == canonical:
