@@ -15,6 +15,11 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Breaking
 
+- **Derived agent credentials no longer support `--stdout`.** A derived token
+  is bound to its freshly generated child proof key, so `heddle auth
+  derive-agent --out <directory>` writes the portable token-and-key bundle;
+  omitting `--out` installs both together in the local credential store.
+
 - **Repository and wire format v3.** Physical state identity is now a 32-byte
   content-addressed `StateId`, distinct from rewrite-stable `ChangeId`, and
   signatures are attachments rather than identity-bearing state fields. Heddle
