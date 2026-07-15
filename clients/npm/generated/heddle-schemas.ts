@@ -1247,7 +1247,7 @@ export interface LandBatchPeerSchema {
   git_commit?: string | null;
   integrated: boolean;
   message: string;
-  primary_command: string | null;
+  primary_command?: string | null;
   recovery_commands: string[];
   siblings_restack_failed: SiblingRestackFailureSchema[];
   siblings_restacked: string[];

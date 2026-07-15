@@ -166,7 +166,7 @@ fn initialized_overlay_observe_commands_project_full_git_history_without_writes(
 }
 
 #[test]
-fn unbound_overlay_history_uses_native_query_and_canonical_revision_semantics() {
+fn unbound_overlay_history_preserves_filters_and_canonical_revision_semantics() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();

@@ -812,12 +812,8 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         );
     }
 
-    let integration_transaction_id = if repo.capability() == repo::RepositoryCapability::GitOverlay
-    {
-        Some(write_prepared_land_marker(&repo, &merge_thread)?)
-    } else {
-        None
-    };
+    let integration_transaction_id =
+        prepare_land_target_and_journal(&repo, &user_config, &merge_thread)?;
     if integration_transaction_id.is_some() {
         objects::fault_inject::maybe_fail_at("land_after_prepared_journal")?;
     }
@@ -840,16 +836,6 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         )?;
     }
 
-    // Bootstrap missing current state (freshly-adopted git-overlay repos) so
-    // the core merge facade has a base to merge into instead of hard-erroring.
-    let _ = ensure_current_state(
-        &repo,
-        &user_config,
-        Some(format!(
-            "Bootstrap git-overlay before landing {}",
-            merge_thread.id
-        )),
-    )?;
     let merge_output = if let Some(transaction_id) = integration_transaction_id.as_deref() {
         merge_thread_into_current_transactional(
             &repo,
@@ -2128,6 +2114,30 @@ fn write_prepared_land_marker(repo: &Repository, thread: &Thread) -> Result<Stri
     Ok(integration_transaction_id)
 }
 
+fn prepare_land_target_and_journal(
+    repo: &Repository,
+    user_config: &UserConfig,
+    thread: &Thread,
+) -> Result<Option<String>> {
+    // Bind an unbound Git-overlay target before recording the land's durable
+    // pre-state. Recovery identifies the committed transaction by its exact
+    // pre-target transition, so a Prepared marker must never journal `None`
+    // and then let the merge mutate a newly bootstrapped target.
+    let _ = ensure_current_state(
+        repo,
+        user_config,
+        Some(format!(
+            "Bootstrap git-overlay before landing {}",
+            thread.id
+        )),
+    )?;
+    if repo.capability() == repo::RepositoryCapability::GitOverlay {
+        Ok(Some(write_prepared_land_marker(repo, thread)?))
+    } else {
+        Ok(None)
+    }
+}
+
 fn record_land_collapse_in_marker(repo: &Repository, collapse_state: &StateId) -> Result<()> {
     let Some(mut marker) = load_incomplete_land_marker(repo)? else {
         return Err(anyhow!(
@@ -2858,9 +2868,13 @@ fn write_multi_land_output(
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        process::Command,
+    };
 
     use heddle_core::AUTO_LAND_CONFIDENCE_RECOVERY_ACTION;
+    use tempfile::TempDir;
 
     use super::*;
     use crate::cli::commands::command_catalog::validate_recommended_action;
@@ -2894,6 +2908,54 @@ mod tests {
             auto: false,
             shared_target_dir: None,
         }
+    }
+
+    #[test]
+    fn prepare_land_target_journals_bound_overlay_state() {
+        let temp = TempDir::new().expect("create temp Git repository");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Test User"]);
+        git(&["config", "user.email", "test@example.com"]);
+        fs::write(temp.path().join("README.md"), "initial\n").expect("write fixture");
+        git(&["add", "README.md"]);
+        git(&["commit", "-m", "initial"]);
+
+        let repo = Repository::bootstrap_git_overlay(temp.path()).expect("bootstrap overlay");
+        assert!(
+            repo.current_state().expect("read unbound state").is_none(),
+            "fresh overlay must begin without a bound Heddle target"
+        );
+        let thread = thread_with_execution_path(temp.path().join("agent-thread"));
+
+        let transaction = prepare_land_target_and_journal(&repo, &UserConfig::default(), &thread)
+            .expect("prepare land journal");
+        assert!(transaction.is_some());
+        assert!(
+            repo.current_state().expect("read bound state").is_some(),
+            "preparation must bind the Git tip before journaling"
+        );
+        let marker = load_incomplete_land_marker(&repo)
+            .expect("read land marker")
+            .expect("prepared marker");
+        assert_eq!(marker.phase, IncompleteLandPhase::Prepared);
+        assert!(
+            marker.pre_target_state.is_some(),
+            "Prepared recovery marker must capture the bound pre-land target"
+        );
+        clear_incomplete_land_marker(&repo).expect("clear fixture marker");
     }
 
     #[test]

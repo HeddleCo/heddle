@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Read-only projection of reachable Git commits into Heddle states.
 
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use objects::{
     object::{Blob, ContentHash, State, StateId, Tree, TreeEntry},
@@ -19,10 +22,25 @@ use crate::{
 /// Constructing it performs no Heddle writes and moves no Git references.
 pub struct OverlayHistory {
     git: GitSource,
-    store: InMemoryStore,
     commits: HashMap<String, CommitEntry>,
     states: Vec<(String, State)>,
-    git_by_state: HashMap<StateId, String>,
+}
+
+/// A bounded projection of one Git commit plus the stable descriptor IDs of
+/// its direct parents. Descriptor IDs intentionally use the same parentless
+/// state shape as lazy Git-overlay binding; computing `show <revision>` never
+/// needs to walk or materialize the revision's complete ancestry.
+pub struct OverlayTipProjection {
+    pub git_oid: String,
+    pub state: State,
+    pub parent_ids: Vec<StateId>,
+}
+
+/// One bounded, descriptor-shaped commit returned by an unbound overlay log.
+pub struct OverlayLogEntry {
+    pub git_oid: String,
+    pub state: State,
+    pub parent_ids: Vec<StateId>,
 }
 
 /// One target-file line and the Git commit that last introduced it.
@@ -32,6 +50,79 @@ pub struct OverlayBlameLine {
 }
 
 impl OverlayHistory {
+    pub fn project_tip(root: &Path, revision: &str) -> crate::Result<OverlayTipProjection> {
+        let git = GitSource::open(root)?;
+        let git_oid = git.resolve_history_revision(revision)?;
+        let store = InMemoryStore::new();
+        let mut trees = HashMap::new();
+        let mut states = HashMap::new();
+        let (state, parent_ids) =
+            project_descriptor_commit(&git, &store, &git_oid, &mut trees, &mut states)?;
+        Ok(OverlayTipProjection {
+            git_oid,
+            state,
+            parent_ids,
+        })
+    }
+
+    pub fn project_log(
+        root: &Path,
+        revision: &str,
+        limit: usize,
+        since: Option<&str>,
+        agent_model_substring: Option<&str>,
+        paths: &[String],
+    ) -> crate::Result<Vec<OverlayLogEntry>> {
+        let git = GitSource::open(root)?;
+        let tip = git.resolve_history_revision(revision)?;
+        let mut current = Some(tip.clone());
+        let stop_at = since
+            .map(|revision| git.resolve_history_revision(revision))
+            .transpose()?;
+        if let (Some(stop_at), Some(since_revision)) = (stop_at.as_ref(), since)
+            && !commit_is_reachable(&git, &tip, stop_at)?
+        {
+            return Err(IngestError::Other(format!(
+                "canonical Git history revision '{since_revision}' is outside the projected graph"
+            )));
+        }
+        let store = InMemoryStore::new();
+        let mut trees = HashMap::new();
+        let mut states = HashMap::new();
+        let mut entries = Vec::new();
+
+        while entries.len() < limit {
+            let Some(git_oid) = current else {
+                break;
+            };
+            if stop_at.as_ref() == Some(&git_oid) {
+                break;
+            }
+            let commit = git.read_commit(&git_oid)?;
+            current = commit.parents.first().cloned();
+            if !paths.is_empty() && !commit_touches_paths(&git, &commit, paths)? {
+                continue;
+            }
+            let (state, parent_ids) =
+                project_descriptor_commit(&git, &store, &git_oid, &mut trees, &mut states)?;
+            if let Some(filter) = agent_model_substring
+                && !state
+                    .attribution
+                    .agent
+                    .as_ref()
+                    .is_some_and(|agent| agent.model.contains(filter))
+            {
+                continue;
+            }
+            entries.push(OverlayLogEntry {
+                git_oid,
+                state,
+                parent_ids,
+            });
+        }
+        Ok(entries)
+    }
+
     pub fn open(root: &Path, revision: &str) -> crate::Result<Self> {
         let git = GitSource::open(root)?;
         let tip = git.resolve_history_revision(revision)?;
@@ -39,30 +130,18 @@ impl OverlayHistory {
         let store = InMemoryStore::new();
         let mut trees = HashMap::new();
         let mut commits_by_git = HashMap::with_capacity(commits.len());
-        let mut states_by_git = HashMap::<String, StateId>::new();
-        let mut git_by_state = HashMap::with_capacity(commits.len());
         let mut states = Vec::with_capacity(commits.len());
         for commit in commits {
             let tree = translate_tree(&git, &store, &commit.tree_sha, &mut trees)?;
-            let parents = commit
-                .parents
-                .iter()
-                .filter_map(|parent| states_by_git.get(parent).copied())
-                .collect();
-            let state = state_from_commit(&commit, tree, parents, false)?;
-            store.put_state(&state)?;
-            states_by_git.insert(commit.sha.clone(), state.state_id);
-            git_by_state.insert(state.state_id, commit.sha.clone());
+            let state = state_from_commit(&commit, tree, Vec::new(), false)?;
             states.push((commit.sha.clone(), state));
             commits_by_git.insert(commit.sha.clone(), commit);
         }
         states.reverse();
         Ok(Self {
             git,
-            store,
             commits: commits_by_git,
             states,
-            git_by_state,
         })
     }
 
@@ -72,26 +151,6 @@ impl OverlayHistory {
 
     pub fn tip(&self) -> Option<&(String, State)> {
         self.states.first()
-    }
-
-    pub fn source(&self) -> &InMemoryStore {
-        &self.store
-    }
-
-    pub fn state_id_for_revision(&self, revision: &str) -> crate::Result<StateId> {
-        let git_oid = self.git.resolve_history_revision(revision)?;
-        self.states
-            .iter()
-            .find_map(|(candidate, state)| (candidate == &git_oid).then_some(state.state_id))
-            .ok_or_else(|| {
-                IngestError::Other(format!(
-                    "canonical Git history revision '{revision}' is outside the projected graph"
-                ))
-            })
-    }
-
-    pub fn git_oid_for_state(&self, state: &StateId) -> Option<&str> {
-        self.git_by_state.get(state).map(String::as_str)
     }
 
     /// Attribute a UTF-8 file using the same path-targeted, merge-aware LCS
@@ -232,6 +291,110 @@ impl OverlayHistory {
     }
 }
 
+fn commit_is_reachable(git: &GitSource, tip: &str, target: &str) -> crate::Result<bool> {
+    let mut pending = vec![tip.to_string()];
+    let mut seen = HashSet::new();
+    while let Some(git_oid) = pending.pop() {
+        if git_oid == target {
+            return Ok(true);
+        }
+        if !seen.insert(git_oid.clone()) {
+            continue;
+        }
+        pending.extend(git.read_commit(&git_oid)?.parents);
+    }
+    Ok(false)
+}
+
+fn project_descriptor_commit(
+    git: &GitSource,
+    store: &InMemoryStore,
+    git_oid: &str,
+    trees: &mut HashMap<String, ContentHash>,
+    states: &mut HashMap<String, State>,
+) -> crate::Result<(State, Vec<StateId>)> {
+    let commit = git.read_commit(git_oid)?;
+    let state = project_descriptor_state(git, store, &commit, trees, states)?;
+    let mut parent_ids = Vec::with_capacity(commit.parents.len());
+    for parent_oid in &commit.parents {
+        let parent = git.read_commit(parent_oid)?;
+        parent_ids.push(project_descriptor_state(git, store, &parent, trees, states)?.state_id);
+    }
+    Ok((state, parent_ids))
+}
+
+fn project_descriptor_state(
+    git: &GitSource,
+    store: &InMemoryStore,
+    commit: &CommitEntry,
+    trees: &mut HashMap<String, ContentHash>,
+    states: &mut HashMap<String, State>,
+) -> crate::Result<State> {
+    if let Some(state) = states.get(&commit.sha) {
+        return Ok(state.clone());
+    }
+    let tree = translate_tree(git, store, &commit.tree_sha, trees)?;
+    let state = state_from_commit(commit, tree, Vec::new(), false)?;
+    states.insert(commit.sha.clone(), state.clone());
+    Ok(state)
+}
+
+fn commit_touches_paths(
+    git: &GitSource,
+    commit: &CommitEntry,
+    paths: &[String],
+) -> crate::Result<bool> {
+    let parent_tree = commit
+        .parents
+        .first()
+        .map(|parent| git.read_commit(parent).map(|parent| parent.tree_sha))
+        .transpose()?;
+    for path in paths {
+        let current = tree_entry_at_path(git, &commit.tree_sha, path)?;
+        let parent = parent_tree
+            .as_deref()
+            .map(|tree| tree_entry_at_path(git, tree, path))
+            .transpose()?
+            .flatten();
+        if current != parent {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn tree_entry_at_path(
+    git: &GitSource,
+    root_tree: &str,
+    path: &str,
+) -> crate::Result<Option<TreeChild>> {
+    let components = path
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>();
+    if components.is_empty() || components.contains(&"..") {
+        return Ok(None);
+    }
+    let mut tree_oid = root_tree.to_string();
+    for (index, component) in components.iter().enumerate() {
+        let Some(child) = git
+            .read_tree(&tree_oid)?
+            .into_iter()
+            .find(|child| child.raw_name == component.as_bytes())
+        else {
+            return Ok(None);
+        };
+        if index + 1 == components.len() {
+            return Ok(Some(child));
+        }
+        if child.kind != TreeChildKind::Tree {
+            return Ok(None);
+        }
+        tree_oid = child.sha;
+    }
+    Ok(None)
+}
+
 struct GitBlameFrontier {
     commit_oid: String,
     blob_oid: String,
@@ -293,4 +456,101 @@ fn translate_child(
         }
     }
     .map_err(|error| IngestError::Heddle(error.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{io::Write, process::Command};
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn git(path: &Path, args: &[&str], input: Option<&[u8]>) -> String {
+        let mut command = Command::new("git");
+        command
+            .args(args)
+            .current_dir(path)
+            .stdin(if input.is_some() {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            })
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .env("GIT_AUTHOR_NAME", "Overlay Test")
+            .env("GIT_AUTHOR_EMAIL", "overlay@example.com")
+            .env("GIT_COMMITTER_NAME", "Overlay Test")
+            .env("GIT_COMMITTER_EMAIL", "overlay@example.com")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null");
+        let mut child = command.spawn().expect("spawn git");
+        if let Some(input) = input {
+            child
+                .stdin
+                .as_mut()
+                .expect("git stdin")
+                .write_all(input)
+                .expect("write git stdin");
+        }
+        let output = child.wait_with_output().expect("git output");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git output utf8")
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn tip_projection_does_not_walk_beyond_direct_parents() {
+        let repo = TempDir::new().unwrap();
+        git(repo.path(), &["init", "-q", "-b", "main"], None);
+        let blob = git(
+            repo.path(),
+            &["hash-object", "-w", "--stdin"],
+            Some(b"ok\n"),
+        );
+        let mut invalid_tree = format!("100644 blob {blob}\t").into_bytes();
+        invalid_tree.extend_from_slice(b"bad\xffname\0");
+        let invalid_tree = git(repo.path(), &["mktree", "-z"], Some(&invalid_tree));
+        let root = git(
+            repo.path(),
+            &["commit-tree", &invalid_tree, "-m", "invalid root"],
+            None,
+        );
+        let safe_tree = git(
+            repo.path(),
+            &["mktree"],
+            Some(format!("100644 blob {blob}\tsafe.txt\n").as_bytes()),
+        );
+        let parent = git(
+            repo.path(),
+            &["commit-tree", &safe_tree, "-p", &root, "-m", "safe parent"],
+            None,
+        );
+        let tip = git(
+            repo.path(),
+            &["commit-tree", &safe_tree, "-p", &parent, "-m", "safe tip"],
+            None,
+        );
+        git(repo.path(), &["update-ref", "refs/heads/main", &tip], None);
+
+        let projection = OverlayHistory::project_tip(repo.path(), "HEAD")
+            .expect("tip projection must stay bounded to tip + direct parent");
+        assert_eq!(projection.git_oid, tip);
+        assert_eq!(projection.state.intent.as_deref(), Some("safe tip"));
+        assert_eq!(projection.parent_ids.len(), 1);
+        let log = OverlayHistory::project_log(repo.path(), "HEAD", 1, None, None, &[])
+            .expect("bounded log projection must not inspect older history");
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].state.state_id, projection.state.state_id);
+        assert!(
+            OverlayHistory::open(repo.path(), "HEAD").is_err(),
+            "the full-history control must reach the unrepresentable grandparent"
+        );
+    }
 }

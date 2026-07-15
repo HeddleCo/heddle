@@ -421,29 +421,27 @@ fn render_unbound_overlay_log(
     options: &LogCommandOptions,
 ) -> Result<()> {
     let revision = options.state.as_deref().unwrap_or("HEAD");
-    let history = ingest::OverlayHistory::open(repo.root(), revision)?;
-    let start_id = history.tip().map(|(_, state)| state.state_id);
-    let since_id = options
-        .since
-        .as_deref()
-        .map(|revision| history.state_id_for_revision(revision))
-        .transpose()?;
-    let changed_paths = ChangedPathFilters::try_from_paths(options.paths.clone())?;
-    let query = HistoryQuery::new(start_id)
-        .with_limit(options.limit)
-        .with_agent_filter(options.agent.clone())
-        .with_changed_paths(changed_paths)
-        .with_stop_at(since_id);
-    let entries = repo::query_history_from_source(history.source(), &query)?
-        .into_iter()
-        .map(|state| {
-            let mut entry = StateEntry::from(&state);
-            entry.git_checkpoint = history
-                .git_oid_for_state(&state.state_id)
-                .map(str::to_string);
-            entry
-        })
-        .collect();
+    ChangedPathFilters::try_from_paths(options.paths.clone())?;
+    let entries = ingest::OverlayHistory::project_log(
+        repo.root(),
+        revision,
+        options.limit,
+        options.since.as_deref(),
+        options.agent.as_deref(),
+        &options.paths,
+    )?
+    .into_iter()
+    .map(|projected| {
+        let mut entry = StateEntry::from(&projected.state);
+        entry.parents = projected
+            .parent_ids
+            .iter()
+            .map(|parent| parent.short())
+            .collect();
+        entry.git_checkpoint = Some(projected.git_oid);
+        entry
+    })
+    .collect();
     let output = LogOutput {
         output_kind: "log",
         status: "completed",

@@ -19136,8 +19136,7 @@
             "siblings_restack_failed",
             "blockers",
             "warnings",
-            "recovery_commands",
-            "primary_command"
+            "recovery_commands"
           ],
           "type": "object"
         },

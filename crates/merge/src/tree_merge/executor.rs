@@ -26,16 +26,20 @@ fn union_executable(left: bool, right: bool) -> bool {
     left || right
 }
 
-fn merge_executable(base: &FlatLeaf, our: &FlatLeaf, their: &FlatLeaf) -> bool {
-    if our.executable == their.executable {
-        our.executable
-    } else if our.executable == base.executable {
-        their.executable
-    } else if their.executable == base.executable {
-        our.executable
+fn merge_executable_values(base: bool, our: bool, their: bool) -> bool {
+    if our == their {
+        our
+    } else if our == base {
+        their
+    } else if their == base {
+        our
     } else {
-        union_executable(our.executable, their.executable)
+        union_executable(our, their)
     }
+}
+
+fn merge_executable(base: &FlatLeaf, our: &FlatLeaf, their: &FlatLeaf) -> bool {
+    merge_executable_values(base.executable, our.executable, their.executable)
 }
 
 fn merge_entry_type(base: &FlatLeaf, our: &FlatLeaf, their: &FlatLeaf) -> Option<EntryType> {
@@ -243,10 +247,16 @@ fn apply_renames(
                 );
             } else {
                 // Opposing side kept base content; take rename destination
-                // and union executable with opposing (usually base mode).
+                // while independently three-way merging its mode. Content
+                // equality does not mean the opposing side kept the base
+                // executable bit.
                 let mut leaf = leaf_from_rename(rename);
                 if leaf.entry_type == EntryType::Blob {
-                    leaf.executable = union_executable(leaf.executable, opposing.executable);
+                    leaf.executable = merge_executable_values(
+                        rename.from_executable,
+                        leaf.executable,
+                        opposing.executable,
+                    );
                 }
                 merged_flat.insert(rename.to_path.clone(), leaf);
             }
@@ -444,6 +454,36 @@ fn merge_remaining_paths(
                     )
                 };
                 let merged_type = merge_entry_type(base, our, their);
+                let selected_content_matches_type = merged_type.is_none_or(|entry_type| {
+                    (our.hash == merged_hash && our.entry_type == entry_type)
+                        || (their.hash == merged_hash && their.entry_type == entry_type)
+                });
+                if !content_was_merged && !selected_content_matches_type {
+                    // Kind and content were changed on opposite sides. Do not
+                    // reinterpret regular-file bytes as a symlink target (or
+                    // vice versa); materialize an ordinary conflict blob so
+                    // resolution remains explicit and lossless.
+                    let conflict_hash = content_conflict_merge(
+                        store,
+                        blob_source,
+                        &our.hash,
+                        &their.hash,
+                        path,
+                        conflicts,
+                        labels,
+                    )?;
+                    merged_flat.insert(
+                        path.clone(),
+                        FlatLeaf::blob(
+                            conflict_hash,
+                            union_executable(
+                                our.entry_type == EntryType::Blob && our.executable,
+                                their.entry_type == EntryType::Blob && their.executable,
+                            ),
+                        ),
+                    );
+                    continue;
+                }
                 let leaf = match (content_was_merged, merged_type) {
                     (false, Some(EntryType::Symlink)) => FlatLeaf::symlink(merged_hash),
                     (false, Some(EntryType::Blob)) => {
@@ -1473,6 +1513,32 @@ mod tests {
     }
 
     #[test]
+    fn rename_preserves_opposing_chmod_removal() {
+        let store = InMemoryStore::new();
+        let script = put_blob(&store, b"#!/bin/sh\necho ok\n");
+        let base = Tree::from_entries(vec![TreeEntry::file("old.sh", script, true).unwrap()]);
+        let ours = Tree::from_entries(vec![TreeEntry::file("new.sh", script, true).unwrap()]);
+        let theirs = Tree::from_entries(vec![TreeEntry::file("old.sh", script, false).unwrap()]);
+
+        let result = crate::merge_trees(
+            &store,
+            &&store,
+            &base,
+            &ours,
+            &theirs,
+            crate::MergeOptions::default(),
+        )
+        .expect("rename plus chmod should merge");
+        assert!(result.conflicts.is_empty(), "{:?}", result.conflicts);
+        let moved = entry_by_name(&result.tree, "new.sh");
+        assert_eq!(moved.blob_hash(), Some(script));
+        assert!(
+            !moved.is_executable(),
+            "the opposing side's base-relative chmod removal must survive the rename"
+        );
+    }
+
+    #[test]
     fn merge_detects_kind_change_even_when_content_hash_is_identical() {
         let store = InMemoryStore::new();
         let hash = put_blob(&store, b"same bytes\n");
@@ -1489,6 +1555,52 @@ mod tests {
         )
         .unwrap();
         assert!(entry_by_name(&result.tree, "entry").is_symlink());
+    }
+
+    #[test]
+    fn flat_rename_merge_conflicts_cross_kind_and_content_changes() {
+        let store = InMemoryStore::new();
+        let shared = put_blob(&store, b"shared\n");
+        let edited = put_blob(&store, b"edited regular file\n");
+        let renamed = put_blob(&store, b"rename trigger\n");
+        let base = Tree::from_entries(vec![
+            TreeEntry::file("entry", shared, false).unwrap(),
+            TreeEntry::file("old.txt", renamed, false).unwrap(),
+        ]);
+        let ours = Tree::from_entries(vec![
+            TreeEntry::symlink("entry", shared).unwrap(),
+            TreeEntry::file("new.txt", renamed, false).unwrap(),
+        ]);
+        let theirs = Tree::from_entries(vec![
+            TreeEntry::file("entry", edited, false).unwrap(),
+            TreeEntry::file("old.txt", renamed, false).unwrap(),
+        ]);
+
+        let result = crate::merge_trees(
+            &store,
+            &&store,
+            &base,
+            &ours,
+            &theirs,
+            crate::MergeOptions::default(),
+        )
+        .expect("kind/content conflict should return a resolution tree");
+        assert!(
+            result.conflicts.iter().any(|path| path == "entry"),
+            "the cross-kind content edit must be explicit: {:?}",
+            result.conflicts
+        );
+        let entry = entry_by_name(&result.tree, "entry");
+        assert!(
+            entry.is_blob(),
+            "edited regular-file bytes must never be emitted as a symlink target"
+        );
+        let content = store
+            .get_blob(&entry.blob_hash().expect("conflict blob"))
+            .unwrap()
+            .expect("conflict content");
+        let content = String::from_utf8_lossy(content.content());
+        assert!(content.contains("<<<<<<<") && content.contains("edited regular file"));
     }
 
     #[test]
