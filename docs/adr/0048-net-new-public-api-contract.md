@@ -38,17 +38,16 @@ cutover approval while the discrepancies below remain open.
 
 ## Current implementation status
 
-Status was verified on 2026-07-14 against API `f32adc1f`, Weft `6accf761`,
-Tapestry `origin/feat/app-site-overhaul` at `7e729160`, Tapestry `origin/main`
-at `b234795c`, and this Heddle cutover branch after merging Heddle
-`origin/main` at `b0443f91`.
+Status was verified on 2026-07-15 against API `e3b3e6d0`, Weft `origin/main`
+at `5133043f`, Tapestry `origin/main` at `b234795c`, and Heddle `origin/main`
+at `5e293ce2`.
 
 | Component | Current state | Cutover consequence |
 |---|---|---|
-| API | The v1alpha1 source and generators exist, but the migration manifest drops live or implemented behavior and signing-identity semantics are not conformance-pinned. | The API revision is not ready to publish or re-pin as the coordinated contract. |
-| Heddle | This draft branch consumes API revision `f32adc1f` and no longer owns the legacy generated contract. Its latest `origin/main` merge and session-test port are complete. | Heddle-local compilation is necessary but does not establish hosted interoperability. |
+| API | Revision `e3b3e6d0` preserves the four handle operations on `IdentityService`, reserves legacy subject tag/name 1 from `HandlePrincipal`, and retains public fields on tags 2–8. Other rows below and signing-identity semantics remain unresolved. | Heddle can compile against the corrected handle contract, but the API revision is not yet a complete publishable cutover contract. |
+| Heddle | This draft branch consumes API revision `e3b3e6d0`, synchronizes its API capability declaration to that revision, and no longer owns the legacy generated contract. | Heddle-local compilation is necessary but does not establish hosted interoperability. |
 | Weft | `crates/weft-server/Cargo.toml:49` still depends on `heddle-grpc` 0.23.0, and `crates/weft-server/src/serve.rs:130-157` registers legacy `heddle.v1` services. | A v1alpha1 Heddle call has no matching hosted route until a separate Weft cutover lands. |
-| Tapestry | The overhaul branch still depends on `@heddleco/grpc` 0.23.0 (`package.json:50`) and imports generated `heddle/v1` modules in `src/lib/server/api.ts:12-84` and other routes. | A separate Tapestry cutover and caller audit must land in the same release window. |
+| Tapestry | `origin/main` still uses the legacy handle client; issue `HeddleCo/tapestry#163` owns the subject-free shared adapter and live status, request, claim, and resolution coverage. | The Tapestry adapter follows the Weft shared-service adapter and must land in the same release window. |
 | Publication | Heddle currently exact-pins a git revision in `crates/client/Cargo.toml:40`; `heddle-api` 0.1.0 is not yet available through this workspace's release pipeline. | The API package must publish before a Heddle crates.io release can include this dependency. |
 
 ## Contract correction decision matrix
@@ -58,12 +57,12 @@ behavior until the API and each consumer have a tested replacement.
 
 | Area | Grounded current behavior | Required API/cutover decision | Status |
 |---|---|---|---|
-| Native handles | Tapestry `origin/main` exposes live status, request, and claim routes (`src/routes/api/handles/{status,request,claim}/+server.ts`) backed by calls in `src/lib/server/api.ts:1964-2003`. Weft implements `GetHandleStatus`, `RequestHeldName`, `ClaimHandle`, and `ResolveHandle` in `crates/weft-server/src/server/grpc_hosted_impl/user.rs:375-850`. The API manifest currently classifies all four as dropped (`migration-manifest.json:432-434,526-528,636-648`). | Add v1alpha1 handle RPCs, or approve and implement an explicit product replacement that preserves the live handle flows. They may not be dropped on the basis of the current inventory. | **Blocked — API issue/PR required** |
+| Native handles | API revision `e3b3e6d0` defines `IdentityService/ClaimHandle`, `GetHandleStatus`, `RequestHeldName`, and `ResolveHandle`. `HandlePrincipal` reserves legacy subject tag/name 1 and keeps the public projection on tags 2–8. Tapestry `origin/main` still exposes the three legacy status, request, and claim routes, while Weft `origin/main` still serves the legacy implementations. | Complete `HeddleCo/weft#591` and then `HeddleCo/tapestry#163`, preserving escrow, canonical-handle, tombstone, retry-key, and existence-hiding behavior without copying a subject into the public principal. | **Contract resolved — producer and web adapters pending** |
 | Subscription and billing reconciliation | Weft implements the billing-authorized `RecordSubscription` write at `crates/weft-server/src/server/grpc_hosted_impl/auth.rs:2091-2189`. The Tapestry overhaul Polar route is still a fulfillment stub and names this RPC as part of the missing entitlement path (`src/routes/api/webhook/polar/+server.ts:13-62`). The API manifest drops it at `migration-manifest.json:142-144`. | Retain `RecordSubscription`, or land a reviewed reconciliation replacement and port its external caller before removing the old RPC. | **Blocked — API, Weft, and Tapestry work required** |
 | Review verdicts | Weft implements `RecordVerdict` as a first-class idempotent write at `crates/weft-server/src/server/grpc_hosted_impl/state_review.rs:308-370`; the API's `StateStatus` documentation still refers to `RecordVerdict` (`proto/heddle/api/v1alpha1/types.proto:41-44`) while the migration manifest drops it (`migration-manifest.json:846-848`). | Add a first-class v1alpha1 `RecordVerdict` RPC and port the producer. A verdict remains distinct from `SignState`; it is not dropped behavior. | **Blocked — API and Weft work required** |
 | Provider-token lifecycle | The API candidate retains `IdentityService/StoreProviderToken` (`proto/heddle/api/v1alpha1/identity.proto:545-554,861-869`). Weft encrypts stored access and refresh tokens (`crates/weft-server/src/pg_registry.rs:2107-2197`), but its provider-token import branch explicitly fails because token resolution is not wired into the worker (`crates/weft-server/src/import_worker.rs:1747-1756`). Tapestry's overhaul stores GitHub and GitLab tokens through `src/lib/server/api.ts:1821-1845` and represents private imports with `ProviderTokenSource` at `src/lib/server/api.ts:2087-2130`. | Preserve storage and encrypted server handling, then define and implement private-import consumption, expiry/refresh, and revocation semantics as one audited lifecycle before declaring the caller cut over. | **Blocked — API/Weft semantics and Tapestry port required** |
 | Current Tapestry callers | The overhaul imports legacy identity, registry, repository/content, feed, import, search, workflow/thread, discussion, state-review, review-analysis, and repository-event generated modules across `src/lib/server/api.ts`, `src/lib/server/review-api.ts`, `src/routes/api/review`, `src/routes/app/events`, and feed routes. | Audit every legacy import and invoked method against the corrected descriptor, then port and test all callers. The API drop list is not approved by checking only Heddle call sites. | **Blocked — complete consumer inventory and Tapestry PR required** |
-| Signing identity | Heddle PoP canonicalization uses `hex(device_public_key)` (`crates/client/src/grpc_hosted/request_signing.rs:125-145`), while the API fixture uses `principal:alice` (`tests/fixtures/unary-signing-v1.json:2`). Heddle's human retry reuses that canonical byte string but sends `hex(credential_id)` as the identity header (`request_signing.rs:204-220`). | Define the stable identity value for each signing tier, reconcile canonical bytes with the identity header, and add human-tier conformance vectors in API before changing the pin. | **Blocked — security contract issue/PR and Fable gate required** |
+| Signing identity | Heddle PoP canonicalization uses `hex(device_public_key)` (`crates/client/src/grpc_hosted/request_signing.rs:125-145`), while the API fixture uses `principal:alice` (`tests/fixtures/unary-signing-v1.json:2`). Heddle's human retry reuses that canonical byte string but sends `hex(credential_id)` as the identity header (`request_signing.rs:204-220`). | Define the stable identity value for each signing tier, reconcile canonical bytes with the identity header, and add human-tier conformance vectors in API before changing the pin. | **Blocked — security contract issue/PR required** |
 | Producer and consumers | Weft registers only legacy routes and Tapestry overhaul imports only the legacy package; this Heddle branch already calls v1alpha1 paths. | Land separate Weft and Tapestry cutover PRs and deploy all three consumers in one recorded maintenance window. | **Blocked — coordinated release required** |
 | Package release | The Heddle branch uses an exact git revision plus `version = "=0.1.0"`; API publication is outside Heddle's release workflow. | Publish the corrected `heddle-api` 0.1.0 release before the next Heddle release-plz publication and replace the temporary git pin as part of the coordinated work. | **Blocked — API package publication required** |
 
@@ -76,8 +75,8 @@ until every box below is backed by its owning PR and test evidence.
 
 - [ ] Re-audit every dropped migration-manifest RPC against current Weft,
   Tapestry `origin/main`, and Tapestry `origin/feat/app-site-overhaul` callers.
-- [ ] Restore or replace the four live handle RPCs without removing handle
-  functionality.
+- [x] Restore the four live handle RPCs without removing handle functionality
+  (`HeddleCo/api#9`, merged as `e3b3e6d0`).
 - [ ] Retain `RecordSubscription` until the billing reconciliation caller and
   replacement, if any, are live.
 - [ ] Add first-class `RecordVerdict` to v1alpha1 and port its Weft producer.
@@ -94,8 +93,9 @@ until every box below is backed by its owning PR and test evidence.
 - [ ] Tapestry replaces every legacy generated import and ports its API module,
   review/event/feed routes, OAuth/provider-token flows, Polar reconciliation,
   and live handle flows.
-- [ ] Heddle re-pins the corrected API revision/package and reruns its hosted
-  adapter, signing, session, CLI, daemon, schema, and supply-chain gates.
+- [x] Heddle re-pins API revision `e3b3e6d0` and reruns its hosted adapter,
+  signing, session, CLI, daemon, schema, and supply-chain gates on this draft
+  branch.
 - [ ] Cross-product tests prove the exact Heddle and Tapestry clients can call
   the exact Weft build planned for the window.
 
@@ -108,8 +108,9 @@ until every box below is backed by its owning PR and test evidence.
 - [ ] Verify handles, subscription reconciliation, verdict recording,
   provider-token-backed private import, and the audited Tapestry call surface
   before traffic resumes.
-- [ ] Obtain the required Fable approval, then remove the Draft/do-not-merge
-  hold. Until then, this cutover remains blocked.
+- [ ] After the coordinated prerequisites pass, obtain exact-head Codex review
+  approval, then remove the Draft/do-not-merge hold. Until then, this cutover
+  remains blocked.
 
 ## Request and compatibility policy
 

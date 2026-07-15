@@ -631,8 +631,14 @@ fn parse_hosted_role_arg(
 }
 
 #[cfg(test)]
-mod spool_request_shape_tests {
-    use grpc::heddle::api::v1alpha1::ResolveMonorepoRequest;
+mod request_shape_tests {
+    use grpc::heddle::api::v1alpha1::{
+        ClaimHandleRequest, GetHandleStatusRequest, HandlePrincipal, RequestHeldNameRequest,
+        ResolveHandleRequest, ResolveMonorepoRequest,
+        identity_service_client::IdentityServiceClient,
+    };
+    use prost::Message;
+    use tonic::transport::Channel;
 
     #[test]
     fn resolve_monorepo_request_threads_optional_max_depth() {
@@ -648,5 +654,109 @@ mod spool_request_shape_tests {
             max_depth: None,
         };
         assert_eq!(unbounded.max_depth, None);
+    }
+
+    #[test]
+    fn shared_handle_client_surface_is_generated_with_retry_keys() {
+        #[allow(dead_code)]
+        async fn compile_all_handle_calls(mut client: IdentityServiceClient<Channel>) {
+            let _ = client
+                .get_handle_status(GetHandleStatusRequest {
+                    name: "octocat".to_string(),
+                })
+                .await;
+            let _ = client
+                .request_held_name(RequestHeldNameRequest {
+                    name: "octocat".to_string(),
+                    client_operation_id: "request-1".to_string(),
+                })
+                .await;
+            let _ = client
+                .claim_handle(ClaimHandleRequest {
+                    name: "octocat".to_string(),
+                    client_operation_id: "claim-1".to_string(),
+                })
+                .await;
+            let _ = client
+                .resolve_handle(ResolveHandleRequest {
+                    name: "octocat".to_string(),
+                })
+                .await;
+        }
+
+        let _ = compile_all_handle_calls;
+    }
+
+    #[test]
+    fn shared_handle_principal_drops_the_legacy_subject_field() {
+        #[derive(Clone, PartialEq, Message)]
+        struct LegacyResolvedPrincipal {
+            #[prost(string, tag = "1")]
+            subject: String,
+            #[prost(string, tag = "2")]
+            display_name: String,
+            #[prost(string, tag = "3")]
+            handle: String,
+            #[prost(bool, tag = "4")]
+            resolved: bool,
+            #[prost(string, tag = "5")]
+            primary_handle: String,
+            #[prost(string, tag = "6")]
+            kind: String,
+            #[prost(bool, tag = "7")]
+            verified: bool,
+            #[prost(string, tag = "8")]
+            discriminator: String,
+        }
+
+        let legacy = LegacyResolvedPrincipal {
+            subject: "user:private".to_string(),
+            display_name: "Octo Cat".to_string(),
+            handle: "octocat".to_string(),
+            resolved: true,
+            primary_handle: "octocat".to_string(),
+            kind: "native".to_string(),
+            verified: true,
+            discriminator: String::new(),
+        };
+        let public = HandlePrincipal::decode(legacy.encode_to_vec().as_slice())
+            .expect("legacy public tags must decode");
+
+        assert_eq!(public.display_name, "Octo Cat");
+        assert_eq!(public.handle, "octocat");
+        assert_eq!(public.primary_handle, "octocat");
+        assert!(public.resolved);
+        assert!(public.verified);
+
+        let round_trip = LegacyResolvedPrincipal::decode(public.encode_to_vec().as_slice())
+            .expect("public principal must remain wire-compatible on tags 2-8");
+        assert!(
+            round_trip.subject.is_empty(),
+            "the reserved legacy subject tag must not survive public decoding"
+        );
+
+        let descriptor = prost_types::FileDescriptorSet::decode(grpc::FILE_DESCRIPTOR_SET)
+            .expect("the shared API descriptor must decode");
+        let principal = descriptor
+            .file
+            .iter()
+            .filter(|file| file.package.as_deref() == Some("heddle.api.v1alpha1"))
+            .flat_map(|file| &file.message_type)
+            .find(|message| message.name.as_deref() == Some("HandlePrincipal"))
+            .expect("the shared descriptor must define HandlePrincipal");
+        assert!(
+            principal
+                .field
+                .iter()
+                .all(|field| field.name.as_deref() != Some("subject")),
+            "HandlePrincipal must not expose subject at any tag"
+        );
+        assert!(principal.reserved_name.iter().any(|name| name == "subject"));
+        assert!(
+            principal.reserved_range.iter().any(|range| {
+                range.start.is_some_and(|start| start <= 1) && range.end.is_some_and(|end| end > 1)
+            }),
+            "HandlePrincipal must reserve legacy subject tag 1"
+        );
     }
 }

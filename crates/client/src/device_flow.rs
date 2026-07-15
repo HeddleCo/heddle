@@ -21,10 +21,11 @@ enum AgentAuthOperationDisposition {
     Denied,
 }
 
-/// Exhaustive agent-policy classification for `AuthService`.
+/// Exhaustive agent-policy classification for `IdentityService`.
 ///
-/// The exact-set test below compares this table with `auth.proto`, so adding an
-/// auth RPC requires an explicit decision before derived-agent CI can pass.
+/// The exact-set test below compares this table with the shared API descriptor,
+/// so adding an identity RPC requires an explicit decision before derived-agent
+/// CI can pass.
 const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
     (
         "BeginWebAuthnRegistration",
@@ -35,6 +36,7 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
         "BeginWebAuthnAuthentication",
         AgentAuthOperationDisposition::ReviewedSafe,
     ),
+    ("ClaimHandle", AgentAuthOperationDisposition::Denied),
     (
         "FinishWebAuthnAuthentication",
         // The WebAuthn ceremony, not an attached bearer, proves this request.
@@ -72,10 +74,6 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
     ),
     ("WhoAmI", AgentAuthOperationDisposition::ReviewedSafe),
     (
-        "RecordSubscription",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    (
         "IntrospectCredential",
         AgentAuthOperationDisposition::ReviewedSafe,
     ),
@@ -94,15 +92,17 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
         AgentAuthOperationDisposition::ReviewedSafe,
     ),
     (
-        "AnalyzeExternalDiff",
+        "GetInvitationSummary",
         AgentAuthOperationDisposition::ReviewedSafe,
     ),
     (
-        "GetInvitationSummary",
+        "GetHandleStatus",
         AgentAuthOperationDisposition::ReviewedSafe,
     ),
     ("ListSessions", AgentAuthOperationDisposition::ReviewedSafe),
     ("RevokeSession", AgentAuthOperationDisposition::Denied),
+    ("RequestHeldName", AgentAuthOperationDisposition::Denied),
+    ("ResolveHandle", AgentAuthOperationDisposition::ReviewedSafe),
     // MintBiscuit authenticates its own keypair/device proof; an attached
     // derived bearer cannot authorize or widen the minted credential.
     ("MintBiscuit", AgentAuthOperationDisposition::ReviewedSafe),
@@ -111,31 +111,6 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
     ("IssuePresenceToken", AgentAuthOperationDisposition::Denied),
     (
         "MintAnonBiscuit",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    (
-        "DeclareRecoveryMethod",
-        AgentAuthOperationDisposition::Denied,
-    ),
-    (
-        "DeclareHardwareKeyRecovery",
-        AgentAuthOperationDisposition::Denied,
-    ),
-    (
-        "DeclareSocialGuardians",
-        AgentAuthOperationDisposition::Denied,
-    ),
-    ("DeclarePaperCode", AgentAuthOperationDisposition::Denied),
-    ("BeginRecovery", AgentAuthOperationDisposition::ReviewedSafe),
-    (
-        "SubmitRecoveryProof",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    ("VetoRecovery", AgentAuthOperationDisposition::ReviewedSafe),
-    // Recovery completion is authorized by the in-flight recovery proof and
-    // veto-window state, not by the caller's attached bearer.
-    (
-        "CompleteRecovery",
         AgentAuthOperationDisposition::ReviewedSafe,
     ),
 ];
@@ -723,15 +698,21 @@ mod tests {
     }
 
     #[test]
-    fn auth_service_agent_policy_exactly_matches_the_proto_catalog() {
-        let proto = include_str!("../../grpc/proto/heddle/v1/auth.proto");
-        let proto_operations = proto
-            .lines()
-            .filter_map(|line| {
-                line.trim()
-                    .strip_prefix("rpc ")
-                    .and_then(|rpc| rpc.split_once('(').map(|(name, _)| name))
-            })
+    fn identity_service_agent_policy_exactly_matches_the_shared_descriptor() {
+        use prost::Message;
+
+        let descriptor = prost_types::FileDescriptorSet::decode(grpc::FILE_DESCRIPTOR_SET)
+            .expect("the shared API descriptor must decode");
+        let proto_operations = descriptor
+            .file
+            .iter()
+            .filter(|file| file.package.as_deref() == Some("heddle.api.v1alpha1"))
+            .flat_map(|file| &file.service)
+            .find(|service| service.name.as_deref() == Some("IdentityService"))
+            .expect("the shared descriptor must define IdentityService")
+            .method
+            .iter()
+            .map(|method| method.name.as_deref().expect("RPC method name"))
             .collect::<BTreeSet<_>>();
         let policy_operations = AUTH_SERVICE_AGENT_POLICY
             .iter()
@@ -745,7 +726,7 @@ mod tests {
         );
         assert_eq!(
             policy_operations, proto_operations,
-            "every AuthService RPC must be explicitly classified for derived agents"
+            "every IdentityService RPC must be explicitly classified for derived agents"
         );
     }
 

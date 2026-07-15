@@ -13,7 +13,7 @@ categories.workspace = true
 chrono.workspace = true
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.10" }
 futures.workspace = true
-api = { git = "https://github.com/HeddleCo/api", rev = "f32adc1f3f8ddeae80a7818289efb89bd3dc44a6", package = "heddle-api", version = "=0.1.0", features = ["server"] }
+api = { git = "https://github.com/HeddleCo/api", rev = "e3b3e6d0e70c88e571b404f068e893842c02ac6f", package = "heddle-api", version = "=0.1.0", features = ["server"] }
 hex.workspace = true
 libc.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.10" }
