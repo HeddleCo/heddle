@@ -15,19 +15,145 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use crypto::{Ed25519Signer, Signer};
 
-/// Operations that an agent attenuation can never authorize, even when a
-/// caller constructs [`AgentAttenuation`] directly without an allowlist.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentAuthOperationDisposition {
+    ReviewedSafe,
+    Denied,
+}
+
+/// Exhaustive agent-policy classification for `AuthService`.
 ///
-/// Credential-issuing and destructive methods excluded from the W1 agent
-/// operation surface. This floor limits use of the attenuated token; delegated
-/// PoP separately prevents the derive path from handing an ancestor proof key
-/// to the child process.
-pub const AGENT_OPERATION_DENY_FLOOR: &[&str] = &[
-    "CreateServiceAccount",
-    "IssueServiceAccountCredential",
-    "DeleteRepository",
-    "DeleteNamespace",
+/// The exact-set test below compares this table with `auth.proto`, so adding an
+/// auth RPC requires an explicit decision before derived-agent CI can pass.
+const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
+    (
+        "BeginWebAuthnRegistration",
+        AgentAuthOperationDisposition::Denied,
+    ),
+    ("RegisterPublicKey", AgentAuthOperationDisposition::Denied),
+    (
+        "BeginWebAuthnAuthentication",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    (
+        "FinishWebAuthnAuthentication",
+        // The WebAuthn ceremony, not an attached bearer, proves this request.
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    (
+        "CreateDeviceAuthorization",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    (
+        "ApproveDeviceAuthorization",
+        AgentAuthOperationDisposition::Denied,
+    ),
+    (
+        "ExchangeDeviceAuthorization",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    (
+        "WaitForDeviceAuthorization",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    ("RotateCredential", AgentAuthOperationDisposition::Denied),
+    ("RevokeCredential", AgentAuthOperationDisposition::Denied),
+    (
+        "CreateServiceAccount",
+        AgentAuthOperationDisposition::Denied,
+    ),
+    (
+        "IssueServiceAccountCredential",
+        AgentAuthOperationDisposition::Denied,
+    ),
+    (
+        "RevokeServiceAccount",
+        AgentAuthOperationDisposition::Denied,
+    ),
+    ("WhoAmI", AgentAuthOperationDisposition::ReviewedSafe),
+    (
+        "RecordSubscription",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    (
+        "IntrospectCredential",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    (
+        "ListServiceAccounts",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    (
+        "ListScopeCapabilities",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    ("LinkOAuthIdentity", AgentAuthOperationDisposition::Denied),
+    ("StoreProviderToken", AgentAuthOperationDisposition::Denied),
+    (
+        "VerifySignupEmail",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    (
+        "AnalyzeExternalDiff",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    (
+        "GetInvitationSummary",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    ("ListSessions", AgentAuthOperationDisposition::ReviewedSafe),
+    ("RevokeSession", AgentAuthOperationDisposition::Denied),
+    // MintBiscuit authenticates its own keypair/device proof; an attached
+    // derived bearer cannot authorize or widen the minted credential.
+    ("MintBiscuit", AgentAuthOperationDisposition::ReviewedSafe),
+    // Presence currently re-mints an authority token instead of preserving
+    // the caller's complete attenuation chain, so agents must not invoke it.
+    ("IssuePresenceToken", AgentAuthOperationDisposition::Denied),
+    (
+        "MintAnonBiscuit",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    (
+        "DeclareRecoveryMethod",
+        AgentAuthOperationDisposition::Denied,
+    ),
+    (
+        "DeclareHardwareKeyRecovery",
+        AgentAuthOperationDisposition::Denied,
+    ),
+    (
+        "DeclareSocialGuardians",
+        AgentAuthOperationDisposition::Denied,
+    ),
+    ("DeclarePaperCode", AgentAuthOperationDisposition::Denied),
+    ("BeginRecovery", AgentAuthOperationDisposition::ReviewedSafe),
+    (
+        "SubmitRecoveryProof",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    ("VetoRecovery", AgentAuthOperationDisposition::ReviewedSafe),
+    // Recovery completion is authorized by the in-flight recovery proof and
+    // veto-window state, not by the caller's attached bearer.
+    (
+        "CompleteRecovery",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
 ];
+
+/// Destructive non-auth methods that remain mandatory denials for every
+/// derived token, even when the caller constructs [`AgentAttenuation`]
+/// directly without an allowlist.
+const NON_AUTH_AGENT_OPERATION_DENY_FLOOR: &[&str] = &["DeleteRepository", "DeleteNamespace"];
+
+fn mandatory_agent_denied_operations() -> impl Iterator<Item = &'static str> {
+    NON_AUTH_AGENT_OPERATION_DENY_FLOOR.iter().copied().chain(
+        AUTH_SERVICE_AGENT_POLICY
+            .iter()
+            .filter_map(|(operation, disposition)| {
+                (*disposition == AgentAuthOperationDisposition::Denied).then_some(*operation)
+            }),
+    )
+}
 
 /// Curated W1 operation ceiling for `heddle auth derive-agent`.
 ///
@@ -323,10 +449,11 @@ fn build_attenuation_block(
             .as_str(),
         )
         .context("expiry check")?;
-    // This independent check is deliberately present even when the caller
-    // supplies no operation allowlist. It is the non-optional credential-
-    // issuing/destructive operation floor for every token from this primitive.
-    for denied in AGENT_OPERATION_DENY_FLOOR {
+    // These independent checks are deliberately present even when the caller
+    // supplies no operation allowlist. They are the mandatory auth-trust,
+    // credential, recovery-enrollment, presence, and destructive-operation
+    // floor for every token from this primitive.
+    for denied in mandatory_agent_denied_operations() {
         block = block
             .check(format!("check if operation($op), $op != {}", biscuit_string(denied)).as_str())
             .context("agent operation deny floor")?;
@@ -473,6 +600,8 @@ pub fn read_only_repo_agent(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use biscuit_auth::{Biscuit, KeyPair, builder::AuthorizerBuilder, datalog::RunLimits};
 
     use super::*;
@@ -550,6 +679,74 @@ mod tests {
         let error = effective_pop_public_key_hex(&token)
             .expect_err("a child block without a key transition must fail closed");
         assert!(error.to_string().contains("exactly one pop_delegation"));
+    }
+
+    #[test]
+    fn effective_pop_key_rejects_duplicate_authority_anchors() {
+        let first = Ed25519Signer::generate().expect("first root PoP key");
+        let second = Ed25519Signer::generate().expect("second root PoP key");
+        let token = Biscuit::builder()
+            .fact(r#"user("alice")"#)
+            .expect("user fact")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(first.public_key())).as_str())
+            .expect("first root PoP fact")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(second.public_key())).as_str())
+            .expect("second root PoP fact")
+            .build(&KeyPair::new())
+            .expect("build root")
+            .to_base64()
+            .expect("encode root");
+
+        let error = effective_pop_public_key_hex(&token)
+            .expect_err("multiple authority proof anchors must fail closed");
+        assert!(error.to_string().contains("exactly one device_pop_key"));
+    }
+
+    #[test]
+    fn effective_pop_key_rejects_authority_block_delegations() {
+        let signer = Ed25519Signer::generate().expect("root PoP key");
+        let token = Biscuit::builder()
+            .fact(r#"user("alice")"#)
+            .expect("user fact")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
+            .expect("root PoP fact")
+            .fact(r#"pop_delegation("parent", "child", "signature")"#)
+            .expect("misplaced delegation fact")
+            .build(&KeyPair::new())
+            .expect("build malformed root")
+            .to_base64()
+            .expect("encode malformed root");
+
+        let error = effective_pop_public_key_hex(&token)
+            .expect_err("an authority-block delegation must fail closed");
+        assert!(error.to_string().contains("only in post-authority blocks"));
+    }
+
+    #[test]
+    fn auth_service_agent_policy_exactly_matches_the_proto_catalog() {
+        let proto = include_str!("../../grpc/proto/heddle/v1/auth.proto");
+        let proto_operations = proto
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix("rpc ")
+                    .and_then(|rpc| rpc.split_once('(').map(|(name, _)| name))
+            })
+            .collect::<BTreeSet<_>>();
+        let policy_operations = AUTH_SERVICE_AGENT_POLICY
+            .iter()
+            .map(|(operation, _)| *operation)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            policy_operations.len(),
+            AUTH_SERVICE_AGENT_POLICY.len(),
+            "the agent auth policy must classify each RPC exactly once"
+        );
+        assert_eq!(
+            policy_operations, proto_operations,
+            "every AuthService RPC must be explicitly classified for derived agents"
+        );
     }
 
     #[test]
@@ -729,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn server_accepts_allowed_operation_and_rejects_credential_issuance_and_delete_floor() {
+    fn server_accepts_allowed_operation_and_rejects_the_mandatory_operation_floor() {
         let (parent, root, parent_pop) = fresh_parent_token();
         let child_pop = Ed25519Signer::generate().expect("child PoP key");
         let child = attenuate_for_agent(
@@ -766,7 +963,7 @@ mod tests {
 
         server_authorizes(&child, &root, "Push", Utc::now())
             .expect("server accepts an allowlisted push");
-        for denied in AGENT_OPERATION_DENY_FLOOR {
+        for denied in mandatory_agent_denied_operations() {
             assert!(
                 server_authorizes(&child, &root, denied, Utc::now()).is_err(),
                 "server must reject hard-denied operation {denied}"

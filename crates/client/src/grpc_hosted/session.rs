@@ -4,8 +4,9 @@
 //! every hosted entry point (push, pull, fetch, clone, support, approval,
 //! lazy hydration): resolve the auth token, fall back to the credential
 //! store, attach the proof key, build the validated client config, connect,
-//! then run mandatory credential rotation. This module owns that assembly so
-//! the command modules choose only intent + remote and call one seam.
+//! then rotate only an eligible stored authority credential. This module owns
+//! that assembly so the command modules choose only intent + remote and call
+//! one seam.
 
 use std::net::SocketAddr;
 
@@ -13,7 +14,10 @@ use anyhow::{Context, Result};
 use cli_shared::{ClientConfig, UserConfig};
 use wire::{AuthToken, ProtocolError};
 
-use crate::{credentials, grpc_hosted::HostedGrpcClient};
+use crate::{
+    credentials,
+    grpc_hosted::{HostedGrpcClient, RenewableAuthorityCredential},
+};
 
 /// How a hosted session resolves its auth token.
 pub enum HostedAuthMode {
@@ -36,6 +40,7 @@ pub enum HostedAuthMode {
 /// [`HostedGrpcClient::open_session`], which builds and connects in one call.
 pub struct HostedSession {
     config: ClientConfig,
+    renewable_authority_credential: Option<RenewableAuthorityCredential>,
 }
 
 impl HostedSession {
@@ -49,11 +54,12 @@ impl HostedSession {
         server_key: Option<String>,
         mode: HostedAuthMode,
     ) -> Result<Self> {
-        let (token, mut credential_proof_key) = match mode {
-            HostedAuthMode::ConfigToken => (user_config.remote_token()?, None),
+        let (token, mut credential_proof_key, renewable_authority_credential) = match mode {
+            HostedAuthMode::ConfigToken => (user_config.remote_token()?, None, None),
             HostedAuthMode::CredentialFallback => {
                 let mut token = user_config.remote_token()?;
                 let mut credential_proof_key = None;
+                let mut renewable_authority_credential = None;
                 if token.is_none()
                     && let Some(ref key) = server_key
                 {
@@ -67,11 +73,13 @@ impl HostedSession {
                     // file. A *missing* file still returns Ok(None) and falls
                     // back cleanly.
                     if let Some(cred) = credentials::resolve_credential_for_server(key)? {
+                        renewable_authority_credential =
+                            RenewableAuthorityCredential::from_stored(&cred);
                         token = Some(AuthToken::new(cred.token, "credential-store"));
                         credential_proof_key = cred.private_key_pem;
                     }
                 }
-                (token, credential_proof_key)
+                (token, credential_proof_key, renewable_authority_credential)
             }
         };
 
@@ -91,7 +99,10 @@ impl HostedSession {
         {
             config = config.with_auth_proof_key_pem(pem);
         }
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            renewable_authority_credential,
+        })
     }
 
     /// Explicitly allow cleartext to non-loopback hosts for this session
@@ -104,15 +115,17 @@ impl HostedSession {
         self
     }
 
-    /// Connect and run mandatory credential rotation.
+    /// Connect and evaluate renewal for an eligible stored authority token.
     ///
-    /// The rotation MUST run immediately after connect — every hosted entry
-    /// point relies on a fresh token before its first RPC. This is the single
-    /// place that pairs connect with rotation; see the source-presence guard
-    /// in this module's tests.
+    /// The eligibility check runs immediately after connect and requires the
+    /// active bearer to remain byte-for-byte identical to the stored one-block
+    /// authority credential selected during [`HostedSession::build`]. Explicit
+    /// config/env and attenuated tokens are never rotated here.
     pub async fn connect(&self, addr: SocketAddr) -> Result<HostedGrpcClient, ProtocolError> {
         let mut client = HostedGrpcClient::connect(addr, &self.config).await?;
-        client.auto_rotate_if_needed().await;
+        client
+            .auto_rotate_if_needed(self.renewable_authority_credential.as_ref())
+            .await;
         Ok(client)
     }
 }
@@ -150,9 +163,9 @@ fn server_keys_match(left: &str, right: &str) -> bool {
 
 impl HostedGrpcClient {
     /// Open a usable hosted session in one call: resolve auth, build the
-    /// validated client config, connect, and run mandatory rotation. Callers
-    /// that must prevalidate the config before irreversible work build a
-    /// [`HostedSession`] first, then [`HostedSession::connect`].
+    /// validated client config, connect, and evaluate eligible stored-authority
+    /// renewal. Callers that must prevalidate the config before irreversible
+    /// work build a [`HostedSession`] first, then [`HostedSession::connect`].
     pub async fn open_session(
         addr: SocketAddr,
         user_config: &UserConfig,
@@ -180,15 +193,14 @@ impl HostedGrpcClient {
 
 #[cfg(test)]
 mod tests {
-    //! The connect/rotate invariant now lives here, in the one seam every
-    //! hosted entry point opens its session through. This source-presence
-    //! guard replaces the per-call-site rotation checks: rotation MUST run
-    //! immediately after `HostedGrpcClient::connect`, or a process whose
-    //! cached token has slipped past expiry hits an auth failure on its first
-    //! RPC even though the rotation data is on disk.
+    //! The connect/renewal-eligibility invariant lives here, in the one seam
+    //! every hosted entry point opens its session through. This source-presence
+    //! guard replaces the per-call-site checks: an eligible stored authority
+    //! credential must be considered immediately after connect, while explicit
+    //! and attenuated tokens carry no renewal binding.
 
     #[test]
-    fn session_connect_rotates_credentials_after_connect() {
+    fn session_connect_checks_eligible_renewal_after_connect() {
         let source = include_str!("session.rs");
         let connect_idx = source
             .find("HostedGrpcClient::connect(addr, &self.config)")
@@ -202,6 +214,134 @@ mod tests {
             "auto_rotate_if_needed must follow HostedGrpcClient::connect within the \
              same async block (found {rotate_offset} chars later)",
         );
+    }
+
+    #[test]
+    fn explicit_derived_token_cannot_rotate_from_a_nearly_expired_stored_parent() {
+        use biscuit_auth::{Biscuit, KeyPair};
+        use crypto::{Ed25519Signer, Signer};
+
+        use super::{HostedAuthMode, HostedSession};
+        use crate::credentials;
+
+        let _guard = credentials::lock_test_env();
+        let home = tempfile::TempDir::new().expect("temp Heddle home");
+        let previous_home = std::env::var_os("HEDDLE_HOME");
+        let previous_remote_token = std::env::var_os("HEDDLE_REMOTE_TOKEN");
+        unsafe {
+            std::env::set_var("HEDDLE_HOME", home.path());
+            std::env::remove_var("HEDDLE_REMOTE_TOKEN");
+        }
+
+        let result = std::panic::catch_unwind(|| {
+            let parent_signer = Ed25519Signer::generate().expect("parent proof key");
+            let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+            let parent_token = Biscuit::builder()
+                .fact(r#"user("alice")"#)
+                .expect("user fact")
+                .fact(r#"credential_id("cred-parent")"#)
+                .expect("credential fact")
+                .fact(
+                    format!(
+                        "device_pop_key(\"{}\")",
+                        hex::encode(parent_signer.public_key())
+                    )
+                    .as_str(),
+                )
+                .expect("proof key fact")
+                .fact(format!("expires_at({})", expires_at.to_rfc3339()).as_str())
+                .expect("expiry fact")
+                .build(&KeyPair::new())
+                .expect("mint parent")
+                .to_base64()
+                .expect("encode parent");
+            let server = "127.0.0.1:8421";
+            let stored_parent = credentials::ServerCredential {
+                token: parent_token.clone(),
+                subject: "alice".to_string(),
+                device_id: Some("device-parent".to_string()),
+                credential_id: Some("cred-parent".to_string()),
+                private_key_pem: Some(parent_signer.to_pem().expect("parent PEM")),
+                expires_at: Some(expires_at.to_rfc3339()),
+            };
+            assert!(
+                credentials::token_needs_rotation(&stored_parent),
+                "the stored parent fixture must exercise the renewal window"
+            );
+            credentials::store_server_credential(server, stored_parent)
+                .expect("store nearly expired parent");
+
+            let child_signer = Ed25519Signer::generate().expect("child proof key");
+            let child_token = crate::device_flow::attenuate_for_agent(
+                &parent_token,
+                crate::device_flow::AgentAttenuation {
+                    agent_id: "explicit-child".to_string(),
+                    expires_at: chrono::Utc::now() + chrono::Duration::minutes(3),
+                    allowed_operations: Some(vec!["Push".to_string()]),
+                    allowed_resources: None,
+                    declared_scopes: Vec::new(),
+                },
+                &parent_signer,
+                child_signer.public_key(),
+            )
+            .expect("derive explicit child");
+
+            let stored_session = HostedSession::build(
+                &cli_shared::UserConfig::default(),
+                Some(server.to_string()),
+                HostedAuthMode::CredentialFallback,
+            )
+            .expect("build stored-parent session");
+            assert_eq!(
+                stored_session
+                    .config
+                    .token
+                    .as_ref()
+                    .map(|token| token.id.as_str()),
+                Some(parent_token.as_str())
+            );
+            assert!(
+                stored_session.renewable_authority_credential.is_some(),
+                "the exact stored authority token is renewable"
+            );
+
+            unsafe { std::env::set_var("HEDDLE_REMOTE_TOKEN", &child_token) };
+            let explicit_child_session = HostedSession::build(
+                &cli_shared::UserConfig::default(),
+                Some(server.to_string()),
+                HostedAuthMode::CredentialFallback,
+            )
+            .expect("build explicit-child session");
+            assert_eq!(
+                explicit_child_session
+                    .config
+                    .token
+                    .as_ref()
+                    .map(|token| token.id.as_str()),
+                Some(child_token.as_str()),
+                "the explicit child remains the active bearer"
+            );
+            assert!(
+                explicit_child_session
+                    .renewable_authority_credential
+                    .is_none(),
+                "an explicit derived bearer must not borrow the stored parent's renewal identity"
+            );
+        });
+
+        unsafe {
+            match previous_home {
+                Some(path) => std::env::set_var("HEDDLE_HOME", path),
+                None => std::env::remove_var("HEDDLE_HOME"),
+            }
+            match previous_remote_token {
+                Some(token) => std::env::set_var("HEDDLE_REMOTE_TOKEN", token),
+                None => std::env::remove_var("HEDDLE_REMOTE_TOKEN"),
+            }
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     #[tokio::test]

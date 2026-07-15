@@ -49,11 +49,15 @@ heddle auth derive-agent \
 Without `--allow`, the command installs the curated safe set: push/pull,
 repository reads, context operations, discussions, and `WhoAmI`. Repeating
 `--allow` selects a subset; it cannot opt into an unsafe method. Every derived
-block independently rejects `CreateServiceAccount`,
-`IssueServiceAccountCredential`, `DeleteRepository`, and `DeleteNamespace`.
-Those checks are the non-optional credential-issuing and destructive-operation
-floor, including for callers of the Rust helper. They restrict use of the
-derived token; they do not constrain device-key-authenticated `MintBiscuit`.
+block independently applies the mandatory deny policy in
+[`device_flow.rs`](../crates/client/src/device_flow.rs). That policy rejects
+bearer-authorized credential issuance, auth-trust mutation, recovery-method
+enrollment, and presence-token issuance, plus `DeleteRepository` and
+`DeleteNamespace`. Its `AuthService` table is checked for exact agreement with
+`auth.proto`, so a new auth RPC cannot land without an explicit agent-policy
+classification. These checks also apply to direct callers of the Rust helper.
+They restrict use of the derived token; they do not constrain
+device-key-authenticated `MintBiscuit`.
 
 By default the child replaces the active stored credential for `--server`, so
 the next push/pull and any further derivation use that child and its fresh PoP
@@ -185,8 +189,8 @@ let attenuated = time_bounded(
 ```
 
 No operation or resource allowlist — the agent inherits the parent except for
-the non-optional credential-issuance/delete floor, and only for the next 12
-hours.
+the mandatory auth-trust/credential/recovery-enrollment/presence and delete
+floor, and only for the next 12 hours.
 
 ### 3. Multi-repo writer
 
@@ -199,7 +203,7 @@ let attenuated = attenuate_for_agent(
         agent_id: "agent-cross-repo".to_string(),
         expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
         // No operation allowlist → inherits the parent except for the
-        // non-optional credential-issuance/delete floor.
+        // mandatory auth-trust/credential/recovery/presence/delete floor.
         allowed_operations: None,
         // But only on these two repos.
         allowed_resources: Some(vec![
