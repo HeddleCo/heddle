@@ -2,7 +2,7 @@
   "schema_version": 2,
   "consumer": "heddle",
   "api_repository": "HeddleCo/api",
-  "api_revision": "e3b3e6d0e70c88e571b404f068e893842c02ac6f",
+  "api_revision": "726958dd194d58189df58c94517aab2c34969f62",
   "api_snapshot": "capabilities/declarations/heddle.json",
   "local_declaration": "heddle.json",
   "local_sha256": "16030d310aa37fd7896798d1b168a47ae35fee0e414e389e55f0f36779cc4460",

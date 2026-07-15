@@ -447,10 +447,13 @@ The public protobuf contract and its `heddle-api` Rust package must be released
 independently from `HeddleCo/api`; they are not part of this workspace's
 publication pipeline.
 
-The v1alpha1 cutover must not merge while Heddle still relies on an unpublished
-git-pinned `heddle-api` 0.1.0 candidate. Publish the corrected API package and
-replace the temporary pin before the next Heddle release-plz publication. The
-full cross-repository release gate is tracked in
+The v1alpha1 cutover must not merge while Heddle still relies on the temporary
+git pin to API revision `e3b3e6d0`. The TypeScript package
+`@heddleco/api@0.1.1` is published, but the Rust `heddle-api@0.1.1` crate is not:
+HeddleCo/api#10 is blocked on configuring that repository's
+`CARGO_REGISTRY_TOKEN`. Publish the Rust crate and replace the temporary git pin
+before the next Heddle release-plz publication. The full cross-repository
+release gate is tracked in
 [ADR 0048](docs/adr/0048-net-new-public-api-contract.md#coordinated-cutover-checklist).
 
 1. `release-plz` (configured in `release-plz.toml`) opens a PR that
