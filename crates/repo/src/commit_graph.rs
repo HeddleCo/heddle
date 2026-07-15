@@ -22,7 +22,7 @@ use super::{
     },
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct CommitGraphNode {
     parents: Vec<StateId>,
     generation: usize,
@@ -30,6 +30,17 @@ struct CommitGraphNode {
     created_at_secs: i64,
     agent_model: Option<String>,
     bloom: Option<[u8; 256]>,
+}
+
+type CommitGraphStateData = (Vec<StateId>, ContentHash, i64, Option<String>);
+
+impl CommitGraphNode {
+    fn is_legacy_unresolved_placeholder(&self) -> bool {
+        self.parents.is_empty()
+            && self.tree_hash == ContentHash::from_bytes([0; 32])
+            && self.created_at_secs == 0
+            && self.agent_model.is_none()
+    }
 }
 
 #[cfg(feature = "async-source")]
@@ -77,7 +88,17 @@ where
         C: CommitGraphCache + 'source,
     {
         let (nodes, persistence_dirty) = match cache.load() {
-            Ok(Some(nodes)) => (nodes.into_memory_nodes(), false),
+            Ok(Some(nodes)) => {
+                let mut nodes = nodes.into_memory_nodes();
+                let loaded_len = nodes.len();
+                // Older v2 caches encoded an unavailable parent as a real
+                // zero-tree root. A zero content hash is not a valid Heddle
+                // tree identity, so discard those placeholders and let the
+                // object source resolve the edge when it becomes available.
+                nodes.retain(|_, node| !node.is_legacy_unresolved_placeholder());
+                let removed_placeholder = nodes.len() != loaded_len;
+                (nodes, removed_placeholder)
+            }
             Ok(None) => (HashMap::new(), false),
             Err(error) => {
                 let cache_label = cache_label(&cache);
@@ -183,51 +204,69 @@ where
     }
 
     pub fn ensure_loaded(&mut self, state_id: StateId) -> Result<()> {
-        if self.nodes.contains_key(&state_id) {
-            return Ok(());
-        }
-
-        let initial_len = self.nodes.len();
-        let mut expanded = HashSet::new();
-        let mut stack = vec![state_id];
-        while let Some(current) = stack.pop() {
-            if self.nodes.contains_key(&current) {
-                continue;
-            }
-
-            if expanded.insert(current) {
-                stack.push(current);
-                let (parents, _, _, _) = self.load_state_data(current)?;
-                for parent in &parents {
-                    if !self.nodes.contains_key(parent) {
-                        stack.push(*parent);
-                    }
-                }
-                continue;
-            }
-
-            let (parents, tree_hash, created_at_secs, agent_model) =
-                self.load_state_data(current)?;
-            let generation = parents
-                .iter()
-                .filter_map(|parent| self.generation(*parent))
-                .max()
-                .map_or(0, |generation| generation + 1);
-            self.nodes.insert(
-                current,
-                CommitGraphNode {
+        // Walk the complete cached parent closure even when the requested
+        // node itself is already cached. A lazy Git descriptor can name
+        // unavailable parents; later adoption must discover those parents
+        // and recompute descendant generations without a manual rebuild.
+        let mut scheduled = HashSet::new();
+        let mut pending: HashMap<StateId, CommitGraphStateData> = HashMap::new();
+        let mut stack = vec![(state_id, false)];
+        while let Some((current, expanded)) = stack.pop() {
+            if expanded {
+                let Some((parents, tree_hash, created_at_secs, agent_model)) =
+                    pending.remove(&current)
+                else {
+                    continue;
+                };
+                let previous = self.nodes.get(&current);
+                let bloom = previous
+                    .filter(|node| node.parents == parents && node.tree_hash == tree_hash)
+                    .and_then(|node| node.bloom);
+                let generation = parents
+                    .iter()
+                    .filter_map(|parent| self.generation(*parent))
+                    .max()
+                    .map_or(0, |generation| generation + 1);
+                let node = CommitGraphNode {
                     parents,
                     generation,
                     tree_hash,
                     created_at_secs,
                     agent_model,
-                    bloom: None,
-                },
-            );
-        }
+                    bloom,
+                };
+                if previous != Some(&node) {
+                    self.nodes.insert(current, node);
+                    self.persistence_dirty = true;
+                }
+                continue;
+            }
 
-        if self.nodes.len() != initial_len {
-            self.persistence_dirty = true;
+            if !scheduled.insert(current) {
+                continue;
+            }
+            let data = if let Some(node) = self.nodes.get(&current) {
+                Some((
+                    node.parents.clone(),
+                    node.tree_hash,
+                    node.created_at_secs,
+                    node.agent_model.clone(),
+                ))
+            } else {
+                self.load_state_data(current)?
+            };
+            let Some(data) = data else {
+                // An unavailable parent is an unresolved edge, not a real
+                // parentless zero-tree node. Never persist a dummy identity
+                // that could mask later materialization.
+                continue;
+            };
+            let parents = data.0.clone();
+            pending.insert(current, data);
+            stack.push((current, true));
+            for parent in parents.into_iter().rev() {
+                stack.push((parent, false));
+            }
         }
         self.persist_if_dirty();
 
@@ -278,19 +317,15 @@ where
         self.nodes.get(id).and_then(|n| n.bloom.as_ref())
     }
 
-    fn load_state_data(
-        &self,
-        state_id: StateId,
-    ) -> Result<(Vec<StateId>, ContentHash, i64, Option<String>)> {
-        match self.source.get_state(&state_id)? {
-            Some(state) => Ok((
+    fn load_state_data(&self, state_id: StateId) -> Result<Option<CommitGraphStateData>> {
+        Ok(self.source.get_state(&state_id)?.map(|state| {
+            (
                 state.parents,
                 state.tree,
                 state.created_at.timestamp(),
                 state.attribution.agent.map(|a| a.model),
-            )),
-            None => Ok((vec![], ContentHash::from_bytes([0; 32]), 0, None)),
-        }
+            )
+        }))
     }
 
     fn generation(&self, state_id: StateId) -> Option<usize> {
@@ -471,10 +506,6 @@ async fn ensure_loaded_async<S>(
 where
     S: AsyncObjectSource + ?Sized,
 {
-    if nodes.contains_key(&state_id) {
-        return Ok(());
-    }
-
     let mut expanded = HashSet::new();
     let mut stack = vec![state_id];
     while let Some(current) = stack.pop() {
@@ -484,7 +515,9 @@ where
 
         if expanded.insert(current) {
             stack.push(current);
-            let parents = load_state_parents_async(source, current).await?;
+            let Some(parents) = load_state_parents_async(source, current).await? else {
+                continue;
+            };
             for parent in &parents {
                 if !nodes.contains_key(parent) {
                     stack.push(*parent);
@@ -493,7 +526,9 @@ where
             continue;
         }
 
-        let parents = load_state_parents_async(source, current).await?;
+        let Some(parents) = load_state_parents_async(source, current).await? else {
+            continue;
+        };
         let generation = parents
             .iter()
             .filter_map(|parent| generation_async(nodes, *parent))
@@ -512,14 +547,14 @@ where
 }
 
 #[cfg(feature = "async-source")]
-async fn load_state_parents_async<S>(source: &S, state_id: StateId) -> Result<Vec<StateId>>
+async fn load_state_parents_async<S>(source: &S, state_id: StateId) -> Result<Option<Vec<StateId>>>
 where
     S: AsyncObjectSource + ?Sized,
 {
     Ok(source
         .get_state(&state_id)
         .await?
-        .map_or_else(Vec::new, |state| state.parents))
+        .map(|state| state.parents))
 }
 
 #[cfg(feature = "async-source")]
@@ -549,10 +584,14 @@ mod tests {
     use std::fs;
 
     use anyhow::Result;
+    use objects::{
+        object::{Attribution, ContentHash, Principal, State, Tree},
+        store::ObjectStore,
+    };
     #[cfg(feature = "async-source")]
     use objects::{
-        object::{Attribution, Blob, ContentHash, Principal, State, StateId, Tree},
-        store::{AsyncObjectSource, InMemoryStore, ObjectStore},
+        object::{Blob, StateId},
+        store::{AsyncObjectSource, InMemoryStore},
     };
     use tempfile::TempDir;
 
@@ -625,6 +664,57 @@ mod tests {
 
         let mut reloaded_graph = CommitGraphIndex::new(&repo);
         assert!(reloaded_graph.is_ancestor(&base.id(), &next.id())?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn commit_graph_reloads_parent_edges_materialized_after_lazy_tip() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let repo = Repository::init_default(temp_dir.path())?;
+        let attribution = Attribution::human(Principal::new("Test User", "test@example.com"));
+        let parent = State::new(Tree::new().hash(), vec![], attribution.clone());
+        let tip = State::new(Tree::new().hash(), vec![parent.id()], attribution);
+        repo.store().put_state(&tip)?;
+
+        let mut lazy_graph = CommitGraphIndex::new(&repo);
+        lazy_graph.ensure_loaded(tip.id())?;
+        assert!(lazy_graph.node_metadata(&parent.id()).is_none());
+        drop(lazy_graph);
+
+        // Emulate the exact poisoned v2 cache shape written by older builds,
+        // so reopening also proves the on-disk upgrade path rather than only
+        // the new no-placeholder write path.
+        let graph_path = commit_graph_path(&repo);
+        let mut persisted = super::super::commit_graph_persistence::load_commit_graph(&graph_path)?
+            .expect("lazy graph cache");
+        persisted.insert(
+            parent.id(),
+            super::super::commit_graph_persistence::PersistedCommitGraphNode {
+                parents: vec![],
+                generation: 0,
+                tree_hash: ContentHash::from_bytes([0; 32]),
+                created_at_secs: 0,
+                agent_model: None,
+                bloom: None,
+            },
+        );
+        super::super::commit_graph_persistence::save_commit_graph(&graph_path, &persisted)?;
+
+        repo.store().put_state(&parent)?;
+        let mut materialized_graph = CommitGraphIndex::new(&repo);
+        assert!(materialized_graph.is_ancestor(&parent.id(), &tip.id())?);
+        assert_eq!(
+            materialized_graph.find_merge_base(&parent.id(), &tip.id())?,
+            Some(parent.id())
+        );
+        assert_eq!(
+            materialized_graph
+                .node_metadata(&parent.id())
+                .expect("materialized parent metadata")
+                .tree_hash,
+            parent.tree
+        );
 
         Ok(())
     }

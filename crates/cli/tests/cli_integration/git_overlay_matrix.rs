@@ -281,6 +281,11 @@ fn unbound_overlay_history_preserves_filters_and_canonical_revision_semantics() 
         .filter_map(|state| state["intent"].as_str())
         .collect::<Vec<_>>();
     assert_eq!(path_intents, vec!["main change"]);
+    let windows_path_log = json(temp.path(), &["log", "-n", "10", "--path", r".\main.txt"]);
+    assert_eq!(
+        windows_path_log["states"], path_log["states"],
+        "unbound overlay projection must consume the same normalized path contract as native history"
+    );
 
     let principal_is_not_agent = json(
         temp.path(),
@@ -4221,6 +4226,21 @@ fn git_overlay_matrix_land_recovers_checkpoint_published_before_crash() {
         marker.exists(),
         "status must not mutate the recovery journal"
     );
+    let short = heddle_output(&["status", "--short"], Some(&nested)).unwrap();
+    assert!(
+        short.status.success(),
+        "short status should remain an observe-only recovery report: {}",
+        String::from_utf8_lossy(&short.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&short.stdout).contains("recovery work pending"),
+        "short status must not claim clean while a durable land marker exists: {}",
+        String::from_utf8_lossy(&short.stdout)
+    );
+    assert!(
+        marker.exists(),
+        "short status must report without consuming the recovery journal"
+    );
 
     let _ = heddle(
         &[
@@ -4533,6 +4553,35 @@ fn recovery_dispatch_respects_observe_only_modes_and_adopt_destination() {
     assert_eq!(
         repo::Repository::open(&destination).unwrap().capability(),
         repo::RepositoryCapability::NativeHeddle
+    );
+}
+
+#[test]
+fn failed_adopt_of_nested_git_target_does_not_bootstrap_sidecar() {
+    let temp = TempDir::new().unwrap();
+    let parent = temp.path().join("parent");
+    let nested = parent.join("nested-target");
+    std::fs::create_dir_all(&nested).unwrap();
+    init_git_repo_with_branch(&parent, "main");
+    std::fs::write(parent.join("README.md"), "parent\n").unwrap();
+    git_commit_all(&parent, "parent base");
+    heddle(&["init"], Some(&parent)).unwrap();
+
+    // Make the nested target an unborn Git repository. Adoption must refuse
+    // it during preflight without Repository::open inheriting the parent's
+    // metadata and auto-bootstrapping a nested sidecar first.
+    init_git_repo_with_branch(&nested, "main");
+    let nested_arg = nested.to_string_lossy().into_owned();
+    let failed = heddle_output(&["--output", "json", "adopt", &nested_arg], Some(&parent)).unwrap();
+    assert!(!failed.status.success(), "unborn nested adopt must fail");
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("git_history_empty"),
+        "failure must come from adopt preflight: {}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert!(
+        !nested.join(".heddle").exists(),
+        "failed destination preflight must leave no Heddle metadata"
     );
 }
 

@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Heddle: An AI-native version control system.
 
-use std::{any::Any, path::PathBuf, time::Instant};
+use std::{
+    any::Any,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use anyhow::Result;
 use clap::{Arg, ArgAction, CommandFactory, Parser, error::ErrorKind};
@@ -291,9 +295,7 @@ async fn async_main() -> Result<()> {
     // destination-scoped commands before any repository is opened, so a command
     // aimed at another path can never consume cwd recovery state.
     if let Some(start) = incomplete_land_recovery_start(&cli, &command_contract)?
-        && start
-            .ancestors()
-            .any(|ancestor| ancestor.join(".heddle").exists())
+        && recovery_target_has_existing_metadata(&cli.command, &start)
     {
         let repo = repo::Repository::open(&start)?;
         recover_incomplete_land_if_present(&repo)?;
@@ -817,6 +819,19 @@ async fn async_main() -> Result<()> {
             std::process::exit(code.into());
         }
     }
+}
+
+/// Check for an existing recovery target without opening or bootstrapping it.
+/// Adopt resolves a destination Git root, so only metadata at that exact root
+/// belongs to the invocation; inheriting an ancestor `.heddle` would let
+/// `Repository::open` create a sidecar before adopt preflight completes.
+fn recovery_target_has_existing_metadata(command: &Commands, start: &Path) -> bool {
+    if matches!(command, Commands::Adopt(_)) {
+        return start.join(".heddle").is_dir();
+    }
+    start
+        .ancestors()
+        .any(|ancestor| ancestor.join(".heddle").is_dir())
 }
 
 fn is_harness_relay_invocation(command: &Commands) -> bool {

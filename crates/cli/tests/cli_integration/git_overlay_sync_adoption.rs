@@ -480,7 +480,7 @@ fn init_then_start_binds_git_tip_not_orphan_bootstrap() {
 }
 
 #[test]
-fn lazy_tip_short_id_resolves_and_adopt_materializes_native_closure() {
+fn lazy_tip_log_cache_then_adopt_materializes_complete_native_graph() {
     let temp = TempDir::new().unwrap();
     let work = temp.path().join("work");
     std::fs::create_dir(&work).unwrap();
@@ -510,6 +510,15 @@ fn lazy_tip_short_id_resolves_and_adopt_materializes_native_closure() {
         "short-id show should return the lazy descriptor state: {shown}"
     );
 
+    // Warm and persist the graph while only the non-root tip descriptor is
+    // available. Its parent edge must remain unresolved rather than becoming
+    // a cached zero-tree root.
+    let lazy_log: Value = serde_json::from_str(
+        &heddle(&["log", "--output", "json"], Some(&work)).expect("lazy descriptor log"),
+    )
+    .expect("lazy log json");
+    assert_eq!(lazy_log["states"].as_array().map(Vec::len), Some(1));
+
     heddle(&["adopt"], Some(&work)).expect("full adoption after lazy bind");
     let native_state = ingest_mapped_change(&work, &main_tip).expect("native tip mapping");
     std::fs::rename(work.join(".git"), work.join(".git-disabled")).unwrap();
@@ -521,6 +530,30 @@ fn lazy_tip_short_id_resolves_and_adopt_materializes_native_closure() {
         .get_state(&state_id)
         .unwrap()
         .expect("adopted tip state must be native without Git read-through");
+    let parent_id = *state
+        .parents
+        .first()
+        .expect("non-root adopted tip must retain its real parent");
+    let parent = repo
+        .store()
+        .get_state(&parent_id)
+        .unwrap()
+        .expect("adoption must materialize the previously unresolved parent");
+    assert_ne!(
+        parent.tree,
+        objects::object::ContentHash::from_bytes([0; 32]),
+        "the parent must not remain a cached zero-tree placeholder"
+    );
+    let mut graph = repo::CommitGraphIndex::new(&repo);
+    assert!(
+        graph.is_ancestor(&parent_id, &state_id).unwrap(),
+        "reloaded graph must traverse the newly materialized parent"
+    );
+    assert_eq!(
+        graph.find_merge_base(&parent_id, &state_id).unwrap(),
+        Some(parent_id),
+        "merge-base must see the real parent without manual cache rebuild"
+    );
     let tree = repo
         .store()
         .get_tree(&state.tree)
@@ -538,6 +571,20 @@ fn lazy_tip_short_id_resolves_and_adopt_materializes_native_closure() {
         .unwrap()
         .expect("adopted tip blob must be native without Git read-through");
     assert_eq!(blob.content(), b"one\ntwo\n");
+
+    let path_log: Value = serde_json::from_str(
+        &heddle(
+            &["log", "--path", "story.txt", "--output", "json"],
+            Some(&work),
+        )
+        .expect("path history after materialization"),
+    )
+    .expect("path log json");
+    assert_eq!(
+        path_log["states"].as_array().map(Vec::len),
+        Some(2),
+        "path history must cross the formerly unresolved parent: {path_log}"
+    );
 }
 
 #[test]

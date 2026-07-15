@@ -421,14 +421,18 @@ fn render_unbound_overlay_log(
     options: &LogCommandOptions,
 ) -> Result<()> {
     let revision = options.state.as_deref().unwrap_or("HEAD");
-    ChangedPathFilters::try_from_paths(options.paths.clone())?;
+    let path_filters = ChangedPathFilters::try_from_paths(options.paths.clone())?;
+    let normalized_paths = path_filters
+        .normalized_paths()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     let entries = ingest::OverlayHistory::project_log(
         repo.root(),
         revision,
         options.limit,
         options.since.as_deref(),
         options.agent.as_deref(),
-        &options.paths,
+        &normalized_paths,
     )?
     .into_iter()
     .map(|projected| {

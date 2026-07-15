@@ -119,11 +119,31 @@ pub async fn cmd_status(
 fn try_fast_short_status_report(cli: &Cli) -> Result<Option<FastShortStatusReport>> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
+    if pending_incomplete_land_marker_exists(start) {
+        // The fast report deliberately avoids opening Heddle metadata, so it
+        // cannot carry durable recovery state. Fall through to the complete
+        // read-only report whenever the selected repository has a journal.
+        return Ok(None);
+    }
     let repo_config = fast_short_repo_config(start)?;
     if should_output_json(cli, repo_config.as_ref()) {
         return Ok(None);
     }
     Ok(fast_short_status_report(start)?)
+}
+
+fn pending_incomplete_land_marker_exists(start: &Path) -> bool {
+    let canonical = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+    if let Ok(git) = SleyRepository::discover(&canonical)
+        && let Some(workdir) = git.workdir()
+    {
+        // A nested plain-Git repository under a Heddle checkout is its own
+        // prospective overlay target. Do not inherit the ancestor journal.
+        return workdir.join(".heddle/incomplete-land.json").is_file();
+    }
+    canonical
+        .ancestors()
+        .any(|ancestor| ancestor.join(".heddle/incomplete-land.json").is_file())
 }
 
 fn fast_short_repo_config(start: &Path) -> Result<Option<RepoConfig>> {
@@ -633,6 +653,9 @@ fn render_short_status(output: &StatusOutput) {
             style::bold(short_status_subject(output)),
             style::thread_state(&short_status_health(output))
         );
+    }
+    for blocker in &output.blockers {
+        println!("{}  {}", style::warn("!"), blocker);
     }
     render_materialized_advisory(output);
 }

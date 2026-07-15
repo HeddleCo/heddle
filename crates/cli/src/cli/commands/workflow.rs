@@ -2227,10 +2227,13 @@ fn mark_incomplete_land_phase(repo: &Repository, phase: IncompleteLandPhase) -> 
 }
 
 fn current_git_oid(repo: &Repository) -> Result<Option<String>> {
-    Ok(repo
-        .git_overlay_sley_repository()?
-        .and_then(|git| git.head().ok().and_then(|head| head.oid))
-        .map(|oid| oid.to_string()))
+    let Some(git) = repo.git_overlay_sley_repository()? else {
+        return Ok(None);
+    };
+    let head = git
+        .head()
+        .context("read Git HEAD while reconciling incomplete land")?;
+    Ok(head.oid.map(|oid| oid.to_string()))
 }
 
 fn restore_pre_land_thread(repo: &Repository, marker: &IncompleteLandMarker) -> Result<()> {
@@ -2280,6 +2283,10 @@ pub fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()> {
     let target_branch = marker.target_branch.clone().ok_or_else(|| {
         anyhow!("incomplete-land marker is missing its target Git branch; refusing recovery")
     })?;
+    // Read the exact Git identity before any branch fallback can collapse a
+    // damaged HEAD into a detached/unknown shape. The legitimate unborn case
+    // remains `None`; corrupt or unreadable refs fail closed here.
+    let current_oid = current_git_oid(repo)?;
     let current_branch = repo.git_overlay_current_branch()?;
     if current_branch.as_deref() != Some(target_branch.as_str()) {
         return Err(anyhow!(
@@ -2302,7 +2309,6 @@ pub fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()> {
         .refs()
         .get_thread(&ThreadName::new(&marker.thread_id))?
         .map(|state| state.to_string_full());
-    let current_oid = current_git_oid(repo)?;
     let pre_matches = current_target == marker.pre_target_state
         && current_source == marker.pre_source_state
         && current_oid == marker.pre_git_oid;
@@ -2938,6 +2944,59 @@ mod tests {
             auto: false,
             shared_target_dir: None,
         }
+    }
+
+    #[test]
+    fn unborn_land_recovery_marker_fails_closed_on_corrupt_git_head() {
+        let temp = TempDir::new().expect("create temp Git repository");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "main"]);
+        let repo = Repository::bootstrap_git_overlay(temp.path()).expect("bootstrap overlay");
+        assert_eq!(
+            current_git_oid(&repo).expect("read legitimate unborn HEAD"),
+            None
+        );
+
+        let marker = IncompleteLandMarker {
+            thread_id: "unborn-land".to_string(),
+            merge_state: None,
+            collapse_state: None,
+            target_branch: Some("main".to_string()),
+            pre_git_oid: None,
+            expected_git_oid: None,
+            integration_batch_id: None,
+            integration_transaction_id: None,
+            collapse_batch_id: None,
+            phase: IncompleteLandPhase::RollbackComplete,
+            pre_target_state: None,
+            pre_source_state: None,
+            pre_thread: None,
+        };
+        write_land_marker(&repo, &marker).expect("write unborn recovery marker");
+        fs::write(temp.path().join(".git/HEAD"), "not-an-object-id\n").expect("corrupt HEAD");
+
+        let error = recover_incomplete_land_if_present(&repo)
+            .expect_err("corrupt HEAD must not be conflated with unborn HEAD");
+        assert!(
+            error.to_string().contains("Git HEAD") || error.to_string().contains("HEAD"),
+            "recovery should report the damaged ref: {error:#}"
+        );
+        assert!(
+            incomplete_land_marker_path(&repo).is_file(),
+            "failed-closed recovery must retain its durable marker"
+        );
     }
 
     #[test]
