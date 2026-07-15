@@ -147,7 +147,7 @@ fn initialized_overlay_observe_commands_project_full_git_history_without_writes(
     );
     let blame: Value = serde_json::from_str(
         &heddle(
-            &["query", "--attribution", "story.txt", "--output", "json"],
+            &["query", "--attribution", "./story.txt", "--output", "json"],
             Some(temp.path()),
         )
         .unwrap(),

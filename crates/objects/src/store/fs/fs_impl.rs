@@ -627,16 +627,20 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self), fields(hash = %hash.short()))]
     fn has_blob(&self, hash: &ContentHash) -> Result<bool> {
-        if self.try_has_blob_once(hash)? {
-            return Ok(true);
-        }
-        if self.reload_packs_if_stale()? && self.try_has_blob_once(hash)? {
+        if ObjectStore::has_blob_locally(self, hash)? {
             return Ok(true);
         }
         match &self.external_source {
             Some(source) => Ok(source.get_blob(hash)?.is_some()),
             None => Ok(false),
         }
+    }
+
+    fn has_blob_locally(&self, hash: &ContentHash) -> Result<bool> {
+        if self.try_has_blob_once(hash)? {
+            return Ok(true);
+        }
+        Ok(self.reload_packs_if_stale()? && self.try_has_blob_once(hash)?)
     }
 
     /// Loose blob path safe for clonefile/copy materialization.
@@ -829,23 +833,14 @@ impl ObjectStore for FsStore {
         let hash = tree.hash();
         let path = hash_path(&trees_dir(&self.root), &hash);
 
-        // Overlay snapshots rebuild the worktree shape through this shared
-        // chokepoint. If the exact tree is already authoritative in Git,
-        // retain only its content identity and keep the native store sparse.
-        let externally_available = if !path.exists() {
-            match &self.external_source {
-                Some(source) => source.get_tree(&hash)?.is_some(),
-                None => false,
-            }
-        } else {
-            false
-        };
-        if !path.exists() && !externally_available {
+        // `put_tree` is an ownership boundary: a native state that references
+        // this tree must survive loss or pruning of an overlay read-through
+        // source. Descriptor-only states do not call this method; they retain
+        // their explicit external-source semantics.
+        if !ObjectStore::has_tree_locally(self, &hash)? {
             let (_, data) = codec::encode_tree(tree, &self.compression)?;
             trace!(compressed_size = data.len(), "Writing tree");
             self.write_loose_object_atomic(&path, &data)?;
-        } else if externally_available {
-            trace!("Tree remains in authoritative external object source");
         } else {
             trace!("Tree already exists, skipping write");
         }
@@ -878,16 +873,20 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self), fields(hash = %hash.short()))]
     fn has_tree(&self, hash: &ContentHash) -> Result<bool> {
-        if self.try_has_tree_once(hash)? {
-            return Ok(true);
-        }
-        if self.reload_packs_if_stale()? && self.try_has_tree_once(hash)? {
+        if ObjectStore::has_tree_locally(self, hash)? {
             return Ok(true);
         }
         match &self.external_source {
             Some(source) => Ok(source.get_tree(hash)?.is_some()),
             None => Ok(false),
         }
+    }
+
+    fn has_tree_locally(&self, hash: &ContentHash) -> Result<bool> {
+        if self.try_has_tree_once(hash)? {
+            return Ok(true);
+        }
+        Ok(self.reload_packs_if_stale()? && self.try_has_tree_once(hash)?)
     }
 
     #[instrument(skip(self), fields(id = %id.short()))]

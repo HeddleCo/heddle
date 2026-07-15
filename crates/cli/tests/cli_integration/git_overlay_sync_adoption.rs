@@ -55,7 +55,7 @@ fn native_mapped_object_files(path: &std::path::Path, state_id: &str) -> Vec<std
 }
 
 #[test]
-fn capture_reuses_unchanged_git_subtree_without_native_copy() {
+fn capture_persists_unchanged_git_subtree_and_blob_as_native_closure() {
     let temp = TempDir::new().unwrap();
     let work = temp.path().join("work");
     std::fs::create_dir(&work).unwrap();
@@ -66,6 +66,7 @@ fn capture_reuses_unchanged_git_subtree_without_native_copy() {
     git(&work, &["add", "stable/kept.txt"]);
     commit_file(&work, "changed.txt", "before\n", "seed");
     let stable_git_tree = git(&work, &["rev-parse", "HEAD:stable"]);
+    let stable_git_blob = git(&work, &["rev-parse", "HEAD:stable/kept.txt"]);
     heddle(&["init"], Some(&work)).unwrap();
     heddle(
         &["start", "feature/tree-reuse", "--workspace", "solid"],
@@ -80,23 +81,63 @@ fn capture_reuses_unchanged_git_subtree_without_native_copy() {
     let stable_hash = map
         .get_tree(&stable_git_tree)
         .expect("unchanged Git subtree must retain its identity mapping");
-    let hex = stable_hash.to_hex();
+    let stable_blob_hash = map
+        .get_blob(&stable_git_blob)
+        .expect("unchanged Git blob must retain its identity mapping");
+    let captured_repo = repo::Repository::open(&work).unwrap();
+    let captured = captured_repo
+        .current_state()
+        .unwrap()
+        .expect("native capture state");
     assert!(
-        !work
-            .join(".heddle/objects/trees")
-            .join(&hex[..2])
-            .join(&hex[2..])
-            .exists(),
-        "capture must reuse an unchanged Git-backed tree instead of copying it into native storage"
+        captured_repo
+            .store()
+            .has_tree_locally(&captured.tree)
+            .unwrap()
+            && captured_repo
+                .store()
+                .has_tree_locally(&stable_hash)
+                .unwrap(),
+        "native capture must own its root and unchanged subtree"
     );
     assert!(
-        repo::Repository::open(&work)
-            .unwrap()
+        captured_repo
             .store()
-            .get_tree(&stable_hash)
+            .has_blob_locally(&stable_blob_hash)
+            .unwrap(),
+        "native capture must own unchanged blobs referenced by that subtree"
+    );
+    drop(captured_repo);
+
+    // Simulate the exact Git-GC loss mode without relying on GC heuristics:
+    // remove the loose source objects and prove a fresh native store can still
+    // traverse the captured subtree and read its leaf.
+    for oid in [&stable_git_tree, &stable_git_blob] {
+        let object = work.join(".git/objects").join(&oid[..2]).join(&oid[2..]);
+        assert!(object.is_file(), "fixture Git object must be loose: {oid}");
+        std::fs::remove_file(object).unwrap();
+    }
+    let reopened = repo::Repository::open(&work).unwrap();
+    let subtree = reopened
+        .store()
+        .get_tree(&stable_hash)
+        .unwrap()
+        .expect("unchanged subtree must survive loss of Git source object");
+    let kept = subtree
+        .entries()
+        .iter()
+        .find(|entry| entry.name() == "kept.txt")
+        .and_then(|entry| entry.blob_hash())
+        .expect("kept.txt blob hash");
+    assert_eq!(kept, stable_blob_hash);
+    assert_eq!(
+        reopened
+            .store()
+            .get_blob(&kept)
             .unwrap()
-            .is_some(),
-        "the unchanged subtree remains readable from the explicit overlay source"
+            .expect("unchanged blob must survive loss of Git source object")
+            .content(),
+        b"unchanged\n"
     );
 }
 
@@ -278,6 +319,63 @@ fn adopt_all_uses_ingest_mapping_without_internal_mirror() {
             .join("git-projection-mapping.json")
             .exists(),
         "adopt/import must not publish the Git projection mapping cache"
+    );
+}
+
+#[test]
+fn init_then_ready_with_dirty_worktree_captures_edits_instead_of_binding_tip() {
+    let temp = TempDir::new().unwrap();
+    let work = temp.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git(&work, &["init", "-b", "main"]);
+    configure_git_identity(&work);
+    let clean_tip = commit_file(&work, "story.txt", "committed\n", "seed main");
+    heddle(&["init"], Some(&work)).unwrap();
+
+    std::fs::write(work.join("story.txt"), "dirty worktree\n").unwrap();
+    let ready_output = heddle_output(
+        &["ready", "-m", "capture dirty bootstrap", "--output", "json"],
+        Some(&work),
+    )
+    .expect("dirty bootstrap ready");
+    let ready: Value = serde_json::from_slice(&ready_output.stdout).expect("ready JSON");
+    assert_eq!(ready["captured"], true, "{ready}");
+    assert!(
+        ready["captured_state"]
+            .as_str()
+            .is_some_and(|state| state.starts_with("hs-")),
+        "dirty bootstrap must report the native captured state: {ready}"
+    );
+    assert_eq!(
+        ingest_mapped_change(&work, &clean_tip),
+        None,
+        "dirty bootstrap must not take the clean Git-tip descriptor path"
+    );
+
+    let repo = repo::Repository::open(&work).unwrap();
+    let captured = repo
+        .current_state()
+        .unwrap()
+        .expect("dirty bootstrap current state");
+    assert_eq!(captured.intent.as_deref(), Some("capture dirty bootstrap"));
+    let tree = repo
+        .store()
+        .get_tree(&captured.tree)
+        .unwrap()
+        .expect("captured dirty tree");
+    let story = tree
+        .entries()
+        .iter()
+        .find(|entry| entry.name() == "story.txt")
+        .and_then(|entry| entry.blob_hash())
+        .expect("captured story blob");
+    assert_eq!(
+        repo.store()
+            .get_blob(&story)
+            .unwrap()
+            .expect("captured dirty blob")
+            .content(),
+        b"dirty worktree\n"
     );
 }
 

@@ -130,6 +130,9 @@ impl ObjectStore for AnyStore {
     fn has_blob(&self, hash: &ContentHash) -> Result<bool> {
         any_store_dispatch!(self, has_blob(hash))
     }
+    fn has_blob_locally(&self, hash: &ContentHash) -> Result<bool> {
+        any_store_dispatch!(self, has_blob_locally(hash))
+    }
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         match self {
             AnyStore::Fs(inner) => ObjectStore::get_tree(inner, hash),
@@ -145,6 +148,9 @@ impl ObjectStore for AnyStore {
     }
     fn has_tree(&self, hash: &ContentHash) -> Result<bool> {
         any_store_dispatch!(self, has_tree(hash))
+    }
+    fn has_tree_locally(&self, hash: &ContentHash) -> Result<bool> {
+        any_store_dispatch!(self, has_tree_locally(hash))
     }
     fn get_state(&self, id: &StateId) -> Result<Option<State>> {
         match self {
@@ -382,9 +388,20 @@ pub trait ObjectStore: Send + Sync {
     }
 
     fn has_blob(&self, hash: &ContentHash) -> Result<bool>;
+    /// Return whether the blob is owned by this store, excluding any configured
+    /// read-through source. Snapshot builders use this to ensure a new native
+    /// state owns its complete object closure.
+    fn has_blob_locally(&self, hash: &ContentHash) -> Result<bool> {
+        self.has_blob(hash)
+    }
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>>;
     fn put_tree(&self, tree: &Tree) -> Result<ContentHash>;
     fn has_tree(&self, hash: &ContentHash) -> Result<bool>;
+    /// Return whether the tree is owned by this store, excluding any configured
+    /// read-through source.
+    fn has_tree_locally(&self, hash: &ContentHash) -> Result<bool> {
+        self.has_tree(hash)
+    }
     fn get_state(&self, id: &StateId) -> Result<Option<State>>;
     fn put_state(&self, state: &State) -> Result<()>;
     fn has_state(&self, id: &StateId) -> Result<bool>;

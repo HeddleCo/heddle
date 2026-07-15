@@ -567,7 +567,16 @@ pub(crate) fn ensure_current_state(
         return Ok(state.state_id);
     }
 
+    // Lazy binding represents the committed Git tip only. A dirty overlay must
+    // take the native snapshot path so capture-oriented callers (notably
+    // `ready -m`) preserve the worktree bytes they already classified as work.
     if repo.capability() == RepositoryCapability::GitOverlay
+        // Preserve the typed corrupt/unreadable-HEAD failure before status
+        // inspection; a genuine unborn HEAD still falls through to bootstrap.
+        && resolve_active_git_tip_sha(repo)?.is_some()
+        && repo
+            .git_overlay_worktree_status()?
+            .is_some_and(|status| status.is_clean())
         && let Some(state_id) = bind_git_overlay_active_tip(repo)?
     {
         return Ok(state_id);

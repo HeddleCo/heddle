@@ -284,13 +284,9 @@ fn blob_at_path(
 ) -> crate::Result<Option<(String, Vec<u8>)>> {
     let components = path
         .split('/')
-        .filter(|component| !component.is_empty())
+        .filter(|component| !component.is_empty() && *component != ".")
         .collect::<Vec<_>>();
-    if components.is_empty()
-        || components
-            .iter()
-            .any(|component| matches!(*component, "." | ".."))
-    {
+    if components.is_empty() || components.contains(&"..") {
         return Ok(None);
     }
     let mut tree_oid = root_tree.to_string();
@@ -656,6 +652,23 @@ mod tests {
             .expect("tip and direct parent are representable");
         assert_eq!(blame[0].state.state_id, tip_projection.parent_ids[0]);
         assert_eq!(blame[1].state.state_id, tip_projection.state.state_id);
+        let dotted = OverlayHistory::project_blame(repo.path(), "HEAD", "././story.txt")
+            .expect("dot components are a normal spelling of the same Git path");
+        assert_eq!(
+            dotted
+                .iter()
+                .map(|line| (line.content.as_str(), line.git_oid.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("one", first.as_str()), ("two", tip.as_str())]
+        );
+        assert!(
+            OverlayHistory::project_blame(repo.path(), "HEAD", "../story.txt").is_err(),
+            "parent traversal must remain outside the accepted Git path grammar"
+        );
+        assert!(
+            OverlayHistory::project_blame(repo.path(), "HEAD", "dir/../story.txt").is_err(),
+            "normalization must not erase parent traversal components"
+        );
         assert!(
             OverlayHistory::open(repo.path(), "HEAD").is_err(),
             "full-history control must still reach the unrelated invalid path"

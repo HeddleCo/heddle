@@ -102,7 +102,7 @@ impl FsStore {
         let mut builder = PackBuilder::new(compression);
         let mut staged: Vec<(ContentHash, Vec<u8>)> = Vec::with_capacity(blobs.len());
         for (hash, data) in blobs {
-            if ObjectStore::has_blob(self, &hash)? {
+            if ObjectStore::has_blob_locally(self, &hash)? {
                 continue;
             }
             staged.push((hash, data.clone()));
