@@ -1,0 +1,2402 @@
+{
+  "schema_version": 2,
+  "consumer": "heddle",
+  "source_repository": "HeddleCo/heddle",
+  "rpc_mappings": [
+    {
+      "rpc": "heddle.api.v1alpha1.AgentGatewayService/Connect",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AgentService/ControlAgent",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AgentService/DecideAgentPermission",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AgentService/DeleteHarnessPreference",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AgentService/GetAgentCommand",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AgentService/GetAgentPolicy",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AgentService/GetAgentRun",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AgentService/ListAgentRuns",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AgentService/ListAgentTimelineEvents",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AgentService/ListHarnessPreferences",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AgentService/UpdateAgentPolicy",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AgentService/WatchAgentRun",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks this service planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AttentionService/GetFeedSnapshot",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AttentionService/RecordInteraction",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AttentionService/StreamFeed",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AttentionService/UpdateFeedItem",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.CollaborationService/AppendTurn",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.CollaborationService/ListByState",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.CollaborationService/ListBySymbol",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.CollaborationService/OpenDiscussion",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.CollaborationService/ResolveDiscussion",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/ApproveDeviceAuthorization",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/BeginWebAuthnAuthentication",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "begin_web_authn_authentication"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The CLI auth surface does not call this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/BeginWebAuthnRegistration",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/CreateDeviceAuthorization",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/auth_cmd.rs",
+              "contains": "create_device_authorization"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/auth_cmd.rs",
+              "contains": ".create_device_authorization("
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/CreateServiceAccount",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/auth_cmd.rs",
+              "contains": "create_service_account"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/auth_cmd.rs",
+              "contains": ".create_service_account("
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/ExchangeDeviceAuthorization",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/auth_cmd.rs",
+              "contains": "exchange_device_authorization"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/auth_cmd.rs",
+              "contains": ".exchange_device_authorization("
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/FinishWebAuthnAuthentication",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/GetInvitationSummary",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/IntrospectCredential",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/IssuePresenceToken",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/IssueServiceAccountCredential",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/auth_cmd.rs",
+              "contains": "issue_service_account_credential"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/auth_cmd.rs",
+              "contains": ".issue_service_account_credential("
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/LinkOAuthIdentity",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/ListScopeCapabilities",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/ListServiceAccounts",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/ListSessions",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/MintAnonBiscuit",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/MintBiscuit",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/auth_cmd.rs",
+              "contains": "mint_biscuit"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/auth_cmd.rs",
+              "contains": ".mint_biscuit("
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/RegisterPublicKey",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/RevokeCredential",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/RevokeServiceAccount",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/RevokeSession",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/RotateCredential",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/StoreProviderToken",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/VerifySignupEmail",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/WaitForDeviceAuthorization",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/auth_cmd.rs",
+              "contains": "wait_for_device_authorization"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/auth_cmd.rs",
+              "contains": ".wait_for_device_authorization("
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/WhoAmI",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The hosted client has no callable WhoAmI wrapper; the only method-path occurrence is test data."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The CLI auth surface does not call this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.PullRequestReviewService/GetReviewAnalysisResult",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.PullRequestReviewService/GetReviewAnalysisStatus",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.PullRequestReviewService/StartReviewAnalysis",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/AttachChild",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/CreateGrant",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "create_grant"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/CreateInvitation",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "create_invitation"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/CreateNamespace",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "create_namespace"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/CreateRepository",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "create_repository"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/cli/src/cli/commands/remote/mod.rs",
+              "contains": "create_repository"
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/DeleteBookmark",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/DeleteGrant",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "delete_grant"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/DeleteNamespace",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "delete_namespace"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/DeleteRepository",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "delete_repository"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/DetachChild",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/GetCurrentUserNamespace",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "get_current_user_namespace"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/cli/src/cli/commands/remote/mod.rs",
+              "contains": "get_current_user_namespace"
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/GetSpool",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/GrantSupportAccess",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "grant_support_access"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/ListBookmarks",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/ListChildren",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/ListGrants",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "list_grants"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/ListInvitations",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/ListMembers",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/ListSpools",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "list_spools"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/ListSupportAccessGrants",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "list_support_access_grants"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/ListWorktrees",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/ResolveMonorepo",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "resolve_monorepo"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/cli/src/cli/commands/clone.rs",
+              "contains": "resolve_monorepo"
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/ResolveSubjects",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/RevokeInvitation",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/RevokeSupportAccess",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "revoke_support_access"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/SetNamespaceVisibility",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/SetSpoolVisibility",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/UpdateGrant",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "update_grant"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/UpdateNamespace",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "update_namespace"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/UpdateRepository",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "update_repository"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/UpdateSpoolSettings",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/UpsertBookmark",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepoSyncService/ListRefs",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/sync.rs",
+              "contains": "list_refs"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No direct Heddle CLI surface is shipped for this transport primitive."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepoSyncService/Pull",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/sync.rs",
+              "contains": "pull"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/cli/src/cli/commands/remote/remote_ops.rs",
+              "contains": ".pull_with_depth_and_materialization("
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepoSyncService/Push",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/sync.rs",
+              "contains": "push"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/cli/src/cli/commands/remote/mod.rs",
+              "contains": ".push("
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepoSyncService/UpdateRef",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/sync.rs",
+              "contains": "update_ref"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No direct Heddle CLI surface is shipped for this transport primitive."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/CreateImportJob",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/GetBlame",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/content.rs",
+              "contains": "get_blame"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/GetBlob",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/sync.rs",
+              "contains": "get_blob"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/GetCompare",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/content.rs",
+              "contains": "get_compare"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1026",
+          "reason": "The local diff command does not call the hosted GetCompare client mapping."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/GetContextHistory",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/content.rs",
+              "contains": "get_context_history"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/GetDiff",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/GetRefs",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/GetSemanticHotSpots",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/GetState",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The similarly named CLI surface reads local repository state rather than this hosted RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/GetTree",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/ListActions",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/ListContext",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/content.rs",
+              "contains": "list_context"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/ListContextSuggestions",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/content.rs",
+              "contains": "list_context_suggestions"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/ListProvenanceSummaries",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/ListStates",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The similarly named CLI surface reads local repository state rather than this hosted RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/ReviseContext",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/content.rs",
+              "contains": "revise_context"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/SetContext",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/content.rs",
+              "contains": "set_context"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/StreamImportProgress",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/SubscribeRepoEvents",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/SupersedeContext",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/content.rs",
+              "contains": "supersede_context"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.SearchService/Search",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.StateReviewService/GetReviewPayload",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/cli/src/cli/commands/review.rs",
+              "contains": "get_review_payload"
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.StateReviewService/ListSignatures",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/cli/src/cli/commands/review.rs",
+              "contains": "list_signatures"
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.StateReviewService/SignState",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/cli/src/cli/commands/review.rs",
+              "contains": "sign_state"
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/AddApprovalGroupMember",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this client gap."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this CLI gap."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/AddPolicyGroupRequirement",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this client gap."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this CLI gap."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/ApproveThread",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "approve_thread"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/cli/src/cli/commands/thread_approval.rs",
+              "contains": "approve_thread"
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/CheckMergeEligibility",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "check_merge_eligibility"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/cli/src/cli/commands/thread_approval.rs",
+              "contains": "check_merge_eligibility"
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/CreateApprovalGroup",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this client gap."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this CLI gap."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/CreateThreadPolicy",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this client gap."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this CLI gap."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/DeleteApprovalGroup",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this client gap."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this CLI gap."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/DeleteThreadPolicy",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this client gap."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this CLI gap."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/GetWorkspaceSummary",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The similarly named CLI surface reads local repository state rather than this hosted RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/ListApprovalGroups",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this client gap."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this CLI gap."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/ListThreadApprovals",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "list_thread_approvals"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/cli/src/cli/commands/thread_approval.rs",
+              "contains": "list_thread_approvals"
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/ListThreadPolicies",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this client gap."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this CLI gap."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/ListThreads",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The local thread-list command does not call the hosted WorkflowService RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/RemoveApprovalGroupMember",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this client gap."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this CLI gap."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/RemovePolicyGroupRequirement",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this client gap."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "reason": "The workflow-policy administration follow-up owns this CLI gap."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/RevokeApproval",
+      "layers": {
+        "client": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/client/src/grpc_hosted/user.rs",
+              "contains": "revoke_approval"
+            }
+          ],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/cli/src/cli/commands/thread_approval.rs",
+              "contains": "revoke_approval"
+            }
+          ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/StreamWorkspaceSummary",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    }
+  ]
+}
