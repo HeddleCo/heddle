@@ -281,20 +281,9 @@ fn render_unbound_overlay_blame(
     revision: &str,
     output_kind: &'static str,
 ) -> Result<()> {
-    let history = ingest::OverlayHistory::open(repo.root(), revision)?;
-    let states = history
-        .states()
-        .iter()
-        .map(|(git_oid, state)| (git_oid.as_str(), state))
-        .collect::<HashMap<_, _>>();
     let mut lines = Vec::new();
-    for line in history.blame_file(file)? {
-        let state = states.get(line.git_oid.as_str()).ok_or_else(|| {
-            anyhow!(
-                "Git blame referenced commit {} outside the selected history",
-                line.git_oid
-            )
-        })?;
+    for line in ingest::OverlayHistory::project_blame(repo.root(), revision, file)? {
+        let state = &line.state;
         let (principal, agent) = attribution_parts(&state.attribution);
         lines.push(BlameLine {
             line_number: lines.len() + 1,

@@ -156,6 +156,18 @@ fn initialized_overlay_observe_commands_project_full_git_history_without_writes(
     assert_eq!(blame["lines"].as_array().map(Vec::len), Some(2));
     assert_eq!(blame["lines"][0]["principal"]["name"], "Heddle Test");
     assert_eq!(blame["lines"][1]["principal"]["name"], "Second Author");
+    assert_eq!(
+        blame["lines"][1]["state_id"], show["state_id_full"],
+        "tip-authored blame lines must share show/log descriptor identity"
+    );
+    let first_show: Value = serde_json::from_str(
+        &heddle(&["show", "HEAD~1", "--output", "json"], Some(temp.path())).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        blame["lines"][0]["state_id"], first_show["state_id_full"],
+        "ancestor-authored blame lines must share show/log descriptor identity"
+    );
     heddle(&["diff", "HEAD", "--output", "json"], Some(temp.path())).unwrap();
 
     assert_eq!(
@@ -3794,6 +3806,13 @@ fn git_overlay_matrix_land_prepared_journal_recovers_pre_publish_crash() {
     let fixture =
         GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/land-prepared");
     let before_git = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    let before_state = repo::Repository::open(fixture.path())
+        .unwrap()
+        .current_state()
+        .unwrap()
+        .expect("fixture target state")
+        .state_id
+        .to_string_full();
     let crashed = heddle_output_with_env(
         &[
             "--output",
@@ -3814,6 +3833,15 @@ fn git_overlay_matrix_land_prepared_journal_recovers_pre_publish_crash() {
     assert!(
         marker.is_file(),
         "prepared journal must precede integration"
+    );
+    let prepared: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    assert_eq!(prepared["thread_id"], "feature/land-prepared");
+    assert_eq!(prepared["pre_target_state"], before_state);
+    assert!(
+        prepared["integration_transaction_id"]
+            .as_str()
+            .is_some_and(|transaction| transaction.starts_with("land-integration/")),
+        "the crash journal must retain its owning operation identity: {prepared}"
     );
     assert_eq!(
         git_stdout(fixture.path(), &["rev-parse", "HEAD"]),

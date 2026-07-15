@@ -10,6 +10,7 @@ use heddle_core::{
 };
 use heddle_git_projection::GitProjection;
 use objects::{
+    lock::RepositoryLockExt,
     object::{Agent, Attribution, Principal, StateId, ThreadName, Tree},
     store::ObjectStore,
     worktree::WorktreeStatus,
@@ -593,6 +594,15 @@ pub(crate) fn ensure_current_state(
 }
 
 fn bind_git_overlay_active_tip(repo: &Repository) -> Result<Option<StateId>> {
+    // Git HEAD is the authority for an unbound overlay. Hold the canonical
+    // repository lock from the first authoritative read through sha-map,
+    // checkpoint, and Heddle ref publication so concurrent bootstraps cannot
+    // publish a stale tip or lose a checkpoint read-modify-write. The lock is
+    // same-thread reentrant, so nested repository writers remain deadlock-free.
+    let _lock = repo
+        .locker()
+        .write()
+        .map_err(|error| anyhow!("failed to lock repository while binding Git HEAD: {error}"))?;
     let Some(tip_sha) = resolve_active_git_tip_sha(repo)? else {
         return Ok(None);
     };
@@ -1242,6 +1252,12 @@ fn is_disk_full_anyhow(err: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        process::Command,
+        sync::{Arc, Barrier},
+        thread,
+    };
+
     use super::*;
 
     fn user_config_with_principal() -> UserConfig {
@@ -1352,6 +1368,92 @@ mod tests {
             .expect("detected harness actor should set agent");
         assert_eq!(agent.provider, "anthropic");
         assert_eq!(agent.model, "claude-opus-4-8[1m]");
+    }
+
+    #[test]
+    fn concurrent_overlay_bootstraps_bind_latest_locked_git_tip_once() {
+        let temp = tempfile::TempDir::new().expect("create Git fixture");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("Git output is UTF-8")
+                .trim()
+                .to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Overlay Test"]);
+        git(&["config", "user.email", "overlay@example.com"]);
+        std::fs::write(temp.path().join("README.md"), "old\n").expect("write old tip");
+        git(&["add", "README.md"]);
+        git(&["commit", "-m", "old tip"]);
+        let old_tip = git(&["rev-parse", "HEAD"]);
+
+        let repo = Repository::bootstrap_git_overlay(temp.path()).expect("bootstrap overlay");
+        let authoritative_update = repo.locker().write().expect("hold repository lock");
+        let ready = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let root = temp.path().to_path_buf();
+            let ready = Arc::clone(&ready);
+            workers.push(thread::spawn(move || {
+                let repo = Repository::open(root).expect("open worker repository");
+                ready.wait();
+                bind_git_overlay_active_tip(&repo).expect("bind authoritative Git tip")
+            }));
+        }
+        ready.wait();
+
+        // Both simulated commands are now contending on the repository lock.
+        // Advance authoritative Git while holding it; neither command may have
+        // resolved the stale tip before the publication transaction begins.
+        std::fs::write(temp.path().join("README.md"), "new\n").expect("write new tip");
+        git(&["add", "README.md"]);
+        git(&["commit", "-m", "new tip"]);
+        let new_tip = git(&["rev-parse", "HEAD"]);
+        drop(authoritative_update);
+
+        let states = workers
+            .into_iter()
+            .map(|worker| {
+                worker
+                    .join()
+                    .expect("join bootstrap worker")
+                    .expect("state")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(states[0], states[1]);
+        let repo = Repository::open(temp.path()).expect("reopen repository");
+        assert_eq!(
+            repo.current_state()
+                .expect("read current state")
+                .expect("bound state")
+                .state_id,
+            states[0]
+        );
+        assert!(
+            repo.git_overlay_mapped_state_for_git_commit(&old_tip)
+                .expect("read old mapping")
+                .is_none(),
+            "no contender may publish the Git tip observed before lock acquisition"
+        );
+        let checkpoints = repo.list_git_checkpoints().expect("read checkpoints");
+        assert_eq!(
+            checkpoints.len(),
+            1,
+            "checkpoint RMW must not lose or duplicate"
+        );
+        assert_eq!(checkpoints[0].git_commit, new_tip);
+        assert_eq!(checkpoints[0].state_id, states[0].to_string_full());
     }
 
     #[test]

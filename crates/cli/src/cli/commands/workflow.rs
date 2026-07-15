@@ -20,6 +20,7 @@ use heddle_core::{
 };
 use heddle_git_projection::GitProjection;
 use objects::{
+    lock::{RepositoryLockExt, WriteLockGuard},
     object::{State, StateId, ThreadName},
     store::ObjectStore,
 };
@@ -356,6 +357,15 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     } else {
         Repository::open(&target_path)?
     };
+    // One land owns the target repository from recovery/preflight through
+    // integration, Git checkpoint publication, and marker cleanup. This makes
+    // the Prepared marker an operation-owned journal instead of a replaceable
+    // singleton shared by concurrent land commands. Repository writes below
+    // re-enter this canonical same-thread lock safely.
+    let land_transaction_lock = repo
+        .locker()
+        .write()
+        .map_err(|error| anyhow!("failed to lock repository for land: {error}"))?;
     MULTI_LAND_COLLECTOR.with(|collector| {
         if let Some(batch) = collector.borrow_mut().as_mut() {
             batch.target_root = Some(repo.root().to_path_buf());
@@ -563,12 +573,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     let manual_resolution_current = manual_resolution_current(&repo, &merge_thread);
     let squash_land = should_squash_land(&args, &user_config);
     if manual_resolution_current {
-        let integration_transaction_id =
-            if repo.capability() == repo::RepositoryCapability::GitOverlay {
-                Some(write_prepared_land_marker(&repo, &merge_thread)?)
-            } else {
-                None
-            };
+        let integration_transaction_id = prepare_land_target_and_journal(
+            &repo,
+            &user_config,
+            &merge_thread,
+            &land_transaction_lock,
+        )?;
         if integration_transaction_id.is_some() {
             objects::fault_inject::maybe_fail_at("land_after_prepared_journal")?;
         }
@@ -812,8 +822,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         );
     }
 
-    let integration_transaction_id =
-        prepare_land_target_and_journal(&repo, &user_config, &merge_thread)?;
+    let integration_transaction_id = prepare_land_target_and_journal(
+        &repo,
+        &user_config,
+        &merge_thread,
+        &land_transaction_lock,
+    )?;
     if integration_transaction_id.is_some() {
         objects::fault_inject::maybe_fail_at("land_after_prepared_journal")?;
     }
@@ -2085,7 +2099,11 @@ fn write_incomplete_land_marker(
     Ok(())
 }
 
-fn write_prepared_land_marker(repo: &Repository, thread: &Thread) -> Result<String> {
+fn write_prepared_land_marker(
+    repo: &Repository,
+    thread: &Thread,
+    _land_transaction_lock: &WriteLockGuard,
+) -> Result<String> {
     let integration_transaction_id = format!("land-integration/{}", uuid::Uuid::new_v4());
     let marker = IncompleteLandMarker {
         thread_id: thread.id.clone(),
@@ -2118,6 +2136,7 @@ fn prepare_land_target_and_journal(
     repo: &Repository,
     user_config: &UserConfig,
     thread: &Thread,
+    land_transaction_lock: &WriteLockGuard,
 ) -> Result<Option<String>> {
     // Bind an unbound Git-overlay target before recording the land's durable
     // pre-state. Recovery identifies the committed transaction by its exact
@@ -2132,7 +2151,11 @@ fn prepare_land_target_and_journal(
         )),
     )?;
     if repo.capability() == repo::RepositoryCapability::GitOverlay {
-        Ok(Some(write_prepared_land_marker(repo, thread)?))
+        Ok(Some(write_prepared_land_marker(
+            repo,
+            thread,
+            land_transaction_lock,
+        )?))
     } else {
         Ok(None)
     }
@@ -2244,6 +2267,13 @@ pub(crate) fn pending_incomplete_land_thread(repo: &Repository) -> Result<Option
 }
 
 pub fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()> {
+    // Recovery and a live land mutate the same marker, refs, oplog batches,
+    // worktree, and Git checkpoint. Serialize the complete recovery decision
+    // and mutation with land; callers already holding the lock re-enter it.
+    let _lock = repo
+        .locker()
+        .write()
+        .map_err(|error| anyhow!("failed to lock repository for land recovery: {error}"))?;
     let Some(mut marker) = load_incomplete_land_marker(repo)? else {
         return Ok(());
     };
@@ -2940,8 +2970,10 @@ mod tests {
         );
         let thread = thread_with_execution_path(temp.path().join("agent-thread"));
 
-        let transaction = prepare_land_target_and_journal(&repo, &UserConfig::default(), &thread)
-            .expect("prepare land journal");
+        let land_lock = repo.locker().write().expect("lock land transaction");
+        let transaction =
+            prepare_land_target_and_journal(&repo, &UserConfig::default(), &thread, &land_lock)
+                .expect("prepare land journal");
         assert!(transaction.is_some());
         assert!(
             repo.current_state().expect("read bound state").is_some(),
@@ -2956,6 +2988,99 @@ mod tests {
             "Prepared recovery marker must capture the bound pre-land target"
         );
         clear_incomplete_land_marker(&repo).expect("clear fixture marker");
+    }
+
+    #[test]
+    fn prepared_land_marker_ownership_cannot_cross_concurrent_transactions() {
+        let temp = TempDir::new().expect("create temp Git repository");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Test User"]);
+        git(&["config", "user.email", "test@example.com"]);
+        fs::write(temp.path().join("README.md"), "initial\n").expect("write fixture");
+        git(&["add", "README.md"]);
+        git(&["commit", "-m", "initial"]);
+
+        let repo = Repository::bootstrap_git_overlay(temp.path()).expect("bootstrap overlay");
+        let first_lock = repo.locker().write().expect("lock first land");
+        let mut first_thread = thread_with_execution_path(temp.path().join("first"));
+        first_thread.id = "first-land".to_string();
+        first_thread.thread = first_thread.id.clone();
+        let first_transaction = prepare_land_target_and_journal(
+            &repo,
+            &UserConfig::default(),
+            &first_thread,
+            &first_lock,
+        )
+        .expect("prepare first land")
+        .expect("overlay transaction");
+        let first_marker = load_incomplete_land_marker(&repo)
+            .expect("read first marker")
+            .expect("first marker");
+
+        let contender_root = temp.path().to_path_buf();
+        let contender_blocked = std::thread::spawn(move || {
+            let contender = Repository::open(contender_root).expect("open contender");
+            contender
+                .locker()
+                .try_write()
+                .expect("try contender lock")
+                .is_none()
+        })
+        .join()
+        .expect("join contender");
+        assert!(
+            contender_blocked,
+            "a second land cannot enter marker preparation while the first owns the transaction"
+        );
+        assert_eq!(first_marker.thread_id, first_thread.id);
+        assert_eq!(
+            first_marker.integration_transaction_id.as_deref(),
+            Some(first_transaction.as_str())
+        );
+        assert!(first_marker.pre_target_state.is_some());
+
+        clear_incomplete_land_marker(&repo).expect("finish first land fixture");
+        drop(first_lock);
+
+        let second_lock = repo.locker().write().expect("lock second land");
+        let mut second_thread = thread_with_execution_path(temp.path().join("second"));
+        second_thread.id = "second-land".to_string();
+        second_thread.thread = second_thread.id.clone();
+        let second_transaction = prepare_land_target_and_journal(
+            &repo,
+            &UserConfig::default(),
+            &second_thread,
+            &second_lock,
+        )
+        .expect("prepare second land")
+        .expect("overlay transaction");
+        let second_marker = load_incomplete_land_marker(&repo)
+            .expect("read second marker")
+            .expect("second marker");
+        assert_ne!(second_transaction, first_transaction);
+        assert_eq!(second_marker.thread_id, second_thread.id);
+        assert_eq!(
+            second_marker.integration_transaction_id.as_deref(),
+            Some(second_transaction.as_str())
+        );
+        assert_eq!(
+            second_marker.pre_target_state, first_marker.pre_target_state,
+            "serialized lands journal their own transaction against the same unchanged pre-state"
+        );
+        clear_incomplete_land_marker(&repo).expect("clear second fixture marker");
     }
 
     #[test]

@@ -21,8 +21,6 @@ use crate::{
 /// A deterministic, in-memory Heddle view of a Git revision and its ancestry.
 /// Constructing it performs no Heddle writes and moves no Git references.
 pub struct OverlayHistory {
-    git: GitSource,
-    commits: HashMap<String, CommitEntry>,
     states: Vec<(String, State)>,
 }
 
@@ -47,6 +45,7 @@ pub struct OverlayLogEntry {
 pub struct OverlayBlameLine {
     pub content: String,
     pub git_oid: String,
+    pub state: State,
 }
 
 impl OverlayHistory {
@@ -123,26 +122,52 @@ impl OverlayHistory {
         Ok(entries)
     }
 
+    /// Project path-scoped blame without translating unrelated repository
+    /// trees. Commit metadata and tree components are loaded lazily along the
+    /// blame frontier; full descriptor trees are materialized only for commits
+    /// that remain as final line origins, preserving the same stable state IDs
+    /// used by bounded show/log projection.
+    pub fn project_blame(
+        root: &Path,
+        revision: &str,
+        path: &str,
+    ) -> crate::Result<Vec<OverlayBlameLine>> {
+        let git = GitSource::open(root)?;
+        let tip_oid = git.resolve_history_revision(revision)?;
+        let mut commits = HashMap::new();
+        let origins = blame_file_origins(&git, &tip_oid, path, &mut commits)?;
+        let store = InMemoryStore::new();
+        let mut trees = HashMap::new();
+        let mut states = HashMap::new();
+        origins
+            .into_iter()
+            .map(|(content, git_oid)| {
+                let commit = read_commit_cached(&git, &mut commits, &git_oid)?;
+                let state =
+                    project_descriptor_state(&git, &store, &commit, &mut trees, &mut states)?;
+                Ok(OverlayBlameLine {
+                    content,
+                    git_oid,
+                    state,
+                })
+            })
+            .collect()
+    }
+
     pub fn open(root: &Path, revision: &str) -> crate::Result<Self> {
         let git = GitSource::open(root)?;
         let tip = git.resolve_history_revision(revision)?;
         let commits = git.commits_topo([tip])?;
         let store = InMemoryStore::new();
         let mut trees = HashMap::new();
-        let mut commits_by_git = HashMap::with_capacity(commits.len());
         let mut states = Vec::with_capacity(commits.len());
         for commit in commits {
             let tree = translate_tree(&git, &store, &commit.tree_sha, &mut trees)?;
             let state = state_from_commit(&commit, tree, Vec::new(), false)?;
             states.push((commit.sha.clone(), state));
-            commits_by_git.insert(commit.sha.clone(), commit);
         }
         states.reverse();
-        Ok(Self {
-            git,
-            commits: commits_by_git,
-            states,
-        })
+        Ok(Self { states })
     }
 
     pub fn states(&self) -> &[(String, State)] {
@@ -152,84 +177,60 @@ impl OverlayHistory {
     pub fn tip(&self) -> Option<&(String, State)> {
         self.states.first()
     }
+}
 
-    /// Attribute a UTF-8 file using the same path-targeted, merge-aware LCS
-    /// walk as native Heddle blame, while reading Git objects through Sley.
-    pub fn blame_file(&self, path: &str) -> crate::Result<Vec<OverlayBlameLine>> {
-        let (tip_oid, _) = self
-            .tip()
-            .ok_or_else(|| IngestError::Other("cannot blame an empty Git history".to_string()))?;
-        let tip = self
-            .commits
-            .get(tip_oid)
-            .ok_or_else(|| IngestError::Other(format!("projected Git tip {tip_oid} is missing")))?;
-        let (target_blob, target_bytes) = self
-            .blob_at_path(&tip.tree_sha, path)?
-            .ok_or_else(|| IngestError::Other(format!("path '{path}' is absent from Git tip")))?;
-        let target_lines = split_text_lines(&target_bytes)
-            .ok_or_else(|| IngestError::Other(format!("path '{path}' is not a UTF-8 text file")))?;
-        let mut origins = vec![tip_oid.clone(); target_lines.len()];
-        let mut worklist = vec![GitBlameFrontier {
-            commit_oid: tip_oid.clone(),
-            blob_oid: target_blob,
-            commit_lines: target_lines.clone(),
-            commit_to_target: (0..target_lines.len()).map(Some).collect(),
-        }];
+fn read_commit_cached(
+    git: &GitSource,
+    commits: &mut HashMap<String, CommitEntry>,
+    git_oid: &str,
+) -> crate::Result<CommitEntry> {
+    if let Some(commit) = commits.get(git_oid) {
+        return Ok(commit.clone());
+    }
+    let commit = git.read_commit(git_oid)?;
+    commits.insert(git_oid.to_string(), commit.clone());
+    Ok(commit)
+}
 
-        while let Some(frontier) = worklist.pop() {
-            let Some(commit) = self.commits.get(&frontier.commit_oid) else {
+fn blame_file_origins(
+    git: &GitSource,
+    tip_oid: &str,
+    path: &str,
+    commits: &mut HashMap<String, CommitEntry>,
+) -> crate::Result<Vec<(String, String)>> {
+    let tip = read_commit_cached(git, commits, tip_oid)?;
+    let (target_blob, target_bytes) = blob_at_path(git, &tip.tree_sha, path)?
+        .ok_or_else(|| IngestError::Other(format!("path '{path}' is absent from Git tip")))?;
+    let target_lines = split_text_lines(&target_bytes)
+        .ok_or_else(|| IngestError::Other(format!("path '{path}' is not a UTF-8 text file")))?;
+    let mut origins = vec![tip_oid.to_string(); target_lines.len()];
+    let mut worklist = vec![GitBlameFrontier {
+        commit_oid: tip_oid.to_string(),
+        blob_oid: target_blob,
+        commit_lines: target_lines.clone(),
+        commit_to_target: (0..target_lines.len()).map(Some).collect(),
+    }];
+
+    while let Some(frontier) = worklist.pop() {
+        let commit = read_commit_cached(git, commits, &frontier.commit_oid)?;
+        let mut moved = vec![false; frontier.commit_lines.len()];
+        for parent_oid in &commit.parents {
+            let parent = read_commit_cached(git, commits, parent_oid)?;
+            let Some((parent_blob, parent_bytes)) = blob_at_path(git, &parent.tree_sha, path)?
+            else {
                 continue;
             };
-            let mut moved = vec![false; frontier.commit_lines.len()];
-            for parent_oid in &commit.parents {
-                let Some(parent) = self.commits.get(parent_oid) else {
-                    continue;
-                };
-                let Some((parent_blob, parent_bytes)) =
-                    self.blob_at_path(&parent.tree_sha, path)?
-                else {
-                    continue;
-                };
-                if parent_blob == frontier.blob_oid {
-                    let mut parent_to_target = vec![None; frontier.commit_lines.len()];
-                    let mut any_moved = false;
-                    for (index, target_index) in frontier.commit_to_target.iter().enumerate() {
-                        if moved[index] {
-                            continue;
-                        }
-                        if let Some(target_index) = target_index {
-                            origins[*target_index] = parent_oid.clone();
-                            parent_to_target[index] = Some(*target_index);
-                            moved[index] = true;
-                            any_moved = true;
-                        }
-                    }
-                    if any_moved {
-                        worklist.push(GitBlameFrontier {
-                            commit_oid: parent_oid.clone(),
-                            blob_oid: parent_blob,
-                            commit_lines: frontier.commit_lines.clone(),
-                            commit_to_target: parent_to_target,
-                        });
-                    }
-                    break;
-                }
-
-                let Some(parent_lines) = split_text_lines(&parent_bytes) else {
-                    continue;
-                };
-                let mut parent_to_target = vec![None; parent_lines.len()];
+            if parent_blob == frontier.blob_oid {
+                let mut parent_to_target = vec![None; frontier.commit_lines.len()];
                 let mut any_moved = false;
-                for (parent_index, frontier_index) in
-                    lcs_line_matches(&parent_lines, &frontier.commit_lines)
-                {
-                    if moved[frontier_index] {
+                for (index, target_index) in frontier.commit_to_target.iter().enumerate() {
+                    if moved[index] {
                         continue;
                     }
-                    if let Some(target_index) = frontier.commit_to_target[frontier_index] {
-                        origins[target_index] = parent_oid.clone();
-                        parent_to_target[parent_index] = Some(target_index);
-                        moved[frontier_index] = true;
+                    if let Some(target_index) = target_index {
+                        origins[*target_index] = parent_oid.clone();
+                        parent_to_target[index] = Some(*target_index);
+                        moved[index] = true;
                         any_moved = true;
                     }
                 }
@@ -237,58 +238,81 @@ impl OverlayHistory {
                     worklist.push(GitBlameFrontier {
                         commit_oid: parent_oid.clone(),
                         blob_oid: parent_blob,
-                        commit_lines: parent_lines,
+                        commit_lines: frontier.commit_lines.clone(),
                         commit_to_target: parent_to_target,
                     });
                 }
+                break;
             }
-        }
 
-        Ok(target_lines
-            .into_iter()
-            .zip(origins)
-            .map(|(content, git_oid)| OverlayBlameLine { content, git_oid })
-            .collect())
-    }
-
-    fn blob_at_path(
-        &self,
-        root_tree: &str,
-        path: &str,
-    ) -> crate::Result<Option<(String, Vec<u8>)>> {
-        let components = path
-            .split('/')
-            .filter(|component| !component.is_empty())
-            .collect::<Vec<_>>();
-        if components.is_empty()
-            || components
-                .iter()
-                .any(|component| matches!(*component, "." | ".."))
-        {
-            return Ok(None);
-        }
-        let mut tree_oid = root_tree.to_string();
-        for (index, component) in components.iter().enumerate() {
-            let Some(child) = self
-                .git
-                .read_tree(&tree_oid)?
-                .into_iter()
-                .find(|child| child.raw_name == component.as_bytes())
-            else {
-                return Ok(None);
+            let Some(parent_lines) = split_text_lines(&parent_bytes) else {
+                continue;
             };
-            let is_leaf = index + 1 == components.len();
-            match (is_leaf, child.kind) {
-                (false, TreeChildKind::Tree) => tree_oid = child.sha,
-                (true, TreeChildKind::Blob { .. }) => {
-                    let bytes = self.git.read_blob(&child.sha)?;
-                    return Ok(Some((child.sha, bytes)));
+            let mut parent_to_target = vec![None; parent_lines.len()];
+            let mut any_moved = false;
+            for (parent_index, frontier_index) in
+                lcs_line_matches(&parent_lines, &frontier.commit_lines)
+            {
+                if moved[frontier_index] {
+                    continue;
                 }
-                _ => return Ok(None),
+                if let Some(target_index) = frontier.commit_to_target[frontier_index] {
+                    origins[target_index] = parent_oid.clone();
+                    parent_to_target[parent_index] = Some(target_index);
+                    moved[frontier_index] = true;
+                    any_moved = true;
+                }
+            }
+            if any_moved {
+                worklist.push(GitBlameFrontier {
+                    commit_oid: parent_oid.clone(),
+                    blob_oid: parent_blob,
+                    commit_lines: parent_lines,
+                    commit_to_target: parent_to_target,
+                });
             }
         }
-        Ok(None)
     }
+
+    Ok(target_lines.into_iter().zip(origins).collect())
+}
+
+fn blob_at_path(
+    git: &GitSource,
+    root_tree: &str,
+    path: &str,
+) -> crate::Result<Option<(String, Vec<u8>)>> {
+    let components = path
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| matches!(*component, "." | ".."))
+    {
+        return Ok(None);
+    }
+    let mut tree_oid = root_tree.to_string();
+    for (index, component) in components.iter().enumerate() {
+        let Some(child) = git
+            .read_tree(&tree_oid)?
+            .into_iter()
+            .find(|child| child.raw_name == component.as_bytes())
+        else {
+            return Ok(None);
+        };
+        let is_leaf = index + 1 == components.len();
+        match (is_leaf, child.kind) {
+            (false, TreeChildKind::Tree) => tree_oid = child.sha,
+            (true, TreeChildKind::Blob { .. }) => {
+                let bytes = git.read_blob(&child.sha)?;
+                return Ok(Some((child.sha, bytes)));
+            }
+            _ => return Ok(None),
+        }
+    }
+    Ok(None)
 }
 
 fn first_parent_oid(commit: &CommitEntry) -> Option<String> {
@@ -559,6 +583,82 @@ mod tests {
         assert!(
             OverlayHistory::open(repo.path(), "HEAD").is_err(),
             "the full-history control must reach the unrepresentable grandparent"
+        );
+    }
+
+    #[test]
+    fn path_scoped_blame_ignores_unrepresentable_unrelated_history() {
+        let repo = TempDir::new().unwrap();
+        git(repo.path(), &["init", "-q", "-b", "main"], None);
+        let unrelated_blob = git(
+            repo.path(),
+            &["hash-object", "-w", "--stdin"],
+            Some(b"unrelated\n"),
+        );
+        let mut invalid_tree = format!("100644 blob {unrelated_blob}\t").into_bytes();
+        invalid_tree.extend_from_slice(b"bad\xffname\0");
+        let invalid_tree = git(repo.path(), &["mktree", "-z"], Some(&invalid_tree));
+        let invalid_root = git(
+            repo.path(),
+            &["commit-tree", &invalid_tree, "-m", "invalid unrelated root"],
+            None,
+        );
+
+        let first_blob = git(
+            repo.path(),
+            &["hash-object", "-w", "--stdin"],
+            Some(b"one\n"),
+        );
+        let first_tree = git(
+            repo.path(),
+            &["mktree"],
+            Some(format!("100644 blob {first_blob}\tstory.txt\n").as_bytes()),
+        );
+        let first = git(
+            repo.path(),
+            &[
+                "commit-tree",
+                &first_tree,
+                "-p",
+                &invalid_root,
+                "-m",
+                "add story",
+            ],
+            None,
+        );
+        let tip_blob = git(
+            repo.path(),
+            &["hash-object", "-w", "--stdin"],
+            Some(b"one\ntwo\n"),
+        );
+        let tip_tree = git(
+            repo.path(),
+            &["mktree"],
+            Some(format!("100644 blob {tip_blob}\tstory.txt\n").as_bytes()),
+        );
+        let tip = git(
+            repo.path(),
+            &["commit-tree", &tip_tree, "-p", &first, "-m", "extend story"],
+            None,
+        );
+        git(repo.path(), &["update-ref", "refs/heads/main", &tip], None);
+
+        let blame = OverlayHistory::project_blame(repo.path(), "HEAD", "story.txt")
+            .expect("valid-file blame must not translate an unrelated invalid tree");
+        assert_eq!(
+            blame
+                .iter()
+                .map(|line| (line.content.as_str(), line.git_oid.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("one", first.as_str()), ("two", tip.as_str())]
+        );
+        let tip_projection = OverlayHistory::project_tip(repo.path(), "HEAD")
+            .expect("tip and direct parent are representable");
+        assert_eq!(blame[0].state.state_id, tip_projection.parent_ids[0]);
+        assert_eq!(blame[1].state.state_id, tip_projection.state.state_id);
+        assert!(
+            OverlayHistory::open(repo.path(), "HEAD").is_err(),
+            "full-history control must still reach the unrelated invalid path"
         );
     }
 
