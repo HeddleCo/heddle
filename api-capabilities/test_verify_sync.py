@@ -39,7 +39,6 @@ class VerifySyncTests(unittest.TestCase):
             "source_repository": "HeddleCo/heddle",
             "rpc_mappings": [{
                 "rpc": RPC,
-                "capability": "state comparison",
                 "layers": {
                     "client": {"status": "shipped", "evidence": [{"path": "src/mapping.rs", "contains": "get_compare"}], "follow_up": None},
                     "cli": {"status": "shipped", "evidence": [{"path": "src/mapping.rs", "contains": "client.get_compare("}], "follow_up": None},

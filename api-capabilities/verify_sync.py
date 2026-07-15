@@ -18,7 +18,7 @@ REPOSITORY_ROOT = ROOT.parent
 CONSUMER = "heddle"
 LOCAL_DECLARATION = "heddle.json"
 API_REPOSITORY = "HeddleCo/api"
-API_REVISION = "659f0a4ab9befb9d623872797a84eb637b7d6103"
+API_REVISION = "2d64784862f9dea3d2df7e0a15b30f215d10ce3e"
 API_SNAPSHOT = "capabilities/declarations/heddle.json"
 LAYERS = ("client", "cli")
 STATUSES = {
@@ -100,16 +100,17 @@ def sanitize(declaration: object, repository_root: Path) -> dict[str, object]:
     sanitized_rows: list[dict[str, object]] = []
     seen: set[str] = set()
     for row in rows:
-        if not isinstance(row, dict) or not isinstance(row.get("rpc"), str):
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"rpc", "layers"}
+            or not isinstance(row.get("rpc"), str)
+        ):
             raise SystemExit("invalid RPC mapping")
         rpc = row["rpc"]
         if rpc in seen:
             raise SystemExit(f"duplicate RPC mapping: {rpc}")
         seen.add(rpc)
-        capability = row.get("capability")
         layers = row.get("layers")
-        if not isinstance(capability, str) or not capability:
-            raise SystemExit(f"invalid capability for {rpc}")
         if not isinstance(layers, dict) or set(layers) != set(LAYERS):
             raise SystemExit(f"invalid layer set for {rpc}")
         sanitized_layers: dict[str, dict[str, str]] = {}
@@ -127,9 +128,7 @@ def sanitize(declaration: object, repository_root: Path) -> dict[str, object]:
                 for item in evidence:
                     _validate_rust_binding(repository_root, item, rpc, layer_name)
             sanitized_layers[layer_name] = {"status": status}
-        sanitized_rows.append(
-            {"rpc": rpc, "capability": capability, "layers": sanitized_layers}
-        )
+        sanitized_rows.append({"rpc": rpc, "layers": sanitized_layers})
     return {
         "schema_version": 2,
         "consumer": CONSUMER,
