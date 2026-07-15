@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Backend-neutral object storage abstractions and concrete implementations.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use crate::object::{
     Action, ActionId, Blob, ContentHash, State, StateAttachment, StateAttachmentId, StateId, Tree,
@@ -50,6 +50,16 @@ pub use writer_lease::{
     WriterLeaseReserveOutcome, WriterLeaseStatus, WriterLeaseStore, generate_writer_lease_id,
     generate_writer_lease_token,
 };
+
+/// Read-only objects whose authoritative representation lives outside the
+/// native Heddle object directory. Git-overlay repositories use this seam to
+/// translate objects directly from `.git` without importing a second copy.
+pub trait ExternalObjectSource: Send + Sync {
+    fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>>;
+    fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>>;
+    fn get_state(&self, id: &StateId) -> Result<Option<State>>;
+    fn list_states(&self) -> Result<Vec<StateId>>;
+}
 
 pub use crate::error::{HeddleError as StoreError, HeddleError, Result};
 
@@ -120,6 +130,9 @@ impl ObjectStore for AnyStore {
     fn has_blob(&self, hash: &ContentHash) -> Result<bool> {
         any_store_dispatch!(self, has_blob(hash))
     }
+    fn has_blob_locally(&self, hash: &ContentHash) -> Result<bool> {
+        any_store_dispatch!(self, has_blob_locally(hash))
+    }
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         match self {
             AnyStore::Fs(inner) => ObjectStore::get_tree(inner, hash),
@@ -135,6 +148,9 @@ impl ObjectStore for AnyStore {
     }
     fn has_tree(&self, hash: &ContentHash) -> Result<bool> {
         any_store_dispatch!(self, has_tree(hash))
+    }
+    fn has_tree_locally(&self, hash: &ContentHash) -> Result<bool> {
+        any_store_dispatch!(self, has_tree_locally(hash))
     }
     fn get_state(&self, id: &StateId) -> Result<Option<State>> {
         match self {
@@ -252,6 +268,15 @@ impl ObjectStore for AnyStore {
     }
 }
 
+impl AnyStore {
+    /// Attach a read-only external source to the local filesystem store.
+    pub fn set_external_source(&mut self, source: Arc<dyn ExternalObjectSource>) {
+        match self {
+            Self::Fs(store) => store.set_external_source(source),
+        }
+    }
+}
+
 /// Trait for object storage backends.
 pub trait ObjectStore: Send + Sync {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>>;
@@ -363,9 +388,20 @@ pub trait ObjectStore: Send + Sync {
     }
 
     fn has_blob(&self, hash: &ContentHash) -> Result<bool>;
+    /// Return whether the blob is owned by this store, excluding any configured
+    /// read-through source. Snapshot builders use this to ensure a new native
+    /// state owns its complete object closure.
+    fn has_blob_locally(&self, hash: &ContentHash) -> Result<bool> {
+        self.has_blob(hash)
+    }
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>>;
     fn put_tree(&self, tree: &Tree) -> Result<ContentHash>;
     fn has_tree(&self, hash: &ContentHash) -> Result<bool>;
+    /// Return whether the tree is owned by this store, excluding any configured
+    /// read-through source.
+    fn has_tree_locally(&self, hash: &ContentHash) -> Result<bool> {
+        self.has_tree(hash)
+    }
     fn get_state(&self, id: &StateId) -> Result<Option<State>>;
     fn put_state(&self, state: &State) -> Result<()>;
     fn has_state(&self, id: &StateId) -> Result<bool>;

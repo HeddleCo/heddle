@@ -176,8 +176,8 @@ pub use merge::{
     ThreeWayMergeOutcome, apply_merged_tree, apply_merged_tree_external, bench_detect_renames,
     bench_find_merge_base, bench_three_way_merge, build_thread_preview_report,
     ensure_worktree_clean, merge_thread, merge_thread_into_current,
-    merge_thread_into_current_with_machine_contract, prepare_dir_for_file_replacement,
-    try_three_way_merge_between_tips,
+    merge_thread_into_current_transactional, merge_thread_into_current_with_machine_contract,
+    prepare_dir_for_file_replacement, try_three_way_merge_between_tips,
 };
 pub use objects::{
     CollectingWarnings, HeddleError, NoopProgress, NoopWarnings, ProgressEvent, ProgressSink,
@@ -255,8 +255,8 @@ pub use revert_plan::{
 pub use save::{
     CommitGitIndexPlan, GitScope, SavePlan, SaveReport, SaveVerb, commit_next_action_from_trust,
     commit_scope_text, execute_save, plan_commit_git_index, plan_commit_git_index_only,
-    plan_creates_new_state, plan_git_scope, plan_writes_git_checkpoint, split_git_extra_paths,
-    staged_commit_summary, tree_leaf_name,
+    plan_creates_new_state, plan_git_scope, plan_writes_git_checkpoint,
+    recover_published_git_checkpoint, split_git_extra_paths, staged_commit_summary, tree_leaf_name,
 };
 pub use semantic_plan::{
     HOT_EVENT_KIND_TOKENS, HotEventKindToken, hot_event_kind_label, human_event_kind,

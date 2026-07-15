@@ -509,6 +509,15 @@ impl PackedOpLogIndex {
             .collect())
     }
 
+    pub(crate) fn committed_batch(&self, transaction_id: &str) -> Result<Option<OpBatch>> {
+        let Some((_commit_entry_id, batch_id)) = self.transaction_commit(transaction_id)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .collect_batches_scoped(1, |batch| batch.id == batch_id, None)?
+            .pop())
+    }
+
     pub(crate) fn append_entries(&self, new_entries: &[OpEntry]) -> Result<Self> {
         if new_entries.is_empty() {
             return Ok(self.clone());

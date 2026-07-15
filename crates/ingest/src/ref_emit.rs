@@ -60,11 +60,27 @@ pub struct RefEmitter<'a, R: RefBackend, S: ObjectStore> {
     refs: &'a R,
     store: &'a S,
     map: &'a ShaMap,
+    state_remaps: std::collections::HashMap<StateId, StateId>,
 }
 
 impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
     pub fn new(refs: &'a R, store: &'a S, map: &'a ShaMap) -> Self {
-        Self { refs, store, map }
+        Self {
+            refs,
+            store,
+            map,
+            state_remaps: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Permit only the explicit lazy-descriptor identities replaced by this
+    /// import to move directly to their canonical full-history states.
+    pub fn with_state_remaps(
+        mut self,
+        remaps: impl IntoIterator<Item = (StateId, StateId)>,
+    ) -> Self {
+        self.state_remaps.extend(remaps);
+        self
     }
 
     /// Emit every [`RefHead`] as a thread or marker. Idempotent: calling
@@ -113,6 +129,7 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
                         .get_thread(&thread_name)
                         .await
                         .map_err(IngestError::from)?
+                        && self.state_remaps.get(&existing) != Some(&cid)
                         && !self.thread_can_adopt_change(&existing, &cid)?
                     {
                         return Err(IngestError::ThreadDiverged {

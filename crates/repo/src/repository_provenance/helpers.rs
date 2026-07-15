@@ -11,10 +11,7 @@ use objects::{
 
 use super::{HeddleError, Repository, Result, builder::ProvenanceBuilder};
 
-pub(super) fn split_text_lines(bytes: &[u8]) -> Option<Vec<String>> {
-    let content = std::str::from_utf8(bytes).ok()?;
-    Some(content.lines().map(str::to_string).collect())
-}
+pub(super) use objects::util::{lcs_line_matches, split_text_lines};
 
 pub(super) fn build_single_origin_provenance(
     file_blob: ContentHash,
@@ -79,37 +76,6 @@ pub(super) fn expand_line_origin_sets_with_builder(
     }
 
     Ok(translated_sets)
-}
-
-pub(super) fn lcs_line_matches(old_lines: &[String], new_lines: &[String]) -> Vec<(usize, usize)> {
-    let n = old_lines.len();
-    let m = new_lines.len();
-    let mut dp = vec![vec![0u32; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            dp[i][j] = if old_lines[i] == new_lines[j] {
-                dp[i + 1][j + 1] + 1
-            } else {
-                dp[i + 1][j].max(dp[i][j + 1])
-            };
-        }
-    }
-
-    let mut i = 0usize;
-    let mut j = 0usize;
-    let mut matches = Vec::new();
-    while i < n && j < m {
-        if old_lines[i] == new_lines[j] {
-            matches.push((i, j));
-            i += 1;
-            j += 1;
-        } else if dp[i + 1][j] >= dp[i][j + 1] {
-            i += 1;
-        } else {
-            j += 1;
-        }
-    }
-    matches
 }
 
 pub(super) fn coalesce_line_spans(line_origin_sets: &[u32]) -> Vec<LineSpan> {

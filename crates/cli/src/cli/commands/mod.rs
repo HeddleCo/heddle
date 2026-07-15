@@ -98,12 +98,13 @@ pub use clone::{
 };
 pub use collapse::cmd_collapse;
 pub use command_catalog::{
-    CommandCatalogOutput, advanced_help_groups, build_command_catalog, command_canonical_command,
-    command_contract_root_commands, command_help_tier, command_help_visibility, command_path,
-    command_persists_op_id, command_runtime_contract, command_runtime_contract_for_command,
-    command_supports_json_for_command, command_supports_op_id, command_supports_op_id_for_command,
-    command_surface, command_uses_bootstrap_op_id_store, observe_only_root_commands,
-    operator_envelope_verbs, root_commands_for_advanced_help, root_commands_for_help_visibility,
+    CommandCatalogOutput, CommandRuntimeContract, advanced_help_groups, build_command_catalog,
+    command_canonical_command, command_contract_root_commands, command_help_tier,
+    command_help_visibility, command_path, command_persists_op_id, command_runtime_contract,
+    command_runtime_contract_for_command, command_supports_json_for_command,
+    command_supports_op_id, command_supports_op_id_for_command, command_surface,
+    command_uses_bootstrap_op_id_store, observe_only_root_commands, operator_envelope_verbs,
+    root_commands_for_advanced_help, root_commands_for_help_visibility,
 };
 pub use commit::cmd_commit;
 pub use completion::{cmd_complete, cmd_completion};
@@ -170,4 +171,5 @@ pub use undo::{cmd_redo, cmd_undo, cmd_undo_recover};
 pub use verify::cmd_verify;
 pub use visibility::cmd_visibility;
 pub use watch::cmd_watch;
+pub use workflow::recover_incomplete_land_if_present;
 pub use workflow::{cmd_land, cmd_sync};

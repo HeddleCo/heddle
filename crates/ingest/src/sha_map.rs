@@ -280,6 +280,19 @@ impl ShaMap {
         self.insert_raw(MapKind::Commit, git_sha, heddle.to_string_full())
     }
 
+    /// Remove one commit identity inside the caller's active import batch.
+    ///
+    /// Full adoption uses this to replace a lazy descriptor's parentless state
+    /// with the canonical state produced while walking complete Git history.
+    pub(crate) fn remove_commit(&mut self, git_sha: &str) -> Result<(), ShaMapError> {
+        let git_sha = normalize_git_sha(git_sha)?;
+        self.conn.execute(
+            "DELETE FROM sha_map WHERE git_sha = ? AND kind = ?",
+            params![git_sha, MapKind::Commit.as_i64()],
+        )?;
+        Ok(())
+    }
+
     /// Insert a tree mapping.
     pub fn insert_tree(&mut self, git_sha: &str, heddle: ContentHash) -> Result<(), ShaMapError> {
         self.insert_tree_with_lossy_entries(git_sha, heddle, &[])
@@ -477,6 +490,29 @@ impl ShaMap {
                 Err(_) => return Vec::new(),
             };
         rows.filter_map(|r| r.ok()).collect()
+    }
+
+    /// Every mapped Heddle content hash of the requested source kind.
+    /// Used by overlay integrity checks to prove source objects were not
+    /// copied into native storage.
+    pub fn content_hashes(&self, kind: MapKind) -> Vec<ContentHash> {
+        if kind == MapKind::Commit {
+            return Vec::new();
+        }
+        let mut stmt = match self
+            .conn
+            .prepare_cached("SELECT heddle_repr FROM sha_map WHERE kind = ?")
+        {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map(params![kind.as_i64()], |row| row.get::<_, String>(0)) {
+            Ok(rows) => rows,
+            Err(_) => return Vec::new(),
+        };
+        rows.filter_map(|row| row.ok())
+            .filter_map(|value| ContentHash::from_hex(&value).ok())
+            .collect()
     }
 }
 

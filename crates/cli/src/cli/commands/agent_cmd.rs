@@ -741,6 +741,7 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
                     no_daemon: false,
                     interactive_setup: false,
                     shared_target: false,
+                    no_shared_target: false,
                     hydrate: false,
                 },
             )?;

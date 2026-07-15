@@ -393,6 +393,22 @@ impl RecoveryAdvice {
         )
     }
 
+    pub(crate) fn git_overlay_tip_bind_failed(details: impl Into<String>) -> Self {
+        let primary = "heddle adopt".to_string();
+        Self::safety_refusal(
+            "git_overlay_tip_bind_failed",
+            "Could not bind the active Git tip into Heddle",
+            format!(
+                "Run `{primary}` to import Git history explicitly, then retry. Heddle refused to invent a parentless bootstrap root while a Git tip exists."
+            ),
+            details.into(),
+            "binding the active Git tip would otherwise be skipped in favor of an orphan Heddle root",
+            "Git refs, Heddle refs, and worktree files were left unchanged",
+            primary.clone(),
+            vec![primary, "heddle status".to_string()],
+        )
+    }
+
     pub(crate) fn init_path_conflict(positional: &str, repo_path: &str) -> Self {
         Self::invalid_usage(
             "init_path_conflict",
@@ -728,6 +744,115 @@ impl RecoveryAdvice {
         )
     }
 
+    pub(crate) fn land_checkpoint_rolled_back(
+        thread: &str,
+        checkpoint_error: impl fmt::Display,
+        performed_steps: Vec<String>,
+    ) -> Self {
+        let completed = if performed_steps.is_empty() {
+            "no completed steps were recorded".to_string()
+        } else {
+            performed_steps.join(", ")
+        };
+        let retry = super::thread_landing::land_local_command(thread);
+        Self::safety_refusal(
+            "land_checkpoint_rolled_back",
+            format!(
+                "Land for `{thread}` failed at Git checkpoint and was rolled back: {checkpoint_error}"
+            ),
+            format!("Resolve the Git checkpoint issue, then retry `{retry}`."),
+            "Git checkpoint failed after local land steps; land auto-undid the integration so Git and Heddle tips stay consistent",
+            "retrying after fixing the checkpoint issue is safe because the Heddle integration was rolled back",
+            format!(
+                "completed steps before rollback: {completed}. No Git checkpoint was written; land-owned Heddle integration was undone."
+            ),
+            retry.clone(),
+            vec!["heddle verify".to_string(), retry],
+        )
+    }
+
+    pub(crate) fn land_checkpoint_partial_failure_undo_failed(
+        thread: &str,
+        checkpoint_error: impl fmt::Display,
+        undo_error: impl fmt::Display,
+        performed_steps: Vec<String>,
+    ) -> Self {
+        let completed = if performed_steps.is_empty() {
+            "no completed steps were recorded".to_string()
+        } else {
+            performed_steps.join(", ")
+        };
+        Self::safety_refusal(
+            "land_checkpoint_partial_failure",
+            format!(
+                "Land partially completed for `{thread}`, but Git checkpoint failed: {checkpoint_error}. Auto-undo also failed: {undo_error}"
+            ),
+            "Run `heddle undo` to roll back the local land, or resolve the Git issue and run `heddle commit -m \"...\"`.",
+            "Git checkpoint failed after local land steps, and automatic rollback did not complete",
+            "retrying blindly could obscure the already-landed local merge state; manual undo is required",
+            format!("completed steps: {completed}. No Git checkpoint was written."),
+            "heddle undo",
+            vec![
+                "heddle undo".to_string(),
+                "heddle commit -m \"...\"".to_string(),
+            ],
+        )
+    }
+
+    pub(crate) fn land_checkpoint_recovery_required(
+        thread: &str,
+        checkpoint_error: impl fmt::Display,
+        recovery_error: impl fmt::Display,
+        performed_steps: Vec<String>,
+    ) -> Self {
+        let completed = if performed_steps.is_empty() {
+            "no completed steps were recorded".to_string()
+        } else {
+            performed_steps.join(", ")
+        };
+        Self::safety_refusal(
+            "land_checkpoint_recovery_required",
+            format!(
+                "Land checkpoint recovery for `{thread}` did not complete: {checkpoint_error}. Recovery also failed: {recovery_error}"
+            ),
+            "Run `heddle status` to retry durable checkpoint recovery before changing either tip.",
+            "Git checkpoint publication may have completed, but its durable Heddle metadata could not be finalized",
+            "rolling back Heddle while Git may already point at the landed state would split the two tips",
+            format!(
+                "completed steps: {completed}. The incomplete-land marker was preserved for a later recovery attempt."
+            ),
+            "heddle status",
+            vec!["heddle status".to_string(), "heddle verify".to_string()],
+        )
+    }
+
+    pub(crate) fn land_checkpoint_rollback_marker_cleanup_failed(
+        thread: &str,
+        checkpoint_error: impl fmt::Display,
+        cleanup_error: impl fmt::Display,
+        performed_steps: Vec<String>,
+    ) -> Self {
+        let completed = if performed_steps.is_empty() {
+            "no completed steps were recorded".to_string()
+        } else {
+            performed_steps.join(", ")
+        };
+        Self::safety_refusal(
+            "land_checkpoint_marker_cleanup_failed",
+            format!(
+                "Land for `{thread}` was rolled back after checkpoint failure, but its recovery marker could not be removed: {checkpoint_error}. Marker cleanup failed: {cleanup_error}"
+            ),
+            "Restore write access to `.heddle`, remove `.heddle/incomplete-land.json`, then retry the land.",
+            "the land-owned Heddle integration was undone, but the stale recovery marker remains",
+            "leaving the marker unreported would make the next command attempt to recover work that is already rolled back",
+            format!(
+                "completed steps before rollback: {completed}. Git was not checkpointed; the land-owned integration was undone."
+            ),
+            "heddle status",
+            vec!["heddle status".to_string()],
+        )
+    }
+
     pub(crate) fn from_git_projection_error(
         error: &heddle_git_projection::git_core::GitProjectionError,
     ) -> Option<Self> {
@@ -738,9 +863,20 @@ impl RecoveryAdvice {
             {
                 Some(Self::git_overlay_note_ref_conflict())
             }
-            GitProjectionError::NonFastForwardRef { name, .. } => name
+            GitProjectionError::NonFastForwardRef {
+                name,
+                remote_destination: true,
+                ..
+            } => name
                 .strip_prefix("refs/heads/")
                 .map(Self::git_overlay_remote_push_rejected),
+            GitProjectionError::NonFastForwardRef {
+                name,
+                remote_destination: false,
+                ..
+            } => name
+                .strip_prefix("refs/heads/")
+                .map(Self::git_overlay_local_non_fast_forward),
             GitProjectionError::MappingConflict { .. } => {
                 Some(Self::git_overlay_mapping_conflict())
             }
@@ -841,6 +977,27 @@ impl RecoveryAdvice {
             "the remote branch, local Git branch, Heddle refs, index, and worktree files were left unchanged",
             primary_command.clone(),
             vec![primary_command, "heddle verify".to_string()],
+        )
+    }
+
+    /// Updating the authoritative checkout branch would replace a local Git
+    /// commit. Keep this distinct from a remote push rejection so recovery is
+    /// executable in the current checkout.
+    pub(crate) fn git_overlay_local_non_fast_forward(branch: &str) -> Self {
+        let import_command = format!("heddle import git --ref {branch}");
+        Self::safety_refusal(
+            "git_overlay_local_non_fast_forward",
+            format!("Local Git branch '{branch}' does not fast-forward from the Heddle tip"),
+            format!(
+                "Inspect with `heddle status`, then reconcile the authoritative Git branch with `{import_command}` before retrying."
+            ),
+            format!(
+                "updating local branch '{branch}' would replace work that exists only on the Git tip"
+            ),
+            "forcing the local Git branch could discard Git-owned history",
+            "Heddle refs, the local Git branch, index, and worktree were left unchanged by this ref update",
+            "heddle status",
+            vec!["heddle status".to_string(), import_command],
         )
     }
 

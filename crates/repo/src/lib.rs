@@ -132,10 +132,10 @@ pub use repository::{
     SnapshotExecution, SnapshotProfile, SpoolFacet, ThreadCaptureOutcome, TreeBuildProfile,
     TrustedKey, UntrackedSet, UntrackedSubtree, WarmCanonicalStoreStats, WorktreeCompareProfile,
     WorktreeIndexInspection, WorktreeStatusDetailed, compute_rewrite_pct, find_merge_base,
-    is_major_rewrite, is_synthetic_root,
+    is_major_rewrite, is_synthetic_root, query_history_from_source,
 };
 #[cfg(feature = "git-overlay")]
-pub use repository::{GitOverlayBranchTip, GitOverlayOutOfBandCommits};
+pub use repository::{GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitOverlayShortStatus};
 #[cfg(feature = "async-source")]
 pub use repository::{find_merge_base_async, is_ancestor_async};
 pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};

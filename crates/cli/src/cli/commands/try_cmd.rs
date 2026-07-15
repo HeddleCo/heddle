@@ -188,6 +188,7 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
         no_daemon: false,
         interactive_setup: false,
         shared_target: false,
+        no_shared_target: false,
         hydrate: false,
     };
     let start_output = start_thread(&repo, start_args)?;

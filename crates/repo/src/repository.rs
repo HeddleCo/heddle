@@ -9,6 +9,9 @@ pub(crate) mod commit_graph;
 mod commit_graph_persistence;
 #[path = "context_suggestions.rs"]
 mod context_suggestions;
+#[cfg(feature = "git-overlay")]
+#[path = "git_overlay_object_source.rs"]
+mod git_overlay_object_source;
 #[path = "repo_config.rs"]
 pub(crate) mod repo_config;
 #[path = "repository_context.rs"]
@@ -50,6 +53,8 @@ pub use context_suggestions::{
     compute_rewrite_pct, is_major_rewrite,
 };
 pub use objects::object::DiffKind;
+#[cfg(feature = "git-overlay")]
+use objects::object::MarkerName;
 use objects::{
     Progress,
     error::{HeddleError, Result},
@@ -58,9 +63,8 @@ use objects::{
     object::{Attribution, ContentHash, Principal, State, StateId, ThreadName, Tree},
     store::{AnyStore, FsStore, ObjectStore, ShallowInfo},
     sync::RwLockExt,
+    worktree::WorktreeStatus,
 };
-#[cfg(feature = "git-overlay")]
-use objects::{object::MarkerName, worktree::WorktreeStatus};
 use oplog::{OpLog, OpLogBackend, OpRecord};
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
 pub use refs::{RefSummaryIndexInspection, SpoolFacet};
@@ -77,7 +81,9 @@ pub use repo_config::{
 };
 #[cfg(feature = "async-source")]
 pub use repository_history::query_history_async;
-pub use repository_history::{ChangedPathFilter, ChangedPathFilters, HistoryQuery};
+pub use repository_history::{
+    ChangedPathFilter, ChangedPathFilters, HistoryQuery, query_history_from_source,
+};
 pub use repository_maintenance::{
     ChangeMonitorInspection, CommitGraphInspection, PackFilesInspection, PartialFetchInspection,
     PullPlannerCacheInspection, RefCountsInspection, RepositoryMaintenanceRunReport,
@@ -123,6 +129,14 @@ mod status_untracked_scan;
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
 const GIT_CHECKPOINT_INTENT_FILE: &str = "git-checkpoint-intent.json";
 const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
+
+#[derive(Debug)]
+pub struct GitOverlayShortStatus {
+    pub worktree: WorktreeStatus,
+    pub index_staged_paths: Vec<String>,
+    pub index_extra_paths: Vec<String>,
+    pub index_plan_applicable: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryCapability {
@@ -546,9 +560,34 @@ impl Repository {
     ///
     /// Returns the local [`FsStore`] wrapped in the [`AnyStore`] enum so object
     /// access stays statically dispatched.
-    fn build_store(config: &RepoConfig, heddle_dir: &Path) -> Result<AnyStore> {
-        let _ = config;
-        Ok(AnyStore::Fs(FsStore::new(heddle_dir)))
+    fn build_store(
+        config: &RepoConfig,
+        root: &Path,
+        heddle_dir: &Path,
+        shared_overlay_source_root: Option<&Path>,
+    ) -> Result<AnyStore> {
+        let store = AnyStore::Fs(FsStore::new(heddle_dir));
+        #[cfg(feature = "git-overlay")]
+        let mut store = store;
+        #[cfg(not(feature = "git-overlay"))]
+        let _ = (config, root, shared_overlay_source_root);
+        #[cfg(feature = "git-overlay")]
+        let overlay_source_root = shared_overlay_source_root
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                (config.repository.source_authority == RepositorySourceAuthority::GitOverlay)
+                    .then(|| root.to_path_buf())
+            });
+        #[cfg(feature = "git-overlay")]
+        if let Some(source_root) = overlay_source_root {
+            store.set_external_source(Arc::new(
+                git_overlay_object_source::GitOverlayObjectSource::new(
+                    source_root,
+                    heddle_dir.to_path_buf(),
+                ),
+            ));
+        }
+        Ok(store)
     }
 
     /// Initialize a new bare repository at the given path.
@@ -578,6 +617,8 @@ impl Repository {
         objects::fs_atomic::create_private_dir_all(&heddle_dir)?;
 
         let store = FsStore::new(&heddle_dir);
+        #[cfg(feature = "git-overlay")]
+        let mut store = store;
         store.init()?;
 
         let refs = RefManager::new(&heddle_dir);
@@ -593,6 +634,16 @@ impl Repository {
         let mut config = RepoConfig::default();
         config.repository.source_authority = source_authority;
         config.save(&heddle_dir.join("config.toml"))?;
+
+        #[cfg(feature = "git-overlay")]
+        if source_authority == RepositorySourceAuthority::GitOverlay {
+            store.set_external_source(Arc::new(
+                git_overlay_object_source::GitOverlayObjectSource::new(
+                    root.clone(),
+                    heddle_dir.clone(),
+                ),
+            ));
+        }
 
         refs.write_head(&Head::Attached {
             thread: ThreadName::from("main"),
@@ -615,7 +666,7 @@ impl Repository {
         // point — parity with `open_raw`.
         refs.init_reconcile_watermark()?;
 
-        Ok(Self {
+        let repo = Self {
             root,
             heddle_dir: heddle_dir.clone(),
             capability: repository_capability_for_authority(source_authority),
@@ -627,7 +678,13 @@ impl Repository {
             blob_hydrator: RwLock::new(None),
             git_overlay_repo: RwLock::new(None),
             progress: RwLock::new(Progress::null()),
-        })
+        };
+
+        // A freshly initialized repository is already in the current format.
+        // Record that fact during the mutating init operation so the first
+        // observe-only command does not have to create the migration ledger.
+        crate::migration::apply_pending(&repo)?;
+        Ok(repo)
     }
 
     /// Initialize a new repository with a seeded `main` thread.
@@ -773,8 +830,17 @@ impl Repository {
                     let config_path = shared_galeed_dir.join("config.toml");
                     let mut config = RepoConfig::load_for_repository(&config_path)?;
                     ensure_supported_repo_format(&config_path, &config)?;
+                    let shared_overlay_source_root = (config.repository.source_authority
+                        == RepositorySourceAuthority::GitOverlay)
+                        .then(|| shared_galeed_dir.parent().map(Path::to_path_buf))
+                        .flatten();
                     config.repository.source_authority = pointer.source_authority;
-                    let store = Self::build_store(&config, &shared_galeed_dir)?;
+                    let store = Self::build_store(
+                        &config,
+                        dir,
+                        &shared_galeed_dir,
+                        shared_overlay_source_root.as_deref(),
+                    )?;
                     let local_head_path = heddle_path.join("HEAD");
                     let refs = RefManager::new(&shared_galeed_dir).with_local_head(local_head_path);
                     let repo =
@@ -788,7 +854,7 @@ impl Repository {
                     let config_path = heddle_path.join("config.toml");
                     let config = RepoConfig::load_for_repository(&config_path)?;
                     ensure_supported_repo_format(&config_path, &config)?;
-                    let store = Self::build_store(&config, &heddle_path)?;
+                    let store = Self::build_store(&config, dir, &heddle_path, None)?;
                     let refs = RefManager::new(&heddle_path);
                     let repo = Self::open_raw(dir.to_path_buf(), heddle_path, store, config, refs)?;
                     repo.run_open_hooks()?;
@@ -1483,6 +1549,14 @@ impl Repository {
     /// would silently reintroduce the pathological checkpoint cost.
     #[cfg(feature = "git-overlay")]
     pub fn git_overlay_worktree_status(&self) -> Result<Option<WorktreeStatus>> {
+        Ok(self
+            .git_overlay_short_status()?
+            .map(|status| status.worktree))
+    }
+
+    /// Build worktree status and Git-index intent from one Sley status stream.
+    #[cfg(feature = "git-overlay")]
+    pub fn git_overlay_short_status(&self) -> Result<Option<GitOverlayShortStatus>> {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
         }
@@ -1498,7 +1572,11 @@ impl Repository {
         let mut modified = BTreeSet::new();
         let mut deleted = BTreeSet::new();
         let ignore_patterns = self.ignore_patterns()?;
-        let ignore_matcher = crate::worktree_ignore::WorktreeIgnoreMatcher::new(&ignore_patterns);
+        let worktree_ignore = crate::worktree_ignore::WorktreeIgnoreMatcher::new(&ignore_patterns);
+        let index_ignore = objects::worktree::build_worktree_ignore(&ignore_patterns);
+        let index_plan_applicable = git_worktree_matches_repo_root(&git_repo, self.root());
+        let mut index_staged_paths = Vec::new();
+        let mut index_extra_paths = Vec::new();
 
         git_repo
             .stream_short_status_with_options(
@@ -1508,13 +1586,25 @@ impl Repository {
                 },
                 |entry| {
                     let path = git_path(entry.path);
+                    if path.is_empty() {
+                        return Ok(SleyStreamControl::Continue);
+                    }
+                    if index_plan_applicable {
+                        append_short_status_to_index_intent(
+                            &mut index_staged_paths,
+                            &mut index_extra_paths,
+                            &index_ignore,
+                            entry,
+                            &path,
+                        );
+                    }
                     if ignored_git_overlay_status_path(&path) {
                         return Ok(SleyStreamControl::Continue);
                     }
                     let path = PathBuf::from(path);
 
                     if entry.index == b'?' && entry.worktree == b'?' {
-                        if git_overlay_untracked_path_ignored(&ignore_matcher, &path) {
+                        if git_overlay_untracked_path_ignored(&worktree_ignore, &path) {
                             return Ok(SleyStreamControl::Continue);
                         }
                         added.insert(path);
@@ -1541,11 +1631,22 @@ impl Repository {
                 ))
             })?;
 
-        Ok(Some(WorktreeStatus {
-            modified: modified.into_iter().collect(),
-            added: added.into_iter().collect(),
-            deleted: deleted.into_iter().collect(),
+        Ok(Some(GitOverlayShortStatus {
+            worktree: WorktreeStatus {
+                modified: modified.into_iter().collect(),
+                added: added.into_iter().collect(),
+                deleted: deleted.into_iter().collect(),
+            },
+            index_staged_paths,
+            index_extra_paths,
+            index_plan_applicable,
         }))
+    }
+
+    /// Native-only builds have no Git status stream.
+    #[cfg(not(feature = "git-overlay"))]
+    pub fn git_overlay_short_status(&self) -> Result<Option<GitOverlayShortStatus>> {
+        Ok(None)
     }
 
     fn git_projection_mapping(&self) -> Result<HashMap<String, String>> {
@@ -2942,6 +3043,52 @@ fn git_path(path: &[u8]) -> String {
 #[cfg(feature = "git-overlay")]
 fn ignored_git_overlay_status_path(path: &str) -> bool {
     path == ".heddle" || path.starts_with(".heddle/")
+}
+
+#[cfg(feature = "git-overlay")]
+const GIT_MODE_COMMIT: u32 = 0o160000;
+
+#[cfg(feature = "git-overlay")]
+fn git_worktree_matches_repo_root(git: &SleyRepository, root: &Path) -> bool {
+    git.workdir().is_some_and(
+        |workdir| match (workdir.canonicalize(), root.canonicalize()) {
+            (Ok(workdir), Ok(root)) => workdir == root,
+            _ => false,
+        },
+    )
+}
+
+#[cfg(feature = "git-overlay")]
+fn append_short_status_to_index_intent(
+    staged_paths: &mut Vec<String>,
+    extra_paths: &mut Vec<String>,
+    ignore_matcher: &objects::worktree::WorktreeIgnoreMatcher,
+    entry: sley::ShortStatusRow<'_>,
+    path: &str,
+) {
+    if entry.index == b'?' && entry.worktree == b'?' {
+        if !ignore_matcher.is_ignored(Path::new(path)) {
+            extra_paths.push(format!("untracked: {path}"));
+        }
+        return;
+    }
+    if entry.index != b' ' && entry.index != b'!' {
+        staged_paths.push(path.to_string());
+    }
+    if entry.worktree != b' '
+        && entry.worktree != b'!'
+        && !status_row_is_gitlink_worktree_only(entry)
+    {
+        extra_paths.push(format!("unstaged: {path}"));
+    }
+}
+
+#[cfg(feature = "git-overlay")]
+fn status_row_is_gitlink_worktree_only(entry: sley::ShortStatusRow<'_>) -> bool {
+    entry.index == b' '
+        && (entry.index_mode == Some(GIT_MODE_COMMIT)
+            || entry.head_mode == Some(GIT_MODE_COMMIT)
+            || entry.worktree_mode == Some(GIT_MODE_COMMIT))
 }
 
 #[cfg(feature = "git-overlay")]

@@ -1391,16 +1391,32 @@ impl GitIndexPlan {
 const GIT_MODE_COMMIT: u32 = 0o160000;
 
 pub fn git_index_plan_for_repo(repo: &Repository) -> Result<Option<GitIndexPlan>> {
-    let Some(git) = repo.git_overlay_sley_repository()? else {
+    let Some(status) = repo.git_overlay_short_status()? else {
         return Ok(None);
     };
-    if !git_worktree_matches_root(&git, repo.root()) {
-        return Ok(None);
+    Ok(git_index_plan_from_short_status(&status))
+}
+
+fn git_index_plan_from_short_status(status: &repo::GitOverlayShortStatus) -> Option<GitIndexPlan> {
+    status.index_plan_applicable.then(|| {
+        GitIndexPlan::from_intent(&GitIndexIntent {
+            staged_paths: status.index_staged_paths.clone(),
+            extra_paths: status.index_extra_paths.clone(),
+        })
+    })
+}
+
+fn load_git_overlay_status_and_index_plan(
+    repo: &Repository,
+) -> (Result<Option<WorktreeStatus>>, Option<GitIndexPlan>) {
+    match repo.git_overlay_short_status() {
+        Ok(Some(status)) => {
+            let index = git_index_plan_from_short_status(&status);
+            (Ok(Some(status.worktree)), index)
+        }
+        Ok(None) => (Ok(None), None),
+        Err(error) => (Err(error), None),
     }
-    let ignore_patterns = repo.ignore_patterns()?;
-    Ok(Some(GitIndexPlan::from_intent(
-        &git_index_intent_for_root_with_ignore_and_repo(repo.root(), &ignore_patterns, &git)?,
-    )))
 }
 
 /// Build a Git index plan for a worktree root without requiring a Heddle
@@ -1973,7 +1989,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
     let import_hint_ms = import_hint_start.elapsed().as_millis();
 
     let git_overlay_status_start = Instant::now();
-    let git_worktree_status_result = repo.git_overlay_worktree_status();
+    let (git_worktree_status_result, git_index) = load_git_overlay_status_and_index_plan(repo);
     let git_overlay_status_ms = git_overlay_status_start.elapsed().as_millis();
 
     let verification_start = Instant::now();
@@ -1993,9 +2009,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
 
     let git_worktree_status = git_worktree_status_result.unwrap_or(None);
 
-    let git_index_start = Instant::now();
-    let git_index = git_index_plan_for_repo(repo)?;
-    let git_index_ms = git_index_start.elapsed().as_millis();
+    let git_index_ms = 0;
 
     let identity_notice = first_capture_identity_notice(ctx, repo, current_state.as_ref())?;
     let git_clean_mapping_blocker = matches!(
@@ -3209,6 +3223,64 @@ mod tests {
             "injected repo must report zero facade open cost"
         );
         assert!(!report.trust.status.is_empty());
+    }
+
+    #[test]
+    fn single_short_status_stream_builds_worktree_and_index_plan() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .expect("git init");
+        std::fs::write(root.join("tracked.txt"), "v1\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(root)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-m",
+                "init",
+            ])
+            .current_dir(root)
+            .output()
+            .expect("git commit");
+        repo::Repository::init_default(root).expect("heddle init");
+        let repo = repo::Repository::open(root).expect("open");
+        if repo.capability() != repo::RepositoryCapability::GitOverlay {
+            return;
+        }
+        std::fs::write(root.join("tracked.txt"), "v2\n").unwrap();
+        std::fs::write(root.join("untracked.txt"), "u\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "untracked.txt"])
+            .current_dir(root)
+            .output()
+            .expect("stage untracked");
+        std::fs::write(root.join("untracked.txt"), "u2\n").unwrap();
+
+        let snapshot = repo
+            .git_overlay_short_status()
+            .expect("short status")
+            .expect("overlay short status");
+        assert!(snapshot.index_plan_applicable);
+        assert!(!snapshot.worktree.is_clean());
+        assert!(!snapshot.index_staged_paths.is_empty() || !snapshot.index_extra_paths.is_empty());
+
+        let (worktree, plan) = super::load_git_overlay_status_and_index_plan(&repo);
+        let worktree = worktree.expect("worktree ok").expect("some status");
+        assert_eq!(worktree.modified.len(), snapshot.worktree.modified.len());
+        assert_eq!(worktree.added.len(), snapshot.worktree.added.len());
+        assert_eq!(worktree.deleted.len(), snapshot.worktree.deleted.len());
+        assert!(plan.is_some());
     }
 
     #[test]

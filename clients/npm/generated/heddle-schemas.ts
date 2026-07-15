@@ -1240,6 +1240,41 @@ export interface IntegrationUpgradeSchema {
   [key: string]: unknown;
 }
 
+export interface LandBatchPeerSchema {
+  blockers: string[];
+  captured: boolean;
+  checkpointed: boolean;
+  git_commit?: string | null;
+  integrated: boolean;
+  message: string;
+  primary_command?: string | null;
+  recovery_commands: string[];
+  siblings_restack_failed: SiblingRestackFailureSchema[];
+  siblings_restacked: string[];
+  status: string;
+  synced: boolean;
+  thread: string;
+  warnings: string[];
+}
+
+export interface LandBatchSchema {
+  action: string;
+  git_head: string | null;
+  idempotency_status?: string | null;
+  landed: string[];
+  message: string;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "land_batch";
+  peers: LandBatchPeerSchema[];
+  recommended_action: string | null;
+  replayed?: boolean | null;
+  status: string;
+  stopped_at: string | null;
+  threads: string[];
+  verification: RepositoryVerificationStateSchema | null;
+}
+
 export interface LandSchema {
   action: string;
   blockers?: string[] | null;
@@ -1260,6 +1295,8 @@ export interface LandSchema {
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   replayed?: boolean | null;
+  siblings_restack_failed: SiblingRestackFailureSchema[];
+  siblings_restacked: string[];
   skipped_steps: string[];
   status: string;
   synced: boolean;
@@ -2112,6 +2149,11 @@ export interface ShowSchema {
   storage_model: string;
   tree: string;
   verification?: unknown;
+}
+
+export interface SiblingRestackFailureSchema {
+  message: string;
+  thread: string;
 }
 
 export interface StartSchema {
@@ -3224,6 +3266,7 @@ export interface HeddleVerbOutputs {
   "integration uninstall": IntegrationUninstallSchema;
   "integration upgrade": IntegrationUpgradeSchema;
   land: LandSchema;
+  "land --threads": LandBatchSchema;
   log: LogSchema;
   "log --reflog": LogReflogSchema;
   "log --timeline": TimelineLogSchema;
@@ -3385,6 +3428,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "integration uninstall",
   "integration upgrade",
   "land",
+  "land --threads",
   "log",
   "log --reflog",
   "log --timeline",

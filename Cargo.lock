@@ -1954,6 +1954,7 @@ dependencies = [
  "heddle-format",
  "heddle-objects",
  "similar",
+ "sley",
  "tracing",
 ]
 

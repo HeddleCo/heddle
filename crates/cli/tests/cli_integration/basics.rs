@@ -1393,7 +1393,7 @@ fn test_cli_import_git_ref_imports_only_selected_branch() {
 }
 
 #[test]
-fn test_cli_show_git_only_branch_tip_suggests_ref_scoped_import() {
+fn test_cli_show_git_only_branch_tip_is_observable_without_import() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
@@ -1405,16 +1405,18 @@ fn test_cli_show_git_only_branch_tip_suggests_ref_scoped_import() {
         &["show", "support/git-only", "--output", "json"],
         Some(temp.path()),
     )
-    .unwrap_err()
-    .to_string();
+    .unwrap();
+    let output: Value = serde_json::from_str(&output).unwrap();
+    assert!(output["state_id"].as_str().is_some(), "{output}");
+    let repo = repo::Repository::open(temp.path()).unwrap();
     assert!(
-        output.contains("heddle import git --ref support/git-only"),
-        "show should recommend a ref-scoped import for git-only branch tips: {output}"
+        repo.current_state().unwrap().is_none(),
+        "showing a Git-only branch must not bind a Heddle current state"
     );
 }
 
 #[test]
-fn test_cli_show_git_only_tag_suggests_ref_scoped_import() {
+fn test_cli_show_git_only_tag_is_observable_without_import() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
@@ -1422,12 +1424,13 @@ fn test_cli_show_git_only_tag_suggests_ref_scoped_import() {
     git(&["tag", "v1.0.0"], temp.path());
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let output = heddle(&["show", "v1.0.0", "--output", "json"], Some(temp.path()))
-        .unwrap_err()
-        .to_string();
+    let output = heddle(&["show", "v1.0.0", "--output", "json"], Some(temp.path())).unwrap();
+    let output: Value = serde_json::from_str(&output).unwrap();
+    assert!(output["state_id"].as_str().is_some(), "{output}");
+    let repo = repo::Repository::open(temp.path()).unwrap();
     assert!(
-        output.contains("heddle import git --ref v1.0.0"),
-        "show should recommend a ref-scoped import for git-only tags: {output}"
+        repo.current_state().unwrap().is_none(),
+        "showing a Git-only tag must not bind a Heddle current state"
     );
 }
 
@@ -1557,12 +1560,11 @@ fn test_cli_import_git_ref_imports_only_selected_tag() {
     let parsed_v1: Value = serde_json::from_str(&v1).unwrap();
     assert!(parsed_v1["state_id"].as_str().is_some());
 
-    let v2_err = heddle(&["show", "v2.0.0", "--output", "json"], Some(temp.path()))
-        .unwrap_err()
-        .to_string();
+    let v2 = heddle(&["show", "v2.0.0", "--output", "json"], Some(temp.path())).unwrap();
+    let parsed_v2: Value = serde_json::from_str(&v2).unwrap();
     assert!(
-        v2_err.contains("heddle import git --ref v2.0.0"),
-        "unselected tag should remain import-only: {v2_err}"
+        parsed_v2["state_id"].as_str().is_some(),
+        "an unselected Git tag remains observable without being imported: {parsed_v2}"
     );
 }
 

@@ -111,6 +111,9 @@ pub enum GitProjectionError {
         name: String,
         old: ObjectId,
         new: ObjectId,
+        /// True when the rejected ref belongs to a push destination; false
+        /// when Heddle is updating the checkout's authoritative local `.git`.
+        remote_destination: bool,
     },
 
     #[error(
@@ -587,6 +590,7 @@ pub struct GitProjection<'a> {
     pub mapping: SyncMapping,
     pub commit_message_overrides: HashMap<StateId, String>,
     pub commit_parent_overrides: HashMap<StateId, Vec<ObjectId>>,
+    linearize_unmapped_tip_to_checkout: bool,
 }
 
 struct MappingFileSnapshot {
@@ -767,6 +771,7 @@ impl<'a> GitProjection<'a> {
             mapping: SyncMapping::new(),
             commit_message_overrides: HashMap::new(),
             commit_parent_overrides: HashMap::new(),
+            linearize_unmapped_tip_to_checkout: false,
         }
     }
 
@@ -876,6 +881,13 @@ impl<'a> GitProjection<'a> {
 
     pub fn set_commit_parent_override(&mut self, state_id: StateId, parents: Vec<ObjectId>) {
         self.commit_parent_overrides.insert(state_id, parents);
+    }
+
+    /// Export an otherwise-unmapped tip on top of the checkout branch's
+    /// current Git commit. Multi-peer land enables this for every peer after
+    /// the first so the batch advances one linear Git branch.
+    pub fn linearize_unmapped_tip_to_checkout(&mut self) {
+        self.linearize_unmapped_tip_to_checkout = true;
     }
 
     pub fn with_mapping_rollback<T>(
@@ -1748,6 +1760,18 @@ impl<'a> GitProjection<'a> {
         self.seed_git_checkpoint_mappings_from_repo(&checkout.object_repo)?;
         self.seed_ingest_identity_mappings_from_repo(&checkout.object_repo)?;
 
+        // Sequential peer lands must advance the checkout branch linearly.
+        // A restacked Heddle state can otherwise export beside the Git commit
+        // produced by the previous peer, making the local ref update non-FF.
+        // Never remint a state that already has a durable Git identity.
+        if self.linearize_unmapped_tip_to_checkout
+            && self.mapping.get_git(state_id).is_none()
+            && !self.commit_parent_overrides.contains_key(state_id)
+            && let Some(previous) = checkout.previous_branch
+        {
+            self.set_commit_parent_override(*state_id, vec![previous]);
+        }
+
         let identity = git_config_identity_with_global_fallback(self.heddle_repo.root())?;
         let audience = AudienceTier::Public;
         for reachable in self.sort_states_topologically(&[*state_id])? {
@@ -1840,6 +1864,7 @@ impl<'a> GitProjection<'a> {
                 phase: GitCheckpointIntentPhase::Prepared,
             };
             self.heddle_repo.begin_git_checkpoint_intent(&intent)?;
+            objects::fault_inject::maybe_panic_at("git_checkpoint_after_intent_before_publish");
         }
 
         checkout.publish(git_oid)?;
@@ -3177,6 +3202,7 @@ pub fn ensure_commit_update_fast_forward(
             name: name.to_string(),
             old,
             new,
+            remote_destination: false,
         }),
         Err(err) => Err(GitProjectionError::Git(format!(
             "ref update would move {name}: {old} -> {new}, but Heddle could not verify it as a fast-forward ({err}); fetch/import first or inspect the refs explicitly"
@@ -3791,6 +3817,7 @@ pub fn plan_destination_reconcile(
                             name: full.clone(),
                             old: old.unwrap_or_else(|| ObjectId::null(mirror_repo.object_format())),
                             new: update.target,
+                            remote_destination: true,
                         });
                     }
                 }

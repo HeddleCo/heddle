@@ -494,7 +494,7 @@ impl<'a> TreeBuildPolicy<'a> {
         if self.seen.contains(&hash) {
             return Ok(());
         }
-        if self.repo.store.has_blob(&hash)? {
+        if self.repo.store.has_blob_locally(&hash)? {
             self.seen.insert(hash);
             return Ok(());
         }
@@ -557,7 +557,9 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         // since materialise time. Skips the read+hash entirely for
         // unchanged files — the dominant cost on a "one file edited
         // in a big repo" capture.
-        if let Some(hash) = self.lookup_stat_cache_hash(&entry) {
+        if let Some(hash) = self.lookup_stat_cache_hash(&entry)
+            && self.repo.store.has_blob_locally(&hash)?
+        {
             self.stat_cache_hits += 1;
             state.profile.file_count += 1;
             state.entries.push(TreeEntry::file(

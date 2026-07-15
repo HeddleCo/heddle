@@ -75,6 +75,29 @@ fn git_ref_snapshot(path: &std::path::Path) -> String {
     )
 }
 
+fn directory_bytes_snapshot(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    fn visit(root: &std::path::Path, path: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
+        let mut entries = std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        for entry in entries {
+            if entry.is_dir() {
+                visit(root, &entry, out);
+            } else {
+                out.push((
+                    entry.strip_prefix(root).unwrap().display().to_string(),
+                    std::fs::read(&entry).unwrap(),
+                ));
+            }
+        }
+    }
+    let mut snapshot = Vec::new();
+    visit(root, root, &mut snapshot);
+    snapshot
+}
+
 fn git_commit_all(path: &std::path::Path, message: &str) {
     git(&["add", "."], path);
     git(&["commit", "-m", message], path);
@@ -82,6 +105,211 @@ fn git_commit_all(path: &std::path::Path, message: &str) {
 
 fn initialize_git_overlay(path: &std::path::Path) {
     heddle(&["init"], Some(path)).unwrap();
+}
+
+#[test]
+fn initialized_overlay_observe_commands_project_full_git_history_without_writes() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("story.txt"), "one\n").unwrap();
+    git_commit_all(temp.path(), "first");
+    git(&["config", "user.name", "Second Author"], temp.path());
+    std::fs::write(temp.path().join("story.txt"), "one\ntwo\n").unwrap();
+    git_commit_all(temp.path(), "second");
+    initialize_git_overlay(temp.path());
+    std::fs::write(temp.path().join("dirty.txt"), "visible diff\n").unwrap();
+
+    let before_files = directory_bytes_snapshot(&temp.path().join(".heddle"));
+    let before_refs = git_ref_snapshot(temp.path());
+
+    let log: Value =
+        serde_json::from_str(&heddle(&["log", "--output", "json"], Some(temp.path())).unwrap())
+            .unwrap();
+    assert!(
+        log["states"]
+            .as_array()
+            .is_some_and(|states| states.len() == 2)
+    );
+    assert!(
+        log["states"][0]["parents"]
+            .as_array()
+            .is_some_and(|parents| !parents.is_empty()),
+        "lazy log must retain Git ancestry: {log}"
+    );
+    let show: Value = serde_json::from_str(
+        &heddle(&["show", "HEAD", "--output", "json"], Some(temp.path())).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        show["parents"]
+            .as_array()
+            .is_some_and(|parents| !parents.is_empty())
+    );
+    let blame: Value = serde_json::from_str(
+        &heddle(
+            &["query", "--attribution", "./story.txt", "--output", "json"],
+            Some(temp.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(blame["lines"].as_array().map(Vec::len), Some(2));
+    assert_eq!(blame["lines"][0]["principal"]["name"], "Heddle Test");
+    assert_eq!(blame["lines"][1]["principal"]["name"], "Second Author");
+    assert_eq!(
+        blame["lines"][1]["state_id"], show["state_id_full"],
+        "tip-authored blame lines must share show/log descriptor identity"
+    );
+    let first_show: Value = serde_json::from_str(
+        &heddle(&["show", "HEAD~1", "--output", "json"], Some(temp.path())).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        blame["lines"][0]["state_id"], first_show["state_id_full"],
+        "ancestor-authored blame lines must share show/log descriptor identity"
+    );
+    heddle(&["diff", "HEAD", "--output", "json"], Some(temp.path())).unwrap();
+
+    assert_eq!(
+        directory_bytes_snapshot(&temp.path().join(".heddle")),
+        before_files
+    );
+    assert_eq!(git_ref_snapshot(temp.path()), before_refs);
+}
+
+#[test]
+fn unbound_overlay_blame_routes_explicit_heddle_state_through_native_provenance() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("story.txt"), "mapped line\n").unwrap();
+    git_commit_all(temp.path(), "mapped main");
+    let mapped_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+    initialize_git_overlay(temp.path());
+    let mapped_state = ingest::bind_single_git_commit_overlay(
+        temp.path(),
+        temp.path(),
+        &mapped_git,
+        ingest::ImportOptions::default(),
+    )
+    .expect("bind explicit Heddle state fixture");
+
+    git(&["checkout", "-b", "unbound"], temp.path());
+    std::fs::write(temp.path().join("unbound.txt"), "unbound\n").unwrap();
+    git_commit_all(temp.path(), "unbound tip");
+    let repo = repo::Repository::open(temp.path()).expect("open unbound overlay branch");
+    assert!(repo.current_state().unwrap().is_none());
+    drop(repo);
+
+    let state_spec = mapped_state.to_string_full();
+    let blame = json(
+        temp.path(),
+        &[
+            "query",
+            "--attribution",
+            "story.txt",
+            "--state",
+            &state_spec,
+        ],
+    );
+    assert_eq!(blame["lines"][0]["content"], "mapped line");
+    assert_eq!(blame["lines"][0]["state_id"], mapped_state.short());
+}
+
+#[test]
+fn unbound_overlay_history_preserves_filters_and_canonical_revision_semantics() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
+    git_commit_all(temp.path(), "base");
+    let base_oid = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+    git(&["tag", "base-tag", &base_oid], temp.path());
+
+    git(&["checkout", "-b", "side"], temp.path());
+    git(&["config", "user.name", "Side Author"], temp.path());
+    std::fs::write(temp.path().join("side.txt"), "side\n").unwrap();
+    git_commit_all(temp.path(), "side change");
+
+    git(&["checkout", "main"], temp.path());
+    git(
+        &["config", "user.name", "principal-agent-model-hit"],
+        temp.path(),
+    );
+    std::fs::write(temp.path().join("main.txt"), "main\n").unwrap();
+    git_commit_all(temp.path(), "main change");
+    git(
+        &["merge", "--no-ff", "side", "-m", "merge side"],
+        temp.path(),
+    );
+    initialize_git_overlay(temp.path());
+
+    let before_files = directory_bytes_snapshot(&temp.path().join(".heddle"));
+    let first_parent = json(temp.path(), &["log", "-n", "10"]);
+    let intents = first_parent["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|state| state["intent"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(intents, vec!["merge side", "main change", "base"]);
+
+    let side_parent_bound = heddle_output(
+        &["--output", "json", "log", "--since", "side", "-n", "10"],
+        Some(temp.path()),
+    )
+    .expect("invoke log with side-parent bound");
+    assert!(!side_parent_bound.status.success());
+    assert!(
+        side_parent_bound.stdout.is_empty(),
+        "an invalid side-parent bound must not emit older first-parent states: {}",
+        String::from_utf8_lossy(&side_parent_bound.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&side_parent_bound.stderr)
+            .contains("canonical Git history revision 'side' is outside the projected graph"),
+        "side-parent refusal must retain the canonical history error: {}",
+        String::from_utf8_lossy(&side_parent_bound.stderr)
+    );
+
+    let zero = json(temp.path(), &["log", "-n", "0"]);
+    assert_eq!(zero["states"].as_array().map(Vec::len), Some(0));
+
+    let path_log = json(temp.path(), &["log", "-n", "10", "--path", "main.txt"]);
+    let path_intents = path_log["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|state| state["intent"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(path_intents, vec!["main change"]);
+    let windows_path_log = json(temp.path(), &["log", "-n", "10", "--path", r".\main.txt"]);
+    assert_eq!(
+        windows_path_log["states"], path_log["states"],
+        "unbound overlay projection must consume the same normalized path contract as native history"
+    );
+
+    let principal_is_not_agent = json(
+        temp.path(),
+        &["log", "--agent", "agent-model-hit", "-n", "10"],
+    );
+    assert_eq!(
+        principal_is_not_agent["states"].as_array().map(Vec::len),
+        Some(0)
+    );
+
+    let head_parent = json(temp.path(), &["show", "HEAD~1"]);
+    assert_eq!(head_parent["intent"], "main change");
+    let at_grandparent = json(temp.path(), &["show", "@~2"]);
+    assert_eq!(at_grandparent["intent"], "base");
+    let branch = json(temp.path(), &["show", "side"]);
+    assert_eq!(branch["intent"], "side change");
+    let full_tag = json(temp.path(), &["show", "refs/tags/base-tag"]);
+    assert_eq!(full_tag["intent"], "base");
+
+    assert_eq!(
+        directory_bytes_snapshot(&temp.path().join(".heddle")),
+        before_files,
+        "unbound query and canonical revision reads must not persist Heddle state"
+    );
 }
 
 fn raw_git_preservation_action() -> &'static str {
@@ -3477,6 +3705,1113 @@ fn git_overlay_matrix_filemode_changes_surface_and_capture() {
 }
 
 #[test]
+fn git_overlay_matrix_land_checkpoint_failure_auto_undoes_heddle_integration() {
+    let fixture =
+        GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/land-rollback");
+    let before_state =
+        json(fixture.path(), &["--output", "json", "status"])["current_state"].clone();
+    let before_git = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    let before_refs = git_ref_snapshot(fixture.path());
+
+    let land = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/land-rollback",
+        ],
+        Some(fixture.path()),
+        &[("HEDDLE_FAULT_INJECT", "git_checkpoint_before_write_through")],
+    )
+    .expect("invoke land with checkpoint fault injection");
+    assert!(!land.status.success());
+    assert!(land.stdout.is_empty());
+    let stderr = std::str::from_utf8(&land.stderr).unwrap();
+    let envelope: Value = serde_json::from_str(stderr)
+        .unwrap_or_else(|error| panic!("stderr JSON: {error}: {stderr}"));
+    assert_eq!(envelope["kind"], "land_checkpoint_rolled_back");
+    assert_eq!(
+        json(fixture.path(), &["--output", "json", "status"])["current_state"],
+        before_state,
+        "auto-undo must restore the pre-land Heddle tip"
+    );
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        before_git
+    );
+    assert_eq!(git_ref_snapshot(fixture.path()), before_refs);
+}
+
+#[test]
+fn git_overlay_matrix_integrated_marker_write_failure_uses_committed_batch_for_rollback() {
+    let fixture = GitOverlayFixture::imported_main()
+        .with_ready_materialized_thread("feature/integrated-marker-rollback");
+    let before_state =
+        json(fixture.path(), &["--output", "json", "status"])["current_state"].clone();
+    let before_git = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+
+    let land = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/integrated-marker-rollback",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "land_before_integrated_marker_update",
+        )],
+    )
+    .expect("invoke land with integrated marker fault injection");
+    assert!(!land.status.success());
+    let envelope: Value = serde_json::from_slice(&land.stderr).expect("typed rollback error");
+    assert_eq!(
+        envelope["kind"], "land_checkpoint_rolled_back",
+        "{envelope}"
+    );
+    assert_eq!(
+        json(fixture.path(), &["--output", "json", "status"])["current_state"],
+        before_state,
+        "rollback must use the committed integration transaction even while the durable marker is still Prepared"
+    );
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        before_git
+    );
+    assert!(
+        !fixture.path().join(".heddle/incomplete-land.json").exists(),
+        "successful rollback must consume the prepared marker"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_prepared_marker_recovers_unrecorded_owned_collapse() {
+    let thread = "feature/collapse-marker-recovery";
+    let fixture = GitOverlayFixture::imported_main().with_ready_materialized_thread(thread);
+    std::fs::write(fixture.ready_thread_path().join("second.txt"), "second\n").unwrap();
+    let second = json(
+        fixture.ready_thread_path(),
+        &["--output", "json", "ready", "-m", "second ready state"],
+    );
+    assert_eq!(second["status"], "completed", "{second}");
+
+    let repo = repo::Repository::open(fixture.path()).unwrap();
+    let before_source = repo
+        .refs()
+        .get_thread(&objects::object::ThreadName::new(thread))
+        .unwrap()
+        .expect("ready thread source");
+    drop(repo);
+
+    let failed = heddle_output_with_env(
+        &["--output", "json", "land", "--thread", thread],
+        Some(fixture.path()),
+        &[("HEDDLE_FAULT_INJECT", "land_before_collapse_marker_update")],
+    )
+    .expect("invoke land with collapse marker fault injection");
+    assert!(!failed.status.success());
+    let marker_path = fixture.path().join(".heddle/incomplete-land.json");
+    let marker: Value = serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+    assert_eq!(marker["phase"], "prepared", "{marker}");
+    assert!(marker["collapse_state"].is_null(), "{marker}");
+
+    let repo = repo::Repository::open(fixture.path()).unwrap();
+    let collapsed_source = repo
+        .refs()
+        .get_thread(&objects::object::ThreadName::new(thread))
+        .unwrap()
+        .expect("collapsed source");
+    assert_ne!(collapsed_source, before_source);
+    drop(repo);
+
+    let recovery = heddle_output(&["--output", "json", "init"], Some(fixture.path())).unwrap();
+    assert!(
+        recovery.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovery.stderr)
+    );
+    let repo = repo::Repository::open(fixture.path()).unwrap();
+    assert_eq!(
+        repo.refs()
+            .get_thread(&objects::object::ThreadName::new(thread))
+            .unwrap(),
+        Some(before_source),
+        "recovery must infer and undo only the exact collapse from the recorded thread transition"
+    );
+    assert!(!marker_path.exists());
+}
+
+#[test]
+fn git_overlay_matrix_land_prepared_journal_recovers_pre_publish_crash() {
+    let fixture =
+        GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/land-prepared");
+    let before_git = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    let before_state = repo::Repository::open(fixture.path())
+        .unwrap()
+        .current_state()
+        .unwrap()
+        .expect("fixture target state")
+        .state_id
+        .to_string_full();
+    let crashed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/land-prepared",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "land_after_integration_before_journal_update",
+        )],
+    )
+    .expect("invoke land with pre-publication crash injection");
+    assert!(!crashed.status.success());
+    let marker = fixture.path().join(".heddle/incomplete-land.json");
+    assert!(
+        marker.is_file(),
+        "prepared journal must precede integration"
+    );
+    let prepared: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    assert_eq!(prepared["thread_id"], "feature/land-prepared");
+    assert_eq!(prepared["pre_target_state"], before_state);
+    assert!(
+        prepared["integration_transaction_id"]
+            .as_str()
+            .is_some_and(|transaction| transaction.starts_with("land-integration/")),
+        "the crash journal must retain its owning operation identity: {prepared}"
+    );
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        before_git
+    );
+
+    let status = json(fixture.path(), &["--output", "json", "status"]);
+    assert!(
+        marker.is_file(),
+        "observe-only status must retain the journal"
+    );
+    assert_eq!(status["coordination_status"], "blocked");
+
+    let retry = heddle(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/land-prepared",
+        ],
+        Some(fixture.path()),
+    )
+    .expect("retry should idempotently roll back the prepared phase and land");
+    let retry: Value = serde_json::from_str(&retry).unwrap();
+    assert_eq!(retry["status"], "landed", "{retry}");
+    assert!(!marker.exists());
+}
+
+#[test]
+fn git_overlay_matrix_automatic_land_recovers_each_transaction_boundary() {
+    for fault in [
+        "transactional_ff_after_worktree_before_commit",
+        "transactional_ff_after_commit",
+        "land_after_integration_before_journal_update",
+    ] {
+        let thread = format!("feature/auto-{fault}");
+        let fixture = GitOverlayFixture::imported_main().with_ready_materialized_thread(&thread);
+        let before_git = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+        let failed = heddle_output_with_env(
+            &["--output", "json", "land", "--thread", &thread],
+            Some(fixture.path()),
+            &[("HEDDLE_FAULT_INJECT", fault)],
+        )
+        .unwrap_or_else(|error| panic!("invoke automatic land at {fault}: {error}"));
+        assert!(!failed.status.success(), "fault {fault} must stop land");
+        assert!(
+            fixture.path().join(".heddle/incomplete-land.json").exists(),
+            "fault {fault} must retain the prepared journal"
+        );
+        assert_eq!(
+            git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+            before_git,
+            "Heddle integration at {fault} must not publish Git"
+        );
+
+        let retry = json(
+            fixture.path(),
+            &["--output", "json", "land", "--thread", &thread],
+        );
+        assert_eq!(retry["status"], "landed", "retry after {fault}: {retry}");
+        assert!(
+            !fixture.path().join(".heddle/incomplete-land.json").exists(),
+            "retry after {fault} must consume the journal"
+        );
+    }
+}
+
+#[test]
+fn git_overlay_matrix_manual_resolution_land_recovers_each_transaction_boundary() {
+    for fault in [
+        "transactional_ff_after_worktree_before_commit",
+        "transactional_ff_after_commit",
+        "land_after_integration_before_journal_update",
+    ] {
+        let thread = format!("feature/manual-{fault}");
+        let fixture = GitOverlayFixture::imported_main().with_ready_materialized_thread(&thread);
+        let resolved = json(
+            fixture.path(),
+            &["--output", "json", "thread", "resolve", &thread],
+        );
+        assert_eq!(
+            resolved["status"], "completed",
+            "fixture for {fault}: {resolved}"
+        );
+        let before_git = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+        let failed = heddle_output_with_env(
+            &["--output", "json", "land", "--thread", &thread],
+            Some(fixture.path()),
+            &[("HEDDLE_FAULT_INJECT", fault)],
+        )
+        .unwrap_or_else(|error| panic!("invoke manual-resolution land at {fault}: {error}"));
+        assert!(!failed.status.success(), "fault {fault} must stop land");
+        assert!(
+            fixture.path().join(".heddle/incomplete-land.json").exists(),
+            "fault {fault} must retain the prepared journal"
+        );
+        assert_eq!(
+            git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+            before_git,
+            "manual-resolution integration at {fault} must not publish Git"
+        );
+
+        let retry = json(
+            fixture.path(),
+            &["--output", "json", "land", "--thread", &thread],
+        );
+        assert_eq!(retry["status"], "landed", "retry after {fault}: {retry}");
+        assert!(
+            !fixture.path().join(".heddle/incomplete-land.json").exists(),
+            "retry after {fault} must consume the journal"
+        );
+    }
+}
+
+#[test]
+fn prepared_land_recovery_refuses_unrelated_git_divergence_at_mutation_chokepoint() {
+    let fixture = GitOverlayFixture::imported_main()
+        .with_ready_materialized_thread("feature/prepared-divergence");
+    let crashed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/prepared-divergence",
+        ],
+        Some(fixture.path()),
+        &[("HEDDLE_FAULT_INJECT", "land_after_prepared_journal")],
+    )
+    .unwrap();
+    assert!(!crashed.status.success());
+    let marker = fixture.path().join(".heddle/incomplete-land.json");
+    assert!(marker.exists());
+
+    std::fs::write(fixture.path().join("unrelated.txt"), "unrelated\n").unwrap();
+    git_commit_all(fixture.path(), "unrelated external mutation");
+    let unrelated_head = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    let capture = heddle_output(
+        &["capture", "-m", "must not consume unrelated work"],
+        Some(fixture.path()),
+    )
+    .unwrap();
+
+    assert!(!capture.status.success());
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        unrelated_head
+    );
+    assert!(marker.exists(), "failed recovery must preserve its journal");
+    assert!(
+        String::from_utf8_lossy(&capture.stderr)
+            .contains("refusing to infer or undo unrelated work"),
+        "mutation chokepoint must fail closed: {}",
+        String::from_utf8_lossy(&capture.stderr)
+    );
+}
+
+#[test]
+fn prepared_land_recovery_refuses_unowned_worktree_changes() {
+    let fixture = GitOverlayFixture::imported_main()
+        .with_ready_materialized_thread("feature/prepared-worktree-divergence");
+    let crashed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/prepared-worktree-divergence",
+        ],
+        Some(fixture.path()),
+        &[("HEDDLE_FAULT_INJECT", "land_after_prepared_journal")],
+    )
+    .unwrap();
+    assert!(!crashed.status.success());
+    let marker = fixture.path().join(".heddle/incomplete-land.json");
+    assert!(marker.exists());
+
+    let unrelated = fixture.path().join("unrelated.txt");
+    std::fs::write(&unrelated, "unrelated and uncommitted\n").unwrap();
+    let capture = heddle_output(
+        &[
+            "capture",
+            "-m",
+            "must not discard unrelated worktree changes",
+        ],
+        Some(fixture.path()),
+    )
+    .unwrap();
+
+    assert!(!capture.status.success());
+    assert_eq!(
+        std::fs::read_to_string(&unrelated).unwrap(),
+        "unrelated and uncommitted\n"
+    );
+    assert!(marker.exists(), "failed recovery must preserve its journal");
+    assert!(
+        String::from_utf8_lossy(&capture.stderr).contains("refusing to discard them"),
+        "mutation chokepoint must fail closed: {}",
+        String::from_utf8_lossy(&capture.stderr)
+    );
+}
+
+#[test]
+fn published_land_recovery_validates_branch_before_finalizing() {
+    let fixture = GitOverlayFixture::imported_main()
+        .with_ready_materialized_thread("feature/published-wrong-branch");
+    let crashed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/published-wrong-branch",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "git_checkpoint_after_publish_before_phase",
+        )],
+    )
+    .unwrap();
+    assert!(!crashed.status.success());
+    let published = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    git(
+        &["checkout", "-b", "unrelated-recovery-branch"],
+        fixture.path(),
+    );
+
+    let ready = heddle_output(&["ready"], Some(fixture.path())).unwrap();
+    assert!(!ready.status.success());
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        published
+    );
+    assert!(
+        fixture.path().join(".heddle/incomplete-land.json").exists(),
+        "wrong-branch recovery must retain the journal"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_rollback_started_phase_prevents_double_undo() {
+    let fixture =
+        GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/rollback-phase");
+    let before_state =
+        json(fixture.path(), &["--output", "json", "status"])["current_state"].clone();
+    let failed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/rollback-phase",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "git_checkpoint_before_write_through,land_after_rollback_before_journal_update",
+        )],
+    )
+    .unwrap();
+    assert!(!failed.status.success());
+    let marker_path = fixture.path().join(".heddle/incomplete-land.json");
+    let marker: Value = serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+    assert_eq!(marker["phase"], "rollback_started", "{marker}");
+    assert_eq!(
+        json(fixture.path(), &["--output", "json", "status"])["current_state"],
+        before_state,
+        "first undo already restored the target"
+    );
+
+    let retry = heddle(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/rollback-phase",
+        ],
+        Some(fixture.path()),
+    )
+    .expect("retry must finalize rollback without applying the undo twice");
+    let retry: Value = serde_json::from_str(&retry).unwrap();
+    assert_eq!(retry["status"], "landed", "{retry}");
+    assert!(
+        !fixture
+            .path()
+            .join(".heddle/state/git-checkpoint-intent.json")
+            .exists(),
+        "idempotent rollback recovery must remove its matching unpublished checkpoint intent"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_land_recovers_checkpoint_published_before_crash() {
+    let fixture =
+        GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/land-recover");
+    let before_git = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+
+    let crashed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/land-recover",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "git_checkpoint_after_publish_before_phase",
+        )],
+    )
+    .expect("invoke land with post-publish crash injection");
+    assert!(!crashed.status.success());
+    let marker = fixture.path().join(".heddle/incomplete-land.json");
+    assert!(marker.is_file(), "crash must preserve the land journal");
+
+    let after_publish = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    assert_ne!(
+        after_publish, before_git,
+        "Git publication must have happened"
+    );
+
+    let nested = fixture.path().join("nested-status");
+    std::fs::create_dir(&nested).unwrap();
+    let status = json(&nested, &["--output", "json", "status"]);
+    assert!(status["current_state"].as_str().is_some());
+    assert!(
+        status["blockers"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item
+                .as_str()
+                .is_some_and(|text| text.contains("recovery work pending")))),
+        "observe-only status must report, not execute, durable recovery: {status}"
+    );
+    assert!(
+        marker.exists(),
+        "status must not mutate the recovery journal"
+    );
+    let short = heddle_output(&["status", "--short"], Some(&nested)).unwrap();
+    assert!(
+        short.status.success(),
+        "short status should remain an observe-only recovery report: {}",
+        String::from_utf8_lossy(&short.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&short.stdout).contains("recovery work pending"),
+        "short status must not claim clean while a durable land marker exists: {}",
+        String::from_utf8_lossy(&short.stdout)
+    );
+    assert!(
+        marker.exists(),
+        "short status must report without consuming the recovery journal"
+    );
+
+    let _ = heddle(
+        &[
+            "--output",
+            "json",
+            "ready",
+            "--thread",
+            "feature/land-recover",
+        ],
+        Some(fixture.path()),
+    );
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        after_publish,
+        "recovery must finalize the published checkpoint, not rewind Git"
+    );
+    assert!(
+        !marker.exists(),
+        "successful recovery must clear the journal"
+    );
+    assert!(
+        !fixture
+            .path()
+            .join(".heddle/state/git-checkpoint-intent.json")
+            .exists(),
+        "recovery must finalize the durable checkpoint intent"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_recovers_checkpoint_before_marker_oid_update() {
+    let fixture = GitOverlayFixture::imported_main()
+        .with_ready_materialized_thread("feature/checkpoint-marker-gap");
+    let before_git = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    let failed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/checkpoint-marker-gap",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "land_after_checkpoint_before_marker_update",
+        )],
+    )
+    .expect("invoke land in checkpoint/marker crash window");
+    assert!(!failed.status.success());
+    let marker_path = fixture.path().join(".heddle/incomplete-land.json");
+    let marker: Value = serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+    assert!(marker["expected_git_oid"].is_null(), "{marker}");
+    assert!(
+        !fixture
+            .path()
+            .join(".heddle/state/git-checkpoint-intent.json")
+            .exists(),
+        "checkpoint intent is finalized before the injected failure"
+    );
+    let published = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    assert_ne!(published, before_git);
+
+    let retry = heddle_output(
+        &[
+            "--output",
+            "json",
+            "ready",
+            "--thread",
+            "feature/checkpoint-marker-gap",
+        ],
+        Some(fixture.path()),
+    )
+    .unwrap();
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        published
+    );
+    assert!(!marker_path.exists());
+}
+
+#[test]
+fn git_overlay_matrix_old_state_checkpoint_does_not_complete_unpublished_land() {
+    let fixture =
+        GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/land-old-map");
+    let before_git = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    let crashed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/land-old-map",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "git_checkpoint_after_intent_before_publish",
+        )],
+    )
+    .expect("invoke land with pre-publish crash");
+    assert!(!crashed.status.success());
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        before_git
+    );
+
+    let marker_path = fixture.path().join(".heddle/incomplete-land.json");
+    let marker: Value = serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+    let merge_state = marker["merge_state"].as_str().unwrap();
+    let repo = repo::Repository::open(fixture.path()).unwrap();
+    let state = repo.resolve_state(merge_state).unwrap().unwrap();
+    repo.record_git_checkpoint(&state, before_git.clone(), "pre-existing export")
+        .unwrap();
+
+    let _ = heddle(
+        &[
+            "--output",
+            "json",
+            "ready",
+            "--thread",
+            "feature/land-old-map",
+        ],
+        Some(fixture.path()),
+    );
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        before_git,
+        "an old state mapping must not masquerade as this land's publication"
+    );
+    assert!(
+        !marker_path.exists(),
+        "ready should roll the incomplete land back"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_recovery_is_idempotent_after_coalesce() {
+    let fixture = GitOverlayFixture::imported_main()
+        .with_ready_materialized_thread("feature/coalesced-recovery");
+    let crashed = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/coalesced-recovery",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "land_after_coalesce_before_journal_clear",
+        )],
+    )
+    .unwrap();
+    assert!(!crashed.status.success());
+    let marker = fixture.path().join(".heddle/incomplete-land.json");
+    assert!(marker.exists());
+    let published = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    let status = json(fixture.path(), &["--output", "json", "status"]);
+    assert_eq!(status["coordination_status"], "blocked");
+    assert!(marker.exists(), "status remains observe-only");
+
+    let _ = heddle(
+        &[
+            "--output",
+            "json",
+            "ready",
+            "--thread",
+            "feature/coalesced-recovery",
+        ],
+        Some(fixture.path()),
+    );
+    assert_eq!(
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        published
+    );
+    assert!(
+        !marker.exists(),
+        "recovery must tolerate already-coalesced batches"
+    );
+}
+
+#[test]
+fn recovered_manual_land_clears_resolution_metadata_before_journal() {
+    let thread = "feature/manual-recovery-cleanup";
+    let fixture = GitOverlayFixture::imported_main().with_ready_materialized_thread(thread);
+    let resolved = json(
+        fixture.path(),
+        &["--output", "json", "thread", "resolve", thread],
+    );
+    assert_eq!(resolved["status"], "completed", "{resolved}");
+    let failed = heddle_output_with_env(
+        &["--output", "json", "land", "--thread", thread],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "land_after_coalesce_before_journal_clear",
+        )],
+    )
+    .unwrap();
+    assert!(!failed.status.success());
+    let marker = fixture.path().join(".heddle/incomplete-land.json");
+    assert!(marker.exists());
+
+    let retry = heddle_output(&["--output", "json", "init"], Some(fixture.path())).unwrap();
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    let repo = repo::Repository::open(fixture.path()).unwrap();
+    let record = repo::ThreadManager::new(repo.heddle_dir())
+        .load(thread)
+        .unwrap()
+        .expect("landed thread metadata");
+    assert_eq!(
+        record.integration_policy_result.manual_resolution_state,
+        None
+    );
+    assert!(!record.integration_policy_result.conflicts_resolved_manually);
+    assert!(!marker.exists());
+}
+
+#[test]
+fn destination_init_does_not_recover_unrelated_cwd_repository() {
+    let temp = TempDir::new().unwrap();
+    let current = temp.path().join("current");
+    let destination = temp.path().join("destination");
+    std::fs::create_dir(&current).unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    init_git_repo_with_branch(&current, "main");
+    std::fs::write(current.join("README.md"), "current\n").unwrap();
+    git_commit_all(&current, "current base");
+    heddle(&["init"], Some(&current)).unwrap();
+    let marker = current.join(".heddle/incomplete-land.json");
+    std::fs::write(&marker, b"{}\n").unwrap();
+
+    let destination_arg = destination.to_string_lossy().into_owned();
+    let output = heddle_output(&["init", &destination_arg], Some(&current)).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(destination.join(".heddle").is_dir());
+    assert!(
+        marker.exists(),
+        "destination init must not consume cwd recovery state"
+    );
+
+    let current_arg = current.to_string_lossy().into_owned();
+    let targeted = heddle_output(&["init", &current_arg], Some(&destination)).unwrap();
+    assert!(
+        !targeted.status.success(),
+        "positional init of an existing target must recover that target"
+    );
+    assert!(
+        String::from_utf8_lossy(&targeted.stderr).contains("parse incomplete-land marker"),
+        "target recovery error should remain actionable: {}",
+        String::from_utf8_lossy(&targeted.stderr)
+    );
+}
+
+#[test]
+fn recovery_dispatch_respects_observe_only_modes_and_adopt_destination() {
+    let temp = TempDir::new().unwrap();
+    let current = temp.path().join("current");
+    let destination = temp.path().join("destination");
+    std::fs::create_dir(&current).unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    for (path, content) in [(&current, "current\n"), (&destination, "destination\n")] {
+        init_git_repo_with_branch(path, "main");
+        std::fs::write(path.join("README.md"), content).unwrap();
+        git_commit_all(path, "base");
+    }
+    heddle(&["init"], Some(&current)).unwrap();
+    let marker = current.join(".heddle/incomplete-land.json");
+    std::fs::write(&marker, b"{}\n").unwrap();
+
+    let listed = heddle_output(&["undo", "--list"], Some(&current)).unwrap();
+    assert!(
+        listed.status.success(),
+        "observe-only undo must not parse land recovery state: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(marker.exists(), "observe-only mode must retain the journal");
+
+    let mutating = heddle_output(&["undo"], Some(&current)).unwrap();
+    assert!(!mutating.status.success());
+    assert!(
+        String::from_utf8_lossy(&mutating.stderr).contains("parse incomplete-land marker"),
+        "mutating sibling must still enter recovery: {}",
+        String::from_utf8_lossy(&mutating.stderr)
+    );
+
+    let destination_arg = destination.to_string_lossy().into_owned();
+    let adopted = heddle_output(&["adopt", &destination_arg], Some(&current)).unwrap();
+    assert!(
+        adopted.status.success(),
+        "destination adopt must not recover cwd: {}",
+        String::from_utf8_lossy(&adopted.stderr)
+    );
+    assert!(marker.exists(), "destination adopt must retain cwd journal");
+    assert_eq!(
+        repo::Repository::open(&destination).unwrap().capability(),
+        repo::RepositoryCapability::NativeHeddle
+    );
+}
+
+#[test]
+fn failed_adopt_of_nested_git_target_does_not_bootstrap_sidecar() {
+    let temp = TempDir::new().unwrap();
+    let parent = temp.path().join("parent");
+    let nested = parent.join("nested-target");
+    std::fs::create_dir_all(&nested).unwrap();
+    init_git_repo_with_branch(&parent, "main");
+    std::fs::write(parent.join("README.md"), "parent\n").unwrap();
+    git_commit_all(&parent, "parent base");
+    heddle(&["init"], Some(&parent)).unwrap();
+
+    // Make the nested target an unborn Git repository. Adoption must refuse
+    // it during preflight without Repository::open inheriting the parent's
+    // metadata and auto-bootstrapping a nested sidecar first.
+    init_git_repo_with_branch(&nested, "main");
+    let nested_arg = nested.to_string_lossy().into_owned();
+    let failed = heddle_output(&["--output", "json", "adopt", &nested_arg], Some(&parent)).unwrap();
+    assert!(!failed.status.success(), "unborn nested adopt must fail");
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("git_history_empty"),
+        "failure must come from adopt preflight: {}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert!(
+        !nested.join(".heddle").exists(),
+        "failed destination preflight must leave no Heddle metadata"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_multi_peer_land_fast_forwards_git_tip() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
+    git_commit_all(temp.path(), "base");
+    heddle(&["init"], Some(temp.path())).expect("initialize Git Overlay");
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).expect("import main");
+
+    let alpha = temp.path().with_extension("alpha");
+    let beta = temp.path().with_extension("beta");
+    json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "start",
+            "alpha",
+            "--path",
+            alpha.to_str().unwrap(),
+        ],
+    );
+    json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "start",
+            "beta",
+            "--path",
+            beta.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(alpha.join("alpha.txt"), "alpha\n").unwrap();
+    json(&alpha, &["--output", "json", "capture", "-m", "alpha edit"]);
+    std::fs::write(beta.join("beta.txt"), "beta\n").unwrap();
+    json(&beta, &["--output", "json", "capture", "-m", "beta edit"]);
+
+    let alpha_land = json(
+        temp.path(),
+        &["--output", "json", "land", "--thread", "alpha"],
+    );
+    assert_eq!(alpha_land["status"], "landed", "{alpha_land}");
+    let after_alpha = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+    assert_eq!(alpha_land["checkpointed"], true, "{alpha_land}");
+
+    let beta_land = json(
+        temp.path(),
+        &["--output", "json", "land", "--thread", "beta"],
+    );
+    assert_eq!(beta_land["status"], "landed", "{beta_land}");
+    let after_beta = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+    assert_ne!(after_beta, after_alpha);
+    let is_ancestor = Command::new("git")
+        .args(["merge-base", "--is-ancestor", &after_alpha, &after_beta])
+        .current_dir(temp.path())
+        .status()
+        .expect("git merge-base --is-ancestor");
+    assert!(is_ancestor.success());
+    let tree = git_stdout(temp.path(), &["ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(tree.lines().any(|line| line == "alpha.txt"));
+    assert!(tree.lines().any(|line| line == "beta.txt"));
+}
+
+#[test]
+fn git_overlay_matrix_land_threads_flag_lands_peers_in_order() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
+    git_commit_all(temp.path(), "base");
+    heddle(&["init"], Some(temp.path())).expect("initialize Git Overlay");
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).expect("import main");
+
+    let alpha = temp.path().with_extension("alpha-mt");
+    let beta = temp.path().with_extension("beta-mt");
+    for (name, path) in [("alpha", &alpha), ("beta", &beta)] {
+        json(
+            temp.path(),
+            &[
+                "--output",
+                "json",
+                "start",
+                name,
+                "--path",
+                path.to_str().unwrap(),
+            ],
+        );
+    }
+    std::fs::write(alpha.join("a.txt"), "a\n").unwrap();
+    json(&alpha, &["--output", "json", "capture", "-m", "a"]);
+    std::fs::write(beta.join("b.txt"), "b\n").unwrap();
+    json(&beta, &["--output", "json", "capture", "-m", "b"]);
+
+    let out = heddle(
+        &["--output", "json", "land", "--threads", "alpha,beta"],
+        Some(temp.path()),
+    )
+    .expect("land --threads alpha,beta");
+    let batch: Value = serde_json::from_str(out.trim())
+        .unwrap_or_else(|error| panic!("expected one land_batch JSON: {error}: {out}"));
+    assert_eq!(batch["output_kind"], "land_batch", "{batch}");
+    assert_eq!(batch["status"], "landed", "{batch}");
+    assert_eq!(batch["peers"].as_array().map(Vec::len), Some(2));
+    let tree = git_stdout(temp.path(), &["ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(tree.lines().any(|line| line == "a.txt"));
+    assert!(tree.lines().any(|line| line == "b.txt"));
+}
+
+#[test]
+fn git_overlay_matrix_land_threads_reports_failed_peer_in_batch() {
+    let fixture =
+        GitOverlayFixture::imported_main().with_ready_materialized_thread("feature/batch-fail");
+    let out = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--threads",
+            "feature/batch-fail",
+        ],
+        Some(fixture.path()),
+        &[("HEDDLE_FAULT_INJECT", "git_checkpoint_before_write_through")],
+    )
+    .expect("invoke batch land with checkpoint failure");
+    assert!(!out.status.success());
+    assert!(
+        out.stderr.is_empty(),
+        "batch must not emit a second envelope: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let batch: Value = serde_json::from_slice(&out.stdout).expect("single batch JSON on stdout");
+    assert_eq!(batch["output_kind"], "land_batch", "{batch}");
+    assert_eq!(batch["status"], "blocked", "{batch}");
+    assert_eq!(batch["stopped_at"], "feature/batch-fail", "{batch}");
+    assert_eq!(
+        batch["git_head"],
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        "batch envelope Git state must come from the resolved target repository"
+    );
+    assert!(
+        batch["verification"].is_object(),
+        "batch envelope trust must come from the resolved target repository: {batch}"
+    );
+    assert_eq!(batch["peers"].as_array().map(Vec::len), Some(1));
+    assert_eq!(batch["peers"][0]["thread"], "feature/batch-fail");
+    assert_eq!(batch["peers"][0]["status"], "blocked");
+    assert_eq!(
+        batch["peers"][0]["primary_command"],
+        "heddle land --thread feature/batch-fail"
+    );
+    assert_eq!(
+        batch["peers"][0]["recovery_commands"],
+        serde_json::json!(["heddle verify", "heddle land --thread feature/batch-fail"])
+    );
+    assert_eq!(
+        batch["recommended_action"],
+        "heddle land --thread feature/batch-fail"
+    );
+    assert!(
+        batch["peers"][0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("rolled back")),
+        "{batch}"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_land_reports_sibling_enumeration_failure() {
+    let fixture = GitOverlayFixture::imported_main()
+        .with_ready_materialized_thread("feature/sibling-enumeration");
+    let out = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/sibling-enumeration",
+        ],
+        Some(fixture.path()),
+        &[("HEDDLE_FAULT_INJECT", "land_sibling_enumeration")],
+    )
+    .unwrap();
+    assert!(out.status.success());
+    let land: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(land["status"], "landed", "{land}");
+    assert_eq!(
+        land["siblings_restack_failed"].as_array().map(Vec::len),
+        Some(1),
+        "enumeration failure must remain structured: {land}"
+    );
+    assert!(
+        land["warnings"]
+            .as_array()
+            .is_some_and(|warnings| !warnings.is_empty()),
+        "enumeration failure must be loud: {land}"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_human_land_batch_prints_peer_warnings_and_restack_failures() {
+    let fixture = GitOverlayFixture::imported_main()
+        .with_ready_materialized_thread("feature/human-batch-warning");
+    let out = heddle_output_with_env(
+        &[
+            "--output",
+            "text",
+            "land",
+            "--threads",
+            "feature/human-batch-warning",
+        ],
+        Some(fixture.path()),
+        &[("HEDDLE_FAULT_INJECT", "land_sibling_enumeration")],
+    )
+    .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("warning:"),
+        "peer warnings must be visible: {stdout}"
+    );
+    assert!(
+        stdout.contains("restack failed:"),
+        "each peer restack failure must be visible: {stdout}"
+    );
+}
+
+#[test]
 fn git_overlay_matrix_manual_git_merge_commit_after_bootstrap_commands() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "feature/drop-in");
@@ -4020,7 +5355,7 @@ fn git_overlay_matrix_native_worktree_branch_switch_and_remote_drift_surface_cle
     );
     std::fs::write(worktree_path.join("native.txt"), "native worktree\n").unwrap();
     initialize_git_overlay(&worktree_path);
-    let worktree_status = json(&worktree_path, &["status", "--output", "json"]);
+    let worktree_status = json(&worktree_path, &["status", "--verbose", "--output", "json"]);
     assert_eq!(worktree_status["thread"], "support/native-worktree");
     assert_eq!(
         worktree_status["remote_tracking"]["upstream"], "",
@@ -4058,7 +5393,7 @@ fn git_overlay_matrix_native_worktree_branch_switch_and_remote_drift_surface_cle
     git(&["push", "origin", "feature/drop-in"], other.path());
     git(&["fetch", "origin"], temp.path());
 
-    let root_status = json(temp.path(), &["status", "--output", "json"]);
+    let root_status = json(temp.path(), &["status", "--verbose", "--output", "json"]);
     assert_eq!(root_status["thread"], "feature/drop-in");
     assert_eq!(root_status["remote_tracking"]["branch"], "feature/drop-in");
     assert_eq!(root_status["remote_tracking"]["behind"], 1);

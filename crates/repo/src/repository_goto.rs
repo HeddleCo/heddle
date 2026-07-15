@@ -4,8 +4,8 @@
 use std::time::Instant;
 
 use objects::{lock::RepositoryLockExt, object::StateId, store::ObjectStore};
-use oplog::OpLogRecorder;
-use refs::Head;
+use oplog::{OpLogRecorder, OpRecord};
+use refs::{Head, RefExpectation, RefUpdate};
 use tracing::debug;
 
 use super::{
@@ -24,6 +24,180 @@ enum WorktreeBaseline {
 }
 
 impl Repository {
+    /// Return whether the checkout exactly materializes `target` without
+    /// changing refs or recording an operation.
+    pub fn worktree_matches_state(&self, target: &StateId) -> Result<bool> {
+        let target_state = self
+            .store
+            .get_state(target)?
+            .ok_or(HeddleError::StateNotFound(*target))?;
+        let target_tree = self
+            .store
+            .get_tree(&target_state.tree)?
+            .ok_or_else(|| HeddleError::NotFound(format!("tree {}", target_state.tree)))?;
+        Ok(self.build_tree(&self.root)? == target_tree)
+    }
+
+    /// Restore checkout files to a state without moving refs or recording an
+    /// operation. Recovery uses this only when a prepared transaction has no
+    /// committed sentinel, so the authoritative ref is already unchanged.
+    pub fn restore_worktree_state_only(
+        &self,
+        target: &StateId,
+        materialized: Option<&StateId>,
+    ) -> Result<()> {
+        let _lock = self
+            .locker()
+            .write()
+            .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+        let target_state = self
+            .store
+            .get_state(target)?
+            .ok_or(HeddleError::StateNotFound(*target))?;
+        let target_tree = self
+            .store
+            .get_tree(&target_state.tree)?
+            .ok_or_else(|| HeddleError::NotFound(format!("tree {}", target_state.tree)))?;
+        let materialized_tree = materialized
+            .map(|state| {
+                self.store
+                    .get_state(state)?
+                    .ok_or(HeddleError::StateNotFound(*state))
+            })
+            .transpose()?
+            .map(|state| {
+                self.store
+                    .get_tree(&state.tree)?
+                    .ok_or_else(|| HeddleError::NotFound(format!("tree {}", state.tree)))
+            })
+            .transpose()?;
+        let plan = self.plan_worktree_apply(
+            materialized_tree.as_ref(),
+            &target_tree,
+            &self.root,
+            true,
+            WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+        )?;
+        self.execute_worktree_apply(&plan, &target_tree, &self.root)?;
+        Ok(())
+    }
+
+    /// Apply and publish a fast-forward as one recoverable transaction. The
+    /// worktree is staged first; the exact forward record and transaction token
+    /// then commit before the target ref publishes. A crash before commit is
+    /// distinguishable from an applied transaction by the durable token.
+    pub fn fast_forward_attached_transactional(
+        &self,
+        source_thread: &str,
+        target: &StateId,
+        transaction_id: &str,
+    ) -> Result<()> {
+        let _lock = self
+            .locker()
+            .write()
+            .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+        let head_before = self.refs.read_head()?;
+        let pre_target = match &head_before {
+            Head::Attached { thread } => self
+                .refs
+                .get_thread(thread)?
+                .ok_or_else(|| HeddleError::NotFound(format!("thread {thread}")))?,
+            Head::Detached { state } => *state,
+        };
+        let current_state = self
+            .store
+            .get_state(&pre_target)?
+            .ok_or(HeddleError::StateNotFound(pre_target))?;
+        let target_state = self
+            .store
+            .get_state(target)?
+            .ok_or(HeddleError::StateNotFound(*target))?;
+        let current_tree = self
+            .store
+            .get_tree(&current_state.tree)?
+            .ok_or_else(|| HeddleError::NotFound(format!("tree {}", current_state.tree)))?;
+        let target_tree = self
+            .store
+            .get_tree(&target_state.tree)?
+            .ok_or_else(|| HeddleError::NotFound(format!("tree {}", target_state.tree)))?;
+        let plan = self.plan_worktree_apply(
+            Some(&current_tree),
+            &target_tree,
+            &self.root,
+            false,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+        )?;
+        self.execute_worktree_apply(&plan, &target_tree, &self.root)?;
+
+        let rewind_worktree = || {
+            let rewind = self.plan_worktree_apply(
+                Some(&target_tree),
+                &current_tree,
+                &self.root,
+                true,
+                WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+            )?;
+            self.execute_worktree_apply(&rewind, &current_tree, &self.root)?;
+            Result::Ok(())
+        };
+        if let Err(error) =
+            objects::fault_inject::maybe_fail_at("transactional_ff_after_worktree_before_commit")
+        {
+            rewind_worktree()?;
+            return Err(error.into());
+        }
+
+        let (record, update) = match &head_before {
+            Head::Attached { thread } => (
+                OpRecord::FastForward {
+                    source_thread: source_thread.to_string(),
+                    target_thread: thread.to_string(),
+                    pre_target_id: pre_target,
+                    post_target_id: *target,
+                },
+                RefUpdate::Thread {
+                    name: thread.clone(),
+                    expected: RefExpectation::Value(pre_target),
+                    new: Some(*target),
+                },
+            ),
+            Head::Detached { .. } => (
+                OpRecord::Goto {
+                    target: *target,
+                    prev_head: Some(pre_target),
+                    head: *target,
+                },
+                RefUpdate::Head {
+                    expected: RefExpectation::Value(head_before.clone()),
+                    new: Head::Detached { state: *target },
+                },
+            ),
+        };
+        let records = vec![
+            record,
+            OpRecord::TransactionCommit {
+                transaction_id: transaction_id.to_string(),
+                op_count: 1,
+            },
+        ];
+        if let Err(error) = self.commit_and_publish(records, &[update]) {
+            rewind_worktree()?;
+            return Err(error);
+        }
+        objects::fault_inject::maybe_fail_at("transactional_ff_after_commit")?;
+
+        if let Head::Attached { thread } = head_before {
+            let thread_manager = ThreadManager::new(self.heddle_dir());
+            if let Some(mut current_meta) = thread_manager.find_by_thread(&thread)? {
+                current_meta.current_state = Some(target.short());
+                current_meta.updated_at = chrono::Utc::now();
+                current_meta.freshness = ThreadFreshness::Current;
+                thread_manager.save(&current_meta)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Move worktree to a different state.
     pub fn goto(&self, target: &StateId) -> Result<()> {
         self.goto_internal(

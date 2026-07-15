@@ -77,6 +77,7 @@ schema_registry! {
     (&["undo --list"], UndoListSchema),
     (&["ready"], ReadySchema),
     (&["land"], LandSchema),
+    (&["land --threads"], LandBatchSchema),
     (&["sync"], SyncSchema),
     (&["continue", "abort"], OperatorCommandSchema),
     (&["start"], ThreadStartSchema),
@@ -198,7 +199,59 @@ pub fn schema_for_verb(verb: &str) -> Option<Value> {
         })?;
     add_op_id_replay_fields_if_supported(verb, &mut schema);
     add_json_discriminator_if_advertised(verb, &mut schema);
+    stabilize_land_output_shapes(verb, &mut schema);
     Some(schema)
+}
+
+fn require_object_fields(schema: &mut Value, fields: &[&str]) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    let required = object
+        .entry("required".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(required) = required.as_array_mut() else {
+        return;
+    };
+    for field in fields {
+        if !required.iter().any(|value| value.as_str() == Some(field)) {
+            required.push(Value::String((*field).to_string()));
+        }
+    }
+}
+
+fn stabilize_land_output_shapes(verb: &str, schema: &mut Value) {
+    match verb {
+        "land" => require_object_fields(schema, &["siblings_restacked", "siblings_restack_failed"]),
+        "land --threads" => {
+            require_object_fields(
+                schema,
+                &[
+                    "stopped_at",
+                    "git_head",
+                    "recommended_action",
+                    "verification",
+                ],
+            );
+            if let Some(peer) = schema
+                .get_mut("$defs")
+                .and_then(Value::as_object_mut)
+                .and_then(|defs| defs.get_mut("LandBatchPeerSchema"))
+            {
+                require_object_fields(
+                    peer,
+                    &[
+                        "siblings_restacked",
+                        "siblings_restack_failed",
+                        "blockers",
+                        "warnings",
+                        "recovery_commands",
+                    ],
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 fn schema_for_report_contract_verb(verb: &str) -> Option<Value> {
@@ -1274,6 +1327,47 @@ pub struct LandSchema {
     pub skipped_steps: Vec<String>,
     pub merge_state: Option<String>,
     pub chosen_path: String,
+    pub siblings_restacked: Vec<String>,
+    pub siblings_restack_failed: Vec<SiblingRestackFailureSchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SiblingRestackFailureSchema {
+    pub thread: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LandBatchPeerSchema {
+    pub thread: String,
+    pub status: String,
+    pub message: String,
+    pub captured: bool,
+    pub checkpointed: bool,
+    pub git_commit: Option<String>,
+    pub integrated: bool,
+    pub synced: bool,
+    pub siblings_restacked: Vec<String>,
+    pub siblings_restack_failed: Vec<SiblingRestackFailureSchema>,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
+    pub primary_command: Option<String>,
+    pub recovery_commands: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LandBatchSchema {
+    pub output_kind: String,
+    pub status: String,
+    pub action: String,
+    pub message: String,
+    pub threads: Vec<String>,
+    pub landed: Vec<String>,
+    pub stopped_at: Option<String>,
+    pub peers: Vec<LandBatchPeerSchema>,
+    pub git_head: Option<String>,
+    pub recommended_action: Option<String>,
+    pub verification: Option<RepositoryVerificationStateSchema>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -3543,6 +3637,24 @@ mod tests {
         assert!(
             properties.contains_key("captured_state"),
             "ready schema should document captured_state even though schemars models nullable Option fields as optional"
+        );
+    }
+
+    #[test]
+    fn land_batch_peer_primary_command_remains_optional() {
+        let schema = schema_for_verb("land --threads").expect("land batch schema");
+        let peer = schema
+            .get("$defs")
+            .and_then(Value::as_object)
+            .and_then(|defs| defs.get("LandBatchPeerSchema"))
+            .expect("land batch peer schema");
+        assert!(
+            property_schema(peer, "primary_command").is_object(),
+            "peer schema must still describe primary_command: {peer}"
+        );
+        assert!(
+            !required_fields(peer).contains(&"primary_command"),
+            "successful peers omit None primary_command values: {peer}"
         );
     }
 

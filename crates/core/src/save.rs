@@ -73,6 +73,9 @@ pub struct SavePlan {
     pub commit_safe_post_verify: bool,
     /// Fold snapshot + GitCheckpoint oplog batches into one undo unit.
     pub coalesce_snapshot_and_checkpoint: bool,
+    /// Export an unmapped checkpoint state on top of the checkout's current
+    /// Git tip. Used only by sequential multi-peer land.
+    pub linearize_git_parent: bool,
     /// Optional precomputed git-overlay worktree status for verification reuse
     /// on the no-new-state path. Post-mutation paths always recompute.
     pub precomputed_worktree_status:
@@ -94,6 +97,7 @@ impl SavePlan {
             run_hooks: true,
             commit_safe_post_verify: false,
             coalesce_snapshot_and_checkpoint: false,
+            linearize_git_parent: false,
             precomputed_worktree_status: None,
         }
     }
@@ -119,6 +123,7 @@ impl SavePlan {
                 git_scope,
                 GitScope::Staged | GitScope::WorktreeAll
             ),
+            linearize_git_parent: false,
             precomputed_worktree_status: None,
         }
     }
@@ -141,6 +146,7 @@ impl SavePlan {
             run_hooks: true,
             commit_safe_post_verify: false,
             coalesce_snapshot_and_checkpoint: false,
+            linearize_git_parent: false,
             precomputed_worktree_status: None,
         }
     }
@@ -464,7 +470,7 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
                 .or_else(|| git_rev_parse_head(repo.root()));
             git_previous_commit = previous.clone();
             let summary = checkpoint_summary(&plan, &state);
-            let record = write_git_checkpoint(repo, &state, summary)?;
+            let record = write_git_checkpoint(repo, &state, summary, plan.linearize_git_parent)?;
             if plan.coalesce_snapshot_and_checkpoint
                 && let Some(state_id) = snapshot_state_id.as_ref()
             {
@@ -616,9 +622,14 @@ fn write_git_checkpoint(
     repo: &Repository,
     state: &State,
     summary: String,
+    linearize_git_parent: bool,
 ) -> Result<GitCheckpointRecord> {
     let _lock = repo.locker().write()?;
+    objects::fault_inject::maybe_fail_at("git_checkpoint_before_write_through")?;
     let mut bridge = GitProjection::new(repo);
+    if linearize_git_parent {
+        bridge.linearize_unmapped_tip_to_checkout();
+    }
     let git_commit = match bridge
         .write_through_current_checkout_with_message(state.state_id, summary.clone())?
     {
@@ -647,18 +658,81 @@ fn write_git_checkpoint(
             "published Git checkpoint does not match its durable finalization intent"
         ));
     }
-    let record = repo.record_git_checkpoint(&state.state_id, git_commit.clone(), summary)?;
+    finalize_published_git_checkpoint(repo, &state.state_id, git_commit, summary, intent)
+}
+
+/// Finish the metadata/oplog half of a checkpoint whose Git ref was already
+/// published before a crash. Returns `None` when no matching published intent
+/// exists, so callers can continue with their own recovery policy.
+pub fn recover_published_git_checkpoint(
+    repo: &Repository,
+    state_id: &StateId,
+) -> Result<Option<GitCheckpointRecord>> {
+    let _lock = repo.locker().write()?;
+    let Some(mut intent) = repo.pending_git_checkpoint_intent()? else {
+        return Ok(None);
+    };
+    if intent.state_id != state_id.to_string_full() {
+        return Ok(None);
+    }
+    let current_branch = repo.git_overlay_current_branch()?;
+    if current_branch.as_deref() != Some(intent.branch.as_str()) {
+        return Err(anyhow!(
+            "pending Git checkpoint targets branch '{}' but the checkout is on '{}'",
+            intent.branch,
+            current_branch.as_deref().unwrap_or("detached HEAD")
+        ));
+    }
+    let current_oid = git_rev_parse_head(repo.root());
+    if intent.phase == repo::GitCheckpointIntentPhase::Prepared {
+        if current_oid == intent.previous_git_oid {
+            return Ok(None);
+        }
+        if current_oid.as_deref() != Some(intent.new_git_oid.as_str()) {
+            return Err(anyhow!(
+                "prepared Git checkpoint expected HEAD at {} or {}, found {}",
+                intent.previous_git_oid.as_deref().unwrap_or("<unborn>"),
+                intent.new_git_oid,
+                current_oid.as_deref().unwrap_or("<unborn>")
+            ));
+        }
+        let git_oid = intent.new_git_oid.clone();
+        intent = repo.mark_git_checkpoint_published(state_id, &git_oid)?;
+    }
+    if intent.phase != repo::GitCheckpointIntentPhase::Published {
+        return Ok(None);
+    }
+    if current_oid.as_deref() != Some(intent.new_git_oid.as_str()) {
+        return Err(anyhow!(
+            "published Git checkpoint expected HEAD at {}, found {}",
+            intent.new_git_oid,
+            current_oid.as_deref().unwrap_or("<unborn>")
+        ));
+    }
+    let git_commit = intent.new_git_oid.clone();
+    let summary = intent.summary.clone();
+    finalize_published_git_checkpoint(repo, state_id, git_commit, summary, intent).map(Some)
+}
+
+fn finalize_published_git_checkpoint(
+    repo: &Repository,
+    state_id: &StateId,
+    git_commit: String,
+    summary: String,
+    intent: repo::GitCheckpointIntent,
+) -> Result<GitCheckpointRecord> {
+    let record = repo.record_git_checkpoint(state_id, git_commit.clone(), summary)?;
     objects::fault_inject::maybe_panic_at("git_checkpoint_after_metadata_before_oplog");
     let transaction_id = format!(
         "git-checkpoint:v1:{}:{}",
-        state.state_id.to_string_full(),
+        state_id.to_string_full(),
         git_commit
     );
     repo.oplog().record_batch_exactly_once(
         vec![
             OpRecord::GitCheckpoint {
                 branch: intent.branch,
-                state: state.state_id,
+                state: *state_id,
                 previous_git_oid: intent.previous_git_oid,
                 new_git_oid: git_commit.clone(),
             },
@@ -671,7 +745,7 @@ fn write_git_checkpoint(
         &transaction_id,
     )?;
     objects::fault_inject::maybe_panic_at("git_checkpoint_after_oplog_before_finalize");
-    repo.finish_git_checkpoint_intent(&state.state_id, &git_commit)?;
+    repo.finish_git_checkpoint_intent(state_id, &git_commit)?;
     Ok(record)
 }
 

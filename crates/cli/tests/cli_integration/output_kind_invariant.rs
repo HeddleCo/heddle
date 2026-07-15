@@ -35,7 +35,7 @@ use cli::cli::commands::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{heddle, heddle_output};
+use super::{git_hermetic, heddle, heddle_output};
 
 /// Verbs whose `output_kind` invariant is enforced — both the catalog
 /// declaration and (where invocable) the runtime emission.
@@ -994,6 +994,46 @@ fn transport_runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
 fn runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
     if matches!(output_kind, "clone" | "pull") {
         return transport_runtime_doc_case(output_kind);
+    }
+    if output_kind == "land_batch" {
+        let fixture = TempDir::new().expect("land batch fixture");
+        let work = fixture.path().join("work");
+        let alpha = fixture.path().join("alpha");
+        let beta = fixture.path().join("beta");
+        std::fs::create_dir_all(&work).expect("create Git Overlay worktree");
+        git_hermetic(&["init", "-b", "main"], &work);
+        git_hermetic(&["config", "user.name", "Heddle Test"], &work);
+        git_hermetic(&["config", "user.email", "heddle@test.example"], &work);
+        std::fs::write(work.join("README.md"), "base\n").expect("seed Git worktree");
+        git_hermetic(&["add", "README.md"], &work);
+        git_hermetic(&["commit", "-m", "base"], &work);
+        heddle(&["init"], Some(&work)).expect("initialize Git Overlay");
+        heddle(&["import", "git", "--ref", "main"], Some(&work)).expect("import main");
+        for (thread, path, file) in [
+            ("alpha", alpha.as_path(), "alpha.txt"),
+            ("beta", beta.as_path(), "beta.txt"),
+        ] {
+            heddle(
+                &[
+                    "start",
+                    thread,
+                    "--path",
+                    path.to_str().expect("UTF-8 thread path"),
+                    "--workspace",
+                    "solid",
+                ],
+                Some(&work),
+            )
+            .expect("start batch peer");
+            std::fs::write(path.join(file), format!("{thread}\n")).expect("write peer work");
+            heddle(&["ready", "-m", &format!("ready {thread}")], Some(path))
+                .expect("ready batch peer");
+        }
+        return Some(RuntimeDocCase {
+            _fixture: fixture,
+            cwd: work,
+            argv: sv(&["land", "--threads", "alpha,beta"]),
+        });
     }
     let case = match output_kind {
         "thread_switch" => {

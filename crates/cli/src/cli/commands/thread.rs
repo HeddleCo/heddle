@@ -1055,8 +1055,13 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // every non-cargo project. We log a debug-level note so a curious
     // operator can still see it landed silently.
     let is_rust_workspace = shared_target::workspace_root_is_rust(repo);
+    let wants_shared_target = shared_target::shared_target_requested(
+        args.shared_target,
+        args.no_shared_target,
+        is_rust_workspace,
+    );
     let shared_target_decision =
-        plan_shared_target_redirect(args.shared_target, &thread_mode, is_rust_workspace);
+        plan_shared_target_redirect(wants_shared_target, &thread_mode, is_rust_workspace);
     let shared_target_dir_path: Option<PathBuf> = match shared_target_decision {
         heddle_core::SharedTargetRedirectDecision::Apply => {
             Some(shared_target::shared_target_dir(repo)?)
@@ -1077,7 +1082,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // Pure gate (requested + mode) lives in heddle-core; rust/busy I/O
     // stays in shared_target so the pre-start population is counted once.
     if should_advise_shared_target(
-        args.shared_target,
+        wants_shared_target,
         &thread_mode,
         shared_target::should_advise_shared_target(repo),
     ) {
