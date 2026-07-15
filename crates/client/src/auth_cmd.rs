@@ -20,13 +20,13 @@ use tonic::{
 };
 use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
-use crate::device_flow::{
-    AgentAttenuation, SAFE_AGENT_OPERATIONS, attenuate_for_agent, effective_pop_public_key_hex,
-};
 use crate::{
     auth_requests::AuthCommand,
     credentials,
     credentials::ServerCredential,
+    device_flow::{
+        AgentAttenuation, SAFE_AGENT_OPERATIONS, attenuate_for_agent, effective_pop_public_key_hex,
+    },
     grpc_hosted::{HostedSession, operation_id::ClientOperationId},
 };
 

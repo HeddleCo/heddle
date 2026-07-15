@@ -282,8 +282,7 @@ mod tests {
 
     #[test]
     fn grant_repository_targets_preserve_both_reference_variants() {
-        use grpc::heddle::api::v1alpha1::grant_target_ref::Target;
-        use grpc::heddle::api::v1alpha1::{GrantTargetRef, HostedRole};
+        use grpc::heddle::api::v1alpha1::{GrantTargetRef, HostedRole, grant_target_ref::Target};
 
         for reference in [
             Reference::HostedId("repo_123".to_string()),
