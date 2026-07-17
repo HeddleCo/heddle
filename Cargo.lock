@@ -1663,7 +1663,8 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "heddle-api"
 version = "0.1.2"
-source = "git+https://github.com/HeddleCo/api?rev=86a90cb7a5a7fb5b89037c9b5e251b1e5647a254#86a90cb7a5a7fb5b89037c9b5e251b1e5647a254"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "461132b7b20cc2c07c90026fddc4c33e88dd1112c08f5735be6a9d3e64ed8e42"
 dependencies = [
  "bytes",
  "hex",
