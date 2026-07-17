@@ -14,7 +14,7 @@ publish = false # temporary: direct git-pinned heddle-api dependency is not publ
 chrono.workspace = true
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.10" }
 futures.workspace = true
-api = { git = "https://github.com/HeddleCo/api", rev = "c5b980f35e1c81a48edda1f735d8c896794b30c8", package = "heddle-api", version = "=0.1.2", features = ["server"] }
+api = { git = "https://github.com/HeddleCo/api", rev = "86a90cb7a5a7fb5b89037c9b5e251b1e5647a254", package = "heddle-api", version = "=0.1.2", features = ["server"] }
 hex.workspace = true
 libc.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.10" }
