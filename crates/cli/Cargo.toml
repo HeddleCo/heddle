@@ -2,6 +2,7 @@
 name = "heddle-cli"
 version.workspace = true
 edition.workspace = true
+publish = false # not in the crates.io publish set; see publish-crates.yml PUBLISHABLE_CRATES
 authors.workspace = true
 description.workspace = true
 license.workspace = true
