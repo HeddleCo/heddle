@@ -792,10 +792,6 @@ jobs:
       # per-crate regression turns the build red on both `main` pushes and
       # PRs regardless of whether Codecov is reachable.
       #
-      # `crates/grpc` is intentionally not gated: its surface is tonic-
-      # generated code emitted to OUT_DIR, which never lands under
-      # `crates/grpc/` in lcov, so audit-coverage would `bail` with
-      # "no lines counted". Its 60% goal is tracked in the doc only.
       - name: Coverage gate (per crate)
         run: |
           cargo run -p heddle-devtools --quiet -- \

@@ -34,20 +34,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use grpc::{
-    DiscussionServiceServer, HookServiceServer, OperationLogQueryServiceServer,
-    SignalServiceServer, StateReviewServiceServer, TimelineServiceServer,
-};
+use api::heddle::api::v1alpha1::state_review_service_server::StateReviewServiceServer;
 use objects::error::{HeddleError, Result};
 use repo::{Repository, operation_dedup::OperationDedupStore};
 use tokio::net::UnixListener;
 use tokio_stream::{StreamExt, wrappers::UnixListenerStream};
 use tonic::transport::Server;
 
-use crate::grpc_local_impl::{
-    GrpcLocalService, LocalDiscussionService, LocalHookService, LocalOperationLogQueryService,
-    LocalSignalService, LocalStateReviewService, LocalTimelineService,
-};
+use crate::grpc_local_impl::{GrpcLocalService, LocalStateReviewService};
 
 const PRIVATE_SOCKET_UMASK: libc::mode_t = 0o177;
 
@@ -367,12 +361,6 @@ pub async fn serve(
     let inner = GrpcLocalService::new(Arc::new(repo), dedup);
 
     let state_review = StateReviewServiceServer::new(LocalStateReviewService::new(inner.clone()));
-    let discussion = DiscussionServiceServer::new(LocalDiscussionService::new(inner.clone()));
-    let signal = SignalServiceServer::new(LocalSignalService::new(inner.clone()));
-    let query =
-        OperationLogQueryServiceServer::new(LocalOperationLogQueryService::new(inner.clone()));
-    let timeline = TimelineServiceServer::new(LocalTimelineService::new(inner.clone()));
-    let hook = HookServiceServer::new(LocalHookService::new(inner));
 
     // Per-connection SO_PEERCRED gate. Mode 0600 already keeps other users
     // from opening the socket; this filter is the defense-in-depth layer
@@ -383,11 +371,6 @@ pub async fn serve(
 
     Server::builder()
         .add_service(state_review)
-        .add_service(discussion)
-        .add_service(signal)
-        .add_service(query)
-        .add_service(timeline)
-        .add_service(hook)
         .serve_with_incoming_shutdown(incoming, shutdown)
         .await
         .map_err(|e| HeddleError::InvalidObject(format!("local daemon transport failed: {e}")))?;

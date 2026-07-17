@@ -21,10 +21,11 @@ enum AgentAuthOperationDisposition {
     Denied,
 }
 
-/// Exhaustive agent-policy classification for `AuthService`.
+/// Exhaustive agent-policy classification for `IdentityService`.
 ///
-/// The exact-set test below compares this table with `auth.proto`, so adding an
-/// auth RPC requires an explicit decision before derived-agent CI can pass.
+/// The exact-set test below compares this table with the shared API descriptor,
+/// so adding an identity RPC requires an explicit decision before derived-agent
+/// CI can pass.
 const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
     (
         "BeginWebAuthnRegistration",
@@ -35,6 +36,7 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
         "BeginWebAuthnAuthentication",
         AgentAuthOperationDisposition::ReviewedSafe,
     ),
+    ("ClaimHandle", AgentAuthOperationDisposition::Denied),
     (
         "FinishWebAuthnAuthentication",
         // The WebAuthn ceremony, not an attached bearer, proves this request.
@@ -71,6 +73,8 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
         AgentAuthOperationDisposition::Denied,
     ),
     ("WhoAmI", AgentAuthOperationDisposition::ReviewedSafe),
+    // The hosted handler still requires the billing service account's
+    // billing:write right; an attached derived bearer cannot create it.
     (
         "RecordSubscription",
         AgentAuthOperationDisposition::ReviewedSafe,
@@ -94,15 +98,17 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
         AgentAuthOperationDisposition::ReviewedSafe,
     ),
     (
-        "AnalyzeExternalDiff",
+        "GetInvitationSummary",
         AgentAuthOperationDisposition::ReviewedSafe,
     ),
     (
-        "GetInvitationSummary",
+        "GetHandleStatus",
         AgentAuthOperationDisposition::ReviewedSafe,
     ),
     ("ListSessions", AgentAuthOperationDisposition::ReviewedSafe),
     ("RevokeSession", AgentAuthOperationDisposition::Denied),
+    ("RequestHeldName", AgentAuthOperationDisposition::Denied),
+    ("ResolveHandle", AgentAuthOperationDisposition::ReviewedSafe),
     // MintBiscuit authenticates its own keypair/device proof; an attached
     // derived bearer cannot authorize or widen the minted credential.
     ("MintBiscuit", AgentAuthOperationDisposition::ReviewedSafe),
@@ -117,23 +123,14 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
         "DeclareRecoveryMethod",
         AgentAuthOperationDisposition::Denied,
     ),
-    (
-        "DeclareHardwareKeyRecovery",
-        AgentAuthOperationDisposition::Denied,
-    ),
-    (
-        "DeclareSocialGuardians",
-        AgentAuthOperationDisposition::Denied,
-    ),
-    ("DeclarePaperCode", AgentAuthOperationDisposition::Denied),
+    // Recovery execution is authorized by public, independent proof material
+    // and the veto-window state rather than by an attached derived bearer.
     ("BeginRecovery", AgentAuthOperationDisposition::ReviewedSafe),
     (
         "SubmitRecoveryProof",
         AgentAuthOperationDisposition::ReviewedSafe,
     ),
     ("VetoRecovery", AgentAuthOperationDisposition::ReviewedSafe),
-    // Recovery completion is authorized by the in-flight recovery proof and
-    // veto-window state, not by the caller's attached bearer.
     (
         "CompleteRecovery",
         AgentAuthOperationDisposition::ReviewedSafe,
@@ -400,6 +397,43 @@ pub(crate) fn effective_pop_public_key_hex(token_b64: &str) -> Result<String> {
     Ok(hex::encode(effective_key))
 }
 
+/// Read the one stable subject asserted by a Biscuit authority block.
+///
+/// The authority subject is the authenticated principal used by request
+/// signing. Attenuation blocks may narrow authorization, but cannot replace
+/// the authority identity.
+pub(crate) fn authenticated_subject(token_b64: &str) -> Result<String> {
+    use biscuit_auth::builder::{BlockBuilder, Term};
+
+    let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token_b64.as_bytes())
+        .context("parse Biscuit while resolving its authenticated subject")?;
+    let authority_source = biscuit
+        .print_block_source(0)
+        .context("read Biscuit authority block")?;
+    let authority = BlockBuilder::new()
+        .code(&authority_source)
+        .context("parse Biscuit authority block")?;
+    let subjects = authority
+        .facts
+        .iter()
+        .filter_map(|fact| {
+            match (
+                fact.predicate.name.as_str(),
+                fact.predicate.terms.as_slice(),
+            ) {
+                ("user", [Term::Str(subject)]) if !subject.trim().is_empty() => {
+                    Some(subject.clone())
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+    let [subject] = subjects.as_slice() else {
+        bail!("Biscuit authority block must contain exactly one non-empty user(subject) fact");
+    };
+    Ok(subject.clone())
+}
+
 fn decode_fixed_hex(value: &str, expected_len: usize, label: &str) -> Result<Vec<u8>> {
     let decoded = hex::decode(value).with_context(|| format!("{label} is not valid hex"))?;
     if decoded.len() != expected_len {
@@ -658,6 +692,50 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_subject_is_unique_authority_owned_and_required() {
+        let (authority_token, _, _) = fresh_parent_token();
+        assert_eq!(
+            authenticated_subject(&authority_token).expect("authority subject"),
+            "alice"
+        );
+
+        let attenuated = biscuit_auth::UnverifiedBiscuit::from_base64(authority_token.as_bytes())
+            .expect("parse authority token")
+            .append(
+                biscuit_auth::builder::BlockBuilder::new()
+                    .fact(r#"user("mallory")"#)
+                    .expect("attenuation-local user fact"),
+            )
+            .expect("append attenuation")
+            .to_base64()
+            .expect("encode attenuation");
+        assert_eq!(
+            authenticated_subject(&attenuated).expect("authority remains authoritative"),
+            "alice"
+        );
+
+        let missing = Biscuit::builder()
+            .fact(r#"session("sess-1")"#)
+            .expect("session fact")
+            .build(&KeyPair::new())
+            .expect("build missing-subject token")
+            .to_base64()
+            .expect("encode missing-subject token");
+        assert!(authenticated_subject(&missing).is_err());
+
+        let duplicate = Biscuit::builder()
+            .fact(r#"user("alice")"#)
+            .expect("first user fact")
+            .fact(r#"user("mallory")"#)
+            .expect("second user fact")
+            .build(&KeyPair::new())
+            .expect("build duplicate-subject token")
+            .to_base64()
+            .expect("encode duplicate-subject token");
+        assert!(authenticated_subject(&duplicate).is_err());
+    }
+
+    #[test]
     fn effective_pop_key_rejects_a_delegationless_attenuation_block() {
         let signer = Ed25519Signer::generate().expect("root PoP key");
         let token = Biscuit::builder()
@@ -723,15 +801,21 @@ mod tests {
     }
 
     #[test]
-    fn auth_service_agent_policy_exactly_matches_the_proto_catalog() {
-        let proto = include_str!("../../grpc/proto/heddle/v1/auth.proto");
-        let proto_operations = proto
-            .lines()
-            .filter_map(|line| {
-                line.trim()
-                    .strip_prefix("rpc ")
-                    .and_then(|rpc| rpc.split_once('(').map(|(name, _)| name))
-            })
+    fn identity_service_agent_policy_exactly_matches_the_shared_descriptor() {
+        use prost::Message;
+
+        let descriptor = prost_types::FileDescriptorSet::decode(grpc::FILE_DESCRIPTOR_SET)
+            .expect("the shared API descriptor must decode");
+        let proto_operations = descriptor
+            .file
+            .iter()
+            .filter(|file| file.package.as_deref() == Some("heddle.api.v1alpha1"))
+            .flat_map(|file| &file.service)
+            .find(|service| service.name.as_deref() == Some("IdentityService"))
+            .expect("the shared descriptor must define IdentityService")
+            .method
+            .iter()
+            .map(|method| method.name.as_deref().expect("RPC method name"))
             .collect::<BTreeSet<_>>();
         let policy_operations = AUTH_SERVICE_AGENT_POLICY
             .iter()
@@ -745,7 +829,7 @@ mod tests {
         );
         assert_eq!(
             policy_operations, proto_operations,
-            "every AuthService RPC must be explicitly classified for derived agents"
+            "every IdentityService RPC must be explicitly classified for derived agents"
         );
     }
 

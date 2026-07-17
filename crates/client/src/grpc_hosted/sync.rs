@@ -8,13 +8,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use grpc::heddle::v1::{
-    GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer, GitPackTransfer,
-    GitRefKind as GrpcGitRefKind, GitRefUpdateTransfer, ListRefsRequest, ObjectAvailabilityStatus,
-    ObjectDescriptor, PackChunk, PackStreamKind, PartialFetchStatus, PullMessage, PullRequest,
-    PushMessage, PushRequest, RedactionTransfer, StateVisibilityTransfer, ThreadConfidenceSummary,
-    ThreadIntegrationPolicy, ThreadMetadata, ThreadVerificationSummary, TransportMode,
-    UpdateRefRequest, WantObjects, git_lane_transfer, pull_message, push_message,
+use grpc::heddle::api::v1alpha1::{
+    GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer, GitObjectAlgorithm,
+    GitObjectId as ProtoGitObjectId, GitPackTransfer, GitRefKind as GrpcGitRefKind,
+    GitRefUpdateTransfer, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor, PackChunk,
+    PackStreamKind, PartialFetchStatus, PullClientFrame, PullRequest, PullServerFrame,
+    PushClientFrame, PushRequest, PushServerFrame, RedactionTransfer, StateVisibilityTransfer,
+    StreamOpeningProof, ThreadConfidenceSummary, ThreadIntegrationPolicy, ThreadMetadata,
+    ThreadVerificationSummary, TransportMode, UpdateRefRequest, WantObjects, git_lane_transfer,
+    pull_client_frame, pull_server_frame, push_client_frame, push_server_frame,
 };
 use objects::{
     Progress,
@@ -44,6 +46,7 @@ use super::{
         parse_descriptor_to_info, status_to_protocol_error, to_proto_object_info,
         transport_mode_name,
     },
+    operation_id::ClientOperationId,
 };
 
 #[derive(Clone, Copy)]
@@ -77,7 +80,7 @@ struct GitLanePushPlan {
     /// `checkpoint: None` — the discriminator the weft server uses to admit
     /// checkpoint-less multi-ref pushes. Per-ref compare-and-set expectations
     /// are pre-applied from the server `ListRefs` response.
-    ref_updates: Vec<PushMessage>,
+    ref_updates: Vec<GitRefUpdateTransfer>,
 }
 
 #[derive(Clone)]
@@ -164,6 +167,44 @@ pub struct PullProfile {
 }
 
 impl HostedGrpcClient {
+    fn stream_opening_proof(
+        &self,
+        stream_id: &str,
+        route: &str,
+        repository: &str,
+        resume_cursor: &str,
+    ) -> Result<StreamOpeningProof, ProtocolError> {
+        use crypto::Signer as _;
+
+        let signer = self.device_signer()?.ok_or_else(|| {
+            ProtocolError::AuthenticationFailed(
+                "hosted sync requires a stable device signing identity".to_string(),
+            )
+        })?;
+        let identity = self.stable_signing_identity()?;
+        let capability_context = Vec::new();
+        let canonical = grpc::signing::stream_open_bytes(
+            identity,
+            stream_id,
+            route,
+            repository,
+            resume_cursor,
+            &capability_context,
+        );
+        let signature = signer
+            .sign(&canonical)
+            .map_err(|err| ProtocolError::AuthenticationFailed(err.to_string()))?;
+        Ok(StreamOpeningProof {
+            stream_id: stream_id.to_string(),
+            route: route.to_string(),
+            repository: super::helpers::repository_ref(repository),
+            resume_cursor: resume_cursor.to_string(),
+            capability_context,
+            nonce: Vec::new(),
+            signature,
+        })
+    }
+
     pub async fn list_refs(&mut self, repo_path: &str) -> Result<Vec<RefEntry>, ProtocolError> {
         Ok(self
             .list_refs_with_revision_addresses(repo_path)
@@ -182,9 +223,12 @@ impl HostedGrpcClient {
         repo_path: &str,
     ) -> Result<Vec<HostedRefEntry>, ProtocolError> {
         let mut request = Request::new(ListRefsRequest {
-            repo_path: repo_path.to_string(),
+            repo_path: super::helpers::repository_ref(repo_path),
         });
-        self.apply_signed_auth(&mut request, "/heddle.v1.RepoSyncService/ListRefs")?;
+        self.apply_signed_auth(
+            &mut request,
+            "/heddle.api.v1alpha1.RepoSyncService/ListRefs",
+        )?;
         let response = self
             .inner
             .list_refs(request)
@@ -197,8 +241,9 @@ impl HostedGrpcClient {
             .map(|entry| {
                 Ok(HostedRefEntry {
                     name: entry.name,
-                    state_id: StateId::try_from_slice(&entry.state_id)
-                        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
+                    state_id: super::helpers::parse_proto_state_id(entry.state_id)?.ok_or_else(
+                        || ProtocolError::InvalidState("ref is missing its state ID".to_string()),
+                    )?,
                     is_thread: entry.is_thread,
                     revision_address: entry.revision_address,
                 })
@@ -216,9 +261,14 @@ impl HostedGrpcClient {
         new_value: StateId,
         force: bool,
         thread_metadata: Option<&SyncedThreadMetadata>,
+        client_operation_id: String,
     ) -> Result<RefUpdated, ProtocolError> {
+        let operation_id = ClientOperationId::for_required_method(
+            "heddle.api.v1alpha1.RepoSyncService/UpdateRef",
+            client_operation_id,
+        )?;
         let mut request = Request::new(UpdateRefRequest {
-            repo_path: repo_path.to_string(),
+            repo_path: super::helpers::repository_ref(repo_path),
             name: name.to_string(),
             is_thread,
             force,
@@ -231,9 +281,12 @@ impl HostedGrpcClient {
                 .map(|value| RevisionAddress::heddle(value).to_string())
                 .unwrap_or_default(),
             new_revision_address: RevisionAddress::heddle(new_value).to_string(),
-            client_operation_id: String::new(),
+            client_operation_id: operation_id.to_wire(),
         });
-        self.apply_signed_auth(&mut request, "/heddle.v1.RepoSyncService/UpdateRef")?;
+        self.apply_signed_auth(
+            &mut request,
+            "/heddle.api.v1alpha1.RepoSyncService/UpdateRef",
+        )?;
         let response = self
             .inner
             .update_ref(request)
@@ -261,13 +314,19 @@ impl HostedGrpcClient {
         local_state: StateId,
         target_thread: &str,
         force: bool,
+        client_operation_id: String,
     ) -> Result<PushComplete, ProtocolError> {
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.RepoSyncService/Push",
+            client_operation_id,
+        );
         self.push_with_revision(
             repo,
             repo_path,
             local_state,
             target_thread,
             force,
+            operation_id,
             RevisionAddress::heddle(local_state).to_string(),
             None,
             &Progress::null(),
@@ -289,6 +348,7 @@ impl HostedGrpcClient {
     /// `progress` drives the live push line (packing → uploading bytes →
     /// writing N refs); pass [`Progress::null`] for machine-readable / non-TTY
     /// callers.
+    #[allow(clippy::too_many_arguments)]
     pub async fn push_git_overlay_mirror(
         &mut self,
         repo: &Repository,
@@ -297,7 +357,12 @@ impl HostedGrpcClient {
         target_thread: &str,
         force: bool,
         progress: &Progress,
+        client_operation_id: String,
     ) -> Result<PushComplete, ProtocolError> {
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.RepoSyncService/Push",
+            client_operation_id,
+        );
         progress.set_phase("packing refs");
         let remote_ref_expectations = self.git_mirror_ref_expectations(repo_path).await?;
         let git_lane = build_git_mirror_push_plan(
@@ -312,6 +377,7 @@ impl HostedGrpcClient {
             local_state,
             target_thread,
             force,
+            operation_id,
             local_revision_address,
             Some(git_lane),
             progress,
@@ -343,6 +409,7 @@ impl HostedGrpcClient {
         local_state: StateId,
         target_thread: &str,
         force: bool,
+        operation_id: ClientOperationId,
         local_revision_address: String,
         git_lane: Option<GitLanePushPlan>,
         progress: &Progress,
@@ -373,10 +440,10 @@ impl HostedGrpcClient {
         let transfer_id = push_transfer_id(repo_path, local_state, target_thread);
         let transport_mode = preferred_transport_mode(&self.transport, object_count);
         let thread_metadata = load_thread_metadata(repo, target_thread, local_state)?;
-        let request_message = PushMessage {
-            body: Some(push_message::Body::Request(PushRequest {
-                repo_path: repo_path.to_string(),
-                local_state: local_state.to_string_full(),
+        let request_message = PushClientFrame {
+            frame: Some(push_client_frame::Frame::Request(Box::new(PushRequest {
+                repo_path: super::helpers::repository_ref(repo_path),
+                local_state: super::helpers::proto_state_id(local_state),
                 target_thread: target_thread.to_string(),
                 create_thread: true,
                 force,
@@ -402,16 +469,27 @@ impl HostedGrpcClient {
                 thread_metadata: thread_metadata
                     .map(|metadata| to_proto_thread_metadata(&metadata)),
                 local_revision_address,
-                client_operation_id: String::new(),
-            })),
+            }))),
+            client_operation_id: operation_id.to_wire(),
         };
 
         let (tx, rx) = mpsc::channel(self.transport.max_inflight_objects.max(4));
+        tx.send(PushClientFrame {
+            frame: Some(push_client_frame::Frame::Open(self.stream_opening_proof(
+                &transfer_id,
+                "/heddle.api.v1alpha1.RepoSyncService/Push",
+                repo_path,
+                "",
+            )?)),
+            client_operation_id: operation_id.to_wire(),
+        })
+        .await
+        .map_err(|_| ProtocolError::InvalidState("failed to open push stream".to_string()))?;
         tx.send(request_message).await.map_err(|_| {
             ProtocolError::InvalidState("failed to initialize push stream".to_string())
         })?;
         let mut request = Request::new(ReceiverStream::new(rx));
-        self.apply_auth(&mut request, "/heddle.v1.RepoSyncService/Push")?;
+        self.apply_auth(&mut request, "/heddle.api.v1alpha1.RepoSyncService/Push")?;
         let mut response = self
             .inner
             .push(request)
@@ -420,8 +498,8 @@ impl HostedGrpcClient {
             .into_inner();
 
         let ready = match response.message().await.map_err(status_to_protocol_error)? {
-            Some(PushMessage {
-                body: Some(push_message::Body::Ready(ready)),
+            Some(PushServerFrame {
+                frame: Some(push_server_frame::Frame::Ready(ready)),
             }) => ready,
             _ => {
                 return Err(ProtocolError::InvalidState(
@@ -471,7 +549,10 @@ impl HostedGrpcClient {
                 &tx,
                 repo,
                 &wanted_plan.partitions.packable_objects,
-                &transfer_id,
+                PushWireIdentities {
+                    transfer_id: &transfer_id,
+                    client_operation_id: operation_id.as_str(),
+                },
                 self.transport.chunk_size.max(1),
                 &self.transport,
                 ready_transport_mode,
@@ -480,7 +561,7 @@ impl HostedGrpcClient {
         }
 
         for info in wanted_plan.partitions.sidecar_objects {
-            let message = sidecar_push_message(repo, info)?;
+            let message = sidecar_push_message(repo, info, operation_id.as_str())?;
             tx.send(message).await.map_err(|_| {
                 ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
             })?;
@@ -498,6 +579,7 @@ impl HostedGrpcClient {
                     pack,
                     self.transport.chunk_size.max(1),
                     progress,
+                    operation_id.as_str(),
                 )
                 .await?;
             } else {
@@ -505,7 +587,12 @@ impl HostedGrpcClient {
             }
             progress.set_phase(format!("writing {} refs", git_lane.ref_updates.len()));
             for ref_update in git_lane.ref_updates {
-                tx.send(ref_update).await.map_err(|_| {
+                tx.send(git_lane_push_message(
+                    git_lane_transfer::Body::RefUpdate(ref_update),
+                    operation_id.as_str(),
+                ))
+                .await
+                .map_err(|_| {
                     ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
                 })?;
             }
@@ -513,18 +600,11 @@ impl HostedGrpcClient {
         drop(tx);
 
         let result = match response.message().await.map_err(status_to_protocol_error)? {
-            Some(PushMessage {
-                body: Some(push_message::Body::Complete(complete)),
+            Some(PushServerFrame {
+                frame: Some(push_server_frame::Frame::Complete(complete)),
             }) => PushComplete {
                 success: complete.success,
-                new_state: if complete.new_state.is_empty() {
-                    None
-                } else {
-                    Some(
-                        StateId::parse(&complete.new_state)
-                            .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
-                    )
-                },
+                new_state: super::helpers::parse_proto_state_id(complete.new_state)?,
                 error: (!complete.error.is_empty()).then_some(complete.error),
                 transfer_id: complete
                     .transfer
@@ -730,11 +810,14 @@ impl HostedGrpcClient {
         path: &str,
     ) -> Result<objects::object::Blob, ProtocolError> {
         let mut request = Request::new(GetBlobRequest {
-            repo_path: repo_path.to_string(),
+            repo_path: super::helpers::repository_ref(repo_path),
             r#ref: reference.to_string(),
             path: path.to_string(),
         });
-        self.apply_signed_auth(&mut request, "/heddle.v1.ContentService/GetBlob")?;
+        self.apply_signed_auth(
+            &mut request,
+            "/heddle.api.v1alpha1.RepositoryService/GetBlob",
+        )?;
         let response = self
             .content
             .get_blob(request)
@@ -823,17 +906,20 @@ impl HostedGrpcClient {
             options.depth,
             options.target_state,
         );
-        let request_message = PullMessage {
-            body: Some(pull_message::Body::Request(PullRequest {
-                repo_path: repo_path.to_string(),
+        let request_message = PullClientFrame {
+            frame: Some(pull_client_frame::Frame::Request(PullRequest {
+                repo_path: super::helpers::repository_ref(repo_path),
                 remote_thread: remote_thread.to_string(),
                 local_thread: options.local_thread.unwrap_or_default().to_string(),
                 target_state: options
                     .target_state
-                    .map(|value| value.to_string_full())
-                    .unwrap_or_default(),
+                    .and_then(super::helpers::proto_state_id),
                 depth: options.depth.unwrap_or_default(),
-                exclude_states: exclude_states.iter().map(StateId::to_string_full).collect(),
+                exclude_states: exclude_states
+                    .iter()
+                    .copied()
+                    .filter_map(super::helpers::proto_state_id)
+                    .collect(),
                 transfer: Some(self.transport.transfer_checkpoint_with_mode(
                     transfer_id.clone(),
                     TransportMode::NativePack,
@@ -848,16 +934,25 @@ impl HostedGrpcClient {
                     .target_state
                     .map(|state| RevisionAddress::heddle(state).to_string())
                     .unwrap_or_default(),
-                client_operation_id: String::new(),
             })),
         };
 
         let (tx, rx) = mpsc::channel(self.transport.max_inflight_objects.max(4));
+        tx.send(PullClientFrame {
+            frame: Some(pull_client_frame::Frame::Open(self.stream_opening_proof(
+                &transfer_id,
+                "/heddle.api.v1alpha1.RepoSyncService/Pull",
+                repo_path,
+                "",
+            )?)),
+        })
+        .await
+        .map_err(|_| ProtocolError::InvalidState("failed to open pull stream".to_string()))?;
         tx.send(request_message).await.map_err(|_| {
             ProtocolError::InvalidState("failed to initialize pull stream".to_string())
         })?;
         let mut request = Request::new(ReceiverStream::new(rx));
-        self.apply_auth(&mut request, "/heddle.v1.RepoSyncService/Pull")?;
+        self.apply_auth(&mut request, "/heddle.api.v1alpha1.RepoSyncService/Pull")?;
         let mut response = self
             .inner
             .pull(request)
@@ -866,8 +961,8 @@ impl HostedGrpcClient {
             .into_inner();
 
         let ready = match response.message().await.map_err(status_to_protocol_error)? {
-            Some(PullMessage {
-                body: Some(pull_message::Body::Ready(ready)),
+            Some(PullServerFrame {
+                frame: Some(pull_server_frame::Frame::Ready(ready)),
             }) => ready,
             _ => {
                 return Err(ProtocolError::InvalidState(
@@ -879,8 +974,8 @@ impl HostedGrpcClient {
             ready_wait: exchange_start.elapsed(),
             ..PullProfile::default()
         };
-        let remote_state = StateId::parse(&ready.remote_state)
-            .map_err(|err| ProtocolError::InvalidState(err.to_string()))?;
+        let remote_state = super::helpers::parse_proto_state_id(ready.remote_state)?
+            .ok_or_else(|| ProtocolError::InvalidState("missing remote state".to_string()))?;
         let advertised_object_count = ready.objects_to_fetch.len();
         let PullWantPlan {
             wants,
@@ -896,8 +991,8 @@ impl HostedGrpcClient {
         )?;
         let native_pack_required = native_pack_required_for_pull(want_full_closure, &transfer_plan);
 
-        tx.send(PullMessage {
-            body: Some(pull_message::Body::Want(WantObjects {
+        tx.send(PullClientFrame {
+            frame: Some(pull_client_frame::Frame::Want(WantObjects {
                 objects: wants.clone(),
                 want_full_closure,
                 transfer: Some(self.transport.transfer_checkpoint_with_mode(
@@ -925,8 +1020,8 @@ impl HostedGrpcClient {
         let mut git_pack_state = GitPackPullInstallState::default();
         let mut received = 0usize;
         while let Some(message) = response.message().await.map_err(status_to_protocol_error)? {
-            match message.body {
-                Some(pull_message::Body::Pack(chunk)) => {
+            match message.frame {
+                Some(pull_server_frame::Frame::Pack(chunk)) => {
                     profile.bytes_received =
                         profile.bytes_received.saturating_add(chunk.data.len());
                     profile.pack_bytes_received =
@@ -969,7 +1064,7 @@ impl HostedGrpcClient {
                     profile.pack_decode_apply += decode_elapsed;
                     profile.decode += decode_elapsed;
                 }
-                Some(pull_message::Body::Redaction(transfer)) => {
+                Some(pull_server_frame::Frame::Redaction(transfer)) => {
                     // Out-of-pack channel: receive a redaction sidecar
                     // and route through `Repository::accept_wire_redactions`
                     // for signature + trust-list verification. The
@@ -1000,7 +1095,7 @@ impl HostedGrpcClient {
                     let decode_elapsed = decode_start.elapsed();
                     profile.store_receive_object += decode_elapsed;
                 }
-                Some(pull_message::Body::StateVisibility(transfer)) => {
+                Some(pull_server_frame::Frame::StateVisibility(transfer)) => {
                     wire::check_received_transfer_blob_size(
                         transfer.state_visibility_blob.len(),
                         wire::MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE,
@@ -1010,23 +1105,33 @@ impl HostedGrpcClient {
                         .bytes_received
                         .saturating_add(transfer.state_visibility_blob.len());
                     profile.object_mix.record(ObjectType::StateVisibility);
-                    let state = StateId::parse(&transfer.state_id).map_err(|err| {
-                        ProtocolError::InvalidState(format!(
-                            "StateVisibilityTransfer.state_id is not a valid StateId: {err}"
-                        ))
-                    })?;
+                    let state = transfer
+                        .state_id
+                        .as_ref()
+                        .ok_or_else(|| {
+                            ProtocolError::InvalidState(
+                                "StateVisibilityTransfer.state_id is required".to_string(),
+                            )
+                        })
+                        .and_then(|state| {
+                            StateId::try_from_slice(&state.value).map_err(|err| {
+                                ProtocolError::InvalidState(format!(
+                                    "StateVisibilityTransfer.state_id is not a valid StateId: {err}"
+                                ))
+                            })
+                        })?;
                     let decode_start = Instant::now();
                     repo.accept_wire_state_visibility(state, &transfer.state_visibility_blob)
                         .map_err(|err| {
                             ProtocolError::InvalidState(format!(
                                 "accept_wire_state_visibility for state {}: {err}",
-                                transfer.state_id
+                                state
                             ))
                         })?;
                     let decode_elapsed = decode_start.elapsed();
                     profile.store_receive_object += decode_elapsed;
                 }
-                Some(pull_message::Body::GitLane(transfer)) => {
+                Some(pull_server_frame::Frame::GitLane(transfer)) => {
                     let decode_start = Instant::now();
                     profile.bytes_received = profile
                         .bytes_received
@@ -1040,17 +1145,10 @@ impl HostedGrpcClient {
                     let decode_elapsed = decode_start.elapsed();
                     profile.store_receive_object += decode_elapsed;
                 }
-                Some(pull_message::Body::Complete(complete)) => {
+                Some(pull_server_frame::Frame::Complete(complete)) => {
                     profile.receive_and_apply = receive_start.elapsed();
                     git_pack_state.ensure_idle()?;
-                    let final_state = if complete.new_state.is_empty() {
-                        None
-                    } else {
-                        Some(
-                            StateId::parse(&complete.new_state)
-                                .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
-                        )
-                    };
+                    let final_state = super::helpers::parse_proto_state_id(complete.new_state)?;
 
                     if complete.success {
                         if native_pack_required {
@@ -1221,7 +1319,8 @@ impl HostedGrpcClient {
 fn redaction_push_message(
     repo: &Repository,
     info: wire::ObjectInfo,
-) -> Result<PushMessage, ProtocolError> {
+    client_operation_id: &str,
+) -> Result<PushClientFrame, ProtocolError> {
     let wire::ObjectId::Hash(blob) = info.id else {
         return Err(ProtocolError::InvalidState(
             "wanted Redaction must be keyed by ObjectId::Hash(content_hash)".to_string(),
@@ -1244,11 +1343,12 @@ fn redaction_push_message(
                 hex
             ))
         })?;
-    Ok(PushMessage {
-        body: Some(push_message::Body::Redaction(RedactionTransfer {
+    Ok(PushClientFrame {
+        frame: Some(push_client_frame::Frame::Redaction(RedactionTransfer {
             blob_hash: hex,
-            redactions_blob: bytes.into(),
+            redactions_blob: bytes,
         })),
+        client_operation_id: client_operation_id.to_string(),
     })
 }
 
@@ -1303,10 +1403,13 @@ fn wanted_packable_type(wanted_types: &WantedTypes, pack_id: &PackObjectId) -> O
 fn sidecar_push_message(
     repo: &Repository,
     info: wire::ObjectInfo,
-) -> Result<PushMessage, ProtocolError> {
+    client_operation_id: &str,
+) -> Result<PushClientFrame, ProtocolError> {
     match info.obj_type {
-        ObjectType::Redaction => redaction_push_message(repo, info),
-        ObjectType::StateVisibility => state_visibility_push_message(repo, info),
+        ObjectType::Redaction => redaction_push_message(repo, info, client_operation_id),
+        ObjectType::StateVisibility => {
+            state_visibility_push_message(repo, info, client_operation_id)
+        }
         obj_type => Err(ProtocolError::InvalidState(format!(
             "{obj_type:?} is not an out-of-pack sidecar object"
         ))),
@@ -1316,7 +1419,8 @@ fn sidecar_push_message(
 fn state_visibility_push_message(
     repo: &Repository,
     info: wire::ObjectInfo,
-) -> Result<PushMessage, ProtocolError> {
+    client_operation_id: &str,
+) -> Result<PushClientFrame, ProtocolError> {
     let wire::ObjectId::StateId(state) = info.id else {
         return Err(ProtocolError::InvalidState(
             "wanted StateVisibility must be keyed by ObjectId::StateId(state)".to_string(),
@@ -1337,13 +1441,14 @@ fn state_visibility_push_message(
                 state_id
             ))
         })?;
-    Ok(PushMessage {
-        body: Some(push_message::Body::StateVisibility(
+    Ok(PushClientFrame {
+        frame: Some(push_client_frame::Frame::StateVisibility(
             StateVisibilityTransfer {
-                state_id,
-                state_visibility_blob: bytes.into(),
+                state_id: super::helpers::proto_state_id(state),
+                state_visibility_blob: bytes,
             },
         )),
+        client_operation_id: client_operation_id.to_string(),
     })
 }
 
@@ -1619,16 +1724,20 @@ fn to_proto_thread_metadata(metadata: &SyncedThreadMetadata) -> ThreadMetadata {
         thread_mode: metadata.mode.to_string(),
         thread_state: metadata.state.to_string(),
         freshness: metadata.freshness.to_string(),
-        base_state: state_id_string_to_bytes(&metadata.base_state),
+        base_state: StateId::parse(&metadata.base_state)
+            .ok()
+            .and_then(super::helpers::proto_state_id),
         base_root: state_id_string_to_bytes(&metadata.base_root),
-        current_state: metadata
-            .current_state
-            .as_deref()
-            .map(state_id_string_to_bytes),
-        merged_state: metadata
-            .merged_state
-            .as_deref()
-            .map(state_id_string_to_bytes),
+        current_state: metadata.current_state.as_deref().and_then(|state| {
+            StateId::parse(state)
+                .ok()
+                .and_then(super::helpers::proto_state_id)
+        }),
+        merged_state: metadata.merged_state.as_deref().and_then(|state| {
+            StateId::parse(state)
+                .ok()
+                .and_then(super::helpers::proto_state_id)
+        }),
         changed_paths: metadata.changed_paths.clone(),
         impact_categories: metadata
             .impact_categories
@@ -1812,7 +1921,7 @@ fn build_git_mirror_plan_from_sley(
         .map_err(|err| ProtocolError::InvalidState(format!("list git-overlay refs: {err}")))?;
 
     let mut roots: Vec<GitObjectId> = Vec::new();
-    let mut ref_updates: Vec<PushMessage> = Vec::new();
+    let mut ref_updates: Vec<GitRefUpdateTransfer> = Vec::new();
     let mut newest_root: Option<GitObjectId> = None;
 
     for reference in refs {
@@ -1879,7 +1988,7 @@ fn build_git_mirror_plan_from_sley(
         let kind = grpc_git_ref_kind(GitRefName::new(&reference.name).wire_kind());
         let mut message =
             git_ref_update_message(&reference.name, kind, target_oid, peeled_oid, None);
-        apply_git_ref_expectation_value(&mut message, &expectation)?;
+        apply_git_ref_expectation_value(&mut message, &expectation);
         ref_updates.push(message);
     }
 
@@ -1996,26 +2105,29 @@ fn build_git_lane_multi_root_pack_plan(
 }
 
 async fn send_git_pack_streaming_messages(
-    tx: &mpsc::Sender<PushMessage>,
+    tx: &mpsc::Sender<PushClientFrame>,
     pack: &GitPackPushPlan,
     chunk_size: usize,
     progress: &Progress,
+    client_operation_id: &str,
 ) -> Result<(), ProtocolError> {
     let tx = tx.clone();
     let pack = pack.clone();
     let progress = progress.clone();
+    let client_operation_id = client_operation_id.to_string();
     tokio::task::spawn_blocking(move || {
-        stream_git_pack_messages_blocking(tx, pack, chunk_size, progress)
+        stream_git_pack_messages_blocking(tx, pack, chunk_size, progress, client_operation_id)
     })
     .await
     .map_err(|err| ProtocolError::InvalidState(format!("Git pack streaming task failed: {err}")))?
 }
 
 fn stream_git_pack_messages_blocking(
-    tx: mpsc::Sender<PushMessage>,
+    tx: mpsc::Sender<PushClientFrame>,
     pack: GitPackPushPlan,
     chunk_size: usize,
     progress: Progress,
+    client_operation_id: String,
 ) -> Result<(), ProtocolError> {
     let mut writer = GitPackPushMessageWriter::new(
         tx,
@@ -2024,6 +2136,7 @@ fn stream_git_pack_messages_blocking(
         pack.pack_size,
         chunk_size,
         progress,
+        client_operation_id,
     );
     let mut pack_file = pack
         .pack_file
@@ -2047,7 +2160,7 @@ fn stream_git_pack_messages_blocking(
 }
 
 struct GitPackPushMessageWriter {
-    tx: mpsc::Sender<PushMessage>,
+    tx: mpsc::Sender<PushClientFrame>,
     transfer_id: String,
     pack_id: Vec<u8>,
     pack_size: u64,
@@ -2055,6 +2168,7 @@ struct GitPackPushMessageWriter {
     buffer: Vec<u8>,
     offset: u64,
     chunk_index: u32,
+    client_operation_id: String,
     /// Live "uploading N/M bytes" progress, driven per flushed chunk. A null
     /// handle (`--output json` / non-TTY) makes every update a no-op.
     progress: Progress,
@@ -2066,12 +2180,13 @@ struct GitPackPushMessageWriter {
 
 impl GitPackPushMessageWriter {
     fn new(
-        tx: mpsc::Sender<PushMessage>,
+        tx: mpsc::Sender<PushClientFrame>,
         transfer_id: String,
         pack_id: Vec<u8>,
         pack_size: u64,
         chunk_size: usize,
         progress: Progress,
+        client_operation_id: String,
     ) -> Self {
         let chunk_size = chunk_size.max(1);
         Self {
@@ -2083,6 +2198,7 @@ impl GitPackPushMessageWriter {
             buffer: Vec::with_capacity(chunk_size),
             offset: 0,
             chunk_index: 0,
+            client_operation_id,
             progress,
             last_progress_pct: u64::MAX,
         }
@@ -2107,17 +2223,18 @@ impl GitPackPushMessageWriter {
         }
         let is_final_chunk = next_offset == self.pack_size;
         self.tx
-            .blocking_send(git_lane_push_message(git_lane_transfer::Body::Pack(
-                GitPackTransfer {
+            .blocking_send(git_lane_push_message(
+                git_lane_transfer::Body::Pack(GitPackTransfer {
                     transfer_id: self.transfer_id.clone(),
                     offset: self.offset,
                     chunk_index: self.chunk_index,
                     is_final_chunk,
                     pack_size: self.pack_size,
-                    pack_chunk: chunk.into(),
-                    pack_id: self.pack_id.clone().into(),
-                },
-            )))
+                    pack_chunk: chunk,
+                    pack_id: self.pack_id.clone(),
+                }),
+                &self.client_operation_id,
+            ))
             .map_err(|_| {
                 io::Error::new(io::ErrorKind::BrokenPipe, "push stream closed unexpectedly")
             })?;
@@ -2205,44 +2322,32 @@ fn git_ref_update_message(
     target_oid: GitObjectId,
     peeled_oid: Option<GitObjectId>,
     checkpoint: Option<GitCheckpointTransfer>,
-) -> PushMessage {
-    git_lane_push_message(git_lane_transfer::Body::RefUpdate(GitRefUpdateTransfer {
+) -> GitRefUpdateTransfer {
+    GitRefUpdateTransfer {
         name: name.to_string(),
         kind: kind as i32,
-        target_oid: target_oid.as_bytes().to_vec().into(),
-        peeled_oid: peeled_oid
-            .map(|oid| oid.as_bytes().to_vec())
-            .unwrap_or_default()
-            .into(),
+        target_oid: proto_git_oid(&target_oid),
+        peeled_oid: peeled_oid.as_ref().and_then(proto_git_oid),
         expected_missing: false,
-        expected_target_oid: Vec::new().into(),
+        expected_target_oid: None,
         checkpoint,
-    }))
+    }
 }
 
 fn apply_git_ref_expectation_value(
-    message: &mut PushMessage,
+    update: &mut GitRefUpdateTransfer,
     expectation: &GitRefRemoteExpectation,
-) -> Result<(), ProtocolError> {
-    let Some(push_message::Body::GitLane(GitLaneTransfer {
-        body: Some(git_lane_transfer::Body::RefUpdate(update)),
-    })) = message.body.as_mut()
-    else {
-        return Err(ProtocolError::InvalidState(
-            "Git lane push plan missing ref update message".to_string(),
-        ));
-    };
+) {
     match expectation {
         GitRefRemoteExpectation::Missing => {
             update.expected_missing = true;
-            update.expected_target_oid = Vec::new().into();
+            update.expected_target_oid = None;
         }
         GitRefRemoteExpectation::Value(oid) => {
             update.expected_missing = false;
-            update.expected_target_oid = oid.clone().into();
+            update.expected_target_oid = proto_git_oid_bytes(oid);
         }
     }
-    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2273,11 +2378,15 @@ fn parse_git_ref_expectation(
     }
 }
 
-fn git_lane_push_message(body: git_lane_transfer::Body) -> PushMessage {
-    PushMessage {
-        body: Some(push_message::Body::GitLane(GitLaneTransfer {
+fn git_lane_push_message(
+    body: git_lane_transfer::Body,
+    client_operation_id: &str,
+) -> PushClientFrame {
+    PushClientFrame {
+        frame: Some(push_client_frame::Frame::GitLane(GitLaneTransfer {
             body: Some(body),
         })),
+        client_operation_id: client_operation_id.to_string(),
     }
 }
 
@@ -2286,9 +2395,15 @@ fn git_lane_transfer_size(transfer: &GitLaneTransfer) -> usize {
         Some(git_lane_transfer::Body::Pack(pack)) => pack.pack_chunk.len(),
         Some(git_lane_transfer::Body::RefUpdate(update)) => update
             .target_oid
-            .len()
-            .saturating_add(update.peeled_oid.len())
-            .saturating_add(update.expected_target_oid.len())
+            .as_ref()
+            .map_or(0, |oid| oid.digest.len())
+            .saturating_add(update.peeled_oid.as_ref().map_or(0, |oid| oid.digest.len()))
+            .saturating_add(
+                update
+                    .expected_target_oid
+                    .as_ref()
+                    .map_or(0, |oid| oid.digest.len()),
+            )
             .saturating_add(
                 update
                     .checkpoint
@@ -2306,8 +2421,14 @@ fn git_lane_transfer_size(transfer: &GitLaneTransfer) -> usize {
 fn git_checkpoint_transfer_size(checkpoint: &GitCheckpointTransfer) -> usize {
     checkpoint
         .heddle_state_id
-        .len()
-        .saturating_add(checkpoint.git_commit_oid.len())
+        .as_ref()
+        .map_or(0, |state| state.value.len())
+        .saturating_add(
+            checkpoint
+                .git_commit_oid
+                .as_ref()
+                .map_or(0, |oid| oid.digest.len()),
+        )
         .saturating_add(checkpoint.thread.len())
         .saturating_add(checkpoint.metadata_json.len())
 }
@@ -2536,10 +2657,10 @@ fn accept_git_lane_ref_update(
     update: GitRefUpdateTransfer,
 ) -> Result<(), ProtocolError> {
     let git_repo = git_lane_sley_repository(repo, git_repo)?;
-    let target = git_oid_from_bytes(
+    let target = git_oid_from_proto(
         git_repo,
         "GitRefUpdateTransfer.target_oid",
-        &update.target_oid,
+        update.target_oid.as_ref(),
     )?;
     git_repo.read_commit(&target).map_err(|err| {
         ProtocolError::InvalidState(format!(
@@ -2570,12 +2691,22 @@ fn record_git_lane_checkpoint(
     git_repo: &SleyRepository,
     checkpoint: GitCheckpointTransfer,
 ) -> Result<(), ProtocolError> {
-    let state = StateId::try_from_slice(&checkpoint.heddle_state_id)
-        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?;
-    let commit_oid = git_oid_from_bytes(
+    let state = checkpoint
+        .heddle_state_id
+        .as_ref()
+        .ok_or_else(|| {
+            ProtocolError::InvalidState(
+                "GitCheckpointTransfer.heddle_state_id is required".to_string(),
+            )
+        })
+        .and_then(|state| {
+            StateId::try_from_slice(&state.value)
+                .map_err(|err| ProtocolError::InvalidState(err.to_string()))
+        })?;
+    let commit_oid = git_oid_from_proto(
         git_repo,
         "GitCheckpointTransfer.git_commit_oid",
-        &checkpoint.git_commit_oid,
+        checkpoint.git_commit_oid.as_ref(),
     )?;
     let commit_hex = commit_oid.to_hex();
     if repo
@@ -2631,11 +2762,42 @@ fn git_oid_from_bytes(
         .map_err(|err| ProtocolError::InvalidState(format!("{field}: {err}")))
 }
 
+fn git_oid_from_proto(
+    git_repo: &SleyRepository,
+    field: &str,
+    oid: Option<&ProtoGitObjectId>,
+) -> Result<GitObjectId, ProtocolError> {
+    let oid = oid.ok_or_else(|| ProtocolError::InvalidState(format!("{field} is required")))?;
+    git_oid_from_bytes(git_repo, field, &oid.digest)
+}
+
+fn proto_git_oid(oid: &GitObjectId) -> Option<ProtoGitObjectId> {
+    proto_git_oid_bytes(oid.as_bytes())
+}
+
+fn proto_git_oid_bytes(bytes: &[u8]) -> Option<ProtoGitObjectId> {
+    let algorithm = match bytes.len() {
+        20 => GitObjectAlgorithm::Sha1,
+        32 => GitObjectAlgorithm::Sha256,
+        _ => return None,
+    };
+    Some(ProtoGitObjectId {
+        algorithm: algorithm as i32,
+        digest: bytes.to_vec(),
+    })
+}
+
+#[derive(Clone, Copy)]
+struct PushWireIdentities<'a> {
+    transfer_id: &'a str,
+    client_operation_id: &'a str,
+}
+
 async fn send_native_pack_streaming_messages(
-    tx: &mpsc::Sender<PushMessage>,
+    tx: &mpsc::Sender<PushClientFrame>,
     repo: &Repository,
     objects: &[ObjectInfo],
-    transfer_id: &str,
+    identities: PushWireIdentities<'_>,
     chunk_size: usize,
     transport: &super::helpers::HostedTransportPolicy,
     transport_mode: TransportMode,
@@ -2677,7 +2839,7 @@ async fn send_native_pack_streaming_messages(
                     &mut pack_reader,
                     false,
                     PackStreamKind::Pack,
-                    transfer_id,
+                    identities,
                     transport,
                     transport_mode,
                 )
@@ -2696,7 +2858,7 @@ async fn send_native_pack_streaming_messages(
         &mut pack_reader,
         true,
         PackStreamKind::Pack,
-        transfer_id,
+        identities,
         transport,
         transport_mode,
     )
@@ -2705,7 +2867,7 @@ async fn send_native_pack_streaming_messages(
         tx,
         &bundle.index_path,
         PackStreamKind::Index,
-        transfer_id,
+        identities,
         chunk_size,
         transport,
         transport_mode,
@@ -2757,11 +2919,11 @@ fn native_pack_object_load_worker_count(object_count: usize) -> usize {
 }
 
 async fn drain_growing_native_pack_stream(
-    tx: &mpsc::Sender<PushMessage>,
+    tx: &mpsc::Sender<PushClientFrame>,
     reader: &mut wire::GrowingPackChunkReader,
     final_stream: bool,
     stream_kind: PackStreamKind,
-    transfer_id: &str,
+    identities: PushWireIdentities<'_>,
     transport: &super::helpers::HostedTransportPolicy,
     transport_mode: TransportMode,
 ) -> Result<(), ProtocolError> {
@@ -2772,7 +2934,7 @@ async fn drain_growing_native_pack_stream(
             tx,
             stream_kind,
             data,
-            transfer_id,
+            identities,
             transport,
             transport_mode,
             chunk_index,
@@ -2785,10 +2947,10 @@ async fn drain_growing_native_pack_stream(
 }
 
 async fn send_native_pack_file_stream(
-    tx: &mpsc::Sender<PushMessage>,
+    tx: &mpsc::Sender<PushClientFrame>,
     path: &std::path::Path,
     stream_kind: PackStreamKind,
-    transfer_id: &str,
+    identities: PushWireIdentities<'_>,
     chunk_size: usize,
     transport: &super::helpers::HostedTransportPolicy,
     transport_mode: TransportMode,
@@ -2799,7 +2961,7 @@ async fn send_native_pack_file_stream(
             tx,
             stream_kind,
             data,
-            transfer_id,
+            identities,
             transport,
             transport_mode,
             chunk_index,
@@ -2813,10 +2975,10 @@ async fn send_native_pack_file_stream(
 
 #[allow(clippy::too_many_arguments)]
 async fn send_pack_chunk(
-    tx: &mpsc::Sender<PushMessage>,
+    tx: &mpsc::Sender<PushClientFrame>,
     stream_kind: PackStreamKind,
     data: Vec<u8>,
-    transfer_id: &str,
+    identities: PushWireIdentities<'_>,
     transport: &super::helpers::HostedTransportPolicy,
     transport_mode: TransportMode,
     chunk_index: u32,
@@ -2824,12 +2986,12 @@ async fn send_pack_chunk(
     is_final_chunk: bool,
 ) -> Result<(), ProtocolError> {
     let chunk_length = data.len().min(u32::MAX as usize) as u32;
-    tx.send(PushMessage {
-        body: Some(push_message::Body::Pack(PackChunk {
+    tx.send(PushClientFrame {
+        frame: Some(push_client_frame::Frame::Pack(PackChunk {
             stream_kind: stream_kind as i32,
-            data: data.into(),
+            data,
             transfer: Some(transport.transfer_checkpoint_with_mode(
-                transfer_id,
+                identities.transfer_id,
                 transport_mode,
                 chunk_index,
                 offset,
@@ -2838,6 +3000,7 @@ async fn send_pack_chunk(
             chunk_length,
             is_final_chunk,
         })),
+        client_operation_id: identities.client_operation_id.to_string(),
     })
     .await
     .map_err(|_| ProtocolError::InvalidState("push stream closed unexpectedly".to_string()))
@@ -2858,9 +3021,10 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
     use cli_shared::ClientConfig;
-    use grpc::heddle::v1::{
+    use grpc::heddle::api::v1alpha1::{
         ListRefsRequest, ListRefsResponse, PullComplete as GrpcPullComplete, PullReady,
-        TransferCheckpoint, UpdateRefRequest, UpdateRefResponse, push_message,
+        PullServerFrame, PushServerFrame, StateId as ProtoStateId, TransferCheckpoint,
+        UpdateRefRequest, UpdateRefResponse, pull_server_frame, push_client_frame,
         repo_sync_service_server::{RepoSyncService, RepoSyncServiceServer},
     };
     use objects::{
@@ -2875,12 +3039,25 @@ mod tests {
     use wire::{ObjectId, ObjectInfo};
 
     use super::*;
-    use crate::grpc_hosted::helpers::{descriptor_id_from_info, to_proto_object_info};
+    use crate::grpc_hosted::helpers::{
+        descriptor_id_from_info, proto_state_id, to_proto_object_info,
+    };
 
     fn temp_repo() -> (TempDir, Repository) {
         let dir = TempDir::new().expect("tempdir");
         let repo = Repository::init_default(dir.path()).expect("init repo");
         (dir, repo)
+    }
+
+    fn proto_oid_bytes(oid: &Option<ProtoGitObjectId>) -> Option<&[u8]> {
+        oid.as_ref().map(|oid| oid.digest.as_slice())
+    }
+
+    fn signed_test_config() -> ClientConfig {
+        let signer = crypto::Ed25519Signer::generate().expect("generate test signing identity");
+        ClientConfig::default()
+            .with_auth_proof_key_pem(signer.to_pem().expect("export test key"))
+            .with_authenticated_principal("principal:alice")
     }
 
     /// An unseeded repo with no thread heads — the shape `heddle clone`
@@ -2940,6 +3117,78 @@ mod tests {
     }
 
     #[test]
+    fn push_operation_identity_is_not_the_resumable_transfer_identity() {
+        let transfer_id = push_transfer_id(
+            "acme/widgets",
+            StateId::from_bytes([5; 32]),
+            "feature/retry",
+        );
+        let operation_id =
+            ClientOperationId::caller_or_fresh("heddle.api.v1alpha1.RepoSyncService/Push", "");
+        let next_operation_id =
+            ClientOperationId::caller_or_fresh("heddle.api.v1alpha1.RepoSyncService/Push", "");
+
+        assert_ne!(operation_id.as_str(), transfer_id);
+        assert_ne!(operation_id, next_operation_id);
+    }
+
+    #[tokio::test]
+    async fn push_and_pull_opening_proofs_are_bound_to_the_authenticated_principal() {
+        use crypto::Signer as _;
+
+        let config = signed_test_config();
+        let signer = crypto::Ed25519Signer::from_pem(
+            config
+                .auth_proof_key_pem
+                .as_deref()
+                .expect("test proof key"),
+        )
+        .expect("test signer");
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let client = HostedGrpcClient::from_channel(channel, &config).expect("test client");
+        for (stream_id, route) in [
+            (
+                "push-transfer-1",
+                "/heddle.api.v1alpha1.RepoSyncService/Push",
+            ),
+            (
+                "pull-transfer-1",
+                "/heddle.api.v1alpha1.RepoSyncService/Pull",
+            ),
+        ] {
+            let proof = client
+                .stream_opening_proof(stream_id, route, "acme/widgets", "")
+                .expect("opening proof");
+            let canonical = grpc::signing::stream_open_bytes(
+                "principal:alice",
+                &proof.stream_id,
+                &proof.route,
+                "acme/widgets",
+                &proof.resume_cursor,
+                &proof.capability_context,
+            );
+
+            crypto::verify_payload_signature(
+                &canonical,
+                "ed25519",
+                signer.public_key(),
+                &proof.signature,
+            )
+            .expect("stream proof must verify under the contract principal identity");
+        }
+
+        let implementation = include_str!("sync.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("sync implementation section");
+        assert_eq!(
+            implementation.matches("self.stream_opening_proof(").count(),
+            2,
+            "Push and Pull must both route their opening frame through the shared proof chokepoint"
+        );
+    }
+
+    #[test]
     fn git_lane_messages_pack_reachable_commit_graph_and_attach_checkpoint() {
         let dir = TempDir::new().expect("tempdir");
         let git = sley::Repository::init(dir.path()).expect("init git");
@@ -2972,14 +3221,21 @@ mod tests {
                 .expect("non-empty pack plan");
         assert_eq!(pack.pack_id.len(), git.object_format().raw_len());
         let (tx, mut rx) = mpsc::channel(8);
-        stream_git_pack_messages_blocking(tx, pack.clone(), 64 * 1024, Progress::null())
-            .expect("stream git lane pack");
+        stream_git_pack_messages_blocking(
+            tx,
+            pack.clone(),
+            64 * 1024,
+            Progress::null(),
+            "test-push-op".to_string(),
+        )
+        .expect("stream git lane pack");
         let mut pack_bytes = Vec::new();
         let mut chunks = Vec::new();
         while let Some(chunk) = rx.blocking_recv() {
-            let Some(push_message::Body::GitLane(GitLaneTransfer {
+            assert_eq!(chunk.client_operation_id, "test-push-op");
+            let Some(push_client_frame::Frame::GitLane(GitLaneTransfer {
                 body: Some(git_lane_transfer::Body::Pack(pack)),
-            })) = chunk.body
+            })) = chunk.frame
             else {
                 panic!("expected git pack chunk");
             };
@@ -3001,39 +3257,52 @@ mod tests {
             commit_oid,
             None,
             Some(GitCheckpointTransfer {
-                heddle_state_id: state.as_bytes().to_vec().into(),
-                git_commit_oid: commit_oid.as_bytes().to_vec().into(),
+                heddle_state_id: proto_state_id(state),
+                git_commit_oid: proto_git_oid(&commit_oid),
                 thread: "main".to_string(),
                 metadata_json: String::new(),
             }),
         );
-        let Some(push_message::Body::GitLane(GitLaneTransfer {
-            body: Some(git_lane_transfer::Body::RefUpdate(update)),
-        })) = ref_message.body
-        else {
-            panic!("expected git ref update message");
-        };
+        let update = ref_message;
         assert_eq!(update.name, "refs/heads/main");
         assert_eq!(update.kind, GrpcGitRefKind::Branch as i32);
-        assert_eq!(update.target_oid.as_ref(), commit_oid.as_bytes());
+        assert_eq!(
+            update.target_oid.as_ref().map(|oid| oid.digest.as_slice()),
+            Some(commit_oid.as_bytes())
+        );
         let checkpoint = update.checkpoint.expect("checkpoint");
-        assert_eq!(checkpoint.heddle_state_id.as_ref(), state.as_bytes());
-        assert_eq!(checkpoint.git_commit_oid.as_ref(), commit_oid.as_bytes());
+        assert_eq!(
+            checkpoint
+                .heddle_state_id
+                .as_ref()
+                .map(|state| state.value.as_slice()),
+            Some(state.as_bytes().as_slice())
+        );
+        assert_eq!(
+            checkpoint
+                .git_commit_oid
+                .as_ref()
+                .map(|oid| oid.digest.as_slice()),
+            Some(commit_oid.as_bytes())
+        );
         assert_eq!(checkpoint.thread, "main");
     }
 
-    fn sample_ref_update_message(commit_oid: GitObjectId) -> PushMessage {
-        git_ref_update_message(
-            "refs/heads/main",
-            GrpcGitRefKind::Branch,
-            commit_oid,
-            None,
-            Some(GitCheckpointTransfer {
-                heddle_state_id: StateId::from_bytes([9u8; 32]).as_bytes().to_vec().into(),
-                git_commit_oid: commit_oid.as_bytes().to_vec().into(),
-                thread: "main".to_string(),
-                metadata_json: String::new(),
-            }),
+    fn sample_ref_update_message(commit_oid: GitObjectId) -> PushClientFrame {
+        git_lane_push_message(
+            git_lane_transfer::Body::RefUpdate(git_ref_update_message(
+                "refs/heads/main",
+                GrpcGitRefKind::Branch,
+                commit_oid,
+                None,
+                Some(GitCheckpointTransfer {
+                    heddle_state_id: proto_state_id(StateId::from_bytes([9u8; 32])),
+                    git_commit_oid: proto_git_oid(&commit_oid),
+                    thread: "main".to_string(),
+                    metadata_json: String::new(),
+                }),
+            )),
+            "test-push-op",
         )
     }
 
@@ -3078,11 +3347,7 @@ mod tests {
     }
 
     fn mirror_ref_updates(plan: &GitLanePushPlan) -> Vec<GitRefUpdateTransfer> {
-        plan.ref_updates
-            .iter()
-            .map(git_ref_update_from_message)
-            .cloned()
-            .collect()
+        plan.ref_updates.clone()
     }
 
     /// A commit that reuses `parent`'s tree/blob closure and only adds one new
@@ -3280,19 +3545,28 @@ mod tests {
 
         let main = by_name["refs/heads/main"];
         assert_eq!(main.kind, GrpcGitRefKind::Branch as i32);
-        assert_eq!(main.target_oid.as_ref(), main_commit.as_bytes());
-        assert!(main.peeled_oid.is_empty(), "commit refs are not peeled");
+        assert_eq!(
+            proto_oid_bytes(&main.target_oid),
+            Some(main_commit.as_bytes())
+        );
+        assert!(main.peeled_oid.is_none(), "commit refs are not peeled");
 
         let feature = by_name["refs/heads/feature"];
         assert_eq!(feature.kind, GrpcGitRefKind::Branch as i32);
-        assert_eq!(feature.target_oid.as_ref(), feature_commit.as_bytes());
+        assert_eq!(
+            proto_oid_bytes(&feature.target_oid),
+            Some(feature_commit.as_bytes())
+        );
 
         let tag_update = by_name["refs/tags/v1"];
         assert_eq!(tag_update.kind, GrpcGitRefKind::Tag as i32);
-        assert_eq!(tag_update.target_oid.as_ref(), tag_oid.as_bytes());
         assert_eq!(
-            tag_update.peeled_oid.as_ref(),
-            tagged_commit.as_bytes(),
+            proto_oid_bytes(&tag_update.target_oid),
+            Some(tag_oid.as_bytes())
+        );
+        assert_eq!(
+            proto_oid_bytes(&tag_update.peeled_oid),
+            Some(tagged_commit.as_bytes()),
             "annotated tag ref is peeled to its underlying commit",
         );
 
@@ -3312,13 +3586,19 @@ mod tests {
         // The single pack must actually contain the whole closure: main,
         // feature, tag object + tagged commit, plus their trees/blobs.
         let (tx, mut rx) = mpsc::channel(64);
-        stream_git_pack_messages_blocking(tx, plan_pack.clone(), 64 * 1024, Progress::null())
-            .expect("stream mirror pack");
+        stream_git_pack_messages_blocking(
+            tx,
+            plan_pack.clone(),
+            64 * 1024,
+            Progress::null(),
+            "test-push-op".to_string(),
+        )
+        .expect("stream mirror pack");
         let mut pack_bytes = Vec::new();
         while let Some(message) = rx.blocking_recv() {
-            if let Some(push_message::Body::GitLane(GitLaneTransfer {
+            if let Some(push_client_frame::Frame::GitLane(GitLaneTransfer {
                 body: Some(git_lane_transfer::Body::Pack(pack)),
-            })) = message.body
+            })) = message.frame
             {
                 pack_bytes.extend_from_slice(&pack.pack_chunk);
             }
@@ -3400,7 +3680,10 @@ mod tests {
 
         let main = by_name["refs/heads/main"];
         assert!(!main.expected_missing);
-        assert_eq!(hex::encode(main.expected_target_oid.as_ref()), remote_oid);
+        assert_eq!(
+            hex::encode(proto_oid_bytes(&main.expected_target_oid).expect("expected oid")),
+            remote_oid
+        );
 
         let feature = by_name["refs/heads/feature"];
         assert!(
@@ -3431,12 +3714,15 @@ mod tests {
             GrpcGitRefKind::Other as i32,
             "refs/pull/* classifies as Other",
         );
-        assert_eq!(pull.target_oid.as_ref(), pr_commit.as_bytes());
+        assert_eq!(
+            proto_oid_bytes(&pull.target_oid),
+            Some(pr_commit.as_bytes())
+        );
         assert!(
             pull.checkpoint.is_none(),
             "mirror ref updates are checkpoint-less",
         );
-        assert!(pull.peeled_oid.is_empty(), "a commit ref is not peeled");
+        assert!(pull.peeled_oid.is_none(), "a commit ref is not peeled");
     }
 
     /// The default mirror push must ship CONTENT refs (heads, tags, and
@@ -3470,7 +3756,7 @@ mod tests {
         let names: Vec<&str> = plan
             .ref_updates
             .iter()
-            .map(|m| git_ref_update_from_message(m).name.as_str())
+            .map(|update| update.name.as_str())
             .collect();
 
         assert!(
@@ -3524,7 +3810,7 @@ mod tests {
         let names: Vec<&str> = plan
             .ref_updates
             .iter()
-            .map(|m| git_ref_update_from_message(m).name.as_str())
+            .map(|update| update.name.as_str())
             .collect();
         assert_eq!(
             names,
@@ -3540,13 +3826,14 @@ mod tests {
             "0123456789abcdef0123456789abcdef01234567",
         )
         .expect("oid");
-        let mut message = sample_ref_update_message(commit_oid);
+        let message = sample_ref_update_message(commit_oid);
 
         let expectation = parse_git_ref_expectation("").expect("missing expectation");
-        apply_git_ref_expectation_value(&mut message, &expectation).expect("apply expectation");
         let update = git_ref_update_from_message(&message);
+        let mut update = update.clone();
+        apply_git_ref_expectation_value(&mut update, &expectation);
         assert!(update.expected_missing);
-        assert!(update.expected_target_oid.is_empty());
+        assert!(update.expected_target_oid.is_none());
     }
 
     #[test]
@@ -3557,14 +3844,18 @@ mod tests {
         )
         .expect("oid");
         let remote_oid = "89abcdef012345670123456789abcdef01234567";
-        let mut message = sample_ref_update_message(commit_oid);
+        let message = sample_ref_update_message(commit_oid);
 
         let expectation =
             parse_git_ref_expectation(&format!("git:{remote_oid}")).expect("git expectation");
-        apply_git_ref_expectation_value(&mut message, &expectation).expect("apply expectation");
         let update = git_ref_update_from_message(&message);
+        let mut update = update.clone();
+        apply_git_ref_expectation_value(&mut update, &expectation);
         assert!(!update.expected_missing);
-        assert_eq!(hex::encode(update.expected_target_oid.as_ref()), remote_oid);
+        assert_eq!(
+            hex::encode(proto_oid_bytes(&update.expected_target_oid).expect("expected oid")),
+            remote_oid
+        );
     }
 
     #[test]
@@ -3577,15 +3868,17 @@ mod tests {
             10,
             4,
             Progress::null(),
+            "test-push-op".to_string(),
         );
         writer.write_all(b"abcdefghij").expect("write pack bytes");
         writer.finish().expect("finish pack stream");
 
         let mut chunks = Vec::new();
         while let Some(message) = rx.blocking_recv() {
-            let Some(push_message::Body::GitLane(GitLaneTransfer {
+            assert_eq!(message.client_operation_id, "test-push-op");
+            let Some(push_client_frame::Frame::GitLane(GitLaneTransfer {
                 body: Some(git_lane_transfer::Body::Pack(pack)),
-            })) = message.body
+            })) = message.frame
             else {
                 panic!("expected git pack chunk");
             };
@@ -3596,19 +3889,19 @@ mod tests {
         assert_eq!(chunks[0].offset, 0);
         assert_eq!(chunks[0].chunk_index, 0);
         assert!(!chunks[0].is_final_chunk);
-        assert_eq!(chunks[0].pack_chunk.as_ref(), b"abcd");
+        assert_eq!(chunks[0].pack_chunk.as_slice(), b"abcd");
         assert_eq!(chunks[1].offset, 4);
         assert_eq!(chunks[1].chunk_index, 1);
         assert!(!chunks[1].is_final_chunk);
-        assert_eq!(chunks[1].pack_chunk.as_ref(), b"efgh");
+        assert_eq!(chunks[1].pack_chunk.as_slice(), b"efgh");
         assert_eq!(chunks[2].offset, 8);
         assert_eq!(chunks[2].chunk_index, 2);
         assert!(chunks[2].is_final_chunk);
-        assert_eq!(chunks[2].pack_chunk.as_ref(), b"ij");
+        assert_eq!(chunks[2].pack_chunk.as_slice(), b"ij");
         assert!(
             chunks
                 .iter()
-                .all(|chunk| chunk.pack_id.as_ref() == &[0x42; 20][..])
+                .all(|chunk| chunk.pack_id.as_slice() == &[0x42; 20][..])
         );
     }
 
@@ -3654,8 +3947,14 @@ mod tests {
         let progress = Progress::with_sink(Box::new(Forward(std::sync::Arc::clone(&sink))));
 
         let (tx, mut rx) = mpsc::channel(1024);
-        stream_git_pack_messages_blocking(tx, pack.clone(), 64, progress.clone())
-            .expect("stream pack");
+        stream_git_pack_messages_blocking(
+            tx,
+            pack.clone(),
+            64,
+            progress.clone(),
+            "test-push-op".to_string(),
+        )
+        .expect("stream pack");
         while rx.blocking_recv().is_some() {}
 
         let phases = sink.phases();
@@ -3707,8 +4006,8 @@ mod tests {
                         chunk_index: chunk_index as u32,
                         is_final_chunk: next_offset == pack.pack.len() as u64,
                         pack_size: pack.pack.len() as u64,
-                        pack_chunk: chunk.to_vec().into(),
-                        pack_id: pack.checksum.as_bytes().to_vec().into(),
+                        pack_chunk: chunk.to_vec(),
+                        pack_id: pack.checksum.as_bytes().to_vec(),
                     },
                 )
                 .expect("receive chunk");
@@ -3737,8 +4036,8 @@ mod tests {
                 chunk_index: 0,
                 is_final_chunk: true,
                 pack_size: 0,
-                pack_chunk: Vec::new().into(),
-                pack_id: Vec::new().into(),
+                pack_chunk: Vec::new(),
+                pack_id: Vec::new(),
             })),
         };
         let err = accept_git_lane_pull_transfer(&repo, &mut git_repo, &mut state, transfer)
@@ -3749,10 +4048,10 @@ mod tests {
         );
     }
 
-    fn git_ref_update_from_message(message: &PushMessage) -> &GitRefUpdateTransfer {
-        let Some(push_message::Body::GitLane(GitLaneTransfer {
+    fn git_ref_update_from_message(message: &PushClientFrame) -> &GitRefUpdateTransfer {
+        let Some(push_client_frame::Frame::GitLane(GitLaneTransfer {
             body: Some(git_lane_transfer::Body::RefUpdate(update)),
-        })) = message.body.as_ref()
+        })) = message.frame.as_ref()
         else {
             panic!("expected git ref update message");
         };
@@ -3913,11 +4212,11 @@ mod tests {
             Ok(Response::new(UpdateRefResponse::default()))
         }
 
-        type PushStream = tokio_stream::wrappers::ReceiverStream<Result<PushMessage, Status>>;
+        type PushStream = tokio_stream::wrappers::ReceiverStream<Result<PushServerFrame, Status>>;
 
         async fn push(
             &self,
-            _request: tonic::Request<tonic::Streaming<PushMessage>>,
+            _request: tonic::Request<tonic::Streaming<PushClientFrame>>,
         ) -> Result<Response<Self::PushStream>, Status> {
             let (_tx, rx) = mpsc::channel(1);
             Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
@@ -3925,11 +4224,11 @@ mod tests {
             )))
         }
 
-        type PullStream = tokio_stream::wrappers::ReceiverStream<Result<PullMessage, Status>>;
+        type PullStream = tokio_stream::wrappers::ReceiverStream<Result<PullServerFrame, Status>>;
 
         async fn pull(
             &self,
-            request: tonic::Request<tonic::Streaming<PullMessage>>,
+            request: tonic::Request<tonic::Streaming<PullClientFrame>>,
         ) -> Result<Response<Self::PullStream>, Status> {
             let state = self.state;
             let state_visibility_blob = self.state_visibility_blob.clone();
@@ -3937,9 +4236,20 @@ mod tests {
 
             tokio::spawn(async move {
                 let mut inbound = request.into_inner();
+                if !matches!(
+                    inbound.message().await,
+                    Ok(Some(PullClientFrame {
+                        frame: Some(pull_client_frame::Frame::Open(_)),
+                    }))
+                ) {
+                    let _ = tx
+                        .send(Err(Status::invalid_argument("expected signed pull open")))
+                        .await;
+                    return;
+                }
                 match inbound.message().await {
-                    Ok(Some(PullMessage {
-                        body: Some(pull_message::Body::Request(_)),
+                    Ok(Some(PullClientFrame {
+                        frame: Some(pull_client_frame::Frame::Request(_)),
                     })) => {}
                     other => {
                         let _ = tx
@@ -3956,9 +4266,9 @@ mod tests {
                     ObjectAvailabilityStatus::Missing,
                     "missing state visibility",
                 );
-                let ready = PullMessage {
-                    body: Some(pull_message::Body::Ready(PullReady {
-                        remote_state: state.to_string_full(),
+                let ready = PullServerFrame {
+                    frame: Some(pull_server_frame::Frame::Ready(PullReady {
+                        remote_state: proto_state_id(state),
                         objects_to_fetch: vec![descriptor],
                         transfer: None,
                         partial_fetch_status: PartialFetchStatus::Disabled as i32,
@@ -3973,8 +4283,8 @@ mod tests {
                 }
 
                 match inbound.message().await {
-                    Ok(Some(PullMessage {
-                        body: Some(pull_message::Body::Want(want)),
+                    Ok(Some(PullClientFrame {
+                        frame: Some(pull_client_frame::Frame::Want(want)),
                     })) if !want.want_full_closure
                         && want.objects.len() == 1
                         && want.objects[0].object_type == "state_visibility" => {}
@@ -3988,11 +4298,11 @@ mod tests {
                     }
                 }
 
-                let transfer = PullMessage {
-                    body: Some(pull_message::Body::StateVisibility(
+                let transfer = PullServerFrame {
+                    frame: Some(pull_server_frame::Frame::StateVisibility(
                         StateVisibilityTransfer {
-                            state_id: state.to_string_full(),
-                            state_visibility_blob: state_visibility_blob.into(),
+                            state_id: proto_state_id(state),
+                            state_visibility_blob,
                         },
                     )),
                 };
@@ -4000,10 +4310,10 @@ mod tests {
                     return;
                 }
 
-                let complete = PullMessage {
-                    body: Some(pull_message::Body::Complete(GrpcPullComplete {
+                let complete = PullServerFrame {
+                    frame: Some(pull_server_frame::Frame::Complete(GrpcPullComplete {
                         success: true,
-                        new_state: state.to_string_full(),
+                        new_state: proto_state_id(state),
                         error: String::new(),
                         transfer: Some(TransferCheckpoint {
                             transfer_id: "sidecar-only-test".to_string(),
@@ -4052,7 +4362,7 @@ mod tests {
                 .expect("serve sidecar-only test service");
         });
 
-        let client = HostedGrpcClient::connect(addr, &ClientConfig::default())
+        let client = HostedGrpcClient::connect(addr, &signed_test_config())
             .await
             .expect("connect client");
         Some((client, handle))
@@ -4246,7 +4556,7 @@ mod tests {
 
         let err = match result {
             Err(err) => err,
-            Ok(_) => panic!("oversized sidecar PullMessage must be rejected at decode"),
+            Ok(_) => panic!("oversized sidecar PullClientFrame must be rejected at decode"),
         };
         let message = err.to_string();
         assert!(
@@ -4286,11 +4596,11 @@ mod tests {
             Ok(Response::new(UpdateRefResponse::default()))
         }
 
-        type PushStream = tokio_stream::wrappers::ReceiverStream<Result<PushMessage, Status>>;
+        type PushStream = tokio_stream::wrappers::ReceiverStream<Result<PushServerFrame, Status>>;
 
         async fn push(
             &self,
-            _request: tonic::Request<tonic::Streaming<PushMessage>>,
+            _request: tonic::Request<tonic::Streaming<PushClientFrame>>,
         ) -> Result<Response<Self::PushStream>, Status> {
             let (_tx, rx) = mpsc::channel(1);
             Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
@@ -4298,11 +4608,11 @@ mod tests {
             )))
         }
 
-        type PullStream = tokio_stream::wrappers::ReceiverStream<Result<PullMessage, Status>>;
+        type PullStream = tokio_stream::wrappers::ReceiverStream<Result<PullServerFrame, Status>>;
 
         async fn pull(
             &self,
-            request: tonic::Request<tonic::Streaming<PullMessage>>,
+            request: tonic::Request<tonic::Streaming<PullClientFrame>>,
         ) -> Result<Response<Self::PullStream>, Status> {
             let state = self.state;
             let pack_bundle = self.pack_bundle.clone();
@@ -4311,9 +4621,20 @@ mod tests {
 
             tokio::spawn(async move {
                 let mut inbound = request.into_inner();
+                if !matches!(
+                    inbound.message().await,
+                    Ok(Some(PullClientFrame {
+                        frame: Some(pull_client_frame::Frame::Open(_)),
+                    }))
+                ) {
+                    let _ = tx
+                        .send(Err(Status::invalid_argument("expected signed pull open")))
+                        .await;
+                    return;
+                }
                 match inbound.message().await {
-                    Ok(Some(PullMessage {
-                        body: Some(pull_message::Body::Request(_)),
+                    Ok(Some(PullClientFrame {
+                        frame: Some(pull_client_frame::Frame::Request(_)),
                     })) => {}
                     other => {
                         let _ = tx
@@ -4325,9 +4646,9 @@ mod tests {
                     }
                 }
 
-                let ready = PullMessage {
-                    body: Some(pull_message::Body::Ready(PullReady {
-                        remote_state: state.to_string_full(),
+                let ready = PullServerFrame {
+                    frame: Some(pull_server_frame::Frame::Ready(PullReady {
+                        remote_state: proto_state_id(state),
                         objects_to_fetch: vec![
                             object_descriptor_with_status(
                                 &state_info(state),
@@ -4353,8 +4674,8 @@ mod tests {
                 }
 
                 match inbound.message().await {
-                    Ok(Some(PullMessage {
-                        body: Some(pull_message::Body::Want(want)),
+                    Ok(Some(PullClientFrame {
+                        frame: Some(pull_client_frame::Frame::Want(want)),
                     })) if !want.want_full_closure
                         && want.objects.len() == 2
                         && want
@@ -4383,11 +4704,11 @@ mod tests {
                     }
                 }
 
-                let transfer = PullMessage {
-                    body: Some(pull_message::Body::StateVisibility(
+                let transfer = PullServerFrame {
+                    frame: Some(pull_server_frame::Frame::StateVisibility(
                         StateVisibilityTransfer {
-                            state_id: state.to_string_full(),
-                            state_visibility_blob: state_visibility_blob.into(),
+                            state_id: proto_state_id(state),
+                            state_visibility_blob,
                         },
                     )),
                 };
@@ -4395,10 +4716,10 @@ mod tests {
                     return;
                 }
 
-                let complete = PullMessage {
-                    body: Some(pull_message::Body::Complete(GrpcPullComplete {
+                let complete = PullServerFrame {
+                    frame: Some(pull_server_frame::Frame::Complete(GrpcPullComplete {
                         success: true,
-                        new_state: state.to_string_full(),
+                        new_state: proto_state_id(state),
                         error: String::new(),
                         transfer: Some(TransferCheckpoint {
                             transfer_id: "state-and-visibility-test".to_string(),
@@ -4424,7 +4745,7 @@ mod tests {
         bundle: &wire::NativePackBundle,
         transfer_id: &str,
         chunk_size: usize,
-    ) -> Vec<PullMessage> {
+    ) -> Vec<PullServerFrame> {
         let mut messages = Vec::new();
         let chunk_size = chunk_size.max(1);
 
@@ -4435,10 +4756,10 @@ mod tests {
             else {
                 break;
             };
-            messages.push(PullMessage {
-                body: Some(pull_message::Body::Pack(PackChunk {
+            messages.push(PullServerFrame {
+                frame: Some(pull_server_frame::Frame::Pack(PackChunk {
                     stream_kind: PackStreamKind::Pack as i32,
-                    data: bundle.pack_data[start..start + len].to_vec().into(),
+                    data: bundle.pack_data[start..start + len].to_vec(),
                     transfer: Some(TransferCheckpoint {
                         transfer_id: transfer_id.to_string(),
                         transport_mode: TransportMode::NativePack as i32,
@@ -4460,10 +4781,10 @@ mod tests {
             else {
                 break;
             };
-            messages.push(PullMessage {
-                body: Some(pull_message::Body::Pack(PackChunk {
+            messages.push(PullServerFrame {
+                frame: Some(pull_server_frame::Frame::Pack(PackChunk {
                     stream_kind: PackStreamKind::Index as i32,
-                    data: bundle.index_data[start..start + len].to_vec().into(),
+                    data: bundle.index_data[start..start + len].to_vec(),
                     transfer: Some(TransferCheckpoint {
                         transfer_id: transfer_id.to_string(),
                         transport_mode: TransportMode::NativePack as i32,
@@ -4508,7 +4829,7 @@ mod tests {
                 .expect("serve state-and-visibility test service");
         });
 
-        let client = HostedGrpcClient::connect(addr, &ClientConfig::default())
+        let client = HostedGrpcClient::connect(addr, &signed_test_config())
             .await
             .expect("connect client");
         Some((client, handle))
@@ -4674,9 +4995,11 @@ mod tests {
             .expect("load sidecar")
             .expect("sidecar exists");
 
-        let message = redaction_push_message(&repo, redaction_info(blob)).expect("message");
+        let message =
+            redaction_push_message(&repo, redaction_info(blob), "test-push-op").expect("message");
+        assert_eq!(message.client_operation_id, "test-push-op");
 
-        let Some(push_message::Body::Redaction(transfer)) = message.body else {
+        let Some(push_client_frame::Frame::Redaction(transfer)) = message.frame else {
             panic!("expected redaction transfer");
         };
         assert_eq!(transfer.blob_hash, blob.to_hex());
@@ -4688,7 +5011,8 @@ mod tests {
         let (_dir, repo) = temp_repo();
         let blob = sample_blob();
 
-        let err = redaction_push_message(&repo, redaction_info(blob)).expect_err("missing sidecar");
+        let err = redaction_push_message(&repo, redaction_info(blob), "test-push-op")
+            .expect_err("missing sidecar");
 
         assert!(matches!(err, ProtocolError::InvalidState(_)));
         assert!(
@@ -4710,7 +5034,8 @@ mod tests {
             .join(format!("{}.bin", blob.to_hex()));
         std::fs::create_dir_all(&redaction_path).expect("directory at redaction path");
 
-        let err = redaction_push_message(&repo, redaction_info(blob)).expect_err("load error");
+        let err = redaction_push_message(&repo, redaction_info(blob), "test-push-op")
+            .expect_err("load error");
 
         assert!(matches!(err, ProtocolError::InvalidState(_)));
         assert!(
@@ -4732,12 +5057,20 @@ mod tests {
             .expect("sidecar exists");
 
         let message =
-            state_visibility_push_message(&repo, state_visibility_info(state)).expect("message");
+            state_visibility_push_message(&repo, state_visibility_info(state), "test-push-op")
+                .expect("message");
+        assert_eq!(message.client_operation_id, "test-push-op");
 
-        let Some(push_message::Body::StateVisibility(transfer)) = message.body else {
+        let Some(push_client_frame::Frame::StateVisibility(transfer)) = message.frame else {
             panic!("expected state visibility transfer");
         };
-        assert_eq!(transfer.state_id, state.to_string_full());
+        assert_eq!(
+            transfer
+                .state_id
+                .as_ref()
+                .map(|state| state.value.as_slice()),
+            Some(state.as_bytes().as_slice())
+        );
         assert_eq!(transfer.state_visibility_blob, expected_bytes);
     }
 
@@ -4971,7 +5304,7 @@ mod tests {
         known_parent: StateId,
         full_pack: wire::NativePackBundle,
         delta_pack: wire::NativePackBundle,
-        captured_exclude: std::sync::Arc<std::sync::Mutex<Option<Vec<String>>>>,
+        captured_exclude: std::sync::Arc<std::sync::Mutex<Option<Vec<ProtoStateId>>>>,
     }
 
     #[tonic::async_trait]
@@ -4990,11 +5323,11 @@ mod tests {
             Ok(Response::new(UpdateRefResponse::default()))
         }
 
-        type PushStream = tokio_stream::wrappers::ReceiverStream<Result<PushMessage, Status>>;
+        type PushStream = tokio_stream::wrappers::ReceiverStream<Result<PushServerFrame, Status>>;
 
         async fn push(
             &self,
-            _request: tonic::Request<tonic::Streaming<PushMessage>>,
+            _request: tonic::Request<tonic::Streaming<PushClientFrame>>,
         ) -> Result<Response<Self::PushStream>, Status> {
             let (_tx, rx) = mpsc::channel(1);
             Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
@@ -5002,20 +5335,31 @@ mod tests {
             )))
         }
 
-        type PullStream = tokio_stream::wrappers::ReceiverStream<Result<PullMessage, Status>>;
+        type PullStream = tokio_stream::wrappers::ReceiverStream<Result<PullServerFrame, Status>>;
 
         async fn pull(
             &self,
-            request: tonic::Request<tonic::Streaming<PullMessage>>,
+            request: tonic::Request<tonic::Streaming<PullClientFrame>>,
         ) -> Result<Response<Self::PullStream>, Status> {
             let svc = self.clone();
             let (tx, rx) = mpsc::channel(16);
 
             tokio::spawn(async move {
                 let mut inbound = request.into_inner();
+                if !matches!(
+                    inbound.message().await,
+                    Ok(Some(PullClientFrame {
+                        frame: Some(pull_client_frame::Frame::Open(_)),
+                    }))
+                ) {
+                    let _ = tx
+                        .send(Err(Status::invalid_argument("expected signed pull open")))
+                        .await;
+                    return;
+                }
                 let exclude = match inbound.message().await {
-                    Ok(Some(PullMessage {
-                        body: Some(pull_message::Body::Request(req)),
+                    Ok(Some(PullClientFrame {
+                        frame: Some(pull_client_frame::Frame::Request(req)),
                     })) => req.exclude_states,
                     other => {
                         let _ = tx
@@ -5028,14 +5372,14 @@ mod tests {
                 };
                 *svc.captured_exclude.lock().unwrap() = Some(exclude.clone());
 
-                let remote_full = svc.remote_state.to_string_full();
-                let parent_full = svc.known_parent.to_string_full();
+                let remote_proto = proto_state_id(svc.remote_state).expect("valid remote state");
+                let parent_proto = proto_state_id(svc.known_parent).expect("valid parent state");
 
                 // Mirror the server contract: subtract advertised closures.
-                let (objects, pack, short_circuit) = if exclude.contains(&remote_full) {
+                let (objects, pack, short_circuit) = if exclude.contains(&remote_proto) {
                     // weft#215 zero-delta short-circuit: client is at the tip.
                     (Vec::new(), None, true)
-                } else if exclude.contains(&parent_full) {
+                } else if exclude.contains(&parent_proto) {
                     // Client is behind at `known_parent`; send only the delta.
                     (
                         svc.delta_objects.clone(),
@@ -5058,9 +5402,9 @@ mod tests {
                     })
                     .collect();
 
-                let ready = PullMessage {
-                    body: Some(pull_message::Body::Ready(PullReady {
-                        remote_state: remote_full.clone(),
+                let ready = PullServerFrame {
+                    frame: Some(pull_server_frame::Frame::Ready(PullReady {
+                        remote_state: proto_state_id(svc.remote_state),
                         objects_to_fetch: descriptors,
                         transfer: None,
                         partial_fetch_status: PartialFetchStatus::Disabled as i32,
@@ -5077,8 +5421,8 @@ mod tests {
 
                 // Expect the client's Want.
                 match inbound.message().await {
-                    Ok(Some(PullMessage {
-                        body: Some(pull_message::Body::Want(_)),
+                    Ok(Some(PullClientFrame {
+                        frame: Some(pull_client_frame::Frame::Want(_)),
                     })) => {}
                     other => {
                         let _ = tx
@@ -5100,10 +5444,10 @@ mod tests {
                     }
                 }
 
-                let complete = PullMessage {
-                    body: Some(pull_message::Body::Complete(GrpcPullComplete {
+                let complete = PullServerFrame {
+                    frame: Some(pull_server_frame::Frame::Complete(GrpcPullComplete {
                         success: true,
-                        new_state: remote_full,
+                        new_state: proto_state_id(svc.remote_state),
                         error: String::new(),
                         transfer: Some(TransferCheckpoint {
                             transfer_id: "delta-aware-test".to_string(),
@@ -5150,7 +5494,7 @@ mod tests {
                 .await
                 .expect("serve delta-aware test service");
         });
-        let client = HostedGrpcClient::connect(addr, &ClientConfig::default())
+        let client = HostedGrpcClient::connect(addr, &signed_test_config())
             .await
             .expect("connect client");
         Some((client, handle))
@@ -5209,7 +5553,7 @@ mod tests {
         let advertised = captured.lock().unwrap().clone().expect("request captured");
         assert_eq!(
             advertised,
-            vec![head.to_string_full()],
+            vec![proto_state_id(head).expect("valid state")],
             "a bare pull at the tip must advertise that tip in exclude_states"
         );
         assert!(exchange.result.success);
@@ -5318,7 +5662,7 @@ mod tests {
         let advertised = captured.lock().unwrap().clone().expect("request captured");
         assert_eq!(
             advertised,
-            vec![parent.to_string_full()],
+            vec![proto_state_id(parent).expect("valid state")],
             "a behind client must advertise the parent head it holds"
         );
         assert!(exchange.result.success);
@@ -5560,7 +5904,7 @@ mod tests {
         let advertised = captured.lock().unwrap().clone().expect("request captured");
         assert_eq!(
             advertised,
-            vec![head.to_string_full()],
+            vec![proto_state_id(head).expect("valid state")],
             "an explicit --local-thread with a complete closure must advertise its head"
         );
         assert!(exchange.result.success);

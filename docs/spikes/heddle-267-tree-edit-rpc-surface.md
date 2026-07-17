@@ -1,6 +1,8 @@
 # heddle#267 - tree-edit RPC surface for FS-less operation
 
-**Status:** spike decision doc. No production RPC code lands in this issue.
+**Status:** superseded by ADR 0048. No production RPC code landed from this
+spike; `TreeEditService` is intentionally absent from the net-new public API.
+The document remains as historical design exploration.
 
 **Decision:** add a hosted **TreeEditService** whose read methods operate on
 committed trees and whose write path stages content-addressed captures, then

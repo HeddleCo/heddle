@@ -327,15 +327,6 @@ else
   err "publish-manifests must be gated to stable releases only"
 fi
 
-if grep -E "^\s*publish-grpc-client:" "$WF" >/dev/null \
-   && grep -F "npm publish --registry=\"\${registry}\"" "$WF" >/dev/null \
-   && grep -F "package_version" "$WF" >/dev/null \
-   && grep -F "crates/grpc/Cargo.toml" "$WF" >/dev/null; then
-  ok "TypeScript gRPC client publication is wired to the release pipeline and tracks heddle-grpc"
-else
-  err "release workflow must publish the TypeScript gRPC client from release.yml and verify its npm version tracks crates/grpc/Cargo.toml"
-fi
-
 # sha256 checksums.
 if grep -Ei "sha256sum|shasum|sha256" "$WF" >/dev/null; then
   ok "sha256 checksums step"
@@ -435,7 +426,7 @@ else
   errors << "validate-tag must declare 'tag', 'kind', and 'publish_release' outputs" unless outs.key?("tag") && outs.key?("kind") && outs.key?("publish_release")
 end
 
-downstream = ["build", "build-macos-cask", "release", "publish-grpc-client", "publish-manifests"]
+downstream = ["build", "build-macos-cask", "release", "publish-manifests"]
 downstream.each do |name|
   job = jobs[name]
   if !job.is_a?(Hash)
@@ -492,29 +483,6 @@ if pm.is_a?(Hash)
     errors << "publish-manifests must depend on release so the GitHub Release exists before opening tap PRs"
   else
     oks << "publish-manifests depends on release"
-  end
-end
-
-pg = jobs["publish-grpc-client"]
-if pg.is_a?(Hash)
-  condition = pg.fetch("if", "").to_s
-  if !condition.include?("needs.validate-tag.outputs.kind == 'stable'")
-    errors << "publish-grpc-client must gate on needs.validate-tag.outputs.kind == 'stable'"
-  else
-    oks << "publish-grpc-client is stable-only"
-  end
-  needs = pg.fetch("needs", [])
-  needs = [needs] if needs.is_a?(String)
-  if !needs.include?("release")
-    errors << "publish-grpc-client must depend on release so npm publication follows successful release publication"
-  else
-    oks << "publish-grpc-client depends on release"
-  end
-  permissions = pg.fetch("permissions", {}) || {}
-  if permissions.fetch("packages", nil) == "write"
-    oks << "publish-grpc-client has package write permission"
-  else
-    errors << "publish-grpc-client must be the release job with packages: write"
   end
 end
 
@@ -619,7 +587,7 @@ else:
 # explicitly keeps this honest: adding a new downstream job requires
 # updating this list, which forces a conscious decision about whether
 # the new job needs the trust gate.
-downstream = ["build", "build-macos-cask", "release", "publish-grpc-client", "publish-manifests"]
+downstream = ["build", "build-macos-cask", "release", "publish-manifests"]
 for name in downstream:
     job = jobs.get(name)
     if not isinstance(job, dict):
@@ -682,26 +650,6 @@ if isinstance(pm, dict):
         errors.append("publish-manifests must depend on release so the GitHub Release exists before opening tap PRs")
     else:
         oks.append("publish-manifests depends on release")
-
-pg = jobs.get("publish-grpc-client")
-if isinstance(pg, dict):
-    condition = str(pg.get("if", ""))
-    if "needs.validate-tag.outputs.kind == 'stable'" not in condition:
-        errors.append("publish-grpc-client must gate on needs.validate-tag.outputs.kind == 'stable'")
-    else:
-        oks.append("publish-grpc-client is stable-only")
-    needs = pg.get("needs", [])
-    if isinstance(needs, str):
-        needs = [needs]
-    if "release" not in needs:
-        errors.append("publish-grpc-client must depend on release so npm publication follows successful release publication")
-    else:
-        oks.append("publish-grpc-client depends on release")
-    permissions = pg.get("permissions") or {}
-    if permissions.get("packages") == "write":
-        oks.append("publish-grpc-client has package write permission")
-    else:
-        errors.append("publish-grpc-client must be the release job with packages: write")
 
 # Linux glibc floor (#549): the two -unknown-linux-gnu build legs must
 # pin an ubuntu-22.04 runner (glibc 2.35). Read the runner per matrix

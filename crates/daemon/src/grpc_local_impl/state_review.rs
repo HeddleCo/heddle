@@ -10,17 +10,18 @@
 use ::state_review::{
     PathSymbol, ReadingOrderPartition, SymbolKind, build_review_payload_partition,
 };
-use crypto::verify_payload_signature;
-use grpc::heddle::v1::{
-    AnchoredDiscussion, GetReviewPayloadRequest, GetReviewProgressRequest,
-    GetReviewProgressResponse, ListSignaturesRequest, ListSignaturesResponse, MergeRequirement,
-    PathSymbolRef as ProtoPathSymbolRef, ReadingOrderPartition as ProtoReadingOrderPartition,
-    RecordCheckAckRequest, RecordCheckAckResponse, RecordVerdictRequest, RecordVerdictResponse,
+use api::heddle::api::v1alpha1::{
+    AnchoredDiscussion, GetRepoSignalHealthRequest, GetReviewPayloadRequest,
+    GetReviewProgressRequest, GetReviewProgressResponse, ListSignaturesRequest,
+    ListSignaturesResponse, MergeRequirement, PathSymbolRef as ProtoPathSymbolRef,
+    ReadingOrderPartition as ProtoReadingOrderPartition, RecordCheckAckRequest,
+    RecordCheckAckResponse, RecordVerdictRequest, RecordVerdictResponse, RepoSignalHealthReport,
     ReviewPayload, ReviewScope as ProtoReviewScope, ReviewSignature as ProtoReviewSignature,
     ReviewSummary, RiskSignal as ProtoRiskSignal, SignStateRequest, SignStateResponse,
-    SignalAnchor as ProtoSignalAnchor, SigningFooter,
-    state_review_service_server::StateReviewService,
+    SignalAnchor as ProtoSignalAnchor, SignalHealthEntry as ProtoSignalHealthEntry, SigningFooter,
+    Verdict as ProtoVerdict, state_review_service_server::StateReviewService,
 };
+use crypto::verify_payload_signature;
 use objects::{
     lock::RepositoryLockExt,
     object::{
@@ -42,6 +43,14 @@ use super::{GrpcLocalService, to_status, with_idempotency};
 /// to bound the window for replay-style attacks.
 const SIGN_TIMESTAMP_SKEW_SECS: i64 = 5 * 60;
 
+/// Verdicts use a distinct canonical payload so they cannot be replayed as
+/// ordinary positive review signatures.
+const VERDICT_SIGNING_PAYLOAD_TAG: &[u8] = b"hd-rev-sig-v2\x00";
+
+/// Collision-safe marker for verdict metadata stored in the existing review
+/// signature justification field.
+const VERDICT_ENVELOPE_TAG: &str = "\u{1}hd-verdict-v1\u{1}";
+
 /// Local-mode `StateReviewService` implementation.
 #[derive(Clone)]
 pub struct LocalStateReviewService {
@@ -56,6 +65,27 @@ impl LocalStateReviewService {
 
 #[tonic::async_trait]
 impl StateReviewService for LocalStateReviewService {
+    async fn get_repo_signal_health(
+        &self,
+        request: Request<GetRepoSignalHealthRequest>,
+    ) -> Result<Response<RepoSignalHealthReport>, Status> {
+        let report =
+            super::get_repo_signal_health(self.inner.repo(), request.into_inner().window_states)
+                .map_err(to_status)?;
+        Ok(Response::new(RepoSignalHealthReport {
+            entries: report
+                .entries
+                .into_iter()
+                .map(|entry| ProtoSignalHealthEntry {
+                    module_id: entry.module_id,
+                    fire_rate: entry.fire_rate,
+                    warn: entry.warn,
+                })
+                .collect(),
+            window_states: report.window_states,
+        }))
+    }
+
     async fn get_review_payload(
         &self,
         request: Request<GetReviewPayloadRequest>,
@@ -242,9 +272,9 @@ impl StateReviewService for LocalStateReviewService {
             merge_requirements: Vec::<MergeRequirement>::new(),
             signing_footer: Some(SigningFooter {
                 available_kinds: vec![
-                    grpc::heddle::v1::ReviewKind::Read as i32,
-                    grpc::heddle::v1::ReviewKind::AgentPreview as i32,
-                    grpc::heddle::v1::ReviewKind::AgentCoReview as i32,
+                    api::heddle::api::v1alpha1::ReviewKind::Read as i32,
+                    api::heddle::api::v1alpha1::ReviewKind::AgentPreview as i32,
+                    api::heddle::api::v1alpha1::ReviewKind::AgentCoReview as i32,
                 ],
             }),
         };
@@ -322,17 +352,28 @@ impl StateReviewService for LocalStateReviewService {
         Ok(Response::new(ListSignaturesResponse { signatures }))
     }
 
-    // The verdict (weft#481) and review-progress (weft#482) RPCs are defined
-    // on the wire in heddle-grpc 0.19 but implemented server-side in weft
-    // (the verdict blob append + the `review_check_acks` table). Local mode
-    // does not back these; the handlers land with the weft impl.
     async fn record_verdict(
         &self,
-        _request: Request<RecordVerdictRequest>,
+        request: Request<RecordVerdictRequest>,
     ) -> Result<Response<RecordVerdictResponse>, Status> {
-        Err(Status::unimplemented(
-            "RecordVerdict is not available in local mode (weft#481)",
-        ))
+        let req = request.into_inner();
+        let req_bytes = req.encode_to_vec();
+        let client_operation_id = req.client_operation_id.clone();
+        let inner = self.inner.clone();
+
+        let response = with_idempotency(
+            &self.inner,
+            &client_operation_id,
+            "state_review.record_verdict",
+            &req_bytes,
+            move || {
+                let inner = inner.clone();
+                async move { execute_record_verdict(&inner, req).await }
+            },
+        )
+        .await?;
+
+        Ok(Response::new(response))
     }
 
     async fn record_check_ack(
@@ -340,7 +381,7 @@ impl StateReviewService for LocalStateReviewService {
         _request: Request<RecordCheckAckRequest>,
     ) -> Result<Response<RecordCheckAckResponse>, Status> {
         Err(Status::unimplemented(
-            "RecordCheckAck is not available in local mode (weft#482)",
+            "record_check_ack is not available in local mode: local repositories do not persist review check acknowledgements",
         ))
     }
 
@@ -349,7 +390,7 @@ impl StateReviewService for LocalStateReviewService {
         _request: Request<GetReviewProgressRequest>,
     ) -> Result<Response<GetReviewProgressResponse>, Status> {
         Err(Status::unimplemented(
-            "GetReviewProgress is not available in local mode (weft#482)",
+            "get_review_progress is not available in local mode: local repositories do not persist review progress",
         ))
     }
 }
@@ -361,13 +402,13 @@ async fn execute_sign_state(
     req: SignStateRequest,
 ) -> Result<SignStateResponse, Status> {
     // 1. Validate the kind.
-    let kind = match grpc::heddle::v1::ReviewKind::try_from(req.kind)
+    let kind = match api::heddle::api::v1alpha1::ReviewKind::try_from(req.kind)
         .map_err(|_| Status::invalid_argument(format!("unknown review kind tag {}", req.kind)))?
     {
-        grpc::heddle::v1::ReviewKind::Read => ReviewKind::Read,
-        grpc::heddle::v1::ReviewKind::AgentPreview => ReviewKind::AgentPreview,
-        grpc::heddle::v1::ReviewKind::AgentCoReview => ReviewKind::AgentCoReview,
-        grpc::heddle::v1::ReviewKind::Unspecified => {
+        api::heddle::api::v1alpha1::ReviewKind::Read => ReviewKind::Read,
+        api::heddle::api::v1alpha1::ReviewKind::AgentPreview => ReviewKind::AgentPreview,
+        api::heddle::api::v1alpha1::ReviewKind::AgentCoReview => ReviewKind::AgentCoReview,
+        api::heddle::api::v1alpha1::ReviewKind::Unspecified => {
             return Err(Status::invalid_argument("review kind is required"));
         }
     };
@@ -392,6 +433,11 @@ async fn execute_sign_state(
     let actor = repo
         .get_principal()
         .map_err(|err| Status::internal(format!("resolve caller principal: {err}")))?;
+    if req.justification.starts_with(VERDICT_ENVELOPE_TAG) {
+        return Err(Status::invalid_argument(
+            "justification must not begin with the reserved verdict-envelope prefix",
+        ));
+    }
     let justification = if req.justification.is_empty() {
         None
     } else {
@@ -441,8 +487,84 @@ async fn execute_sign_state(
         ))
     })?;
 
-    // 5. Serialize the read-modify-write and re-load the state inside the
-    // critical section.
+    let new_index = append_review_signature(repo, state_id, new_sig)?;
+
+    Ok(SignStateResponse {
+        signature_id: synthetic_signature_id(new_index),
+        state_id: req.state_id,
+    })
+}
+
+async fn execute_record_verdict(
+    inner: &GrpcLocalService,
+    req: RecordVerdictRequest,
+) -> Result<RecordVerdictResponse, Status> {
+    let verdict = verdict_str_from_proto(req.verdict)?;
+    let state_id = parse_state_id(&req.state_id)?;
+    if matches!(verdict, "hold" | "reject") && req.reason.trim().is_empty() {
+        return Err(Status::invalid_argument(
+            "reason is required for HOLD and REJECT verdicts",
+        ));
+    }
+    let scope = match req.scope.as_ref() {
+        Some(scope) => proto_scope_to_object(scope)?,
+        None => ReviewScope::WholeChange,
+    };
+    let signed_at = req.signed_at.as_ref().map(|time| time.seconds).unwrap_or(0);
+    if signed_at == 0 {
+        return Err(Status::invalid_argument(
+            "signed_at is required and must match the timestamp the client signed over",
+        ));
+    }
+    let now = chrono::Utc::now().timestamp();
+    if (signed_at - now).abs() > SIGN_TIMESTAMP_SKEW_SECS {
+        return Err(Status::invalid_argument(format!(
+            "signed_at={signed_at} is too far from server time={now} (max skew {SIGN_TIMESTAMP_SKEW_SECS}s)"
+        )));
+    }
+
+    let payload = verdict_signing_payload(state_id, verdict, &scope, signed_at, &req.reason);
+    verify_payload_signature(&payload, &req.algorithm, &req.public_key, &req.signature).map_err(
+        |err| {
+            Status::invalid_argument(format!(
+                "verdict signature failed verification ({}): {err}",
+                req.algorithm
+            ))
+        },
+    )?;
+
+    let repo = inner.repo();
+    let signature = ReviewSignature {
+        actor: repo
+            .get_principal()
+            .map_err(|err| Status::internal(format!("resolve caller principal: {err}")))?,
+        kind: ReviewKind::Read,
+        scope,
+        justification: Some(encode_verdict_envelope(verdict, &req.reason)),
+        signed_at,
+        algorithm: req.algorithm.clone(),
+        public_key: hex::encode(&req.public_key),
+        signature: hex::encode(&req.signature),
+    };
+    signature
+        .validate()
+        .map_err(|err| Status::invalid_argument(format!("invalid review signature: {err}")))?;
+
+    let new_index = append_review_signature(repo, state_id, signature)?;
+    Ok(RecordVerdictResponse {
+        signature_id: synthetic_signature_id(new_index),
+        state_id: req.state_id,
+    })
+}
+
+/// Append one signed review record while holding the repository write lock.
+/// SignState and RecordVerdict share this tail so concurrent local writes do
+/// not lose one another's attachment updates.
+fn append_review_signature(
+    repo: &Repository,
+    state_id: StateId,
+    signature: ReviewSignature,
+) -> Result<usize, Status> {
     let _lock = repo
         .locker()
         .write()
@@ -478,10 +600,9 @@ async fn execute_sign_state(
         }
         None => ReviewSignaturesBlob::new(Vec::new()),
     };
-    blob.signatures.push(new_sig);
+    blob.signatures.push(signature);
     let new_index = blob.signatures.len() - 1;
 
-    // 6. Persist the new blob.
     let bytes = blob
         .encode()
         .map_err(|err| Status::internal(format!("encode review signatures: {err}")))?;
@@ -498,11 +619,7 @@ async fn execute_sign_state(
         supersedes: prior.map(|attachment| attachment.id()),
     };
     repo.put_state_attachment(&attachment).map_err(to_status)?;
-
-    Ok(SignStateResponse {
-        signature_id: synthetic_signature_id(new_index),
-        state_id: req.state_id,
-    })
+    Ok(new_index)
 }
 
 /// `ReviewSignature` doesn't carry an explicit id; we synthesise one from
@@ -532,13 +649,97 @@ fn attachment_hash(
     Ok(Some(hash))
 }
 
-fn parse_state_id(s: &[u8]) -> Result<StateId, Status> {
-    StateId::try_from_slice(s)
+fn parse_state_id(
+    state_id: &Option<api::heddle::api::v1alpha1::StateId>,
+) -> Result<StateId, Status> {
+    let bytes = state_id
+        .as_ref()
+        .ok_or_else(|| Status::invalid_argument("state_id is required"))?;
+    StateId::try_from_slice(&bytes.value)
         .map_err(|err| Status::invalid_argument(format!("invalid state_id: {err}")))
 }
 
+fn api_state_id(state_id: &StateId) -> api::heddle::api::v1alpha1::StateId {
+    api::heddle::api::v1alpha1::StateId {
+        value: state_id.as_bytes().to_vec(),
+    }
+}
+
+fn verdict_signing_payload(
+    state_id: StateId,
+    verdict: &str,
+    scope: &ReviewScope,
+    signed_at: i64,
+    reason: &str,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(VERDICT_SIGNING_PAYLOAD_TAG.len() + 256);
+    payload.extend_from_slice(VERDICT_SIGNING_PAYLOAD_TAG);
+    payload.extend_from_slice(state_id.to_string_full().as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(verdict.as_bytes());
+    payload.push(0);
+    match scope {
+        ReviewScope::WholeChange => {
+            payload.extend_from_slice(b"whole_change");
+            payload.push(0);
+        }
+        ReviewScope::Symbols(symbols) => {
+            payload.extend_from_slice(b"symbols");
+            payload.push(0);
+            payload.extend_from_slice(&(symbols.len() as u32).to_le_bytes());
+            for symbol in symbols {
+                payload.extend_from_slice(symbol.file.as_bytes());
+                payload.push(0);
+                payload.extend_from_slice(symbol.symbol.as_bytes());
+                payload.push(0);
+            }
+        }
+    }
+    payload.extend_from_slice(&signed_at.to_le_bytes());
+    payload.extend_from_slice(reason.as_bytes());
+    payload.push(0);
+    payload
+}
+
+fn verdict_str_from_proto(tag: i32) -> Result<&'static str, Status> {
+    match ProtoVerdict::try_from(tag)
+        .map_err(|_| Status::invalid_argument(format!("unknown verdict tag {tag}")))?
+    {
+        ProtoVerdict::Sign => Ok("sign"),
+        ProtoVerdict::Hold => Ok("hold"),
+        ProtoVerdict::Reject => Ok("reject"),
+        ProtoVerdict::Unspecified => Err(Status::invalid_argument("verdict is required")),
+    }
+}
+
+fn encode_verdict_envelope(verdict: &str, reason: &str) -> String {
+    let body = serde_json::json!({ "verdict": verdict, "reason": reason });
+    format!("{VERDICT_ENVELOPE_TAG}{body}")
+}
+
+fn decode_verdict_envelope(justification: &str) -> Option<(String, String)> {
+    let body = justification.strip_prefix(VERDICT_ENVELOPE_TAG)?;
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let verdict = value.get("verdict")?.as_str()?.to_string();
+    let reason = value
+        .get("reason")
+        .and_then(|reason| reason.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some((verdict, reason))
+}
+
+fn verdict_proto_from_str(verdict: &str) -> ProtoVerdict {
+    match verdict {
+        "sign" => ProtoVerdict::Sign,
+        "hold" => ProtoVerdict::Hold,
+        "reject" => ProtoVerdict::Reject,
+        _ => ProtoVerdict::Unspecified,
+    }
+}
+
 fn proto_scope_to_object(scope: &ProtoReviewScope) -> Result<ReviewScope, Status> {
-    use grpc::heddle::v1::review_scope::Scope;
+    use api::heddle::api::v1alpha1::review_scope::Scope;
     match scope.scope.as_ref() {
         None | Some(Scope::WholeChange(_)) => Ok(ReviewScope::WholeChange),
         Some(Scope::Symbols(list)) => {
@@ -558,7 +759,7 @@ fn proto_scope_to_object(scope: &ProtoReviewScope) -> Result<ReviewScope, Status
 }
 
 fn object_scope_to_proto(scope: &ReviewScope) -> ProtoReviewScope {
-    use grpc::heddle::v1::review_scope::{Scope, SymbolList, WholeChange};
+    use api::heddle::api::v1alpha1::review_scope::{Scope, SymbolList, WholeChange};
     let inner = match scope {
         ReviewScope::WholeChange => Scope::WholeChange(WholeChange {}),
         ReviewScope::Symbols(symbols) => Scope::Symbols(SymbolList {
@@ -575,13 +776,29 @@ fn object_scope_to_proto(scope: &ReviewScope) -> ProtoReviewScope {
 }
 
 fn review_signature_to_proto(sig: ReviewSignature, signature_id: String) -> ProtoReviewSignature {
+    let (verdict, reason, justification) = match sig
+        .justification
+        .as_deref()
+        .and_then(decode_verdict_envelope)
+    {
+        Some((verdict, reason)) => (
+            verdict_proto_from_str(&verdict) as i32,
+            reason,
+            String::new(),
+        ),
+        None => (
+            ProtoVerdict::Unspecified as i32,
+            String::new(),
+            sig.justification.unwrap_or_default(),
+        ),
+    };
     ProtoReviewSignature {
         signature_id,
         actor_name: sig.actor.name.clone(),
         actor_email: sig.actor.email.clone(),
         kind: review_kind_to_proto(sig.kind) as i32,
         scope: Some(object_scope_to_proto(&sig.scope)),
-        justification: sig.justification.unwrap_or_default(),
+        justification,
         signed_at: Some(prost_types::Timestamp {
             seconds: sig.signed_at,
             nanos: 0,
@@ -589,18 +806,16 @@ fn review_signature_to_proto(sig: ReviewSignature, signature_id: String) -> Prot
         algorithm: sig.algorithm,
         public_key: hex::decode(&sig.public_key).unwrap_or_default(),
         signature: hex::decode(&sig.signature).unwrap_or_default(),
-        // Legacy positive signatures predate the verdict surface (weft#481):
-        // VERDICT_UNSPECIFIED (treated as SIGN) with no decline reason.
-        verdict: grpc::heddle::v1::Verdict::Unspecified as i32,
-        reason: String::new(),
+        verdict,
+        reason,
     }
 }
 
-fn review_kind_to_proto(kind: ReviewKind) -> grpc::heddle::v1::ReviewKind {
+fn review_kind_to_proto(kind: ReviewKind) -> api::heddle::api::v1alpha1::ReviewKind {
     match kind {
-        ReviewKind::Read => grpc::heddle::v1::ReviewKind::Read,
-        ReviewKind::AgentPreview => grpc::heddle::v1::ReviewKind::AgentPreview,
-        ReviewKind::AgentCoReview => grpc::heddle::v1::ReviewKind::AgentCoReview,
+        ReviewKind::Read => api::heddle::api::v1alpha1::ReviewKind::Read,
+        ReviewKind::AgentPreview => api::heddle::api::v1alpha1::ReviewKind::AgentPreview,
+        ReviewKind::AgentCoReview => api::heddle::api::v1alpha1::ReviewKind::AgentCoReview,
     }
 }
 
@@ -759,7 +974,7 @@ fn discussion_to_anchored_proto(d: &Discussion) -> AnchoredDiscussion {
             file: d.anchor.file.clone(),
             symbol: d.anchor.symbol.clone(),
         }),
-        opened_against_state: d.opened_against_state.as_bytes().to_vec(),
+        opened_against_state: Some(api_state_id(&d.opened_against_state)),
         opened_at: Some(prost_types::Timestamp {
             seconds: d.opened_at,
             nanos: 0,
@@ -767,7 +982,7 @@ fn discussion_to_anchored_proto(d: &Discussion) -> AnchoredDiscussion {
         turns: d
             .turns
             .iter()
-            .map(|t| grpc::heddle::v1::DiscussionTurn {
+            .map(|t| api::heddle::api::v1alpha1::DiscussionTurn {
                 author_name: t.author.name.clone(),
                 author_email: t.author.email.clone(),
                 body: t.body.clone(),
@@ -786,8 +1001,8 @@ fn discussion_to_anchored_proto(d: &Discussion) -> AnchoredDiscussion {
 
 fn discussion_resolution_to_proto(
     resolution: &DiscussionResolution,
-) -> grpc::heddle::v1::DiscussionResolution {
-    use grpc::heddle::v1::discussion_resolution::{
+) -> api::heddle::api::v1alpha1::DiscussionResolution {
+    use api::heddle::api::v1alpha1::discussion_resolution::{
         Dismissed, Open, ResolvedByEdit, ResolvedIntoAnnotation, State,
     };
     let state = match resolution {
@@ -798,13 +1013,13 @@ fn discussion_resolution_to_proto(
             })
         }
         DiscussionResolution::ResolvedByEdit { state_id } => State::ByEdit(ResolvedByEdit {
-            state_id: state_id.as_bytes().to_vec(),
+            state_id: Some(api_state_id(state_id)),
         }),
         DiscussionResolution::Dismissed { reason } => State::Dismissed(Dismissed {
             reason: reason.clone(),
         }),
     };
-    grpc::heddle::v1::DiscussionResolution { state: Some(state) }
+    api::heddle::api::v1alpha1::DiscussionResolution { state: Some(state) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,8 +1225,8 @@ fn line_count(content: &[u8]) -> u32 {
 mod tests {
     use std::sync::Arc;
 
+    use api::heddle::api::v1alpha1::ReviewScope as ProtoReviewScope;
     use crypto::Signer as _;
-    use grpc::heddle::v1::ReviewScope as ProtoReviewScope;
     use repo::{Repository, operation_dedup::OperationDedupStore};
     use tempfile::TempDir;
 
@@ -1049,11 +1264,11 @@ mod tests {
         let signed_at = chrono::Utc::now().timestamp();
         let payload = signing_payload(*state_id, ReviewKind::Read, &scope, signed_at, None);
         let signature = signer.sign(&payload).expect("sign payload");
-        use grpc::heddle::v1::review_scope::{Scope, WholeChange};
+        use api::heddle::api::v1alpha1::review_scope::{Scope, WholeChange};
         SignStateRequest {
-            repo_path: String::new(),
-            state_id: state_id.as_bytes().to_vec(),
-            kind: grpc::heddle::v1::ReviewKind::Read as i32,
+            repo_path: None,
+            state_id: Some(api_state_id(state_id)),
+            kind: api::heddle::api::v1alpha1::ReviewKind::Read as i32,
             scope: Some(ProtoReviewScope {
                 scope: Some(Scope::WholeChange(WholeChange {})),
             }),
@@ -1061,6 +1276,38 @@ mod tests {
             algorithm: "ed25519".to_string(),
             public_key: signer.public_key().to_vec(),
             signature: signature.clone(),
+            signed_at: Some(prost_types::Timestamp {
+                seconds: signed_at,
+                nanos: 0,
+            }),
+            client_operation_id: op_id.to_string(),
+        }
+    }
+
+    fn verdict_request(
+        state_id: &StateId,
+        verdict: ProtoVerdict,
+        reason: &str,
+        op_id: &str,
+    ) -> RecordVerdictRequest {
+        let signer = crypto::Ed25519Signer::generate().expect("generate ed25519 key");
+        let scope = ReviewScope::WholeChange;
+        let signed_at = chrono::Utc::now().timestamp();
+        let verdict_str = verdict_str_from_proto(verdict as i32).expect("explicit verdict");
+        let payload = verdict_signing_payload(*state_id, verdict_str, &scope, signed_at, reason);
+        let signature = signer.sign(&payload).expect("sign verdict payload");
+        use api::heddle::api::v1alpha1::review_scope::{Scope, WholeChange};
+        RecordVerdictRequest {
+            repo_path: None,
+            state_id: Some(api_state_id(state_id)),
+            verdict: verdict as i32,
+            scope: Some(ProtoReviewScope {
+                scope: Some(Scope::WholeChange(WholeChange {})),
+            }),
+            reason: reason.to_string(),
+            algorithm: "ed25519".to_string(),
+            public_key: signer.public_key().to_vec(),
+            signature,
             signed_at: Some(prost_types::Timestamp {
                 seconds: signed_at,
                 nanos: 0,
@@ -1080,26 +1327,115 @@ mod tests {
             .await
             .expect("sign_state");
         assert!(!resp.get_ref().signature_id.is_empty());
-        assert_eq!(resp.get_ref().state_id, state_id.as_bytes().to_vec());
+        assert_eq!(resp.get_ref().state_id, Some(api_state_id(&state_id)));
 
         let listing = svc
             .list_signatures(Request::new(ListSignaturesRequest {
-                repo_path: String::new(),
-                state_id: state_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&state_id)),
             }))
             .await
             .expect("list_signatures");
         let sigs = &listing.get_ref().signatures;
         assert_eq!(sigs.len(), 1, "expected one signature, got {sigs:?}");
-        assert_eq!(sigs[0].kind, grpc::heddle::v1::ReviewKind::Read as i32);
+        assert_eq!(
+            sigs[0].kind,
+            api::heddle::api::v1alpha1::ReviewKind::Read as i32
+        );
         assert_eq!(sigs[0].algorithm, "ed25519");
         assert_eq!(sigs[0].actor_name, "Alice Tester");
         assert_eq!(sigs[0].actor_email, "alice@example.com");
         let scope_case = sigs[0].scope.as_ref().and_then(|s| s.scope.as_ref());
         assert!(matches!(
             scope_case,
-            Some(grpc::heddle::v1::review_scope::Scope::WholeChange(_))
+            Some(api::heddle::api::v1alpha1::review_scope::Scope::WholeChange(_))
         ));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_global)]
+    async fn record_verdict_persists_signed_opinion_without_changing_state() {
+        let (svc, repo, _tmp) = fresh_service();
+        let state_id = capture_state(&repo);
+        let op_id = objects::object::OperationId::new().to_string();
+        let request = verdict_request(&state_id, ProtoVerdict::Hold, "needs another pass", &op_id);
+
+        let first = svc
+            .record_verdict(Request::new(request.clone()))
+            .await
+            .expect("record verdict");
+        let replay = svc
+            .record_verdict(Request::new(request))
+            .await
+            .expect("replay verdict");
+        assert_eq!(first.get_ref(), replay.get_ref());
+        assert_eq!(first.get_ref().state_id, Some(api_state_id(&state_id)));
+        assert_eq!(repo.head().expect("read head"), Some(state_id));
+
+        let listing = svc
+            .list_signatures(Request::new(ListSignaturesRequest {
+                repo_path: None,
+                state_id: Some(api_state_id(&state_id)),
+            }))
+            .await
+            .expect("list signatures");
+        let signatures = &listing.get_ref().signatures;
+        assert_eq!(signatures.len(), 1, "idempotent replay must append once");
+        assert_eq!(signatures[0].verdict, ProtoVerdict::Hold as i32);
+        assert_eq!(signatures[0].reason, "needs another pass");
+        assert!(signatures[0].justification.is_empty());
+        assert_eq!(
+            signatures[0].kind,
+            api::heddle::api::v1alpha1::ReviewKind::Read as i32
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_global)]
+    async fn record_verdict_rejects_reason_changed_after_signing() {
+        let (svc, repo, _tmp) = fresh_service();
+        let state_id = capture_state(&repo);
+        let mut request = verdict_request(&state_id, ProtoVerdict::Reject, "unsafe", "");
+        request.reason = "different reason".to_string();
+
+        let error = svc
+            .record_verdict(Request::new(request))
+            .await
+            .expect_err("changed signed reason must fail verification");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().contains("failed verification"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_global)]
+    async fn full_contract_routes_signal_health_and_stubs_review_progress() {
+        let (svc, _repo, _tmp) = fresh_service();
+        let health = svc
+            .get_repo_signal_health(Request::new(GetRepoSignalHealthRequest {
+                repo_path: None,
+                window_states: 1,
+            }))
+            .await
+            .expect("local signal health");
+        assert_eq!(health.get_ref().window_states, 1);
+
+        let ack_error = svc
+            .record_check_ack(Request::new(RecordCheckAckRequest::default()))
+            .await
+            .expect_err("local check acks are unsupported");
+        assert_eq!(ack_error.code(), tonic::Code::Unimplemented);
+        assert!(ack_error.message().contains("not available in local mode"));
+
+        let progress_error = svc
+            .get_review_progress(Request::new(GetReviewProgressRequest::default()))
+            .await
+            .expect_err("local review progress is unsupported");
+        assert_eq!(progress_error.code(), tonic::Code::Unimplemented);
+        assert!(
+            progress_error
+                .message()
+                .contains("not available in local mode")
+        );
     }
 
     #[tokio::test]
@@ -1128,8 +1464,8 @@ mod tests {
 
         let listing = svc
             .list_signatures(Request::new(ListSignaturesRequest {
-                repo_path: String::new(),
-                state_id: state_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&state_id)),
             }))
             .await
             .expect("list_signatures");
@@ -1208,8 +1544,8 @@ mod tests {
 
         let listing = svc
             .list_signatures(Request::new(ListSignaturesRequest {
-                repo_path: String::new(),
-                state_id: state_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&state_id)),
             }))
             .await
             .expect("list_signatures");
@@ -1252,8 +1588,8 @@ mod tests {
 
         let listing = svc
             .list_signatures(Request::new(ListSignaturesRequest {
-                repo_path: String::new(),
-                state_id: state_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&state_id)),
             }))
             .await
             .expect("list_signatures");
@@ -1287,8 +1623,8 @@ mod tests {
 
         let resp_first = svc
             .get_review_payload(Request::new(GetReviewPayloadRequest {
-                repo_path: String::new(),
-                state_id: first.state_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&first.state_id)),
                 include_all_signals: false,
             }))
             .await
@@ -1332,8 +1668,8 @@ mod tests {
 
         let resp_second = svc
             .get_review_payload(Request::new(GetReviewPayloadRequest {
-                repo_path: String::new(),
-                state_id: second.state_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&second.state_id)),
                 include_all_signals: false,
             }))
             .await
@@ -1420,8 +1756,8 @@ mod tests {
 
         let resp = svc
             .get_review_payload(Request::new(GetReviewPayloadRequest {
-                repo_path: String::new(),
-                state_id: changed_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&changed_id)),
                 include_all_signals: false,
             }))
             .await
@@ -1489,8 +1825,8 @@ mod tests {
         // but no Status::Internal error from the gRPC layer.
         let resp = svc
             .get_review_payload(Request::new(GetReviewPayloadRequest {
-                repo_path: String::new(),
-                state_id: missing_tree_state_id.as_bytes().to_vec(),
+                repo_path: None,
+                state_id: Some(api_state_id(&missing_tree_state_id)),
                 include_all_signals: false,
             }))
             .await

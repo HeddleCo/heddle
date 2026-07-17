@@ -1,6 +1,9 @@
 # FUSE worker IPC — decision doc (heddle#88)
 
-**Status:** Spike. Decisions locked; implementation tracked separately (see §6).
+**Status:** Superseded in part by ADR 0048. The crash-isolation analysis remains
+useful, but the proposed `heddle.v1` schema and `heddle-grpc` ownership are not
+valid implementation guidance. Worker-private IPC must remain internal and
+must not recreate a shared protobuf schema outside `HeddleCo/api`.
 **Scope:** Linux only. macOS uses FSKit; Windows uses ProjFS — both kernel-managed
 process models out of heddle's control (see §4 "Cross-platform parity").
 **Inputs grounded against:** `crates/daemon/src/local_daemon.rs`,
@@ -19,7 +22,7 @@ that fired DID corrupt the caught-from process's heap before we caught it.
 This doc captures the three locked design decisions for the
 `heddle-fuse-worker` sub-process that gives Linux that isolation.
 
-### Decision A — IPC: gRPC over Unix socket
+### Historical Decision A — IPC: gRPC over Unix socket
 
 Each fuse-worker exposes a gRPC service on its own Unix socket. Because the
 daemon supports multiple concurrent mounts per repo (keyed by thread; see

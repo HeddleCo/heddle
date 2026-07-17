@@ -416,6 +416,23 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.IdentityService/ClaimHandle",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The shared handle adapter is not a shipped Heddle client surface."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The shared handle adapter is not a shipped Heddle CLI surface."
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.IdentityService/CreateDeviceAuthorization",
       "layers": {
         "client": {
@@ -504,6 +521,23 @@
           "evidence": [],
           "follow_up": null,
           "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/GetHandleStatus",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The shared handle adapter is not a shipped Heddle client surface."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The shared handle adapter is not a shipped Heddle CLI surface."
         }
       }
     },
@@ -711,6 +745,40 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.IdentityService/RequestHeldName",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The shared handle adapter is not a shipped Heddle client surface."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The shared handle adapter is not a shipped Heddle CLI surface."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/ResolveHandle",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The shared handle adapter is not a shipped Heddle client surface."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The shared handle adapter is not a shipped Heddle CLI surface."
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.IdentityService/RevokeCredential",
       "layers": {
         "client": {
@@ -851,6 +919,142 @@
           "evidence": [],
           "follow_up": null,
           "reason": "The CLI auth surface does not call this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OperationService/BatchGetOperations",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OperationService/CancelOperation",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OperationService/GetOperation",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OperationService/GetOperationBatch",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OperationService/ListOperations",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OperationService/SubmitOperation",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OperationService/SubmitOperationBatch",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OperationService/WatchOperations",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "The descriptor marks OperationService planned."
         }
       }
     },
@@ -1622,23 +1826,6 @@
       }
     },
     {
-      "rpc": "heddle.api.v1alpha1.RepositoryService/CreateImportJob",
-      "layers": {
-        "client": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle hosted-client mapping is shipped."
-        },
-        "cli": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
-        }
-      }
-    },
-    {
       "rpc": "heddle.api.v1alpha1.RepositoryService/GetBlame",
       "layers": {
         "client": {
@@ -1933,23 +2120,6 @@
             }
           ],
           "follow_up": null
-        },
-        "cli": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
-        }
-      }
-    },
-    {
-      "rpc": "heddle.api.v1alpha1.RepositoryService/StreamImportProgress",
-      "layers": {
-        "client": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle hosted-client mapping is shipped."
         },
         "cli": {
           "status": "intentionally-unsupported",

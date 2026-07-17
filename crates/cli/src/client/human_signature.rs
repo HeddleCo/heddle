@@ -80,10 +80,11 @@ mod tests {
 
     fn req_with_action_url(action_url: Option<String>) -> HumanSignatureRequest {
         HumanSignatureRequest {
-            method_path: "/heddle.v1.HostedUserService/DeleteRepository".to_string(),
-            action_summary: "Authorize /heddle.v1.HostedUserService/DeleteRepository".to_string(),
+            method_path: "/heddle.api.v1alpha1.RegistryService/DeleteRepository".to_string(),
+            action_summary: "Authorize /heddle.api.v1alpha1.RegistryService/DeleteRepository"
+                .to_string(),
             challenge: "abc".to_string(),
-            canonical: b"weft-req-sig-v1:...".to_vec(),
+            canonical: b"heddle-req-sig-v1:...".to_vec(),
             action_url,
         }
     }
@@ -111,7 +112,7 @@ mod tests {
     #[test]
     fn cli_callback_includes_action_url_in_typed_error_when_present() {
         let cb = cli_human_signature_callback();
-        let url = "https://app.heddle.sh/verify-action?method=%2Fheddle.v1.HostedUserService%2FDeleteRepository&challenge=CHAL";
+        let url = "https://app.heddle.sh/verify-action?method=%2Fheddle.api.v1alpha1.RegistryService%2FDeleteRepository&challenge=CHAL";
         let result = cb(req_with_action_url(Some(url.to_string())));
         match result {
             Err(ProtocolError::AuthorizationFailed(msg)) => {

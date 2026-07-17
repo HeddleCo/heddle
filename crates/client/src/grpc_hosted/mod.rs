@@ -1,9 +1,10 @@
 //! Hosted gRPC client for the transport rewrite.
 
 mod content;
-mod helpers;
+pub(crate) mod helpers;
 mod hydration;
 pub mod monorepo;
+pub(crate) mod operation_id;
 pub mod request_signing;
 mod session;
 mod sync;
@@ -11,11 +12,12 @@ mod user;
 
 use cli_shared::{ClientConfig, cleartext_connect_allowed, cleartext_refused_message};
 use crypto::{Ed25519Signer, Signer};
-use grpc::heddle::v1::{
-    KeypairProof, MintBiscuitRequest, auth_service_client::AuthServiceClient,
-    content_service_client::ContentServiceClient,
-    hosted_user_service_client::HostedUserServiceClient, mint_biscuit_request::Proof,
+use grpc::heddle::api::v1alpha1::{
+    KeypairProof, MintBiscuitRequest, identity_service_client::IdentityServiceClient,
+    mint_biscuit_request::Proof, registry_service_client::RegistryServiceClient,
     repo_sync_service_client::RepoSyncServiceClient,
+    repository_service_client::RepositoryServiceClient,
+    workflow_service_client::WorkflowServiceClient,
 };
 use objects::{object::MarkerName, store::ObjectStore};
 use repo::Repository;
@@ -90,19 +92,21 @@ impl RenewableAuthorityCredential {
 
 pub struct HostedGrpcClient {
     pub(super) inner: RepoSyncServiceClient<Channel>,
-    pub(super) user: HostedUserServiceClient<Channel>,
-    pub(super) auth: AuthServiceClient<Channel>,
-    pub(super) content: ContentServiceClient<Channel>,
+    pub(super) user: RegistryServiceClient<Channel>,
+    pub(super) auth: IdentityServiceClient<Channel>,
+    pub(super) content: RepositoryServiceClient<Channel>,
+    pub(super) workflow: WorkflowServiceClient<Channel>,
     pub(super) token_header: Option<MetadataValue<tonic::metadata::Ascii>>,
     transport: helpers::HostedTransportPolicy,
     pub(super) auth_proof_key_pem: Option<String>,
+    authenticated_principal: Option<String>,
     /// The key used to look up this server's credential in the credential
     /// store. When the session also carries an exact renewable-authority
     /// binding, `auto_rotate_if_needed` uses this key to re-read and update
     /// `~/.heddle/credentials.toml` transparently.
     server_key: Option<String>,
     /// App-registered WebAuthn signer invoked when a `human`-tier RPC is
-    /// rejected with `x-weft-sig-required: human`. `None` => human-tier RPCs
+    /// rejected with `x-heddle-sig-required: human`. `None` => human-tier RPCs
     /// surface a typed error rather than looping. See
     /// [`request_signing::HumanSignatureCallback`].
     on_human_signature: Option<request_signing::HumanSignatureCallback>,
@@ -138,6 +142,13 @@ impl HostedGrpcClient {
             .connect()
             .await
             .map_err(|err| ProtocolError::Io(std::io::Error::other(err.to_string())))?;
+        Self::from_channel(channel, config)
+    }
+
+    pub(super) fn from_channel(
+        channel: Channel,
+        config: &ClientConfig,
+    ) -> Result<Self, ProtocolError> {
         let token_header = config
             .token
             .as_ref()
@@ -145,6 +156,11 @@ impl HostedGrpcClient {
             .transpose()
             .map_err(|err| ProtocolError::AuthenticationFailed(err.to_string()))?;
         let transport = helpers::HostedTransportPolicy::from_client_config(config);
+        if config.auth_proof_key_pem.is_some() && config.authenticated_principal.is_none() {
+            return Err(ProtocolError::AuthenticationFailed(
+                "hosted request signing requires an authenticated principal".to_string(),
+            ));
+        }
         Ok(Self {
             // Bound the single-shot, server-controlled sidecar allocation at
             // the gRPC decode boundary: tonic rejects an oversized inbound
@@ -154,12 +170,14 @@ impl HostedGrpcClient {
             // defense-in-depth, but this is the load-bearing guard.
             inner: RepoSyncServiceClient::new(channel.clone())
                 .max_decoding_message_size(wire::MAX_PULL_DECODE_MESSAGE_SIZE),
-            user: HostedUserServiceClient::new(channel.clone()),
-            auth: AuthServiceClient::new(channel.clone()),
-            content: ContentServiceClient::new(channel),
+            user: RegistryServiceClient::new(channel.clone()),
+            auth: IdentityServiceClient::new(channel.clone()),
+            content: RepositoryServiceClient::new(channel.clone()),
+            workflow: WorkflowServiceClient::new(channel.clone()),
             token_header,
             transport,
             auth_proof_key_pem: config.auth_proof_key_pem.clone(),
+            authenticated_principal: config.authenticated_principal.clone(),
             server_key: config.server_key.clone(),
             on_human_signature: None,
         })
@@ -167,7 +185,7 @@ impl HostedGrpcClient {
 
     /// Register the app's WebAuthn signer for the destructive (`human`) tier.
     ///
-    /// Invoked when a signed RPC is rejected with `x-weft-sig-required: human`;
+    /// Invoked when a signed RPC is rejected with `x-heddle-sig-required: human`;
     /// the callback produces a [`request_signing::WebAuthnAssertion`] over the
     /// same action and the call is retried once. With no callback registered, a
     /// human-tier rejection surfaces a typed error (no loop). The CLI wires a
@@ -194,6 +212,22 @@ impl HostedGrpcClient {
         }
     }
 
+    fn stable_signing_identity(&self) -> Result<&str, ProtocolError> {
+        self.authenticated_principal
+            .as_deref()
+            .filter(|principal| {
+                principal
+                    .strip_prefix("principal:")
+                    .is_some_and(|subject| !subject.trim().is_empty())
+            })
+            .ok_or_else(|| {
+                ProtocolError::AuthenticationFailed(
+                    "hosted request signing requires the bearer token's stable authenticated principal"
+                        .to_string(),
+                )
+            })
+    }
+
     /// Stamp bearer auth (token + `x-heddle-proof`) and, for unary requests,
     /// attach the Tier-1 PoP request signature over the serialized body.
     ///
@@ -212,7 +246,9 @@ impl HostedGrpcClient {
             return Ok(None);
         };
         let message_bytes = request.get_ref().encode_to_vec();
-        let ctx = request_signing::attach_pop(request, &signer, method_path, &message_bytes)?;
+        let identity = self.stable_signing_identity()?;
+        let ctx =
+            request_signing::attach_pop(request, &signer, identity, method_path, &message_bytes)?;
         Ok(Some(ctx))
     }
 
@@ -520,7 +556,19 @@ impl HostedGrpcClient {
             }
 
             let result = self
-                .update_ref(repo_path, &marker, false, old_value, state_id, true, None)
+                .update_ref(
+                    repo_path,
+                    &marker,
+                    false,
+                    old_value,
+                    state_id,
+                    true,
+                    None,
+                    operation_id::ClientOperationId::fresh(
+                        "heddle.api.v1alpha1.RepoSyncService/UpdateRef",
+                    )
+                    .to_wire(),
+                )
                 .await?;
             if !result.success {
                 return Err(ProtocolError::InvalidState(
@@ -576,17 +624,34 @@ mod tests {
         HostedGrpcClient {
             inner: RepoSyncServiceClient::new(channel.clone())
                 .max_decoding_message_size(wire::MAX_PULL_DECODE_MESSAGE_SIZE),
-            user: HostedUserServiceClient::new(channel.clone()),
-            auth: AuthServiceClient::new(channel.clone()),
-            content: ContentServiceClient::new(channel),
+            user: RegistryServiceClient::new(channel.clone()),
+            auth: IdentityServiceClient::new(channel.clone()),
+            content: RepositoryServiceClient::new(channel.clone()),
+            workflow: WorkflowServiceClient::new(channel.clone()),
             token_header: Some(
                 MetadataValue::try_from(format!("Bearer {token}")).expect("valid bearer header"),
             ),
             transport: helpers::HostedTransportPolicy::from_client_config(&config),
             auth_proof_key_pem: Some(auth_proof_key_pem),
+            authenticated_principal: Some("principal:alice".to_string()),
             server_key: None,
             on_human_signature: None,
         }
+    }
+
+    #[tokio::test]
+    async fn signed_client_fails_closed_without_an_authenticated_principal() {
+        let signer = Ed25519Signer::generate().expect("proof signer");
+        let config =
+            ClientConfig::default().with_auth_proof_key_pem(signer.to_pem().expect("proof PEM"));
+        let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+
+        let error = match HostedGrpcClient::from_channel(channel, &config) {
+            Ok(_) => panic!("proof signing without a principal must fail closed"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("authenticated principal"));
     }
 
     #[test]
@@ -657,7 +722,7 @@ mod tests {
         let signer = Ed25519Signer::generate().expect("generate signer");
         let pem = signer.to_pem().expect("export signer pem");
         let token = "test-token";
-        let path = "/heddle.v1.AuthService/WhoAmI";
+        let path = "/heddle.api.v1alpha1.IdentityService/WhoAmI";
         let client = test_client(pem, token);
         let mut request = Request::new(());
 
@@ -685,5 +750,59 @@ mod tests {
         let canonical = crypto::pop::pop_canonical_payload(token, proof_ts, "POST", path, nonce);
         crypto::verify_payload_signature(&canonical, "ed25519", signer.public_key(), &sig)
             .expect("proof verifies against device public key");
+    }
+
+    #[tokio::test]
+    async fn service_account_issue_preserves_custom_proof_and_adds_full_hosted_auth_chain() {
+        use grpc::heddle::api::v1alpha1::IssueServiceAccountCredentialRequest;
+
+        let signer = Ed25519Signer::generate().expect("generate signer");
+        let pem = signer.to_pem().expect("export signer pem");
+        let client = test_client(pem, "stored-biscuit");
+        let mut request = Request::new(IssueServiceAccountCredentialRequest {
+            service_account_id: "sa-1".to_string(),
+            public_key: vec![7; 32],
+            scope: "repo:acme/*".to_string(),
+            ttl_secs: None,
+            client_operation_id: "stable-op-1".to_string(),
+        });
+        request
+            .metadata_mut()
+            .insert("x-heddle-issue-sa-proof-ts", "1700000000".parse().unwrap());
+        request.metadata_mut().insert_bin(
+            "x-heddle-issue-sa-proof-sig-bin",
+            tonic::metadata::MetadataValue::from_bytes(b"service-account-proof"),
+        );
+
+        client
+            .apply_signed_auth(
+                &mut request,
+                "/heddle.api.v1alpha1.IdentityService/IssueServiceAccountCredential",
+            )
+            .expect("prepare signed request");
+        let metadata = request.metadata();
+        assert!(metadata.get("authorization").is_some());
+        assert!(metadata.get(crypto::pop::HDR_PROOF).is_some());
+        assert!(metadata.get(crypto::pop::HDR_PROOF_TS).is_some());
+        assert!(metadata.get(crypto::pop::HDR_PROOF_NONCE).is_some());
+        assert!(metadata.get(request_signing::HDR_SIG_TS).is_some());
+        assert!(metadata.get_bin(request_signing::HDR_SIG_BIN).is_some());
+        assert!(
+            metadata
+                .get_bin(request_signing::HDR_SIG_NONCE_BIN)
+                .is_some()
+        );
+        assert_eq!(
+            metadata
+                .get("x-heddle-issue-sa-proof-ts")
+                .and_then(|value| value.to_str().ok()),
+            Some("1700000000")
+        );
+        assert!(
+            metadata
+                .get_bin("x-heddle-issue-sa-proof-sig-bin")
+                .is_some()
+        );
+        assert_eq!(request.get_ref().client_operation_id, "stable-op-1");
     }
 }

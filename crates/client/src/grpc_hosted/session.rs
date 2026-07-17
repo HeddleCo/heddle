@@ -12,6 +12,8 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use cli_shared::{ClientConfig, UserConfig};
+use crypto::{Ed25519Signer, Signer};
+use tonic::transport::Channel;
 use wire::{AuthToken, ProtocolError};
 
 use crate::{
@@ -44,6 +46,31 @@ pub struct HostedSession {
 }
 
 impl HostedSession {
+    /// Build a session from the exact stored authority credential selected by
+    /// an auth command. Unlike `CredentialFallback`, configured/env tokens
+    /// cannot replace the selected bearer. The matching device proof key is
+    /// required and validated before the command performs any mutation.
+    pub fn build_stored_credential(user_config: &UserConfig, server_key: &str) -> Result<Self> {
+        let credential = credentials::get_server_credential(server_key)?.ok_or_else(|| {
+            anyhow::anyhow!(weft_client_shim::HostedRecoveryAdvice::auth_required(
+                server_key
+            ))
+        })?;
+        let proof_key = validated_stored_proof_key(&credential, server_key)?;
+        let authenticated_principal = validated_authenticated_principal(&credential)?;
+        let renewable_authority_credential = RenewableAuthorityCredential::from_stored(&credential);
+        let token = AuthToken::new(credential.token, "credential-store");
+        let mut config = user_config.heddle_client_config(Some(token))?;
+        config = config
+            .with_server_key(server_key.to_string())
+            .with_auth_proof_key_pem(proof_key)
+            .with_authenticated_principal(authenticated_principal);
+        Ok(Self {
+            config,
+            renewable_authority_credential,
+        })
+    }
+
     /// Resolve auth + build the validated client config for a hosted session.
     /// Owns credential-store fallback (per `mode`), server-key attachment, and
     /// proof-key attachment from either a credential or the matching shared
@@ -54,12 +81,18 @@ impl HostedSession {
         server_key: Option<String>,
         mode: HostedAuthMode,
     ) -> Result<Self> {
-        let (token, mut credential_proof_key, renewable_authority_credential) = match mode {
-            HostedAuthMode::ConfigToken => (user_config.remote_token()?, None, None),
+        let (
+            token,
+            mut credential_proof_key,
+            renewable_authority_credential,
+            stored_credential_subject,
+        ) = match mode {
+            HostedAuthMode::ConfigToken => (user_config.remote_token()?, None, None, None),
             HostedAuthMode::CredentialFallback => {
                 let mut token = user_config.remote_token()?;
                 let mut credential_proof_key = None;
                 let mut renewable_authority_credential = None;
+                let mut stored_credential_subject = None;
                 if token.is_none()
                     && let Some(ref key) = server_key
                 {
@@ -75,11 +108,17 @@ impl HostedSession {
                     if let Some(cred) = credentials::resolve_credential_for_server(key)? {
                         renewable_authority_credential =
                             RenewableAuthorityCredential::from_stored(&cred);
+                        stored_credential_subject = Some(cred.subject.clone());
                         token = Some(AuthToken::new(cred.token, "credential-store"));
                         credential_proof_key = cred.private_key_pem;
                     }
                 }
-                (token, credential_proof_key, renewable_authority_credential)
+                (
+                    token,
+                    credential_proof_key,
+                    renewable_authority_credential,
+                    stored_credential_subject,
+                )
             }
         };
 
@@ -98,6 +137,24 @@ impl HostedSession {
             && config.auth_proof_key_pem.is_none()
         {
             config = config.with_auth_proof_key_pem(pem);
+        }
+        if config.auth_proof_key_pem.is_some() {
+            let token = config.token.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "hosted request signing has a proof key but no authenticated bearer token"
+                )
+            })?;
+            let subject = crate::device_flow::authenticated_subject(&token.id)
+                .context("reading the hosted bearer token's authenticated principal")?;
+            if stored_credential_subject
+                .as_deref()
+                .is_some_and(|stored| stored != subject.as_str())
+            {
+                anyhow::bail!(
+                    "stored credential subject does not match the bearer token's authenticated principal"
+                );
+            }
+            config = config.with_authenticated_principal(format!("principal:{subject}"));
         }
         Ok(Self {
             config,
@@ -128,6 +185,49 @@ impl HostedSession {
             .await;
         Ok(client)
     }
+
+    /// Finish a validated session over a channel whose URI/TLS policy was
+    /// already established by the auth command's endpoint connector.
+    pub async fn connect_channel(
+        &self,
+        channel: Channel,
+    ) -> Result<HostedGrpcClient, ProtocolError> {
+        let mut client = HostedGrpcClient::from_channel(channel, &self.config)?;
+        client
+            .auto_rotate_if_needed(self.renewable_authority_credential.as_ref())
+            .await;
+        Ok(client)
+    }
+}
+
+fn validated_authenticated_principal(credential: &credentials::ServerCredential) -> Result<String> {
+    let subject = crate::device_flow::authenticated_subject(&credential.token)
+        .context("reading the stored credential's authenticated principal")?;
+    if subject != credential.subject {
+        anyhow::bail!(
+            "stored credential subject does not match the bearer token's authenticated principal"
+        );
+    }
+    Ok(format!("principal:{subject}"))
+}
+
+fn validated_stored_proof_key(
+    credential: &credentials::ServerCredential,
+    server_key: &str,
+) -> Result<String> {
+    let pem = credential.private_key_pem.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "stored credential for {server_key} has no device proof key; run `heddle auth login --server {server_key}` first"
+        )
+    })?;
+    let signer = Ed25519Signer::from_pem(pem)
+        .map_err(|error| anyhow::anyhow!("stored device proof key is invalid: {error}"))?;
+    let token_key = crate::device_flow::effective_pop_public_key_hex(&credential.token)
+        .context("reading the stored credential's effective proof key")?;
+    if !token_key.eq_ignore_ascii_case(&hex::encode(signer.public_key())) {
+        anyhow::bail!("stored device proof key does not match the credential Biscuit");
+    }
+    Ok(pem.to_string())
 }
 
 fn shared_device_proof_key(server_key: &str, token: &str) -> Result<Option<String>> {
@@ -198,6 +298,70 @@ mod tests {
     //! guard replaces the per-call-site checks: an eligible stored authority
     //! credential must be considered immediately after connect, while explicit
     //! and attenuated tokens carry no renewal binding.
+
+    use biscuit_auth::{Biscuit, KeyPair};
+    use crypto::{Ed25519Signer, Signer};
+
+    use super::{validated_authenticated_principal, validated_stored_proof_key};
+    use crate::credentials;
+
+    fn proof_bound_credential(signer: &Ed25519Signer) -> credentials::ServerCredential {
+        let token = Biscuit::builder()
+            .fact(r#"user("alice")"#)
+            .expect("user fact")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
+            .expect("proof key fact")
+            .build(&KeyPair::new())
+            .expect("mint credential")
+            .to_base64()
+            .expect("encode credential");
+        credentials::ServerCredential {
+            token,
+            subject: "alice".to_string(),
+            device_id: Some("device-1".to_string()),
+            credential_id: None,
+            private_key_pem: Some(signer.to_pem().expect("proof PEM")),
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn stored_session_rejects_missing_or_mismatched_proof_keys_before_connect() {
+        let signer = Ed25519Signer::generate().expect("proof signer");
+        let mut missing = proof_bound_credential(&signer);
+        missing.private_key_pem = None;
+        let error = validated_stored_proof_key(&missing, "grpc.example")
+            .expect_err("a missing proof key must fail before connect");
+        assert!(error.to_string().contains("has no device proof key"));
+
+        let wrong_signer = Ed25519Signer::generate().expect("wrong proof signer");
+        let mut mismatched = proof_bound_credential(&signer);
+        mismatched.private_key_pem = Some(wrong_signer.to_pem().expect("wrong PEM"));
+        let error = validated_stored_proof_key(&mismatched, "grpc.example")
+            .expect_err("a mismatched proof key must fail before connect");
+        assert!(error.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn stored_session_accepts_the_proof_key_bound_into_its_biscuit() {
+        let signer = Ed25519Signer::generate().expect("proof signer");
+        let credential = proof_bound_credential(&signer);
+        let pem =
+            validated_stored_proof_key(&credential, "grpc.example").expect("matching proof key");
+        assert_eq!(pem, credential.private_key_pem.unwrap());
+    }
+
+    #[test]
+    fn stored_session_rejects_a_subject_that_disagrees_with_its_biscuit() {
+        let signer = Ed25519Signer::generate().expect("proof signer");
+        let mut credential = proof_bound_credential(&signer);
+        credential.subject = "mallory".to_string();
+
+        let error = validated_authenticated_principal(&credential)
+            .expect_err("stored metadata cannot replace the authenticated token subject");
+
+        assert!(error.to_string().contains("does not match"));
+    }
 
     #[test]
     fn session_connect_checks_eligible_renewal_after_connect() {
@@ -348,6 +512,13 @@ mod tests {
     async fn token_only_derived_child_does_not_fall_back_to_the_parent_device_key() {
         use biscuit_auth::{Biscuit, KeyPair};
         use crypto::{Ed25519Signer, Signer};
+        use grpc::heddle::api::v1alpha1::{
+            identity_service_client::IdentityServiceClient,
+            registry_service_client::RegistryServiceClient,
+            repo_sync_service_client::RepoSyncServiceClient,
+            repository_service_client::RepositoryServiceClient,
+            workflow_service_client::WorkflowServiceClient,
+        };
         use tonic::{Request, metadata::MetadataValue, transport::Endpoint};
 
         use super::{HostedAuthMode, HostedSession};
@@ -480,19 +651,12 @@ mod tests {
             );
             let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
             let client = HostedGrpcClient {
-                inner: grpc::heddle::v1::repo_sync_service_client::RepoSyncServiceClient::new(
-                    channel.clone(),
-                )
-                .max_decoding_message_size(wire::MAX_PULL_DECODE_MESSAGE_SIZE),
-                user: grpc::heddle::v1::hosted_user_service_client::HostedUserServiceClient::new(
-                    channel.clone(),
-                ),
-                auth: grpc::heddle::v1::auth_service_client::AuthServiceClient::new(
-                    channel.clone(),
-                ),
-                content: grpc::heddle::v1::content_service_client::ContentServiceClient::new(
-                    channel,
-                ),
+                inner: RepoSyncServiceClient::new(channel.clone())
+                    .max_decoding_message_size(wire::MAX_PULL_DECODE_MESSAGE_SIZE),
+                user: RegistryServiceClient::new(channel.clone()),
+                auth: IdentityServiceClient::new(channel.clone()),
+                content: RepositoryServiceClient::new(channel.clone()),
+                workflow: WorkflowServiceClient::new(channel),
                 token_header: Some(
                     MetadataValue::try_from(format!(
                         "Bearer {}",
@@ -504,10 +668,11 @@ mod tests {
                     &config,
                 ),
                 auth_proof_key_pem: config.auth_proof_key_pem,
+                authenticated_principal: config.authenticated_principal,
                 server_key: config.server_key,
                 on_human_signature: None,
             };
-            let method = "/heddle.v1.RepoSyncService/Push";
+            let method = "/heddle.api.v1alpha1.RepoSyncService/Push";
             let mut request = Request::new(());
             client
                 .apply_auth(&mut request, method)

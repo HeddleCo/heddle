@@ -101,15 +101,13 @@ they tune the 1.0 targets the next sections propose against it.
     `DiscussionsBlob`, `RiskSignalBlob`, `RedactionsBlob`,
     `ReviewSignaturesBlob`, `FileProvenance`, `StructuredConflict`
     (`crates/objects/src/object/*.rs`).
-- **Wire protocol.** Package `heddle.v1` in
-  [`crates/grpc/proto/heddle/v1/service.proto`](../crates/grpc/proto/heddle/v1/service.proto)
-  defines 14 gRPC services (`RepoSyncService`, `HostedUserService`,
-  `AuthService`, `ContentService`, `RepoEventService`,
-  `ThreadWorkflowService`, `ReviewService`, `FeedService`,
-  `StateReviewService`, `DiscussionService`, `SignalService`,
-  `OperationLogQueryService`, `TransactionService`, `HookService`).
-  The package version segment is `v1`; the file does not declare a
-  separate semantic version.
+- **Hosted API candidate.** The `heddle.api.v1alpha1` protobuf source,
+  descriptors, policy, and generated SDK sources are owned by
+  [`HeddleCo/api`](https://github.com/HeddleCo/api). The Heddle cutover branch
+  consumes an exact git-pinned `heddle-api` candidate and removes its schema
+  copy. The contract correction, Weft/Tapestry cutovers, and package publication
+  remain blocked by [ADR 0048](adr/0048-net-new-public-api-contract.md); service
+  maturity labels in the candidate descriptor do not prove a live deployment.
 - **Content-addressing primitives.** `ContentHash` is a 32-byte
   BLAKE3 digest
   ([`crates/objects/src/object/hash.rs:13`](../crates/objects/src/object/hash.rs));
@@ -151,7 +149,7 @@ floor below what we already have, which doesn't gate anything.
 <TBD: maintainer> — proposed: **65 % line per crate** for the
 storage-format and identity-bearing crates (`heddle-objects`,
 `heddle-refs`, `heddle-oplog`, `heddle-repo`, `heddle-crypto`,
-`heddle-wire`, `heddle-grpc`), and **no floor** for the rest. The
+`heddle-wire`), and **no floor** for the rest. The
 distinction is "if this crate is wrong, on-disk or on-wire data is
 wrong" vs. "if this crate is wrong, the CLI prints a worse string".
 The integration-test crates and CLI dispatch crates are better
@@ -285,16 +283,13 @@ crates are committed to the stability contract and which remain
 - `heddle-objects` — `ContentHash`, `ChangeId`, blob/tree/state
   types, format constants. Anything that downstream tooling or
   alternative storage backends must agree on.
-- `heddle-wire` — native Heddle wire/protocol types, transfer
-  planners, and thin Rust adapters. The protobuf/gRPC boundary itself
-  is gated separately (§3.4); this is the Rust-side handle on it.
-- `heddle-grpc` — service trait shapes and client stubs, so
-  downstream gRPC clients can compile against a stable surface.
+- `heddle-wire` — native Heddle wire/protocol types and transfer
+  planners. The hosted protobuf boundary is gated separately (§3.6) and is
+  released from `HeddleCo/api`.
 
-Rationale: these three are the surfaces that an independent
-implementer or an alternative server (e.g. `weft`, which already
-depends on them) cannot route around. Pinning them is what makes
-ecosystem investment safe.
+Rationale: these are the Heddle-owned surfaces an independent local
+implementer cannot route around. Hosted consumers rely on the separately owned
+`heddle-api` package and its compatibility policy instead.
 
 **Proposed remain `0.x` (no API-stability commitment):**
 
@@ -352,8 +347,8 @@ meet first":
   not part of the stability commitment.
 - `op_id_coverage.rs` — state-changing CLI verbs must thread `--op-id` and
   behave idempotently on replay. The separate descriptor-driven
-  `heddle-devtools audit-grpc-contract` command governs protobuf RPC effect and
-  retry-key declarations.
+  descriptor audits in `HeddleCo/api` govern hosted protobuf RPC effect,
+  signing, and retry-key declarations.
 - `heddle doctor docs` — flag names referenced in tracked markdown
   must match the live binary.
 - `heddle doctor schemas` — every documented schema verb registered
@@ -504,27 +499,28 @@ here is weaker: <TBD: maintainer — proposed: format bumps are
 allowed within 1.0.x as long as the on-upgrade rebuild path is
 exercised by the test suite and runs in O(oplog size).>
 
-### 3.6 Wire protocol
+### 3.6 Hosted API protocol
 
-The gRPC services in
-[`crates/grpc/proto/heddle/v1/service.proto`](../crates/grpc/proto/heddle/v1/service.proto)
-sit under package `heddle.v1`. The package version segment (`v1`)
-is the wire-stability boundary: 1.0 servers and clients communicate
-on `heddle.v1`, and any non-backwards-compatible wire change moves
-to `heddle.v2` with both packages served simultaneously during the
-transition.
+The target gRPC services are generated from `HeddleCo/api` under
+`heddle.api.v1alpha1`. This alpha package is intentionally incompatible with
+the still-live `heddle.v1` package and is planned for a coordinated hard
+cutover without a compatibility shim. It is not yet the deployed Weft/Tapestry
+contract. The cutover requires consumers to exact-pin pre-1.0 SDK versions.
+Breaking changes increment the minor version and require a checked-in report
+plus coordinated consumer release candidates. At 1.0 the package advances to
+`heddle.api.v1`; later incompatible generations use a new package rather than
+changing `v1`. ADR 0048 records the current blockers and cutover checklist.
 
 **1.0 commitment.**
 
 <TBD: maintainer> — proposed:
 
-- Adding a new RPC, a new service, or a new optional field to an
-  existing message is **not** a breaking wire change (proto3 default
-  semantics handle missing fields).
-- Removing or renumbering a field, changing a field's wire type, or
-  removing an RPC is a breaking wire change and moves to `heddle.v2`.
-- `v1` is supported on the server for **<TBD: maintainer — proposed
-  12 months>** after `v2` is introduced.
+- Additive changes must pass Buf lint, descriptor audits, deterministic
+  generation, and downstream compile fixtures.
+- Removed names and field tags are reserved and never reused, including during
+  breaking pre-1.0 releases.
+- Once `heddle.api.v1` ships, breaking checks are non-overridable except by a
+  new package generation.
 
 ## 4. SemVer policy
 
@@ -620,10 +616,8 @@ When a stable item is to be removed:
 - **JSON output fields covered by `heddle doctor schemas`:** same
   as Tier-`Everyday`. JSON shape changes are silently breaking for
   agents and need the longer window.
-- **Wire-protocol fields (proto3 optional):** the field can be
-  marked `[deprecated = true]` immediately, but server-side
-  handling must continue for the same window as the `heddle.v1`
-  package itself (§3.6).
+- **Hosted API fields:** compatibility and deprecation are governed by the
+  `HeddleCo/api` release policy (§3.6), not by Heddle's crate lifecycle.
 - **Sidecar / oplog format versions:** at least one minor release
   after the new format ships before the old format reader can be
   removed. The reader removal is itself a breaking change (§4.1).

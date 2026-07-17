@@ -232,7 +232,6 @@ crates/review/              # review primitives
 crates/state_review/        # state-level review helpers
 crates/ingest/              # `heddle-ingest` binary and Git import path
 crates/wire/                # native Heddle wire protocol types
-crates/grpc/                # gRPC client and server transport
 crates/client/              # local-side hosted client
 crates/weft-client-shim/    # shim used by the `client` feature to talk to weft
 crates/crypto/              # crypto primitives
@@ -245,6 +244,14 @@ docs/                       # architecture, principles, stability, design notes
 specs/                      # Quint formal specifications
 tests/                      # integration and property tests
 ```
+
+The net-new hosted protobuf contract and generated SDK sources are owned by the
+public [`HeddleCo/api`](https://github.com/HeddleCo/api) repository. The target
+packages are `heddle-api` and `@heddleco/api`, but their coordinated Heddle,
+Weft, and Tapestry cutover is still blocked; see
+[ADR 0048](docs/adr/0048-net-new-public-api-contract.md). Heddle keeps native
+CLI and daemon behavior internal when it does not require a cross-product
+contract.
 
 Architecture and runtime details are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

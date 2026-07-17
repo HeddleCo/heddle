@@ -345,7 +345,6 @@ fn default_cli_runtime_source_dirs(workspace: &Path) -> Vec<PathBuf> {
         "crates/crypto/src",
         "crates/daemon/src",
         "crates/git-projection/src",
-        "crates/grpc/src",
         "crates/ingest/src",
         "crates/merge/src",
         "crates/mount/src",

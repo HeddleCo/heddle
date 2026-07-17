@@ -7,7 +7,6 @@ members = [
     "crates/crypto",
     "crates/daemon",
     "crates/devtools",
-    "crates/grpc",
     "crates/ingest",
     "crates/merge",
     "crates/mount",

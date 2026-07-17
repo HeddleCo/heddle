@@ -1808,13 +1808,15 @@ async fn clone_monorepo(
 /// Parses content-state bytes into [`StateId`]; malformed/absent states map
 /// to `None` (empty checkout), matching prior client planner policy.
 #[cfg(feature = "client")]
-fn monorepo_node_facts_from_resolved(node: &grpc::heddle::v1::MonorepoNode) -> MonorepoNodeFacts {
+fn monorepo_node_facts_from_resolved(
+    node: &api::heddle::api::v1alpha1::MonorepoNode,
+) -> MonorepoNodeFacts {
     use objects::object::StateId;
 
     let content_state = node
         .content_state
-        .as_deref()
-        .and_then(|bytes| StateId::try_from_slice(bytes).ok());
+        .as_ref()
+        .and_then(|state_id| StateId::try_from_slice(&state_id.value).ok());
     let edges = node
         .edges
         .iter()

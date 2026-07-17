@@ -71,16 +71,10 @@ Two numbers per crate:
 | `crypto` | 80% | 80% | at goal |
 | `daemon` | 80% | 80% | at goal |
 | `ingest` | 80% | 80% | at goal |
-| `grpc` | not gated | 60% | see below |
 
-### Why `grpc` is not gated
-
-`crates/grpc`'s surface is tonic-generated code emitted to `OUT_DIR` at
-build time. Those files never appear under `crates/grpc/` in `lcov.info`,
-so `audit-coverage` would `bail` with "no lines counted" if it were
-listed. The 60% goal is tracked here as policy, but enforcing it needs a
-strategy to measure generated-code coverage first (a separate piece of
-work). Do not add `grpc` to the `--gate` list until that exists.
+Generated hosted API bindings are built and tested in `HeddleCo/api`; they are
+not an in-tree crate and are therefore outside this repository's coverage
+gate. Heddle's adapter behavior remains covered by the consuming crates.
 
 ## Running the gate locally
 

@@ -211,6 +211,19 @@ Current shipped behavior:
   desktop integrations without relying on an unverified native OpenCode tool
   registration API.
 
+Planned hosted behavior:
+
+- `AgentGatewayService` will carry resumable daemon-to-Weft timeline ingest and
+  command delivery.
+- `AgentService` will expose policy-filtered run queries, watches, permissions,
+  and intervention to Tapestry.
+- Both interfaces are contract-first and `PLANNED` in the `heddle-api` 0.1.0
+  candidate. Weft does not register them, and their presence in the descriptor
+  is not evidence that hosted Agent Timeline or intervention is live.
+- OpenCode is the first intended full-intervention adapter. Codex and Claude
+  Code remain capability-negotiated and observe-only until their adapters can
+  implement controls honestly.
+
 Current install flow:
 
 - `heddle init` can optionally offer harness integration install in interactive mode

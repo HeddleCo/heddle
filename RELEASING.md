@@ -439,9 +439,25 @@ the same PR.
 
 ## Automated crates.io publishing
 
-`heddle-grpc` and the rest of the OSS workspace crates publish to
-crates.io automatically on every push to `main` via
+The workspace's declared-publishable crates publish to crates.io
+automatically on relevant pushes to `main` via
 `.github/workflows/publish-crates.yml`. The normal flow is:
+
+The public protobuf contract and its `heddle-api` Rust package must be released
+independently from `HeddleCo/api`; they are not part of this workspace's
+publication pipeline.
+
+Heddle currently relies on a temporary git pin to API revision `e3b3e6d0`.
+The TypeScript package
+`@heddleco/api@0.1.1` is published, but the Rust `heddle-api@0.1.1` crate is not:
+HeddleCo/api#10 is blocked on configuring that repository's
+`CARGO_REGISTRY_TOKEN`. While that blocker remains, `heddle-client`,
+`heddle-daemon`, and `heddle-cli` are marked `publish = false`, excluded from
+`PUBLISHABLE_CRATES`, and disabled in `release-plz.toml`; independently
+publishable workspace crates continue through the normal pipeline. Publish the
+Rust crate and replace the temporary git pin before re-enabling those three
+packages. The full cross-repository release gate is tracked in
+[ADR 0048](docs/adr/0048-net-new-public-api-contract.md#coordinated-cutover-checklist).
 
 1. `release-plz` (configured in `release-plz.toml`) opens a PR that
    bumps Cargo.toml versions and updates `CHANGELOG.md`.
@@ -478,15 +494,13 @@ own creds; that's a deliberate ops action, not workflow surface.
 Maintained as an explicit `PUBLISHABLE_CRATES` env var in
 `publish-crates.yml`, in topological order (deps first). Adding a new
 publishable crate is a one-line workflow edit, reviewed in PR. The
-list mirrors `release-plz.toml`'s `[[package]]` blocks.
+list mirrors the `release = true` package policy in `release-plz.toml`.
 
 Auto-discovery (`cargo metadata --workspace`) is deliberately avoided:
 an implicit `publish = true` (or absence of `publish = false`) in a
 new Cargo.toml is invisible at PR review time, and accidentally
 flipping it would silently expand the public surface. Currently
-**all 17 workspace crates are publishable** (none declare
-`publish = false`); the explicit list keeps that scope visible in
-diff.
+the explicit list keeps the publication scope visible in diff.
 
 ### Token wiring
 
@@ -533,7 +547,9 @@ two-pass shape as `check-release-pipeline.sh`:
   `refs/heads/main` — TOCTOU); the env-var key is exactly
   `CARGO_REGISTRY_TOKEN` (cargo's documented name); that env var is
   wired from `secrets.CRATES_IO_API_KEY` (the repo-settings secret
-  name).
+  name). Direct git-pinned `heddle-api` consumers must also be marked
+  `publish = false`, absent from `PUBLISHABLE_CRATES`, and explicitly
+  `release = false` in `release-plz.toml`.
 
 ### Verifying a publish
 
@@ -542,7 +558,7 @@ two-pass shape as `check-release-pipeline.sh`:
 gh run watch --repo HeddleCo/heddle --workflow publish-crates.yml
 
 # Once green, confirm the crate is queryable:
-curl -s https://crates.io/api/v1/crates/heddle-grpc | jq '.crate.max_stable_version'
+curl -s https://crates.io/api/v1/crates/heddle-wire | jq '.crate.max_stable_version'
 ```
 
 The workflow's "Published to crates.io" summary table is the

@@ -2,7 +2,24 @@
 
 Agent timelines should use first-class Heddle-native timeline operations stored adjacent to source history. Timeline operations explain agent execution, tool calls, cursor movement, branches, and tool captures without advancing `HEAD` or becoming source history states. They may reference source states, oplog recovery entries, collaboration operations, and captures when those relationships are part of the execution provenance.
 
-Agent timeline sync is a Weft-backed capability from day one of implementation. Timeline operations should not start as local-only runner logs with a later export bridge; the local model, durable identity, hosted validation, policy filtering, and sync metadata need to be designed together. Weft may reject or suppress timeline operations under hosted policy, but accepted timeline history remains Heddle-native repository metadata rather than Git-hosted notes or provider transcripts.
+Agent timeline sync is designed as a Weft-backed capability from its first
+hosted implementation. The local model, durable identity, hosted validation,
+policy filtering, and sync metadata are designed together rather than joined by
+a later export bridge. The local Timeline transport that preceded this design
+is not part of the shared public API.
+
+The public contract reserves two explicitly `PLANNED` interfaces.
+`AgentGatewayService` defines resumable daemon-to-Weft timeline ingest and
+command delivery. `AgentService` defines Tapestry-facing run queries, watches,
+policy, permissions, and intervention. Neither interface is registered by Weft
+or live in Tapestry for the API 0.1.0 candidate. OpenCode is the first intended
+full-intervention adapter; Codex and Claude Code remain capability-negotiated
+and observe-only until honest control adapters exist. Local timeline objects and
+commands may ship independently of those hosted interfaces.
+
+When hosted sync ships, Weft may reject or suppress timeline operations under
+hosted policy, but accepted timeline history remains Heddle-native repository
+metadata rather than Git-hosted notes or provider transcripts.
 
 Durable timeline operation bytes use canonical MessagePack envelopes with an explicit timeline operation schema version and an explicit operation kind. JSON, protobuf, gRPC, OpenCode adapter structs, and Tapestry view models are adapters, not the durable source of truth. The timeline codec follows the collaboration operation pattern: one latest encoder, explicit version dispatch, frozen decode-only historical schema snapshots, no blind unversioned decode path, and golden canonical byte/hash fixtures for representative operation kinds.
 

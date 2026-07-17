@@ -37,7 +37,7 @@ uuid.workspace = true
 # matching versions from the registry.
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.10" }
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.10" }
-grpc = { path = "../grpc", package = "heddle-grpc", version = "0.23" }
+grpc = { package = "heddle-api", version = "=0.1.2", features = ["client"] }
 objects = { path = "../objects", package = "heddle-objects", version = "0.10" }
 wire = { path = "../wire", package = "heddle-wire", version = "0.10", default-features = false }
 refs = { path = "../refs", package = "heddle-refs", version = "0.10" }
@@ -45,6 +45,8 @@ repo = { path = "../repo", package = "heddle-repo", version = "0.10", default-fe
 weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.10" }
 
 [dev-dependencies]
+grpc = { package = "heddle-api", version = "=0.1.2", features = ["client", "server", "reflection"] }
+prost-reflect.workspace = true
 tempfile.workspace = true
 
 [lib]

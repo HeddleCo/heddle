@@ -14,6 +14,10 @@ pub struct ClientConfig {
     pub token: Option<AuthToken>,
     /// Optional private key used to prove possession of a bound token.
     pub auth_proof_key_pem: Option<String>,
+    /// Stable authenticated principal bound to the bearer token. Request
+    /// signatures use this value as their canonical identity; the device key
+    /// remains only the proof key.
+    pub authenticated_principal: Option<String>,
     /// Server key used to look up the credential in the credential store
     /// (`~/.heddle/credentials.toml`).  Matches the key used by `heddle auth login`.
     pub server_key: Option<String>,
@@ -54,6 +58,7 @@ impl ClientConfig {
             client_id: client_id.into(),
             token: None,
             auth_proof_key_pem: None,
+            authenticated_principal: None,
             server_key: None,
             tls_enabled: false,
             tls_domain_name: None,
@@ -79,6 +84,12 @@ impl ClientConfig {
     /// Set a private key used for proof-of-possession metadata.
     pub fn with_auth_proof_key_pem(mut self, pem: impl Into<String>) -> Self {
         self.auth_proof_key_pem = Some(pem.into());
+        self
+    }
+
+    /// Set the stable principal authenticated by the bearer token.
+    pub fn with_authenticated_principal(mut self, principal: impl Into<String>) -> Self {
+        self.authenticated_principal = Some(principal.into());
         self
     }
 
