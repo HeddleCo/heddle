@@ -2,7 +2,6 @@
 name = "heddle-client"
 version.workspace = true
 edition.workspace = true
-publish = false # not in the crates.io publish set; see publish-crates.yml PUBLISHABLE_CRATES
 authors.workspace = true
 description = "Heddle hosted-backend client: auth, support, presence, the gRPC client wrappers, and the global credential store."
 license.workspace = true
