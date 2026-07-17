@@ -79,7 +79,8 @@ tonic.workspace = true
 # (`rebase_ops::mint_rebase_transaction_id`) so a nanosecond-resolution
 # clock collision can't silently drop the later rebase's batch via
 # `flush_rebase_batch`'s dedup (heddle#198 r3 / Codex PR #218 P2).
-uuid.workspace = true
+# `v5` derives deterministic per-thread push client_operation_ids (remote::push).
+uuid = { workspace = true, features = ["v5"] }
 # Health.Check probe for the local daemon UDS handshake. Only
 # pulled in for the client side; the local daemon binary itself does
 # not (yet) install a health reporter — see `client::local_daemon`.
