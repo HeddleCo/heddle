@@ -73,6 +73,12 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
         AgentAuthOperationDisposition::Denied,
     ),
     ("WhoAmI", AgentAuthOperationDisposition::ReviewedSafe),
+    // The hosted handler still requires the billing service account's
+    // billing:write right; an attached derived bearer cannot create it.
+    (
+        "RecordSubscription",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
     (
         "IntrospectCredential",
         AgentAuthOperationDisposition::ReviewedSafe,
@@ -111,6 +117,22 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
     ("IssuePresenceToken", AgentAuthOperationDisposition::Denied),
     (
         "MintAnonBiscuit",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    (
+        "DeclareRecoveryMethod",
+        AgentAuthOperationDisposition::Denied,
+    ),
+    // Recovery execution is authorized by public, independent proof material
+    // and the veto-window state rather than by an attached derived bearer.
+    ("BeginRecovery", AgentAuthOperationDisposition::ReviewedSafe),
+    (
+        "SubmitRecoveryProof",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    ("VetoRecovery", AgentAuthOperationDisposition::ReviewedSafe),
+    (
+        "CompleteRecovery",
         AgentAuthOperationDisposition::ReviewedSafe,
     ),
 ];
