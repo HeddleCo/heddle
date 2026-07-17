@@ -1370,7 +1370,14 @@ async fn push_network_all_threads(
         let thread_operation_id = if root_operation_id.is_empty() {
             String::new()
         } else {
-            format!("{root_operation_id}:push:{}", thread.name)
+            // Each thread needs a DISTINCT client_operation_id so weft/daemon dedup
+            // per-thread instead of collapsing them — but the id must parse as a
+            // strict UUID (a composite "{uuid}:push:{thread}" string is rejected as
+            // InvalidArgument). Derive a deterministic, retry-stable per-thread
+            // UUIDv5 from the root op-id (namespace) and the thread name.
+            let namespace = uuid::Uuid::parse_str(&root_operation_id)
+                .unwrap_or(uuid::Uuid::NAMESPACE_OID);
+            uuid::Uuid::new_v5(&namespace, thread.name.as_bytes()).to_string()
         };
         let outcome = push_network_one_thread(
             repo,
