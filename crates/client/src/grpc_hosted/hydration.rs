@@ -524,6 +524,7 @@ mod tests {
     use cli_shared::ClientConfig;
     use grpc::heddle::api::v1alpha1::{
         collaboration_service_client::CollaborationServiceClient,
+        state_review_service_client::StateReviewServiceClient,
         identity_service_client::IdentityServiceClient,
         registry_service_client::RegistryServiceClient,
         repo_sync_service_client::RepoSyncServiceClient,
@@ -554,7 +555,8 @@ mod tests {
             auth: IdentityServiceClient::new(channel.clone()),
             content: RepositoryServiceClient::new(channel.clone()),
             workflow: WorkflowServiceClient::new(channel.clone()),
-            collaboration: CollaborationServiceClient::new(channel),
+            collaboration: CollaborationServiceClient::new(channel.clone()),
+            review: StateReviewServiceClient::new(channel),
             token_header: None,
             transport,
             auth_proof_key_pem: None,

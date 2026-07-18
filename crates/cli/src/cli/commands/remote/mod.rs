@@ -1280,6 +1280,40 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
                 );
             }
         }
+
+        // Write path for hosted context annotations (heddle context) and review
+        // signatures (heddle review sign) — same seam as discussions. #549
+        // rejects these attachments in the pack, so they only reach the server
+        // over the caller-authenticated RPCs. Best-effort: the object push
+        // already landed, so a sync hiccup warns rather than failing the push.
+        match crate::client::context_sync::push_context(repo, &mut client, &repo_path).await {
+            Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
+                println!(
+                    "{} synced {count} annotation(s) to {}",
+                    style::ok_marker(),
+                    style::dim(&repo_path)
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("{} context sync skipped: {error:#}", style::warn_marker());
+            }
+        }
+        match crate::client::review_sync::push_review_signatures(repo, &mut client, &repo_path)
+            .await
+        {
+            Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
+                println!(
+                    "{} synced {count} review signature(s) to {}",
+                    style::ok_marker(),
+                    style::dim(&repo_path)
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("{} review sync skipped: {error:#}", style::warn_marker());
+            }
+        }
     }
 
     // CLI maps wire/protobuf transport fields → pure domain fields; core

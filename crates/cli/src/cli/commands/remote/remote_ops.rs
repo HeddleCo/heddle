@@ -1105,6 +1105,25 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
                     );
                 }
             }
+            // Read path for hosted context annotations — same seam as discussions.
+            match crate::client::context_sync::pull_context(repo, &mut client, repo_path).await {
+                Ok(count)
+                    if count > 0 && !should_output_json(options.cli, Some(repo.config())) =>
+                {
+                    println!(
+                        "{} synced {count} annotation(s) from {}",
+                        crate::cli::style::ok_marker(),
+                        crate::cli::style::dim(repo_path)
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!(
+                        "{} context sync skipped: {error:#}",
+                        crate::cli::style::warn_marker()
+                    );
+                }
+            }
             // Facts reuse the same string-mapped transport fields.
             let facts_fields = HostedPullResultFields {
                 success: true,
