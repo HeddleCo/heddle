@@ -1257,6 +1257,31 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
     .await?;
     clear_line(&progress);
 
+    // Write path for hosted discussions (heddle discuss): the pushed state(s)
+    // are now on the server, so replay any local symbol-anchored discussions to
+    // the hosted CollaborationService over the same signed client. Best-effort:
+    // the object push already succeeded, so a discussion-sync hiccup warns
+    // rather than failing the push (the next push resumes from the mirror map).
+    if result.success {
+        match crate::client::discussion_sync::push_discussions(repo, &mut client, &repo_path).await
+        {
+            Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
+                println!(
+                    "{} synced {count} discussion(s) to {}",
+                    style::ok_marker(),
+                    style::dim(&repo_path)
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!(
+                    "{} discussion sync skipped: {error:#}",
+                    style::warn_marker()
+                );
+            }
+        }
+    }
+
     // CLI maps wire/protobuf transport fields → pure domain fields; core
     // parses success/failure and builds execution facts / outcome.
     let fields = HostedPushResultFields {

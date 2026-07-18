@@ -1081,6 +1081,30 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
                     }
                 }
             }
+            // Read path for hosted discussions (heddle discuss): materialize any
+            // new hosted CollaborationService discussions/turns for the pulled
+            // head into the local op-log. Best-effort — a fetch hiccup warns
+            // rather than failing the pull.
+            match crate::client::discussion_sync::pull_discussions(repo, &mut client, repo_path)
+                .await
+            {
+                Ok(count)
+                    if count > 0 && !should_output_json(options.cli, Some(repo.config())) =>
+                {
+                    println!(
+                        "{} synced {count} discussion(s) from {}",
+                        crate::cli::style::ok_marker(),
+                        crate::cli::style::dim(repo_path)
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!(
+                        "{} discussion sync skipped: {error:#}",
+                        crate::cli::style::warn_marker()
+                    );
+                }
+            }
             // Facts reuse the same string-mapped transport fields.
             let facts_fields = HostedPullResultFields {
                 success: true,

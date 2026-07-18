@@ -4,6 +4,8 @@
 //! Connects to Heddle servers for push, pull, and other operations.
 
 #[cfg(feature = "client")]
+pub mod discussion_sync;
+#[cfg(feature = "client")]
 pub mod human_signature;
 pub mod local_daemon;
 pub mod local_sync;

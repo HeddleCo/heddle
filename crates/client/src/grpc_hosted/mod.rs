@@ -1,5 +1,6 @@
 //! Hosted gRPC client for the transport rewrite.
 
+mod collaboration;
 mod content;
 pub(crate) mod helpers;
 mod hydration;
@@ -13,8 +14,10 @@ mod user;
 use cli_shared::{ClientConfig, cleartext_connect_allowed, cleartext_refused_message};
 use crypto::{Ed25519Signer, Signer};
 use grpc::heddle::api::v1alpha1::{
-    KeypairProof, MintBiscuitRequest, identity_service_client::IdentityServiceClient,
-    mint_biscuit_request::Proof, registry_service_client::RegistryServiceClient,
+    KeypairProof, MintBiscuitRequest,
+    collaboration_service_client::CollaborationServiceClient,
+    identity_service_client::IdentityServiceClient, mint_biscuit_request::Proof,
+    registry_service_client::RegistryServiceClient,
     repo_sync_service_client::RepoSyncServiceClient,
     repository_service_client::RepositoryServiceClient,
     workflow_service_client::WorkflowServiceClient,
@@ -96,6 +99,7 @@ pub struct HostedGrpcClient {
     pub(super) auth: IdentityServiceClient<Channel>,
     pub(super) content: RepositoryServiceClient<Channel>,
     pub(super) workflow: WorkflowServiceClient<Channel>,
+    pub(super) collaboration: CollaborationServiceClient<Channel>,
     pub(super) token_header: Option<MetadataValue<tonic::metadata::Ascii>>,
     transport: helpers::HostedTransportPolicy,
     pub(super) auth_proof_key_pem: Option<String>,
@@ -174,6 +178,7 @@ impl HostedGrpcClient {
             auth: IdentityServiceClient::new(channel.clone()),
             content: RepositoryServiceClient::new(channel.clone()),
             workflow: WorkflowServiceClient::new(channel.clone()),
+            collaboration: CollaborationServiceClient::new(channel.clone()),
             token_header,
             transport,
             auth_proof_key_pem: config.auth_proof_key_pem.clone(),
@@ -606,6 +611,7 @@ impl HostedGrpcClient {
     }
 }
 
+pub use collaboration::{HostedDiscussion, HostedDiscussionTurn};
 pub use hydration::{LazyHostedHydrator, PullMaterialization, register_hosted_factory};
 pub use monorepo::{MonorepoCloneOp, MonorepoClonePlan, SkippedChild};
 pub use session::{HostedAuthMode, HostedSession};
@@ -628,6 +634,7 @@ mod tests {
             auth: IdentityServiceClient::new(channel.clone()),
             content: RepositoryServiceClient::new(channel.clone()),
             workflow: WorkflowServiceClient::new(channel.clone()),
+            collaboration: CollaborationServiceClient::new(channel.clone()),
             token_header: Some(
                 MetadataValue::try_from(format!("Bearer {token}")).expect("valid bearer header"),
             ),
