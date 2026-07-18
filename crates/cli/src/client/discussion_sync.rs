@@ -51,7 +51,7 @@ use objects::{
     },
 };
 use objects::store::ObjectStore;
-use repo::{CollaborationStore, Repository};
+use repo::{CollaborationStore, Repository, mark_legacy_discussions_migrated};
 use serde::{Deserialize, Serialize};
 
 use crate::client::HostedGrpcClient;
@@ -238,6 +238,15 @@ pub async fn pull_discussions(
     client: &mut HostedGrpcClient,
     repo_path: &str,
 ) -> Result<usize> {
+    // Hosted discussions arrive as server-minted `Discussions` state-attachments
+    // on the pulled objects. Those are the transport form of what we
+    // authoritatively re-materialize below via the CollaborationService RPCs —
+    // so claim the one-shot legacy blob->op-log migration marker to keep it from
+    // also converting them (which would duplicate every discussion and diverge
+    // on multi-turn supersede history). Fresh clones have no genuine local
+    // legacy discussions, and existing repos already hold the marker.
+    mark_legacy_discussions_migrated(repo).context("claim legacy discussion migration marker")?;
+
     let Some(head_state) = repo.head().context("resolve repository head")? else {
         return Ok(0);
     };

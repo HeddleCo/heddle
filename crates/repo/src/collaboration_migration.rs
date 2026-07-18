@@ -171,14 +171,41 @@ pub fn apply_legacy_discussion_migration(
     Ok(report)
 }
 
+fn legacy_discussion_migration_marker(repository: &Repository) -> std::path::PathBuf {
+    repository
+        .heddle_dir()
+        .join("collaboration/migrations/legacy-discussions-v1")
+}
+
+/// Claim the one-shot legacy-discussion migration marker without running the
+/// migration. Idempotent.
+///
+/// Hosted repositories carry their discussions as server-minted `Discussions`
+/// state-attachments that ride the normal pull. Those attachments are the
+/// *transport* form of the hosted `CollaborationService` discussions, which the
+/// hosted-sync bridge materializes into the op-log directly (RPC read path). If
+/// the one-shot legacy blob→op-log migration were also allowed to run over the
+/// same pulled attachments it would (a) duplicate every hosted discussion and
+/// (b) diverge on multi-turn discussions, whose `AppendTurn` supersede history
+/// leaves several differing blobs on one state. A fresh clone has no genuine
+/// *local* legacy discussions to migrate, so claiming the marker at hosted-sync
+/// time is safe and leaves the RPC-materialized op-log authoritative.
+pub fn mark_legacy_discussions_migrated(repository: &Repository) -> Result<()> {
+    let marker = legacy_discussion_migration_marker(repository);
+    if marker.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(marker.parent().expect("migration marker has parent"))?;
+    write_file_atomic(&marker, b"1\n")?;
+    Ok(())
+}
+
 pub fn migrate_legacy_discussions_once(
     repository: &Repository,
     store: &CollaborationStore,
     import_actor: Attribution,
 ) -> Result<Option<LegacyDiscussionMigrationReport>> {
-    let marker = repository
-        .heddle_dir()
-        .join("collaboration/migrations/legacy-discussions-v1");
+    let marker = legacy_discussion_migration_marker(repository);
     if marker.exists() {
         return Ok(None);
     }
