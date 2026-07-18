@@ -119,7 +119,11 @@ pub struct PullObjectMix {
 #[derive(Debug, Clone)]
 pub struct HostedRefEntry {
     pub name: String,
-    pub state_id: StateId,
+    /// Heddle-native refs (threads/markers) carry a `StateId`. Git-overlay
+    /// refs advertised straight from the server's Git lane (weft#633) have no
+    /// heddle state and leave this `None`; they are addressed purely by their
+    /// `git:<oid>` `revision_address`.
+    pub state_id: Option<StateId>,
     pub is_thread: bool,
     pub revision_address: String,
 }
@@ -210,10 +214,15 @@ impl HostedGrpcClient {
             .list_refs_with_revision_addresses(repo_path)
             .await?
             .into_iter()
-            .map(|entry| RefEntry {
-                name: entry.name,
-                state_id: entry.state_id,
-                is_thread: entry.is_thread,
+            // Heddle-native refs only: git-overlay refs (weft#633) carry no
+            // heddle StateId and are irrelevant to the state-id consumers
+            // (marker sync, clone thread tracking).
+            .filter_map(|entry| {
+                entry.state_id.map(|state_id| RefEntry {
+                    name: entry.name,
+                    state_id,
+                    is_thread: entry.is_thread,
+                })
             })
             .collect())
     }
@@ -241,9 +250,7 @@ impl HostedGrpcClient {
             .map(|entry| {
                 Ok(HostedRefEntry {
                     name: entry.name,
-                    state_id: super::helpers::parse_proto_state_id(entry.state_id)?.ok_or_else(
-                        || ProtocolError::InvalidState("ref is missing its state ID".to_string()),
-                    )?,
+                    state_id: super::helpers::parse_proto_state_id(entry.state_id)?,
                     is_thread: entry.is_thread,
                     revision_address: entry.revision_address,
                 })
@@ -3689,6 +3696,75 @@ mod tests {
         assert!(
             feature.expected_missing,
             "ref absent from ListRefs is expected-missing (create)",
+        );
+    }
+
+    /// A `git:<oid>` revision address (a Git-lane ref tip advertised by the
+    /// server) parses to a compare-and-set `Value` expectation; an empty
+    /// address means the server holds no tip for the name → `Missing`
+    /// (create). This is the create-vs-update pivot behind weft#633: before the
+    /// server advertised Git-lane refs under their Git names, the mirror push
+    /// never saw a `git:` address for an existing ref and re-created it.
+    #[test]
+    fn git_ref_expectation_maps_git_address_to_update() {
+        let oid = "89abcdef012345670123456789abcdef01234567";
+        assert_eq!(
+            parse_git_ref_expectation(&format!("git:{oid}")).expect("parse git address"),
+            GitRefRemoteExpectation::Value(hex::decode(oid).expect("hex")),
+        );
+        assert_eq!(
+            parse_git_ref_expectation("").expect("parse empty address"),
+            GitRefRemoteExpectation::Missing,
+        );
+    }
+
+    /// End-to-end of the client half of weft#633: when the server advertises an
+    /// existing branch tip as a `git:<oid>` address, the mirror push negotiates
+    /// a fast-forward ref UPDATE (compare-and-set against the advertised tip)
+    /// rather than a create — while an unadvertised tag is still created. The
+    /// compare-and-set precondition (not a force) is what keeps a genuinely
+    /// divergent concurrent move rejected instead of blindly overwritten.
+    #[test]
+    fn git_mirror_plan_updates_existing_ref_from_advertised_git_address() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut git = sley::Repository::init(dir.path()).expect("init git");
+        let main_commit = write_commit(&git, "main");
+        let tag_commit = write_commit(&git, "tag");
+        set_ref(&mut git, "refs/heads/main", main_commit);
+        set_ref(&mut git, "refs/tags/v1", tag_commit);
+
+        // The revision addresses the server's ListRefs now returns for the
+        // existing Git-lane refs. Only `refs/heads/main` is advertised; the tag
+        // is new to the server.
+        let remote_main_oid = "89abcdef012345670123456789abcdef01234567";
+        let mut expectations = HashMap::new();
+        expectations.insert(
+            "refs/heads/main".to_string(),
+            parse_git_ref_expectation(&format!("git:{remote_main_oid}"))
+                .expect("parse advertised git address"),
+        );
+
+        let plan = build_git_mirror_plan_from_sley(&git, 64 * 1024, &expectations)
+            .expect("build mirror plan");
+        let updates = mirror_ref_updates(&plan);
+        let by_name: HashMap<&str, &GitRefUpdateTransfer> =
+            updates.iter().map(|u| (u.name.as_str(), u)).collect();
+
+        let main = by_name["refs/heads/main"];
+        assert!(
+            !main.expected_missing,
+            "an advertised existing ref must be an UPDATE, not a create",
+        );
+        assert_eq!(
+            hex::encode(proto_oid_bytes(&main.expected_target_oid).expect("expected oid")),
+            remote_main_oid,
+            "the update must compare-and-set against the server's advertised tip",
+        );
+
+        let tag = by_name["refs/tags/v1"];
+        assert!(
+            tag.expected_missing,
+            "a ref the server does not advertise is still created",
         );
     }
 
