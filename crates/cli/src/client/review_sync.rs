@@ -12,26 +12,29 @@
 //!   signature WE authored to the hosted `SignState`. The signature bytes were
 //!   computed over the deterministic [`objects::object::state_review::signing_payload`],
 //!   byte-identical to the server's reconstruction, so the exact signature the
-//!   local `review sign` wrote verifies unchanged server-side.
+//!   local `review sign` wrote verifies unchanged server-side. weft relaxes the
+//!   `signed_at` skew gate for this authenticated install path, so a signature
+//!   minted long before the push still lands.
 //! * **Pull (read path):** none needed — the server-minted `ReviewSignatures`
 //!   attachment rides the pull pack like any server-owned attachment, so a clone
 //!   / pull materializes it and the local `review show` reads it directly.
 //!
 //! ## Fail-closed self filter
 //!
-//! Only signatures whose actor is the local principal are forwarded. The server
-//! binds the signing key to the authenticated pusher, so attempting to replay
-//! another actor's signature (e.g. one a clone pulled) would be rejected anyway;
-//! the self filter avoids the pointless round-trip and any misattribution.
+//! Only signatures whose actor is the local principal are forwarded. The actor
+//! is resolved from [`Repository::get_principal`] (env → config → git) — the SAME
+//! source `review sign` stamped the `actor` with — NOT `config().principal`
+//! alone, which is empty in git-overlay / env-identity repos and would silently
+//! drop our own signatures. When the principal is unresolvable we warn and skip
+//! (we cannot tell which signatures are ours).
 //!
-//! ## weft#638 limit (degrade gracefully, don't fix here)
+//! ## Retry discipline
 //!
-//! A signature is minted against a specific state. States not present on the
-//! server (unpushed ancestors, or a head that advanced past the signed state)
-//! make `SignState` fail; that warns and continues rather than failing the push.
-//! The mirror (`.heddle/collaboration/hosted-review-mirror.json`) records synced
-//! `(state, signature)` pairs so a re-push does not re-sign, and is saved after
-//! every signature and on the error path.
+//! The mirror (`.heddle/collaboration/hosted-review-mirror.json`) records both
+//! `synced` and permanently-`rejected` `(state, signature)` pairs. A transient
+//! failure (network / server unavailable / state not yet on the server) is left
+//! for the next push to retry; a permanent rejection (bad signature, key not
+//! owned by the caller) is recorded so it stops retrying and warning every push.
 
 #![cfg(feature = "client")]
 
@@ -52,6 +55,7 @@ use objects::object::{
 use objects::store::ObjectStore;
 use repo::{HistoryQuery, Repository, StateAttachmentKind};
 use serde::{Deserialize, Serialize};
+use wire::ProtocolError;
 
 use crate::client::HostedGrpcClient;
 
@@ -66,9 +70,13 @@ struct HostedReviewMirror {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct RepoReviewMirror {
-    /// Signed `(state_id, signature-hex)` pairs already forwarded to the server.
+    /// `(state_id, signature-hex)` pairs successfully installed on the server.
     #[serde(default)]
     synced: Vec<String>,
+    /// Pairs the server permanently rejected — do not retry (avoids warning
+    /// every push over a signature that will never install).
+    #[serde(default)]
+    rejected: Vec<String>,
 }
 
 fn synced_key(state_id: &StateId, signature_hex: &str) -> String {
@@ -125,6 +133,22 @@ fn scope_to_proto(scope: &ReviewScope) -> ProtoReviewScope {
     ProtoReviewScope { scope: Some(inner) }
 }
 
+/// Whether a hosted rejection is permanent (won't succeed on retry) vs transient
+/// (retry next push). A malformed/invalid signature or a key the caller does not
+/// own will never install; a network error or a state not yet on the server may.
+fn is_permanent(error: &ProtocolError) -> bool {
+    matches!(
+        error,
+        ProtocolError::InvalidState(_) | ProtocolError::AuthorizationFailed(_)
+    )
+}
+
+enum ForwardOutcome {
+    Installed,
+    Permanent(String),
+    Transient(String),
+}
+
 /// Read the current `ReviewSignatures` blob for a state, if any.
 fn read_signatures(repo: &Repository, state_id: &StateId) -> Result<Vec<ReviewSignature>> {
     let Some(attachment) =
@@ -144,8 +168,6 @@ fn read_signatures(repo: &Repository, state_id: &StateId) -> Result<Vec<ReviewSi
 }
 
 /// Replay local review signatures we authored to the hosted `StateReviewService`.
-/// Saves the mirror after each signature and continues past a per-signature
-/// failure (warn-and-skip).
 pub async fn push_review_signatures(
     repo: &Repository,
     client: &mut HostedGrpcClient,
@@ -155,20 +177,38 @@ pub async fn push_review_signatures(
         return Ok(0);
     };
 
-    // Only forward signatures the local principal actually authored.
-    let Some(principal) = repo.config().principal.clone() else {
-        return Ok(0);
+    // Resolve our identity from the SAME source `review sign` stamped the actor
+    // with (env → config → git). Warn + skip if unresolvable — we cannot tell
+    // which signatures are ours.
+    let principal = match repo.get_principal() {
+        Ok(principal) => principal,
+        Err(error) => {
+            eprintln!(
+                "{} review sync skipped: could not resolve the local principal ({error}); \
+                 set one with `heddle init --principal-name <name> --principal-email <email>`",
+                crate::cli::style::warn_marker(),
+            );
+            return Ok(0);
+        }
     };
 
     let states = repo
         .query_history(&HistoryQuery::new(Some(head)).with_limit(REVIEW_SCAN_LIMIT))
         .context("walk history for review signatures")?;
 
-    let mut mirror = load_mirror(repo.heddle_dir())?;
-    let already: HashSet<String> = mirror
+    let heddle_dir = repo.heddle_dir().to_path_buf();
+    let mut mirror = load_mirror(&heddle_dir)?;
+    let skip: HashSet<String> = mirror
         .repos
         .get(repo_path)
-        .map(|repo_mirror| repo_mirror.synced.iter().cloned().collect())
+        .map(|repo_mirror| {
+            repo_mirror
+                .synced
+                .iter()
+                .chain(repo_mirror.rejected.iter())
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut synced = 0usize;
@@ -185,27 +225,42 @@ pub async fn push_review_signatures(
             }
         };
         for signature in signatures {
-            // Self filter: the server binds the signing key to the caller, so we
-            // can only (re)mint our own signatures.
             if signature.actor.name != principal.name || signature.actor.email != principal.email {
                 continue;
             }
             let key = synced_key(&state.state_id, &signature.signature);
-            if already.contains(&key) {
+            if skip.contains(&key) {
                 continue;
             }
-            let result =
-                forward_signature(client, repo_path, &state.state_id, &signature).await;
-            match result {
-                Ok(()) => {
-                    let repo_mirror = mirror.repos.entry(repo_path.to_string()).or_default();
-                    repo_mirror.synced.push(key);
-                    save_mirror(repo.heddle_dir(), &mirror)?;
+            match forward_signature(client, repo_path, &state.state_id, &signature).await {
+                ForwardOutcome::Installed => {
+                    mirror
+                        .repos
+                        .entry(repo_path.to_string())
+                        .or_default()
+                        .synced
+                        .push(key);
+                    save_mirror(&heddle_dir, &mirror)?;
                     synced += 1;
                 }
-                Err(error) => {
+                ForwardOutcome::Permanent(message) => {
+                    // Record so we stop retrying + warning on every push.
+                    mirror
+                        .repos
+                        .entry(repo_path.to_string())
+                        .or_default()
+                        .rejected
+                        .push(key);
+                    save_mirror(&heddle_dir, &mirror)?;
                     eprintln!(
-                        "{} hosted review {}: {error:#}",
+                        "{} hosted review {}: permanently rejected, will not retry: {message}",
+                        crate::cli::style::warn_marker(),
+                        state.state_id.short()
+                    );
+                }
+                ForwardOutcome::Transient(message) => {
+                    eprintln!(
+                        "{} hosted review {}: {message} (will retry on next push)",
                         crate::cli::style::warn_marker(),
                         state.state_id.short()
                     );
@@ -213,7 +268,6 @@ pub async fn push_review_signatures(
             }
         }
     }
-
     Ok(synced)
 }
 
@@ -222,12 +276,17 @@ async fn forward_signature(
     repo_path: &str,
     state_id: &StateId,
     signature: &ReviewSignature,
-) -> Result<()> {
-    let public_key = hex::decode(&signature.public_key)
-        .map_err(|error| anyhow::anyhow!("review public_key is not hex: {error}"))?;
-    let signature_bytes = hex::decode(&signature.signature)
-        .map_err(|error| anyhow::anyhow!("review signature is not hex: {error}"))?;
-    client
+) -> ForwardOutcome {
+    // A malformed stored signature will never install → permanent.
+    let public_key = match hex::decode(&signature.public_key) {
+        Ok(bytes) => bytes,
+        Err(error) => return ForwardOutcome::Permanent(format!("public_key is not hex: {error}")),
+    };
+    let signature_bytes = match hex::decode(&signature.signature) {
+        Ok(bytes) => bytes,
+        Err(error) => return ForwardOutcome::Permanent(format!("signature is not hex: {error}")),
+    };
+    match client
         .sign_state(
             repo_path,
             state_id,
@@ -241,8 +300,13 @@ async fn forward_signature(
             sign_op_id(repo_path, state_id, &signature.signature),
         )
         .await
-        .with_context(|| format!("sign hosted state {}", state_id.short()))?;
-    Ok(())
+    {
+        // Idempotent success or an already-installed signature both mean "on the
+        // server".
+        Ok(_) | Err(ProtocolError::AlreadyExists(_)) => ForwardOutcome::Installed,
+        Err(error) if is_permanent(&error) => ForwardOutcome::Permanent(error.to_string()),
+        Err(error) => ForwardOutcome::Transient(error.to_string()),
+    }
 }
 
 const OP_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x6865_6464_6c65_7276_775f_7379_6e63_0001);
@@ -250,14 +314,18 @@ const OP_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x6865_6464_6c65_7276_775
 fn sign_op_id(repo_path: &str, state_id: &StateId, signature_hex: &str) -> String {
     uuid::Uuid::new_v5(
         &OP_NAMESPACE,
-        format!("sign:{repo_path}:{}:{signature_hex}", state_id.to_string_full()).as_bytes(),
+        format!(
+            "sign:{repo_path}:{}:{signature_hex}",
+            state_id.to_string_full()
+        )
+        .as_bytes(),
     )
     .to_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{Principal, SymbolAnchor};
+    use objects::object::SymbolAnchor;
 
     use super::*;
 
@@ -283,8 +351,6 @@ mod tests {
         }
     }
 
-    // The synced key binds a signature to a state, so the same signature bytes
-    // on two states sync independently and a re-push of either is a no-op.
     #[test]
     fn synced_key_is_state_scoped() {
         let a = StateId::from_bytes([1; 32]);
@@ -306,12 +372,17 @@ mod tests {
         );
     }
 
+    // A bad-signature / key-not-owned rejection is permanent (stops retrying);
+    // a network / not-yet-pushed error is transient (retries next push).
     #[test]
-    fn actor_self_filter_matches_principal() {
-        let actor = Principal::new("Alice", "alice@x");
-        let same = Principal::new("Alice", "alice@x");
-        let other = Principal::new("Bob", "bob@x");
-        assert!(actor.name == same.name && actor.email == same.email);
-        assert!(actor.name != other.name || actor.email != other.email);
+    fn permanent_vs_transient_classification() {
+        assert!(is_permanent(&ProtocolError::InvalidState("bad sig".into())));
+        assert!(is_permanent(&ProtocolError::AuthorizationFailed(
+            "key not owned".into()
+        )));
+        assert!(!is_permanent(&ProtocolError::ObjectNotFound(
+            "state not on server yet".into()
+        )));
+        assert!(!is_permanent(&ProtocolError::Remote("unavailable".into())));
     }
 }
