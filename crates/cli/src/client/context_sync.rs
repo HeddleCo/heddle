@@ -257,23 +257,22 @@ pub async fn push_context(
             .map(|attribution| attribution.to_string());
 
     let mut mirror = load_mirror(repo.heddle_dir())?;
-    // Server annotation ids currently known (initial ListContext + mirror), so
-    // a `SetContext`'s freshly-minted id can be spotted as the one NOT already
-    // seen, and a pulled annotation (local id == server id) is recognized as
-    // already-hosted without a duplicate create.
-    let mut known_server_ids: HashSet<String> = mirror
-        .repos
-        .get(repo_path)
-        .map(|repo_mirror| {
-            repo_mirror
-                .annotations
-                .iter()
-                .map(|entry| entry.server_id.clone())
-                .collect()
-        })
-        .unwrap_or_default();
+    // `server_counts`: id → revision_count the server currently holds (from the
+    // initial ListContext). Lets the adopt path (a pulled annotation whose local
+    // id == server id) forward only the revisions the server is actually missing,
+    // even with no mirror row. `known_ids` additionally folds in mirror server
+    // ids so a `SetContext`'s freshly-minted id is spotted as the one NOT already
+    // known.
+    let mut server_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for annotation in list_server_annotations(client, repo_path).await? {
-        known_server_ids.insert(annotation.id);
+        server_counts.insert(annotation.id, annotation.revision_count as usize);
+    }
+    let mut known_ids: HashSet<String> = server_counts.keys().cloned().collect();
+    if let Some(repo_mirror) = mirror.repos.get(repo_path) {
+        for entry in &repo_mirror.annotations {
+            known_ids.insert(entry.server_id.clone());
+        }
     }
 
     let mut synced = 0usize;
@@ -286,7 +285,8 @@ pub async fn push_context(
                 annotation,
                 self_attribution.as_deref(),
                 &mut mirror,
-                &mut known_server_ids,
+                &server_counts,
+                &mut known_ids,
             )
             .await;
             save_mirror(repo.heddle_dir(), &mirror)?;
@@ -315,7 +315,8 @@ async fn push_one(
     annotation: &Annotation,
     self_attribution: Option<&str>,
     mirror: &mut HostedContextMirror,
-    known_server_ids: &mut HashSet<String>,
+    server_counts: &std::collections::HashMap<String, usize>,
+    known_ids: &mut HashSet<String>,
 ) -> Result<bool> {
     let repo_mirror = mirror.repos.entry(repo_path.to_string()).or_default();
     let linked = repo_mirror
@@ -323,23 +324,26 @@ async fn push_one(
         .iter()
         .position(|entry| entry.local_id == annotation.annotation_id);
 
-    // Resolve the server id + how many revisions are already synced.
-    let (server_id, mut synced_revisions) = match linked {
+    // Resolve the server id, how many revisions are already synced, and whether
+    // this call created a new server annotation.
+    let (server_id, mut synced_revisions, created) = match linked {
         Some(index) => (
             repo_mirror.annotations[index].server_id.clone(),
             repo_mirror.annotations[index].synced_revisions,
+            false,
         ),
-        None if known_server_ids.contains(&annotation.annotation_id) => {
+        None if server_counts.contains_key(&annotation.annotation_id) => {
             // Pulled / pack-delivered: local id IS the server id. Adopt it
             // without a duplicate create (idempotent even with no mirror row).
-            let synced = annotation.revisions.len();
+            // Sync from the server's actual revision count so any revision we
+            // added locally after the pull is still forwarded.
+            let synced = server_counts[&annotation.annotation_id];
             repo_mirror.annotations.push(ContextMirrorEntry {
                 local_id: annotation.annotation_id.clone(),
                 server_id: annotation.annotation_id.clone(),
                 synced_revisions: synced,
             });
-            // Nothing new to push for the create; fall through to revisions.
-            (annotation.annotation_id.clone(), synced)
+            (annotation.annotation_id.clone(), synced, false)
         }
         None => {
             // Genuinely new annotation → create it. Fail-closed self filter.
@@ -357,20 +361,22 @@ async fn push_one(
                 return Ok(false);
             }
             let server_id =
-                create_on_server(client, repo_path, target, annotation, known_server_ids).await?;
-            known_server_ids.insert(server_id.clone());
+                create_on_server(client, repo_path, target, annotation, known_ids).await?;
+            known_ids.insert(server_id.clone());
             let repo_mirror = mirror.repos.entry(repo_path.to_string()).or_default();
             repo_mirror.annotations.push(ContextMirrorEntry {
                 local_id: annotation.annotation_id.clone(),
                 server_id: server_id.clone(),
                 synced_revisions: 1,
             });
-            (server_id, 1)
+            (server_id, 1, true)
         }
     };
 
     // Forward any revisions the server does not yet hold (linear append).
-    let mut pushed_any = synced_revisions == 1 && linked.is_none();
+    // "Pushed" = we created the annotation OR forwarded at least one revision;
+    // adopting an already-hosted annotation with nothing new is not a push.
+    let mut pushed_any = created;
     while synced_revisions < annotation.revisions.len() {
         let revision = &annotation.revisions[synced_revisions];
         client
