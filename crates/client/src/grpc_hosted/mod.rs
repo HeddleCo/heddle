@@ -2,6 +2,7 @@
 
 mod collaboration;
 mod content;
+mod state_review;
 pub(crate) mod helpers;
 mod hydration;
 pub mod monorepo;
@@ -20,6 +21,7 @@ use grpc::heddle::api::v1alpha1::{
     registry_service_client::RegistryServiceClient,
     repo_sync_service_client::RepoSyncServiceClient,
     repository_service_client::RepositoryServiceClient,
+    state_review_service_client::StateReviewServiceClient,
     workflow_service_client::WorkflowServiceClient,
 };
 use objects::{object::MarkerName, store::ObjectStore};
@@ -100,6 +102,7 @@ pub struct HostedGrpcClient {
     pub(super) content: RepositoryServiceClient<Channel>,
     pub(super) workflow: WorkflowServiceClient<Channel>,
     pub(super) collaboration: CollaborationServiceClient<Channel>,
+    pub(super) review: StateReviewServiceClient<Channel>,
     pub(super) token_header: Option<MetadataValue<tonic::metadata::Ascii>>,
     transport: helpers::HostedTransportPolicy,
     pub(super) auth_proof_key_pem: Option<String>,
@@ -179,6 +182,7 @@ impl HostedGrpcClient {
             content: RepositoryServiceClient::new(channel.clone()),
             workflow: WorkflowServiceClient::new(channel.clone()),
             collaboration: CollaborationServiceClient::new(channel.clone()),
+            review: StateReviewServiceClient::new(channel.clone()),
             token_header,
             transport,
             auth_proof_key_pem: config.auth_proof_key_pem.clone(),

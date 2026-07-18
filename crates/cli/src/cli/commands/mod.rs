@@ -18,7 +18,7 @@ mod command_catalog;
 mod commit;
 pub(crate) mod compact;
 mod completion;
-mod context;
+pub(crate) mod context;
 mod daemon;
 mod diff;
 mod discuss;

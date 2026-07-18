@@ -1635,6 +1635,15 @@ async fn clone_network(
                 eprintln!("{} discussion sync skipped: {error:#}", style::warn_marker());
             }
         }
+        // Read path for hosted context annotations (heddle context): materialize
+        // the hosted head's annotations into the local Context attachment so
+        // `context list` sees them. Best-effort, mirroring discussions.
+        match crate::client::context_sync::pull_context(&local_repo, &mut client, repo_path).await {
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("{} context sync skipped: {error:#}", style::warn_marker());
+            }
+        }
         if should_output_json(cli, Some(local_repo.config())) {
             let output = heddle_clone_output(
                 origin_url.clone(),
