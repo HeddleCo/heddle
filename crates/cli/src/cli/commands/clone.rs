@@ -1966,6 +1966,15 @@ fn select_hosted_clone_thread<'a>(
 
     let mut threads = remote_threads
         .into_iter()
+        // weft#633: for git-overlay repos, hosted ListRefs advertises each
+        // branch tip under a companion entry keyed by the FULL Git ref name
+        // (`refs/heads/main`), marked is_thread=true so the wire stays compatible
+        // with the pinned published client. Those companions are never a valid
+        // heddle track target — the real thread is the short name — so drop any
+        // `refs/`-prefixed candidate before default selection. Without this a
+        // repo whose default branch is not `main` mis-selects the companion:
+        // e.g. `refs/heads/trunk` sorts lexicographically before `trunk`.
+        .filter(|thread| !thread.starts_with("refs/"))
         .map(str::to_string)
         .collect::<Vec<_>>();
     threads.sort();
@@ -2309,6 +2318,35 @@ mod tests {
                 .expect("thread selected");
 
         assert_eq!(selected, "feature");
+    }
+
+    // weft#633: the hosted ListRefs response for a git-overlay repo carries
+    // companion entries keyed by the full Git ref name (`refs/heads/trunk`)
+    // alongside the real short-name thread. Those must never be selected as the
+    // clone track target — `refs/heads/trunk` sorts before `trunk`, so without
+    // the filter default selection would pick the companion and clone would
+    // fail on a bogus track name.
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_clone_thread_selection_ignores_git_ref_companions() {
+        let selected = select_hosted_clone_thread(
+            None,
+            ["refs/heads/trunk", "trunk", "refs/heads/main", "main"],
+            "owner/repo",
+        )
+        .expect("thread selected");
+        assert_eq!(selected, "main", "companion refs/heads/* entries are ignored");
+
+        let non_main = select_hosted_clone_thread(
+            None,
+            ["refs/heads/trunk", "trunk"],
+            "owner/repo",
+        )
+        .expect("thread selected");
+        assert_eq!(
+            non_main, "trunk",
+            "a non-main default resolves to the short thread, not its companion"
+        );
     }
 
     #[cfg(feature = "client")]
