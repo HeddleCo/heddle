@@ -86,6 +86,19 @@ fn change_id_state_field(change_id: ChangeId) -> Option<ProtoStateId> {
 }
 
 impl HostedGrpcClient {
+    /// The authenticated hosted username (the bearer token's `principal:<subject>`
+    /// subject). weft stamps discussion turns with `Principal::new(username, "")`,
+    /// so this is the author name our own pushed turns carry server-side — the
+    /// identity the discussion-sync bridge uses to recognize turns we published.
+    /// `None` for an anonymous/unsigned client.
+    pub fn authenticated_username(&self) -> Option<String> {
+        self.authenticated_principal
+            .as_deref()
+            .and_then(|principal| principal.strip_prefix("principal:"))
+            .map(|subject| subject.trim().to_string())
+            .filter(|subject| !subject.is_empty())
+    }
+
     /// Open a hosted discussion anchored at `change_id`'s state, seeded with
     /// `body` as the first turn. Caller-authenticated + PoP-signed.
     #[allow(clippy::too_many_arguments)]
