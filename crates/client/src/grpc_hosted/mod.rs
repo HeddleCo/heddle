@@ -639,6 +639,7 @@ mod tests {
             content: RepositoryServiceClient::new(channel.clone()),
             workflow: WorkflowServiceClient::new(channel.clone()),
             collaboration: CollaborationServiceClient::new(channel.clone()),
+            review: StateReviewServiceClient::new(channel.clone()),
             token_header: Some(
                 MetadataValue::try_from(format!("Bearer {token}")).expect("valid bearer header"),
             ),
