@@ -86,7 +86,8 @@ pub mod worktree_walk;
 pub use collaboration_migration::{
     LegacyDiscussionMigrationBlocker, LegacyDiscussionMigrationItem, LegacyDiscussionMigrationPlan,
     LegacyDiscussionMigrationReport, apply_legacy_discussion_migration,
-    migrate_legacy_discussions_once, plan_legacy_discussion_migration,
+    mark_legacy_discussions_migrated, migrate_legacy_discussions_once,
+    plan_legacy_discussion_migration,
 };
 pub use collaboration_store::{
     CollaborationIntegrityReport, CollaborationStore, CollaborationWriteDisposition,

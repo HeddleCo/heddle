@@ -1623,6 +1623,18 @@ async fn clone_network(
                 .context("failed to materialize hosted clone worktree")?;
         }
         configure_hosted_clone_origin(&local_repo, &endpoint_spec, repo_path)?;
+        // Read path for hosted discussions (heddle discuss): materialize the
+        // hosted CollaborationService discussions for the cloned head into the
+        // local op-log so `discuss list` / `discuss show` see them. Best-effort:
+        // a fetch hiccup warns rather than failing an otherwise-good clone.
+        match crate::client::discussion_sync::pull_discussions(&local_repo, &mut client, repo_path)
+            .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("{} discussion sync skipped: {error:#}", style::warn_marker());
+            }
+        }
         if should_output_json(cli, Some(local_repo.config())) {
             let output = heddle_clone_output(
                 origin_url.clone(),
