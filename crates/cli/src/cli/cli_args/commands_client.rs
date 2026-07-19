@@ -1,7 +1,39 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Hosted-client command arguments.
 
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
+
+/// Preset operation ceilings for `heddle auth derive-agent`.
+///
+/// Each variant expands to a curated subset of the safe agent operation
+/// ceiling. `--scope`/`--allow` stay usable alongside a template and, when
+/// combined, may only *narrow* it (they intersect the template's set).
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentTemplateArg {
+    /// Read + review: every read RPC plus Pull. No writes, no ref moves.
+    /// (ListStates/GetState/GetBlame/GetTree/GetBlob/GetDiff/GetCompare/
+    /// ListActions/ListContext/GetContextHistory/GetDiscussion/ListByState/
+    /// ListBySymbol/... + Pull + WhoAmI.)
+    Reviewer,
+    /// Read + collaboration writes: the reviewer set plus Push, UpdateRef,
+    /// SetContext/ReviseContext/SupersedeContext, and
+    /// OpenDiscussion/AppendTurn/ResolveDiscussion. No repo/namespace admin.
+    Contributor,
+    /// Read + Pull + the Push/UpdateRef a CI lander needs to run ready/land.
+    /// No context or discussion writes.
+    #[value(name = "ci-landing")]
+    CiLanding,
+}
+
+impl From<AgentTemplateArg> for heddle_client::device_flow::AgentTemplate {
+    fn from(arg: AgentTemplateArg) -> Self {
+        match arg {
+            AgentTemplateArg::Reviewer => Self::Reviewer,
+            AgentTemplateArg::Contributor => Self::Contributor,
+            AgentTemplateArg::CiLanding => Self::CiLanding,
+        }
+    }
+}
 
 #[derive(Subcommand, Clone, Debug)]
 pub enum AuthCommands {
@@ -60,6 +92,13 @@ pub enum AuthCommands {
         #[arg(long = "allow")]
         allowed_operations: Vec<String>,
 
+        /// Preset operation ceiling. `reviewer` = read-only + Pull;
+        /// `contributor` = reviewer + Push/UpdateRef + context/discussion
+        /// writes; `ci-landing` = reviewer + Push/UpdateRef for ready/land.
+        /// A combined `--allow` may only narrow the template.
+        #[arg(long, value_enum)]
+        template: Option<AgentTemplateArg>,
+
         /// Write `token`, child `device-key.pem`, and `metadata.json` files to this directory.
         #[arg(long, value_name = "DIR")]
         out: Option<std::path::PathBuf>,
@@ -106,6 +145,7 @@ impl From<AuthCommands> for heddle_client::AuthCommand {
                 ttl_secs,
                 scopes,
                 allowed_operations,
+                template,
                 out,
             } => heddle_client::AuthCommand::DeriveAgent {
                 server,
@@ -113,6 +153,7 @@ impl From<AuthCommands> for heddle_client::AuthCommand {
                 ttl_secs,
                 scopes,
                 allowed_operations,
+                template: template.map(Into::into),
                 out,
             },
             AuthCommands::CreateServiceToken {

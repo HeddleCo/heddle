@@ -25,7 +25,8 @@ use crate::{
     credentials,
     credentials::ServerCredential,
     device_flow::{
-        AgentAttenuation, SAFE_AGENT_OPERATIONS, attenuate_for_agent, effective_pop_public_key_hex,
+        AgentAttenuation, AgentTemplate, SAFE_AGENT_OPERATIONS, attenuate_for_agent,
+        effective_pop_public_key_hex,
     },
     grpc_hosted::{HostedSession, operation_id::ClientOperationId},
 };
@@ -78,6 +79,11 @@ struct AgentTokenExportMetadata<'a> {
     subject: &'a str,
     expires_at: String,
     scopes: Vec<String>,
+    /// Preset the ceiling was derived from, when `--template` was used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    template: Option<&'a str>,
+    /// Exact operation ceiling recorded in the token's attenuation block.
+    allowed_operations: Vec<String>,
 }
 
 const DERIVED_TOKEN_SECURITY_NOTE: &str = "Derived credential has its own proof key and is operation/TTL/resource-scope-limited and enforced server-side. Keep the token and child key together; the parent device key is not exported.";
@@ -120,6 +126,7 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             ttl_secs,
             scopes,
             allowed_operations,
+            template,
             out,
         } => cmd_auth_derive_agent(
             &server,
@@ -127,6 +134,7 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             ttl_secs,
             scopes,
             allowed_operations,
+            template,
             out.as_deref(),
         ),
         AuthCommand::CreateServiceToken {
@@ -151,12 +159,14 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
 
 /// Derive an offline child credential with a fresh PoP key, then either install
 /// it as the active credential or write a portable token + child-key bundle.
+#[allow(clippy::too_many_arguments)]
 fn cmd_auth_derive_agent(
     server: &str,
     agent_id: Option<String>,
     ttl_secs: u64,
     scopes: Vec<String>,
     requested_operations: Vec<String>,
+    template: Option<AgentTemplate>,
     out: Option<&Path>,
 ) -> Result<()> {
     if ttl_secs == 0 {
@@ -198,7 +208,7 @@ fn cmd_auth_derive_agent(
     };
 
     let agent_id = agent_id.unwrap_or_else(|| format!("agent-{}", uuid::Uuid::new_v4()));
-    let allowed_operations = select_agent_operations(requested_operations)?;
+    let allowed_operations = resolve_agent_operations(template, requested_operations)?;
     let declared_scopes = parse_agent_scopes(scopes)?;
     validate_scope_narrowing(&parent.token, &declared_scopes)?;
     let child_signer = Ed25519Signer::generate()
@@ -233,9 +243,15 @@ fn cmd_auth_derive_agent(
                 .iter()
                 .map(|(kind, path)| format!("{kind}:{path}"))
                 .collect(),
+            template: template.map(|template| template.as_str()),
+            allowed_operations: allowed_operations.clone(),
         };
         write_agent_bundle(out, &child_token, &child_private_key_pem, &export_metadata)?;
         println!("Agent token {agent_id} written to {}.", out.display());
+        if let Some(template) = template {
+            println!("Template: {} ceiling", template.as_str());
+        }
+        println!("Allowed operations: {}", allowed_operations.join(", "));
         println!("{DERIVED_TOKEN_SECURITY_NOTE}");
         return Ok(());
     }
@@ -258,6 +274,9 @@ fn cmd_auth_derive_agent(
 
     println!("Derived and installed agent token {agent_id} for {server}.");
     println!("Expires: {expires_at}");
+    if let Some(template) = template {
+        println!("Template: {} ceiling", template.as_str());
+    }
     println!("Allowed operations: {}", allowed_operations.join(", "));
     if declared_scopes.is_empty() {
         println!("Scopes: none (full resource authority inherited from parent)");
@@ -275,22 +294,39 @@ fn cmd_auth_derive_agent(
     Ok(())
 }
 
-fn select_agent_operations(requested: Vec<String>) -> Result<Vec<String>> {
-    if requested.is_empty() {
-        return Ok(SAFE_AGENT_OPERATIONS
+/// Resolve the final operation ceiling for a derived agent.
+///
+/// The base set is the template's curated subset (when `--template` is given)
+/// or the full [`SAFE_AGENT_OPERATIONS`] ceiling otherwise. An explicit
+/// `--allow` may only *narrow* that base: every requested operation must be a
+/// member of the base set, and the result is their intersection. This keeps
+/// `--template` pure sugar over `--allow` — it can never widen the ceiling.
+fn resolve_agent_operations(
+    template: Option<AgentTemplate>,
+    requested: Vec<String>,
+) -> Result<Vec<String>> {
+    let base: BTreeSet<String> = match template {
+        Some(template) => template.operations().into_iter().collect(),
+        None => SAFE_AGENT_OPERATIONS
             .iter()
             .map(|operation| (*operation).to_string())
-            .collect());
+            .collect(),
+    };
+
+    if requested.is_empty() {
+        return Ok(base.into_iter().collect());
     }
-    let safe = SAFE_AGENT_OPERATIONS
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
+
     let mut selected = BTreeSet::new();
     for operation in requested {
-        if !safe.contains(operation.as_str()) {
+        if !base.contains(&operation) {
+            let ceiling = match template {
+                Some(template) => format!("the {:?} template's operation set", template.as_str()),
+                None => "the safe agent operation ceiling".to_string(),
+            };
             bail!(
-                "operation {operation:?} is outside the safe agent operation ceiling; --allow can only narrow the default set"
+                "operation {operation:?} is outside {ceiling}; --allow can only narrow the {} set",
+                if template.is_some() { "template" } else { "default" }
             );
         }
         selected.insert(operation);
@@ -1912,6 +1948,7 @@ mod tests {
                 vec!["repo:acme/heddle".to_string()],
                 vec!["Push".to_string()],
                 None,
+                None,
             )
             .expect("derive and install parent agent");
             let installed = credentials::get_server_credential(server)
@@ -1959,6 +1996,7 @@ mod tests {
                 vec!["repo:acme/heddle/subtree".to_string()],
                 vec!["Push".to_string()],
                 None,
+                None,
             )
             .expect("derive narrower subagent");
             let subagent = credentials::get_server_credential(server)
@@ -1996,6 +2034,7 @@ mod tests {
                 vec!["repo:acme".to_string()],
                 vec!["Push".to_string()],
                 None,
+                None,
             )
             .expect_err("subagent scope widening must be rejected");
             assert!(error.to_string().contains("would widen"));
@@ -2016,6 +2055,7 @@ mod tests {
                 3600,
                 vec!["repo:acme/heddle".to_string()],
                 vec!["Push".to_string()],
+                None,
                 Some(&export_dir),
             )
             .expect("derive portable child credential");
@@ -2067,6 +2107,7 @@ mod tests {
                 3600,
                 vec!["repo:acme/heddle".to_string()],
                 vec!["Push".to_string()],
+                None,
                 Some(&export_dir),
             )
             .expect_err("an existing bundle must not be replaced piecemeal");
@@ -2111,7 +2152,7 @@ mod tests {
             "DeleteRepository",
             "DeleteNamespace",
         ] {
-            let error = select_agent_operations(vec![operation.to_string()])
+            let error = resolve_agent_operations(None, vec![operation.to_string()])
                 .expect_err("unsafe operation must be outside CLI ceiling");
             assert!(
                 error
@@ -2119,6 +2160,52 @@ mod tests {
                     .contains("outside the safe agent operation ceiling")
             );
         }
+    }
+
+    #[test]
+    fn template_expands_to_a_curated_allow_set() {
+        let reviewer = resolve_agent_operations(Some(AgentTemplate::Reviewer), Vec::new())
+            .expect("reviewer template resolves");
+        assert!(reviewer.contains(&"GetState".to_string()));
+        assert!(reviewer.contains(&"Pull".to_string()));
+        // Reviewer grants no writes / ref moves.
+        assert!(!reviewer.contains(&"Push".to_string()));
+        assert!(!reviewer.contains(&"UpdateRef".to_string()));
+        assert!(!reviewer.contains(&"SetContext".to_string()));
+
+        let contributor = resolve_agent_operations(Some(AgentTemplate::Contributor), Vec::new())
+            .expect("contributor template resolves");
+        assert!(contributor.contains(&"Push".to_string()));
+        assert!(contributor.contains(&"SetContext".to_string()));
+        assert!(contributor.contains(&"OpenDiscussion".to_string()));
+
+        let ci = resolve_agent_operations(Some(AgentTemplate::CiLanding), Vec::new())
+            .expect("ci-landing template resolves");
+        assert!(ci.contains(&"Push".to_string()));
+        assert!(ci.contains(&"UpdateRef".to_string()));
+        assert!(ci.contains(&"Pull".to_string()));
+        // CI landing grants no collaboration writes.
+        assert!(!ci.contains(&"OpenDiscussion".to_string()));
+        assert!(!ci.contains(&"SetContext".to_string()));
+    }
+
+    #[test]
+    fn explicit_allow_only_narrows_a_template() {
+        // `--allow GetState` intersects the reviewer set: result is just GetState.
+        let narrowed = resolve_agent_operations(
+            Some(AgentTemplate::Reviewer),
+            vec!["GetState".to_string()],
+        )
+        .expect("narrowing within the template is allowed");
+        assert_eq!(narrowed, vec!["GetState".to_string()]);
+
+        // `--allow Push` is outside the reviewer set, so it cannot widen it.
+        let error = resolve_agent_operations(
+            Some(AgentTemplate::Reviewer),
+            vec!["Push".to_string()],
+        )
+        .expect_err("a template cannot be widened by --allow");
+        assert!(error.to_string().contains("outside"));
     }
 
     #[test]

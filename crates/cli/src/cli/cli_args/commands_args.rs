@@ -870,6 +870,12 @@ pub struct ReadyArgs {
     /// Honest confidence estimate (0.0-1.0) if `ready` captures outstanding work.
     #[arg(long, value_parser = parse_confidence)]
     pub confidence: Option<f32>,
+
+    /// Preview the readiness decision (integration target, conflicts, verify
+    /// verdicts, would-be thread transition) without capturing work or moving
+    /// the thread to Ready/Blocked. No mutation occurs.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Arguments for the `sync` command.
@@ -906,6 +912,12 @@ pub struct LandArgs {
     /// Preserve per-State Git export instead of squashing the landed thread.
     #[arg(long)]
     pub no_squash: bool,
+
+    /// Preview the integration (thread -> target, merge relation, conflicts,
+    /// verify verdicts) without capturing work, syncing, or merging. No
+    /// mutation occurs and no server round-trip is made.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `thread show`.
@@ -1198,6 +1210,12 @@ pub struct PushArgs {
     /// Prefer enabling TLS; use this only for intentional lab/VPN testing.
     #[arg(long)]
     pub insecure: bool,
+
+    /// Preview the push plan (target, thread/track ref, state that would be
+    /// published, force status) without pushing, moving refs, capturing work,
+    /// running hooks, or contacting the server for anything beyond read/plan.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 impl PushArgs {

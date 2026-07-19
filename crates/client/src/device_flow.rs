@@ -193,6 +193,93 @@ pub const SAFE_AGENT_OPERATIONS: &[&str] = &[
     "WhoAmI",
 ];
 
+/// Read-only RPCs shared by every derived-agent template. Every entry is a
+/// member of [`SAFE_AGENT_OPERATIONS`]; the `templates_stay_within_safe_ceiling`
+/// test enforces that invariant.
+const TEMPLATE_READ_OPERATIONS: &[&str] = &[
+    "GetRefs",
+    "ListRefs",
+    "ListStates",
+    "GetState",
+    "GetBlame",
+    "ListProvenanceSummaries",
+    "GetTree",
+    "GetBlob",
+    "GetCompare",
+    "GetDiff",
+    "GetSemanticHotSpots",
+    "ListActions",
+    "ListContext",
+    "GetContextHistory",
+    "ListContextSuggestions",
+    "GetDiscussion",
+    "ListByState",
+    "ListBySymbol",
+    "WhoAmI",
+];
+
+/// Collaboration writes a `contributor` adds on top of the read set.
+const TEMPLATE_CONTRIBUTOR_WRITES: &[&str] = &[
+    "Push",
+    "UpdateRef",
+    "SetContext",
+    "ReviseContext",
+    "SupersedeContext",
+    "OpenDiscussion",
+    "AppendTurn",
+    "ResolveDiscussion",
+];
+
+/// The push/pull/ref-move set a CI lander needs to run `ready`/`land`.
+const TEMPLATE_CI_LANDING_WRITES: &[&str] = &["Push", "UpdateRef"];
+
+/// Preset operation ceilings for `heddle auth derive-agent --template`.
+///
+/// A template is pure sugar over `--allow`: it expands to a curated subset of
+/// [`SAFE_AGENT_OPERATIONS`]. An explicit `--allow` combined with a template
+/// may only *narrow* the template's set (the two intersect), never widen it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentTemplate {
+    /// Read + review: every read RPC plus `Pull`. No writes, no ref moves.
+    Reviewer,
+    /// Read + collaboration writes: reviewer plus `Push`/`UpdateRef`, context
+    /// writes, and discussion writes. No repo/namespace admin.
+    Contributor,
+    /// Read + `Pull` + the `Push`/`UpdateRef` a CI lander needs to run
+    /// `ready`/`land`. No context or discussion writes.
+    CiLanding,
+}
+
+impl AgentTemplate {
+    /// Stable lower-kebab name used on the CLI and in metadata.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentTemplate::Reviewer => "reviewer",
+            AgentTemplate::Contributor => "contributor",
+            AgentTemplate::CiLanding => "ci-landing",
+        }
+    }
+
+    /// The sorted, deduplicated operation set this template grants. Every
+    /// entry is guaranteed to be within [`SAFE_AGENT_OPERATIONS`].
+    pub fn operations(&self) -> Vec<String> {
+        let mut set: std::collections::BTreeSet<&'static str> =
+            TEMPLATE_READ_OPERATIONS.iter().copied().collect();
+        // `Pull` is a server-side read (fetch); every template can sync.
+        set.insert("Pull");
+        match self {
+            AgentTemplate::Reviewer => {}
+            AgentTemplate::Contributor => {
+                set.extend(TEMPLATE_CONTRIBUTOR_WRITES.iter().copied());
+            }
+            AgentTemplate::CiLanding => {
+                set.extend(TEMPLATE_CI_LANDING_WRITES.iter().copied());
+            }
+        }
+        set.into_iter().map(str::to_string).collect()
+    }
+}
+
 /// Restrictions applied to a sub-agent's Biscuit. Constructed via
 /// [`AgentAttenuation::time_bounded`] for the simplest case (no
 /// operation/resource narrowing) or built up field-by-field for
@@ -663,6 +750,39 @@ mod tests {
     use biscuit_auth::{Biscuit, KeyPair, builder::AuthorizerBuilder, datalog::RunLimits};
 
     use super::*;
+
+    #[test]
+    fn templates_stay_within_safe_ceiling() {
+        let safe: BTreeSet<&str> = SAFE_AGENT_OPERATIONS.iter().copied().collect();
+        for template in [
+            AgentTemplate::Reviewer,
+            AgentTemplate::Contributor,
+            AgentTemplate::CiLanding,
+        ] {
+            for operation in template.operations() {
+                assert!(
+                    safe.contains(operation.as_str()),
+                    "template {:?} operation {operation:?} escapes SAFE_AGENT_OPERATIONS",
+                    template.as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn template_privilege_ordering_holds() {
+        let reviewer: BTreeSet<String> =
+            AgentTemplate::Reviewer.operations().into_iter().collect();
+        let contributor: BTreeSet<String> =
+            AgentTemplate::Contributor.operations().into_iter().collect();
+        let ci: BTreeSet<String> = AgentTemplate::CiLanding.operations().into_iter().collect();
+        // Reviewer is the read-only floor; both write templates are supersets.
+        assert!(reviewer.is_subset(&contributor));
+        assert!(reviewer.is_subset(&ci));
+        // Contributor carries collaboration writes CI landing does not.
+        assert!(contributor.contains("OpenDiscussion"));
+        assert!(!ci.contains("OpenDiscussion"));
+    }
 
     /// Mint a parent Biscuit using biscuit-auth directly. We avoid
     /// pulling `weft_server::biscuit::mint` because that would force

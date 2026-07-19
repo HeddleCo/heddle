@@ -3820,6 +3820,36 @@ pub fn command_runtime_contract(command_name: &str) -> Option<CommandRuntimeCont
     runtime_contract_for_path(command_name.split_whitespace())
 }
 
+/// The catalog's declared mutation surface for a command, surfaced to
+/// callers such as `--dry-run` so the plan report cites the single
+/// source of truth (`heddle help --output json`) rather than
+/// re-deriving side effects at each call site.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct CommandSideEffectFlags {
+    pub may_move_ref: bool,
+    pub destructive_requires_force: bool,
+    pub network_io: bool,
+    pub writes_heddle_refs: bool,
+    pub writes_git_refs: bool,
+}
+
+/// Look up the declared side-effect flags for a command path (e.g.
+/// `"push"`, `"land"`, `"ready"`). Returns `None` for an unknown command.
+pub fn command_side_effect_flags(command_name: &str) -> Option<CommandSideEffectFlags> {
+    let path = command_name.split_whitespace().collect::<Vec<_>>();
+    active_command_contract_entries()
+        .iter()
+        .copied()
+        .find(|entry| entry.path == path.as_slice())
+        .map(|entry| CommandSideEffectFlags {
+            may_move_ref: entry.contract.may_move_ref,
+            destructive_requires_force: entry.contract.destructive_requires_force,
+            network_io: entry.contract.network_io,
+            writes_heddle_refs: entry.contract.writes_heddle_refs,
+            writes_git_refs: entry.contract.writes_git_refs,
+        })
+}
+
 pub(crate) fn command_runtime_contract_for_schema_verb(
     schema_verb: &str,
 ) -> Option<CommandRuntimeContract> {
