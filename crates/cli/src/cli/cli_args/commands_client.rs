@@ -5,8 +5,10 @@ use clap::{Subcommand, ValueEnum};
 
 /// Preset operation ceilings for `heddle auth derive-agent`.
 ///
-/// Each variant expands to a curated subset of the safe agent operation
-/// ceiling. `--scope`/`--allow` stay usable alongside a template and, when
+/// Each variant expands to a curated set of safe agent operations. `reviewer`
+/// and `ci-landing` are strict subsets of the safe ceiling; `contributor` is
+/// the full safe ceiling (the named form of the default `--allow`-less
+/// derivation). `--scope`/`--allow` stay usable alongside a template and, when
 /// combined, may only *narrow* it (they intersect the template's set).
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentTemplateArg {
@@ -18,6 +20,8 @@ pub enum AgentTemplateArg {
     /// Read + collaboration writes: the reviewer set plus Push, UpdateRef,
     /// SetContext/ReviseContext/SupersedeContext, and
     /// OpenDiscussion/AppendTurn/ResolveDiscussion. No repo/namespace admin.
+    /// This is the full safe agent ceiling — the named form of deriving with
+    /// no --template/--allow.
     Contributor,
     /// Read + Pull + the Push/UpdateRef a CI lander needs to run ready/land.
     /// No context or discussion writes.

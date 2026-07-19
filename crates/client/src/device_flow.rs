@@ -244,6 +244,16 @@ pub enum AgentTemplate {
     Reviewer,
     /// Read + collaboration writes: reviewer plus `Push`/`UpdateRef`, context
     /// writes, and discussion writes. No repo/namespace admin.
+    ///
+    /// This is intentionally the **full safe agent ceiling** — its operation
+    /// set equals [`SAFE_AGENT_OPERATIONS`], so `--template contributor` is
+    /// the named, self-documenting form of "everything an agent may safely do"
+    /// (equivalent to deriving with no `--template`/`--allow`). Every op in
+    /// `SAFE_AGENT_OPERATIONS` is either a read or one of the collaboration
+    /// writes a contributor holds; there is nothing safe left to withhold.
+    /// `contributor_ceiling_equals_safe_agent_operations` pins this: if the
+    /// safe ceiling ever grows, that test fails and forces a conscious
+    /// decision about whether the new op belongs to `contributor`.
     Contributor,
     /// Read + `Pull` + the `Push`/`UpdateRef` a CI lander needs to run
     /// `ready`/`land`. No context or discussion writes.
@@ -251,6 +261,16 @@ pub enum AgentTemplate {
 }
 
 impl AgentTemplate {
+    /// Every template variant, in privilege order. A new variant added to the
+    /// enum must be added here too — the `operations()` match already forces
+    /// handling it, and the template invariant tests iterate `ALL` so a new
+    /// variant is automatically held to the safe-ceiling and ordering checks.
+    pub const ALL: [AgentTemplate; 3] = [
+        AgentTemplate::Reviewer,
+        AgentTemplate::CiLanding,
+        AgentTemplate::Contributor,
+    ];
+
     /// Stable lower-kebab name used on the CLI and in metadata.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -754,11 +774,7 @@ mod tests {
     #[test]
     fn templates_stay_within_safe_ceiling() {
         let safe: BTreeSet<&str> = SAFE_AGENT_OPERATIONS.iter().copied().collect();
-        for template in [
-            AgentTemplate::Reviewer,
-            AgentTemplate::Contributor,
-            AgentTemplate::CiLanding,
-        ] {
+        for template in AgentTemplate::ALL {
             for operation in template.operations() {
                 assert!(
                     safe.contains(operation.as_str()),
@@ -767,6 +783,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn contributor_ceiling_equals_safe_agent_operations() {
+        // `contributor` is intentionally the full safe agent ceiling. Pin the
+        // equivalence so it can't silently drift: if `SAFE_AGENT_OPERATIONS`
+        // grows a new op, this fails and forces a conscious decision about
+        // whether the new op belongs to `contributor` (or should be withheld
+        // from it, at which point contributor becomes a genuine proper subset).
+        let contributor: BTreeSet<String> =
+            AgentTemplate::Contributor.operations().into_iter().collect();
+        let safe: BTreeSet<String> = SAFE_AGENT_OPERATIONS
+            .iter()
+            .map(|op| (*op).to_string())
+            .collect();
+        assert_eq!(
+            contributor, safe,
+            "contributor template must equal SAFE_AGENT_OPERATIONS; update the \
+             template (or SAFE_AGENT_OPERATIONS) and this assertion together"
+        );
     }
 
     #[test]
@@ -779,6 +815,9 @@ mod tests {
         // Reviewer is the read-only floor; both write templates are supersets.
         assert!(reviewer.is_subset(&contributor));
         assert!(reviewer.is_subset(&ci));
+        // CI landing sits between reviewer and contributor: it adds only
+        // Push/UpdateRef, so it is a proper subset of contributor (the ceiling).
+        assert!(ci.is_subset(&contributor));
         // Contributor carries collaboration writes CI landing does not.
         assert!(contributor.contains("OpenDiscussion"));
         assert!(!ci.contains("OpenDiscussion"));
