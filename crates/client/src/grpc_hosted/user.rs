@@ -144,6 +144,21 @@ fn default_spool_settings_request() -> grpc::heddle::api::v1alpha1::SpoolSetting
 }
 
 impl HostedGrpcClient {
+    /// Resolve the acting identity for the bound bearer (subject, staff/service
+    /// markers, session, server-side scope, and directly-held resource roles).
+    /// Read-only; drives `heddle whoami`.
+    pub(crate) async fn who_am_i(
+        &mut self,
+    ) -> Result<grpc::heddle::api::v1alpha1::WhoAmIResponse, ProtocolError> {
+        Ok(signed_call!(
+            self,
+            auth,
+            who_am_i,
+            "/heddle.api.v1alpha1.IdentityService/WhoAmI",
+            grpc::heddle::api::v1alpha1::WhoAmIRequest {}
+        ))
+    }
+
     pub(crate) async fn create_service_account(
         &mut self,
         request: CreateServiceAccountRequest,

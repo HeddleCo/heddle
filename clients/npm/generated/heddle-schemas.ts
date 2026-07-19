@@ -3175,6 +3175,51 @@ export interface WatchLineSchema {
   ts: string;
 }
 
+export interface WhoamiIdentitySchema {
+  actor_subject: string;
+  agent_model?: string | null;
+  agent_provider?: string | null;
+  amr: string[];
+  credential_id: string;
+  device_id?: string | null;
+  is_biscuit: boolean;
+  is_service_account: boolean;
+  is_staff: boolean;
+  roles: WhoamiRoleSchema[];
+  server_scope: string;
+  session_id: string;
+  subject: string;
+}
+
+export interface WhoamiRoleSchema {
+  resource_kind: string;
+  resource_path: string;
+  /** One of `reader`, `developer`, `maintainer`, `admin`, `owner`. */
+  role: string;
+}
+
+export interface WhoamiSchema {
+  /** A usable credential is stored locally for this server. */
+  authenticated: boolean;
+  expires_at?: string | null;
+  identity?: WhoamiIdentitySchema | null;
+  /** Intersected gRPC operation ceiling; null ⇒ full authority. */
+  operation_ceiling?: string[] | null;
+  output_kind: "whoami";
+  /** The device proof key required to sign hosted requests is present. */
+  proof_key_available: boolean;
+  /** The server answered `WhoAmI`; `identity` below is authoritative. */
+  reachable: boolean;
+  recommended_action?: string | null;
+  /** Resource scopes as `kind:path` (empty ⇒ full resource authority). */
+  scopes: string[];
+  server: string;
+  /** `root`, `agent`, or `service-account`; null when unauthenticated. */
+  token_kind?: string | null;
+  /** Seconds until expiry; negative when already expired. */
+  ttl_seconds_remaining?: number | null;
+}
+
 export interface WorktreeIndexInspectionSchema {
   directory_entries: number;
   error?: string | null;
@@ -3345,6 +3390,7 @@ export interface HeddleVerbOutputs {
   "visibility set": VisibilitySetSchema;
   "visibility show": VisibilityShowSchema;
   watch: WatchLineSchema;
+  whoami: WhoamiSchema;
 }
 
 /** Every verb that emits a schema-backed `--output json` payload. */
@@ -3507,4 +3553,5 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "visibility set",
   "visibility show",
   "watch",
+  "whoami",
 ] as const;

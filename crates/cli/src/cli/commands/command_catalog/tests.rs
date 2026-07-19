@@ -149,6 +149,8 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
             "heddle/platform",
         ],
     ),
+    #[cfg(feature = "client")]
+    sample(&["whoami"], &["whoami"]),
     #[cfg(feature = "git-overlay")]
     sample(&["import", "git"], &["import", "git"]),
     #[cfg(feature = "git-overlay")]
@@ -1597,6 +1599,11 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "auth logout",
             "auth status",
             "auth create-service-token",
+            // heddle whoami (H6, weft#642): the machine-readable
+            // acting-identity verb emits `output_kind: "whoami"`, so it
+            // advertises its discriminator here alongside the other
+            // client-gated hosted verbs.
+            "whoami",
             "import git",
             "export git",
             "sync git",
@@ -2269,5 +2276,8 @@ fn op_id_persistence_reads_contract_table() {
 
 #[test]
 fn feature_gated_command_roots_are_catalog_owned() {
-    assert_eq!(feature_gated_command_roots(), &["auth"]);
+    // `auth` and `whoami` are the client-gated top-level roots: their clap
+    // variants are `#[cfg(feature = "client")]` and their catalog entries carry
+    // `feature_gate = "client"`. Any new feature-gated root MUST be listed here.
+    assert_eq!(feature_gated_command_roots(), &["auth", "whoami"]);
 }

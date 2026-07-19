@@ -421,6 +421,20 @@ Examples:
         command: AuthCommands,
     },
 
+    /// Report the acting identity (principal, token kind, scopes, operation
+    /// ceiling, TTL, signing status, server reachability).
+    #[cfg(feature = "client")]
+    #[command(after_help = "\
+Examples:
+  heddle whoami                       # human-readable identity summary
+  heddle whoami --output json         # machine-readable, stable output_kind shape
+  heddle whoami --server grpc.heddle.sh")]
+    Whoami {
+        /// Heddle server address (defaults to the configured server).
+        #[arg(long)]
+        server: Option<String>,
+    },
+
     /// Manage code context annotations.
     #[command(after_help = "\
 Examples:

@@ -86,7 +86,7 @@ struct AgentTokenExportMetadata<'a> {
     allowed_operations: Vec<String>,
 }
 
-const DERIVED_TOKEN_SECURITY_NOTE: &str = "Derived credential has its own proof key and is operation/TTL-limited server-side; declared scopes await W3 enforcement. Keep the token and child key together; the parent device key is not exported.";
+const DERIVED_TOKEN_SECURITY_NOTE: &str = "Derived credential has its own proof key and is operation/TTL/resource-scope-limited and enforced server-side. Keep the token and child key together; the parent device key is not exported.";
 
 const SERVICE_TOKEN_TTL_DAYS: u32 = 30;
 const SERVICE_TOKEN_TTL_SECS: i64 = SERVICE_TOKEN_TTL_DAYS as i64 * 24 * 3600;
@@ -219,9 +219,13 @@ fn cmd_auth_derive_agent(
             agent_id: agent_id.clone(),
             expires_at,
             allowed_operations: Some(allowed_operations.clone()),
-            // W3 will enforce the declarations below. Adding a resource check
-            // in W1 would reject every request against today's servers.
-            allowed_resources: None,
+            // W3 (weft#644): the server injects a `resource("repo", <path>)`
+            // fact per request, so emit the ENFORCEABLE resource caveat. A
+            // `namespace:` scope is encoded client-side as a repo-path prefix
+            // (see `build_attenuation_block`) because the server never emits a
+            // `resource("namespace", …)` fact. `agent_scope` facts are still
+            // recorded (`declared_scopes`) for audit + narrowing checks.
+            allowed_resources: (!declared_scopes.is_empty()).then(|| declared_scopes.clone()),
             declared_scopes: declared_scopes.clone(),
         },
         &signer,
@@ -275,10 +279,10 @@ fn cmd_auth_derive_agent(
     }
     println!("Allowed operations: {}", allowed_operations.join(", "));
     if declared_scopes.is_empty() {
-        println!("Scopes: none declared");
+        println!("Scopes: none (full resource authority inherited from parent)");
     } else {
         println!(
-            "Scopes: {} (recorded now; server enforcement begins with W3)",
+            "Scopes: {} (enforced server-side per request)",
             declared_scopes
                 .iter()
                 .map(|(kind, path)| format!("{kind}:{path}"))
@@ -352,8 +356,8 @@ fn parse_agent_scopes(scopes: Vec<String>) -> Result<Vec<(String, String)>> {
 
 fn validate_scope_narrowing(parent_token: &str, child: &[(String, String)]) -> Result<()> {
     if child.is_empty() {
-        // Omitting a scope adds no new declaration; all ancestor declarations
-        // remain in the immutable chain for W3 to enforce.
+        // Omitting a scope adds no new restriction; every ancestor's resource
+        // caveat remains in the immutable chain and keeps being enforced.
         return Ok(());
     }
     for ancestor in agent_scope_blocks(parent_token)? {
@@ -512,12 +516,12 @@ fn publish_agent_bundle_with_sync(
     sync_parent(parent).with_context(|| format!("syncing agent bundle parent {}", parent.display()))
 }
 
-struct HeadlessTokenMetadata {
-    subject: String,
-    is_derived: bool,
-    credential_id: Option<String>,
-    expires_at: Option<String>,
-    proof_public_key_hex: String,
+pub(crate) struct HeadlessTokenMetadata {
+    pub(crate) subject: String,
+    pub(crate) is_derived: bool,
+    pub(crate) credential_id: Option<String>,
+    pub(crate) expires_at: Option<String>,
+    pub(crate) proof_public_key_hex: String,
 }
 
 /// Install an operator-provisioned, device-bound credential without a browser.
@@ -563,7 +567,7 @@ pub(crate) fn install_headless_credential(
     Ok(metadata.subject)
 }
 
-fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetadata> {
+pub(crate) fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetadata> {
     use biscuit_auth::builder::{BlockBuilder, Term};
 
     let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
@@ -1117,7 +1121,7 @@ fn current_unix_timestamp_i64() -> Result<i64> {
 // ---------------------------------------------------------------------------
 
 /// Resolve server from explicit arg, default credential, or fallback.
-fn resolve_server(explicit: Option<&str>) -> Result<String> {
+pub(crate) fn resolve_server(explicit: Option<&str>) -> Result<String> {
     if let Some(s) = explicit {
         return Ok(s.to_string());
     }
@@ -1128,7 +1132,7 @@ fn resolve_server(explicit: Option<&str>) -> Result<String> {
 }
 
 /// Connect a raw gRPC channel to the given server.
-async fn connect_channel(server: &str) -> Result<Channel> {
+pub(crate) async fn connect_channel(server: &str) -> Result<Channel> {
     let uri = infer_server_uri(server);
     // F2: the auth-login / service-token connect path sends the device key and
     // receives the bearer biscuit. Refuse cleartext (`http://`) to a

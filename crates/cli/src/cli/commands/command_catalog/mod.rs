@@ -1475,6 +1475,21 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "client",
         ),
     ),
+    entry(
+        &["whoami"],
+        category(
+            feature_gated(
+                json_discriminators(
+                    documented_schemas(READ_JSON, &["whoami"]),
+                    &[json_discriminator(Some("whoami"), "output_kind", "whoami")],
+                ),
+                "client",
+            ),
+            // Groups under "Repo and environment" in `heddle help advanced`,
+            // alongside the `auth` identity commands.
+            "repo",
+        ),
+    ),
     entry(&["import"], surface(GROUP, "git_projection")),
     entry(
         &["import", "git"],
@@ -4564,6 +4579,8 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             AuthCommands::DeriveAgent { .. } => vec!["auth", "derive-agent"],
             AuthCommands::CreateServiceToken { .. } => vec!["auth", "create-service-token"],
         },
+        #[cfg(feature = "client")]
+        Commands::Whoami { .. } => vec!["whoami"],
         Commands::Context { command } => match command {
             ContextCommands::Set(_) => vec!["context", "set"],
             ContextCommands::Get(_) => vec!["context", "get"],

@@ -145,6 +145,7 @@ schema_registry! {
     (&["agent fanout plan", "agent fanout start"], AgentFanoutSchema),
     (&["auth logout"], AuthLogoutSchema),
     (&["auth status"], AuthStatusSchema),
+    (&["whoami"], WhoamiSchema),
     (&["auth create-service-token"], AuthCreateServiceTokenSchema),
     (&["agent provenance begin", "agent provenance end", "agent provenance show"], AgentProvenanceEnvelopeSchema),
     (&["agent provenance segment"], AgentProvenanceSegmentEnvelopeSchema),
@@ -718,6 +719,54 @@ pub struct AuthStatusSchema {
     pub credential_id: Option<String>,
     pub expires_at: Option<String>,
     pub recommended_action: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WhoamiSchema {
+    pub output_kind: String,
+    pub server: String,
+    /// A usable credential is stored locally for this server.
+    pub authenticated: bool,
+    /// The server answered `WhoAmI`; `identity` below is authoritative.
+    pub reachable: bool,
+    /// `root`, `agent`, or `service-account`; null when unauthenticated.
+    pub token_kind: Option<String>,
+    /// Resource scopes as `kind:path` (empty ⇒ full resource authority).
+    pub scopes: Vec<String>,
+    /// Intersected gRPC operation ceiling; null ⇒ full authority.
+    pub operation_ceiling: Option<Vec<String>>,
+    pub expires_at: Option<String>,
+    /// Seconds until expiry; negative when already expired.
+    pub ttl_seconds_remaining: Option<i64>,
+    /// The device proof key required to sign hosted requests is present.
+    pub proof_key_available: bool,
+    pub identity: Option<WhoamiIdentitySchema>,
+    pub recommended_action: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WhoamiIdentitySchema {
+    pub subject: String,
+    pub actor_subject: String,
+    pub is_staff: bool,
+    pub is_service_account: bool,
+    pub is_biscuit: bool,
+    pub session_id: String,
+    pub amr: Vec<String>,
+    pub server_scope: String,
+    pub credential_id: String,
+    pub device_id: Option<String>,
+    pub agent_provider: Option<String>,
+    pub agent_model: Option<String>,
+    pub roles: Vec<WhoamiRoleSchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WhoamiRoleSchema {
+    pub resource_path: String,
+    pub resource_kind: String,
+    /// One of `reader`, `developer`, `maintainer`, `admin`, `owner`.
+    pub role: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

@@ -162,12 +162,21 @@ impl Error for HostedRecoveryAdvice {}
 /// `AuthCommands`, etc.) and the heddle-client crate.
 #[async_trait]
 pub trait WeftExtensions: Send + Sync {
-    /// `heddle auth <subcommand>` — login, logout, whoami, device
+    /// `heddle auth <subcommand>` — login, logout, device
     /// authorization, service account issuance.
     async fn auth(
         &self,
         ctx: &(dyn CliContext + 'static),
         command: &(dyn Any + Send + Sync),
+    ) -> Result<()>;
+
+    /// `heddle whoami` — resolve and report the acting identity (principal,
+    /// token kind, scopes, operation ceiling, TTL, signing + reachability).
+    /// `server` is the optional `--server` override.
+    async fn whoami(
+        &self,
+        ctx: &(dyn CliContext + 'static),
+        server: Option<String>,
     ) -> Result<()>;
 }
 
@@ -184,6 +193,14 @@ impl WeftExtensions for NoopWeftExtensions {
         _command: &(dyn Any + Send + Sync),
     ) -> Result<()> {
         Err(anyhow!(not_enabled_error("auth")))
+    }
+
+    async fn whoami(
+        &self,
+        _ctx: &(dyn CliContext + 'static),
+        _server: Option<String>,
+    ) -> Result<()> {
+        Err(anyhow!(not_enabled_error("whoami")))
     }
 }
 
