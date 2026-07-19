@@ -696,6 +696,30 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                 _ => {}
             }
         }
+        // A hosted gRPC status carrying a typed conflict/cursor/stream detail
+        // (AX H4): project the machine-readable detail into the envelope so a
+        // JSON caller gets the conflicting resource / restart cursor / stream
+        // resumability instead of an opaque status string.
+        if let Some(status) = cause.downcast_ref::<tonic::Status>()
+            && let Some(typed) = crate::hosted_typed_error::HostedTypedError::from_status(status)
+        {
+            return ErrorClassification {
+                kind: typed.kind().to_string(),
+                human_error: Some(status.message().to_string()),
+                hint: typed.hint(),
+                unsafe_condition:
+                    "the hosted server rejected the request with a typed conflict/cursor/stream detail"
+                        .to_string(),
+                would_change:
+                    "retrying unchanged may repeat the same rejection until the advised recovery is applied"
+                        .to_string(),
+                preserved: "no local repository state was changed by the rejected hosted request"
+                    .to_string(),
+                primary_command: "heddle status".to_string(),
+                recovery_commands: vec!["heddle status".to_string()],
+                extra_json_fields: typed.extra_json_fields(),
+            };
+        }
         if let Some(io) = cause.downcast_ref::<std::io::Error>() {
             if objects::fs_atomic::is_out_of_space(io) {
                 return ErrorClassification::known(

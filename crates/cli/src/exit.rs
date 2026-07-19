@@ -213,6 +213,15 @@ impl HeddleExitCode {
             }
             if let Some(status) = cause.downcast_ref::<tonic::Status>() {
                 use tonic::Code;
+                // A typed conflict/cursor/stream detail (AX H4) overrides the
+                // bare-code mapping: a cursor/stream failure is a safe restart
+                // (TempFail 75) even though its status code is InvalidArgument /
+                // Unavailable, and a conflict is a protocol rejection.
+                if let Some(typed) = crate::hosted_typed_error::HostedTypedError::from_status(status)
+                    && let Some(code) = typed.exit_code()
+                {
+                    return code;
+                }
                 return match status.code() {
                     Code::Unavailable | Code::DeadlineExceeded | Code::ResourceExhausted => {
                         Self::TempFail
