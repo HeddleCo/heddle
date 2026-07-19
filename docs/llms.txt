@@ -1,0 +1,40 @@
+# Heddle
+
+> Agent-native version control. Heddle is built around saved states and isolated threads with signed provenance, and exposes a stable JSON machine contract (`--output json`) so agents can drive it without parsing prose. Git compatibility is an interop/output layer, not the core model.
+
+This index covers Heddle's top-level reference docs. Start an agent at `heddle help model` for the mental model and `heddle help --output json` for the machine-readable command catalog; the docs below carry the durable contracts (exit codes, JSON schemas, stability guarantees, auth model).
+
+## Docs
+
+- [Heddle Architecture](ARCHITECTURE.md): This document describes Heddle's current architecture at a high level. It focuses on the system as it exists today, while noting the hosted and web direction...
+- [CLI Dependency Audit — 2026-05-12](CLI_DEP_AUDIT_2026-05-12.md): A dogfooding-driven dep audit on PR #75 found that the heddle CLI pulls 485 transitive packages for a binary whose default behavior is local-only VCS. That n...
+- [Heddle CLI World-Class Audit - 2026-05-21](CLI_WORLD_CLASS_AUDIT_2026-05-21.md): Historical snapshot — superseded. This report records the CLI surface as
+- [Heddle CLI world-class rubric](CLI_WORLD_CLASS_RUBRIC.md): Status: audit rubric. This is intentionally strict. A command that is
+- [Legacy Deletion Next Wave](LEGACY_DELETION_NEXT_WAVE.md): This note tracks cleanup that should come after the current deletion wave. The
+- [Heddle CLI — Operating Principles](PRINCIPLES.md): This is how Heddle thinks about its CLI. The surface is small on purpose, the
+- [Self-sovereign auth: minting and attenuating your own Biscuit](SELF_SOVEREIGN_AUTH.md): A self-sovereign Heddle client is one that holds its own root
+- [Sley Integration Contract](SLEY_INTEGRATION.md): Status: current Heddle hardening note. Heddle now treats Sley as the Git-format
+- [Heddle 1.0 stability criterion](STABILITY.md): Status: strawman. Every <TBD: maintainer> marker is a policy
+- [Verification And Git Projection Cleanup Plan](VERIFICATION_CLEANUP_PLAN.md): Status: cleanup plan from the July 2026 branch review and follow-up design interview.
+- [Heddle Verification State Logic Map](VERIFICATION_STATE_LOGIC_MAP.md): This map documents both the current centralized repository verification
+- [Phase 4 (Wire Protocol) Summary](WIRE_PROTOCOL.md): This phase adds a minimal, local-testable wire protocol and remote operations (push/pull) for Heddle.
+- [Workspace Split Plan](WORKSPACE_SPLIT_PLAN.md): Status: Phase 1 executed on 2026-05-13. The workspace now lives across three repos:
+- [Heddle CLI exit codes](exit-codes.md): The CLI follows BSD sysexits.h so codes mean the same thing to humans, init
+- [.heddleignore](heddleignore.md): .heddleignore is heddle's per-repo file for telling heddle capture,
+- [Heddle JSON output schemas](json-schemas.md): This document is the canonical reference for every CLI verb that emits
+- [Heddle personas](personas.md): This doc names the three personas heddle's OSS quality is evaluated against. Each round of "persona eval" walks current heddle main from each persona's persp...
+- [heddle undo](undo.md): A safety net for the operations a daily user is most likely to want to roll back.
+- [Unwrap and Expect Policy](unwrap-policy.md): Heddle should reach zero production unwrap and expect call sites before 1.0. Until that cleanup is complete, the gate is per-crate: crates that already have...
+
+## Reference directories
+
+Not inlined into `llms-full.txt`; browse in-repo under `docs/`.
+
+- [adr/](adr/): Architecture Decision Records.
+- [agents/](agents/): Per-repo agent operating config (issue tracker, domain docs).
+- [design/](design/): Design notes and proposals.
+- [contributor-guide/](contributor-guide/): Contributor onboarding and workflow guides.
+- [perf/](perf/): Performance investigations and profiles.
+- [benchmarks/](benchmarks/): Benchmark harness notes and results.
+- [spikes/](spikes/): Exploratory spikes and prototypes.
+- [program/](program/): Program-level planning docs.

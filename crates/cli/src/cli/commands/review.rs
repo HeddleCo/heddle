@@ -519,7 +519,12 @@ fn resolve_state(cli: &Cli, explicit: Option<&str>) -> Result<Vec<u8>> {
 }
 
 fn status_to_anyhow(status: tonic::Status) -> anyhow::Error {
-    anyhow!("{}: {}", status.code(), status.message())
+    // Preserve the `tonic::Status` in the error chain (rather than flattening
+    // to a formatted string) so any typed conflict/cursor/stream detail it
+    // carries (AX H4) survives for the exit-code and JSON-envelope classifiers
+    // in `crate::hosted_typed_error`. `tonic::Status` implements `Error`, so its
+    // `Display` (`"status: <message>"`) still renders for string-only callers.
+    anyhow::Error::new(status)
 }
 
 fn review_mine_only_principal_required_advice() -> RecoveryAdvice {
