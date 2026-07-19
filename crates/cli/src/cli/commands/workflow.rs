@@ -33,6 +33,7 @@ use super::{
     advice::RecoveryAdvice,
     checkpoint::{GitCheckpointRequest, create_git_checkpoint},
     collapse::{CollapsePublishedRef, collapse_resolved_states},
+    dry_run::{DryRunPlan, DryRunVerdict, IntegrationPreview},
     git_overlay_txn,
     merge::{
         build_thread_preview_report, merge_thread_into_current,
@@ -340,6 +341,9 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
 }
 
 pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
+    if args.dry_run {
+        return emit_land_dry_run(cli, &args);
+    }
     if !args.threads.is_empty() {
         return cmd_land_many(cli, args).await;
     }
@@ -2663,6 +2667,118 @@ fn finish_recovered_land(
     )?;
     clear_manual_resolution_state(repo, &marker.thread_id)?;
     clear_incomplete_land_marker(repo)
+}
+
+/// Render the `heddle land --dry-run` plan. Read-only: builds the
+/// integration preview for each thread that would land, but never acquires
+/// the land lock, captures work, syncs the remote, or merges. No server
+/// round-trip is made.
+fn emit_land_dry_run(cli: &Cli, args: &LandArgs) -> Result<()> {
+    let cwd_repo = cli.open_repo()?;
+    let target_path = cwd_repo.active_worktree_path()?;
+    let repo = if target_path == *cwd_repo.root() {
+        cwd_repo
+    } else {
+        Repository::open(&target_path)?
+    };
+
+    // Ordered set of threads a real land would process: `--thread` first
+    // (when supplied), then each `--threads` peer, deduped.
+    let mut thread_ids: Vec<String> = Vec::new();
+    if let Some(thread) = args.thread.as_deref() {
+        thread_ids.push(thread.to_string());
+    }
+    for peer in &args.threads {
+        if !thread_ids.contains(peer) {
+            thread_ids.push(peer.clone());
+        }
+    }
+    if thread_ids.is_empty() {
+        // Fall back to the current thread, matching a bare `heddle land`.
+        if let Some(current) = current_thread(&repo)?.map(|thread| thread.id) {
+            thread_ids.push(current);
+        }
+    }
+
+    let squash = should_squash_land(args, &UserConfig::load_default().unwrap_or_default());
+    let target_label = if squash { "squash-landed" } else { "preserved (--no-squash)" };
+    let mut dry = DryRunPlan::new(
+        "land",
+        if thread_ids.len() == 1 {
+            format!("land thread '{}' ({target_label})", thread_ids[0])
+        } else {
+            format!("land {} threads ({target_label})", thread_ids.len())
+        },
+    );
+
+    if thread_ids.is_empty() {
+        dry.blockers
+            .push("no current thread; pass --thread <name>".to_string());
+    }
+
+    for thread_id in &thread_ids {
+        let mut thread = match resolve_thread(
+            &repo,
+            Some(thread_id),
+            "land",
+            "heddle land --thread <name>",
+        ) {
+            Ok(thread) => thread,
+            Err(_) => {
+                dry.blockers.push(format!("thread '{thread_id}' not found"));
+                continue;
+            }
+        };
+
+        // Check the thread's own checkout for outstanding work, matching the
+        // real land's capture decision.
+        let would_capture = if thread.execution_path.as_os_str().is_empty()
+            || !thread.execution_path.exists()
+        {
+            false
+        } else {
+            Repository::open(&thread.execution_path)
+                .ok()
+                .and_then(|thread_repo| {
+                    let options = worktree_status_options(Some(thread_repo.config()));
+                    worktree_dirty(&thread_repo, &options).ok()
+                })
+                .unwrap_or(false)
+        };
+
+        // Read-only: only mutates the in-memory thread's freshness.
+        let report = build_thread_preview_report(&repo, &mut thread, true)?;
+        dry.integrations.push(IntegrationPreview {
+            thread: thread.id.clone(),
+            target: thread.target_thread.clone(),
+            merge_relation: report.merge_relation.clone(),
+            freshness: report.freshness.clone(),
+            conflict_count: report.conflict_count,
+            conflicts: report.conflicts.clone(),
+            changed_path_count: report.changed_path_count,
+            would_transition_to: Some("landed".to_string()),
+            would_capture_dirty: would_capture,
+        });
+        for blocker in &report.blockers {
+            if !dry.blockers.contains(blocker) {
+                dry.blockers.push(blocker.clone());
+            }
+        }
+    }
+
+    let trust = build_repository_verification_state(&repo);
+    dry.verdicts.push(DryRunVerdict {
+        source: "verification".to_string(),
+        status: if trust.verified {
+            "verified".to_string()
+        } else {
+            trust.status.clone()
+        },
+        detail: trust.summary.clone(),
+    });
+    dry.note("integration merges are previewed locally; no capture, sync, or merge was performed");
+
+    dry.emit(cli, Some(repo.config()))
 }
 
 async fn cmd_land_many(cli: &Cli, args: LandArgs) -> Result<()> {

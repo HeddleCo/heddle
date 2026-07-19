@@ -23,6 +23,7 @@ use serde::{
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
+    dry_run::{DryRunPlan, DryRunVerdict, IntegrationPreview},
     merge::{ThreadPreviewReport, build_thread_preview_report},
     next_action::{NextActionValidationContext, normalized_action, write_command_json},
     operator_core::{
@@ -158,6 +159,9 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     }
 
     let repo = Repository::open(start)?;
+    if args.dry_run {
+        return emit_ready_dry_run(cli, &repo, &args);
+    }
     super::workflow::recover_incomplete_land_if_present(&repo)?;
     let user_config = UserConfig::load_default().unwrap_or_default();
     // Compute the git-overlay worktree status ONCE up front. It feeds the initial
@@ -449,6 +453,124 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     write_ready_output(cli, &repo, &output)?;
 
     Ok(())
+}
+
+/// Render the `heddle ready --dry-run` plan. Read-only: builds the same
+/// integration preview and readiness classification the real command uses,
+/// but never captures work, refreshes a stale thread, or moves the thread
+/// to Ready/Blocked.
+fn emit_ready_dry_run(cli: &Cli, repo: &Repository, args: &ReadyArgs) -> Result<()> {
+    let trust = build_repository_verification_state(repo);
+
+    // Resolve the thread without falling back to a mutation. A missing
+    // current thread is reported as a blocker rather than an error so the
+    // plan still renders.
+    let thread = match args.thread.clone() {
+        Some(thread_id) => load_thread(repo, &thread_id).ok(),
+        None => current_thread(repo).ok().flatten(),
+    };
+
+    let Some(mut thread) = thread else {
+        let mut dry = DryRunPlan::new("ready", "evaluate thread readiness");
+        dry.blockers
+            .push("no current thread; pass --thread <name>".to_string());
+        push_verification_verdict(&mut dry, &trust);
+        return dry.emit(cli, Some(repo.config()));
+    };
+
+    let status_options = worktree_status_options(Some(repo.config()));
+    let dirty = worktree_dirty(repo, &status_options).unwrap_or(false);
+    let would_capture = dirty && args.message.is_some();
+
+    let mut dry = DryRunPlan::new(
+        "ready",
+        format!("evaluate thread '{}' for integration readiness", thread.id),
+    );
+
+    if repo.current_state()?.is_none() {
+        dry.note("no current state yet; a real run would first bootstrap one");
+    }
+    if dirty && args.message.is_none() {
+        dry.note(
+            "worktree has outstanding changes; a real run needs -m <message> to capture them first",
+        );
+    }
+
+    // `build_thread_preview_report` only mutates the in-memory thread's
+    // freshness (via `refresh_thread_freshness`); it persists nothing.
+    let report = build_thread_preview_report(repo, &mut thread, true)?;
+    let decision = classify_ready_decision(ReadyDecisionInput {
+        merge_relation: &report.merge_relation,
+        // A real run would capture dirty work (when -m is supplied) before
+        // classifying; reflect that so the preview matches the outcome.
+        captured: would_capture,
+        thread_already_ready: thread.state == ThreadState::Ready,
+        conflict_count: report.conflict_count,
+        blockers: &report.blockers,
+    });
+
+    let would_transition_to = if decision.has_integration_target && !decision.already_ready {
+        Some(
+            if decision.integration_clear {
+                "ready"
+            } else {
+                "blocked"
+            }
+            .to_string(),
+        )
+    } else {
+        None
+    };
+
+    dry.integrations.push(IntegrationPreview {
+        thread: thread.id.clone(),
+        target: thread.target_thread.clone(),
+        merge_relation: report.merge_relation.clone(),
+        freshness: report.freshness.clone(),
+        conflict_count: report.conflict_count,
+        conflicts: report.conflicts.clone(),
+        changed_path_count: report.changed_path_count,
+        would_transition_to,
+        would_capture_dirty: would_capture,
+    });
+
+    let integration_status = if !decision.has_integration_target {
+        "no-target"
+    } else if decision.integration_clear {
+        "clear"
+    } else {
+        "blocked"
+    };
+    dry.verdicts.push(DryRunVerdict {
+        source: "integration".to_string(),
+        status: integration_status.to_string(),
+        detail: if decision.has_integration_target {
+            format!(
+                "{} vs {}: {}",
+                thread.id,
+                thread.target_thread.as_deref().unwrap_or("(none)"),
+                report.merge_relation
+            )
+        } else {
+            "no integration target configured".to_string()
+        },
+    });
+    push_verification_verdict(&mut dry, &trust);
+
+    dry.blockers.extend(report.blockers.clone());
+    dry.emit(cli, Some(repo.config()))
+}
+
+fn push_verification_verdict(dry: &mut DryRunPlan, trust: &RepositoryVerificationState) {
+    dry.verdicts.push(DryRunVerdict {
+        source: "verification".to_string(),
+        status: if trust.verified {
+            "verified".to_string()
+        } else {
+            trust.status.clone()
+        },
+        detail: trust.summary.clone(),
+    });
 }
 
 fn write_ready_output(cli: &Cli, repo: &Repository, output: &ReadyOutput) -> Result<()> {

@@ -22,6 +22,7 @@ pub(crate) mod context;
 mod daemon;
 mod diff;
 mod discuss;
+pub(crate) mod dry_run;
 mod doctor;
 mod doctor_docs;
 mod doctor_schemas;

@@ -49,6 +49,7 @@ use super::{
     advice::RecoveryAdvice,
     auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
     command_catalog::{ActionFields, ActionTemplate},
+    dry_run::{DryRunPlan, RefUpdatePreview},
     snapshot::ensure_current_state,
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
@@ -232,6 +233,7 @@ fn git_overlay_push_output(
 /// in this module and consume plan fields.
 ///
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_push(
     cli: &Cli,
     remote: Option<String>,
@@ -240,6 +242,7 @@ pub async fn cmd_push(
     force: bool,
     all_threads: bool,
     insecure: bool,
+    dry_run: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
     if repo.capability() == RepositoryCapability::GitOverlay && state.is_some() {
@@ -283,6 +286,10 @@ pub async fn cmd_push(
     .map_err(|blocker| map_remote_preflight_blocker(blocker, "push", remote.as_deref()))?;
     if insecure && matches!(plan.path, PushPath::LocalGitOverlayRefs { .. }) {
         return Err(git_overlay_push_insecure_advice());
+    }
+
+    if dry_run {
+        return emit_push_dry_run(cli, &repo, &plan, remote.as_deref(), thread.as_deref());
     }
 
     // `pre_push` JSON-protocol hook fires before any push work, on every
@@ -436,6 +443,73 @@ pub async fn cmd_push(
     run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
 
     Ok(())
+}
+
+/// Render the `heddle push --dry-run` plan. Read-only: reads the local
+/// tip that would be published and the resolved plan, but never captures
+/// work, moves refs, runs hooks, or contacts the server.
+fn emit_push_dry_run(
+    cli: &Cli,
+    repo: &Repository,
+    plan: &PushPlan,
+    remote_arg: Option<&str>,
+    thread: Option<&str>,
+) -> Result<()> {
+    let target_label = remote_arg
+        .map(str::to_string)
+        .or_else(|| plan.remote.clone())
+        .unwrap_or_else(|| "(default remote)".to_string());
+
+    let path_kind = match plan.path {
+        PushPath::LocalGitOverlayRefs { .. } => "local git-overlay refs",
+        PushPath::LocalNativeHeddle { .. } => "local native Heddle repository",
+        PushPath::NativeRemote { .. } => "native/hosted Heddle remote",
+    };
+
+    let mut dry = DryRunPlan::new(
+        "push",
+        format!("push to {target_label} ({path_kind})"),
+    );
+
+    if plan.all_threads {
+        // Per-thread tips are read cheaply, but for a broad fan-out we keep
+        // the preview to the plan shape and let the real run enumerate.
+        dry.note("--all-threads: every pushable thread would be shipped");
+    } else {
+        // Read-only resolution of the tip that would be published. Unlike
+        // `resolve_push_state_id`, this does NOT bootstrap a state (a
+        // mutation) — it only reports what is already present.
+        let new_tip = repo
+            .current_state()
+            .ok()
+            .flatten()
+            .map(|state| state.state_id.short().to_string());
+        if new_tip.is_none() {
+            dry.note(
+                "no current state yet; a real push would first bootstrap a state to publish",
+            );
+        }
+        dry.ref_updates.push(RefUpdatePreview {
+            name: thread
+                .map(str::to_string)
+                .unwrap_or_else(|| plan.track_name.clone()),
+            // The remote's current tip lives server-side; dry-run does not
+            // fetch it, so the "from" side is intentionally unknown.
+            from: None,
+            to: new_tip,
+            requires_force: plan.force,
+        });
+    }
+
+    if plan.force {
+        dry.note("--force: a non-fast-forward remote tip would be overwritten");
+    }
+    dry.note(
+        "remote tip comparison (fast-forward vs. rejection) requires the server and is skipped; \
+         no server round-trip was made",
+    );
+
+    dry.emit(cli, Some(repo.config()))
 }
 
 fn git_overlay_push_state_advice() -> anyhow::Error {
