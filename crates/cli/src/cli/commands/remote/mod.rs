@@ -233,7 +233,6 @@ fn git_overlay_push_output(
 /// in this module and consume plan fields.
 ///
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub async fn cmd_push(
     cli: &Cli,
     remote: Option<String>,
