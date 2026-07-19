@@ -29,7 +29,6 @@
 use api::heddle::api::v1alpha1::{
     ConflictDetail, CursorFailure, StreamFailure, cursor_failure::Reason as CursorReason,
 };
-use prost::Message as _;
 
 use crate::exit::HeddleExitCode;
 
@@ -55,12 +54,15 @@ fn decode_first_detail<T: prost::Message + Default>(
     status: &tonic::Status,
     message_name: &str,
 ) -> Option<T> {
-    let rpc = RpcStatus::decode(status.details()).ok()?;
+    // Fully-qualified so no `use prost::Message` import is needed (rustc
+    // versions disagree on whether the bare `RpcStatus::decode` path requires
+    // the trait in scope; the qualified form compiles cleanly on all of them).
+    let rpc = <RpcStatus as prost::Message>::decode(status.details()).ok()?;
     let expected = heddle_type_url(message_name);
     rpc.details
         .into_iter()
         .find(|any| any.type_url == expected)
-        .and_then(|any| T::decode(any.value.as_slice()).ok())
+        .and_then(|any| <T as prost::Message>::decode(any.value.as_slice()).ok())
 }
 
 /// A hosted typed error the CLI knows how to render + classify. Built from a
