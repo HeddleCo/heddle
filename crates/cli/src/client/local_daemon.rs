@@ -509,6 +509,22 @@ mod tests {
             .env_clear()
             .spawn()
             .expect("spawn sleep");
+        // `spawn()` returns after fork() but before the child reaches
+        // exec("/bin/sleep"). Inside that fork→exec window /proc/<pid>/exe
+        // still resolves to THIS test binary, so `is_heddle_process` — and
+        // therefore `probe` — would correctly (but unhelpfully for this test)
+        // report the pid as a live heddle daemon. Under load the window
+        // widens and the probe races into it, so wait for the child to finish
+        // exec'ing away from our executable before probing. Only this test
+        // hits the window; real pidfile pids are long exec'd daemons.
+        let exec_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while is_heddle_process(child.id() as i32) {
+            assert!(
+                std::time::Instant::now() < exec_deadline,
+                "spawned child never exec'd away from the test binary"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let temp = TempDir::new().unwrap();
         let sockets = temp.path().join("sockets");
         std::fs::create_dir_all(&sockets).unwrap();
