@@ -38640,6 +38640,189 @@
       ],
       "title": "WatchLineSchema",
       "type": "object"
+    },
+    "whoami": {
+      "$defs": {
+        "WhoamiIdentitySchema": {
+          "properties": {
+            "actor_subject": {
+              "type": "string"
+            },
+            "agent_model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent_provider": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "amr": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "credential_id": {
+              "type": "string"
+            },
+            "device_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "is_biscuit": {
+              "type": "boolean"
+            },
+            "is_service_account": {
+              "type": "boolean"
+            },
+            "is_staff": {
+              "type": "boolean"
+            },
+            "roles": {
+              "items": {
+                "$ref": "#/$defs/WhoamiRoleSchema"
+              },
+              "type": "array"
+            },
+            "server_scope": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "subject",
+            "actor_subject",
+            "is_staff",
+            "is_service_account",
+            "is_biscuit",
+            "session_id",
+            "amr",
+            "server_scope",
+            "credential_id",
+            "roles"
+          ],
+          "type": "object"
+        },
+        "WhoamiRoleSchema": {
+          "properties": {
+            "resource_kind": {
+              "type": "string"
+            },
+            "resource_path": {
+              "type": "string"
+            },
+            "role": {
+              "description": "One of `reader`, `developer`, `maintainer`, `admin`, `owner`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "resource_path",
+            "resource_kind",
+            "role"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "authenticated": {
+          "description": "A usable credential is stored locally for this server.",
+          "type": "boolean"
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WhoamiIdentitySchema"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operation_ceiling": {
+          "description": "Intersected gRPC operation ceiling; null ⇒ full authority.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "whoami"
+          ],
+          "type": "string"
+        },
+        "proof_key_available": {
+          "description": "The device proof key required to sign hosted requests is present.",
+          "type": "boolean"
+        },
+        "reachable": {
+          "description": "The server answered `WhoAmI`; `identity` below is authoritative.",
+          "type": "boolean"
+        },
+        "recommended_action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopes": {
+          "description": "Resource scopes as `kind:path` (empty ⇒ full resource authority).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "server": {
+          "type": "string"
+        },
+        "token_kind": {
+          "description": "`root`, `agent`, or `service-account`; null when unauthenticated.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ttl_seconds_remaining": {
+          "description": "Seconds until expiry; negative when already expired.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "output_kind",
+        "server",
+        "authenticated",
+        "reachable",
+        "scopes",
+        "proof_key_available"
+      ],
+      "title": "WhoamiSchema",
+      "type": "object"
     }
   }
 }
