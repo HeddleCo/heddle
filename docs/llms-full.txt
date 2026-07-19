@@ -5816,6 +5816,53 @@ the same ready envelope.
 
 ---
 
+## `heddle whoami --output json`
+
+```json
+{
+  "output_kind": "whoami",
+  "server": "grpc.heddle.sh",
+  "authenticated": true,
+  "reachable": true,
+  "token_kind": "agent",
+  "scopes": ["repo:alice/api"],
+  "operation_ceiling": ["GetState", "ListRefs", "Pull"],
+  "expires_at": "2026-06-27T00:00:00Z",
+  "ttl_seconds_remaining": 3600,
+  "proof_key_available": true,
+  "identity": {
+    "subject": "did:key:z6Mk...",
+    "actor_subject": "did:key:z6Mk...",
+    "is_staff": false,
+    "is_service_account": false,
+    "is_biscuit": true,
+    "session_id": "sess-123",
+    "amr": ["webauthn"],
+    "server_scope": "repo:alice/*",
+    "credential_id": "cred-123",
+    "device_id": "device-1",
+    "agent_provider": null,
+    "agent_model": null,
+    "roles": [
+      {
+        "resource_path": "alice/api",
+        "resource_kind": "repository",
+        "role": "maintainer"
+      }
+    ]
+  },
+  "recommended_action": null
+}
+```
+
+`token_kind` is one of `root`, `agent`, or `service-account`. `scopes` and
+`operation_ceiling` are read from the local Biscuit delegation chain; an empty
+`scopes` list means full resource authority and a null `operation_ceiling` means
+no operation allowlist. When the server is unreachable, `reachable` is `false`,
+`identity` is `null`, and the locally-known token facts are still reported.
+
+---
+
 ## `heddle auth create-service-token --output json`
 
 ```json
