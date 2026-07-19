@@ -1477,12 +1477,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["whoami"],
-        feature_gated(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["whoami"]),
-                &[json_discriminator(Some("whoami"), "output_kind", "whoami")],
+        category(
+            feature_gated(
+                json_discriminators(
+                    documented_schemas(READ_JSON, &["whoami"]),
+                    &[json_discriminator(Some("whoami"), "output_kind", "whoami")],
+                ),
+                "client",
             ),
-            "client",
+            // Groups under "Repo and environment" in `heddle help advanced`,
+            // alongside the `auth` identity commands.
+            "repo",
         ),
     ),
     entry(&["import"], surface(GROUP, "git_projection")),
