@@ -20,6 +20,10 @@ pub enum AuthCommand {
         ttl_secs: u64,
         scopes: Vec<String>,
         allowed_operations: Vec<String>,
+        /// Preset operation ceiling (`reviewer` | `contributor` | `ci-landing`).
+        /// Expands to a curated `--allow` set; a combined explicit `--allow`
+        /// may only narrow it.
+        template: Option<crate::device_flow::AgentTemplate>,
         out: Option<std::path::PathBuf>,
     },
     CreateServiceToken {
