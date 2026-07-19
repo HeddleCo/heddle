@@ -62,6 +62,9 @@ const SWEPT: &[&str] = &[
     "export git",
     "sync git",
     "status",
+    // heddle#1057 — whoami emits `output_kind: "whoami"` (matches its verb path,
+    // no override needed).
+    "whoami",
     // heddle#272 — output_kind sweep on the named-by-persona verbs.
     "agent presence list",
     "agent presence show",
