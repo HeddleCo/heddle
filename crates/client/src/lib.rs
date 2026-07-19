@@ -12,8 +12,10 @@ pub mod grpc_hosted;
 pub mod presence;
 pub mod support;
 pub mod support_requests;
+pub mod whoami;
 
 pub use auth_cmd::cmd_auth;
+pub use whoami::cmd_whoami;
 pub use auth_requests::AuthCommand;
 // Re-export `device_flow` under the historical `auth` module name so
 // callers using `weft_client::auth::{...}` resolve symbols at the

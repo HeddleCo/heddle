@@ -36,6 +36,14 @@ impl WeftExtensions for EnabledWeftExtensions {
         let command = downcast::<AuthCommands>(command, "AuthCommands")?;
         cmd_auth(ctx, command.clone().into()).await
     }
+
+    async fn whoami(
+        &self,
+        ctx: &(dyn CliContext + 'static),
+        server: Option<String>,
+    ) -> Result<()> {
+        heddle_client::cmd_whoami(ctx, server).await
+    }
 }
 
 fn downcast<'a, T: 'static>(
