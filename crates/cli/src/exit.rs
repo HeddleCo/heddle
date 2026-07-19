@@ -218,8 +218,9 @@ impl HeddleExitCode {
                 // (TempFail 75) even though its status code is InvalidArgument /
                 // Unavailable, and a conflict is a protocol rejection.
                 if let Some(typed) = crate::hosted_typed_error::HostedTypedError::from_status(status)
+                    && let Some(code) = typed.exit_code()
                 {
-                    return typed.exit_code();
+                    return code;
                 }
                 return match status.code() {
                     Code::Unavailable | Code::DeadlineExceeded | Code::ResourceExhausted => {

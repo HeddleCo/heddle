@@ -101,12 +101,24 @@ impl HostedTypedError {
         }
     }
 
-    /// Exit code for this failure. A cursor/stream failure is safe to retry by
-    /// restarting (`TempFail`); a conflict needs a changed input (`Protocol`).
-    pub fn exit_code(&self) -> HeddleExitCode {
+    /// Exit-code override for this typed failure, or `None` to fall through to
+    /// the bare gRPC-code mapping.
+    ///
+    /// A cursor failure is a safe restart (`TempFail`); a conflict needs a
+    /// changed input (`Protocol`). A `StreamFailure`, however, wraps EVERY
+    /// mid-flight stream error — including a `PermissionDenied` / `NotFound` /
+    /// `InvalidArgument` surfaced from inside the stream — so it is only a
+    /// safe-retry when it is *genuinely* retryable (carries retry advice or a
+    /// restart cursor, or its underlying gRPC code is transient). Otherwise we
+    /// return `None` so the caller uses the bare code (PermissionDenied→NoPerm,
+    /// NotFound→NoInput, InvalidArgument→Protocol) rather than telling an agent
+    /// to hot-loop a permission/validation gate as "safe to retry".
+    pub fn exit_code(&self) -> Option<HeddleExitCode> {
         match self {
-            Self::Conflict(_) => HeddleExitCode::Protocol,
-            Self::Cursor(_) | Self::Stream(_) => HeddleExitCode::TempFail,
+            Self::Conflict(_) => Some(HeddleExitCode::Protocol),
+            Self::Cursor(_) => Some(HeddleExitCode::TempFail),
+            Self::Stream(detail) if stream_is_retryable(detail) => Some(HeddleExitCode::TempFail),
+            Self::Stream(_) => None,
         }
     }
 
@@ -152,8 +164,12 @@ impl HostedTypedError {
                     format!(
                         "The stream failed mid-flight but is resumable; retry after {secs}s."
                     )
-                } else {
+                } else if stream_is_retryable(detail) {
                     "The stream failed mid-flight; restart it from the beginning.".to_string()
+                } else {
+                    "The stream failed mid-flight on a terminal error; do not blindly retry — \
+                     inspect the underlying status and fix the cause first."
+                        .to_string()
                 }
             }
         }
@@ -223,6 +239,34 @@ fn stream_retry_after_secs(detail: &StreamFailure) -> Option<i64> {
         .filter(|secs| *secs > 0)
 }
 
+/// Is a `StreamFailure` genuinely safe to retry by restarting? True when it
+/// carries retry advice or a restart cursor, or its underlying gRPC code is a
+/// transient/retryable class. A stream that merely wraps a terminal
+/// PermissionDenied / NotFound / InvalidArgument is NOT safe-retry.
+fn stream_is_retryable(detail: &StreamFailure) -> bool {
+    use tonic::Code;
+    if detail.retry.is_some() {
+        return true;
+    }
+    if detail
+        .cursor
+        .as_ref()
+        .is_some_and(|c| !c.restart_cursor.is_empty())
+    {
+        return true;
+    }
+    matches!(
+        Code::from_i32(detail.grpc_code),
+        Code::Unavailable
+            | Code::DeadlineExceeded
+            | Code::ResourceExhausted
+            | Code::Aborted
+            | Code::Internal
+            | Code::Unknown
+            | Code::Cancelled
+    )
+}
+
 fn cursor_reason_str(reason: i32) -> &'static str {
     match CursorReason::try_from(reason) {
         Ok(CursorReason::Stale) => "stale",
@@ -272,7 +316,7 @@ mod tests {
         );
         let typed = HostedTypedError::from_status(&status).expect("conflict detail decodes");
         assert_eq!(typed.kind(), "hosted_conflict");
-        assert_eq!(typed.exit_code(), HeddleExitCode::Protocol);
+        assert_eq!(typed.exit_code(), Some(HeddleExitCode::Protocol));
         assert!(typed.hint().contains("conflict"));
         let fields = typed.extra_json_fields();
         assert!(fields["conflict_resource"].as_str().unwrap().contains("refs/threads/main"));
@@ -294,7 +338,7 @@ mod tests {
         assert_eq!(typed.kind(), "cursor_invalid");
         // A cursor restart is safe-retry — 75, NOT the InvalidArgument→Protocol
         // default the bare status code would otherwise map to.
-        assert_eq!(typed.exit_code(), HeddleExitCode::TempFail);
+        assert_eq!(typed.exit_code(), Some(HeddleExitCode::TempFail));
         let fields = typed.extra_json_fields();
         assert_eq!(fields["cursor_reason"], "stale");
         assert_eq!(fields["restart_cursor"], "");
@@ -316,7 +360,7 @@ mod tests {
         );
         let typed = HostedTypedError::from_status(&restart).expect("stream detail decodes");
         assert_eq!(typed.kind(), "stream_failure");
-        assert_eq!(typed.exit_code(), HeddleExitCode::TempFail);
+        assert_eq!(typed.exit_code(), Some(HeddleExitCode::TempFail));
         assert!(typed.hint().contains("restart"));
         assert_eq!(typed.extra_json_fields()["stream_resumable"], serde_json::Value::Bool(false));
 
@@ -339,6 +383,31 @@ mod tests {
         let fields = typed.extra_json_fields();
         assert_eq!(fields["stream_resumable"], serde_json::Value::Bool(true));
         assert_eq!(fields["retry_after_secs"], serde_json::Value::Number(3.into()));
+    }
+
+    #[test]
+    fn stream_failure_wrapping_terminal_error_is_not_safe_retry() {
+        // A StreamFailure wraps EVERY mid-stream Err, including a terminal
+        // PermissionDenied surfaced from inside the stream. It must NOT be
+        // reclassified as safe-retry (75) — exit_code() returns None so the
+        // caller falls through to the bare code (PermissionDenied→NoPerm), and
+        // the hint must not tell an agent to restart a policy gate.
+        let denied = status_with_detail(
+            Code::PermissionDenied,
+            "access denied",
+            "StreamFailure",
+            &StreamFailure {
+                grpc_code: Code::PermissionDenied as i32,
+                message: "access denied".to_string(),
+                retry: None,
+                cursor: None,
+            },
+        );
+        let typed = HostedTypedError::from_status(&denied).expect("stream detail decodes");
+        assert_eq!(typed.kind(), "stream_failure");
+        assert_eq!(typed.exit_code(), None); // fall through to bare PermissionDenied→NoPerm
+        assert!(!typed.hint().contains("restart"));
+        assert!(typed.hint().contains("do not blindly retry"));
     }
 
     #[test]
