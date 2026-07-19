@@ -118,9 +118,15 @@ mount = { path = "../mount", package = "heddle-mount", version = "0.10", optiona
 mount = { path = "../mount", package = "heddle-mount", version = "0.10", optional = true }
 
 [features]
-# Keep the default `heddle` build focused on the local invisible-VCS
-# workflow. Heavier import/hosted surfaces are opt-in for release
-# builds that need them. `semantic` is included in defaults because
+# The default `heddle` build ships the full workflow: local
+# invisible-VCS plus the hosted `client` surface (push / clone / pull,
+# discussions, context, review against a weft server). `client` is in
+# the default set because the hosted flows are now core to how heddle
+# is used — gating them behind `--features client` turned a first-run
+# `heddle clone <hosted-url>` / `heddle push` into an opaque error. A
+# slim, local-only build stays available via `--no-default-features
+# --features git-overlay,native,semantic,zstd`. `semantic` is included
+# in defaults because
 # `heddle diff --semantic` and the
 # agent-loop self-review all reach for it; gating
 # the default install behind an extra `--features semantic` flag
@@ -142,13 +148,14 @@ mount = { path = "../mount", package = "heddle-mount", version = "0.10", optiona
 # fallback (`nfsserve` + `tokio` async-trait). The OSS feature
 # subsets that explicitly want a slim build (`--no-default-features
 # --features git-overlay,...`) opt out the same way they do today.
-default = ["git-overlay", "native", "local", "mount", "semantic", "zstd"]
+default = ["git-overlay", "native", "local", "mount", "semantic", "zstd", "client"]
 local = []
-# Repository mode features. At least one must be enabled. Released as
-# three OSS CLI flavors: `git-overlay` only (works on top of existing
-# Git repos; no native content-addressed init), `native` only (pure
-# content-addressed VCS; no Git Projection import/export surface), or both. The closed `heddle-hosted`
-# build adds `client` on top of either / both.
+# Repository mode features. At least one must be enabled. The default
+# build enables both modes plus the hosted `client`. Slimmer builds opt
+# out via `--no-default-features`: `git-overlay` only (works on top of
+# existing Git repos; no native content-addressed init), `native` only
+# (pure content-addressed VCS; no Git Projection import/export surface),
+# or both — and each can drop `client` for a local-only CLI.
 git-overlay = ["repo/git-overlay", "ingest"]
 native = ["repo/native"]
 client = ["dep:heddle-client", "dep:tokio-tungstenite"]

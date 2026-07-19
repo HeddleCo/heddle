@@ -1442,6 +1442,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
 
 /// Push one Heddle state or one authoritative Git mirror over hosted transport.
 #[cfg(feature = "client")]
+#[allow(clippy::too_many_arguments)]
 async fn push_network_one_thread(
     repo: &Repository,
     client: &mut HostedGrpcClient,

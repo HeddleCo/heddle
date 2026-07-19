@@ -880,19 +880,18 @@ fn reconcile_revisions_pull(
 
     for server_rev in server_revs {
         // (a) existing link by server id.
-        if let Some(local_rev_id) = link_by_server.get(server_rev.revision_id.as_str()) {
-            if let Some(local) = existing
+        if let Some(local_rev_id) = link_by_server.get(server_rev.revision_id.as_str())
+            && let Some(local) = existing
                 .iter()
                 .find(|rev| rev.revision_id == *local_rev_id && !consumed.contains(&rev.revision_id))
-            {
-                consumed.insert(local.revision_id.clone());
-                new_revisions.push(local.clone());
-                new_links.push(RevisionLink {
-                    local: local.revision_id.clone(),
-                    server: server_rev.revision_id.clone(),
-                });
-                continue;
-            }
+        {
+            consumed.insert(local.revision_id.clone());
+            new_revisions.push(local.clone());
+            new_links.push(RevisionLink {
+                local: local.revision_id.clone(),
+                server: server_rev.revision_id.clone(),
+            });
+            continue;
         }
         // (b) id equality (pack-delivered: local rev id == server rev id).
         if let Some(local) = existing.iter().find(|rev| {
