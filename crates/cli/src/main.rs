@@ -384,6 +384,7 @@ async fn async_main() -> Result<()> {
             threads,
             message,
             no_squash,
+            dry_run,
         }) => {
             cmd_land(
                 &cli,
@@ -392,6 +393,7 @@ async fn async_main() -> Result<()> {
                     threads: threads.clone(),
                     message: message.clone(),
                     no_squash: *no_squash,
+                    dry_run: *dry_run,
                 },
             )
             .await
@@ -596,6 +598,7 @@ async fn async_main() -> Result<()> {
                 args.force,
                 args.all_threads,
                 args.insecure,
+                args.dry_run,
             )
             .await
         }
