@@ -217,16 +217,20 @@ pub struct AgentAttenuation {
     /// operations. Each entry is the bare method name (e.g.
     /// `"GetState"`, `"ListRefs"`).
     pub allowed_operations: Option<Vec<String>>,
-    /// When `Some`, the agent is restricted to resources whose
-    /// path matches one of the entries. Format: `(kind, path)`
-    /// where `kind ∈ {"repo", "namespace"}`.
+    /// When `Some`, the agent is restricted to resources whose path matches
+    /// one of the entries. Format: `(kind, path)` where
+    /// `kind ∈ {"repo", "namespace"}`. Emits an ENFORCEABLE
+    /// `check if resource($k, $p), …` caveat against the `resource("repo", …)`
+    /// fact the server injects per request (weft#644): a `repo` entry matches
+    /// that exact repo or any subtree path, a `namespace` entry matches the
+    /// whole `<namespace>/` repo subtree. An entry rejects a request whose
+    /// target the caveat does not cover; a full-authority token (`None`) is
+    /// unaffected because facts never reject, only caveats do.
     pub allowed_resources: Option<Vec<(String, String)>>,
-    /// Resource scopes carried for forward-compatible W3 enforcement.
-    ///
-    /// Today's server does not inject request `resource(...)` facts, so an
-    /// `allowed_resources` check fails closed for every RPC. W1 records these
-    /// declarations as `agent_scope(kind, path)` facts instead. They are inert
-    /// until W3 teaches the server to enforce them.
+    /// Resource scopes recorded as `agent_scope(kind, path)` facts for the
+    /// audit trail and for client-side sub-derivation narrowing checks
+    /// (`validate_scope_narrowing`). Enforcement rides on `allowed_resources`
+    /// above — these facts are metadata, not the caveat.
     pub declared_scopes: Vec<(String, String)>,
 }
 
@@ -513,12 +517,32 @@ fn build_attenuation_block(
         let mut clauses = Vec::new();
         for (kind, path) in resources {
             let prefix = format!("{path}/");
-            clauses.push(format!(
-                "($k == {kind_lit} && ($p == {path_lit} || $p.starts_with({prefix_lit})))",
-                kind_lit = biscuit_string(kind),
-                path_lit = biscuit_string(path),
-                prefix_lit = biscuit_string(&prefix),
-            ));
+            match kind.as_str() {
+                // A namespace grant authorizes the whole repo subtree under it.
+                // The server only ever injects `resource("repo", <repo_path>)`
+                // facts (weft#644) — it never emits a `resource("namespace", …)`
+                // fact — so a `$k == "namespace"` caveat would match no fact and
+                // reject EVERY repo RPC. Encode the namespace scope as a repo-path
+                // PREFIX caveat against `<namespace>/` so the injected repo fact
+                // and this caveat compare like-for-like.
+                "namespace" | "ns" => {
+                    clauses.push(format!(
+                        "($k == \"repo\" && $p.starts_with({prefix_lit}))",
+                        prefix_lit = biscuit_string(&prefix),
+                    ));
+                }
+                // A repo grant matches that exact repo, or any nested path under
+                // it (monorepo subtree). Kind is preserved so a future non-repo
+                // resource kind cannot be satisfied by a repo fact.
+                _ => {
+                    clauses.push(format!(
+                        "($k == {kind_lit} && ($p == {path_lit} || $p.starts_with({prefix_lit})))",
+                        kind_lit = biscuit_string(kind),
+                        path_lit = biscuit_string(path),
+                        prefix_lit = biscuit_string(&prefix),
+                    ));
+                }
+            }
         }
         let pred = clauses.join(" || ");
         block = block
@@ -1165,5 +1189,138 @@ mod tests {
         assert!(validate_biscuit_token_string("op", r#"x" || true"#).is_err());
         assert!(validate_biscuit_token_string("op", "a$b").is_err());
         assert!(validate_biscuit_token_string("op", "").is_err());
+    }
+
+    /// Like `server_authorizes` but also injects the per-request
+    /// `resource(kind, path)` fact the weft verifier adds (weft#644), so
+    /// resource-scope caveats are actually exercised end-to-end.
+    fn server_authorizes_resource(
+        token: &str,
+        root: &KeyPair,
+        operation: &str,
+        resource: (&str, &str),
+        now: DateTime<Utc>,
+    ) -> Result<(), biscuit_auth::error::Token> {
+        let root_public = root.public();
+        let biscuit = Biscuit::from_base64(token, move |_| Ok(root_public))?;
+        let mut authorizer = AuthorizerBuilder::new()
+            .set_limits(RunLimits {
+                max_facts: 1000,
+                max_iterations: 100,
+                max_time: std::time::Duration::from_secs(1),
+            })
+            .fact(format!("time({})", now.to_rfc3339()).as_str())?
+            .fact(format!("operation({})", biscuit_string(operation)).as_str())?
+            .fact(
+                format!(
+                    "resource({}, {})",
+                    biscuit_string(resource.0),
+                    biscuit_string(resource.1)
+                )
+                .as_str(),
+            )?
+            .policy("allow if true")?
+            .build(&biscuit)?;
+        authorizer.authorize().map(|_| ())
+    }
+
+    #[test]
+    fn repo_scope_caveat_admits_in_scope_repo_and_rejects_siblings() {
+        let (parent, root, parent_pop) = fresh_parent_token();
+        let child_pop = Ed25519Signer::generate().expect("child PoP key");
+        let child = attenuate_for_agent(
+            &parent,
+            AgentAttenuation {
+                agent_id: "agent-repo".to_string(),
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+                allowed_operations: Some(vec!["GetState".to_string()]),
+                allowed_resources: Some(vec![("repo".to_string(), "alice/repoA".to_string())]),
+                declared_scopes: vec![("repo".to_string(), "alice/repoA".to_string())],
+            },
+            &parent_pop,
+            child_pop.public_key(),
+        )
+        .expect("derive repo-scoped child");
+
+        // In scope: the exact repo and any nested subtree path.
+        server_authorizes_resource(&child, &root, "GetState", ("repo", "alice/repoA"), Utc::now())
+            .expect("in-scope repo is admitted");
+        server_authorizes_resource(
+            &child,
+            &root,
+            "GetState",
+            ("repo", "alice/repoA/pkg"),
+            Utc::now(),
+        )
+        .expect("in-scope subtree is admitted");
+        // Out of scope: a sibling repo in the same namespace is rejected.
+        assert!(
+            server_authorizes_resource(
+                &child,
+                &root,
+                "GetState",
+                ("repo", "alice/repoB"),
+                Utc::now()
+            )
+            .is_err(),
+            "an out-of-scope sibling repo must be rejected by the resource caveat"
+        );
+        // Fail closed when no resource fact is injected at all.
+        assert!(
+            server_authorizes(&child, &root, "GetState", Utc::now()).is_err(),
+            "a resource-scoped caveat must fail closed when the request has no target"
+        );
+    }
+
+    #[test]
+    fn namespace_scope_caveat_is_a_repo_prefix_not_a_namespace_kind() {
+        let (parent, root, parent_pop) = fresh_parent_token();
+        let child_pop = Ed25519Signer::generate().expect("child PoP key");
+        let child = attenuate_for_agent(
+            &parent,
+            AgentAttenuation {
+                agent_id: "agent-ns".to_string(),
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+                allowed_operations: Some(vec!["GetState".to_string()]),
+                allowed_resources: Some(vec![("namespace".to_string(), "alice".to_string())]),
+                declared_scopes: vec![("namespace".to_string(), "alice".to_string())],
+            },
+            &parent_pop,
+            child_pop.public_key(),
+        )
+        .expect("derive namespace-scoped child");
+
+        // The caveat is encoded against `resource("repo", …)` as a path prefix —
+        // NOT `resource("namespace", …)`, which would match no injected fact and
+        // brick every repo RPC.
+        let block = biscuit_auth::UnverifiedBiscuit::from_base64(child.as_bytes())
+            .expect("parse child")
+            .print_block_source(1)
+            .expect("child block");
+        assert!(
+            block.contains("$k == \"repo\" && $p.starts_with(\"alice/\")"),
+            "namespace scope must emit a repo-path prefix caveat: {block}"
+        );
+        assert!(
+            !block.contains("$k == \"namespace\""),
+            "namespace scope must not emit a resource(\"namespace\", …) caveat: {block}"
+        );
+
+        // Every repo under the namespace is reachable; a repo outside is not.
+        server_authorizes_resource(&child, &root, "GetState", ("repo", "alice/repoA"), Utc::now())
+            .expect("repoA under the namespace is admitted");
+        server_authorizes_resource(&child, &root, "GetState", ("repo", "alice/repoB"), Utc::now())
+            .expect("repoB under the namespace is admitted");
+        assert!(
+            server_authorizes_resource(
+                &child,
+                &root,
+                "GetState",
+                ("repo", "bob/repoC"),
+                Utc::now()
+            )
+            .is_err(),
+            "a repo outside the namespace must be rejected"
+        );
     }
 }
