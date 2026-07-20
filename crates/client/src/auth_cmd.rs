@@ -52,6 +52,9 @@ struct AuthStatusOutput {
     output_kind: &'static str,
     server: String,
     authenticated: bool,
+    /// Credential origin: `env:<path>` when `HEDDLE_CREDENTIAL` is set,
+    /// `keystore` for a stored credential, `none` when unauthenticated.
+    source: String,
     proof_key_available: bool,
     subject: Option<String>,
     credential_id: Option<String>,
@@ -697,11 +700,16 @@ fn cmd_auth_logout(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
 /// Show current authentication status.
 fn cmd_auth_status(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
     let server = resolve_server(server)?;
-    let output = auth_status_output(&server, credentials::get_server_credential(&server)?);
+    // Report through the SAME precedence the runtime authenticates with, so
+    // `auth status` reflects what a hosted op would actually use — including a
+    // `HEDDLE_CREDENTIAL` that overrides the keystore.
+    let resolved = crate::grpc_hosted::resolve_hosted_credential(Some(&server))?;
+    let output = auth_status_output(&server, &resolved);
     if ctx.should_output_json(None) {
         println!("{}", serde_json::to_string(&output)?);
     } else if output.authenticated {
         println!("Server:        {server}");
+        println!("Source:        {}", output.source);
         println!(
             "Subject:       {}",
             output.subject.as_deref().unwrap_or_default()
@@ -731,35 +739,40 @@ fn cmd_auth_status(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn auth_status_output(server: &str, credential: Option<ServerCredential>) -> AuthStatusOutput {
-    match credential {
-        Some(credential) => {
-            let proof_key_available = credential
-                .private_key_pem
-                .as_deref()
-                .is_some_and(|pem| Ed25519Signer::from_pem(pem).is_ok());
-            AuthStatusOutput {
-                output_kind: "auth_status",
-                server: server.to_string(),
-                authenticated: true,
-                proof_key_available,
-                subject: Some(credential.subject),
-                credential_id: credential.credential_id,
-                expires_at: credential.expires_at,
-                recommended_action: (!proof_key_available)
-                    .then(|| format!("heddle auth login --server {server}")),
-            }
+fn auth_status_output(
+    server: &str,
+    resolved: &crate::grpc_hosted::ResolvedHostedCredential,
+) -> AuthStatusOutput {
+    let source = resolved.source.label();
+    if resolved.token.is_some() {
+        let proof_key_available = resolved
+            .proof_key_pem
+            .as_deref()
+            .is_some_and(|pem| Ed25519Signer::from_pem(pem).is_ok());
+        AuthStatusOutput {
+            output_kind: "auth_status",
+            server: server.to_string(),
+            authenticated: true,
+            source,
+            proof_key_available,
+            subject: resolved.subject.clone(),
+            credential_id: resolved.credential_id.clone(),
+            expires_at: resolved.expires_at.clone(),
+            recommended_action: (!proof_key_available)
+                .then(|| format!("heddle auth login --server {server}")),
         }
-        None => AuthStatusOutput {
+    } else {
+        AuthStatusOutput {
             output_kind: "auth_status",
             server: server.to_string(),
             authenticated: false,
+            source,
             proof_key_available: false,
             subject: None,
             credential_id: None,
             expires_at: None,
             recommended_action: Some(format!("heddle auth login --server {server}")),
-        },
+        }
     }
 }
 
@@ -2064,9 +2077,20 @@ mod tests {
 
     #[test]
     fn auth_status_qualifies_a_credential_without_a_proof_key() {
-        let output = auth_status_output("grpc.S", Some(sample_credential()));
+        let credential = sample_credential();
+        let resolved = crate::grpc_hosted::ResolvedHostedCredential {
+            token: Some(wire::AuthToken::new(credential.token, "credential-store")),
+            proof_key_pem: credential.private_key_pem,
+            renewable: None,
+            subject: Some(credential.subject),
+            credential_id: credential.credential_id,
+            expires_at: credential.expires_at,
+            source: crate::grpc_hosted::CredentialSource::Keystore,
+        };
+        let output = auth_status_output("grpc.S", &resolved);
 
         assert!(output.authenticated);
+        assert_eq!(output.source, "keystore");
         assert!(!output.proof_key_available);
         assert!(
             output

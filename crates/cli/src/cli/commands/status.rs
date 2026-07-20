@@ -38,8 +38,6 @@ use super::{
     next_action::{NextActionValidationContext, write_command_json},
     verification_health::{action_template, action_templates, repository_setup_guidance},
 };
-#[cfg(feature = "client")]
-use crate::config::UserConfig;
 use crate::{
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     perf::{ProfileField, ProfileMode, emit_profile, profile_enabled, profile_mode},
@@ -1498,7 +1496,9 @@ impl HostedPresenceWatch {
             return None;
         }
 
-        let token = UserConfig::load_default().ok()?.remote_token().ok()??;
+        let token = crate::client::resolve_hosted_credential(Some(upstream))
+            .ok()?
+            .token?;
         let mut request = normalize_presence_ws_url(upstream)
             .ok()?
             .into_client_request()

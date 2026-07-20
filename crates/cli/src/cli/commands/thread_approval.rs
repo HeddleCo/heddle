@@ -37,7 +37,7 @@ use crate::{
         },
         should_output_json,
     },
-    client::{HostedAuthMode, HostedGrpcClient},
+    client::HostedGrpcClient,
     config::UserConfig,
     remote::{RemoteTarget, resolve_remote_with_key},
 };
@@ -124,17 +124,11 @@ async fn open_heddle_client(
     };
 
     let user_config = UserConfig::load_default()?;
-    // Authenticated thread-workflow RPCs are proof-of-possession gated, so use
-    // CredentialFallback (resolves the credential store's proof key) rather
-    // than a token-only ConfigToken session.
-    let client = HostedGrpcClient::open_session(
-        addr,
-        &user_config,
-        server_key,
-        HostedAuthMode::CredentialFallback,
-    )
-    .await?
-    .with_human_signature_callback(crate::client::cli_human_signature_callback());
+    // Authenticated thread-workflow RPCs are proof-of-possession gated; the
+    // single resolver attaches the credential's proof key.
+    let client = HostedGrpcClient::open_session(addr, &user_config, server_key)
+        .await?
+        .with_human_signature_callback(crate::client::cli_human_signature_callback());
     Ok((client, repo_path))
 }
 

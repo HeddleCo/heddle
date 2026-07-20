@@ -7,8 +7,21 @@
 //! then rotate only an eligible stored authority credential. This module owns
 //! that assembly so the command modules choose only intent + remote and call
 //! one seam.
+//!
+//! # Single credential resolution order
+//!
+//! [`resolve_hosted_credential`] is the ONE precedence every hosted entry
+//! point follows:
+//!
+//! 1. `HEDDLE_CREDENTIAL=<path>` — a path to a `.hcred`. When set it is
+//!    AUTHORITATIVE: an unreadable / expired / verify-failed / server-mismatch
+//!    file is a hard error, never a silent fall-through to the keystore (a
+//!    silent fallback would let an agent push as the human). Loaded through the
+//!    verifying [`crate::credential_file::load_credential_file`] chokepoint.
+//! 2. The per-server keystore entry (`resolve_credential_for_server`).
+//! 3. Unauthenticated.
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, Result};
 use cli_shared::{ClientConfig, UserConfig};
@@ -21,15 +34,172 @@ use crate::{
     grpc_hosted::{HostedGrpcClient, RenewableAuthorityCredential},
 };
 
-/// How a hosted session resolves its auth token.
-pub enum HostedAuthMode {
-    /// Use only the token from env/user config (`remote_token`). Used by
-    /// fetch, support, approval, and lazy hydration.
-    ConfigToken,
-    /// Use the config token, falling back to the per-server credential store
-    /// (and its proof key) when no config token is present. Used by push and
-    /// pull.
-    CredentialFallback,
+/// Environment variable naming a `.hcred` path the runtime authenticates with.
+const HEDDLE_CREDENTIAL_ENV: &str = "HEDDLE_CREDENTIAL";
+
+/// Where a resolved hosted credential originated. Reported by `auth status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialSource {
+    /// The `.hcred` at `HEDDLE_CREDENTIAL=<path>`.
+    Env(PathBuf),
+    /// The per-server entry in the keystore (`credentials.toml`).
+    Keystore,
+    /// No credential resolved for this server.
+    Unauthenticated,
+}
+
+impl CredentialSource {
+    /// Stable label for the `auth status` `source` field.
+    pub fn label(&self) -> String {
+        match self {
+            CredentialSource::Env(path) => format!("env:{}", path.display()),
+            CredentialSource::Keystore => "keystore".to_string(),
+            CredentialSource::Unauthenticated => "none".to_string(),
+        }
+    }
+}
+
+/// A credential resolved by the single hosted-auth precedence. Fully describes
+/// the selected bearer so callers never re-read env/keystore themselves.
+pub struct ResolvedHostedCredential {
+    /// Bearer token, absent when unauthenticated.
+    pub token: Option<AuthToken>,
+    /// Device proof key PEM bound to `token`, when the source carries one.
+    pub proof_key_pem: Option<String>,
+    /// Renewal binding — populated ONLY for a keystore authority credential.
+    /// An env `.hcred` is never renewed (we cannot rewrite the pointed-at file
+    /// and must not touch the keystore on its behalf). Crate-internal: the
+    /// renewal type is module-private and only [`HostedSession::build`]
+    /// consumes it.
+    pub(crate) renewable: Option<RenewableAuthorityCredential>,
+    /// Authenticated subject.
+    pub subject: Option<String>,
+    /// Authority credential id, when present (rotation anchor).
+    pub credential_id: Option<String>,
+    /// RFC 3339 expiry, when the credential carries one.
+    pub expires_at: Option<String>,
+    /// Which mechanism produced this credential.
+    pub source: CredentialSource,
+}
+
+impl std::fmt::Debug for ResolvedHostedCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redact the secret bearer + proof key so a resolved credential can
+        // never leak them into logs, tracing, or a test panic message.
+        f.debug_struct("ResolvedHostedCredential")
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("proof_key_pem", &self.proof_key_pem.as_ref().map(|_| "<redacted>"))
+            .field("renewable", &self.renewable.is_some())
+            .field("subject", &self.subject)
+            .field("credential_id", &self.credential_id)
+            .field("expires_at", &self.expires_at)
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
+/// Read + validate `HEDDLE_CREDENTIAL`. Returns the `.hcred` path when the
+/// variable is set to a non-empty value. Guards against a caller passing
+/// credential *contents* instead of a path — a path never starts with `{`
+/// (the `.hcred` JSON object) and never contains a newline.
+fn heddle_credential_env_path() -> Result<Option<PathBuf>> {
+    match std::env::var(HEDDLE_CREDENTIAL_ENV) {
+        Ok(value) => {
+            if value.is_empty() {
+                // Fail closed rather than fall through to the keystore: a set-but-empty
+                // value is almost always a failed shell expansion (e.g.
+                // `export HEDDLE_CREDENTIAL=$UNSET`), and silently authenticating as
+                // the stored (human) identity is exactly the confusion this resolver
+                // exists to prevent.
+                anyhow::bail!(
+                    "HEDDLE_CREDENTIAL is set but empty; unset it to use the stored \
+                     credential, or point it at a .hcred file"
+                );
+            }
+            if value.starts_with('{') || value.contains('\n') {
+                anyhow::bail!(
+                    "HEDDLE_CREDENTIAL takes a file path, not credential contents"
+                );
+            }
+            Ok(Some(PathBuf::from(value)))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(err @ std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("HEDDLE_CREDENTIAL is not valid UTF-8: {err}")
+        }
+    }
+}
+
+/// Resolve the hosted credential for `server_key` following the single
+/// precedence order documented on this module.
+///
+/// `HEDDLE_CREDENTIAL`, when set, is authoritative: any failure to load, verify,
+/// or match it to `server_key` is a hard error rather than a silent fall-through
+/// to the keystore.
+pub fn resolve_hosted_credential(server_key: Option<&str>) -> Result<ResolvedHostedCredential> {
+    if let Some(path) = heddle_credential_env_path()? {
+        let verified = crate::credential_file::load_credential_file(&path)
+            .with_context(|| format!("loading HEDDLE_CREDENTIAL {}", path.display()))?;
+        if let Some(target) = server_key
+            && !server_keys_match(&verified.server, target)
+        {
+            anyhow::bail!(
+                "HEDDLE_CREDENTIAL {} authenticates server {:?}, but this operation targets {:?}; \
+                 point HEDDLE_CREDENTIAL at a credential minted for {}",
+                path.display(),
+                verified.server,
+                target,
+                target,
+            );
+        }
+        return Ok(ResolvedHostedCredential {
+            token: Some(AuthToken::new(verified.token, "hcred-env")),
+            proof_key_pem: Some(verified.proof_key_pem),
+            renewable: None,
+            subject: Some(verified.subject),
+            credential_id: verified.credential_id,
+            expires_at: verified.expires_at,
+            source: CredentialSource::Env(path),
+        });
+    }
+
+    if let Some(key) = server_key {
+        // Propagate a malformed credentials.toml instead of swallowing it: a
+        // parse error here used to fall through to an unauthenticated request,
+        // which the server rejects with an opaque "missing authorization
+        // metadata" — hiding the real cause. A *missing* file returns Ok(None)
+        // and falls through to unauthenticated cleanly.
+        if let Some(cred) = credentials::resolve_credential_for_server(key)? {
+            let renewable = RenewableAuthorityCredential::from_stored(&cred);
+            return Ok(ResolvedHostedCredential {
+                token: Some(AuthToken::new(cred.token, "credential-store")),
+                proof_key_pem: cred.private_key_pem,
+                renewable,
+                subject: Some(cred.subject),
+                credential_id: cred.credential_id,
+                expires_at: cred.expires_at,
+                source: CredentialSource::Keystore,
+            });
+        }
+    }
+
+    Ok(ResolvedHostedCredential {
+        token: None,
+        proof_key_pem: None,
+        renewable: None,
+        subject: None,
+        credential_id: None,
+        expires_at: None,
+        source: CredentialSource::Unauthenticated,
+    })
+}
+
+/// Resolve the locally active bearer token, if any, using the default server
+/// for keystore lookup. For read/display paths that need the active token
+/// without a specific target remote. Still honors `HEDDLE_CREDENTIAL` first.
+pub fn resolve_active_bearer() -> Result<Option<AuthToken>> {
+    let server = credentials::default_server()?;
+    Ok(resolve_hosted_credential(server.as_deref())?.token)
 }
 
 /// A validated, connectable hosted-session configuration.
@@ -72,55 +242,19 @@ impl HostedSession {
     }
 
     /// Resolve auth + build the validated client config for a hosted session.
-    /// Owns credential-store fallback (per `mode`), server-key attachment, and
-    /// proof-key attachment from either a credential or the matching shared
-    /// same-host device identity — the assembly the command modules used to
-    /// hand-roll.
-    pub fn build(
-        user_config: &UserConfig,
-        server_key: Option<String>,
-        mode: HostedAuthMode,
-    ) -> Result<Self> {
-        let (
+    /// Runs the single [`resolve_hosted_credential`] precedence
+    /// (`HEDDLE_CREDENTIAL` → keystore → unauthenticated), server-key
+    /// attachment, and proof-key attachment from either the resolved credential
+    /// or the matching shared same-host device identity — the assembly the
+    /// command modules used to hand-roll.
+    pub fn build(user_config: &UserConfig, server_key: Option<String>) -> Result<Self> {
+        let ResolvedHostedCredential {
             token,
-            mut credential_proof_key,
-            renewable_authority_credential,
-            stored_credential_subject,
-        ) = match mode {
-            HostedAuthMode::ConfigToken => (user_config.remote_token()?, None, None, None),
-            HostedAuthMode::CredentialFallback => {
-                let mut token = user_config.remote_token()?;
-                let mut credential_proof_key = None;
-                let mut renewable_authority_credential = None;
-                let mut stored_credential_subject = None;
-                if token.is_none()
-                    && let Some(ref key) = server_key
-                {
-                    // Propagate a malformed credentials.toml instead of
-                    // swallowing it: a parse error here (e.g. a missing
-                    // `subject` field) used to fall through to an
-                    // unauthenticated request, which the server rejects with
-                    // the opaque "missing authorization metadata" — hiding the
-                    // real cause. The `?` surfaces the underlying
-                    // "parsing <path>: <toml error>" so the user can fix the
-                    // file. A *missing* file still returns Ok(None) and falls
-                    // back cleanly.
-                    if let Some(cred) = credentials::resolve_credential_for_server(key)? {
-                        renewable_authority_credential =
-                            RenewableAuthorityCredential::from_stored(&cred);
-                        stored_credential_subject = Some(cred.subject.clone());
-                        token = Some(AuthToken::new(cred.token, "credential-store"));
-                        credential_proof_key = cred.private_key_pem;
-                    }
-                }
-                (
-                    token,
-                    credential_proof_key,
-                    renewable_authority_credential,
-                    stored_credential_subject,
-                )
-            }
-        };
+            proof_key_pem: mut credential_proof_key,
+            renewable: renewable_authority_credential,
+            subject: resolved_credential_subject,
+            ..
+        } = resolve_hosted_credential(server_key.as_deref())?;
 
         if credential_proof_key.is_none()
             && let Some(ref key) = server_key
@@ -146,12 +280,12 @@ impl HostedSession {
             })?;
             let subject = crate::device_flow::authenticated_subject(&token.id)
                 .context("reading the hosted bearer token's authenticated principal")?;
-            if stored_credential_subject
+            if resolved_credential_subject
                 .as_deref()
-                .is_some_and(|stored| stored != subject.as_str())
+                .is_some_and(|resolved| resolved != subject.as_str())
             {
                 anyhow::bail!(
-                    "stored credential subject does not match the bearer token's authenticated principal"
+                    "resolved credential subject does not match the bearer token's authenticated principal"
                 );
             }
             config = config.with_authenticated_principal(format!("principal:{subject}"));
@@ -270,9 +404,8 @@ impl HostedGrpcClient {
         addr: SocketAddr,
         user_config: &UserConfig,
         server_key: Option<String>,
-        mode: HostedAuthMode,
     ) -> Result<Self> {
-        Self::open_session_with_insecure(addr, user_config, server_key, mode, false).await
+        Self::open_session_with_insecure(addr, user_config, server_key, false).await
     }
 
     /// Like [`open_session`], but allows cleartext to non-loopback when
@@ -281,10 +414,9 @@ impl HostedGrpcClient {
         addr: SocketAddr,
         user_config: &UserConfig,
         server_key: Option<String>,
-        mode: HostedAuthMode,
         allow_insecure: bool,
     ) -> Result<Self> {
-        Ok(HostedSession::build(user_config, server_key, mode)?
+        Ok(HostedSession::build(user_config, server_key)?
             .with_allow_insecure(allow_insecure)
             .connect(addr)
             .await?)
@@ -302,7 +434,7 @@ mod tests {
     use biscuit_auth::{Biscuit, KeyPair};
     use crypto::{Ed25519Signer, Signer};
 
-    use super::{validated_authenticated_principal, validated_stored_proof_key};
+    use super::{HostedSession, validated_authenticated_principal, validated_stored_proof_key};
     use crate::credentials;
 
     fn proof_bound_credential(signer: &Ed25519Signer) -> credentials::ServerCredential {
@@ -380,27 +512,171 @@ mod tests {
         );
     }
 
-    #[test]
-    fn explicit_derived_token_cannot_rotate_from_a_nearly_expired_stored_parent() {
-        use biscuit_auth::{Biscuit, KeyPair};
-        use crypto::{Ed25519Signer, Signer};
+    /// Mint a device-authority token whose effective PoP key is `signer`.
+    fn mint_authority_token(subject: &str, signer: &Ed25519Signer) -> String {
+        biscuit_auth::Biscuit::builder()
+            .fact(format!("user(\"{subject}\")").as_str())
+            .expect("user fact")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
+            .expect("proof key fact")
+            .build(&biscuit_auth::KeyPair::new())
+            .expect("mint token")
+            .to_base64()
+            .expect("encode token")
+    }
 
-        use super::{HostedAuthMode, HostedSession};
-        use crate::credentials;
+    /// Write a verifiable `.hcred` at `path` for `server`, minting a fresh
+    /// device token bound to a fresh proof key.
+    fn write_sample_hcred(path: &std::path::Path, server: &str, subject: &str) {
+        let signer = Ed25519Signer::generate().expect("proof key");
+        let token = mint_authority_token(subject, &signer);
+        crate::credential_file::write_credential_file(
+            path,
+            &crate::credential_file::VerifiedCredential {
+                server: server.to_string(),
+                kind: crate::credential_file::CredentialKind::Device,
+                subject: subject.to_string(),
+                token,
+                proof_key_pem: signer.to_pem().expect("proof PEM"),
+                expires_at: None,
+                credential_id: None,
+                provenance: None,
+            },
+        )
+        .expect("write sample .hcred");
+    }
 
-        let _guard = credentials::lock_test_env();
+    /// Run `f` with `HEDDLE_HOME` at a fresh temp dir and `HEDDLE_CREDENTIAL`
+    /// cleared, restoring both afterward. Serialized via the credentials lock.
+    fn with_isolated_env<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
+        let _guard = crate::credentials::lock_test_env();
         let home = tempfile::TempDir::new().expect("temp Heddle home");
         let previous_home = std::env::var_os("HEDDLE_HOME");
-        let previous_remote_token = std::env::var_os("HEDDLE_REMOTE_TOKEN");
+        let previous_credential = std::env::var_os("HEDDLE_CREDENTIAL");
         unsafe {
             std::env::set_var("HEDDLE_HOME", home.path());
-            std::env::remove_var("HEDDLE_REMOTE_TOKEN");
+            std::env::remove_var("HEDDLE_CREDENTIAL");
         }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(home.path())));
+        unsafe {
+            match previous_home {
+                Some(path) => std::env::set_var("HEDDLE_HOME", path),
+                None => std::env::remove_var("HEDDLE_HOME"),
+            }
+            match previous_credential {
+                Some(path) => std::env::set_var("HEDDLE_CREDENTIAL", path),
+                None => std::env::remove_var("HEDDLE_CREDENTIAL"),
+            }
+        }
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
 
-        let result = std::panic::catch_unwind(|| {
+    #[test]
+    fn env_credential_resolves_and_reports_env_source() {
+        use super::{CredentialSource, resolve_hosted_credential};
+        with_isolated_env(|home| {
+            let path = home.join("agent.hcred");
+            write_sample_hcred(&path, "grpc.heddle.test", "alice");
+            unsafe { std::env::set_var("HEDDLE_CREDENTIAL", &path) };
+
+            let resolved =
+                resolve_hosted_credential(Some("grpc.heddle.test")).expect("resolve env credential");
+            assert!(resolved.token.is_some(), "env credential is authoritative");
+            assert!(resolved.proof_key_pem.is_some(), "env .hcred carries its key");
+            assert!(
+                resolved.renewable.is_none(),
+                "an env credential is never renewed"
+            );
+            assert_eq!(resolved.subject.as_deref(), Some("alice"));
+            assert_eq!(resolved.source, CredentialSource::Env(path));
+        });
+    }
+
+    #[test]
+    fn env_credential_inline_contents_are_rejected() {
+        use super::resolve_hosted_credential;
+        with_isolated_env(|_home| {
+            unsafe {
+                std::env::set_var("HEDDLE_CREDENTIAL", "{\"format\":\"heddle-credential\"}");
+            }
+            let error = resolve_hosted_credential(Some("grpc.heddle.test"))
+                .expect_err("inline contents must be rejected");
+            assert!(
+                error.to_string().contains("takes a file path"),
+                "unexpected error: {error}"
+            );
+        });
+    }
+
+    #[test]
+    fn env_credential_server_mismatch_is_a_hard_error_with_no_keystore_fallback() {
+        use super::resolve_hosted_credential;
+        with_isolated_env(|home| {
+            // A perfectly good keystore credential exists for the target
+            // server. It must NOT be used to paper over a mismatched
+            // HEDDLE_CREDENTIAL — silent fallback would let an agent push as
+            // the human.
+            credentials::store_server_credential(
+                "grpc.target.test",
+                credentials::ServerCredential {
+                    token: "keystore-token".to_string(),
+                    subject: "human".to_string(),
+                    device_id: None,
+                    credential_id: None,
+                    private_key_pem: None,
+                    expires_at: None,
+                },
+            )
+            .expect("seed keystore");
+
+            let path = home.join("other.hcred");
+            write_sample_hcred(&path, "grpc.other.test", "agent");
+            unsafe { std::env::set_var("HEDDLE_CREDENTIAL", &path) };
+
+            let error = resolve_hosted_credential(Some("grpc.target.test"))
+                .expect_err("server mismatch must be a hard error");
+            let message = error.to_string();
+            assert!(message.contains("grpc.other.test"), "message: {message}");
+            assert!(message.contains("grpc.target.test"), "message: {message}");
+        });
+    }
+
+    #[test]
+    fn env_credential_unreadable_is_a_hard_error_with_no_keystore_fallback() {
+        use super::resolve_hosted_credential;
+        with_isolated_env(|home| {
+            credentials::store_server_credential(
+                "grpc.target.test",
+                credentials::ServerCredential {
+                    token: "keystore-token".to_string(),
+                    subject: "human".to_string(),
+                    device_id: None,
+                    credential_id: None,
+                    private_key_pem: None,
+                    expires_at: None,
+                },
+            )
+            .expect("seed keystore");
+
+            let missing = home.join("does-not-exist.hcred");
+            unsafe { std::env::set_var("HEDDLE_CREDENTIAL", &missing) };
+
+            resolve_hosted_credential(Some("grpc.target.test"))
+                .expect_err("an unreadable HEDDLE_CREDENTIAL must never fall back to the keystore");
+        });
+    }
+
+    #[test]
+    fn env_credential_is_authoritative_and_not_renewable_over_a_stored_parent() {
+        use crypto::{Ed25519Signer, Signer};
+
+        with_isolated_env(|home| {
             let parent_signer = Ed25519Signer::generate().expect("parent proof key");
             let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
-            let parent_token = Biscuit::builder()
+            let parent_token = biscuit_auth::Biscuit::builder()
                 .fact(r#"user("alice")"#)
                 .expect("user fact")
                 .fact(r#"credential_id("cred-parent")"#)
@@ -415,7 +691,7 @@ mod tests {
                 .expect("proof key fact")
                 .fact(format!("expires_at({})", expires_at.to_rfc3339()).as_str())
                 .expect("expiry fact")
-                .build(&KeyPair::new())
+                .build(&biscuit_auth::KeyPair::new())
                 .expect("mint parent")
                 .to_base64()
                 .expect("encode parent");
@@ -435,6 +711,26 @@ mod tests {
             credentials::store_server_credential(server, stored_parent)
                 .expect("store nearly expired parent");
 
+            // Without HEDDLE_CREDENTIAL, the keystore parent is the active,
+            // renewable authority.
+            let stored_session =
+                HostedSession::build(&cli_shared::UserConfig::default(), Some(server.to_string()))
+                    .expect("build stored-parent session");
+            assert_eq!(
+                stored_session
+                    .config
+                    .token
+                    .as_ref()
+                    .map(|token| token.id.as_str()),
+                Some(parent_token.as_str())
+            );
+            assert!(
+                stored_session.renewable_authority_credential.is_some(),
+                "the exact stored authority token is renewable"
+            );
+
+            // The same child, handed to the runtime as a HEDDLE_CREDENTIAL
+            // .hcred, overrides the keystore and is never renewed.
             let child_signer = Ed25519Signer::generate().expect("child proof key");
             let child_token = crate::device_flow::attenuate_for_agent(
                 &parent_token,
@@ -449,33 +745,28 @@ mod tests {
                 child_signer.public_key(),
             )
             .expect("derive explicit child");
-
-            let stored_session = HostedSession::build(
-                &cli_shared::UserConfig::default(),
-                Some(server.to_string()),
-                HostedAuthMode::CredentialFallback,
+            let child_hcred = home.join("child.hcred");
+            crate::credential_file::write_credential_file(
+                &child_hcred,
+                &crate::credential_file::VerifiedCredential {
+                    server: server.to_string(),
+                    kind: crate::credential_file::CredentialKind::Agent,
+                    subject: "alice".to_string(),
+                    token: child_token.clone(),
+                    proof_key_pem: child_signer.to_pem().expect("child PEM"),
+                    expires_at: Some(
+                        (chrono::Utc::now() + chrono::Duration::minutes(3)).to_rfc3339(),
+                    ),
+                    credential_id: None,
+                    provenance: None,
+                },
             )
-            .expect("build stored-parent session");
-            assert_eq!(
-                stored_session
-                    .config
-                    .token
-                    .as_ref()
-                    .map(|token| token.id.as_str()),
-                Some(parent_token.as_str())
-            );
-            assert!(
-                stored_session.renewable_authority_credential.is_some(),
-                "the exact stored authority token is renewable"
-            );
+            .expect("write child .hcred");
 
-            unsafe { std::env::set_var("HEDDLE_REMOTE_TOKEN", &child_token) };
-            let explicit_child_session = HostedSession::build(
-                &cli_shared::UserConfig::default(),
-                Some(server.to_string()),
-                HostedAuthMode::CredentialFallback,
-            )
-            .expect("build explicit-child session");
+            unsafe { std::env::set_var("HEDDLE_CREDENTIAL", &child_hcred) };
+            let explicit_child_session =
+                HostedSession::build(&cli_shared::UserConfig::default(), Some(server.to_string()))
+                    .expect("build explicit-child session");
             assert_eq!(
                 explicit_child_session
                     .config
@@ -483,82 +774,58 @@ mod tests {
                     .as_ref()
                     .map(|token| token.id.as_str()),
                 Some(child_token.as_str()),
-                "the explicit child remains the active bearer"
+                "HEDDLE_CREDENTIAL is authoritative over the keystore"
             );
             assert!(
                 explicit_child_session
                     .renewable_authority_credential
                     .is_none(),
-                "an explicit derived bearer must not borrow the stored parent's renewal identity"
+                "an env-supplied credential must not borrow the stored parent's renewal identity"
             );
         });
-
-        unsafe {
-            match previous_home {
-                Some(path) => std::env::set_var("HEDDLE_HOME", path),
-                None => std::env::remove_var("HEDDLE_HOME"),
-            }
-            match previous_remote_token {
-                Some(token) => std::env::set_var("HEDDLE_REMOTE_TOKEN", token),
-                None => std::env::remove_var("HEDDLE_REMOTE_TOKEN"),
-            }
-        }
-        if let Err(payload) = result {
-            std::panic::resume_unwind(payload);
-        }
     }
 
     #[tokio::test]
-    async fn token_only_derived_child_does_not_fall_back_to_the_parent_device_key() {
-        use biscuit_auth::{Biscuit, KeyPair};
+    async fn token_only_stored_child_does_not_borrow_the_host_device_key() {
         use crypto::{Ed25519Signer, Signer};
         use grpc::heddle::api::v1alpha1::{
             collaboration_service_client::CollaborationServiceClient,
-            state_review_service_client::StateReviewServiceClient,
             identity_service_client::IdentityServiceClient,
             registry_service_client::RegistryServiceClient,
             repo_sync_service_client::RepoSyncServiceClient,
             repository_service_client::RepositoryServiceClient,
+            state_review_service_client::StateReviewServiceClient,
             workflow_service_client::WorkflowServiceClient,
         };
         use tonic::{Request, metadata::MetadataValue, transport::Endpoint};
 
-        use super::{HostedAuthMode, HostedSession};
-        use crate::{auth_cmd, credentials, grpc_hosted::HostedGrpcClient};
+        use crate::{auth_cmd, grpc_hosted::HostedGrpcClient};
 
-        let _guard = credentials::lock_test_env();
-        let home = tempfile::TempDir::new().expect("temp Heddle home");
-        let previous_home = std::env::var_os("HEDDLE_HOME");
-        let previous_remote_token = std::env::var_os("HEDDLE_REMOTE_TOKEN");
-        unsafe { std::env::set_var("HEDDLE_HOME", home.path()) };
-
-        let result = std::panic::catch_unwind(|| {
+        with_isolated_env(|home| {
             let signer = Ed25519Signer::generate().expect("device key");
             let private_key_pem = signer.to_pem().expect("device PEM");
 
             let subject = "headless-agent";
             let credential_id = "cred-headless";
             let expires_at = chrono::Utc::now() + chrono::Duration::days(30);
-            let user_fact = format!("user(\"{subject}\")");
-            let credential_fact = format!("credential_id(\"{credential_id}\")");
-            let expiry_fact = format!("expires_at({})", expires_at.to_rfc3339());
-            let pop_fact = format!("device_pop_key(\"{}\")", hex::encode(signer.public_key()));
-            let token = Biscuit::builder()
-                .fact(user_fact.as_str())
+            let token = biscuit_auth::Biscuit::builder()
+                .fact(format!("user(\"{subject}\")").as_str())
                 .expect("user fact")
-                .fact(credential_fact.as_str())
+                .fact(format!("credential_id(\"{credential_id}\")").as_str())
                 .expect("credential fact")
-                .fact(expiry_fact.as_str())
+                .fact(format!("expires_at({})", expires_at.to_rfc3339()).as_str())
                 .expect("expiry fact")
-                .fact(pop_fact.as_str())
+                .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
                 .expect("PoP key fact")
-                .build(&KeyPair::new())
+                .build(&biscuit_auth::KeyPair::new())
                 .expect("mint fixture biscuit")
                 .to_base64()
                 .expect("encode fixture biscuit");
             let server = "127.0.0.1:8421";
 
-            let root_hcred = home.path().join("root.hcred");
+            // Install the root device credential: the keystore gets the token
+            // AND its device key, and the shared device identity is linked.
+            let root_hcred = home.join("root.hcred");
             crate::credential_file::write_credential_file(
                 &root_hcred,
                 &crate::credential_file::VerifiedCredential {
@@ -575,40 +842,25 @@ mod tests {
             .expect("write root .hcred");
             auth_cmd::install_credential_file(&root_hcred).expect("headless credential install");
 
-            let stored = credentials::get_server_credential(server)
-                .expect("read credentials")
-                .expect("stored credential");
-            assert_eq!(stored.subject, subject);
-            assert_eq!(stored.credential_id.as_deref(), Some(credential_id));
-            assert_eq!(
-                stored.private_key_pem.as_deref(),
-                Some(private_key_pem.as_str())
-            );
-            assert!(stored.expires_at.is_some());
-            let credential_file = std::fs::read_to_string(credentials::credentials_path())
-                .expect("read installed credential file");
-            assert!(credential_file.contains("private_key_pem ="));
-            assert!(!credential_file.contains("\nprivate_key ="));
-
             let identity = repo::identity::load_device(&repo::identity::device_identity_path())
                 .expect("load device identity")
                 .expect("linked device identity");
             assert_eq!(identity.public_key, hex::encode(signer.public_key()));
             assert_eq!(identity.server, server);
 
-            unsafe { std::env::set_var("HEDDLE_REMOTE_TOKEN", &token) };
-            let root_session = HostedSession::build(
-                &cli_shared::UserConfig::default(),
-                Some(server.to_string()),
-                HostedAuthMode::ConfigToken,
-            )
-            .expect("build root same-host session");
+            // The stored root credential resolves its own proof key directly.
+            let root_session =
+                HostedSession::build(&cli_shared::UserConfig::default(), Some(server.to_string()))
+                    .expect("build root session");
             assert_eq!(
                 root_session.config.auth_proof_key_pem.as_deref(),
                 Some(private_key_pem.as_str()),
-                "a root token still resolves its matching same-host device key"
+                "a stored root credential resolves its bound device key"
             );
 
+            // Now replace the keystore entry with a TOKEN-ONLY derived child
+            // (no proof key of its own). Its PoP key differs from the host
+            // device identity, so it must NOT borrow the ancestor device key.
             let child_signer = Ed25519Signer::generate().expect("child PoP key");
             let child_token = crate::device_flow::attenuate_for_agent(
                 &token,
@@ -623,58 +875,28 @@ mod tests {
                 child_signer.public_key(),
             )
             .expect("derive child token");
-
-            let child_private_key_pem = child_signer.to_pem().expect("child PEM");
-            let child_hcred = home.path().join("child.hcred");
-            crate::credential_file::write_credential_file(
-                &child_hcred,
-                &crate::credential_file::VerifiedCredential {
-                    server: server.to_string(),
-                    kind: crate::credential_file::CredentialKind::Agent,
-                    subject: subject.to_string(),
+            credentials::store_server_credential(
+                server,
+                credentials::ServerCredential {
                     token: child_token.clone(),
-                    proof_key_pem: child_private_key_pem.clone(),
-                    expires_at: Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
+                    subject: subject.to_string(),
+                    device_id: None,
                     credential_id: None,
-                    provenance: None,
+                    private_key_pem: None,
+                    expires_at: Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
                 },
             )
-            .expect("write child .hcred");
-            auth_cmd::install_credential_file(&child_hcred)
-                .expect("install derived child credential");
+            .expect("store token-only child");
 
-            let stored_child = credentials::get_server_credential(server)
-                .expect("read installed child credential")
-                .expect("installed child credential");
-            assert_eq!(
-                stored_child.private_key_pem.as_deref(),
-                Some(child_private_key_pem.as_str()),
-                "the per-server child credential must retain its matching child key"
-            );
-            let preserved_identity =
-                repo::identity::load_device(&repo::identity::device_identity_path())
-                    .expect("reload shared device identity")
-                    .expect("shared root identity remains installed");
-            assert_eq!(
-                preserved_identity.public_key,
-                hex::encode(signer.public_key()),
-                "installing a derived child must not replace the host-wide root identity"
-            );
-            assert_eq!(preserved_identity.private_key_pem, private_key_pem);
-
-            unsafe { std::env::set_var("HEDDLE_REMOTE_TOKEN", &child_token) };
-
-            let session = HostedSession::build(
-                &cli_shared::UserConfig::default(),
-                Some(server.to_string()),
-                HostedAuthMode::ConfigToken,
-            )
-            .expect("build hosted session from token-only same-host handoff");
+            let session =
+                HostedSession::build(&cli_shared::UserConfig::default(), Some(server.to_string()))
+                    .expect("build token-only child session");
             let config = session.config;
             assert!(
                 config.auth_proof_key_pem.is_none(),
                 "a token-only child must not silently sign with its ancestor device key"
             );
+
             let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
             let client = HostedGrpcClient {
                 inner: RepoSyncServiceClient::new(channel.clone())
@@ -711,19 +933,5 @@ mod tests {
             assert!(metadata.get(crypto::pop::HDR_PROOF_NONCE).is_none());
             assert!(metadata.get(crypto::pop::HDR_PROOF).is_none());
         });
-
-        unsafe {
-            match previous_home {
-                Some(path) => std::env::set_var("HEDDLE_HOME", path),
-                None => std::env::remove_var("HEDDLE_HOME"),
-            }
-            match previous_remote_token {
-                Some(token) => std::env::set_var("HEDDLE_REMOTE_TOKEN", token),
-                None => std::env::remove_var("HEDDLE_REMOTE_TOKEN"),
-            }
-        }
-        if let Err(payload) = result {
-            std::panic::resume_unwind(payload);
-        }
     }
 }
