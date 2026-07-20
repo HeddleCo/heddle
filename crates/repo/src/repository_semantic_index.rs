@@ -95,7 +95,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
     }
 
     /// Build the index for `tree`, optionally reusing `parent` (its source tree
-    /// + semantic index root) for unchanged-subtree pruning. Returns the
+    /// plus semantic index root) for unchanged-subtree pruning. Returns the
     /// persisted [`SemanticIndexRoot`] and its storage hash.
     pub fn build_root(
         &mut self,
