@@ -2017,7 +2017,7 @@ dependencies = [
 [[package]]
 name = "heddle-api"
 version = "0.2.0"
-source = "git+https://github.com/HeddleCo/api?rev=e519ccb8cc19ea35d2466e6b2729930389e9ddcf#e519ccb8cc19ea35d2466e6b2729930389e9ddcf"
+source = "git+https://github.com/HeddleCo/api?rev=371fedbc7bf8a79ed58a21112ef6f945fdf34784#371fedbc7bf8a79ed58a21112ef6f945fdf34784"
 dependencies = [
  "bytes",
  "hex",
