@@ -3,7 +3,7 @@
 // (`heddle schemas <verb>` / `crates/cli/src/cli/commands/schemas.rs`).
 // Regenerate with `scripts/gen-ts-types.sh`; a drift test keeps it in sync.
 
-export const HEDDLE_SCHEMA_VERSION = "0.10.2" as const;
+export const HEDDLE_SCHEMA_VERSION = "0.10.3" as const;
 
 export interface AbortSchema {
   action: string;
