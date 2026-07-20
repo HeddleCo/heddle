@@ -25,9 +25,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use objects::{
     object::{
-        Blob, ContentHash, SemanticEntryKind, SemanticFileNode, SemanticIndexRoot,
-        SemanticTreeEntry, SemanticTreeNode, State, StateId, SymbolAnchor, SymbolEntry,
-        SymbolKindTag, Tree, TreeEntryTarget,
+        ContentHash, SemanticEntryKind, SemanticFileNode, SemanticIndexRoot, SemanticTreeEntry,
+        SemanticTreeNode, State, StateId, SymbolAnchor, SymbolEntry, SymbolKindTag, Tree,
+        TreeEntryTarget,
     },
     store::ObjectStore,
 };
@@ -79,6 +79,9 @@ pub struct SemanticIndexBuilder<'store, S: ObjectStore> {
     /// Languages encountered while building, seeded from the parent root so
     /// pruned subtrees' grammars are not lost.
     grammars: BTreeMap<String, String>,
+    /// Node blobs written this build, flushed as one pack at the end so a
+    /// snapshot never regresses to N loose per-node fsyncs.
+    pending: Vec<(ContentHash, Vec<u8>)>,
     /// Number of source blobs actually parsed this build.
     pub parse_count: usize,
 }
@@ -90,6 +93,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
             extractor_version,
             file_memo: HashMap::new(),
             grammars: BTreeMap::new(),
+            pending: Vec::new(),
             parse_count: 0,
         }
     }
@@ -113,7 +117,12 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
             node_hash,
             digest,
         );
-        let root_hash = self.put_node(&root.encode()?)?;
+        let root_hash = self.put_node(root.encode()?);
+        // Flush every node blob as a single pack — the same hot path the
+        // snapshot uses for source blobs, so capture stays fsync-cheap and
+        // leaves nothing loose behind.
+        self.store
+            .put_blobs_packed(std::mem::take(&mut self.pending))?;
         Ok((root, root_hash))
     }
 
@@ -154,7 +163,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
             });
         }
         let (node, digest) = SemanticTreeNode::new(entries);
-        let node_hash = self.put_node(&node.encode()?)?;
+        let node_hash = self.put_node(node.encode()?);
         Ok((node_hash, digest))
     }
 
@@ -299,7 +308,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
             extracted.symbols,
         );
         let digest = node.semantic_digest;
-        let node_hash = self.put_node(&node.encode()?)?;
+        let node_hash = self.put_node(node.encode()?);
         Ok(BuiltEntry {
             kind: SemanticEntryKind::File,
             node: node_hash,
@@ -307,8 +316,12 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         })
     }
 
-    fn put_node(&self, bytes: &[u8]) -> Result<ContentHash> {
-        self.store.put_blob(&Blob::new(bytes.to_vec()))
+    /// Queue an encoded node blob for the end-of-build pack flush, returning its
+    /// content hash (identical to what `put_blob` would assign).
+    fn put_node(&mut self, bytes: Vec<u8>) -> ContentHash {
+        let hash = ContentHash::compute_typed("blob", &bytes);
+        self.pending.push((hash, bytes));
+        hash
     }
 }
 
@@ -852,7 +865,7 @@ fn join_path(prefix: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{Attribution, Principal, TreeEntry};
+    use objects::object::{Attribution, Blob, Principal, TreeEntry};
     use tempfile::TempDir;
 
     use super::*;
