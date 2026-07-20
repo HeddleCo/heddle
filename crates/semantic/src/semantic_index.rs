@@ -34,7 +34,12 @@ use crate::{
 /// (non-definition file content), and mod-qualified `container_path`. Bumped so
 /// any same-version-but-old-layout nodes written by a pre-fix branch checkout
 /// are treated as stale and recomputed rather than digest-compared.
-pub const EXTRACTOR_VERSION: u32 = 2;
+///
+/// v3: Zig extraction added. `parent_is_reusable` only validates grammars
+/// *present* in the parent's map, so a pre-Zig index (no `"zig"` entry) would
+/// otherwise carry `.zig` files forward as `Opaque` indefinitely. The bump
+/// forces those to recompute so imported Zig repos gain granularity.
+pub const EXTRACTOR_VERSION: u32 = 3;
 
 /// Stable lowercase language name recorded in file nodes and the root's
 /// grammar map.
