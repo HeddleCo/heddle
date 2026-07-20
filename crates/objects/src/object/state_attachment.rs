@@ -44,7 +44,7 @@ pub enum StateAttachmentBody {
 /// currency (last-attachment-of-a-kind) and supersession (same-kind guard) are
 /// expressed in terms of, and that the wire layer threads through
 /// `wire::ObjectId` (heddle#1080, Fable §B(1)).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StateAttachmentKind {
     Context,
     RiskSignals,

@@ -656,6 +656,7 @@ fn decode_native_pack(pack_data: &[u8], index_data: &[u8]) -> Vec<ObjectData> {
                     ObjectId::StateAttachment {
                         state: attachment.state_id,
                         id: attachment.id(),
+                        kind: attachment.body.kind(),
                     }
                 }
                 (PackObjectId::Hash(hash), _) => ObjectId::Hash(hash),
