@@ -4,7 +4,7 @@ use std::collections::{HashSet, VecDeque};
 use objects::{
     object::{
         ContentHash, SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode, State, StateAttachment,
-        StateAttachmentBody, StateAttachmentId, StateId, TreeEntryTarget,
+        StateAttachmentBody, StateAttachmentId, StateAttachmentKind, StateId, TreeEntryTarget,
     },
     store::{ObjectStore, pack::ObjectType as PackObjectType},
 };
@@ -19,6 +19,12 @@ pub enum ObjectId {
     StateAttachment {
         state: StateId,
         id: StateAttachmentId,
+        /// The attachment's kind, a pure projection of its body
+        /// ([`StateAttachmentBody::kind`]). Carried through the wire so
+        /// descriptors self-describe their kind; the dedup/identity key is
+        /// still `(state, id)`, and kind is coherent under `Eq`/`Hash` because
+        /// it is a deterministic function of the same record.
+        kind: StateAttachmentKind,
     },
 }
 
@@ -615,6 +621,7 @@ fn object_info_from_event(
                 id: ObjectId::StateAttachment {
                     state,
                     id: attachment.id(),
+                    kind: attachment.body.kind(),
                 },
                 obj_type: ObjectType::StateAttachment,
                 size: bytes.len() as u64,
@@ -666,6 +673,7 @@ fn planned_object_from_event(
             id: ObjectId::StateAttachment {
                 state,
                 id: attachment.id(),
+                kind: attachment.body.kind(),
             },
             obj_type: ObjectType::StateAttachment,
         })),

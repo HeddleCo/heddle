@@ -138,7 +138,7 @@ pub fn load_requested_object(store: &impl ObjectStore, req: &ObjectRequest) -> R
                 .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string()))?;
             (ObjectType::State, rmp_serde::to_vec_named(&state)?)
         }
-        ObjectId::StateAttachment { state, id } => {
+        ObjectId::StateAttachment { state, id, kind: _ } => {
             let attachment = store
                 .get_state_attachment(state, id)?
                 .ok_or_else(|| ProtocolError::ObjectNotFound(id.to_string()))?;
@@ -186,7 +186,7 @@ pub fn load_object_data(
         (ObjectId::StateId(state_id), ObjectType::StateVisibility) => store
             .get_state_visibility_bytes_for_state(state_id)?
             .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string_full()))?,
-        (ObjectId::StateAttachment { state, id }, ObjectType::StateAttachment) => {
+        (ObjectId::StateAttachment { state, id, kind: _ }, ObjectType::StateAttachment) => {
             let attachment = store
                 .get_state_attachment(state, id)?
                 .ok_or_else(|| ProtocolError::ObjectNotFound(id.to_string()))?;
@@ -234,12 +234,22 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
             }
             store.put_state_serialized(&data.data, *state_id)?;
         }
-        (ObjectId::StateAttachment { state, id }, ObjectType::StateAttachment) => {
+        (ObjectId::StateAttachment { state, id, kind }, ObjectType::StateAttachment) => {
             let attachment: objects::object::StateAttachment = rmp_serde::from_slice(&data.data)?;
             if attachment.state_id != *state || attachment.id() != *id {
                 return Err(ProtocolError::InvalidState(
                     "state attachment id mismatch".to_string(),
                 ));
+            }
+            // The descriptor's carried kind must agree with the decoded body's
+            // kind — kind is a pure projection of the record, so a divergence
+            // means the descriptor and the bytes disagree about what this
+            // attachment is. Refuse rather than silently trust either side.
+            let body_kind = attachment.body.kind();
+            if *kind != body_kind {
+                return Err(ProtocolError::InvalidState(format!(
+                    "state attachment kind mismatch: descriptor {kind:?}, body {body_kind:?}"
+                )));
             }
             store.put_state_attachment(&attachment)?;
         }
@@ -560,6 +570,7 @@ mod tests {
         let id = ObjectId::StateAttachment {
             state: state.id(),
             id: attachment.id(),
+            kind: attachment.body.kind(),
         };
         let data = load_object_data(&source, &id, ObjectType::StateAttachment).unwrap();
         store_received_object(&dest, &data).unwrap();
