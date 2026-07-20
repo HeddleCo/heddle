@@ -1908,12 +1908,15 @@ no operation allowlist. When the server is unreachable, `reachable` is `false`,
   "output_kind": "auth_create_service_token",
   "name": "github-ci-main",
   "namespace": "heddle/platform",
-  "scope": "namespace:heddle/platform",
-  "token": "heddle_sa_...",
-  "private_key_pem": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
+  "scope": "repo:heddle/platform/*",
+  "credential_path": "/home/ci/.heddle/service-accounts/github-ci-main.hcred",
   "expires_in_days": 30
 }
 ```
+
+The token and proof key are written into the single `.hcred` file at
+`credential_path` (mode `0600`); they never appear on stdout or in this
+contract.
 
 ---
 
