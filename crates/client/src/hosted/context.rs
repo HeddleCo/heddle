@@ -73,6 +73,23 @@ impl CallContextFactory {
         self
     }
 
+    pub fn with_signing_key_pem(
+        mut self,
+        pem: &str,
+        signing_identity: impl Into<String>,
+    ) -> Result<Self> {
+        let signing_identity = signing_identity.into();
+        if !signing_identity
+            .strip_prefix("principal:")
+            .is_some_and(|subject| !subject.trim().is_empty())
+        {
+            return Err(HostedError::SigningIdentityRequired);
+        }
+        self.signer = Some(Arc::new(Ed25519Signer::from_pem(pem)?));
+        self.signing_identity = Some(signing_identity);
+        Ok(self)
+    }
+
     pub fn from_client_config(config: &ClientConfig) -> Result<Self> {
         let signer = config
             .auth_proof_key_pem

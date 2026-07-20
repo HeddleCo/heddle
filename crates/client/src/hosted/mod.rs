@@ -11,6 +11,7 @@ mod content;
 mod context;
 mod error;
 mod helpers;
+mod human;
 mod methods;
 pub mod monorepo;
 mod operation_id;
@@ -28,6 +29,7 @@ pub use collaboration::{HostedDiscussion, HostedDiscussionTurn};
 use connection::HostedConnection;
 pub use context::{CallContextFactory, SignedCallContext};
 pub use error::HostedError;
+pub use human::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion};
 use iroh::{Endpoint, EndpointAddr};
 pub use methods::HostedRoutes;
 use prost::Message;
@@ -48,11 +50,27 @@ impl PullMaterialization {
 }
 
 /// One reusable native connection to a terminating Weft application endpoint.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HostedClient {
     connection: Arc<HostedConnection>,
     context: CallContextFactory,
     transport: helpers::HostedTransportPolicy,
+    on_human_signature: Option<HumanSignatureCallback>,
+}
+
+impl std::fmt::Debug for HostedClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HostedClient")
+            .field("connection", &self.connection)
+            .field("context", &self.context)
+            .field("transport", &self.transport)
+            .field(
+                "has_human_signature_callback",
+                &self.on_human_signature.is_some(),
+            )
+            .finish()
+    }
 }
 
 impl HostedClient {
@@ -65,6 +83,7 @@ impl HostedClient {
             connection: HostedConnection::connect_verified(descriptor).await?,
             context: CallContextFactory::default(),
             transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
+            on_human_signature: None,
         })
     }
 
@@ -76,6 +95,7 @@ impl HostedClient {
             connection: HostedConnection::connect_verified(descriptor).await?,
             context: CallContextFactory::from_client_config(config)?,
             transport: helpers::HostedTransportPolicy::from_client_config(config),
+            on_human_signature: None,
         })
     }
 
@@ -85,6 +105,7 @@ impl HostedClient {
             connection: HostedConnection::connect(endpoint, address).await?,
             context: CallContextFactory::default(),
             transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
+            on_human_signature: None,
         })
     }
 
@@ -97,6 +118,7 @@ impl HostedClient {
             connection: HostedConnection::connect(endpoint, address).await?,
             context: CallContextFactory::from_client_config(config)?,
             transport: helpers::HostedTransportPolicy::from_client_config(config),
+            on_human_signature: None,
         })
     }
 
@@ -109,7 +131,13 @@ impl HostedClient {
             connection: HostedConnection::connect(endpoint, address).await?,
             context,
             transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
+            on_human_signature: None,
         })
+    }
+
+    pub fn with_human_signature_callback(mut self, callback: HumanSignatureCallback) -> Self {
+        self.on_human_signature = Some(callback);
+        self
     }
 
     pub async fn call_unary<Request, Response>(
@@ -131,7 +159,50 @@ impl HostedClient {
             return Err(HostedError::MissingClientOperationId);
         }
         let signed = self.context.unary(method, &encoded, client_operation_id)?;
-        call::unary_encoded(&self.connection, method, &signed.context, &encoded).await
+        match call::unary_encoded(&self.connection, method, &signed.context, &encoded).await {
+            Ok(response) => Ok(response),
+            Err(HostedError::Call {
+                code: api::heddle::api::v1alpha1::CallFailureCode::Unauthenticated,
+                message,
+                details,
+            }) if api::human_verification_challenge(&details).is_some() => {
+                let challenge = api::human_verification_challenge(&details)
+                    .expect("guarded human-verification detail");
+                let canonical = signed
+                    .canonical()
+                    .ok_or(HostedError::SigningIdentityRequired)?;
+                let callback =
+                    self.on_human_signature
+                        .as_ref()
+                        .ok_or_else(|| HostedError::Call {
+                            code: api::heddle::api::v1alpha1::CallFailureCode::Unauthenticated,
+                            message,
+                            details,
+                        })?;
+                let assertion = callback(HumanSignatureRequest {
+                    method_path: method.to_string(),
+                    action_summary: format!("Authorize {method}"),
+                    challenge: human::challenge(canonical),
+                    canonical: canonical.to_vec(),
+                    action_url: (!challenge.action_url.is_empty()).then_some(challenge.action_url),
+                })
+                .map_err(|error| HostedError::Call {
+                    code: api::heddle::api::v1alpha1::CallFailureCode::PermissionDenied,
+                    message: error.to_string(),
+                    details: Vec::new(),
+                })?;
+                let context = signed.with_human_verification(
+                    assertion.signature,
+                    api::heddle::api::v1alpha1::HumanVerification {
+                        client_data_json: assertion.client_data_json,
+                        authenticator_data: assertion.authenticator_data,
+                        user_handle: assertion.user_handle.unwrap_or_default(),
+                    },
+                )?;
+                call::unary_encoded(&self.connection, method, &context, &encoded).await
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn call_server_stream<Request, Response>(
