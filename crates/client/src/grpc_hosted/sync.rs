@@ -544,11 +544,24 @@ impl HostedGrpcClient {
 
         let wanted_plan = RepositoryTransferPlan::from_object_infos(wanted_infos, git_lane_intent);
 
-        if !wanted_plan.partitions.packable_objects.is_empty() {
+        // H3 (heddle#1082): keep the push pack forgery-sealed. `StateAttachment`
+        // records are content-addressed and ride the pull pack server->client
+        // unchanged, but a deployed server rejects any pack-carried attachment
+        // as a forgery guard (weft#549). Split them out of the pack partition
+        // by push-packability and route them onto the out-of-pack sidecar lane
+        // (the same lane as Redaction / StateVisibility), where the server
+        // verifies them per-kind at finalize.
+        let (pack_objects, push_sidecar_objects): (Vec<_>, Vec<_>) = wanted_plan
+            .partitions
+            .packable_objects
+            .into_iter()
+            .partition(|info| info.obj_type.packable_for_push());
+
+        if !pack_objects.is_empty() {
             send_native_pack_streaming_messages(
                 &tx,
                 repo,
-                &wanted_plan.partitions.packable_objects,
+                &pack_objects,
                 PushWireIdentities {
                     transfer_id: &transfer_id,
                     client_operation_id: operation_id.as_str(),
@@ -560,7 +573,12 @@ impl HostedGrpcClient {
             .await?;
         }
 
-        for info in wanted_plan.partitions.sidecar_objects {
+        for info in wanted_plan
+            .partitions
+            .sidecar_objects
+            .into_iter()
+            .chain(push_sidecar_objects)
+        {
             let message = sidecar_push_message(repo, info, operation_id.as_str())?;
             tx.send(message).await.map_err(|_| {
                 ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
@@ -1410,10 +1428,56 @@ fn sidecar_push_message(
         ObjectType::StateVisibility => {
             state_visibility_push_message(repo, info, client_operation_id)
         }
+        ObjectType::StateAttachment => {
+            state_attachment_push_message(repo, info, client_operation_id)
+        }
         obj_type => Err(ProtocolError::InvalidState(format!(
             "{obj_type:?} is not an out-of-pack sidecar object"
         ))),
     }
+}
+
+/// Out-of-pack **push** transport for a `StateAttachment` record (H3,
+/// heddle#1082).
+///
+/// Attachments are content-addressed and ride the pull pack server->client
+/// unchanged, but a deployed server rejects any pack-carried attachment as a
+/// forgery guard (weft#549). On push they therefore travel the sidecar lane
+/// (the same lane as `Redaction` / `StateVisibility`). The sidecar frame must
+/// carry the byte-identical attachment record plus its descriptor kind so the
+/// server can reconstruct and verify it per-kind at finalize (weft W3).
+///
+/// The on-wire carrier is a pending heddle-api addition: 0.1.3 ships only
+/// `ObjectDescriptor.attachment_kind` (H2), not a `StateAttachmentTransfer`
+/// `PushClientFrame` variant. Until that frame lands together with the weft
+/// accept chokepoint (W3, heddle#1082), this arm assembles the payload and then
+/// fails closed rather than smuggling the record through a frame that means
+/// something else. Deployed servers report attachments "present" on push, so
+/// this arm is unreachable in practice today; the forgery seal (excluding the
+/// record from the push pack) is already in force upstream at the push
+/// partition site.
+fn state_attachment_push_message(
+    repo: &Repository,
+    info: wire::ObjectInfo,
+    _client_operation_id: &str,
+) -> Result<PushClientFrame, ProtocolError> {
+    let wire::ObjectId::StateAttachment { id, kind, .. } = &info.id else {
+        return Err(ProtocolError::InvalidState(
+            "wanted StateAttachment must be keyed by ObjectId::StateAttachment".to_string(),
+        ));
+    };
+    // Assemble exactly what the server needs to reconstruct + verify the record:
+    // the byte-identical attachment record (rmp-encoded, the same encoding the
+    // pack/pull path uses) keyed by `(state, id, kind)`. The descriptor kind is
+    // a pure projection of the record body; the receiver re-checks that they
+    // agree at finalize (weft W3).
+    let record = wire::load_object_data(repo.store(), &info.id, ObjectType::StateAttachment)?;
+    Err(ProtocolError::InvalidState(format!(
+        "state attachment {id} ({kind:?}, {} record bytes) is ready for the \
+         sidecar lane, but heddle-api 0.1.3 has no StateAttachmentTransfer push \
+         frame; the sidecar send lands with weft W3 (heddle#1082)",
+        record.data.len()
+    )))
 }
 
 fn state_visibility_push_message(
@@ -4110,6 +4174,124 @@ mod tests {
                 "{obj_type:?} is excluded from native packs but missing from the out-of-pack transfer partition"
             );
         }
+    }
+
+    fn state_attachment_info(state: StateId) -> ObjectInfo {
+        ObjectInfo {
+            id: ObjectId::StateAttachment {
+                state,
+                id: objects::object::StateAttachmentId::from_hash(ContentHash::from_bytes(
+                    [5u8; 32],
+                )),
+                kind: objects::object::StateAttachmentKind::SemanticIndex,
+            },
+            obj_type: ObjectType::StateAttachment,
+            size: 0,
+            delta_base: None,
+        }
+    }
+
+    /// H3 (heddle#1082): on push the attachment record is split out of the pack
+    /// partition and routed to the sidecar lane, while the pull partition keeps
+    /// carrying it in the pack exactly as before.
+    #[test]
+    fn state_attachment_pushes_via_sidecar_lane_but_pulls_in_pack() {
+        let state = StateId::from_bytes([9u8; 32]);
+        let attachment = state_attachment_info(state);
+
+        // The wire plan is built with pull/general semantics, so the record
+        // lands in `packable_objects` (proving pull carriage is unchanged).
+        let plan = RepositoryTransferPlan::from_object_infos(
+            vec![
+                state_info(state),
+                state_visibility_info(state),
+                attachment.clone(),
+            ],
+            GitLaneTransferIntent::HeddleObjectsOnly,
+        );
+        assert!(
+            plan.partitions
+                .packable_objects
+                .iter()
+                .any(|info| info.obj_type == ObjectType::StateAttachment),
+            "pull plan must keep the attachment record in the pack partition"
+        );
+
+        // The push send site re-partitions `packable_objects` by
+        // push-packability: the attachment moves to the sidecar side, the
+        // state stays in the pack side.
+        let (pack_objects, push_sidecar_objects): (Vec<_>, Vec<_>) = plan
+            .partitions
+            .packable_objects
+            .into_iter()
+            .partition(|info| info.obj_type.packable_for_push());
+        assert!(
+            pack_objects.iter().all(|info| info.obj_type != ObjectType::StateAttachment),
+            "attachment record must never ride the push pack"
+        );
+        assert!(
+            pack_objects.iter().any(|info| info.obj_type == ObjectType::State),
+            "ordinary content-addressed objects still ride the push pack"
+        );
+        assert!(
+            push_sidecar_objects
+                .iter()
+                .any(|info| info.obj_type == ObjectType::StateAttachment),
+            "attachment record must be routed to the sidecar lane on push"
+        );
+
+        // Direction predicates agree with the routing.
+        assert!(!attachment.obj_type.packable_for_push());
+        assert!(attachment.obj_type.packable_for_pull());
+    }
+
+    /// The sidecar arm assembles the byte-identical attachment record (proving
+    /// the frame will carry enough to reconstruct it server-side) and then
+    /// fails closed pending the heddle-api `StateAttachmentTransfer` frame
+    /// (lands with weft W3, heddle#1082).
+    #[test]
+    fn state_attachment_push_message_assembles_record_and_defers_frame() {
+        let (dir, repo) = temp_repo();
+        std::fs::write(dir.path().join("README.md"), "hi\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+
+        let risk_blob = repo
+            .store()
+            .put_blob(&Blob::from("risk signals"))
+            .expect("put risk blob");
+        let attachment = objects::object::StateAttachment {
+            state_id: state.state_id,
+            body: objects::object::StateAttachmentBody::RiskSignals(risk_blob),
+            attribution: Attribution::human(Principal::new("H3 Tester", "h3@example.com")),
+            created_at: Utc::now(),
+            supersedes: None,
+        };
+        repo.put_state_attachment(&attachment).unwrap();
+
+        let info = ObjectInfo {
+            id: ObjectId::StateAttachment {
+                state: state.state_id,
+                id: attachment.id(),
+                kind: attachment.body.kind(),
+            },
+            obj_type: ObjectType::StateAttachment,
+            size: 0,
+            delta_base: None,
+        };
+
+        let err = sidecar_push_message(&repo, info, "op-1")
+            .expect_err("attachment sidecar frame is not yet available");
+        let ProtocolError::InvalidState(message) = err else {
+            panic!("expected InvalidState, got {err:?}");
+        };
+        assert!(
+            message.contains("StateAttachmentTransfer"),
+            "error must name the pending api frame: {message}"
+        );
+        assert!(
+            message.contains("record bytes"),
+            "error must confirm the record was assembled: {message}"
+        );
     }
 
     #[test]
