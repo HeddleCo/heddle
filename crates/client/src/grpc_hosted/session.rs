@@ -104,7 +104,18 @@ impl std::fmt::Debug for ResolvedHostedCredential {
 /// (the `.hcred` JSON object) and never contains a newline.
 fn heddle_credential_env_path() -> Result<Option<PathBuf>> {
     match std::env::var(HEDDLE_CREDENTIAL_ENV) {
-        Ok(value) if !value.is_empty() => {
+        Ok(value) => {
+            if value.is_empty() {
+                // Fail closed rather than fall through to the keystore: a set-but-empty
+                // value is almost always a failed shell expansion (e.g.
+                // `export HEDDLE_CREDENTIAL=$UNSET`), and silently authenticating as
+                // the stored (human) identity is exactly the confusion this resolver
+                // exists to prevent.
+                anyhow::bail!(
+                    "HEDDLE_CREDENTIAL is set but empty; unset it to use the stored \
+                     credential, or point it at a .hcred file"
+                );
+            }
             if value.starts_with('{') || value.contains('\n') {
                 anyhow::bail!(
                     "HEDDLE_CREDENTIAL takes a file path, not credential contents"
@@ -112,7 +123,7 @@ fn heddle_credential_env_path() -> Result<Option<PathBuf>> {
             }
             Ok(Some(PathBuf::from(value)))
         }
-        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotPresent) => Ok(None),
         Err(err @ std::env::VarError::NotUnicode(_)) => {
             anyhow::bail!("HEDDLE_CREDENTIAL is not valid UTF-8: {err}")
         }
