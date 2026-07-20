@@ -161,6 +161,25 @@ impl HostedSession {
 }
 
 impl HostedClient {
+    /// Connect to a hosted server through its signed HTTPS endpoint descriptor.
+    ///
+    /// This is the transport-neutral entry point for callers that already
+    /// assembled a [`ClientConfig`] (for example an operator CLI). Descriptor
+    /// verification and Iroh address selection remain inside the hosted-call
+    /// module instead of being repeated by each caller.
+    pub async fn connect_server(server: &str, config: &ClientConfig) -> Result<Self> {
+        let key_id = config.descriptor_key_id.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("native hosted transport requires a trusted descriptor key id")
+        })?;
+        let public_key = config.descriptor_public_key.ok_or_else(|| {
+            anyhow::anyhow!("native hosted transport requires a trusted descriptor public key")
+        })?;
+        let mut keys = DescriptorKeyring::default();
+        keys.insert(key_id, public_key, i64::MIN, i64::MAX)?;
+        let descriptor = fetch_endpoint_descriptor(&descriptor_url(server)?, &keys).await?;
+        Ok(Self::connect_with_config(&descriptor, config).await?)
+    }
+
     pub async fn open_session(
         addr: SocketAddr,
         user_config: &UserConfig,
@@ -267,5 +286,16 @@ mod tests {
             "https://weft.example:8421/.well-known/heddle/iroh-endpoint"
         );
         assert!(descriptor_url("http://weft.example:8421").is_err());
+    }
+
+    #[tokio::test]
+    async fn connect_server_requires_a_descriptor_trust_root_before_network_io() {
+        let error = crate::hosted::HostedClient::connect_server(
+            "weft.example:8421",
+            &cli_shared::ClientConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("trusted descriptor key id"));
     }
 }
