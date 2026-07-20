@@ -40,7 +40,7 @@ uuid.workspace = true
 # matching versions from the registry.
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.10" }
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.10" }
-api = { package = "heddle-api", git = "https://github.com/HeddleCo/api", rev = "4dbdd3f1cd0b34f2f4a5ab74f6265d4b6c849c73", features = ["reflection"] }
+api = { package = "heddle-api", git = "https://github.com/HeddleCo/api", rev = "56501eb754db4637a554d9ac50b63f4741f5145c", features = ["reflection"] }
 objects = { path = "../objects", package = "heddle-objects", version = "0.10" }
 wire = { path = "../wire", package = "heddle-wire", version = "0.10", default-features = false }
 refs = { path = "../refs", package = "heddle-refs", version = "0.10" }
