@@ -13,10 +13,10 @@ use api::heddle::api::v1alpha1::{
     GitObjectId as ProtoGitObjectId, GitPackTransfer, GitRefKind as ProtoGitRefKind,
     GitRefUpdateTransfer, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor, PackChunk,
     PackStreamKind, PartialFetchStatus, PullClientFrame, PullRequest, PullServerFrame,
-    PushClientFrame, PushRequest, PushServerFrame, RedactionTransfer, StateVisibilityTransfer,
-    StreamOpeningProof, ThreadConfidenceSummary, ThreadIntegrationPolicy, ThreadMetadata,
-    ThreadVerificationSummary, TransportMode, UpdateRefRequest, WantObjects, git_lane_transfer,
-    pull_client_frame, pull_server_frame, push_client_frame, push_server_frame,
+    PushClientFrame, PushRequest, PushServerFrame, RedactionTransfer, StateAttachmentTransfer,
+    StateVisibilityTransfer, StreamOpeningProof, ThreadConfidenceSummary, ThreadIntegrationPolicy,
+    ThreadMetadata, ThreadVerificationSummary, TransportMode, UpdateRefRequest, WantObjects,
+    git_lane_transfer, pull_client_frame, pull_server_frame, push_client_frame, push_server_frame,
 };
 use objects::{
     Progress,
@@ -514,11 +514,21 @@ impl HostedClient {
 
         let wanted_plan = RepositoryTransferPlan::from_object_infos(wanted_infos, git_lane_intent);
 
-        if !wanted_plan.partitions.packable_objects.is_empty() {
+        // State attachments remain packable for server-to-client pull, but are
+        // split out of client-to-server packs so Weft's pack anti-forgery seal
+        // can stay absolute. The inspectable sidecar lane is verified per kind
+        // before the hosted ref moves.
+        let (pack_objects, push_sidecar_objects): (Vec<_>, Vec<_>) = wanted_plan
+            .partitions
+            .packable_objects
+            .into_iter()
+            .partition(|info| info.obj_type.packable_for_push());
+
+        if !pack_objects.is_empty() {
             send_native_pack_streaming_messages(
                 &tx,
                 repo,
-                &wanted_plan.partitions.packable_objects,
+                &pack_objects,
                 PushWireIdentities {
                     transfer_id: &transfer_id,
                     client_operation_id: operation_id.as_str(),
@@ -530,7 +540,12 @@ impl HostedClient {
             .await?;
         }
 
-        for info in wanted_plan.partitions.sidecar_objects {
+        for info in wanted_plan
+            .partitions
+            .sidecar_objects
+            .into_iter()
+            .chain(push_sidecar_objects)
+        {
             let message = sidecar_push_message(repo, info, operation_id.as_str())?;
             tx.send(message).await.map_err(|_| {
                 ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
@@ -1551,10 +1566,40 @@ fn sidecar_push_message(
         ObjectType::StateVisibility => {
             state_visibility_push_message(repo, info, client_operation_id)
         }
+        ObjectType::StateAttachment => {
+            state_attachment_push_message(repo, info, client_operation_id)
+        }
         obj_type => Err(ProtocolError::InvalidState(format!(
             "{obj_type:?} is not an out-of-pack sidecar object"
         ))),
     }
+}
+
+/// Build the inspectable, out-of-pack carrier used for client-to-server
+/// attachment pushes. Pull keeps using the native pack. The receiver treats
+/// the decoded body's kind as authoritative and verifies it before install.
+fn state_attachment_push_message(
+    repo: &Repository,
+    info: wire::ObjectInfo,
+    client_operation_id: &str,
+) -> Result<PushClientFrame, ProtocolError> {
+    let record = wire::load_object_data(repo.store(), &info.id, ObjectType::StateAttachment)?;
+    let wire::ObjectId::StateAttachment { state, id, kind } = info.id else {
+        return Err(ProtocolError::InvalidState(
+            "wanted StateAttachment must be keyed by ObjectId::StateAttachment".to_string(),
+        ));
+    };
+    Ok(PushClientFrame {
+        frame: Some(push_client_frame::Frame::StateAttachment(
+            StateAttachmentTransfer {
+                state_id: super::helpers::proto_state_id(state),
+                attachment_id: id.as_hash().to_hex(),
+                attachment_kind: super::helpers::attachment_kind_to_proto(kind) as i32,
+                attachment_object: record.data,
+            },
+        )),
+        client_operation_id: client_operation_id.to_string(),
+    })
 }
 
 fn state_visibility_push_message(
@@ -3154,4 +3199,79 @@ fn preferred_transport_mode(
     let _ = transport;
     let _ = object_count;
     TransportMode::NativePack
+}
+
+#[cfg(test)]
+mod attachment_sidecar_tests {
+    use api::heddle::api::v1alpha1::{
+        StateAttachmentKind as ProtoStateAttachmentKind, push_client_frame,
+    };
+    use chrono::Utc;
+    use objects::{
+        object::{Attribution, Blob, Principal, StateAttachment, StateAttachmentBody},
+        store::ObjectStore,
+    };
+    use tempfile::TempDir;
+    use wire::{ObjectId, ObjectInfo, ObjectType};
+
+    use super::{Repository, sidecar_push_message};
+
+    #[test]
+    fn semantic_index_attachment_emits_verified_sidecar_carrier() {
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        std::fs::write(temp.path().join("lib.rs"), "pub fn f() {}\n").expect("write source");
+        let snapshot = repo
+            .snapshot(Some("seed".to_string()), None)
+            .expect("snapshot");
+        let semantic_root = repo
+            .store()
+            .put_blob(&Blob::from_slice(b"semantic-root"))
+            .expect("put semantic root");
+        let attachment = StateAttachment {
+            state_id: snapshot.state_id,
+            body: StateAttachmentBody::SemanticIndex(semantic_root),
+            attribution: Attribution::human(Principal::new("H3 Tester", "h3@example.com")),
+            created_at: Utc::now(),
+            supersedes: None,
+        };
+        repo.put_state_attachment(&attachment)
+            .expect("put semantic attachment");
+
+        let id = ObjectId::StateAttachment {
+            state: snapshot.state_id,
+            id: attachment.id(),
+            kind: attachment.body.kind(),
+        };
+        let canonical = wire::load_object_data(repo.store(), &id, ObjectType::StateAttachment)
+            .expect("load canonical attachment");
+        let message = sidecar_push_message(
+            &repo,
+            ObjectInfo {
+                id,
+                obj_type: ObjectType::StateAttachment,
+                size: canonical.data.len() as u64,
+                delta_base: None,
+            },
+            "op-1",
+        )
+        .expect("build attachment sidecar");
+
+        assert_eq!(message.client_operation_id, "op-1");
+        let Some(push_client_frame::Frame::StateAttachment(transfer)) = message.frame else {
+            panic!("expected StateAttachmentTransfer")
+        };
+        assert_eq!(
+            transfer.state_id,
+            super::super::helpers::proto_state_id(snapshot.state_id)
+        );
+        assert_eq!(transfer.attachment_id, attachment.id().as_hash().to_hex());
+        assert_eq!(
+            transfer.attachment_kind,
+            ProtoStateAttachmentKind::SemanticIndex as i32
+        );
+        assert_eq!(transfer.attachment_object, canonical.data);
+        assert!(!ObjectType::StateAttachment.packable_for_push());
+        assert!(ObjectType::StateAttachment.packable_for_pull());
+    }
 }

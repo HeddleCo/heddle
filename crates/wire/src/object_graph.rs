@@ -110,8 +110,41 @@ impl ObjectType {
         }
     }
 
+    /// Whether this object type can ride the content-addressed native pack in
+    /// general (the historical, direction-agnostic predicate). Sidecar records
+    /// (`Redaction`, `StateVisibility`) live outside `.heddle/objects/` and can
+    /// never be packed; everything else can.
+    ///
+    /// Prefer [`ObjectType::packable_for_push`] /
+    /// [`ObjectType::packable_for_pull`] at transfer sites: packability is
+    /// direction-dependent for `StateAttachment` (see those methods). This
+    /// method retains the pull/general semantics so pack construction,
+    /// have-set, and local-copy planners are unchanged.
     pub fn packable(self) -> bool {
         !matches!(self, ObjectType::Redaction | ObjectType::StateVisibility)
+    }
+
+    /// Whether this object type may ride the client→server **push** pack.
+    ///
+    /// `StateAttachment` is deliberately excluded on push even though it is a
+    /// content-addressed object: a deployed server rejects any pack-carried
+    /// attachment as a forgery-prevention measure (weft#549). Pushed
+    /// attachments must instead ride the out-of-pack **sidecar** lane (the same
+    /// lane as `Redaction`/`StateVisibility`), where the server can verify them
+    /// per-kind at finalize while the pack itself stays forgery-sealed. Every
+    /// other type keeps its [`ObjectType::packable`] answer.
+    pub fn packable_for_push(self) -> bool {
+        self.packable() && !matches!(self, ObjectType::StateAttachment)
+    }
+
+    /// Whether this object type may ride the server→client **pull/clone** pack.
+    ///
+    /// Identical to [`ObjectType::packable`]: attachments are carried in the
+    /// pull pack exactly as today. The push/pull split exists solely so the
+    /// push direction can exclude `StateAttachment` without disturbing the
+    /// working pull carriage.
+    pub fn packable_for_pull(self) -> bool {
+        self.packable()
     }
 
     pub fn pack_object_type(self) -> Result<PackObjectType> {
@@ -1711,5 +1744,126 @@ mod tests {
                 "plan closure must include state metadata blob {metadata_hash}"
             );
         }
+    }
+
+    /// The push/pull packability split routes `StateAttachment` off the push
+    /// pack (weft#549 forgery seal) while leaving pull carriage and every other
+    /// type untouched.
+    #[test]
+    fn packable_predicates_split_state_attachment_by_direction() {
+        // Sidecar records are never packable in either direction.
+        for sidecar in [ObjectType::Redaction, ObjectType::StateVisibility] {
+            assert!(!sidecar.packable_for_push(), "{sidecar:?} push");
+            assert!(!sidecar.packable_for_pull(), "{sidecar:?} pull");
+        }
+        // Content-addressed objects ride the pack in both directions.
+        for packable in [
+            ObjectType::Blob,
+            ObjectType::Tree,
+            ObjectType::State,
+            ObjectType::Action,
+        ] {
+            assert!(packable.packable_for_push(), "{packable:?} push");
+            assert!(packable.packable_for_pull(), "{packable:?} pull");
+        }
+        // The attachment record: excluded from the push pack, kept on pull.
+        assert!(!ObjectType::StateAttachment.packable_for_push());
+        assert!(ObjectType::StateAttachment.packable_for_pull());
+    }
+
+    /// A pushed state's semantic-index attachment RECORD must be excluded from
+    /// the push pack (it rides the sidecar lane) while its semantic-index
+    /// content blobs still ride the pack in both directions, and the same
+    /// record stays packable server->client on pull.
+    #[test]
+    fn semantic_index_attachment_excluded_from_push_pack_but_kept_for_pull() {
+        use std::collections::BTreeMap;
+
+        use objects::object::{SemanticIndexRoot, SemanticTreeNode};
+
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("README.md"), "hello\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+
+        // Minimal valid semantic-index fixture: an empty tree node under a root.
+        let (node, node_digest) = SemanticTreeNode::new(Vec::new());
+        let node_hash = repo
+            .store()
+            .put_blob(&Blob::new(node.encode().unwrap()))
+            .expect("put semantic tree node");
+        let root = SemanticIndexRoot::new(1, BTreeMap::new(), node_hash, node_digest);
+        let root_hash = repo
+            .store()
+            .put_blob(&Blob::new(root.encode().unwrap()))
+            .expect("put semantic index root");
+        repo.put_state_attachment(&StateAttachment {
+            state_id: state.state_id,
+            body: StateAttachmentBody::SemanticIndex(root_hash),
+            attribution: test_attribution(),
+            created_at: Utc::now(),
+            supersedes: None,
+        })
+        .unwrap();
+
+        let plan = enumerate_state_closure_plan_with_options(
+            repo.store(),
+            state.state_id,
+            StateClosureOptions::default(),
+        )
+        .unwrap();
+
+        // Every StateAttachment record (at least the semantic index authored
+        // above) is push-excluded and pull-included.
+        let attachments: Vec<_> = plan
+            .iter()
+            .filter(|p| p.obj_type == ObjectType::StateAttachment)
+            .collect();
+        assert!(
+            !attachments.is_empty(),
+            "closure must contain the semantic-index attachment record"
+        );
+        for attachment in &attachments {
+            assert!(matches!(attachment.id, ObjectId::StateAttachment { .. }));
+            // Push: excluded from the pack (sidecar lane). Pull: kept in pack.
+            assert!(
+                !attachment.obj_type.packable_for_push(),
+                "attachment record must be excluded from the push pack"
+            );
+            assert!(
+                attachment.obj_type.packable_for_pull(),
+                "attachment record must stay in the pull pack"
+            );
+        }
+
+        // The semantic-index CONTENT blobs are ordinary content-addressed
+        // objects and still ride the pack in both directions — only the
+        // attachment record is sidecar'd on push.
+        for content in [root_hash, node_hash] {
+            let obj = plan
+                .iter()
+                .find(|p| p.id == ObjectId::Hash(content))
+                .unwrap_or_else(|| panic!("semantic content blob {content} in closure"));
+            assert_eq!(obj.obj_type, ObjectType::Blob);
+            assert!(obj.obj_type.packable_for_push());
+            assert!(obj.obj_type.packable_for_pull());
+        }
+
+        // Partitioning the plan by push-packability puts the record on the
+        // sidecar side and never in the pack side.
+        let (push_pack, push_sidecar): (Vec<_>, Vec<_>) =
+            plan.iter().partition(|p| p.obj_type.packable_for_push());
+        assert!(
+            push_sidecar
+                .iter()
+                .any(|p| p.obj_type == ObjectType::StateAttachment),
+            "attachment record routed to the push sidecar partition"
+        );
+        assert!(
+            !push_pack
+                .iter()
+                .any(|p| p.obj_type == ObjectType::StateAttachment),
+            "attachment record must not be in the push pack partition"
+        );
     }
 }
