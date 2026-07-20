@@ -13,7 +13,8 @@ use grpc::heddle::api::v1alpha1::{
     GitObjectId as ProtoGitObjectId, GitPackTransfer, GitRefKind as GrpcGitRefKind,
     GitRefUpdateTransfer, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor, PackChunk,
     PackStreamKind, PartialFetchStatus, PullClientFrame, PullRequest, PullServerFrame,
-    PushClientFrame, PushRequest, PushServerFrame, RedactionTransfer, StateVisibilityTransfer,
+    PushClientFrame, PushRequest, PushServerFrame, RedactionTransfer, StateAttachmentTransfer,
+    StateVisibilityTransfer,
     StreamOpeningProof, ThreadConfidenceSummary, ThreadIntegrationPolicy, ThreadMetadata,
     ThreadVerificationSummary, TransportMode, UpdateRefRequest, WantObjects, git_lane_transfer,
     pull_client_frame, pull_server_frame, push_client_frame, push_server_frame,
@@ -1447,37 +1448,36 @@ fn sidecar_push_message(
 /// carry the byte-identical attachment record plus its descriptor kind so the
 /// server can reconstruct and verify it per-kind at finalize (weft W3).
 ///
-/// The on-wire carrier is a pending heddle-api addition: 0.1.3 ships only
-/// `ObjectDescriptor.attachment_kind` (H2), not a `StateAttachmentTransfer`
-/// `PushClientFrame` variant. Until that frame lands together with the weft
-/// accept chokepoint (W3, heddle#1082), this arm assembles the payload and then
-/// fails closed rather than smuggling the record through a frame that means
-/// something else. Deployed servers report attachments "present" on push, so
-/// this arm is unreachable in practice today; the forgery seal (excluding the
-/// record from the push pack) is already in force upstream at the push
-/// partition site.
+/// The carrier is the `StateAttachmentTransfer` `PushClientFrame` variant
+/// (heddle-api 0.1.4): it carries the state id, the attachment id, the
+/// descriptor kind, and the byte-identical attachment record object so the
+/// server can reconstruct and verify it per-kind at finalize (weft W3). The
+/// receiver re-checks that the carried kind agrees with the decoded body (kind
+/// is a pure projection of the record).
 fn state_attachment_push_message(
     repo: &Repository,
     info: wire::ObjectInfo,
-    _client_operation_id: &str,
+    client_operation_id: &str,
 ) -> Result<PushClientFrame, ProtocolError> {
-    let wire::ObjectId::StateAttachment { id, kind, .. } = &info.id else {
+    // Assemble the byte-identical record (rmp-encoded, the same encoding the
+    // pack/pull path uses) before consuming `info.id` for the frame fields.
+    let record = wire::load_object_data(repo.store(), &info.id, ObjectType::StateAttachment)?;
+    let wire::ObjectId::StateAttachment { state, id, kind } = info.id else {
         return Err(ProtocolError::InvalidState(
             "wanted StateAttachment must be keyed by ObjectId::StateAttachment".to_string(),
         ));
     };
-    // Assemble exactly what the server needs to reconstruct + verify the record:
-    // the byte-identical attachment record (rmp-encoded, the same encoding the
-    // pack/pull path uses) keyed by `(state, id, kind)`. The descriptor kind is
-    // a pure projection of the record body; the receiver re-checks that they
-    // agree at finalize (weft W3).
-    let record = wire::load_object_data(repo.store(), &info.id, ObjectType::StateAttachment)?;
-    Err(ProtocolError::InvalidState(format!(
-        "state attachment {id} ({kind:?}, {} record bytes) is ready for the \
-         sidecar lane, but heddle-api 0.1.3 has no StateAttachmentTransfer push \
-         frame; the sidecar send lands with weft W3 (heddle#1082)",
-        record.data.len()
-    )))
+    Ok(PushClientFrame {
+        frame: Some(push_client_frame::Frame::StateAttachment(
+            StateAttachmentTransfer {
+                state_id: super::helpers::proto_state_id(state),
+                attachment_id: id.as_hash().to_hex(),
+                attachment_kind: super::helpers::attachment_kind_to_proto(kind) as i32,
+                attachment_object: record.data,
+            },
+        )),
+        client_operation_id: client_operation_id.to_string(),
+    })
 }
 
 fn state_visibility_push_message(
@@ -4245,23 +4245,32 @@ mod tests {
         assert!(attachment.obj_type.packable_for_pull());
     }
 
-    /// The sidecar arm assembles the byte-identical attachment record (proving
-    /// the frame will carry enough to reconstruct it server-side) and then
-    /// fails closed pending the heddle-api `StateAttachmentTransfer` frame
-    /// (lands with weft W3, heddle#1082).
+    /// The sidecar arm emits a `StateAttachmentTransfer` frame carrying the
+    /// state id, attachment id, descriptor kind, and the byte-identical record
+    /// object so the server can reconstruct + verify it per-kind (weft W3).
     #[test]
-    fn state_attachment_push_message_assembles_record_and_defers_frame() {
+    fn state_attachment_push_message_emits_transfer_frame() {
+        use grpc::heddle::api::v1alpha1::StateAttachmentKind as ProtoStateAttachmentKind;
+
         let (dir, repo) = temp_repo();
-        std::fs::write(dir.path().join("README.md"), "hi\n").unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn f() {}\n").unwrap();
         let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
 
-        let risk_blob = repo
+        // Build a minimal valid SemanticIndex attachment.
+        let (node, node_digest) = objects::object::SemanticTreeNode::new(Vec::new());
+        let node_hash = repo
             .store()
-            .put_blob(&Blob::from("risk signals"))
-            .expect("put risk blob");
+            .put_blob(&Blob::new(node.encode().unwrap()))
+            .expect("put semantic tree node");
+        let root =
+            objects::object::SemanticIndexRoot::new(1, Default::default(), node_hash, node_digest);
+        let root_hash = repo
+            .store()
+            .put_blob(&Blob::new(root.encode().unwrap()))
+            .expect("put semantic index root");
         let attachment = objects::object::StateAttachment {
             state_id: state.state_id,
-            body: objects::object::StateAttachmentBody::RiskSignals(risk_blob),
+            body: objects::object::StateAttachmentBody::SemanticIndex(root_hash),
             attribution: Attribution::human(Principal::new("H3 Tester", "h3@example.com")),
             created_at: Utc::now(),
             supersedes: None,
@@ -4279,19 +4288,47 @@ mod tests {
             delta_base: None,
         };
 
-        let err = sidecar_push_message(&repo, info, "op-1")
-            .expect_err("attachment sidecar frame is not yet available");
-        let ProtocolError::InvalidState(message) = err else {
-            panic!("expected InvalidState, got {err:?}");
+        let frame = sidecar_push_message(&repo, info, "op-1").expect("emit attachment sidecar frame");
+        assert_eq!(frame.client_operation_id, "op-1");
+        let Some(push_client_frame::Frame::StateAttachment(transfer)) = frame.frame else {
+            panic!("expected a StateAttachmentTransfer frame, got {:?}", frame.frame);
         };
-        assert!(
-            message.contains("StateAttachmentTransfer"),
-            "error must name the pending api frame: {message}"
+        assert_eq!(
+            transfer.state_id,
+            crate::grpc_hosted::helpers::proto_state_id(state.state_id),
+            "frame must carry the attachment's state id",
+        );
+        assert_eq!(
+            transfer.attachment_id,
+            attachment.id().as_hash().to_hex(),
+            "frame must carry the attachment id",
+        );
+        assert_eq!(
+            transfer.attachment_kind,
+            ProtoStateAttachmentKind::SemanticIndex as i32,
+            "frame must carry the descriptor kind",
         );
         assert!(
-            message.contains("record bytes"),
-            "error must confirm the record was assembled: {message}"
+            !transfer.attachment_object.is_empty(),
+            "frame must carry the serialized attachment record",
         );
+        // The carried object bytes are exactly the canonical record encoding
+        // the pack/pull path uses (so the server reconstructs the same record).
+        let canonical = wire::load_object_data(
+            repo.store(),
+            &ObjectId::StateAttachment {
+                state: state.state_id,
+                id: attachment.id(),
+                kind: attachment.body.kind(),
+            },
+            ObjectType::StateAttachment,
+        )
+        .expect("load canonical attachment record");
+        assert_eq!(transfer.attachment_object, canonical.data);
+
+        // Pull direction is unchanged: the record stays packable server->client.
+        assert!(ObjectType::StateAttachment.packable_for_pull());
+        assert!(!ObjectType::StateAttachment.packable_for_push());
     }
 
     #[test]
