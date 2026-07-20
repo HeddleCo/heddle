@@ -967,11 +967,15 @@ fn diff_file_symbols(
     path: &str,
     out: &mut Vec<SymbolDelta>,
 ) {
-    let mut a_by_key: HashMap<SymbolKey, Vec<&SymbolEntry>> = HashMap::new();
+    // BTreeMap, not HashMap: the loops below emit into `out`, so key order must
+    // be deterministic — this is a public, determinism-centric API. (The
+    // pre-refactor code iterated `a.symbols` in canonical order; a HashMap here
+    // reintroduced nondeterministic delta ordering.)
+    let mut a_by_key: BTreeMap<SymbolKey, Vec<&SymbolEntry>> = BTreeMap::new();
     for sym in &a.symbols {
         a_by_key.entry(symbol_key(sym)).or_default().push(sym);
     }
-    let mut b_by_key: HashMap<SymbolKey, Vec<&SymbolEntry>> = HashMap::new();
+    let mut b_by_key: BTreeMap<SymbolKey, Vec<&SymbolEntry>> = BTreeMap::new();
     for sym in &b.symbols {
         b_by_key.entry(symbol_key(sym)).or_default().push(sym);
     }

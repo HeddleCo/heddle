@@ -29,7 +29,12 @@ use crate::{
 /// resolution, or token-stream framing changes in a way that would alter a
 /// `semantic_hash` for unchanged source — it participates in the file node's
 /// identity so a bump forces a clean recompute via the supersedes chain.
-pub const EXTRACTOR_VERSION: u32 = 1;
+///
+/// v2: `hd-sem-file-v2`/`hd-sem-dir-v2` framed layouts, the `scaffold_hash`
+/// (non-definition file content), and mod-qualified `container_path`. Bumped so
+/// any same-version-but-old-layout nodes written by a pre-fix branch checkout
+/// are treated as stale and recomputed rather than digest-compared.
+pub const EXTRACTOR_VERSION: u32 = 2;
 
 /// Stable lowercase language name recorded in file nodes and the root's
 /// grammar map.
