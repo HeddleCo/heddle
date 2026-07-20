@@ -64,6 +64,10 @@ impl Default for CallContextFactory {
 }
 
 impl CallContextFactory {
+    pub fn signing_identity(&self) -> Option<&str> {
+        self.signing_identity.as_deref()
+    }
+
     pub fn with_bearer_capability(mut self, capability: impl Into<Vec<u8>>) -> Self {
         self.bearer_capability = capability.into();
         self

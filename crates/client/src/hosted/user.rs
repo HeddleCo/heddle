@@ -1,0 +1,672 @@
+use api::heddle::api::v1alpha1::{
+    ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, CheckMergeEligibilityRequest,
+    CheckMergeEligibilityResponse, CreateGrantRequest, CreateInvitationRequest,
+    CreateRepositoryRequest, CreateServiceAccountRequest, DeleteGrantRequest,
+    DeleteNamespaceRequest, DeleteRepositoryRequest, GetCurrentUserNamespaceRequest,
+    GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
+    IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
+    ListSpoolsRequest, ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
+    ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
+    ServiceAccountResponse, SpoolSummary, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
+    UpdateNamespaceRequest, UpdateRepositoryRequest, grant_target_ref::Target as GrantTargetKind,
+};
+use wire::ProtocolError;
+
+use super::{
+    HostedClient,
+    helpers::{
+        hosted_to_protocol_error, to_protocol_grant, to_protocol_namespace, to_protocol_repository,
+    },
+    operation_id::ClientOperationId,
+};
+
+macro_rules! signed_call {
+    ($self:ident, $client:ident, $rpc:ident, $path:expr, $msg:expr) => {{
+            let request = $msg;
+            $self
+                .routes()
+                .$rpc(&request)
+                .await
+                .map_err(hosted_to_protocol_error)?
+        }};
+}
+
+/// Dispatch an authenticated unary RPC on `self.user`: wrap the message in a
+/// `tonic::Request`, stamp bearer auth AND the Tier-1 PoP request signature via
+/// `apply_signed_auth`, await the call, and — if the server rejects with
+/// `x-heddle-sig-required: human` — invoke the app-registered human-signature
+/// callback over the SAME action and retry ONCE. Maps a transport `Status` to a
+/// `ProtocolError` and unwraps the response.
+///
+/// `$rpc` is the snake_case tonic client method; `$grpc_method` is the PascalCase
+/// proto RPC name (used to build the signed `:path`). The message is bound once
+/// and cloned for the potential human retry (all hosted request protos derive
+/// `Clone`). Delegates to [`signed_call!`], the one chokepoint for the
+/// auth/sign/retry sequence; must be invoked inside an `async fn` returning
+/// `Result<_, ProtocolError>`.
+macro_rules! authed_call {
+    ($self:ident, $rpc:ident, $grpc_method:literal, $msg:expr) => {{
+            signed_call!(
+                $self,
+                user,
+                $rpc,
+                concat!("/heddle.api.v1alpha1.RegistryService/", $grpc_method),
+                $msg
+            )
+        }};
+}
+
+macro_rules! workflow_call {
+    ($self:ident, $rpc:ident, $grpc_method:literal, $msg:expr) => {{
+            signed_call!(
+                $self,
+                workflow,
+                $rpc,
+                concat!("/heddle.api.v1alpha1.WorkflowService/", $grpc_method),
+                $msg
+            )
+        }};
+}
+
+fn default_spool_settings_request() -> api::heddle::api::v1alpha1::SpoolSettings {
+    use api::heddle::api::v1alpha1::{
+        SpoolBootstrapKind, SpoolBootstrapSyncDirection, SpoolChildPolicy, SpoolHoldLifecycle,
+        SpoolInitialTooling, SpoolSettings, SpoolStateVisibility, SpoolSyncBehavior,
+        SpoolVisibility, SpoolWritePolicy,
+    };
+
+    SpoolSettings {
+        visibility: SpoolVisibility::Private as i32,
+        default_state_visibility: SpoolStateVisibility::Internal as i32,
+        bootstrap_kind: SpoolBootstrapKind::Empty as i32,
+        bootstrap_source: String::new(),
+        write_policy: SpoolWritePolicy::Developers as i32,
+        child_policy: SpoolChildPolicy::Maintainers as i32,
+        initial_tooling: Some(SpoolInitialTooling::default()),
+        sync_behavior: SpoolSyncBehavior::Manual as i32,
+        bootstrap_sync_direction: SpoolBootstrapSyncDirection::Pull as i32,
+        description: String::new(),
+        // UNSPECIFIED = inherit; effective root default is EXPLICIT_SUPERSESSION.
+        hold_lifecycle: SpoolHoldLifecycle::Unspecified as i32,
+    }
+}
+
+impl HostedClient {
+    /// Resolve the acting identity for the bound bearer (subject, staff/service
+    /// markers, session, server-side scope, and directly-held resource roles).
+    /// Read-only; drives `heddle whoami`.
+    pub async fn who_am_i(
+        &mut self,
+    ) -> Result<api::heddle::api::v1alpha1::WhoAmIResponse, ProtocolError> {
+        Ok(signed_call!(
+            self,
+            auth,
+            who_am_i,
+            "/heddle.api.v1alpha1.IdentityService/WhoAmI",
+            api::heddle::api::v1alpha1::WhoAmIRequest {}
+        ))
+    }
+
+    pub async fn create_service_account(
+        &mut self,
+        request: CreateServiceAccountRequest,
+    ) -> Result<ServiceAccountResponse, ProtocolError> {
+        Ok(signed_call!(
+            self,
+            auth,
+            create_service_account,
+            "/heddle.api.v1alpha1.IdentityService/CreateServiceAccount",
+            request
+        ))
+    }
+
+    pub async fn issue_service_account_credential(
+        &mut self,
+        request: IssueServiceAccountCredentialRequest,
+    ) -> Result<IssuedCredentialResponse, ProtocolError> {
+        self.routes()
+            .issue_service_account_credential(&request)
+            .await
+            .map_err(hosted_to_protocol_error)
+    }
+
+    pub async fn begin_login(
+        &mut self,
+        username: &str,
+    ) -> Result<(String, String, u64), ProtocolError> {
+        let request = BeginWebAuthnAuthenticationRequest {
+            username: username.to_string(),
+        };
+        let response = self
+            .routes()
+            .begin_web_authn_authentication(&request)
+            .await
+            .map_err(hosted_to_protocol_error)?;
+        let expires_at_secs = response
+            .expires_at
+            .as_ref()
+            .map(|t| t.seconds.max(0) as u64)
+            .unwrap_or(0);
+        Ok((response.challenge_id, response.challenge, expires_at_secs))
+    }
+
+    pub async fn get_current_user_namespace(
+        &mut self,
+    ) -> Result<wire::HostedNamespaceInfo, ProtocolError> {
+        let namespace = authed_call!(
+            self,
+            get_current_user_namespace,
+            "GetCurrentUserNamespace",
+            GetCurrentUserNamespaceRequest {}
+        );
+        Ok(to_protocol_namespace(namespace))
+    }
+
+    pub async fn list_spools(
+        &mut self,
+        repos_only: bool,
+    ) -> Result<Vec<SpoolSummary>, ProtocolError> {
+        let response = authed_call!(
+            self,
+            list_spools,
+            "ListSpools",
+            ListSpoolsRequest { repos_only }
+        );
+        Ok(response.spools)
+    }
+
+    pub async fn create_namespace(
+        &mut self,
+        kind: &str,
+        slug: &str,
+        parent_path: Option<&str>,
+        display_name: Option<String>,
+    ) -> Result<wire::HostedNamespaceInfo, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateNamespace");
+        let namespace = authed_call!(
+            self,
+            create_namespace,
+            "CreateNamespace",
+            api::heddle::api::v1alpha1::CreateNamespaceRequest {
+                kind: parse_namespace_kind_arg(kind)? as i32,
+                slug: slug.to_string(),
+                parent_path: parent_path.unwrap_or_default().to_string(),
+                display_name: display_name.unwrap_or_default(),
+                settings: Some(default_spool_settings_request()),
+                client_operation_id: operation_id.to_wire(),
+            }
+        );
+        Ok(to_protocol_namespace(namespace))
+    }
+
+    pub async fn create_repository(
+        &mut self,
+        namespace_path: &str,
+        slug: &str,
+    ) -> Result<wire::HostedRepositoryInfo, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateRepository");
+        let repo = authed_call!(
+            self,
+            create_repository,
+            "CreateRepository",
+            CreateRepositoryRequest {
+                namespace_path: namespace_path.to_string(),
+                slug: slug.to_string(),
+                client_operation_id: operation_id.to_wire(),
+            }
+        );
+        Ok(to_protocol_repository(repo))
+    }
+
+    pub async fn update_namespace(
+        &mut self,
+        full_path: &str,
+        new_slug: Option<&str>,
+        display_name: Option<Option<String>>,
+    ) -> Result<wire::HostedNamespaceInfo, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/UpdateNamespace");
+        let (display_name, clear_display_name) = match display_name {
+            Some(Some(value)) => (value, false),
+            Some(None) => (String::new(), true),
+            None => (String::new(), false),
+        };
+        let namespace = authed_call!(
+            self,
+            update_namespace,
+            "UpdateNamespace",
+            UpdateNamespaceRequest {
+                full_path: full_path.to_string(),
+                new_slug: new_slug.unwrap_or_default().to_string(),
+                display_name,
+                clear_display_name,
+                client_operation_id: operation_id.to_wire(),
+            }
+        );
+        Ok(to_protocol_namespace(namespace))
+    }
+
+    pub async fn delete_namespace(&mut self, full_path: &str) -> Result<(), ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/DeleteNamespace");
+        authed_call!(
+            self,
+            delete_namespace,
+            "DeleteNamespace",
+            DeleteNamespaceRequest {
+                full_path: full_path.to_string(),
+                client_operation_id: operation_id.to_wire(),
+            }
+        );
+        Ok(())
+    }
+
+    pub async fn update_repository(
+        &mut self,
+        full_path: &str,
+        new_slug: &str,
+    ) -> Result<wire::HostedRepositoryInfo, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/UpdateRepository");
+        let repo = authed_call!(
+            self,
+            update_repository,
+            "UpdateRepository",
+            UpdateRepositoryRequest {
+                full_path: full_path.to_string(),
+                new_slug: new_slug.to_string(),
+                client_operation_id: operation_id.to_wire(),
+            }
+        );
+        Ok(to_protocol_repository(repo))
+    }
+
+    pub async fn delete_repository(&mut self, full_path: &str) -> Result<(), ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/DeleteRepository");
+        authed_call!(
+            self,
+            delete_repository,
+            "DeleteRepository",
+            DeleteRepositoryRequest {
+                full_path: full_path.to_string(),
+                client_operation_id: operation_id.to_wire(),
+            }
+        );
+        Ok(())
+    }
+
+    pub async fn create_grant(
+        &mut self,
+        subject: &str,
+        role: &str,
+        namespace_path: Option<&str>,
+        repo_path: Option<&str>,
+    ) -> Result<wire::HostedGrantInfo, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateGrant");
+        let target = build_target_ref(namespace_path, repo_path)?;
+        let grant = authed_call!(
+            self,
+            create_grant,
+            "CreateGrant",
+            CreateGrantRequest {
+                subject: subject.to_string(),
+                role: parse_hosted_role_arg(role)? as i32,
+                target,
+                client_operation_id: operation_id.to_wire(),
+            }
+        );
+        Ok(to_protocol_grant(grant))
+    }
+
+    pub async fn list_grants(
+        &mut self,
+        resource: Option<&str>,
+    ) -> Result<Vec<wire::HostedGrantInfo>, ProtocolError> {
+        let response = authed_call!(
+            self,
+            list_grants,
+            "ListGrants",
+            ListGrantsRequest {
+                resource: resource.unwrap_or_default().to_string(),
+            }
+        );
+        Ok(response.grants.into_iter().map(to_protocol_grant).collect())
+    }
+
+    pub async fn update_grant(
+        &mut self,
+        subject: &str,
+        role: &str,
+        namespace_path: Option<&str>,
+        repo_path: Option<&str>,
+    ) -> Result<wire::HostedGrantInfo, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/UpdateGrant");
+        let target = build_target_ref(namespace_path, repo_path)?;
+        let grant = authed_call!(
+            self,
+            update_grant,
+            "UpdateGrant",
+            UpdateGrantRequest {
+                subject: subject.to_string(),
+                role: parse_hosted_role_arg(role)? as i32,
+                target,
+                client_operation_id: operation_id.to_wire(),
+            }
+        );
+        Ok(to_protocol_grant(grant))
+    }
+
+    pub async fn delete_grant(
+        &mut self,
+        subject: &str,
+        namespace_path: Option<&str>,
+        repo_path: Option<&str>,
+    ) -> Result<(), ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/DeleteGrant");
+        let target = build_target_ref(namespace_path, repo_path)?;
+        authed_call!(
+            self,
+            delete_grant,
+            "DeleteGrant",
+            DeleteGrantRequest {
+                subject: subject.to_string(),
+                target,
+                client_operation_id: operation_id.to_wire(),
+            }
+        );
+        Ok(())
+    }
+
+    /// Track D — create a pending invitation. Returns the raw proto type
+    /// to keep the surface narrow until we settle on a domain shape.
+    pub async fn create_invitation(
+        &mut self,
+        email: &str,
+        namespace_path: &str,
+        role: &str,
+    ) -> Result<ProtoInvitation, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateInvitation");
+        let invitation = authed_call!(
+            self,
+            create_invitation,
+            "CreateInvitation",
+            CreateInvitationRequest {
+                email: email.to_string(),
+                namespace_path: namespace_path.to_string(),
+                role: parse_hosted_role_arg(role)? as i32,
+                expires_at: None,
+                metadata: String::new(),
+                client_operation_id: operation_id.to_wire(),
+            }
+        );
+        Ok(invitation)
+    }
+
+    /// Record an approval for `(source_thread → target_thread)` at
+    /// the source's current `source_state`. The server's gate decides
+    /// later whether this approval *counts* against any matching
+    /// policy's requirements.
+    pub async fn approve_thread(
+        &mut self,
+        repo_path: &str,
+        source_thread: &str,
+        target_thread: &str,
+        source_state: &str,
+        note: Option<&str>,
+        client_operation_id: String,
+    ) -> Result<ThreadApproval, ProtocolError> {
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.WorkflowService/ApproveThread",
+            client_operation_id,
+        );
+        Ok(workflow_call!(
+            self,
+            approve_thread,
+            "ApproveThread",
+            ApproveThreadRequest {
+                repo_path: super::helpers::repository_ref(repo_path),
+                source_thread: source_thread.to_string(),
+                target_thread: target_thread.to_string(),
+                source_state: objects::object::StateId::parse(source_state)
+                    .ok()
+                    .and_then(super::helpers::proto_state_id),
+                note: note.unwrap_or_default().to_string(),
+                client_operation_id: operation_id.to_wire(),
+            }
+        ))
+    }
+
+    pub async fn revoke_approval(
+        &mut self,
+        id: &str,
+        client_operation_id: String,
+    ) -> Result<(), ProtocolError> {
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.WorkflowService/RevokeApproval",
+            client_operation_id,
+        );
+        workflow_call!(
+            self,
+            revoke_approval,
+            "RevokeApproval",
+            RevokeApprovalRequest {
+                id: id.to_string(),
+                client_operation_id: operation_id.to_wire(),
+            }
+        );
+        Ok(())
+    }
+
+    pub async fn list_thread_approvals(
+        &mut self,
+        repo_path: &str,
+        source_thread: &str,
+        target_thread: &str,
+    ) -> Result<Vec<ThreadApproval>, ProtocolError> {
+        Ok(workflow_call!(
+            self,
+            list_thread_approvals,
+            "ListThreadApprovals",
+            ListThreadApprovalsRequest {
+                repo_path: super::helpers::repository_ref(repo_path),
+                source_thread: source_thread.to_string(),
+                target_thread: target_thread.to_string(),
+            }
+        )
+        .approvals)
+    }
+
+    /// Ask the server "can <source> merge into <target> at
+    /// <source_state>, given the diff touches `changed_paths`?" The
+    /// reply lists every unmet requirement and the approvals that
+    /// counted as valid.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn check_merge_eligibility(
+        &mut self,
+        repo_path: &str,
+        source_thread: &str,
+        target_thread: &str,
+        source_state: &str,
+        gated_action: &str,
+        changed_paths: Vec<String>,
+        author_user_id: Option<&str>,
+    ) -> Result<CheckMergeEligibilityResponse, ProtocolError> {
+        Ok(workflow_call!(
+            self,
+            check_merge_eligibility,
+            "CheckMergeEligibility",
+            CheckMergeEligibilityRequest {
+                repo_path: super::helpers::repository_ref(repo_path),
+                source_thread: source_thread.to_string(),
+                target_thread: target_thread.to_string(),
+                source_state: objects::object::StateId::parse(source_state)
+                    .ok()
+                    .and_then(super::helpers::proto_state_id),
+                gated_action: gated_action.to_string(),
+                changed_paths,
+                author_user_id: author_user_id.unwrap_or_default().to_string(),
+            }
+        ))
+    }
+
+    /// Phase C: grant a Heddle staff member temporary admin on a
+    /// namespace or repo. Exactly one of `namespace_path` or
+    /// `repo_path` should be set.
+    pub async fn grant_support_access(
+        &mut self,
+        operator_email: &str,
+        namespace_path: Option<&str>,
+        repo_path: Option<&str>,
+        ttl_seconds: u32,
+        reason: &str,
+        client_operation_id: String,
+    ) -> Result<SupportAccessGrant, ProtocolError> {
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.RegistryService/GrantSupportAccess",
+            client_operation_id,
+        );
+        let target = build_target_ref(namespace_path, repo_path)?;
+        Ok(authed_call!(
+            self,
+            grant_support_access,
+            "GrantSupportAccess",
+            GrantSupportAccessRequest {
+                operator_email: operator_email.to_string(),
+                target,
+                ttl_seconds: Some(prost_types::Duration {
+                    seconds: i64::from(ttl_seconds),
+                    nanos: 0,
+                }),
+                reason: reason.to_string(),
+                client_operation_id: operation_id.to_wire(),
+            }
+        ))
+    }
+
+    pub async fn list_support_access_grants(
+        &mut self,
+        namespace_path: Option<&str>,
+        repo_path: Option<&str>,
+        include_inactive: bool,
+    ) -> Result<Vec<SupportAccessGrant>, ProtocolError> {
+        let target = build_target_ref(namespace_path, repo_path)?;
+        Ok(authed_call!(
+            self,
+            list_support_access_grants,
+            "ListSupportAccessGrants",
+            ListSupportAccessGrantsRequest {
+                target,
+                include_inactive,
+            }
+        )
+        .grants)
+    }
+
+    pub async fn revoke_support_access(
+        &mut self,
+        id: &str,
+        client_operation_id: String,
+    ) -> Result<(), ProtocolError> {
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.RegistryService/RevokeSupportAccess",
+            client_operation_id,
+        );
+        authed_call!(
+            self,
+            revoke_support_access,
+            "RevokeSupportAccess",
+            RevokeSupportAccessRequest {
+                id: id.to_string(),
+                client_operation_id: operation_id.to_wire(),
+            }
+        );
+        Ok(())
+    }
+
+    /// Recursively resolve the monorepo rooted at `root_path` into the caller's
+    /// coherent visible slice (per-child visibility, cycle guard, depth bound).
+    /// `max_depth` is an optional recursion bound (server clamps to
+    /// `MONOREPO_MAX_DEPTH`). Returns the root `MonorepoNode` — the whole tree
+    /// the monorepo-clone planner walks.
+    pub async fn resolve_monorepo(
+        &mut self,
+        root_path: &str,
+        max_depth: Option<u32>,
+    ) -> Result<MonorepoNode, ProtocolError> {
+        Ok(authed_call!(
+            self,
+            resolve_monorepo,
+            "ResolveMonorepo",
+            ResolveMonorepoRequest {
+                root_path: root_path.to_string(),
+                max_depth,
+            }
+        ))
+    }
+}
+
+/// Build a `GrantTargetRef` oneof from CLI-style optional path args.
+/// Caller layer enforces that at most one of `namespace_path` /
+/// `repo_path` is set; this helper is just the wire-format adapter.
+fn build_target_ref(
+    namespace_path: Option<&str>,
+    repo_path: Option<&str>,
+) -> Result<Option<GrantTargetRef>, ProtocolError> {
+    match (
+        namespace_path.filter(|s| !s.is_empty()),
+        repo_path.filter(|s| !s.is_empty()),
+    ) {
+        (Some(ns), None) => Ok(Some(GrantTargetRef {
+            target: Some(GrantTargetKind::NamespacePath(ns.to_string())),
+        })),
+        (None, Some(rp)) => Ok(Some(GrantTargetRef {
+            target: Some(GrantTargetKind::RepoPath(
+                super::helpers::repository_ref(rp).expect("non-empty repository path"),
+            )),
+        })),
+        _ => Err(ProtocolError::InvalidState(
+            "exactly one of namespace_path or repo_path must be set".into(),
+        )),
+    }
+}
+
+/// Parse a CLI-supplied namespace kind string ("user" / "namespace" /
+/// "team", with "org" accepted as an alias for "namespace") into the
+/// proto `NamespaceKind` enum.
+fn parse_namespace_kind_arg(
+    value: &str,
+) -> Result<api::heddle::api::v1alpha1::NamespaceKind, ProtocolError> {
+    use api::heddle::api::v1alpha1::NamespaceKind;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "user" => Ok(NamespaceKind::User),
+        "namespace" | "org" => Ok(NamespaceKind::Org),
+        "team" => Ok(NamespaceKind::Team),
+        other => Err(ProtocolError::InvalidState(format!(
+            "invalid namespace kind '{other}': expected user|namespace|team"
+        ))),
+    }
+}
+
+/// Parse a CLI-supplied role name into the proto `HostedRole` enum.
+fn parse_hosted_role_arg(
+    value: &str,
+) -> Result<api::heddle::api::v1alpha1::HostedRole, ProtocolError> {
+    use api::heddle::api::v1alpha1::HostedRole;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "reader" => Ok(HostedRole::Reader),
+        "developer" => Ok(HostedRole::Developer),
+        "maintainer" => Ok(HostedRole::Maintainer),
+        "admin" => Ok(HostedRole::Admin),
+        "owner" => Ok(HostedRole::Owner),
+        other => Err(ProtocolError::InvalidState(format!(
+            "invalid role '{other}': expected reader|developer|maintainer|admin|owner"
+        ))),
+    }
+}

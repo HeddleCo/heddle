@@ -5,10 +5,17 @@
 
 mod bootstrap;
 mod call;
+mod collaboration;
 mod connection;
+mod content;
 mod context;
 mod error;
+mod helpers;
 mod methods;
+pub mod monorepo;
+mod operation_id;
+mod state_review;
+mod user;
 
 use std::sync::Arc;
 
@@ -16,6 +23,7 @@ use api::heddle::api::v1alpha1::CallContext;
 pub use bootstrap::{DescriptorKeyring, VerifiedEndpointDescriptor, fetch_endpoint_descriptor};
 pub use call::{BidirectionalStream, ServerStream};
 use cli_shared::ClientConfig;
+pub use collaboration::{HostedDiscussion, HostedDiscussionTurn};
 use connection::HostedConnection;
 pub use context::{CallContextFactory, SignedCallContext};
 pub use error::HostedError;
