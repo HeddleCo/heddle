@@ -171,12 +171,13 @@ fn test_partial_clone_copies_fewer_objects_than_full() {
         "partial clone must copy fewer objects than a full clone: shallow={shallow_objects}, full={full_objects}"
     );
     // The shallow clone's cost is bounded by the depth window, not the
-    // history length: tip + immediate parents only. A generous ceiling
-    // (well under the full count for a 25-commit history) pins that the
-    // depth boundary actually truncates the walk.
+    // history length: tip + immediate parents, plus the tip state's attached
+    // merkle semantic-index nodes (root + tree + file nodes). A generous
+    // ceiling (well under the full count for a 25-commit history) pins that
+    // the depth boundary actually truncates the walk.
     assert!(
-        shallow_objects <= 12,
-        "depth-1 clone should copy only the tip + immediate parents, got {shallow_objects} objects"
+        shallow_objects <= 24,
+        "depth-1 clone should copy only the tip + immediate parents (plus the tip's semantic index), got {shallow_objects} objects"
     );
 
     for path in [&full_path, &shallow_path] {
