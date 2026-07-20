@@ -168,9 +168,19 @@ xcrun notarytool submit "$STANDALONE_NOTARY_ZIP" \
   --key-id "$NOTARY_KEY_ID" \
   --issuer "$NOTARY_ISSUER_ID" \
   --wait
+# Notarization is gated authoritatively above by `notarytool submit --wait`
+# (non-zero exit on any status other than Accepted) plus `codesign --verify`.
+# `spctl --assess -t execute` does NOT meaningfully assess *standalone* CLI
+# Mach-O binaries: Gatekeeper reports "the code is valid but does not seem to be
+# an app" for a bare executable regardless of notarization, and its exit code
+# flips across macOS runner-image updates (it passed pre-0.10.3, then began
+# failing exit 3 on the same validly-notarized binaries). Run it for diagnostics
+# only; never gate the release on it.
 for target in aarch64-apple-darwin x86_64-apple-darwin; do
-  spctl -a -vvv -t execute "$REPO_ROOT/target/$target/release/heddle"
-  spctl -a -vvv -t execute "$REPO_ROOT/target/$target/release/heddle-fsmonitor-worker"
+  spctl -a -vvv -t execute "$REPO_ROOT/target/$target/release/heddle" \
+    || echo "note: spctl -t execute is advisory for standalone CLI binaries (see comment above)"
+  spctl -a -vvv -t execute "$REPO_ROOT/target/$target/release/heddle-fsmonitor-worker" \
+    || echo "note: spctl -t execute is advisory for standalone CLI binaries (see comment above)"
 done
 rm -rf "$STANDALONE_NOTARY_DIR"
 
