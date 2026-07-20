@@ -141,6 +141,28 @@ runtime, but not the per-stream receive window. A bounded high-BDP endpoint
 profile therefore remains a future WAN experiment rather than a dynamically
 resized stream window.
 
+## Native-cutover promotion retest
+
+On 2026-07-20, after the native Heddle + Weft cutover, the release benchmarks
+were rerun in an otherwise idle workspace at Heddle revision
+`504bc1fd0b4150226372fea2914d245a34abe94c` with API contract revision
+`3acac53f3527ba4a9ea510c331cfffa556f92e1b` and the same pinned Iroh revision.
+The raw benchmark used three 256 MiB samples; the full loopback benchmark used
+one 256 MiB pack and 200 established `ListRefs` calls.
+
+| Metric | Promotion retest | Recorded 256 MiB baseline | Change |
+|---|---:|---:|---:|
+| Raw generated Iroh stream (median) | 212.8 MiB/s | 178.1 MiB/s | +19.5% |
+| QUIC receive into file-backed spool | 229.0 MiB/s | 176.0 MiB/s | +30.1% |
+| End-to-end pull/build/install | 82.6 MiB/s | 72.1 MiB/s | +14.6% |
+| Established `ListRefs` p50 | 46.9 us | 57.2 us v3 smoke | -18.0% |
+
+The raw samples were 212.2, 216.1, and 212.8 MiB/s. The full run spent
+741.1 ms preparing the pack, 1.118 s transferring it, and 1.241 s installing
+it, for 3.100 s total. The promoted transport is not the end-to-end
+bottleneck: pack preparation and durable installation still account for most
+of the non-transfer time.
+
 ## Current costs and caveats
 
 - The standalone minimal-feature benchmark binary is 8.2 MiB. Iroh's default

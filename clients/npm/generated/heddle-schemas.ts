@@ -135,15 +135,6 @@ export interface AgentCaptureSchema {
   task_assignment_id?: string | null;
 }
 
-export interface AgentDaemonStatusSchema {
-  output_kind: "agent_status";
-  pid?: number | null;
-  pid_path: string;
-  running: boolean;
-  socket_path: string;
-  verification: RepositoryVerificationStateSchema;
-}
-
 export interface AgentFanoutCommandSchema {
   argv: string[];
   command: string;
@@ -348,21 +339,6 @@ export interface AgentReserveSchema {
   reservation: AgentReservationSchema;
   token?: string | null;
   verification: RepositoryVerificationStateSchema;
-}
-
-export interface AgentServeSchema {
-  output_kind: "agent_serve";
-  pid_path: string;
-  socket_path: string;
-  status: string;
-}
-
-export interface AgentStopSchema {
-  output_kind: "agent_stop";
-  pid?: number | null;
-  reason?: string | null;
-  stopped: boolean;
-  swept_stale: boolean;
 }
 
 export interface AgentTaskCreateSchema {
@@ -3200,7 +3176,7 @@ export interface WhoamiSchema {
   authenticated: boolean;
   expires_at?: string | null;
   identity?: WhoamiIdentitySchema | null;
-  /** Intersected gRPC operation ceiling; null ⇒ full authority. */
+  /** Intersected hosted-operation ceiling; null ⇒ full authority. */
   operation_ceiling?: string[] | null;
   output_kind: "whoami";
   /** The device proof key required to sign hosted requests is present. */
@@ -3250,9 +3226,6 @@ export interface HeddleVerbOutputs {
   "agent ready": AgentReadySchema;
   "agent release": AgentReleaseSchema;
   "agent reserve": AgentReserveSchema;
-  "agent serve": AgentServeSchema;
-  "agent status": AgentDaemonStatusSchema;
-  "agent stop": AgentStopSchema;
   "agent task create": AgentTaskCreateSchema;
   "agent task list": AgentTaskListSchema;
   "agent task show": AgentTaskShowSchema;
@@ -3413,9 +3386,6 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "agent ready",
   "agent release",
   "agent reserve",
-  "agent serve",
-  "agent status",
-  "agent stop",
   "agent task create",
   "agent task list",
   "agent task show",
