@@ -128,6 +128,9 @@ fn is_test_function(name: &str, lang: Language) -> bool {
             name.starts_with("test") || name.starts_with("it") || name.starts_with("describe")
         }
         Language::Go => name.starts_with("Test"),
+        // Zig `test "…"` / `test Name` blocks are extracted as functions named
+        // `test:"…"` / `test:Name` by the symbol resolver.
+        Language::Zig => name.starts_with("test:"),
         _ => false,
     }
 }

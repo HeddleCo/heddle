@@ -333,10 +333,12 @@ pub(crate) fn visit_definitions<'tree>(
             }
             "lexical_declaration" | "variable_declaration" => {
                 let mut cursor = node.walk();
+                let mut saw_declarator = false;
                 for child in node.children(&mut cursor) {
                     if child.kind() == "variable_declarator"
                         && let Some(name_node) = child.child_by_field_name("name")
                     {
+                        saw_declarator = true;
                         let name = node_text(&name_node, source).to_string();
                         if name.is_empty() {
                             continue;
@@ -361,6 +363,37 @@ pub(crate) fn visit_definitions<'tree>(
                             });
                         }
                     }
+                }
+                // ── Zig ──────────────────────────────────────────
+                // Zig reuses `variable_declaration` for both declarations and
+                // locals, and has no `variable_declarator`: the binding name is
+                // a direct `identifier` child. `const Name = struct|union|
+                // enum|opaque {…}` is Zig's container-as-value idiom, whose
+                // members we walk under `[Name]`; a bare `const`/`var` binding
+                // at container scope is a `ConstDecl`.
+                if kind == "variable_declaration" && !saw_declarator {
+                    descended_with_new_parent =
+                        zig_visit_variable_declaration(node, source, current_parent, emit, &mut stack);
+                }
+            }
+            "test_declaration" => {
+                // Zig `test "name" {…}` / `test Name {…}` → a `Function` named
+                // `test:"name"` / `test:Name` so risk-signal test-reachability
+                // treats them as tests.
+                let mut cursor = node.walk();
+                let test_name = node.children(&mut cursor).find_map(|c| match c.kind() {
+                    "string" | "identifier" => Some(format!("test:{}", node_text(&c, source))),
+                    _ => None,
+                });
+                if let Some(name) = test_name {
+                    emit(DefinitionSite {
+                        node,
+                        name,
+                        kind: DefinitionKind::Function,
+                        parent_name: current_parent.map(String::from),
+                        start_line: node.start_position().row as u32 + 1,
+                        end_line: node.end_position().row as u32 + 1,
+                    });
                 }
             }
 
@@ -437,6 +470,99 @@ fn extract_go_receiver_type(node: &tree_sitter::Node, source: &[u8]) -> Option<S
         }
     }
     None
+}
+
+/// Zig container scopes whose direct `variable_declaration` children are
+/// declarations rather than function-body locals: the file root and the four
+/// container-type bodies. Used to gate bare `const`/`var` bindings so a
+/// function's local variables don't each become a symbol.
+fn is_zig_container_scope(kind: &str) -> bool {
+    matches!(
+        kind,
+        "source_file"
+            | "struct_declaration"
+            | "union_declaration"
+            | "enum_declaration"
+            | "opaque_declaration"
+    )
+}
+
+/// Map a Zig container-declaration node kind to its symbol taxonomy kind.
+/// `struct`/`union`/`opaque` are `Type`; `enum` is `EnumDef`.
+fn zig_container_kind(kind: &str) -> Option<DefinitionKind> {
+    match kind {
+        "struct_declaration" | "union_declaration" | "opaque_declaration" => {
+            Some(DefinitionKind::Type)
+        }
+        "enum_declaration" => Some(DefinitionKind::EnumDef),
+        _ => None,
+    }
+}
+
+/// Handle a Zig `variable_declaration` (no `variable_declarator`). Returns
+/// `true` when it descended into a container body with a new `container_path`
+/// parent (so the caller skips the default same-parent descent).
+///
+/// `const Name = struct|union|enum|opaque {…}` emits `Name` with the matching
+/// kind and walks the container's members under `[Name]`. A bare `const`/`var`
+/// binding at container scope emits a `ConstDecl`; inside a function body it is
+/// a local and is skipped.
+fn zig_visit_variable_declaration<'tree>(
+    node: tree_sitter::Node<'tree>,
+    source: &[u8],
+    current_parent: Option<&str>,
+    emit: &mut impl FnMut(DefinitionSite<'tree>),
+    stack: &mut Vec<(tree_sitter::Node<'tree>, Option<Rc<str>>)>,
+) -> bool {
+    let mut cursor = node.walk();
+    let children: Vec<tree_sitter::Node<'tree>> = node.children(&mut cursor).collect();
+
+    // Binding name = first direct `identifier` child (it precedes `=`; a value
+    // identifier like `const A = B;` comes after and is never first).
+    let Some(name) = children
+        .iter()
+        .find(|c| c.kind() == "identifier")
+        .map(|c| node_text(c, source).to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+
+    if let Some(container) = children.iter().find(|c| zig_container_kind(c.kind()).is_some()) {
+        let dk = zig_container_kind(container.kind()).expect("checked by find");
+        emit(DefinitionSite {
+            node,
+            name: name.clone(),
+            kind: dk,
+            parent_name: current_parent.map(String::from),
+            start_line: node.start_position().row as u32 + 1,
+            end_line: node.end_position().row as u32 + 1,
+        });
+        let child_parent: Rc<str> = Rc::from(name.as_str());
+        let mut member_cursor = container.walk();
+        let members: Vec<_> = container.children(&mut member_cursor).collect();
+        for member in members.into_iter().rev() {
+            stack.push((member, Some(child_parent.clone())));
+        }
+        return true;
+    }
+
+    // Bare binding: a declaration only at container scope; otherwise a local.
+    let at_container_scope = node
+        .parent()
+        .map(|p| is_zig_container_scope(p.kind()))
+        .unwrap_or(false);
+    if at_container_scope {
+        emit(DefinitionSite {
+            node,
+            name,
+            kind: DefinitionKind::ConstDecl,
+            parent_name: current_parent.map(String::from),
+            start_line: node.start_position().row as u32 + 1,
+            end_line: node.end_position().row as u32 + 1,
+        });
+    }
+    false
 }
 
 /// Resolve a symbol name to a line range in source code.
@@ -1010,6 +1136,75 @@ pub mod outer {
             defs.iter().any(|d| d.name == "target"),
             "deep target fn must be returned, not silently dropped; got {defs:?}"
         );
+    }
+
+    /// heddle#1068: Zig's container-as-value idiom, `fn`/`test` blocks, and
+    /// `const`/`var` bindings map onto the shared taxonomy — and function-body
+    /// locals (Zig reuses `const`/`var` for locals) must NOT leak as symbols.
+    #[cfg(feature = "lang-zig")]
+    #[test]
+    fn extract_definitions_reports_zig_taxonomy_parents_and_ranges() {
+        let source = br#"const std = @import("std");
+
+pub const MAX: usize = 100;
+var counter: u32 = 0;
+
+pub fn add(a: i32, b: i32) i32 {
+    const local = 1;
+    return a + b + local;
+}
+
+pub const Point = struct {
+    x: f64,
+    pub fn dist(self: Point) f64 {
+        const scale = 2.0;
+        return self.x * scale;
+    }
+};
+
+const Color = enum { red, green };
+
+const Shape = union(enum) { circle: f64 };
+
+const Handle = opaque {
+    pub fn get() void {}
+};
+
+test "addition works" {
+    const r = add(1, 2);
+    _ = r;
+}
+"#;
+
+        let defs = extract_definitions(source, Path::new("sample.zig")).unwrap();
+
+        assert_definition(&defs, "std", DefinitionKind::ConstDecl, 1, 1, None);
+        assert_definition(&defs, "MAX", DefinitionKind::ConstDecl, 3, 3, None);
+        assert_definition(&defs, "counter", DefinitionKind::ConstDecl, 4, 4, None);
+        assert_definition(&defs, "add", DefinitionKind::Function, 6, 9, None);
+        assert_definition(&defs, "Point", DefinitionKind::Type, 11, 17, None);
+        assert_definition(&defs, "dist", DefinitionKind::Function, 13, 16, Some("Point"));
+        assert_definition(&defs, "Color", DefinitionKind::EnumDef, 19, 19, None);
+        assert_definition(&defs, "Shape", DefinitionKind::Type, 21, 21, None);
+        assert_definition(&defs, "Handle", DefinitionKind::Type, 23, 25, None);
+        assert_definition(&defs, "get", DefinitionKind::Function, 24, 24, Some("Handle"));
+        assert_definition(
+            &defs,
+            "test:\"addition works\"",
+            DefinitionKind::Function,
+            27,
+            30,
+            None,
+        );
+
+        // Function-body / method-body / test-body locals must never surface as
+        // symbols — they are `variable_declaration`s at non-container scope.
+        for leaked in ["local", "scale", "r"] {
+            assert!(
+                !defs.iter().any(|d| d.name == leaked),
+                "local {leaked:?} leaked as a symbol: {defs:?}"
+            );
+        }
     }
 
     fn assert_definition(

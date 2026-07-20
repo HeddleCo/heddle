@@ -1115,6 +1115,49 @@ mod tests {
         );
     }
 
+    /// heddle#1068: a `.zig` blob must index to a real File node (not the
+    /// `Opaque` fallback), and reformatting it must leave the whole-tree
+    /// `semantic_digest` stable — the ghostty git-lane import guarantee.
+    #[test]
+    fn zig_file_indexes_to_real_node_and_reformat_is_digest_stable() {
+        let (temp, repo) = repo();
+        let tight = "pub fn add(a: i32, b: i32) i32 { return a + b; }\ntest \"add\" { _ = add(1, 2); }\n";
+        let loose = "pub fn add(a: i32,   b: i32) i32 {\n    // sum\n    return a + b;\n}\n\ntest \"add\" {\n    _ = add(1, 2);\n}\n";
+
+        let a = snapshot(&repo, &temp, "math.zig", tight);
+        let ra = repo.semantic_index(&a).unwrap().unwrap();
+
+        // Real File node — not Opaque (which resolves to None here).
+        let node_hash = repo
+            .resolve_file_node(&ra, "math.zig")
+            .unwrap()
+            .expect("zig file must index to a real File node, not Opaque");
+        let file = repo.load_semantic_file(&node_hash).unwrap();
+        assert_eq!(file.language, "zig");
+        assert!(
+            file.symbols.iter().any(|s| s.name == "add"),
+            "fn add must be a symbol: {:?}",
+            file.symbols
+        );
+        assert!(
+            file.symbols.iter().any(|s| s.name == "test:\"add\""),
+            "test block must be a symbol: {:?}",
+            file.symbols
+        );
+
+        let b = snapshot(&repo, &temp, "math.zig", loose);
+        let rb = repo.semantic_index(&b).unwrap().unwrap();
+        assert_ne!(ra.tree, rb.tree, "reformat must move the storage hash");
+        assert_eq!(
+            ra.semantic_digest, rb.semantic_digest,
+            "reformatting a Zig file must NOT change the semantic_digest"
+        );
+        assert!(
+            !repo.semantic_changed(&a, &b, "").unwrap(),
+            "semantic_changed must prune a pure Zig reformat"
+        );
+    }
+
     /// GOLDEN: a one-token change to a single function yields exactly one
     /// SymbolDelta, for that symbol, with both old and new hashes present.
     #[test]

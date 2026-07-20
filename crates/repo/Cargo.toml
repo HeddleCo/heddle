@@ -65,8 +65,14 @@ zstd = ["objects/zstd", "wire/zstd"]
 # Symbol resolution. The implementation lives in `semantic`;
 # enabling the feature here pulls in the dep with the parsers our
 # resolver supports. `semantic`'s `common-languages` covers Rust,
-# Python, JS, TS; `lang-go` adds Go.
-tree-sitter-symbols = ["dep:semantic", "semantic/lang-go", "dep:state_review"]
+# Python, JS, TS; `lang-go` adds Go; `lang-zig` adds Zig (ghostty and
+# other Zig-heavy git-lane imports).
+tree-sitter-symbols = [
+    "dep:semantic",
+    "semantic/lang-go",
+    "semantic/lang-zig",
+    "dep:state_review",
+]
 # Alias so that `--workspace --features semantic` (used by the
 # Coverage CI job) resolves cleanly across all crates.  The dep is
 # declared with the `dep:` prefix, so Cargo does not auto-create an
