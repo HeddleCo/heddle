@@ -16,6 +16,7 @@ pub enum StateAttachmentKind {
     ReviewSignatures,
     Discussions,
     StructuredConflicts,
+    SemanticIndex,
     Signature,
 }
 
@@ -27,6 +28,7 @@ impl StateAttachmentKind {
             StateAttachmentBody::ReviewSignatures(_) => Self::ReviewSignatures,
             StateAttachmentBody::Discussions(_) => Self::Discussions,
             StateAttachmentBody::StructuredConflicts(_) => Self::StructuredConflicts,
+            StateAttachmentBody::SemanticIndex(_) => Self::SemanticIndex,
             StateAttachmentBody::Signature(_) => Self::Signature,
         }
     }

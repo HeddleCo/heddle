@@ -3,8 +3,8 @@ use std::collections::{HashSet, VecDeque};
 
 use objects::{
     object::{
-        ContentHash, State, StateAttachment, StateAttachmentBody, StateAttachmentId, StateId,
-        TreeEntryTarget,
+        ContentHash, SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode, State, StateAttachment,
+        StateAttachmentBody, StateAttachmentId, StateId, TreeEntryTarget,
     },
     store::{ObjectStore, pack::ObjectType as PackObjectType},
 };
@@ -314,6 +314,13 @@ fn walk_state_closure(
                     &mut seen_hashes,
                     &mut visit,
                 )?,
+                StateAttachmentBody::SemanticIndex(root) => walk_semantic_index_closure(
+                    store,
+                    root,
+                    &excluded_hashes,
+                    &mut seen_hashes,
+                    &mut visit,
+                )?,
                 StateAttachmentBody::Signature(_) => {}
             }
         }
@@ -408,6 +415,137 @@ fn walk_blob_filtered(
     })?;
     if store.has_redactions_for_blob(&blob_hash)? {
         visit(StateClosureEvent::Redaction { blob: blob_hash })?;
+    }
+    Ok(())
+}
+
+/// Walk the merkle semantic-index closure rooted at `root_hash` (a
+/// `SemanticIndexRoot` blob), emitting every reachable semantic node blob.
+///
+/// All semantic-index nodes (root, tree nodes, file nodes) are stored as
+/// ordinary content-addressed blobs, so replication just needs to enumerate
+/// them. Opaque entries point back at raw source blobs already covered by the
+/// state's tree closure, so they are not re-walked here. Decode failures are
+/// swallowed (the blob itself is still emitted); a semantic index can always be
+/// recomputed downstream.
+fn walk_semantic_index_closure(
+    store: &impl ObjectStore,
+    root_hash: ContentHash,
+    excluded: &HashSet<ContentHash>,
+    seen: &mut HashSet<ContentHash>,
+    visit: &mut impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
+) -> Result<()> {
+    if !emit_semantic_blob(store, root_hash, excluded, seen, visit)? {
+        return Ok(());
+    }
+    let Some(blob) = store.get_blob(&root_hash)? else {
+        return Ok(());
+    };
+    let Ok(root) = SemanticIndexRoot::decode(blob.content()) else {
+        return Ok(());
+    };
+    walk_semantic_tree_node(store, root.tree, excluded, seen, visit)
+}
+
+fn walk_semantic_tree_node(
+    store: &impl ObjectStore,
+    node_hash: ContentHash,
+    excluded: &HashSet<ContentHash>,
+    seen: &mut HashSet<ContentHash>,
+    visit: &mut impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
+) -> Result<()> {
+    if !emit_semantic_blob(store, node_hash, excluded, seen, visit)? {
+        return Ok(());
+    }
+    let Some(blob) = store.get_blob(&node_hash)? else {
+        return Ok(());
+    };
+    let Ok(node) = SemanticTreeNode::decode(blob.content()) else {
+        return Ok(());
+    };
+    for entry in &node.entries {
+        match entry.kind {
+            SemanticEntryKind::Dir => {
+                walk_semantic_tree_node(store, entry.node, excluded, seen, visit)?;
+            }
+            SemanticEntryKind::File => {
+                emit_semantic_blob(store, entry.node, excluded, seen, visit)?;
+            }
+            // Opaque `node` is the raw source blob, already in the tree closure.
+            SemanticEntryKind::Opaque => {}
+        }
+    }
+    Ok(())
+}
+
+/// Emit a semantic node blob as state metadata. Returns `true` when the blob
+/// was newly visited (so the caller may recurse into it), `false` when it was
+/// excluded or already seen.
+fn emit_semantic_blob(
+    store: &impl ObjectStore,
+    hash: ContentHash,
+    excluded: &HashSet<ContentHash>,
+    seen: &mut HashSet<ContentHash>,
+    visit: &mut impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
+) -> Result<bool> {
+    if excluded.contains(&hash) {
+        visit(StateClosureEvent::ExcludedHash { hash })?;
+        return Ok(false);
+    }
+    if !seen.insert(hash) {
+        return Ok(false);
+    }
+    if store.get_blob(&hash)?.is_none() {
+        return Ok(false);
+    }
+    visit(StateClosureEvent::Blob {
+        hash,
+        source: BlobSource::StateMetadata,
+    })?;
+    Ok(true)
+}
+
+/// Collect every semantic-index node blob hash reachable from `root_hash` into
+/// `excluded`, for the have-set computation.
+fn collect_semantic_hashes(
+    store: &impl ObjectStore,
+    root_hash: ContentHash,
+    excluded: &mut HashSet<ContentHash>,
+) -> Result<()> {
+    if !excluded.insert(root_hash) {
+        return Ok(());
+    }
+    let Some(blob) = store.get_blob(&root_hash)? else {
+        return Ok(());
+    };
+    let Ok(root) = SemanticIndexRoot::decode(blob.content()) else {
+        return Ok(());
+    };
+    collect_semantic_tree_hashes(store, root.tree, excluded)
+}
+
+fn collect_semantic_tree_hashes(
+    store: &impl ObjectStore,
+    node_hash: ContentHash,
+    excluded: &mut HashSet<ContentHash>,
+) -> Result<()> {
+    if !excluded.insert(node_hash) {
+        return Ok(());
+    }
+    let Some(blob) = store.get_blob(&node_hash)? else {
+        return Ok(());
+    };
+    let Ok(node) = SemanticTreeNode::decode(blob.content()) else {
+        return Ok(());
+    };
+    for entry in &node.entries {
+        match entry.kind {
+            SemanticEntryKind::Dir => collect_semantic_tree_hashes(store, entry.node, excluded)?,
+            SemanticEntryKind::File => {
+                excluded.insert(entry.node);
+            }
+            SemanticEntryKind::Opaque => {}
+        }
     }
     Ok(())
 }
@@ -625,6 +763,9 @@ fn collect_excluded(
                 | StateAttachmentBody::Discussions(hash)
                 | StateAttachmentBody::StructuredConflicts(hash) => {
                     excluded_hashes.insert(hash);
+                }
+                StateAttachmentBody::SemanticIndex(root) => {
+                    collect_semantic_hashes(store, root, &mut excluded_hashes)?;
                 }
                 StateAttachmentBody::Signature(_) => {}
             }
