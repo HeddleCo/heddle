@@ -18,7 +18,7 @@ use std::{
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 #[cfg(feature = "client")]
-use heddle_client::grpc_hosted::{HostedRefEntry, PullMaterialization};
+use heddle_client::hosted::{HostedClient, HostedRefEntry, PullMaterialization};
 use heddle_core::{
     CloneMode, ClonePlanError, ClonePlanFacts, ClonePlanOptions, CloneRemoteSource,
     UnsupportedCloneFlag, plan_clone, status::next_action::canonical_git_import_ref_command,
@@ -1632,7 +1632,10 @@ async fn clone_network(
         {
             Ok(_) => {}
             Err(error) => {
-                eprintln!("{} discussion sync skipped: {error:#}", style::warn_marker());
+                eprintln!(
+                    "{} discussion sync skipped: {error:#}",
+                    style::warn_marker()
+                );
             }
         }
         // Read path for hosted context annotations (heddle context): materialize
@@ -1876,7 +1879,7 @@ fn monorepo_clone_output_json(
 /// initialized empty repo (layout stays coherent).
 #[cfg(feature = "client")]
 async fn execute_monorepo_node_steps(
-    client: &mut heddle_client::grpc_hosted::HostedGrpcClient,
+    client: &mut HostedClient,
     node_exec: &MonorepoNodeExecution,
     dest: &Path,
     endpoint_spec: &str,
@@ -2356,14 +2359,14 @@ mod tests {
             "owner/repo",
         )
         .expect("thread selected");
-        assert_eq!(selected, "main", "companion refs/heads/* entries are ignored");
+        assert_eq!(
+            selected, "main",
+            "companion refs/heads/* entries are ignored"
+        );
 
-        let non_main = select_hosted_clone_thread(
-            None,
-            ["refs/heads/trunk", "trunk"],
-            "owner/repo",
-        )
-        .expect("thread selected");
+        let non_main =
+            select_hosted_clone_thread(None, ["refs/heads/trunk", "trunk"], "owner/repo")
+                .expect("thread selected");
         assert_eq!(
             non_main, "trunk",
             "a non-main default resolves to the short thread, not its companion"

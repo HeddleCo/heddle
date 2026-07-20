@@ -56,7 +56,7 @@ use super::{
 #[cfg(feature = "client")]
 use crate::cli::progress_render::clear_line;
 #[cfg(feature = "client")]
-use crate::client::HostedGrpcClient;
+use crate::client::HostedClient;
 #[cfg(feature = "client")]
 use crate::client::{HostedAuthMode, HostedSession};
 #[cfg(feature = "client")]
@@ -465,10 +465,7 @@ fn emit_push_dry_run(
         PushPath::NativeRemote { .. } => "native/hosted Heddle remote",
     };
 
-    let mut dry = DryRunPlan::new(
-        "push",
-        format!("push to {target_label} ({path_kind})"),
-    );
+    let mut dry = DryRunPlan::new("push", format!("push to {target_label} ({path_kind})"));
 
     if plan.all_threads {
         // Per-thread tips are read cheaply, but for a broad fan-out we keep
@@ -484,9 +481,7 @@ fn emit_push_dry_run(
             .flatten()
             .map(|state| state.state_id.short().to_string());
         if new_tip.is_none() {
-            dry.note(
-                "no current state yet; a real push would first bootstrap a state to publish",
-            );
+            dry.note("no current state yet; a real push would first bootstrap a state to publish");
         }
         dry.ref_updates.push(RefUpdatePreview {
             name: thread
@@ -1445,7 +1440,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
 #[allow(clippy::too_many_arguments)]
 async fn push_network_one_thread(
     repo: &Repository,
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
     state_id: &objects::object::StateId,
     track_name: &str,
@@ -1487,7 +1482,7 @@ async fn push_network_one_thread(
 #[cfg(feature = "client")]
 async fn push_network_all_threads(
     repo: &Repository,
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
     options: &PushNetworkOptions<'_>,
 ) -> Result<()> {
@@ -1508,8 +1503,8 @@ async fn push_network_all_threads(
             // strict UUID (a composite "{uuid}:push:{thread}" string is rejected as
             // InvalidArgument). Derive a deterministic, retry-stable per-thread
             // UUIDv5 from the root op-id (namespace) and the thread name.
-            let namespace = uuid::Uuid::parse_str(&root_operation_id)
-                .unwrap_or(uuid::Uuid::NAMESPACE_OID);
+            let namespace =
+                uuid::Uuid::parse_str(&root_operation_id).unwrap_or(uuid::Uuid::NAMESPACE_OID);
             uuid::Uuid::new_v5(&namespace, thread.name.as_bytes()).to_string()
         };
         let outcome = push_network_one_thread(
@@ -1609,7 +1604,7 @@ async fn push_network_all_threads(
 #[cfg(feature = "client")]
 async fn auto_provision_hosted_repo(
     repo: &Repository,
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     options: &PushNetworkOptions<'_>,
 ) -> Result<String> {
     let namespace = client.get_current_user_namespace().await?;

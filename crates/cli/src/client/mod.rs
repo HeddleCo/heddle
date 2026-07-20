@@ -9,14 +9,14 @@ pub mod context_sync;
 pub mod discussion_sync;
 #[cfg(feature = "client")]
 pub mod human_signature;
-#[cfg(feature = "client")]
-pub mod review_sync;
 pub mod local_daemon;
 pub mod local_sync;
+#[cfg(feature = "client")]
+pub mod review_sync;
 
 pub use cli_shared::ClientConfig;
 #[cfg(feature = "client")]
-pub use heddle_client::{HostedAuthMode, HostedGrpcClient, HostedSession};
+pub use heddle_client::{HostedAuthMode, HostedClient, HostedSession};
 #[cfg(feature = "client")]
 pub use human_signature::cli_human_signature_callback;
 #[cfg(unix)]

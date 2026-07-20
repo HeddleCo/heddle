@@ -163,6 +163,10 @@ pub struct UserRemoteConfig {
     pub tls_ca_certificate_path: Option<PathBuf>,
     #[serde(default)]
     pub auth_proof_key_pem_path: Option<PathBuf>,
+    #[serde(default)]
+    pub iroh_descriptor_key_id: Option<String>,
+    #[serde(default)]
+    pub iroh_descriptor_public_key_path: Option<PathBuf>,
     /// Allow cleartext connections to non-loopback hosts without TLS.
     /// Prefer enabling TLS; this is an explicit opt-in for lab/VPN testing.
     #[serde(default)]
@@ -459,6 +463,22 @@ impl UserConfig {
             let pem = read_security_config_file("remote.auth_proof_key_pem_path", path)?;
             config = config.with_auth_proof_key_pem(pem);
         }
+        if let (Some(key_id), Some(path)) = (
+            self.remote.iroh_descriptor_key_id.as_deref(),
+            self.remote.iroh_descriptor_public_key_path.as_deref(),
+        ) {
+            config = config.with_descriptor_trust(
+                key_id,
+                read_descriptor_public_key("remote.iroh_descriptor_public_key_path", path)?,
+            );
+        } else if self.remote.iroh_descriptor_key_id.is_some()
+            || self.remote.iroh_descriptor_public_key_path.is_some()
+        {
+            return Err(security_config_error(
+                "remote.iroh_descriptor_key_id/remote.iroh_descriptor_public_key_path",
+                "both descriptor trust fields are required".to_string(),
+            ));
+        }
 
         if env_bool("HEDDLE_REMOTE_TLS")? {
             config = config.with_tls(false);
@@ -487,6 +507,35 @@ impl UserConfig {
                 return Err(security_config_error(
                     "HEDDLE_REMOTE_TLS_CA_CERT",
                     format!("read environment value: {err}"),
+                ));
+            }
+        }
+        match (
+            env::var("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID"),
+            env::var("HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY"),
+        ) {
+            (Ok(key_id), Ok(public_key)) if !key_id.is_empty() && !public_key.is_empty() => {
+                config = config.with_descriptor_trust(
+                    key_id,
+                    parse_descriptor_public_key(
+                        "HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
+                        &public_key,
+                    )?,
+                );
+            }
+            (Err(env::VarError::NotPresent), Err(env::VarError::NotPresent)) => {}
+            (Ok(_), Err(env::VarError::NotPresent))
+            | (Err(env::VarError::NotPresent), Ok(_))
+            | (Ok(_), Ok(_)) => {
+                return Err(security_config_error(
+                    "HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID/HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
+                    "both non-empty descriptor trust values are required".to_string(),
+                ));
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                return Err(security_config_error(
+                    "HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID/HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
+                    format!("read environment value: {error}"),
                 ));
             }
         }
@@ -542,6 +591,23 @@ fn read_security_config_file(setting: &str, path: &Path) -> anyhow::Result<Strin
         security_config_error(
             setting,
             format!("read configured file {}: {err}", path.display()),
+        )
+    })
+}
+
+fn read_descriptor_public_key(setting: &str, path: &Path) -> anyhow::Result<[u8; 32]> {
+    let value = read_security_config_file(setting, path)?;
+    parse_descriptor_public_key(setting, value.trim())
+}
+
+fn parse_descriptor_public_key(setting: &str, value: &str) -> anyhow::Result<[u8; 32]> {
+    let bytes = hex::decode(value).map_err(|error| {
+        security_config_error(setting, format!("decode hex descriptor key: {error}"))
+    })?;
+    bytes.try_into().map_err(|_| {
+        security_config_error(
+            setting,
+            "descriptor key must be a 32-byte Ed25519 public key".to_string(),
         )
     })
 }
@@ -608,6 +674,8 @@ mod tests {
         "HEDDLE_REMOTE_TLS_DOMAIN",
         "HEDDLE_REMOTE_TLS_CA_CERT",
         "HEDDLE_REMOTE_INSECURE",
+        "HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID",
+        "HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
         "HEDDLE_AUTO_CAPTURE",
     ];
 
@@ -750,6 +818,39 @@ mod tests {
         assert!(config.tls_ca_certificate_pem.is_none());
         assert!(config.auth_proof_key_pem.is_none());
         assert!(config.token.is_none());
+        assert!(config.descriptor_key_id.is_none());
+        assert!(config.descriptor_public_key.is_none());
+    }
+
+    #[test]
+    fn heddle_client_config_loads_descriptor_trust_from_environment() {
+        let env = RemoteEnvGuard::clean();
+        env.set("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID", "weft-current");
+        env.set(
+            "HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
+            hex::encode([17; 32]),
+        );
+
+        let config = UserConfig::default().heddle_client_config(None).unwrap();
+
+        assert_eq!(config.descriptor_key_id.as_deref(), Some("weft-current"));
+        assert_eq!(config.descriptor_public_key, Some([17; 32]));
+    }
+
+    #[test]
+    fn heddle_client_config_rejects_partial_descriptor_trust() {
+        let env = RemoteEnvGuard::clean();
+        env.set("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID", "weft-current");
+
+        let error = UserConfig::default()
+            .heddle_client_config(None)
+            .expect_err("partial descriptor trust must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("both non-empty descriptor trust")
+        );
     }
 
     #[test]

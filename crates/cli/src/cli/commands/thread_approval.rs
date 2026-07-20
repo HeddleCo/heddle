@@ -37,7 +37,7 @@ use crate::{
         },
         should_output_json,
     },
-    client::{HostedAuthMode, HostedGrpcClient},
+    client::{HostedAuthMode, HostedClient},
     config::UserConfig,
     remote::{RemoteTarget, resolve_remote_with_key},
 };
@@ -102,7 +102,7 @@ struct ApprovalRevokeOutput {
 async fn open_heddle_client(
     repo: &Repository,
     remote_name: &str,
-) -> Result<(HostedGrpcClient, String)> {
+) -> Result<(HostedClient, String)> {
     let (target, server_key) = resolve_remote_with_key(repo, Some(remote_name))?;
     let (addr, repo_path) = match target {
         RemoteTarget::Network { addr, repo_path } => (
@@ -127,7 +127,7 @@ async fn open_heddle_client(
     // Authenticated thread-workflow RPCs are proof-of-possession gated, so use
     // CredentialFallback (resolves the credential store's proof key) rather
     // than a token-only ConfigToken session.
-    let client = HostedGrpcClient::open_session(
+    let client = HostedClient::open_session(
         addr,
         &user_config,
         server_key,

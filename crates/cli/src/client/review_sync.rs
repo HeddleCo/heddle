@@ -48,16 +48,19 @@ use anyhow::{Context, Result};
 use api::heddle::api::v1alpha1::{
     PathSymbolRef, ReviewKind as ProtoReviewKind, ReviewScope as ProtoReviewScope, review_scope,
 };
-use objects::fs_atomic::write_file_atomic;
-use objects::object::{
-    ReviewKind, ReviewScope, ReviewSignature, ReviewSignaturesBlob, StateAttachmentBody, StateId,
+use objects::{
+    fs_atomic::write_file_atomic,
+    object::{
+        ReviewKind, ReviewScope, ReviewSignature, ReviewSignaturesBlob, StateAttachmentBody,
+        StateId,
+    },
+    store::ObjectStore,
 };
-use objects::store::ObjectStore;
 use repo::{HistoryQuery, Repository, StateAttachmentKind};
 use serde::{Deserialize, Serialize};
 use wire::ProtocolError;
 
-use crate::client::HostedGrpcClient;
+use crate::client::HostedClient;
 
 /// How far back from HEAD to scan for locally-recorded review signatures.
 const REVIEW_SCAN_LIMIT: usize = 50;
@@ -170,7 +173,7 @@ fn read_signatures(repo: &Repository, state_id: &StateId) -> Result<Vec<ReviewSi
 /// Replay local review signatures we authored to the hosted `StateReviewService`.
 pub async fn push_review_signatures(
     repo: &Repository,
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
 ) -> Result<usize> {
     let Some(head) = repo.head().context("resolve repository head")? else {
@@ -272,7 +275,7 @@ pub async fn push_review_signatures(
 }
 
 async fn forward_signature(
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
     state_id: &StateId,
     signature: &ReviewSignature,
@@ -340,7 +343,9 @@ mod tests {
 
     #[test]
     fn symbol_scope_maps_to_proto() {
-        let proto = scope_to_proto(&ReviewScope::Symbols(vec![SymbolAnchor::new("a.rs", "foo")]));
+        let proto = scope_to_proto(&ReviewScope::Symbols(vec![SymbolAnchor::new(
+            "a.rs", "foo",
+        )]));
         match proto.scope {
             Some(review_scope::Scope::Symbols(list)) => {
                 assert_eq!(list.symbols.len(), 1);

@@ -26,7 +26,7 @@
 //! and match the detail `Any` by its `type.googleapis.com/heddle.api.v1alpha1.*`
 //! type URL.
 
-use api::heddle::api::v1alpha1::{
+use grpc::heddle::api::v1alpha1::{
     ConflictDetail, CursorFailure, StreamFailure, cursor_failure::Reason as CursorReason,
 };
 
@@ -163,9 +163,7 @@ impl HostedTypedError {
                         cursor.restart_cursor
                     )
                 } else if let Some(secs) = stream_retry_after_secs(detail) {
-                    format!(
-                        "The stream failed mid-flight but is resumable; retry after {secs}s."
-                    )
+                    format!("The stream failed mid-flight but is resumable; retry after {secs}s.")
                 } else if stream_is_retryable(detail) {
                     "The stream failed mid-flight; restart it from the beginning.".to_string()
                 } else {
@@ -184,7 +182,10 @@ impl HostedTypedError {
         let mut fields = serde_json::Map::new();
         match self {
             Self::Conflict(detail) => {
-                fields.insert("conflict_resource".into(), Value::String(detail.resource.clone()));
+                fields.insert(
+                    "conflict_resource".into(),
+                    Value::String(detail.resource.clone()),
+                );
                 if !detail.expected_version.is_empty() {
                     fields.insert(
                         "conflict_expected_version".into(),
@@ -209,7 +210,10 @@ impl HostedTypedError {
                 );
             }
             Self::Stream(detail) => {
-                fields.insert("stream_grpc_code".into(), Value::Number(detail.grpc_code.into()));
+                fields.insert(
+                    "stream_grpc_code".into(),
+                    Value::Number(detail.grpc_code.into()),
+                );
                 let restart_cursor = detail
                     .cursor
                     .as_ref()
@@ -279,10 +283,11 @@ fn cursor_reason_str(reason: i32) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use api::heddle::api::v1alpha1::RetryAdvice;
+    use grpc::heddle::api::v1alpha1::RetryAdvice;
     use prost::Message as _;
     use tonic::{Code, Status};
+
+    use super::*;
 
     /// Build a `tonic::Status` carrying `detail` as a `google.rpc.Status`
     /// detail, exactly as the weft server's `typed_error` builders do.
@@ -321,7 +326,12 @@ mod tests {
         assert_eq!(typed.exit_code(), Some(HeddleExitCode::Protocol));
         assert!(typed.hint().contains("conflict"));
         let fields = typed.extra_json_fields();
-        assert!(fields["conflict_resource"].as_str().unwrap().contains("refs/threads/main"));
+        assert!(
+            fields["conflict_resource"]
+                .as_str()
+                .unwrap()
+                .contains("refs/threads/main")
+        );
     }
 
     #[test]
@@ -364,7 +374,10 @@ mod tests {
         assert_eq!(typed.kind(), "stream_failure");
         assert_eq!(typed.exit_code(), Some(HeddleExitCode::TempFail));
         assert!(typed.hint().contains("restart"));
-        assert_eq!(typed.extra_json_fields()["stream_resumable"], serde_json::Value::Bool(false));
+        assert_eq!(
+            typed.extra_json_fields()["stream_resumable"],
+            serde_json::Value::Bool(false)
+        );
 
         // Retry advice present → resumable after N seconds.
         let resumable = status_with_detail(
@@ -375,7 +388,10 @@ mod tests {
                 grpc_code: Code::Unavailable as i32,
                 message: "pull stream aborted".to_string(),
                 retry: Some(RetryAdvice {
-                    retry_after: Some(prost_types::Duration { seconds: 3, nanos: 0 }),
+                    retry_after: Some(prost_types::Duration {
+                        seconds: 3,
+                        nanos: 0,
+                    }),
                 }),
                 cursor: None,
             },
@@ -384,7 +400,10 @@ mod tests {
         assert!(typed.hint().contains("resumable"));
         let fields = typed.extra_json_fields();
         assert_eq!(fields["stream_resumable"], serde_json::Value::Bool(true));
-        assert_eq!(fields["retry_after_secs"], serde_json::Value::Number(3.into()));
+        assert_eq!(
+            fields["retry_after_secs"],
+            serde_json::Value::Number(3.into())
+        );
     }
 
     #[test]

@@ -10,11 +10,12 @@ mod connection;
 mod content;
 mod context;
 mod error;
-mod helpers;
+pub(crate) mod helpers;
 mod human;
 mod methods;
 pub mod monorepo;
 mod operation_id;
+mod session;
 mod state_review;
 mod sync;
 mod user;
@@ -28,12 +29,71 @@ use cli_shared::ClientConfig;
 pub use collaboration::{HostedDiscussion, HostedDiscussionTurn};
 use connection::HostedConnection;
 pub use context::{CallContextFactory, SignedCallContext};
+use crypto::{Ed25519Signer, Signer as _};
 pub use error::HostedError;
 pub use human::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion};
 use iroh::{Endpoint, EndpointAddr};
 pub use methods::HostedRoutes;
 use prost::Message;
+pub use session::{HostedAuthMode, HostedSession};
 pub use sync::{HostedRefEntry, PullObjectMix, PullProfile};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RenewableAuthorityCredential {
+    token: String,
+    credential_id: String,
+}
+
+impl RenewableAuthorityCredential {
+    pub(super) fn from_stored(credential: &crate::credentials::ServerCredential) -> Option<Self> {
+        let credential_id = credential.credential_id.clone()?;
+        let signer = Ed25519Signer::from_pem(credential.private_key_pem.as_ref()?).ok()?;
+        let biscuit =
+            biscuit_auth::UnverifiedBiscuit::from_base64(credential.token.as_bytes()).ok()?;
+        if biscuit.block_count() != 1 {
+            return None;
+        }
+        let authority = biscuit_auth::builder::BlockBuilder::new()
+            .code(&biscuit.print_block_source(0).ok()?)
+            .ok()?;
+        let credential_ids = authority
+            .facts
+            .iter()
+            .filter_map(|fact| {
+                match (
+                    fact.predicate.name.as_str(),
+                    fact.predicate.terms.as_slice(),
+                ) {
+                    ("credential_id", [biscuit_auth::builder::Term::Str(id)]) => Some(id),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let [token_credential_id] = credential_ids.as_slice() else {
+            return None;
+        };
+        if token_credential_id.as_str() != credential_id.as_str()
+            || !crate::device_flow::effective_pop_public_key_hex(&credential.token)
+                .is_ok_and(|key| key.eq_ignore_ascii_case(&hex::encode(signer.public_key())))
+        {
+            return None;
+        }
+        Some(Self {
+            token: credential.token.clone(),
+            credential_id,
+        })
+    }
+
+    fn matches_active_client(
+        &self,
+        credential: &crate::credentials::ServerCredential,
+        active_bearer: &[u8],
+    ) -> bool {
+        credential.token == self.token
+            && credential.credential_id.as_deref() == Some(self.credential_id.as_str())
+            && active_bearer == self.token.as_bytes()
+    }
+}
 
 pub type Result<T> = std::result::Result<T, HostedError>;
 
@@ -56,6 +116,7 @@ pub struct HostedClient {
     context: CallContextFactory,
     transport: helpers::HostedTransportPolicy,
     on_human_signature: Option<HumanSignatureCallback>,
+    server_key: Option<String>,
 }
 
 impl std::fmt::Debug for HostedClient {
@@ -84,6 +145,7 @@ impl HostedClient {
             context: CallContextFactory::default(),
             transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
             on_human_signature: None,
+            server_key: None,
         })
     }
 
@@ -96,6 +158,7 @@ impl HostedClient {
             context: CallContextFactory::from_client_config(config)?,
             transport: helpers::HostedTransportPolicy::from_client_config(config),
             on_human_signature: None,
+            server_key: config.server_key.clone(),
         })
     }
 
@@ -106,6 +169,7 @@ impl HostedClient {
             context: CallContextFactory::default(),
             transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
             on_human_signature: None,
+            server_key: None,
         })
     }
 
@@ -119,6 +183,7 @@ impl HostedClient {
             context: CallContextFactory::from_client_config(config)?,
             transport: helpers::HostedTransportPolicy::from_client_config(config),
             on_human_signature: None,
+            server_key: config.server_key.clone(),
         })
     }
 
@@ -132,12 +197,109 @@ impl HostedClient {
             context,
             transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
             on_human_signature: None,
+            server_key: None,
         })
     }
 
     pub fn with_human_signature_callback(mut self, callback: HumanSignatureCallback) -> Self {
         self.on_human_signature = Some(callback);
         self
+    }
+
+    pub(super) async fn auto_rotate_if_needed(
+        &mut self,
+        renewable: Option<&RenewableAuthorityCredential>,
+    ) {
+        let (Some(renewable), Some(server_key)) = (renewable, self.server_key.clone()) else {
+            return;
+        };
+        let credential = match crate::credentials::resolve_credential_for_server(&server_key) {
+            Ok(Some(credential)) => credential,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!("credential rotation: failed to load credential: {error}");
+                return;
+            }
+        };
+        if !renewable.matches_active_client(&credential, self.context.bearer_capability())
+            || !crate::credentials::token_needs_rotation(&credential)
+        {
+            return;
+        }
+        let (Some(public_key_id), Some(private_key_pem)) = (
+            credential.credential_id.clone(),
+            credential.private_key_pem.clone(),
+        ) else {
+            tracing::debug!("credential rotation: stored authority has no renewal key");
+            return;
+        };
+        let signer = match Ed25519Signer::from_pem(&private_key_pem) {
+            Ok(signer) => signer,
+            Err(error) => {
+                tracing::warn!("credential rotation: failed to load signing key: {error}");
+                return;
+            }
+        };
+        let timestamp = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs(),
+            Err(error) => {
+                tracing::warn!("credential rotation: clock skew: {error}");
+                return;
+            }
+        };
+        let signature = match signer.sign(format!("{timestamp}\n{public_key_id}\n").as_bytes()) {
+            Ok(signature) => signature,
+            Err(error) => {
+                tracing::warn!("credential rotation: failed to sign challenge: {error}");
+                return;
+            }
+        };
+        let request = api::heddle::api::v1alpha1::MintBiscuitRequest {
+            subject: credential.subject.clone(),
+            requested_scope: String::new(),
+            user_agent: String::new(),
+            ip: String::new(),
+            proof: Some(
+                api::heddle::api::v1alpha1::mint_biscuit_request::Proof::Keypair(
+                    api::heddle::api::v1alpha1::KeypairProof {
+                        public_key_id,
+                        timestamp,
+                        signature,
+                    },
+                ),
+            ),
+            client_operation_id: String::new(),
+        };
+        let response = match self.routes().mint_biscuit(&request).await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!("credential rotation: MintBiscuit failed: {error}");
+                return;
+            }
+        };
+        let expires_at = response
+            .expires_at
+            .as_ref()
+            .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp.seconds.max(0), 0))
+            .map(|timestamp| timestamp.to_rfc3339())
+            .or(credential.expires_at.clone());
+        let updated = crate::credentials::ServerCredential {
+            token: response.token.clone(),
+            subject: if response.subject.is_empty() {
+                credential.subject
+            } else {
+                response.subject
+            },
+            device_id: credential.device_id,
+            credential_id: credential.credential_id,
+            private_key_pem: Some(private_key_pem),
+            expires_at,
+        };
+        if let Err(error) = crate::credentials::store_server_credential(&server_key, updated) {
+            tracing::warn!("credential rotation: failed to persist credential: {error}");
+        }
+        self.context
+            .set_bearer_capability(response.token.into_bytes());
     }
 
     pub async fn call_unary<Request, Response>(

@@ -3,20 +3,20 @@
 //! SupportAccess` over the configured remote.
 
 use anyhow::{Result, anyhow};
+use api::heddle::api::v1alpha1::{
+    HostedRole, SupportAccessGrant as ProtoSupportAccessGrant,
+    grant_target_ref::Target as GrantTargetKind,
+};
 use cli_shared::{
     UserConfig,
     remote::{RemoteTarget, resolve_remote_with_key},
-};
-use grpc::heddle::api::v1alpha1::{
-    HostedRole, SupportAccessGrant as ProtoSupportAccessGrant,
-    grant_target_ref::Target as GrantTargetKind,
 };
 use repo::Repository;
 use serde::Serialize;
 use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
 use crate::{
-    grpc_hosted::{HostedAuthMode, HostedGrpcClient, helpers::repository_ref_path},
+    hosted::{HostedAuthMode, HostedClient, helpers::repository_ref_path},
     support_requests::{SupportCommand, SupportGrant, SupportList, SupportRevoke},
 };
 
@@ -130,7 +130,7 @@ fn resolve_repo_path(ctx: &dyn CliContext) -> Result<std::path::PathBuf> {
     }
 }
 
-async fn open_client(repo: &Repository, remote: &str) -> Result<HostedGrpcClient> {
+async fn open_client(repo: &Repository, remote: &str) -> Result<HostedClient> {
     let (target, server_key) =
         resolve_remote_with_key(repo, Some(remote)).map_err(anyhow::Error::msg)?;
     let addr = match target {
@@ -143,8 +143,7 @@ async fn open_client(repo: &Repository, remote: &str) -> Result<HostedGrpcClient
         }
     };
     let user_config = UserConfig::load_default()?;
-    HostedGrpcClient::open_session(addr, &user_config, server_key, HostedAuthMode::ConfigToken)
-        .await
+    HostedClient::open_session(addr, &user_config, server_key, HostedAuthMode::ConfigToken).await
 }
 
 /// Parse a TTL string like `"24h"`, `"30m"`, `"4d"`, or a bare number
@@ -322,7 +321,7 @@ async fn run_revoke(ctx: &dyn CliContext, args: SupportRevoke) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use grpc::heddle::api::v1alpha1::{
+    use api::heddle::api::v1alpha1::{
         GrantTargetRef, RepositoryRef, SupportAccessGrant, grant_target_ref::Target,
         repository_ref::Reference,
     };
