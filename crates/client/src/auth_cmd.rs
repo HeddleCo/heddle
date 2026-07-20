@@ -22,6 +22,7 @@ use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
 use crate::{
     auth_requests::AuthCommand,
+    credential_file::{self, CredentialKind, CredentialProvenance, VerifiedCredential},
     credentials,
     credentials::ServerCredential,
     device_flow::{
@@ -64,29 +65,13 @@ struct ServiceTokenOutput {
     name: String,
     namespace: String,
     scope: String,
-    token: String,
-    /// Absolute path of the private-key PEM file written with mode 0600.
-    private_key_path: String,
-    /// Only populated when `--show-secrets` is passed; omitted from JSON otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    private_key_pem: Option<String>,
+    /// Absolute path of the `.hcred` credential file written with mode 0600.
+    /// The token and proof key never appear on stdout or in JSON.
+    credential_path: String,
     expires_in_days: u32,
 }
 
-#[derive(Serialize)]
-struct AgentTokenExportMetadata<'a> {
-    server: &'a str,
-    subject: &'a str,
-    expires_at: String,
-    scopes: Vec<String>,
-    /// Preset the ceiling was derived from, when `--template` was used.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    template: Option<&'a str>,
-    /// Exact operation ceiling recorded in the token's attenuation block.
-    allowed_operations: Vec<String>,
-}
-
-const DERIVED_TOKEN_SECURITY_NOTE: &str = "Derived credential has its own proof key and is operation/TTL/resource-scope-limited and enforced server-side. Keep the token and child key together; the parent device key is not exported.";
+const DERIVED_TOKEN_SECURITY_NOTE: &str = "Derived credential has its own proof key and is operation/TTL/resource-scope-limited and enforced server-side. The token and proof key travel together inside the .hcred file; the parent device key is not exported.";
 
 const SERVICE_TOKEN_TTL_DAYS: u32 = 30;
 const SERVICE_TOKEN_TTL_SECS: i64 = SERVICE_TOKEN_TTL_DAYS as i64 * 24 * 3600;
@@ -99,24 +84,17 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
         AuthCommand::Login {
             server,
             open_browser,
-            token,
-            key_file,
-        } => match (token, key_file) {
-            (Some(token), Some(key_file)) => {
-                let server = server.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "--server is required with --token/--key-file so a headless install cannot target the wrong server"
-                    )
-                })?;
-                let subject = install_headless_credential(server, &token, &key_file)?;
+            credential,
+        } => match credential {
+            Some(credential) => {
+                let subject = install_credential_file(&credential)?;
                 println!("Authenticated as {subject}. Credentials saved.");
                 Ok(())
             }
-            (None, None) => {
+            None => {
                 let server = resolve_server(server.as_deref())?;
                 cmd_auth_login(&server, open_browser).await
             }
-            _ => bail!("--token and --key-file must be provided together"),
         },
         AuthCommand::Logout { server } => cmd_auth_logout(ctx, server.as_deref()),
         AuthCommand::Status { server } => cmd_auth_status(ctx, server.as_deref()),
@@ -141,18 +119,9 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             name,
             namespace,
             server,
-            key_out,
-            show_secrets,
+            out,
         } => {
-            cmd_create_service_token(
-                ctx,
-                server.as_deref(),
-                name,
-                namespace,
-                key_out,
-                show_secrets,
-            )
-            .await
+            cmd_create_service_token(ctx, server.as_deref(), name, namespace, out.as_deref()).await
         }
     }
 }
@@ -235,19 +204,31 @@ fn cmd_auth_derive_agent(
         .to_pem()
         .map_err(|error| anyhow::anyhow!("failed to export child proof key: {error}"))?;
     if let Some(out) = out {
-        let export_metadata = AgentTokenExportMetadata {
-            server,
-            subject: &metadata.subject,
-            expires_at: expires_at.to_rfc3339(),
-            scopes: declared_scopes
-                .iter()
-                .map(|(kind, path)| format!("{kind}:{path}"))
-                .collect(),
-            template: template.map(|template| template.as_str()),
-            allowed_operations: allowed_operations.clone(),
+        let provenance = CredentialProvenance {
+            template: template.map(|template| template.as_str().to_string()),
+            scopes: (!declared_scopes.is_empty()).then(|| {
+                declared_scopes
+                    .iter()
+                    .map(|(kind, path)| format!("{kind}:{path}"))
+                    .collect()
+            }),
+            allowed_operations: Some(allowed_operations.clone()),
+            agent_id: Some(agent_id.clone()),
         };
-        write_agent_bundle(out, &child_token, &child_private_key_pem, &export_metadata)?;
-        println!("Agent token {agent_id} written to {}.", out.display());
+        let verified = VerifiedCredential {
+            server: server.to_string(),
+            kind: CredentialKind::Agent,
+            subject: metadata.subject.clone(),
+            token: child_token,
+            proof_key_pem: child_private_key_pem,
+            expires_at: Some(expires_at.to_rfc3339()),
+            // A derived child must never auto-rotate through MintBiscuit (that
+            // would drop this block's caveats), so it carries no credential id.
+            credential_id: None,
+            provenance: Some(provenance),
+        };
+        credential_file::write_credential_file(out, &verified)?;
+        println!("Agent credential {agent_id} written to {}.", out.display());
         if let Some(template) = template {
             println!("Template: {} ceiling", template.as_str());
         }
@@ -425,97 +406,6 @@ fn scope_is_within(child: &(String, String), parent: &(String, String)) -> bool 
     }
 }
 
-fn write_agent_bundle(
-    directory: &Path,
-    token: &str,
-    child_private_key_pem: &str,
-    metadata: &AgentTokenExportMetadata<'_>,
-) -> Result<()> {
-    let mut metadata_json =
-        serde_json::to_vec_pretty(metadata).context("serializing agent token metadata")?;
-    metadata_json.push(b'\n');
-
-    match std::fs::symlink_metadata(directory) {
-        Ok(_) => bail!(
-            "agent bundle destination {} already exists; choose a new --out directory",
-            directory.display()
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!("checking agent bundle destination {}", directory.display())
-            });
-        }
-    }
-
-    let parent = directory
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    objects::fs_atomic::create_private_dir_all(parent)
-        .with_context(|| format!("creating agent bundle parent {}", parent.display()))?;
-    let bundle_name = directory
-        .file_name()
-        .context("--out must name an agent bundle directory")?
-        .to_string_lossy();
-    let staging = parent.join(format!(
-        ".{bundle_name}.{}.tmp",
-        uuid::Uuid::new_v4().simple()
-    ));
-
-    let write_result = (|| -> Result<()> {
-        objects::fs_atomic::create_private_dir_all(&staging).with_context(|| {
-            format!(
-                "creating private agent bundle staging directory {}",
-                staging.display()
-            )
-        })?;
-        objects::fs_atomic::write_file_atomic_secret(
-            &staging.join("device-key.pem"),
-            child_private_key_pem.as_bytes(),
-        )
-        .with_context(|| format!("writing child proof key under {}", staging.display()))?;
-        objects::fs_atomic::write_file_atomic_secret(&staging.join("token"), token.as_bytes())
-            .with_context(|| format!("writing agent token under {}", staging.display()))?;
-        objects::fs_atomic::write_file_atomic_secret(
-            &staging.join("metadata.json"),
-            &metadata_json,
-        )
-        .with_context(|| format!("writing agent metadata under {}", staging.display()))?;
-        publish_agent_bundle(&staging, directory, parent)?;
-        Ok(())
-    })();
-
-    if write_result.is_err() {
-        let _ = std::fs::remove_dir_all(&staging);
-    }
-    write_result
-}
-
-fn publish_agent_bundle(staging: &Path, directory: &Path, parent: &Path) -> Result<()> {
-    publish_agent_bundle_with_sync(
-        staging,
-        directory,
-        parent,
-        objects::fs_atomic::sync_directory,
-    )
-}
-
-fn publish_agent_bundle_with_sync(
-    staging: &Path,
-    directory: &Path,
-    parent: &Path,
-    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
-) -> Result<()> {
-    std::fs::rename(staging, directory).with_context(|| {
-        format!(
-            "publishing completed agent bundle at {}",
-            directory.display()
-        )
-    })?;
-    sync_parent(parent).with_context(|| format!("syncing agent bundle parent {}", parent.display()))
-}
-
 pub(crate) struct HeadlessTokenMetadata {
     pub(crate) subject: String,
     pub(crate) is_derived: bool,
@@ -524,54 +414,38 @@ pub(crate) struct HeadlessTokenMetadata {
     pub(crate) proof_public_key_hex: String,
 }
 
-/// Install an operator-provisioned, device-bound credential without a browser.
-pub(crate) fn install_headless_credential(
-    server: &str,
-    token: &str,
-    key_file: &Path,
-) -> Result<String> {
-    let token = token.trim();
-    if token.is_empty() {
-        bail!("--token must not be empty");
-    }
+/// Install a verified `.hcred` credential file without a browser.
+///
+/// [`credential_file::load_credential_file`] is the trust chokepoint: it
+/// re-verifies the proof key, subject, and expiry against the token before we
+/// store anything. The server is taken from the file. A `device`-kind
+/// credential is a machine bootstrap key, so it also registers the host's
+/// device signing identity (heddle#482); `agent`/`service` credentials never
+/// do.
+pub(crate) fn install_credential_file(path: &Path) -> Result<String> {
+    let credential = credential_file::load_credential_file(path)?;
+    let server = credential.server.clone();
+    let subject = credential.subject.clone();
+    let register_device_identity = matches!(credential.kind, CredentialKind::Device);
+    let proof_key_pem = credential.proof_key_pem.clone();
 
-    let private_key_pem = std::fs::read_to_string(key_file)
-        .with_context(|| format!("reading device private key from {}", key_file.display()))?;
-    let signer = Ed25519Signer::from_pem(&private_key_pem)
-        .map_err(|error| anyhow::anyhow!("invalid Ed25519 device private key: {error}"))?;
-    let metadata = headless_token_metadata(token)?;
-    let public_key_hex = hex::encode(signer.public_key());
-    if !metadata
-        .proof_public_key_hex
-        .eq_ignore_ascii_case(&public_key_hex)
-    {
-        bail!(
-            "device private key does not match the token's device proof key; install the matching bootstrap key"
-        );
-    }
+    credentials::store_server_credential(&server, credential.into_server_credential())?;
 
-    let credential = ServerCredential {
-        token: token.to_string(),
-        subject: metadata.subject.clone(),
-        device_id: None,
-        credential_id: metadata.credential_id,
-        private_key_pem: Some(private_key_pem.clone()),
-        expires_at: metadata.expires_at,
-    };
-    credentials::store_server_credential(server, credential)?;
-    if !metadata.is_derived {
-        repo::identity::link_device_key(signer.public_key(), &private_key_pem, server)
+    if register_device_identity {
+        let signer = Ed25519Signer::from_pem(&proof_key_pem)
+            .map_err(|error| anyhow::anyhow!("credential proof key is invalid: {error}"))?;
+        repo::identity::link_device_key(signer.public_key(), &proof_key_pem, &server)
             .with_context(|| format!("registering device identity for {server}"))?;
     }
 
-    Ok(metadata.subject)
+    Ok(subject)
 }
 
 pub(crate) fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetadata> {
     use biscuit_auth::builder::{BlockBuilder, Term};
 
     let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
-        .context("parsing --token as a Biscuit")?;
+        .context("parsing credential token as a Biscuit")?;
     let block_count = biscuit.block_count();
     let authority_source = biscuit
         .print_block_source(0)
@@ -894,19 +768,33 @@ fn auth_status_output(server: &str, credential: Option<ServerCredential>) -> Aut
 // ---------------------------------------------------------------------------
 
 /// Create a namespace-scoped service token for CI/ephemeral runners.
+///
+/// Emits a single self-verifying `.hcred` credential file. The token and proof
+/// key never touch stdout or the JSON contract — only the credential path,
+/// scope, and expiry are reported.
 async fn cmd_create_service_token(
     ctx: &dyn CliContext,
     server: Option<&str>,
     name: String,
     namespace: String,
-    key_out: Option<String>,
-    show_secrets: bool,
+    out: Option<&Path>,
 ) -> Result<()> {
     let server = resolve_server(server)?;
     let scope = format!("repo:{namespace}/*");
 
+    // Resolve (and fail-fast reject an existing) credential path BEFORE any
+    // server round trip, so a name collision doesn't strand a created service
+    // account with no locally-written credential.
+    let credential_path = resolve_service_account_credential_path(&name, out);
+    if std::fs::symlink_metadata(&credential_path).is_ok() {
+        bail!(
+            "credential destination {} already exists; choose a new --out path",
+            credential_path.display()
+        );
+    }
+
     // Select and validate the exact stored bearer + matching device proof key
-    // before generating or writing the new service-account key.
+    // before generating the new service-account key.
     let user_config = UserConfig::load_default()?;
     let session = HostedSession::build_stored_credential(&user_config, &server)?;
     let channel = connect_channel(&server).await?;
@@ -927,18 +815,6 @@ async fn cmd_create_service_token(
     let private_key_pem = signer
         .to_pem()
         .map_err(|e| anyhow::anyhow!("failed to export service-account private key: {e}"))?;
-
-    // Always persist the private key to a 0600 file; never dump PEM to stdout
-    // by default (shell history / CI logs). `--show-secrets` opts into printing
-    // the PEM (and including it in JSON).
-    let key_path = resolve_service_account_key_path(&name, key_out.as_deref())?;
-    if let Some(parent) = key_path.parent() {
-        objects::fs_atomic::create_private_dir_all(parent)
-            .with_context(|| format!("creating private key directory {}", parent.display()))?;
-    }
-    objects::fs_atomic::write_file_atomic_secret(&key_path, private_key_pem.as_bytes())
-        .with_context(|| format!("writing private key to {}", key_path.display()))?;
-    let key_path_display = key_path.display().to_string();
 
     // 1. Create the service account.
     let sa_response = auth_client
@@ -978,51 +854,63 @@ async fn cmd_create_service_token(
         .await
         .map_err(|error| anyhow::anyhow!("issue_service_account_credential failed: {error}"))?;
 
+    // Re-derive the subject from the issued token so the written credential is
+    // self-consistent (`load_credential_file` re-checks this on every read).
+    let subject = crate::device_flow::authenticated_subject(&issued.token)
+        .context("reading the issued service token's authenticated subject")?;
+    let expires_at = (chrono::Utc::now()
+        + chrono::Duration::seconds(SERVICE_TOKEN_TTL_SECS))
+    .to_rfc3339();
+
+    let verified = VerifiedCredential {
+        server: server.clone(),
+        kind: CredentialKind::Service,
+        subject,
+        token: issued.token,
+        proof_key_pem: private_key_pem,
+        expires_at: Some(expires_at),
+        credential_id: None,
+        provenance: Some(CredentialProvenance {
+            scopes: Some(vec![scope.clone()]),
+            ..CredentialProvenance::default()
+        }),
+    };
+    credential_file::write_credential_file(&credential_path, &verified)?;
+    let credential_path_display = credential_path.display().to_string();
+
     if ctx.should_output_json(None) {
         let output = ServiceTokenOutput {
             output_kind: "auth_create_service_token",
             name,
             namespace,
             scope,
-            token: issued.token,
-            private_key_path: key_path_display,
-            private_key_pem: show_secrets.then_some(private_key_pem),
+            credential_path: credential_path_display,
             expires_in_days: SERVICE_TOKEN_TTL_DAYS,
         };
         println!("{}", serde_json::to_string(&output)?);
     } else {
         println!();
-        println!("Service token created for \"{}\" (scope: {scope})", name);
+        println!("Service token created for \"{name}\" (scope: {scope})");
         println!();
-        println!("Token: {}", issued.token);
-        println!();
-        println!("Private key written to: {key_path_display}");
-        if show_secrets {
-            println!();
-            println!("Private key PEM:");
-            println!("{private_key_pem}");
-        }
-        println!("This token is proof-of-possession bound to the private key file above.");
-        println!("Set the token as HEDDLE_REMOTE_TOKEN in your CI environment.");
+        println!("Credential written to: {credential_path_display}");
+        println!("Expires in {SERVICE_TOKEN_TTL_DAYS} days.");
         println!(
-            "Configure remote.auth_proof_key_pem_path to {key_path_display} (or copy the key securely)."
+            "The single .hcred file carries the token and its proof key; keep it secret (mode 0600)."
         );
+        println!("Point the runtime at it with HEDDLE_CREDENTIAL={credential_path_display}.");
         println!("This token is scoped to the {namespace} namespace.");
     }
 
     Ok(())
 }
 
-/// Resolve where to write the service-account private key.
+/// Resolve where to write the service-account `.hcred` credential.
 ///
-/// Prefers an explicit `--key-out` path; otherwise writes under
-/// `<heddle_home>/service-accounts/<sanitized-name>.pem`.
-fn resolve_service_account_key_path(
-    name: &str,
-    key_out: Option<&str>,
-) -> Result<std::path::PathBuf> {
-    if let Some(path) = key_out {
-        return Ok(std::path::PathBuf::from(path));
+/// Prefers an explicit `--out` path; otherwise writes under
+/// `<heddle_home>/service-accounts/<sanitized-name>.hcred`.
+fn resolve_service_account_credential_path(name: &str, out: Option<&Path>) -> std::path::PathBuf {
+    if let Some(path) = out {
+        return path.to_path_buf();
     }
     let mut safe: String = name
         .chars()
@@ -1037,9 +925,9 @@ fn resolve_service_account_key_path(
     if safe.is_empty() {
         safe = "service-account".to_string();
     }
-    Ok(repo::identity::heddle_home_dir()
+    repo::identity::heddle_home_dir()
         .join("service-accounts")
-        .join(format!("{safe}.pem")))
+        .join(format!("{safe}.hcred"))
 }
 
 fn issue_service_account_credential_request(
@@ -2042,12 +1930,12 @@ mod tests {
     }
 
     #[test]
-    fn derive_agent_export_contains_token_metadata_and_a_fresh_child_key() {
+    fn derive_agent_out_writes_one_verifiable_hcred_with_a_fresh_child_key() {
         with_isolated_home(|| {
             let server = "grpc.S";
             let (parent, private_key_pem) = stored_device_parent();
             credentials::store_server_credential(server, parent).expect("store parent");
-            let export_dir = repo::identity::heddle_home_dir().join("agent-export");
+            let out = repo::identity::heddle_home_dir().join("agent-export.hcred");
 
             cmd_auth_derive_agent(
                 server,
@@ -2056,49 +1944,44 @@ mod tests {
                 vec!["repo:acme/heddle".to_string()],
                 vec!["Push".to_string()],
                 None,
-                Some(&export_dir),
+                Some(&out),
             )
             .expect("derive portable child credential");
 
-            let mut entries = std::fs::read_dir(&export_dir)
-                .expect("read export directory")
-                .map(|entry| {
-                    entry
-                        .expect("export entry")
-                        .file_name()
-                        .into_string()
-                        .expect("UTF-8 export name")
-                })
-                .collect::<Vec<_>>();
-            entries.sort();
-            assert_eq!(entries, ["device-key.pem", "metadata.json", "token"]);
+            // Exactly one file is emitted — no sibling token/key/metadata files.
+            assert!(out.is_file(), "expected a single .hcred file");
 
-            let token = std::fs::read(export_dir.join("token")).expect("read exported token");
-            let child_private_key = std::fs::read_to_string(export_dir.join("device-key.pem"))
-                .expect("read exported child key");
-            let metadata =
-                std::fs::read(export_dir.join("metadata.json")).expect("read export metadata");
+            // The self-verifying load chokepoint accepts it and re-derives the
+            // effective identity from the token.
+            let loaded = credential_file::load_credential_file(&out).expect("load written .hcred");
+            assert_eq!(loaded.server, server);
+            assert_eq!(loaded.subject, "alice");
+            assert_eq!(loaded.kind, credential_file::CredentialKind::Agent);
             assert_ne!(
-                child_private_key, private_key_pem,
-                "portable export must contain a fresh child key, never the parent device key"
+                loaded.proof_key_pem, private_key_pem,
+                "the .hcred must carry a fresh child key, never the parent device key"
             );
-            let child_signer =
-                Ed25519Signer::from_pem(&child_private_key).expect("parse exported child key");
+            let provenance = loaded.provenance.expect("audit provenance recorded");
+            assert_eq!(provenance.agent_id.as_deref(), Some("agent-export"));
+            assert_eq!(
+                provenance.scopes.as_deref(),
+                Some(["repo:acme/heddle".to_string()].as_slice())
+            );
+            assert_eq!(
+                provenance.allowed_operations.as_deref(),
+                Some(["Push".to_string()].as_slice())
+            );
 
-            let metadata: serde_json::Value =
-                serde_json::from_slice(&metadata).expect("parse export metadata");
-            assert_eq!(metadata["server"], server);
-            assert_eq!(metadata["subject"], "alice");
-            assert_eq!(metadata["scopes"], serde_json::json!(["repo:acme/heddle"]));
-            assert!(metadata["expires_at"].as_str().is_some());
-            let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(&token)
-                .expect("exported token is a Biscuit");
+            let child_signer =
+                Ed25519Signer::from_pem(&loaded.proof_key_pem).expect("parse child key");
+            let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(loaded.token.as_bytes())
+                .expect("token is a Biscuit");
             assert!(
                 parsed
                     .print_block_source(1)
-                    .expect("exported child block")
+                    .expect("child block")
                     .contains(&hex::encode(child_signer.public_key())),
-                "the exported token must bind the key exported beside it"
+                "the token must bind the key packaged alongside it"
             );
 
             let error = cmd_auth_derive_agent(
@@ -2108,40 +1991,11 @@ mod tests {
                 vec!["repo:acme/heddle".to_string()],
                 vec!["Push".to_string()],
                 None,
-                Some(&export_dir),
+                Some(&out),
             )
-            .expect_err("an existing bundle must not be replaced piecemeal");
+            .expect_err("an existing credential file must not be overwritten");
             assert!(error.to_string().contains("already exists"));
-            assert_eq!(
-                std::fs::read(export_dir.join("token")).expect("re-read original token"),
-                token,
-                "a refused replacement must leave the completed bundle unchanged"
-            );
         });
-    }
-
-    #[test]
-    fn publishing_agent_bundle_syncs_the_parent_after_rename_and_reports_sync_failure() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let parent = temp.path();
-        let staging = parent.join(".agent.tmp");
-        let destination = parent.join("agent");
-        std::fs::create_dir(&staging).expect("create staging directory");
-        std::fs::write(staging.join("token"), b"token").expect("write staged token");
-
-        let error =
-            publish_agent_bundle_with_sync(&staging, &destination, parent, |synced_parent| {
-                assert_eq!(synced_parent, parent);
-                assert!(
-                    destination.join("token").is_file(),
-                    "the completed rename must precede the parent sync"
-                );
-                Err(std::io::Error::other("injected parent sync failure"))
-            })
-            .expect_err("a parent sync failure must not be reported as success");
-
-        assert!(error.to_string().contains("syncing agent bundle parent"));
-        assert!(format!("{error:#}").contains("injected parent sync failure"));
     }
 
     #[test]
@@ -2223,20 +2077,95 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn headless_login_requires_an_explicit_server() {
+    async fn login_with_missing_credential_file_fails_closed() {
         let error = cmd_auth(
             &TextCtx,
             AuthCommand::Login {
                 server: None,
                 open_browser: false,
-                token: Some("token".to_string()),
-                key_file: Some(std::path::PathBuf::from("device.pem")),
+                credential: Some(std::path::PathBuf::from("/definitely/not/here.hcred")),
             },
         )
         .await
-        .expect_err("headless install without --server must fail closed");
+        .expect_err("a missing credential file must fail");
+        assert!(error.to_string().contains("opening credential file"));
+    }
 
-        assert!(error.to_string().contains("--server is required"));
+    #[tokio::test]
+    async fn login_with_device_credential_file_installs_and_links_identity() {
+        // `with_isolated_home` guards a process-global env mutation; run the
+        // async install on the current thread inside that guard.
+        let temp = tempfile::TempDir::new().expect("temp home");
+        let _guard = credentials::lock_test_env();
+        let prev_home = std::env::var_os("HOME");
+        let prev_heddle_home = std::env::var_os("HEDDLE_HOME");
+        unsafe {
+            std::env::set_var("HOME", temp.path());
+            std::env::remove_var("HEDDLE_HOME");
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let server = "grpc.device";
+            let signer = Ed25519Signer::generate().expect("device key");
+            let expires_at = chrono::Utc::now() + chrono::Duration::hours(2);
+            let token = biscuit_auth::Biscuit::builder()
+                .fact(r#"user("alice")"#)
+                .expect("user fact")
+                .fact(r#"credential_id("root-credential")"#)
+                .expect("credential fact")
+                .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
+                .expect("device PoP fact")
+                .fact(format!("expires_at({})", expires_at.to_rfc3339()).as_str())
+                .expect("expiry fact")
+                .check(format!("check if time($now), $now < {}", expires_at.to_rfc3339()).as_str())
+                .expect("expiry check")
+                .build(&biscuit_auth::KeyPair::new())
+                .expect("build device token")
+                .to_base64()
+                .expect("encode device token");
+            let path = repo::identity::heddle_home_dir().join("device.hcred");
+            credential_file::write_credential_file(
+                &path,
+                &VerifiedCredential {
+                    server: server.to_string(),
+                    kind: CredentialKind::Device,
+                    subject: "alice".to_string(),
+                    token,
+                    proof_key_pem: signer.to_pem().expect("device PEM"),
+                    expires_at: Some(expires_at.to_rfc3339()),
+                    credential_id: Some("root-credential".to_string()),
+                    provenance: None,
+                },
+            )
+            .expect("write device .hcred");
+
+            let subject = install_credential_file(&path).expect("install device credential");
+            assert_eq!(subject, "alice");
+
+            let stored = credentials::get_server_credential(server)
+                .expect("load stored")
+                .expect("credential stored under the file's server");
+            assert_eq!(stored.subject, "alice");
+            assert_eq!(stored.credential_id.as_deref(), Some("root-credential"));
+            assert!(
+                repo::identity::device_identity_path().exists(),
+                "a device-kind credential registers the host signing identity",
+            );
+        }));
+
+        unsafe {
+            match prev_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_heddle_home {
+                Some(value) => std::env::set_var("HEDDLE_HOME", value),
+                None => std::env::remove_var("HEDDLE_HOME"),
+            }
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     /// On a successful logout, both the credential and the matching device

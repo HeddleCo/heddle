@@ -535,8 +535,6 @@ mod tests {
         let result = std::panic::catch_unwind(|| {
             let signer = Ed25519Signer::generate().expect("device key");
             let private_key_pem = signer.to_pem().expect("device PEM");
-            let key_path = home.path().join("bootstrap-key.pem");
-            std::fs::write(&key_path, &private_key_pem).expect("write bootstrap key");
 
             let subject = "headless-agent";
             let credential_id = "cred-headless";
@@ -560,8 +558,22 @@ mod tests {
                 .expect("encode fixture biscuit");
             let server = "127.0.0.1:8421";
 
-            auth_cmd::install_headless_credential(server, &token, &key_path)
-                .expect("headless credential install");
+            let root_hcred = home.path().join("root.hcred");
+            crate::credential_file::write_credential_file(
+                &root_hcred,
+                &crate::credential_file::VerifiedCredential {
+                    server: server.to_string(),
+                    kind: crate::credential_file::CredentialKind::Device,
+                    subject: subject.to_string(),
+                    token: token.clone(),
+                    proof_key_pem: private_key_pem.clone(),
+                    expires_at: Some(expires_at.to_rfc3339()),
+                    credential_id: Some(credential_id.to_string()),
+                    provenance: None,
+                },
+            )
+            .expect("write root .hcred");
+            auth_cmd::install_credential_file(&root_hcred).expect("headless credential install");
 
             let stored = credentials::get_server_credential(server)
                 .expect("read credentials")
@@ -613,10 +625,22 @@ mod tests {
             .expect("derive child token");
 
             let child_private_key_pem = child_signer.to_pem().expect("child PEM");
-            let child_key_path = home.path().join("child-key.pem");
-            std::fs::write(&child_key_path, &child_private_key_pem)
-                .expect("write child key for install");
-            auth_cmd::install_headless_credential(server, &child_token, &child_key_path)
+            let child_hcred = home.path().join("child.hcred");
+            crate::credential_file::write_credential_file(
+                &child_hcred,
+                &crate::credential_file::VerifiedCredential {
+                    server: server.to_string(),
+                    kind: crate::credential_file::CredentialKind::Agent,
+                    subject: subject.to_string(),
+                    token: child_token.clone(),
+                    proof_key_pem: child_private_key_pem.clone(),
+                    expires_at: Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
+                    credential_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("write child .hcred");
+            auth_cmd::install_credential_file(&child_hcred)
                 .expect("install derived child credential");
 
             let stored_child = credentials::get_server_credential(server)

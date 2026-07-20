@@ -6,6 +6,7 @@
 
 pub mod auth_cmd;
 pub mod auth_requests;
+pub mod credential_file;
 pub mod credentials;
 pub mod device_flow;
 pub mod grpc_hosted;

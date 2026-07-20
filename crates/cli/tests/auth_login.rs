@@ -7,21 +7,26 @@ use std::process::Command;
 use tempfile::TempDir;
 
 #[test]
-fn built_cli_parses_headless_login_args_and_routes_to_install() {
+fn built_cli_parses_credential_login_and_routes_to_verifying_load() {
     let home = TempDir::new().expect("temp Heddle home");
-    let key_path = home.path().join("device.pem");
-    std::fs::write(&key_path, "not an Ed25519 private key").expect("write invalid device key");
+    let credential_path = home.path().join("agent.hcred");
+    // A structurally invalid `.hcred` must be rejected by the verifying load
+    // chokepoint — this proves `--credential` routes into that path.
+    std::fs::write(&credential_path, "{\"not\":\"a credential\"}\n")
+        .expect("write invalid credential file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&credential_path, std::fs::Permissions::from_mode(0o600))
+            .expect("restrict credential perms");
+    }
 
     let output = Command::new(env!("CARGO_BIN_EXE_heddle"))
         .args([
             "auth",
             "login",
-            "--token",
-            "biscuit-token",
-            "--key-file",
-            key_path.to_str().expect("UTF-8 key path"),
-            "--server",
-            "127.0.0.1:8421",
+            "--credential",
+            credential_path.to_str().expect("UTF-8 credential path"),
         ])
         .current_dir(home.path())
         .env("HOME", home.path())
@@ -33,7 +38,8 @@ fn built_cli_parses_headless_login_args_and_routes_to_install() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("invalid Ed25519 device private key"),
-        "expected headless credential install error, got: {stderr}"
+        stderr.contains("parsing credential file")
+            || stderr.contains("not a Heddle credential file"),
+        "expected verifying-load error, got: {stderr}"
     );
 }
