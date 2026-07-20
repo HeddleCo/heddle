@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::{sync::Arc, time::Duration, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use api::heddle::api::v1alpha1::{
     ListRefsResponse, PullRequest, RefEntry, RepositoryRef, StateId as ProtoStateId,

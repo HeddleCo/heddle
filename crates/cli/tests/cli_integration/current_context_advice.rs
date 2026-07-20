@@ -142,7 +142,10 @@ fn session_show_without_active_session_uses_typed_advice() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let envelope = json_failure(&["--output", "json", "agent", "provenance", "show"], temp.path());
+    let envelope = json_failure(
+        &["--output", "json", "agent", "provenance", "show"],
+        temp.path(),
+    );
     assert_eq!(envelope["kind"], "no_current_session");
     assert_eq!(envelope["primary_command"], "heddle agent provenance begin");
     assert!(

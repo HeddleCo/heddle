@@ -2701,7 +2701,11 @@ fn emit_land_dry_run(cli: &Cli, args: &LandArgs) -> Result<()> {
     }
 
     let squash = should_squash_land(args, &UserConfig::load_default().unwrap_or_default());
-    let target_label = if squash { "squash-landed" } else { "preserved (--no-squash)" };
+    let target_label = if squash {
+        "squash-landed"
+    } else {
+        "preserved (--no-squash)"
+    };
     let mut dry = DryRunPlan::new(
         "land",
         if thread_ids.len() == 1 {
@@ -2732,19 +2736,18 @@ fn emit_land_dry_run(cli: &Cli, args: &LandArgs) -> Result<()> {
 
         // Check the thread's own checkout for outstanding work, matching the
         // real land's capture decision.
-        let would_capture = if thread.execution_path.as_os_str().is_empty()
-            || !thread.execution_path.exists()
-        {
-            false
-        } else {
-            Repository::open(&thread.execution_path)
-                .ok()
-                .and_then(|thread_repo| {
-                    let options = worktree_status_options(Some(thread_repo.config()));
-                    worktree_dirty(&thread_repo, &options).ok()
-                })
-                .unwrap_or(false)
-        };
+        let would_capture =
+            if thread.execution_path.as_os_str().is_empty() || !thread.execution_path.exists() {
+                false
+            } else {
+                Repository::open(&thread.execution_path)
+                    .ok()
+                    .and_then(|thread_repo| {
+                        let options = worktree_status_options(Some(thread_repo.config()));
+                        worktree_dirty(&thread_repo, &options).ok()
+                    })
+                    .unwrap_or(false)
+            };
 
         // Read-only: only mutates the in-memory thread's freshness.
         let report = build_thread_preview_report(&repo, &mut thread, true)?;

@@ -25,7 +25,9 @@ use objects::{
         TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
         Tree,
     },
-    store::{ActorPresence, ActorPresenceStore, ActorPresenceStatus, AgentUsageSummary, ObjectStore},
+    store::{
+        ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, ObjectStore,
+    },
 };
 use oplog::OpLogRecorder;
 use refs::Head;
@@ -1893,9 +1895,9 @@ impl HarnessBridgeRuntime {
                 entry.status = status.clone();
                 entry.completed_at = match status {
                     ActorPresenceStatus::Active => None,
-                    ActorPresenceStatus::Abandoned | ActorPresenceStatus::Complete | ActorPresenceStatus::Merged => {
-                        Some(Utc::now())
-                    }
+                    ActorPresenceStatus::Abandoned
+                    | ActorPresenceStatus::Complete
+                    | ActorPresenceStatus::Merged => Some(Utc::now()),
                 };
             })?
         } else {

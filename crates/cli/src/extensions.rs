@@ -37,11 +37,7 @@ impl WeftExtensions for EnabledWeftExtensions {
         cmd_auth(ctx, command.clone().into()).await
     }
 
-    async fn whoami(
-        &self,
-        ctx: &(dyn CliContext + 'static),
-        server: Option<String>,
-    ) -> Result<()> {
+    async fn whoami(&self, ctx: &(dyn CliContext + 'static), server: Option<String>) -> Result<()> {
         heddle_client::cmd_whoami(ctx, server).await
     }
 }

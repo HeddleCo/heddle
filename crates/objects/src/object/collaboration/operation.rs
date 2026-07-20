@@ -2,12 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::object::{Attribution, ChangeId, ContentHash, StateId, VisibilityTier};
-
 use super::{
     CollabOpId, CollaborationCodecError, CollaborationIdempotencyKey, DiscussionRecordId,
     LegacyDiscussionId, LegacySourceLocator,
 };
+use crate::object::{Attribution, ChangeId, ContentHash, StateId, VisibilityTier};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]

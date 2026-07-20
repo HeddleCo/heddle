@@ -14,10 +14,11 @@ use objects::{
 };
 use tracing::{instrument, trace};
 
-use crate::repository::commit_graph_persistence::NullCommitGraphCache;
 use crate::{
     HeddleError, Repository, Result,
-    repository::commit_graph_persistence::{CommitGraphCache, FsCommitGraphCache},
+    repository::commit_graph_persistence::{
+        CommitGraphCache, FsCommitGraphCache, NullCommitGraphCache,
+    },
 };
 
 /// A normalized changed-path filter for history traversal.
