@@ -37,6 +37,41 @@ pub enum StateAttachmentBody {
     Signature(StateSignature),
 }
 
+/// The kind of a [`StateAttachmentBody`], with the payload projected away.
+///
+/// Kind is a pure function of the record: [`StateAttachmentBody::kind`] maps a
+/// body to its kind with no I/O and no ambiguity. This is the primitive that
+/// currency (last-attachment-of-a-kind) and supersession (same-kind guard) are
+/// expressed in terms of, and that the wire layer threads through
+/// `wire::ObjectId` (heddle#1080, Fable §B(1)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StateAttachmentKind {
+    Context,
+    RiskSignals,
+    ReviewSignatures,
+    Discussions,
+    StructuredConflicts,
+    SemanticIndex,
+    Signature,
+}
+
+impl StateAttachmentBody {
+    /// The [`StateAttachmentKind`] of this body — a pure projection that
+    /// discards the payload. Exhaustive by construction: adding a body variant
+    /// forces a matching kind arm here.
+    pub fn kind(&self) -> StateAttachmentKind {
+        match self {
+            StateAttachmentBody::Context(_) => StateAttachmentKind::Context,
+            StateAttachmentBody::RiskSignals(_) => StateAttachmentKind::RiskSignals,
+            StateAttachmentBody::ReviewSignatures(_) => StateAttachmentKind::ReviewSignatures,
+            StateAttachmentBody::Discussions(_) => StateAttachmentKind::Discussions,
+            StateAttachmentBody::StructuredConflicts(_) => StateAttachmentKind::StructuredConflicts,
+            StateAttachmentBody::SemanticIndex(_) => StateAttachmentKind::SemanticIndex,
+            StateAttachmentBody::Signature(_) => StateAttachmentKind::Signature,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StateAttachment {
     pub state_id: StateId,

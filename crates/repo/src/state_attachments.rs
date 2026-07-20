@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use objects::{
-    object::{StateAttachment, StateAttachmentBody, StateAttachmentId, StateId},
+    object::{StateAttachment, StateAttachmentId, StateId},
     store::ObjectStore,
 };
 use oplog::OpLogBackend;
@@ -9,30 +9,10 @@ use refs::RefBackend;
 
 use crate::{HeddleError, Repository, Result};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StateAttachmentKind {
-    Context,
-    RiskSignals,
-    ReviewSignatures,
-    Discussions,
-    StructuredConflicts,
-    SemanticIndex,
-    Signature,
-}
-
-impl StateAttachmentKind {
-    fn of(body: &StateAttachmentBody) -> Self {
-        match body {
-            StateAttachmentBody::Context(_) => Self::Context,
-            StateAttachmentBody::RiskSignals(_) => Self::RiskSignals,
-            StateAttachmentBody::ReviewSignatures(_) => Self::ReviewSignatures,
-            StateAttachmentBody::Discussions(_) => Self::Discussions,
-            StateAttachmentBody::StructuredConflicts(_) => Self::StructuredConflicts,
-            StateAttachmentBody::SemanticIndex(_) => Self::SemanticIndex,
-            StateAttachmentBody::Signature(_) => Self::Signature,
-        }
-    }
-}
+/// The kind of a state attachment, re-exported from the `objects` crate where
+/// it lives as a first-class projection of `StateAttachmentBody` (heddle#1080).
+/// Derive kind from a body with `body.kind()`.
+pub use objects::object::StateAttachmentKind;
 
 impl<R, O, S> Repository<R, O, S>
 where
@@ -49,7 +29,7 @@ where
             let prior = self
                 .get_state_attachment(&attachment.state_id, &prior_id)?
                 .ok_or_else(|| HeddleError::NotFound(format!("state attachment {prior_id}")))?;
-            if StateAttachmentKind::of(&prior.body) != StateAttachmentKind::of(&attachment.body) {
+            if prior.body.kind() != attachment.body.kind() {
                 return Err(HeddleError::InvalidObject(
                     "state attachment can only supersede the same attachment kind".to_string(),
                 ));
@@ -93,7 +73,7 @@ where
         let attachments: Vec<_> = self
             .list_state_attachments(state_id)?
             .into_iter()
-            .filter(|attachment| StateAttachmentKind::of(&attachment.body) == kind)
+            .filter(|attachment| attachment.body.kind() == kind)
             .collect();
         let superseded: std::collections::HashSet<_> = attachments
             .iter()
@@ -109,7 +89,7 @@ where
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, Utc};
-    use objects::object::{Attribution, ContentHash, Principal, StateAttachment};
+    use objects::object::{Attribution, ContentHash, Principal, StateAttachment, StateAttachmentBody};
     use tempfile::TempDir;
 
     use super::*;
