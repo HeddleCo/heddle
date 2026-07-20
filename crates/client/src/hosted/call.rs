@@ -4,12 +4,12 @@ use api::{
     StreamingShape,
     framing::{
         MAX_CONTROL_BODY, ResponseFrame, StreamFrame, decode_response_frame, decode_stream_frame,
-        encode_request_frame, encode_request_prelude, encode_stream_message,
+        encode_request_frame, encode_request_prelude, encode_stream_message_into,
     },
     heddle::api::v1alpha1::CallContext,
     method_descriptor,
 };
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use prost::Message;
 
 use super::{HostedConnection, HostedError, Result};
@@ -108,6 +108,7 @@ where
         responses: ServerStream::new(connection, recv),
         request: PhantomData,
         raw_remaining: 0,
+        control: BytesMut::new(),
     })
 }
 
@@ -237,6 +238,7 @@ pub struct BidirectionalStream<Request, Response> {
     responses: ServerStream<Response>,
     request: PhantomData<Request>,
     raw_remaining: u64,
+    control: BytesMut,
 }
 
 /// Request half of a bidirectional operation stream.
@@ -244,6 +246,7 @@ pub struct BidirectionalRequestStream<Request> {
     send: Option<iroh::endpoint::SendStream>,
     request: PhantomData<Request>,
     raw_remaining: u64,
+    control: BytesMut,
 }
 
 impl<Request, Response> BidirectionalStream<Request, Response>
@@ -257,6 +260,7 @@ where
                 send: self.send,
                 request: PhantomData,
                 raw_remaining: self.raw_remaining,
+                control: self.control,
             },
             self.responses,
         )
@@ -268,12 +272,12 @@ where
                 "raw body must finish before the next request message".to_string(),
             ));
         }
-        let frame =
-            encode_stream_message(&request.encode_to_vec()).map_err(HostedError::framing)?;
+        encode_stream_message_into(&mut self.control, &request.encode_to_vec())
+            .map_err(HostedError::framing)?;
         self.send
             .as_mut()
             .ok_or_else(|| HostedError::Framing("request stream is finished".to_string()))?
-            .write_chunk(Bytes::from(frame))
+            .write_all(&self.control)
             .await
             .map_err(HostedError::transport)
     }
@@ -320,12 +324,12 @@ where
                 "raw body must finish before the next request message".to_string(),
             ));
         }
-        let frame =
-            encode_stream_message(&request.encode_to_vec()).map_err(HostedError::framing)?;
+        encode_stream_message_into(&mut self.control, &request.encode_to_vec())
+            .map_err(HostedError::framing)?;
         self.send
             .as_mut()
             .ok_or_else(|| HostedError::Framing("request stream is finished".to_string()))?
-            .write_chunk(Bytes::from(frame))
+            .write_all(&self.control)
             .await
             .map_err(HostedError::transport)
     }
@@ -336,11 +340,12 @@ where
                 "a raw request body is already active".to_string(),
             ));
         }
-        let frame = api::framing::encode_stream_raw_body(length).map_err(HostedError::framing)?;
+        api::framing::encode_stream_raw_body_into(&mut self.control, length)
+            .map_err(HostedError::framing)?;
         self.send
             .as_mut()
             .ok_or_else(|| HostedError::Framing("request stream is finished".to_string()))?
-            .write_chunk(Bytes::from(frame))
+            .write_all(&self.control)
             .await
             .map_err(HostedError::transport)?;
         self.raw_remaining = length;
