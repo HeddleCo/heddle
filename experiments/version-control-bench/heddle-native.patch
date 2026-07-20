@@ -1,0 +1,338 @@
+diff --git a/scripts/run-full-matrix.mjs b/scripts/run-full-matrix.mjs
+index 4f9d356..59149c9 100644
+--- a/scripts/run-full-matrix.mjs
++++ b/scripts/run-full-matrix.mjs
+@@ -18,7 +18,7 @@ const TASKS = [
+   { id: "pilot-6-update-dirty-branch", label: "Update dirty branch" },
+ ];
+ const AGENTS = ["codex", "claude"];
+-const ARMS = ["git", "but+skill", "jj+skill"];
++const ARMS = ["git", "but+skill", "jj+skill", "heddle-native"];
+
+ function timestamp() {
+   const d = new Date();
+@@ -720,6 +720,7 @@ const gitbutlerRoot = path.resolve(args.get("gitbutler-root") ?? "/Users/kiril/s
+ const butBin = path.resolve(args.get("but-bin") ?? path.join(gitbutlerRoot, "target/release/but"));
+ const skillDir = path.resolve(args.get("skill-dir") ?? path.join(gitbutlerRoot, "crates/but/skill"));
+ const jjBin = args.get("jj-bin") ? path.resolve(args.get("jj-bin")) : null;
++const heddleBin = args.get("heddle-bin") ? path.resolve(args.get("heddle-bin")) : null;
+ const jjSkillDir = args.get("jj-skill-dir") ? path.resolve(args.get("jj-skill-dir")) : null;
+ const jjSkillPackage = args.get("jj-skill-package") ?? null;
+ const jjSkillName = args.get("jj-skill-name") ?? null;
+@@ -770,6 +771,7 @@ for (const plan of plans) {
+   const planModel = plan.agent === "codex" ? codexModel : claudeModel;
+   if (planModel) runArgs.push("--model", planModel);
+   if (jjBin) runArgs.push("--jj-bin", jjBin);
++  if (heddleBin) runArgs.push("--heddle-bin", heddleBin);
+   if (jjSkillDir) runArgs.push("--jj-skill-dir", jjSkillDir);
+   if (jjSkillPackage) runArgs.push("--jj-skill-package", jjSkillPackage);
+   if (jjSkillName) runArgs.push("--jj-skill-name", jjSkillName);
+diff --git a/scripts/run-pilot-agent.mjs b/scripts/run-pilot-agent.mjs
+index 419c98b..0320fd2 100755
+--- a/scripts/run-pilot-agent.mjs
++++ b/scripts/run-pilot-agent.mjs
+@@ -174,6 +174,15 @@ const JJ_MUTATIONS = new Set([
+
+ const JJ_INSPECTIONS = new Set(["diff", "log", "show", "status", "st", "evolog"]);
+
++const HEDDLE_MUTATIONS = new Set([
++  "abort", "adopt", "capture", "collapse", "continue", "init", "land",
++  "revert", "start", "sync", "undo",
++]);
++
++const HEDDLE_INSPECTIONS = new Set([
++  "diff", "help", "log", "ready", "show", "status", "verify",
++]);
++
+ function shellQuote(value) {
+   return `'${String(value).replaceAll("'", "'\\''")}'`;
+ }
+@@ -354,9 +363,10 @@ function prepareClaudeConfig(enabled) {
+
+ function writeWrapper(binDir, tool, realPath, tracePath, arm) {
+   const wrapperPath = path.join(binDir, tool);
+-  const blockGitWrites = tool === "git" && ["but+skill", "jj+skill"].includes(arm);
++  const blockGitWrites = tool === "git" && ["but+skill", "jj+skill", "heddle-native"].includes(arm);
+   const blockBut = tool === "but" && arm !== "but+skill";
+   const blockJj = tool === "jj" && arm !== "jj+skill";
++  const blockHeddle = tool === "heddle" && arm !== "heddle-native";
+   const mutationList = [...GIT_MUTATIONS].filter((command) => command !== "branch").join("|");
+
+   const body = `#!/usr/bin/env bash
+@@ -394,6 +404,9 @@ fi
+ if [[ ${blockJj ? "true" : "false"} == true ]]; then
+   POLICY_BLOCK=true
+ fi
++if [[ ${blockHeddle ? "true" : "false"} == true ]]; then
++  POLICY_BLOCK=true
++fi
+ if [[ ${blockGitWrites ? "true" : "false"} == true && "$INTERNAL" != true ]]; then
+   SUBCOMMAND=""
+   ARGS=("$@")
+@@ -450,7 +463,7 @@ exit "$STATUS"
+   writeFileSync(wrapperPath, body, { mode: 0o755 });
+ }
+
+-function createWrappers(runDir, arm, realBut, realJj) {
++function createWrappers(runDir, arm, realBut, realJj, realHeddle) {
+   const binDir = path.join(runDir, "bin");
+   mkdirSync(binDir, { recursive: true });
+   const tracePath = path.join(runDir, "command-trace.tsv");
+@@ -460,6 +473,7 @@ function createWrappers(runDir, arm, realBut, realJj) {
+   writeWrapper(binDir, "git", realGit, tracePath, arm);
+   writeWrapper(binDir, "but", realBut, tracePath, arm);
+   writeWrapper(binDir, "jj", realJj, tracePath, arm);
++  writeWrapper(binDir, "heddle", realHeddle, tracePath, arm);
+
+   return { binDir, tracePath };
+ }
+@@ -578,6 +592,37 @@ function installPlainGitInstructions(workspace) {
+   };
+ }
+
++function installHeddleNativeInstructions(workspace) {
++  const policyBlock = `## Version control
++
++- This is a Heddle-native repository. Use \`heddle\` for every version-control write operation.
++- Do not use raw Git, GitButler, or Jujutsu writes. Read-only Git inspection describes only the frozen source projection, not current Heddle state; prefer \`heddle status\`, \`heddle log\`, \`heddle show\`, and \`heddle diff\`.
++- In the task text, "commit" means a Heddle state/capture, "branch" means a Heddle thread, and "uncommitted" means uncaptured worktree changes.
++- Preserve the requested reachable first-parent history and intent strings on the named task thread. Heddle objects are immutable, so superseded source states may remain in the object store as long as they are no longer reachable from the final task thread.
++- For a requested new branch, create and switch to one new Heddle thread. For an existing branch, keep the existing thread name.
++- Use \`heddle help advanced\` and individual \`--help\` pages when needed. Do not open an editor or push anything.
++`;
++  const content = `# AGENTS.md
++
++## Benchmark boundary
++
++Work only in the current repository. Do not inspect parent benchmark directories, hidden oracle files, or solution scripts.
++
++${policyBlock}`;
++
++  writeAgentInstructionFiles(workspace, content);
++  writeFileSync(
++    path.join(workspace, ".heddleignore"),
++    ".codex/\n.claude/\nAGENTS.md\nCLAUDE.md\n.heddleignore\n",
++  );
++
++  return {
++    installed_codex: path.join(workspace, "AGENTS.md"),
++    installed_claude: path.join(workspace, "CLAUDE.md"),
++    setup_block_sha256: sha256Text(policyBlock.trimEnd()),
++  };
++}
++
+ function installGitButlerSkill(workspace, skillDir, realBut, butEnv) {
+   const skillFile = path.join(skillDir, "SKILL.md");
+   if (!existsSync(skillFile)) {
+@@ -729,7 +774,7 @@ function installJjSkill(workspace, skillDir, realJj, sourceMetadata) {
+   };
+ }
+
+-function prepareWorkspace(runDir, arm, realBut, butSkillDir, realJj, jjSkill, butEnv) {
++function prepareWorkspace(runDir, arm, realBut, butSkillDir, realJj, jjSkill, butEnv, realHeddle) {
+   const workspace = path.join(runDir, "workspace");
+   const dirty = arm === "git" && taskConfig.fixtureDirty !== false;
+   run("node", [path.join(repoRoot, taskConfig.createFixtureScript), "--out", workspace, "--force", "true", "--dirty", String(dirty)], {
+@@ -761,6 +806,16 @@ function prepareWorkspace(runDir, arm, realBut, butSkillDir, realJj, jjSkill, bu
+     return { workspace, setup };
+   }
+
++  if (arm === "heddle-native") {
++    run(realHeddle, ["init", "-C", workspace, "--output", "json"], { cwd: workspace, stdio: "pipe" });
++    run(realHeddle, ["adopt", "-C", workspace, workspace, "--output", "json"], { cwd: workspace, stdio: "pipe" });
++    const setup = { instructions: installHeddleNativeInstructions(workspace) };
++    if (taskConfig.applyDirtyState !== false) {
++      run("node", [path.join(repoRoot, taskConfig.applyStateScript), "dirty", workspace], { cwd: repoRoot });
++    }
++    return { workspace, setup };
++  }
++
+   return { workspace, setup: { instructions: installPlainGitInstructions(workspace) } };
+ }
+
+@@ -963,8 +1018,41 @@ function agentResultForTranscript(agentResult, agentOutput) {
+   };
+ }
+
++function nativeVerifierWorkspace(workspace) {
++  const bare = path.join(runDir, "native-export.git");
++  const gradeWorkspace = path.join(runDir, "native-grade-workspace");
++  rmSync(bare, { recursive: true, force: true });
++  rmSync(gradeWorkspace, { recursive: true, force: true });
++
++  run(realHeddle, ["export", "git", "-C", workspace, "--destination", bare, "--output", "json"], {
++    cwd: workspace,
++    stdio: "pipe",
++  });
++  run("git", ["clone", "--no-checkout", bare, gradeWorkspace], { cwd: runDir, stdio: "pipe" });
++
++  const currentThread = run(realHeddle, ["thread", "current", "-C", workspace], {
++    cwd: workspace,
++    stdio: "pipe",
++  }).stdout.trim();
++  run("git", ["checkout", currentThread], { cwd: gradeWorkspace, stdio: "pipe" });
++  run("rsync", [
++    "-a", "--delete",
++    "--exclude=.git", "--exclude=.heddle", "--exclude=.codex", "--exclude=.claude",
++    "--exclude=AGENTS.md", "--exclude=CLAUDE.md", "--exclude=.heddleignore",
++    `${workspace}/`, `${gradeWorkspace}/`,
++  ], { cwd: runDir, stdio: "pipe" });
++  return gradeWorkspace;
++}
++
+ function verify(workspace) {
+-  const result = run("node", [path.join(repoRoot, taskConfig.verifyScript), "--repo", workspace, "--task", taskDir], {
++  let verifierWorkspace = workspace;
++  try {
++    if (arm === "heddle-native") verifierWorkspace = nativeVerifierWorkspace(workspace);
++  } catch (error) {
++    return { passed: false, failure_class: "NATIVE_EXPORT_FAILURE", error: String(error) };
++  }
++
++  const result = run("node", [path.join(repoRoot, taskConfig.verifyScript), "--repo", verifierWorkspace, "--task", taskDir], {
+     cwd: repoRoot,
+     check: false,
+   });
+@@ -1130,6 +1218,25 @@ function vcSubcommand(entry) {
+     }
+   }
+
++  if (entry.tool === "heddle") {
++    while (i < parts.length) {
++      const part = parts[i];
++      if (["-C", "--repo", "--output"].includes(part)) {
++        i += 2;
++        continue;
++      }
++      if (part.startsWith("--repo=") || part.startsWith("--output=")) {
++        i += 1;
++        continue;
++      }
++      if (["--no-color", "--quiet", "-q", "--verbose", "-v"].includes(part)) {
++        i += 1;
++        continue;
++      }
++      break;
++    }
++  }
++
+   return { command: parts[i] ?? "", args: parts.slice(i + 1) };
+ }
+
+@@ -1183,13 +1290,32 @@ function isJjMutation(entry) {
+   return false;
+ }
+
++function isHeddleInspection(entry) {
++  const { command, args } = vcSubcommand(entry);
++  if (args.includes("--help") || args.includes("-h") || command === "help") return true;
++  if (HEDDLE_INSPECTIONS.has(command)) return true;
++  if (command === "thread") return ["current", "list", "show", "captures", "approvals", "check-merge"].includes(args[0]);
++  if (command === "timeline") return args[0] === "status";
++  if (command === "agent") return ["presence", "status"].includes(args[0]);
++  return false;
++}
++
++function isHeddleMutation(entry) {
++  const { command, args } = vcSubcommand(entry);
++  if (args.includes("--help") || args.includes("-h") || command === "help") return false;
++  if (HEDDLE_MUTATIONS.has(command)) return true;
++  if (command === "thread") return !["current", "list", "show", "captures", "approvals", "check-merge"].includes(args[0]);
++  if (command === "timeline") return args[0] !== "status";
++  return false;
++}
++
+ function isShellParent(parent) {
+   if (!parent) return false;
+   return ["sh", "bash", "zsh", "/bin/sh", "/bin/bash", "/bin/zsh"].some((shell) => parent === shell || parent.endsWith(`/${shell}`));
+ }
+
+ function isVcEntry(entry) {
+-  return entry.tool === "git" || entry.tool === "but" || entry.tool === "jj";
++  return entry.tool === "git" || entry.tool === "but" || entry.tool === "jj" || entry.tool === "heddle";
+ }
+
+ function isNumber(value) {
+@@ -1254,6 +1380,7 @@ function isInspection(entry) {
+   if (entry.tool === "git") return isGitInspection(entry);
+   if (entry.tool === "but") return isButInspection(entry);
+   if (entry.tool === "jj") return isJjInspection(entry);
++  if (entry.tool === "heddle") return isHeddleInspection(entry);
+   return false;
+ }
+
+@@ -1261,6 +1388,7 @@ function isMutation(entry) {
+   if (entry.tool === "git") return isGitMutation(entry);
+   if (entry.tool === "but") return isButMutation(entry);
+   if (entry.tool === "jj") return isJjMutation(entry);
++  if (entry.tool === "heddle") return isHeddleMutation(entry);
+   return false;
+ }
+
+@@ -1439,6 +1567,7 @@ function summarizeCommands(entries) {
+     git_command_count: vc.filter((entry) => entry.tool === "git").length,
+     but_command_count: vc.filter((entry) => entry.tool === "but").length,
+     jj_command_count: vc.filter((entry) => entry.tool === "jj").length,
++    heddle_command_count: vc.filter((entry) => entry.tool === "heddle").length,
+     inspection_count: inspections.length,
+     mutation_count: mutations.length,
+     failed_vc_command_count: failed.length,
+@@ -1712,6 +1841,7 @@ if (agent === "claude" && !/\d/.test(model)) {
+ const timeoutMs = Number(args.get("timeout-ms") ?? 900000);
+ const realBut = executablePath(args.get("but-bin"), "but");
+ const realJj = executablePath(args.get("jj-bin"), "jj");
++const realHeddle = executablePath(args.get("heddle-bin"), "heddle");
+ const skillDir = path.resolve(args.get("skill-dir") ?? "/Users/kiril/src/gitbutler/crates/but/skill");
+ const configuredJjSkillDir = args.get("jj-skill-dir") ? path.resolve(args.get("jj-skill-dir")) : null;
+ const jjSkillUrlArg = args.get("jj-skill-url") ?? null;
+@@ -1745,8 +1875,8 @@ if (!taskConfig) {
+ }
+ taskDir = path.join(repoRoot, taskConfig.taskDir);
+
+-if (!["git", "but+skill", "jj+skill"].includes(arm)) {
+-  console.error("Usage: node scripts/run-pilot-agent.mjs --task <task-id> --agent <codex|claude> --arm <git|but+skill|jj+skill>");
++if (!["git", "but+skill", "jj+skill", "heddle-native"].includes(arm)) {
++  console.error("Usage: node scripts/run-pilot-agent.mjs --task <task-id> --agent <codex|claude> --arm <git|but+skill|jj+skill|heddle-native>");
+   process.exit(2);
+ }
+
+@@ -1761,8 +1891,8 @@ if (butAppDataDir) {
+   mkdirSync(butAppDataDir, { recursive: true });
+ }
+ const resolvedJjSkill = arm === "jj+skill" ? resolveJjSkillSource(runDir, configuredJjSkillDir, jjSkillSource) : null;
+-const { workspace, setup } = prepareWorkspace(runDir, arm, realBut, skillDir, realJj, resolvedJjSkill, butEnv);
+-const { binDir, tracePath } = createWrappers(runDir, arm, realBut, realJj);
++const { workspace, setup } = prepareWorkspace(runDir, arm, realBut, skillDir, realJj, resolvedJjSkill, butEnv, realHeddle);
++const { binDir, tracePath } = createWrappers(runDir, arm, realBut, realJj, realHeddle);
+ const codexHome = prepareCodexHome(runDir, codexIsolatedHome);
+ const claudeSettings = prepareClaudeSettings(runDir, claudeCleanConfig, claudeEffortLevel);
+ const claudeConfig = prepareClaudeConfig(claudeCleanConfig);
+@@ -1841,7 +1971,19 @@ const jjBinaryMetadata = arm === "jj+skill"
+       version: run(realJj, ["--version"], { cwd: workspace }).stdout.trimEnd(),
+     }
+   : null;
+-const toolBinaryMetadata = arm === "but+skill" ? butBinaryMetadata : arm === "jj+skill" ? jjBinaryMetadata : null;
++const heddleBinaryMetadata = arm === "heddle-native"
++  ? {
++      path: realHeddle,
++      sha256: sha256File(realHeddle),
++      source_git: gitSourceInfo(realHeddle, { scope: "repo" }),
++      version: run(realHeddle, ["--version"], { cwd: workspace }).stdout.trimEnd(),
++    }
++  : null;
++const toolBinaryMetadata = arm === "but+skill"
++  ? butBinaryMetadata
++  : arm === "jj+skill"
++    ? jjBinaryMetadata
++    : heddleBinaryMetadata;
+ const skillSourceGit = activeSkillDir
+   ? (arm === "jj+skill" && !setup.source?.configured_dir ? null : gitSourceInfo(activeSkillDir))
+   : null;
+@@ -1922,6 +2064,7 @@ const result = {
+   tool_binary: toolBinaryMetadata,
+   but_binary: butBinaryMetadata,
+   jj_binary: jjBinaryMetadata,
++  heddle_binary: heddleBinaryMetadata,
+   skill: skillMetadata,
+   agent_result: {
+     status: agentResult.status,
