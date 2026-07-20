@@ -43,21 +43,19 @@ impl From<AgentTemplateArg> for heddle_client::device_flow::AgentTemplate {
 pub enum AuthCommands {
     /// Authenticate with a Heddle server
     Login {
-        /// Heddle server address (required for headless credential install).
+        /// Heddle server address (browser flow). Omit to use the configured
+        /// default server.
         #[arg(long)]
         server: Option<String>,
 
         /// Open the authorization URL in the system browser.
-        #[arg(long, conflicts_with = "token")]
+        #[arg(long)]
         open_browser: bool,
 
-        /// Install an existing Biscuit credential without opening a browser.
-        #[arg(long, requires_all = ["key_file", "server"])]
-        token: Option<String>,
-
-        /// Device private-key PEM matching the token's proof key.
-        #[arg(long, value_name = "PEM_PATH", requires = "token")]
-        key_file: Option<std::path::PathBuf>,
+        /// Install a verified `.hcred` credential file without a browser.
+        /// The server is taken from the file.
+        #[arg(long, value_name = "HCRED_PATH", conflicts_with_all = ["server", "open_browser"])]
+        credential: Option<std::path::PathBuf>,
     },
 
     /// Remove stored credentials for a server
@@ -103,8 +101,9 @@ pub enum AuthCommands {
         #[arg(long, value_enum)]
         template: Option<AgentTemplateArg>,
 
-        /// Write `token`, child `device-key.pem`, and `metadata.json` files to this directory.
-        #[arg(long, value_name = "DIR")]
+        /// Write a single self-verifying `<name>.hcred` credential file to this
+        /// path instead of installing the child into the keystore.
+        #[arg(long, value_name = "HCRED_PATH")]
         out: Option<std::path::PathBuf>,
     },
 
@@ -118,12 +117,10 @@ pub enum AuthCommands {
         /// Heddle server address
         #[arg(long)]
         server: Option<String>,
-        /// Write the private-key PEM to this path (default: under ~/.heddle/service-accounts/)
-        #[arg(long)]
-        key_out: Option<String>,
-        /// Include the private key PEM in stdout / JSON (default: write file only)
-        #[arg(long)]
-        show_secrets: bool,
+        /// Write the `.hcred` credential file to this path
+        /// (default: ~/.heddle/service-accounts/<name>.hcred)
+        #[arg(long, value_name = "HCRED_PATH")]
+        out: Option<std::path::PathBuf>,
     },
 }
 
@@ -133,13 +130,11 @@ impl From<AuthCommands> for heddle_client::AuthCommand {
             AuthCommands::Login {
                 server,
                 open_browser,
-                token,
-                key_file,
+                credential,
             } => heddle_client::AuthCommand::Login {
                 server,
                 open_browser,
-                token,
-                key_file,
+                credential,
             },
             AuthCommands::Logout { server } => heddle_client::AuthCommand::Logout { server },
             AuthCommands::Status { server } => heddle_client::AuthCommand::Status { server },
@@ -164,14 +159,12 @@ impl From<AuthCommands> for heddle_client::AuthCommand {
                 name,
                 namespace,
                 server,
-                key_out,
-                show_secrets,
+                out,
             } => heddle_client::AuthCommand::CreateServiceToken {
                 name,
                 namespace,
                 server,
-                key_out,
-                show_secrets,
+                out,
             },
         }
     }
@@ -184,70 +177,52 @@ mod tests {
     use crate::cli::{AuthCommands, Cli, Commands};
 
     #[test]
-    fn login_parses_headless_token_and_key_file() {
+    fn login_parses_credential_path() {
         let cli = Cli::try_parse_from([
             "heddle",
             "auth",
             "login",
-            "--server",
-            "127.0.0.1:8421",
-            "--token",
-            "biscuit-token",
-            "--key-file",
-            "/run/secrets/device.pem",
+            "--credential",
+            "/run/secrets/agent.hcred",
         ])
-        .expect("headless login flags parse");
+        .expect("credential login flag parses");
 
         let Commands::Auth {
             command:
                 AuthCommands::Login {
                     server,
-                    token,
-                    key_file,
+                    credential,
                     open_browser,
                 },
         } = cli.command
         else {
             panic!("expected auth login");
         };
-        assert_eq!(server.as_deref(), Some("127.0.0.1:8421"));
-        assert_eq!(token.as_deref(), Some("biscuit-token"));
+        assert_eq!(server, None, "server comes from the credential file");
         assert_eq!(
-            key_file.as_deref(),
-            Some(std::path::Path::new("/run/secrets/device.pem"))
+            credential.as_deref(),
+            Some(std::path::Path::new("/run/secrets/agent.hcred"))
         );
         assert!(!open_browser);
     }
 
     #[test]
-    fn login_requires_token_and_key_file_together() {
-        for incomplete in [
-            vec!["--token", "biscuit-token"],
-            vec!["--key-file", "/run/secrets/device.pem"],
+    fn login_credential_conflicts_with_browser_flags() {
+        for conflicting in [
+            vec!["--credential", "/run/secrets/agent.hcred", "--server", "grpc.heddle.sh"],
+            vec!["--credential", "/run/secrets/agent.hcred", "--open-browser"],
         ] {
             let mut args = vec!["heddle", "auth", "login"];
-            args.extend(incomplete);
+            args.extend(conflicting);
             assert!(
                 Cli::try_parse_from(args).is_err(),
-                "incomplete headless credential must be rejected"
+                "--credential must not combine with the browser-login flags"
             );
         }
     }
 
     #[test]
-    fn headless_login_requires_an_explicit_server() {
-        assert!(
-            Cli::try_parse_from([
-                "heddle",
-                "auth",
-                "login",
-                "--token",
-                "biscuit-token",
-                "--key-file",
-                "/run/secrets/device.pem",
-            ])
-            .is_err()
-        );
+    fn interactive_login_needs_no_flags() {
         Cli::try_parse_from(["heddle", "auth", "login"])
             .expect("interactive login may resolve the configured default server");
     }

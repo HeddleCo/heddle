@@ -12309,6 +12309,10 @@
     "auth create-service-token": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "credential_path": {
+          "description": "Path to the `.hcred` credential file written with mode 0600. The token\nand proof key live inside this file and never appear in the contract.",
+          "type": "string"
+        },
         "expires_in_days": {
           "format": "uint32",
           "minimum": 0,
@@ -12326,21 +12330,7 @@
           ],
           "type": "string"
         },
-        "private_key_path": {
-          "description": "Path to the private-key PEM written with mode 0600.",
-          "type": "string"
-        },
-        "private_key_pem": {
-          "description": "Present only when `--show-secrets` was passed.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "scope": {
-          "type": "string"
-        },
-        "token": {
           "type": "string"
         }
       },
@@ -12349,8 +12339,7 @@
         "name",
         "namespace",
         "scope",
-        "token",
-        "private_key_path",
+        "credential_path",
         "expires_in_days"
       ],
       "title": "AuthCreateServiceTokenSchema",

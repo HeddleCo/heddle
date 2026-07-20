@@ -58,7 +58,7 @@ use crate::cli::progress_render::clear_line;
 #[cfg(feature = "client")]
 use crate::client::HostedGrpcClient;
 #[cfg(feature = "client")]
-use crate::client::{HostedAuthMode, HostedSession};
+use crate::client::HostedSession;
 #[cfg(feature = "client")]
 use crate::remote::Remote;
 use crate::{
@@ -354,8 +354,6 @@ pub async fn cmd_push(
         }
     }
 
-    #[cfg(not(feature = "client"))]
-    let token = user_config.remote_token()?;
     #[cfg(feature = "client")]
     let (target, server_key) = resolve_push_target_with_key(&repo, remote.as_deref())?;
     #[cfg(not(feature = "client"))]
@@ -368,10 +366,7 @@ pub async fn cmd_push(
     let network_session = if matches!(target, RemoteTarget::Network { .. }) {
         let allow_insecure =
             insecure || cli_shared::remote_allows_insecure(&repo, remote.as_deref());
-        Some(
-            HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
-                .with_allow_insecure(allow_insecure),
-        )
+        Some(HostedSession::build(&user_config, server_key)?.with_allow_insecure(allow_insecure))
     } else {
         None
     };
@@ -380,7 +375,7 @@ pub async fn cmd_push(
     // local state — matching the prevalidation the `client` build runs above.
     #[cfg(not(feature = "client"))]
     if matches!(target, RemoteTarget::Network { .. }) {
-        user_config.heddle_client_config(token.clone())?;
+        user_config.heddle_client_config(None)?;
     }
 
     // `--all-threads` fans out over every pushable thread (heddle#838);
@@ -433,7 +428,7 @@ pub async fn cmd_push(
             )
             .await?;
             #[cfg(not(feature = "client"))]
-            let _ = (addr, repo_path, token, single_state_id, insecure);
+            let _ = (addr, repo_path, single_state_id, insecure);
             #[cfg(not(feature = "client"))]
             anyhow::bail!(RecoveryAdvice::network_feature_unavailable("push"));
         }

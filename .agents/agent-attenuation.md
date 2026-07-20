@@ -61,9 +61,13 @@ device-key-authenticated `MintBiscuit`.
 
 By default the child replaces the active stored credential for `--server`, so
 the next push/pull and any further derivation use that child and its fresh PoP
-key. Use `--out <DIR>` to write a portable 0600 bundle containing `token`,
-`device-key.pem` (the child key), and `metadata.json`. The parent device key is
-never written into the child credential or bundle. Token-only `--stdout`
+key. Use `--out <name>.hcred` to write a single self-verifying `0600`
+credential file instead: one JSON object carrying the child `token`, its
+`proof_key_pem`, and audit-only `provenance` (template, scopes, allowed
+operations, agent id). The parent device key is never written into the child
+credential or file. `heddle auth login --credential <name>.hcred` installs it,
+re-verifying the proof key, subject, and expiry against the token before
+storing. `--out` refuses to overwrite an existing path. Token-only `--stdout`
 export is intentionally unsupported because the resulting bearer could not
 satisfy its request-proof binding.
 

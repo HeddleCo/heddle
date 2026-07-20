@@ -618,7 +618,10 @@ impl HostedGrpcClient {
 pub use collaboration::{HostedDiscussion, HostedDiscussionTurn};
 pub use hydration::{LazyHostedHydrator, PullMaterialization, register_hosted_factory};
 pub use monorepo::{MonorepoCloneOp, MonorepoClonePlan, SkippedChild};
-pub use session::{HostedAuthMode, HostedSession};
+pub use session::{
+    CredentialSource, HostedSession, ResolvedHostedCredential, resolve_active_bearer,
+    resolve_hosted_credential,
+};
 pub use sync::HostedRefEntry;
 
 #[cfg(test)]
