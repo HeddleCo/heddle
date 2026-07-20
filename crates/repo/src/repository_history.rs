@@ -639,6 +639,9 @@ mod tests {
                 EntryType::Gitlink => {
                     unreachable!("repository history tests do not build gitlinks")
                 }
+                EntryType::Spoollink => {
+                    unreachable!("repository history tests do not build spoollinks")
+                }
             })
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
