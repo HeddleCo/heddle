@@ -5,8 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 HEDDLE_BIN="${HEDDLE_BIN:-$ROOT/target/debug/heddle}"
 HEDDLE_RUNTIME_PATH="${HEDDLE_RUNTIME_PATH-}"
-HEDDLE_REMOTE_PROOF_KEY_PEM="${HEDDLE_REMOTE_PROOF_KEY_PEM-}"
-HEDDLE_REMOTE_PROOF_KEY_PEM_PATH="${HEDDLE_REMOTE_PROOF_KEY_PEM_PATH-}"
 WEFT_ADDR="${WEFT_ADDR:-}"
 HEDDLE_SMOKE_REMOTE="${HEDDLE_SMOKE_REMOTE:-}"
 ARTIFACT_ROOT="${HEDDLE_SMOKE_ARTIFACT_ROOT:-$ROOT/target/smoke-hosted-release}"
@@ -36,23 +34,11 @@ require_command() {
 
 require_command python3
 [[ -x "$HEDDLE_BIN" ]] || fail "HEDDLE_BIN is not executable: $HEDDLE_BIN"
-[[ -n "${HEDDLE_REMOTE_TOKEN:-}" ]] || fail "HEDDLE_REMOTE_TOKEN is required"
-
-if [[ -z "${HEDDLE_CONFIG:-}" && ( -n "$HEDDLE_REMOTE_PROOF_KEY_PEM" || -n "$HEDDLE_REMOTE_PROOF_KEY_PEM_PATH" ) ]]; then
-  cfg_dir="$WORK_ROOT/user-config"
-  mkdir -p "$cfg_dir"
-  if [[ -n "$HEDDLE_REMOTE_PROOF_KEY_PEM" ]]; then
-    HEDDLE_REMOTE_PROOF_KEY_PEM_PATH="$cfg_dir/auth-proof-key.pem"
-    printf '%s\n' "$HEDDLE_REMOTE_PROOF_KEY_PEM" > "$HEDDLE_REMOTE_PROOF_KEY_PEM_PATH"
-    chmod 600 "$HEDDLE_REMOTE_PROOF_KEY_PEM_PATH"
-  fi
-  cat > "$cfg_dir/config.toml" <<EOF
-[remote]
-auth_proof_key_pem_path = '$HEDDLE_REMOTE_PROOF_KEY_PEM_PATH'
-EOF
-  chmod 600 "$cfg_dir/config.toml"
-  export HEDDLE_CONFIG="$cfg_dir/config.toml"
-fi
+# The client authenticates through a single `.hcred` credential file (which
+# carries the token AND its proof key). Point the runtime at it — no separate
+# token/proof-key env vars or user-config plumbing.
+[[ -n "${HEDDLE_CREDENTIAL:-}" ]] || fail "HEDDLE_CREDENTIAL (path to a .hcred) is required"
+[[ -r "$HEDDLE_CREDENTIAL" ]] || fail "HEDDLE_CREDENTIAL is not readable: $HEDDLE_CREDENTIAL"
 
 if [[ -z "$HEDDLE_SMOKE_REMOTE" ]]; then
   [[ -n "$WEFT_ADDR" ]] || fail "set WEFT_ADDR or HEDDLE_SMOKE_REMOTE"

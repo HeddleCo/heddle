@@ -41,6 +41,10 @@ use serde::{Deserialize, Serialize};
 const CREDENTIAL_FORMAT: &str = "heddle-credential";
 /// Only on-disk schema version this build reads and writes.
 const CREDENTIAL_VERSION: u32 = 1;
+/// Upper bound on a `.hcred` file read. A credential file is tiny (a token,
+/// a PEM, and a little metadata); this cap keeps a planted huge file at a
+/// `--credential` / `HEDDLE_CREDENTIAL` path from ballooning memory on load.
+const MAX_CREDENTIAL_FILE_BYTES: u64 = 64 * 1024;
 
 /// The role a `.hcred` credential plays. Audit/provenance metadata only — the
 /// server enforces authority from the token, not this label.
@@ -222,10 +226,22 @@ pub fn write_credential_file(path: &Path, credential: &VerifiedCredential) -> Re
 pub fn load_credential_file(path: &Path) -> Result<VerifiedCredential> {
     // Open through the fail-closed security gate and read from the SAME handle
     // so the permission check and the read observe one inode (no TOCTOU).
-    let mut file = open_credential_file_checked(path)?;
+    let file = open_credential_file_checked(path)?;
+    // Cap the read: a `.hcred` is tiny, so reading one byte past the cap and
+    // finding content there means the file is oversized — reject rather than
+    // OOM on a planted huge file.
     let mut contents = String::new();
-    file.read_to_string(&mut contents)
+    let mut limited = file.take(MAX_CREDENTIAL_FILE_BYTES + 1);
+    limited
+        .read_to_string(&mut contents)
         .with_context(|| format!("reading credential file {}", path.display()))?;
+    if contents.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
+        bail!(
+            "credential file {} exceeds the {} KiB size cap; a credential file is tiny — refusing to load a suspiciously large file",
+            path.display(),
+            MAX_CREDENTIAL_FILE_BYTES / 1024,
+        );
+    }
 
     let on_disk: OnDiskCredential = serde_json::from_str(&contents)
         .with_context(|| format!("parsing credential file {}", path.display()))?;
@@ -241,6 +257,15 @@ pub fn load_credential_file(path: &Path) -> Result<VerifiedCredential> {
             "credential file {} has unsupported version {} (this build reads version {CREDENTIAL_VERSION})",
             path.display(),
             on_disk.version
+        );
+    }
+    // The `server` field reaches terminal output (`auth status`, error
+    // messages, the server-mismatch diagnostic). Reject control characters /
+    // newlines so a crafted `.hcred` can't inject escape sequences there.
+    if on_disk.server.chars().any(|c| c.is_control()) {
+        bail!(
+            "credential file {} has a server field containing control characters",
+            path.display()
         );
     }
 
@@ -496,6 +521,42 @@ mod tests {
         std::fs::write(&path, tampered).expect("rewrite");
         let error = load_credential_file(&path).expect_err("bad version must be rejected");
         assert!(error.to_string().contains("unsupported version"));
+    }
+
+    #[test]
+    fn rejects_oversized_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agent.hcred");
+        // A file past the 64 KiB cap is rejected before any parse/verify.
+        let bloat = "x".repeat((MAX_CREDENTIAL_FILE_BYTES as usize) + 1);
+        std::fs::write(&path, bloat).expect("write oversized file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("tighten perms");
+        }
+        let error = load_credential_file(&path).expect_err("oversized file must be rejected");
+        assert!(
+            error.to_string().contains("size cap"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_control_chars_in_server_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agent.hcred");
+        let (mut credential, _signer) = sample_verified();
+        // A bell control character in `server` would reach terminal output.
+        credential.server = "grpc.heddle\u{0007}.test".to_string();
+        write_credential_file(&path, &credential).expect("write");
+        let error =
+            load_credential_file(&path).expect_err("control chars in server must be rejected");
+        assert!(
+            error.to_string().contains("control characters"),
+            "unexpected error: {error}"
+        );
     }
 
     #[cfg(unix)]

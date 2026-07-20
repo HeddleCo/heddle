@@ -23,7 +23,8 @@ pub use auth_requests::AuthCommand;
 // same path the cli used internally pre-move.
 pub use device_flow as auth;
 pub use grpc_hosted::{
-    HostedAuthMode, HostedGrpcClient, HostedSession,
+    CredentialSource, HostedGrpcClient, HostedSession, ResolvedHostedCredential,
+    resolve_active_bearer, resolve_hosted_credential,
     request_signing::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion},
 };
 pub use presence::{
