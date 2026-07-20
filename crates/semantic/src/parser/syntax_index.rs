@@ -110,7 +110,10 @@ impl SyntaxIndex {
                         });
                     }
                 }
-                Language::C | Language::Cpp | Language::Unknown => {}
+                // Zig has no top-level import statement node — `@import` is a
+                // builtin call bound in a `variable_declaration`, so there is
+                // no dedicated import kind to collect here.
+                Language::C | Language::Cpp | Language::Zig | Language::Unknown => {}
             }
         }
 
@@ -199,6 +202,7 @@ pub(super) fn is_function_kind(kind: &str, language: Language) -> bool {
         Language::Go => kind == "function_declaration" || kind == "method_declaration",
         Language::C | Language::Cpp => kind == "function_definition",
         Language::Java => kind == "method_declaration" || kind == "constructor_declaration",
+        Language::Zig => kind == "function_declaration",
         Language::Unknown => false,
     }
 }

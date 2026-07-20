@@ -12,6 +12,7 @@ pub enum Language {
     C,
     Cpp,
     Java,
+    Zig,
     Unknown,
 }
 
@@ -27,6 +28,7 @@ impl Language {
             Some("c") | Some("h") => Language::C,
             Some("cpp") | Some("cc") | Some("hpp") | Some("cxx") => Language::Cpp,
             Some("java") => Language::Java,
+            Some("zig") => Language::Zig,
             _ => Language::Unknown,
         }
     }
@@ -57,6 +59,8 @@ impl Language {
             Language::Cpp => Some(tree_sitter_cpp::LANGUAGE.into()),
             #[cfg(feature = "lang-java")]
             Language::Java => Some(tree_sitter_java::LANGUAGE.into()),
+            #[cfg(feature = "lang-zig")]
+            Language::Zig => Some(tree_sitter_zig::LANGUAGE.into()),
             _ => None,
         }
     }

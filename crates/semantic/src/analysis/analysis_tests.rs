@@ -264,6 +264,29 @@ fn test_detect_signature_change() {
     );
 }
 
+/// heddle#1068: a parameter change on a Zig `fn` must surface as a
+/// `SignatureChanged` semantic-diff event (drives risk signals for ghostty).
+#[cfg(feature = "lang-zig")]
+#[test]
+fn test_detect_zig_signature_change() {
+    let old = "pub fn process(x: i32) i32 { return x + 1; }\n";
+    let new = "pub fn process(x: i32, y: i32) i32 { return x + y; }\n";
+    let changes = detect_function_changes(
+        std::path::Path::new("main.zig"),
+        std::path::Path::new("main.zig"),
+        old,
+        new,
+        SimilarityMethod::Lines,
+    );
+    let has_sig_change = changes
+        .iter()
+        .any(|c| matches!(c, SemanticChange::SignatureChanged { name, .. } if name == "process"));
+    assert!(
+        has_sig_change,
+        "Expected SignatureChanged for Zig 'process', got: {changes:?}"
+    );
+}
+
 #[test]
 fn test_detect_multiple_function_deletions() {
     let old = "fn a() { 1 }\nfn b() { 2 }\nfn c() { 3 }\n";

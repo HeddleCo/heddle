@@ -34,7 +34,12 @@ use crate::{
 /// (non-definition file content), and mod-qualified `container_path`. Bumped so
 /// any same-version-but-old-layout nodes written by a pre-fix branch checkout
 /// are treated as stale and recomputed rather than digest-compared.
-pub const EXTRACTOR_VERSION: u32 = 2;
+///
+/// v3: Zig extraction added. `parent_is_reusable` only validates grammars
+/// *present* in the parent's map, so a pre-Zig index (no `"zig"` entry) would
+/// otherwise carry `.zig` files forward as `Opaque` indefinitely. The bump
+/// forces those to recompute so imported Zig repos gain granularity.
+pub const EXTRACTOR_VERSION: u32 = 3;
 
 /// Stable lowercase language name recorded in file nodes and the root's
 /// grammar map.
@@ -48,6 +53,7 @@ pub fn language_name(language: Language) -> &'static str {
         Language::C => "c",
         Language::Cpp => "cpp",
         Language::Java => "java",
+        Language::Zig => "zig",
         Language::Unknown => "unknown",
     }
 }
@@ -64,6 +70,7 @@ pub fn grammar_version(language: Language) -> &'static str {
         Language::C => "tree-sitter-c@0.24",
         Language::Cpp => "tree-sitter-cpp@0.23",
         Language::Java => "tree-sitter-java@0.23",
+        Language::Zig => "tree-sitter-zig@1.1",
         Language::Unknown => "none",
     }
 }
@@ -81,6 +88,7 @@ pub fn grammar_version_by_name(name: &str) -> Option<&'static str> {
         "c" => Language::C,
         "cpp" => Language::Cpp,
         "java" => Language::Java,
+        "zig" => Language::Zig,
         _ => return None,
     };
     Some(grammar_version(language))
@@ -333,5 +341,74 @@ mod tests {
     #[test]
     fn unsupported_language_is_none() {
         assert!(extract_semantic_file(b"whatever", Language::Unknown).is_none());
+    }
+
+    // ── Zig (heddle#1068) ────────────────────────────────────────────────
+
+    /// A `.zig` blob must extract a real file node — symbols with per-symbol
+    /// `semantic_hash`es — not the `Opaque` fallback that `Language::Unknown`
+    /// produced before Zig support.
+    #[cfg(feature = "lang-zig")]
+    #[test]
+    fn zig_blob_extracts_real_symbols_with_hashes() {
+        let src = "pub const Point = struct {\n    x: f64,\n    pub fn dist(self: Point) f64 { return self.x; }\n};\n\ntest \"works\" { _ = 1; }\n";
+        let extracted =
+            extract_semantic_file(src.as_bytes(), Language::Zig).expect("zig parses to a real node");
+        assert_eq!(language_name(extracted.language), "zig");
+
+        let by_name = |n: &str| extracted.symbols.iter().find(|s| s.name == n);
+        let point = by_name("Point").expect("Point type extracted");
+        assert_eq!(point.kind, SymbolKindTag::Type);
+        let dist = by_name("dist").expect("method extracted");
+        assert_eq!(dist.kind, SymbolKindTag::Function);
+        assert_eq!(dist.container_path, vec!["Point".to_string()]);
+        let test = by_name("test:\"works\"").expect("test block extracted");
+        assert_eq!(test.kind, SymbolKindTag::Function);
+
+        // Every symbol carries a non-degenerate per-symbol semantic_hash.
+        assert!(
+            extracted
+                .symbols
+                .iter()
+                .all(|s| s.semantic_hash != ContentHash::compute(b"")),
+            "symbols must carry real semantic hashes"
+        );
+    }
+
+    /// Reformatting a Zig file — whitespace + comments only — must leave the
+    /// file node's `semantic_digest` (and every symbol hash + the scaffold)
+    /// byte-identical.
+    #[cfg(feature = "lang-zig")]
+    #[test]
+    fn zig_reformat_leaves_semantic_digest_stable() {
+        use objects::object::SemanticFileNode;
+
+        let tight = "const std = @import(\"std\");\npub fn add(a: i32, b: i32) i32 { return a + b; }\npub const Point = struct { x: f64, pub fn dist(self: Point) f64 { return self.x; } };\n";
+        let loose = "const std = @import(\"std\");\n\n// a comment\npub fn add(a: i32,   b: i32) i32 {\n    return a + b;\n}\n\npub const Point = struct {\n    // fields\n    x: f64,\n    pub fn dist(self: Point) f64 {\n        return self.x;\n    }\n};\n";
+
+        let ea = extract_semantic_file(tight.as_bytes(), Language::Zig).expect("tight parses");
+        let eb = extract_semantic_file(loose.as_bytes(), Language::Zig).expect("loose parses");
+
+        assert_eq!(
+            ea.scaffold_hash, eb.scaffold_hash,
+            "scaffold must be reformat/comment stable"
+        );
+
+        let node = |e: &ExtractedFile, src: &str| {
+            SemanticFileNode::new(
+                language_name(e.language),
+                grammar_version(e.language),
+                EXTRACTOR_VERSION,
+                ContentHash::compute(src.as_bytes()),
+                e.scaffold_hash,
+                e.symbols.clone(),
+            )
+        };
+        // The source blobs differ, but the reformat-stable digest must not.
+        assert_eq!(
+            node(&ea, tight).semantic_digest,
+            node(&eb, loose).semantic_digest,
+            "reformatting must not perturb the file semantic_digest"
+        );
     }
 }

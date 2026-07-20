@@ -16,7 +16,7 @@ name = "semantic"
 [features]
 default = ["common-languages"]
 common-languages = ["lang-rust", "lang-python", "lang-javascript", "lang-typescript"]
-extended-languages = ["lang-c", "lang-cpp", "lang-go", "lang-java"]
+extended-languages = ["lang-c", "lang-cpp", "lang-go", "lang-java", "lang-zig"]
 lang-rust = ["dep:tree-sitter-rust"]
 lang-python = ["dep:tree-sitter-python"]
 lang-javascript = ["dep:tree-sitter-javascript"]
@@ -25,6 +25,7 @@ lang-go = ["dep:tree-sitter-go"]
 lang-c = ["dep:tree-sitter-c"]
 lang-cpp = ["dep:tree-sitter-cpp"]
 lang-java = ["dep:tree-sitter-java"]
+lang-zig = ["dep:tree-sitter-zig"]
 
 [dependencies]
 anyhow.workspace = true
@@ -40,6 +41,7 @@ tree-sitter-javascript = { workspace = true, optional = true }
 tree-sitter-python = { workspace = true, optional = true }
 tree-sitter-rust = { workspace = true, optional = true }
 tree-sitter-typescript = { workspace = true, optional = true }
+tree-sitter-zig = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
