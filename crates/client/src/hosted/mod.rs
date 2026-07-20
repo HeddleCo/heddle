@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use api::heddle::api::v1alpha1::CallContext;
 pub use bootstrap::{DescriptorKeyring, VerifiedEndpointDescriptor, fetch_endpoint_descriptor};
-pub use call::{BidirectionalRequestStream, BidirectionalStream, ServerStream};
+pub use call::{BidirectionalRequestStream, BidirectionalStream, ServerStream, ServerStreamItem};
 use cli_shared::ClientConfig;
 pub use collaboration::{HostedDiscussion, HostedDiscussionTurn};
 use connection::HostedConnection;

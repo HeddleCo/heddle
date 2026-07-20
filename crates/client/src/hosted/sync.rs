@@ -38,7 +38,7 @@ use wire::{
 };
 
 use super::{
-    HostedClient, PullMaterialization,
+    BidirectionalRequestStream, HostedClient, PullMaterialization, ServerStream, ServerStreamItem,
     helpers::{
         descriptor_id, descriptor_id_from_info, hosted_to_protocol_error,
         object_descriptor_with_status, object_type_name, parse_descriptor_to_info,
@@ -464,14 +464,8 @@ impl HostedClient {
             .push(operation_id.to_wire())
             .await
             .map_err(hosted_to_protocol_error)?;
-        let (mut requests, mut response) = stream.split();
-        let request_pump = tokio::spawn(async move {
-            let mut rx = rx;
-            while let Some(message) = rx.recv().await {
-                requests.send(&message).await?;
-            }
-            requests.finish()
-        });
+        let (requests, mut response) = stream.split();
+        let request_pump = tokio::spawn(pump_push_requests(requests, rx));
 
         let ready = match response.next().await.map_err(hosted_to_protocol_error)? {
             Some(PushServerFrame {
@@ -1005,7 +999,7 @@ impl HostedClient {
         let mut git_lane_repo = None;
         let mut git_pack_state = GitPackPullInstallState::default();
         let mut received = 0usize;
-        while let Some(message) = response.next().await.map_err(hosted_to_protocol_error)? {
+        while let Some(message) = next_pull_message(&mut response).await? {
             match message.frame {
                 Some(pull_server_frame::Frame::Pack(chunk)) => {
                     profile.bytes_received =
@@ -1374,6 +1368,93 @@ impl HostedClient {
         }
         Ok(())
     }
+}
+
+async fn pump_push_requests(
+    mut requests: BidirectionalRequestStream<PushClientFrame>,
+    mut rx: mpsc::Receiver<PushClientFrame>,
+) -> super::Result<()> {
+    while let Some(mut message) = rx.recv().await {
+        let raw = take_push_raw_body(&mut message);
+        requests.send(&message).await?;
+        if let Some(raw) = raw {
+            requests.begin_raw(raw.len() as u64).await?;
+            requests.send_raw_chunk(bytes::Bytes::from(raw)).await?;
+        }
+    }
+    requests.finish()
+}
+
+fn take_push_raw_body(message: &mut PushClientFrame) -> Option<Vec<u8>> {
+    match message.frame.as_mut()? {
+        push_client_frame::Frame::Pack(chunk) if !chunk.data.is_empty() => {
+            Some(std::mem::take(&mut chunk.data))
+        }
+        push_client_frame::Frame::GitLane(transfer) => match transfer.body.as_mut()? {
+            git_lane_transfer::Body::Pack(pack) if !pack.pack_chunk.is_empty() => {
+                Some(std::mem::take(&mut pack.pack_chunk))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+async fn next_pull_message(
+    response: &mut ServerStream<PullServerFrame>,
+) -> Result<Option<PullServerFrame>, ProtocolError> {
+    let Some(item) = response
+        .next_item()
+        .await
+        .map_err(hosted_to_protocol_error)?
+    else {
+        return Ok(None);
+    };
+    let ServerStreamItem::Message(mut message) = item else {
+        return Err(ProtocolError::InvalidState(
+            "pull stream sent raw bytes without a pack header".to_string(),
+        ));
+    };
+    let raw_target = match message.frame.as_mut() {
+        Some(pull_server_frame::Frame::Pack(chunk)) if chunk.data.is_empty() => {
+            Some(&mut chunk.data)
+        }
+        Some(pull_server_frame::Frame::GitLane(transfer)) => match transfer.body.as_mut() {
+            Some(git_lane_transfer::Body::Pack(pack)) if pack.pack_chunk.is_empty() => {
+                Some(&mut pack.pack_chunk)
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(raw_target) = raw_target {
+        let Some(ServerStreamItem::RawBody { length }) = response
+            .next_item()
+            .await
+            .map_err(hosted_to_protocol_error)?
+        else {
+            return Err(ProtocolError::InvalidState(
+                "pull pack header was not followed by a raw body".to_string(),
+            ));
+        };
+        let capacity = usize::try_from(length).map_err(|_| {
+            ProtocolError::InvalidState("pull raw body exceeds this platform".to_string())
+        })?;
+        raw_target.reserve(capacity);
+        while let Some(chunk) = response
+            .read_raw_chunk(1024 * 1024)
+            .await
+            .map_err(hosted_to_protocol_error)?
+        {
+            raw_target.extend_from_slice(&chunk);
+        }
+        if raw_target.len() != capacity {
+            return Err(ProtocolError::InvalidState(
+                "pull raw body length changed during receive".to_string(),
+            ));
+        }
+    }
+    Ok(Some(message))
 }
 
 fn redaction_push_message(

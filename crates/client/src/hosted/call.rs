@@ -107,6 +107,7 @@ where
         send: Some(send),
         responses: ServerStream::new(connection, recv),
         request: PhantomData,
+        raw_remaining: 0,
     })
 }
 
@@ -116,6 +117,13 @@ pub struct ServerStream<Response> {
     recv: iroh::endpoint::RecvStream,
     buffered: Vec<u8>,
     response: PhantomData<Response>,
+    raw_remaining: u64,
+}
+
+#[derive(Debug)]
+pub enum ServerStreamItem<Response> {
+    Message(Response),
+    RawBody { length: u64 },
 }
 
 impl<Response> ServerStream<Response>
@@ -128,17 +136,39 @@ where
             recv,
             buffered: Vec::new(),
             response: PhantomData,
+            raw_remaining: 0,
         }
     }
 
     pub async fn next(&mut self) -> Result<Option<Response>> {
+        match self.next_item().await? {
+            Some(ServerStreamItem::Message(response)) => Ok(Some(response)),
+            Some(ServerStreamItem::RawBody { length }) => Err(HostedError::Framing(format!(
+                "unexpected {length}-byte raw body on typed stream"
+            ))),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn next_item(&mut self) -> Result<Option<ServerStreamItem<Response>>> {
+        if self.raw_remaining != 0 {
+            return Err(HostedError::Framing(
+                "raw body must be consumed before the next stream item".to_string(),
+            ));
+        }
         loop {
             if let Some((frame, consumed)) =
                 decode_stream_frame(&self.buffered).map_err(HostedError::framing)?
             {
                 let response = match frame {
-                    StreamFrame::Message(body) => Response::decode(body)?,
+                    StreamFrame::Message(body) => {
+                        ServerStreamItem::Message(Response::decode(body)?)
+                    }
                     StreamFrame::Failure(failure) => return Err(failure.into()),
+                    StreamFrame::RawBody { length } => {
+                        self.raw_remaining = length;
+                        ServerStreamItem::RawBody { length }
+                    }
                 };
                 self.buffered.drain(..consumed);
                 return Ok(Some(response));
@@ -160,6 +190,42 @@ where
         }
     }
 
+    pub async fn read_raw_chunk(&mut self, maximum: usize) -> Result<Option<Bytes>> {
+        if self.raw_remaining == 0 {
+            return Ok(None);
+        }
+        let maximum = maximum.max(1);
+        if !self.buffered.is_empty() {
+            let length = self
+                .buffered
+                .len()
+                .min(maximum)
+                .min(usize::try_from(self.raw_remaining).unwrap_or(usize::MAX));
+            let chunk = Bytes::copy_from_slice(&self.buffered[..length]);
+            self.buffered.drain(..length);
+            self.raw_remaining -= length as u64;
+            return Ok(Some(chunk));
+        }
+        let Some(chunk) = self
+            .recv
+            .read_chunk(maximum)
+            .await
+            .map_err(HostedError::transport)?
+        else {
+            return Err(HostedError::Framing(
+                "stream ended within a declared raw body".to_string(),
+            ));
+        };
+        let accepted = chunk
+            .len()
+            .min(usize::try_from(self.raw_remaining).unwrap_or(usize::MAX));
+        if accepted < chunk.len() {
+            self.buffered.extend_from_slice(&chunk[accepted..]);
+        }
+        self.raw_remaining -= accepted as u64;
+        Ok(Some(chunk.slice(..accepted)))
+    }
+
     pub fn cancel(&mut self) -> Result<()> {
         self.recv.stop(1u32.into()).map_err(HostedError::transport)
     }
@@ -170,12 +236,14 @@ pub struct BidirectionalStream<Request, Response> {
     send: Option<iroh::endpoint::SendStream>,
     responses: ServerStream<Response>,
     request: PhantomData<Request>,
+    raw_remaining: u64,
 }
 
 /// Request half of a bidirectional operation stream.
 pub struct BidirectionalRequestStream<Request> {
     send: Option<iroh::endpoint::SendStream>,
     request: PhantomData<Request>,
+    raw_remaining: u64,
 }
 
 impl<Request, Response> BidirectionalStream<Request, Response>
@@ -188,12 +256,18 @@ where
             BidirectionalRequestStream {
                 send: self.send,
                 request: PhantomData,
+                raw_remaining: self.raw_remaining,
             },
             self.responses,
         )
     }
 
     pub async fn send(&mut self, request: &Request) -> Result<()> {
+        if self.raw_remaining != 0 {
+            return Err(HostedError::Framing(
+                "raw body must finish before the next request message".to_string(),
+            ));
+        }
         let frame =
             encode_stream_message(&request.encode_to_vec()).map_err(HostedError::framing)?;
         self.send
@@ -205,6 +279,11 @@ where
     }
 
     pub fn finish_requests(&mut self) -> Result<()> {
+        if self.raw_remaining != 0 {
+            return Err(HostedError::Framing(
+                "cannot finish a stream within a declared raw body".to_string(),
+            ));
+        }
         if let Some(mut send) = self.send.take() {
             send.finish().map_err(HostedError::transport)?;
         }
@@ -213,6 +292,14 @@ where
 
     pub async fn next(&mut self) -> Result<Option<Response>> {
         self.responses.next().await
+    }
+
+    pub async fn next_item(&mut self) -> Result<Option<ServerStreamItem<Response>>> {
+        self.responses.next_item().await
+    }
+
+    pub async fn read_raw_chunk(&mut self, maximum: usize) -> Result<Option<Bytes>> {
+        self.responses.read_raw_chunk(maximum).await
     }
 
     pub fn cancel(&mut self) -> Result<()> {
@@ -228,6 +315,11 @@ where
     Request: Message,
 {
     pub async fn send(&mut self, request: &Request) -> Result<()> {
+        if self.raw_remaining != 0 {
+            return Err(HostedError::Framing(
+                "raw body must finish before the next request message".to_string(),
+            ));
+        }
         let frame =
             encode_stream_message(&request.encode_to_vec()).map_err(HostedError::framing)?;
         self.send
@@ -238,7 +330,46 @@ where
             .map_err(HostedError::transport)
     }
 
+    pub async fn begin_raw(&mut self, length: u64) -> Result<()> {
+        if self.raw_remaining != 0 {
+            return Err(HostedError::Framing(
+                "a raw request body is already active".to_string(),
+            ));
+        }
+        let frame = api::framing::encode_stream_raw_body(length).map_err(HostedError::framing)?;
+        self.send
+            .as_mut()
+            .ok_or_else(|| HostedError::Framing("request stream is finished".to_string()))?
+            .write_chunk(Bytes::from(frame))
+            .await
+            .map_err(HostedError::transport)?;
+        self.raw_remaining = length;
+        Ok(())
+    }
+
+    pub async fn send_raw_chunk(&mut self, chunk: Bytes) -> Result<()> {
+        if chunk.is_empty() || chunk.len() as u64 > self.raw_remaining {
+            return Err(HostedError::Framing(
+                "raw request chunk exceeds the declared body".to_string(),
+            ));
+        }
+        let length = chunk.len() as u64;
+        self.send
+            .as_mut()
+            .ok_or_else(|| HostedError::Framing("request stream is finished".to_string()))?
+            .write_chunk(chunk)
+            .await
+            .map_err(HostedError::transport)?;
+        self.raw_remaining -= length;
+        Ok(())
+    }
+
     pub fn finish(&mut self) -> Result<()> {
+        if self.raw_remaining != 0 {
+            return Err(HostedError::Framing(
+                "cannot finish a stream within a declared raw body".to_string(),
+            ));
+        }
         if let Some(mut send) = self.send.take() {
             send.finish().map_err(HostedError::transport)?;
         }
