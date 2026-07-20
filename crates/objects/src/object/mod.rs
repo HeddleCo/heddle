@@ -69,7 +69,9 @@ pub use staleness_core::{
     StalenessStatus, annotation_status_for_source,
     annotation_status_for_source_with_symbol_resolver, extract_line_range, resolve_current_symbol,
 };
-pub use state_attachment::{StateAttachment, StateAttachmentBody, StateAttachmentId};
+pub use state_attachment::{
+    StateAttachment, StateAttachmentBody, StateAttachmentId, StateAttachmentKind,
+};
 pub use state_attribution::{Agent, Attribution, Principal};
 pub use state_context::{
     Annotation, AnnotationKind, AnnotationRevision, AnnotationScope, AnnotationStatus, ContextBlob,
