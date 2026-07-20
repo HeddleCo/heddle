@@ -43,7 +43,22 @@ pub fn cmd_semantic(cli: &Cli, command: SemanticCommands) -> Result<()> {
             top,
             include_actors,
         ),
+        SemanticCommands::Index { all } => cmd_semantic_index(cli, all),
     }
+}
+
+/// Backfill the merkle semantic index across history (`heddle semantic index`).
+fn cmd_semantic_index(cli: &Cli, all: bool) -> Result<()> {
+    let repo = cli.open_repo()?;
+    let indexed = repo
+        .backfill_semantic_index(all)
+        .context("backfilling semantic index")?;
+    if all {
+        println!("Recomputed the semantic index for {indexed} state(s).");
+    } else {
+        println!("Indexed {indexed} state(s) that were missing a semantic index.");
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

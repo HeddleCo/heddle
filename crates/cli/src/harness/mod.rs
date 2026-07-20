@@ -955,7 +955,7 @@ impl HarnessBridgeRuntime {
             .transcript_mode
             .unwrap_or(self.user_config.harness.transcript);
         let env_hints = merged_env_hints(&params.env_hints);
-        let token_claims = user_config_token_claims(&self.user_config);
+        let token_claims = active_token_claims();
         let current_session = SessionManager::new(self.repo.root()).get_current_session()?;
         let current_segment = current_session
             .as_ref()
@@ -1992,7 +1992,7 @@ fn resolve_identity(
         .as_ref()
         .and_then(|session| session.current_segment());
     let token_claims = if user_config.harness.auto_infer {
-        user_config_token_claims(user_config)
+        active_token_claims()
     } else {
         None
     };
@@ -2312,12 +2312,22 @@ fn decode_token_claims(token: &str) -> Option<TokenClaims> {
     serde_json::from_slice(&decoded).ok()
 }
 
-fn user_config_token_claims(user_config: &UserConfig) -> Option<TokenClaims> {
-    user_config
-        .remote_token()
-        .ok()
-        .flatten()
-        .and_then(|token| decode_token_claims(&token.id))
+/// Decode the claims of the locally active bearer token, if any, resolved
+/// through the single credential precedence (`HEDDLE_CREDENTIAL` → keystore).
+/// Best-effort session-identity inference; returns `None` when unauthenticated
+/// or built without the `client` feature.
+fn active_token_claims() -> Option<TokenClaims> {
+    #[cfg(feature = "client")]
+    {
+        crate::client::resolve_active_bearer()
+            .ok()
+            .flatten()
+            .and_then(|token| decode_token_claims(&token.id))
+    }
+    #[cfg(not(feature = "client"))]
+    {
+        None
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,9 +1,10 @@
 //! Local-agent presence publisher (Track B).
 //!
 //! Runs in the foreground: reads the configured hosted upstream + namespace
-//! from `.heddle/config.toml`, resolves a bearer token from the user config or
-//! `HEDDLE_REMOTE_TOKEN`, opens a WebSocket to `<upstream>/presence/ws`, and
-//! streams `agent_start` → periodic `agent_heartbeat` → `agent_done` events.
+//! from `.heddle/config.toml`, resolves a bearer token through the single
+//! credential precedence (`HEDDLE_CREDENTIAL` → keystore), opens a WebSocket to
+//! `<upstream>/presence/ws`, and streams `agent_start` → periodic
+//! `agent_heartbeat` → `agent_done` events.
 //!
 //! This module is gated on the `client` feature because the WebSocket
 //! client (and therefore `tokio-tungstenite`) is only pulled in for hosted
@@ -43,8 +44,6 @@ use tokio_tungstenite::{
 };
 use tracing::{debug, info, warn};
 use weft_client_shim::CliContext;
-
-use crate::credentials;
 
 /// Local mirror of `weft_server::presence::hub::PresenceEvent`.
 ///
@@ -201,16 +200,13 @@ pub fn resolve_publisher_config(
         return Ok(None);
     };
 
-    let (token, credential_subject) = if let Some(token) = user_config.remote_token()? {
-        (token.id, None)
-    } else {
-        let stored_credential = credentials::resolve_credential_for_server(upstream)
-            .with_context(|| format!("loading stored credential for {upstream}"))?;
-        if let Some(credential) = stored_credential {
-            (credential.token, Some(credential.subject))
-        } else {
+    let resolved = crate::hosted::resolve_hosted_credential(Some(upstream))
+        .with_context(|| format!("resolving credential for {upstream}"))?;
+    let (token, credential_subject) = match resolved.token {
+        Some(token) => (token.id, resolved.subject),
+        None => {
             return Err(anyhow!(
-                "no remote token available — set HEDDLE_REMOTE_TOKEN or run `heddle auth login`"
+                "no credential available — set HEDDLE_CREDENTIAL=<path.hcred> or run `heddle auth login`"
             ));
         }
     };
@@ -624,14 +620,45 @@ mod tests {
 
     use cli_shared::config::UserPrincipalConfig;
 
-    fn user_with_token_and_principal() -> UserConfig {
-        let mut user = UserConfig::default();
-        user.remote.token = Some("opaque-token".into());
-        user.principal = Some(UserPrincipalConfig {
-            name: "Alice".into(),
-            email: "alice@example.com".into(),
-        });
-        user
+    fn user_with_principal() -> UserConfig {
+        UserConfig {
+            principal: Some(UserPrincipalConfig {
+                name: "Alice".into(),
+                email: "alice@example.com".into(),
+            }),
+            ..UserConfig::default()
+        }
+    }
+
+    /// Run `f` with `HOME` pointed at a fresh temp dir and `HEDDLE_HOME` /
+    /// `HEDDLE_CREDENTIAL` cleared, so credential resolution sees only what the
+    /// test seeds into the keystore. Restores the prior env afterward.
+    fn with_isolated_credential_env<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
+        let _guard = crate::credentials::lock_test_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            ["HOME", "HEDDLE_HOME", "HEDDLE_CREDENTIAL"]
+                .iter()
+                .map(|k| (*k, std::env::var_os(k)))
+                .collect();
+        unsafe {
+            std::env::set_var("HOME", temp.path());
+            std::env::remove_var("HEDDLE_HOME");
+            std::env::remove_var("HEDDLE_CREDENTIAL");
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(temp.path())));
+        unsafe {
+            for (key, value) in saved {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     #[test]
@@ -643,7 +670,7 @@ mod tests {
         let result = resolve_publisher_config(
             &hosted,
             &make_agent("agent-1"),
-            &user_with_token_and_principal(),
+            &user_with_principal(),
             Duration::from_secs(15),
         )
         .unwrap();
@@ -659,7 +686,7 @@ mod tests {
         let result = resolve_publisher_config(
             &hosted,
             &make_agent("agent-1"),
-            &user_with_token_and_principal(),
+            &user_with_principal(),
             Duration::from_secs(15),
         )
         .unwrap();
@@ -668,70 +695,39 @@ mod tests {
 
     #[test]
     fn resolves_subject_from_principal_when_token_is_opaque() {
-        let hosted = HostedConfig {
-            upstream_url: Some("https://heddle.example.com".into()),
-            namespace: Some("heddle/core".into()),
-        };
-        let config = resolve_publisher_config(
-            &hosted,
-            &make_agent("agent-1"),
-            &user_with_token_and_principal(),
-            Duration::from_secs(15),
-        )
-        .unwrap()
-        .expect("config should resolve");
-        assert_eq!(config.subject, "alice@example.com");
-        assert_eq!(config.namespace, "heddle/core");
-        assert_eq!(config.ws_url, "wss://heddle.example.com/presence/ws");
-    }
+        with_isolated_credential_env(|_home| {
+            // Seed a keystore credential for the upstream so a token resolves;
+            // the published subject still prefers the configured principal.
+            crate::credentials::store_server_credential(
+                "https://heddle.example.com",
+                crate::credentials::ServerCredential {
+                    token: "opaque-token".into(),
+                    subject: "keystore-subject".into(),
+                    device_id: None,
+                    credential_id: None,
+                    private_key_pem: None,
+                    expires_at: None,
+                },
+            )
+            .expect("seed keystore credential");
 
-    #[test]
-    fn env_token_skips_malformed_credential_store() {
-        let _guard = crate::credentials::lock_test_env();
-        let temp = tempfile::TempDir::new().unwrap();
-        let original_home = std::env::var_os("HOME");
-        let original_token = std::env::var_os("HEDDLE_REMOTE_TOKEN");
-        unsafe {
-            std::env::set_var("HOME", temp.path());
-            std::env::set_var("HEDDLE_REMOTE_TOKEN", "env-token");
-        }
-        std::fs::create_dir_all(temp.path().join(".heddle")).unwrap();
-        std::fs::write(
-            temp.path().join(".heddle/credentials.toml"),
-            "this is not valid toml =",
-        )
-        .unwrap();
-
-        let hosted = HostedConfig {
-            upstream_url: Some("https://heddle.example.com".into()),
-            namespace: Some("heddle/core".into()),
-        };
-        let config = resolve_publisher_config(
-            &hosted,
-            &make_agent("agent-1"),
-            &UserConfig {
-                remote: Default::default(),
-                principal: user_with_token_and_principal().principal,
-                ..Default::default()
-            },
-            Duration::from_secs(15),
-        )
-        .unwrap()
-        .expect("config should resolve from env token");
-
-        unsafe {
-            if let Some(home) = original_home {
-                std::env::set_var("HOME", home);
-            } else {
-                std::env::remove_var("HOME");
-            }
-            if let Some(token) = original_token {
-                std::env::set_var("HEDDLE_REMOTE_TOKEN", token);
-            } else {
-                std::env::remove_var("HEDDLE_REMOTE_TOKEN");
-            }
-        }
-        assert_eq!(config.token, "env-token");
+            let hosted = HostedConfig {
+                upstream_url: Some("https://heddle.example.com".into()),
+                namespace: Some("heddle/core".into()),
+            };
+            let config = resolve_publisher_config(
+                &hosted,
+                &make_agent("agent-1"),
+                &user_with_principal(),
+                Duration::from_secs(15),
+            )
+            .unwrap()
+            .expect("config should resolve");
+            assert_eq!(config.token, "opaque-token");
+            assert_eq!(config.subject, "alice@example.com");
+            assert_eq!(config.namespace, "heddle/core");
+            assert_eq!(config.ws_url, "wss://heddle.example.com/presence/ws");
+        });
     }
 
     #[test]
@@ -755,49 +751,29 @@ mod tests {
     }
 
     #[test]
-    fn errors_on_missing_token() {
-        // Isolate the env so an ambient `HEDDLE_REMOTE_TOKEN` (common in
-        // dev shells that source a `.env` for the hosted services) can't
-        // satisfy `user_config.remote_token()` and flip the error path
-        // to "could not derive subject from principal config" instead of
-        // the "no remote token available" message this test pins. The
-        // sibling tests use the same lock + save/restore dance.
-        let _guard = crate::credentials::lock_test_env();
-        let temp = tempfile::TempDir::new().unwrap();
-        let original_home = std::env::var_os("HOME");
-        let original_token = std::env::var_os("HEDDLE_REMOTE_TOKEN");
-        unsafe {
-            std::env::set_var("HOME", temp.path());
-            std::env::remove_var("HEDDLE_REMOTE_TOKEN");
-        }
+    fn errors_when_no_credential_available() {
+        // Isolate the env so neither an ambient `HEDDLE_CREDENTIAL` nor a
+        // real keystore can satisfy resolution: with an empty keystore and no
+        // env credential, the publisher must surface the setup error.
+        let msg = with_isolated_credential_env(|_home| {
+            let hosted = HostedConfig {
+                upstream_url: Some("https://heddle.example.com".into()),
+                namespace: Some("heddle/core".into()),
+            };
+            let err = resolve_publisher_config(
+                &hosted,
+                &make_agent("agent-1"),
+                &UserConfig::default(),
+                Duration::from_secs(15),
+            )
+            .unwrap_err();
+            format!("{err}")
+        });
 
-        let hosted = HostedConfig {
-            upstream_url: Some("https://heddle.example.com".into()),
-            namespace: Some("heddle/core".into()),
-        };
-        let user = UserConfig::default();
-        let err = resolve_publisher_config(
-            &hosted,
-            &make_agent("agent-1"),
-            &user,
-            Duration::from_secs(15),
-        )
-        .unwrap_err();
-        let msg = format!("{err}");
-
-        unsafe {
-            if let Some(home) = original_home {
-                std::env::set_var("HOME", home);
-            } else {
-                std::env::remove_var("HOME");
-            }
-            if let Some(token) = original_token {
-                std::env::set_var("HEDDLE_REMOTE_TOKEN", token);
-            } else {
-                std::env::remove_var("HEDDLE_REMOTE_TOKEN");
-            }
-        }
-
-        assert!(msg.contains("remote token"), "unexpected err: {msg}");
+        assert!(
+            msg.contains("no credential available"),
+            "unexpected err: {msg}"
+        );
+        assert!(msg.contains("HEDDLE_CREDENTIAL"), "unexpected err: {msg}");
     }
 }

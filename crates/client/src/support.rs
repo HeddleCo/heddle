@@ -143,7 +143,13 @@ async fn open_client(repo: &Repository, remote: &str) -> Result<HostedClient> {
         }
     };
     let user_config = UserConfig::load_default()?;
-    HostedClient::open_session(addr, &user_config, server_key, HostedAuthMode::ConfigToken).await
+    HostedClient::open_session(
+        addr,
+        &user_config,
+        server_key,
+        HostedAuthMode::CredentialFallback,
+    )
+    .await
 }
 
 /// Parse a TTL string like `"24h"`, `"30m"`, `"4d"`, or a bare number

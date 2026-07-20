@@ -17,6 +17,7 @@ mod operation_id;
 mod redaction;
 mod risk_signal;
 mod semantic_change;
+mod semantic_index;
 mod session;
 mod spool_id;
 mod staleness_core;
@@ -57,13 +58,20 @@ pub use risk_signal::{
     SignalAnchor,
 };
 pub use semantic_change::{ChangeImportance, ModificationKind, SemanticChange};
+pub use semantic_index::{
+    SemanticEntryKind, SemanticFileNode, SemanticIndexError, SemanticIndexRoot, SemanticTreeEntry,
+    SemanticTreeNode, SymbolEntry, SymbolKindTag, compute_dir_semantic_digest,
+    compute_file_scaffold_hash, compute_file_semantic_digest, compute_symbol_semantic_hash,
+};
 pub use session::{Session, SessionSegment, generate_session_id};
 pub use spool_id::{SpoolId, SpoolIdParseError};
 pub use staleness_core::{
     StalenessStatus, annotation_status_for_source,
     annotation_status_for_source_with_symbol_resolver, extract_line_range, resolve_current_symbol,
 };
-pub use state_attachment::{StateAttachment, StateAttachmentBody, StateAttachmentId};
+pub use state_attachment::{
+    StateAttachment, StateAttachmentBody, StateAttachmentId, StateAttachmentKind,
+};
 pub use state_attribution::{Agent, Attribution, Principal};
 pub use state_context::{
     Annotation, AnnotationKind, AnnotationRevision, AnnotationScope, AnnotationStatus, ContextBlob,

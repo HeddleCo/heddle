@@ -223,6 +223,10 @@ pub(super) fn rules_for(language: Language) -> Option<&'static dyn LanguageRules
         Language::Go => Some(&GoRules),
         Language::C | Language::Cpp => Some(&CppRules),
         Language::Java => Some(&JavaRules),
+        // Zig has no semantic merge-driver rules yet — fall back to the
+        // default line-level merge. Symbol taxonomy, function events, and the
+        // semantic index (heddle#1068) do not depend on this path.
+        Language::Zig => None,
         Language::Unknown => None,
     }
 }
@@ -1803,7 +1807,8 @@ mod tests {
                 Language::C => true,
                 Language::Cpp => true,
                 Language::Java => false,
-                Language::Unknown => continue,
+                // Zig has no merge-driver rules (falls back to line merge).
+                Language::Zig | Language::Unknown => continue,
             };
             let rules = rules_for(lang).expect("non-unknown language has rules");
             assert_eq!(

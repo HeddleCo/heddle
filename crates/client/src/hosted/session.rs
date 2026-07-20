@@ -8,12 +8,13 @@ use crypto::{Ed25519Signer, Signer};
 use wire::{AuthToken, ProtocolError};
 
 use super::{
-    DescriptorKeyring, HostedClient, RenewableAuthorityCredential, fetch_endpoint_descriptor,
+    DescriptorKeyring, HostedClient, RenewableAuthorityCredential, credential::server_keys_match,
+    fetch_endpoint_descriptor, resolve_hosted_credential,
 };
 use crate::credentials;
 
 pub enum HostedAuthMode {
-    ConfigToken,
+    Unauthenticated,
     CredentialFallback,
 }
 
@@ -55,27 +56,14 @@ impl HostedSession {
             renewable_authority_credential,
             stored_credential_subject,
         ) = match mode {
-            HostedAuthMode::ConfigToken => (user_config.remote_token()?, None, None, None),
+            HostedAuthMode::Unauthenticated => (None, None, None, None),
             HostedAuthMode::CredentialFallback => {
-                let mut token = user_config.remote_token()?;
-                let mut credential_proof_key = None;
-                let mut renewable_authority_credential = None;
-                let mut stored_credential_subject = None;
-                if token.is_none()
-                    && let Some(ref key) = server_key
-                    && let Some(credential) = credentials::resolve_credential_for_server(key)?
-                {
-                    renewable_authority_credential =
-                        RenewableAuthorityCredential::from_stored(&credential);
-                    stored_credential_subject = Some(credential.subject.clone());
-                    token = Some(AuthToken::new(credential.token, "credential-store"));
-                    credential_proof_key = credential.private_key_pem;
-                }
+                let resolved = resolve_hosted_credential(server_key.as_deref())?;
                 (
-                    token,
-                    credential_proof_key,
-                    renewable_authority_credential,
-                    stored_credential_subject,
+                    resolved.token,
+                    resolved.proof_key_pem,
+                    resolved.renewable,
+                    resolved.subject,
                 )
             }
         };
@@ -262,17 +250,6 @@ fn shared_device_proof_key(server_key: &str, token: &str) -> Result<Option<Strin
         return Ok(None);
     }
     Ok(Some(identity.private_key_pem))
-}
-
-fn server_keys_match(left: &str, right: &str) -> bool {
-    fn without_scheme(value: &str) -> &str {
-        value
-            .strip_prefix("http://")
-            .or_else(|| value.strip_prefix("https://"))
-            .or_else(|| value.strip_prefix("heddle://"))
-            .unwrap_or(value)
-    }
-    without_scheme(left) == without_scheme(right)
 }
 
 #[cfg(test)]

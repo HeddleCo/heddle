@@ -145,11 +145,38 @@ fn test_snapshot_many_small_files() {
     let profile = measure_snapshot_profile(1_000);
     print_snapshot_profile("repository snapshot 1000 files", &profile);
 
+    // The *functional* fast-path guarantee (one `.pack` + one `.idx`, no loose
+    // blobs) is guarded deterministically by
+    // `put_blobs_packed_writes_a_single_packfile_no_loose_blobs` in
+    // `crates/objects/src/store/fs/fs_tests.rs`. This test is a *timing* smoke.
+    //
+    // A hard sub-second wall-clock budget flakes on loaded shared CI runners:
+    // debug builds land ~150 ms locally, but a busy runner can drift past 1 s
+    // with no regression (observed 1.14 s). So enforce the tight budget only
+    // under `HEDDLE_PERF_ASSERT=1` (a dedicated perf job or local
+    // benchmarking); otherwise keep the measurement advisory behind a generous
+    // catastrophe ceiling that only an order-of-magnitude regression or a hang
+    // would trip. The measurement is always printed above for observability.
+    let (budget, context) = if perf_assert_enabled() {
+        (Duration::from_secs(1), "the HEDDLE_PERF_ASSERT=1 budget")
+    } else {
+        (
+            Duration::from_secs(10),
+            "the advisory ceiling (set HEDDLE_PERF_ASSERT=1 to enforce the 1s budget)",
+        )
+    };
     assert!(
-        profile.snapshot_total < Duration::from_secs(1),
-        "Snapshot of 1000 files should take less than 1 second, took {:?}",
-        profile.snapshot_total
+        profile.snapshot_total < budget,
+        "Snapshot of 1000 files took {:?}, exceeding {context} of {budget:?}",
+        profile.snapshot_total,
     );
+}
+
+/// Whether the wall-clock perf budgets in this suite are enforced. Off by
+/// default so shared-runner jitter can't spuriously fail unrelated PRs; a
+/// dedicated perf job (or a local run) sets `HEDDLE_PERF_ASSERT=1`.
+fn perf_assert_enabled() -> bool {
+    std::env::var_os("HEDDLE_PERF_ASSERT").is_some_and(|v| v == "1" || v == "true")
 }
 
 /// Test handling of large individual files.
@@ -629,6 +656,7 @@ fn decode_native_pack(pack_data: &[u8], index_data: &[u8]) -> Vec<ObjectData> {
                     ObjectId::StateAttachment {
                         state: attachment.state_id,
                         id: attachment.id(),
+                        kind: attachment.body.kind(),
                     }
                 }
                 (PackObjectId::Hash(hash), _) => ObjectId::Hash(hash),

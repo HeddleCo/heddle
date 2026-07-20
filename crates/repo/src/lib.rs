@@ -41,6 +41,15 @@ mod repository_redaction;
 #[path = "repository_resolve_for_command.rs"]
 mod repository_resolve_for_command;
 #[cfg(feature = "tree-sitter-symbols")]
+mod repository_semantic_index;
+#[cfg(feature = "tree-sitter-symbols")]
+pub use repository_semantic_index::{ParentIndex, SemanticIndexBuilder};
+/// Read-only, never-compute semantic-index query primitives. Always compiled,
+/// with no tree-sitter dependency, so a parse-free consumer can read a
+/// persisted index (heddle#1078).
+mod repository_semantic_query;
+pub use repository_semantic_query::SymbolDelta;
+#[cfg(feature = "tree-sitter-symbols")]
 mod repository_signals;
 mod repository_state_visibility;
 mod revision_address;

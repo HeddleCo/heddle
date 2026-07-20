@@ -6,6 +6,7 @@
 
 pub mod auth_cmd;
 pub mod auth_requests;
+pub mod credential_file;
 pub mod credentials;
 pub mod device_flow;
 pub mod hosted;
@@ -21,8 +22,9 @@ pub use auth_requests::AuthCommand;
 // same path the cli used internally pre-move.
 pub use device_flow as auth;
 pub use hosted::{
-    HostedAuthMode, HostedClient, HostedSession, HumanSignatureCallback, HumanSignatureRequest,
-    WebAuthnAssertion,
+    CredentialSource, HostedAuthMode, HostedClient, HostedSession, HumanSignatureCallback,
+    HumanSignatureRequest, ResolvedHostedCredential, WebAuthnAssertion, resolve_active_bearer,
+    resolve_hosted_credential,
 };
 pub use presence::{
     PublisherConfig, cmd_presence_publish, resolve_publisher_config, run_publisher,

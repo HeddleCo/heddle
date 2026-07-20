@@ -5,8 +5,10 @@ pub enum AuthCommand {
     Login {
         server: Option<String>,
         open_browser: bool,
-        token: Option<String>,
-        key_file: Option<std::path::PathBuf>,
+        /// Install a verified `.hcred` credential file without a browser.
+        /// The server comes from the file. Mutually exclusive with the
+        /// browser flags.
+        credential: Option<std::path::PathBuf>,
     },
     Logout {
         server: Option<String>,
@@ -24,15 +26,16 @@ pub enum AuthCommand {
         /// Expands to a curated `--allow` set; a combined explicit `--allow`
         /// may only narrow it.
         template: Option<crate::device_flow::AgentTemplate>,
+        /// Write a single `<name>.hcred` credential file to this path instead
+        /// of installing the child into the keystore.
         out: Option<std::path::PathBuf>,
     },
     CreateServiceToken {
         name: String,
         namespace: String,
         server: Option<String>,
-        /// Optional path for the private-key PEM (default: under heddle home).
-        key_out: Option<String>,
-        /// Include private key material in stdout / JSON.
-        show_secrets: bool,
+        /// Path for the `.hcred` credential file
+        /// (default: `~/.heddle/service-accounts/<name>.hcred`).
+        out: Option<std::path::PathBuf>,
     },
 }

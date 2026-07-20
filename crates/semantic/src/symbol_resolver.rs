@@ -115,24 +115,37 @@ fn node_text<'a>(node: &tree_sitter::Node, source: &'a [u8]) -> &'a str {
     std::str::from_utf8(&source[node.byte_range()]).unwrap_or("")
 }
 
-fn push_named_definition(
-    node: &tree_sitter::Node,
+/// One definition discovered by [`visit_definitions`], carrying the AST node
+/// itself so callers that need the definition's subtree (e.g. the semantic
+/// index token stream) can reach it, alongside the resolved metadata.
+pub(crate) struct DefinitionSite<'tree> {
+    pub node: tree_sitter::Node<'tree>,
+    pub name: String,
+    pub kind: DefinitionKind,
+    pub parent_name: Option<String>,
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
+fn emit_named_definition<'tree>(
+    node: tree_sitter::Node<'tree>,
     source: &[u8],
     dk: DefinitionKind,
     parent: Option<&str>,
-    out: &mut Vec<Definition>,
+    emit: &mut impl FnMut(DefinitionSite<'tree>),
 ) {
     if let Some(name_node) = node.child_by_field_name("name") {
         let name = node_text(&name_node, source).to_string();
         if name.is_empty() {
             return;
         }
-        out.push(Definition {
+        emit(DefinitionSite {
+            node,
             name,
             kind: dk,
+            parent_name: parent.map(String::from),
             start_line: node.start_position().row as u32 + 1,
             end_line: node.end_position().row as u32 + 1,
-            parent_name: parent.map(String::from),
         });
     }
 }
@@ -141,8 +154,16 @@ fn push_named_definition(
 /// [`symbol_extraction::find_definitions`]: a recursive walker would recurse
 /// for every child of every non-scope node, so deeply-parseable input drives
 /// call depth proportional to AST depth.
-fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Definition>) {
-    let mut stack: Vec<(tree_sitter::Node, Option<Rc<str>>)> = vec![(root, None)];
+///
+/// The single source of truth for the definition taxonomy. [`walk_definitions`]
+/// collects the metadata; the semantic index reuses the same walk to reach
+/// each definition's AST node without a second, drifting copy of these arms.
+pub(crate) fn visit_definitions<'tree>(
+    root: tree_sitter::Node<'tree>,
+    source: &[u8],
+    emit: &mut impl FnMut(DefinitionSite<'tree>),
+) {
+    let mut stack: Vec<(tree_sitter::Node<'tree>, Option<Rc<str>>)> = vec![(root, None)];
 
     while let Some((node, parent)) = stack.pop() {
         let current_parent = parent.as_deref();
@@ -152,33 +173,49 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
         match kind {
             // ── Rust ──────────────────────────────────────────────
             "function_item" => {
-                push_named_definition(&node, source, DefinitionKind::Function, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Function, current_parent, emit)
             }
             "struct_item" => {
-                push_named_definition(&node, source, DefinitionKind::Type, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Type, current_parent, emit)
             }
             "enum_item" => {
-                push_named_definition(&node, source, DefinitionKind::EnumDef, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::EnumDef, current_parent, emit)
             }
             "trait_item" => {
-                push_named_definition(&node, source, DefinitionKind::Trait, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Trait, current_parent, emit)
             }
-            "type_item" => push_named_definition(
-                &node,
+            "type_item" => emit_named_definition(
+                node,
                 source,
                 DefinitionKind::TypeAlias,
                 current_parent,
-                out,
+                emit,
             ),
-            "const_item" | "static_item" => push_named_definition(
-                &node,
+            "const_item" | "static_item" => emit_named_definition(
+                node,
                 source,
                 DefinitionKind::ConstDecl,
                 current_parent,
-                out,
+                emit,
             ),
             "mod_item" => {
-                push_named_definition(&node, source, DefinitionKind::Module, current_parent, out)
+                // Emit the module, then descend with the module name as the new
+                // container so `mod a { fn f }` yields `f` with `["a"]` — not
+                // the outer scope. Without this, `mod a::f` and `mod b::f`
+                // collapse to the same address.
+                let mod_name: Option<Rc<str>> = node
+                    .child_by_field_name("name")
+                    .map(|n| Rc::from(node_text(&n, source)))
+                    .filter(|name: &Rc<str>| !name.is_empty());
+                emit_named_definition(node, source, DefinitionKind::Module, current_parent, emit);
+                if let Some(name) = mod_name {
+                    let mut cursor = node.walk();
+                    let children: Vec<_> = node.children(&mut cursor).collect();
+                    for child in children.into_iter().rev() {
+                        stack.push((child, Some(name.clone())));
+                    }
+                    descended_with_new_parent = true;
+                }
             }
             "impl_item" => {
                 let parent_name: Option<Rc<str>> =
@@ -193,7 +230,7 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
 
             // ── Python ───────────────────────────────────────────
             "function_definition" => {
-                push_named_definition(&node, source, DefinitionKind::Function, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Function, current_parent, emit)
             }
             "class_definition" => {
                 let class_name: Option<Rc<str>> = node
@@ -202,12 +239,13 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
                 if let Some(ref name) = class_name
                     && !name.is_empty()
                 {
-                    out.push(Definition {
+                    emit(DefinitionSite {
+                        node,
                         name: name.to_string(),
                         kind: DefinitionKind::Class,
+                        parent_name: current_parent.map(String::from),
                         start_line: node.start_position().row as u32 + 1,
                         end_line: node.end_position().row as u32 + 1,
-                        parent_name: current_parent.map(String::from),
                     });
                 }
                 let mut cursor = node.walk();
@@ -220,19 +258,20 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
 
             // ── Go ───────────────────────────────────────────────
             "function_declaration" => {
-                push_named_definition(&node, source, DefinitionKind::Function, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Function, current_parent, emit)
             }
             "method_declaration" => {
                 if let Some(name_node) = node.child_by_field_name("name") {
                     let name = node_text(&name_node, source).to_string();
                     if !name.is_empty() {
                         let receiver = extract_go_receiver_type(&node, source);
-                        out.push(Definition {
+                        emit(DefinitionSite {
+                            node,
                             name,
                             kind: DefinitionKind::Function,
+                            parent_name: receiver.or_else(|| current_parent.map(String::from)),
                             start_line: node.start_position().row as u32 + 1,
                             end_line: node.end_position().row as u32 + 1,
-                            parent_name: receiver.or_else(|| current_parent.map(String::from)),
                         });
                     }
                 }
@@ -252,12 +291,13 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
                             Some("struct_type") => DefinitionKind::Type,
                             _ => DefinitionKind::TypeAlias,
                         };
-                        out.push(Definition {
+                        emit(DefinitionSite {
+                            node: child,
                             name,
                             kind: dk,
+                            parent_name: current_parent.map(String::from),
                             start_line: child.start_position().row as u32 + 1,
                             end_line: child.end_position().row as u32 + 1,
-                            parent_name: current_parent.map(String::from),
                         });
                     }
                 }
@@ -265,7 +305,7 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
 
             // ── JavaScript / TypeScript ──────────────────────────
             "method_definition" => {
-                push_named_definition(&node, source, DefinitionKind::Function, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Function, current_parent, emit)
             }
             "class_declaration" => {
                 let class_name: Option<Rc<str>> = node
@@ -274,12 +314,13 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
                 if let Some(ref name) = class_name
                     && !name.is_empty()
                 {
-                    out.push(Definition {
+                    emit(DefinitionSite {
+                        node,
                         name: name.to_string(),
                         kind: DefinitionKind::Class,
+                        parent_name: current_parent.map(String::from),
                         start_line: node.start_position().row as u32 + 1,
                         end_line: node.end_position().row as u32 + 1,
-                        parent_name: current_parent.map(String::from),
                     });
                 }
                 let mut cursor = node.walk();
@@ -289,29 +330,31 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
                 }
                 descended_with_new_parent = true;
             }
-            "interface_declaration" => push_named_definition(
-                &node,
+            "interface_declaration" => emit_named_definition(
+                node,
                 source,
                 DefinitionKind::Interface,
                 current_parent,
-                out,
+                emit,
             ),
-            "type_alias_declaration" => push_named_definition(
-                &node,
+            "type_alias_declaration" => emit_named_definition(
+                node,
                 source,
                 DefinitionKind::TypeAlias,
                 current_parent,
-                out,
+                emit,
             ),
             "enum_declaration" => {
-                push_named_definition(&node, source, DefinitionKind::EnumDef, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::EnumDef, current_parent, emit)
             }
             "lexical_declaration" | "variable_declaration" => {
                 let mut cursor = node.walk();
+                let mut saw_declarator = false;
                 for child in node.children(&mut cursor) {
                     if child.kind() == "variable_declarator"
                         && let Some(name_node) = child.child_by_field_name("name")
                     {
+                        saw_declarator = true;
                         let name = node_text(&name_node, source).to_string();
                         if name.is_empty() {
                             continue;
@@ -326,30 +369,67 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
                             } else {
                                 DefinitionKind::ConstDecl
                             };
-                            out.push(Definition {
+                            emit(DefinitionSite {
+                                node,
                                 name,
                                 kind: dk,
+                                parent_name: current_parent.map(String::from),
                                 start_line: node.start_position().row as u32 + 1,
                                 end_line: node.end_position().row as u32 + 1,
-                                parent_name: current_parent.map(String::from),
                             });
                         }
                     }
+                }
+                // ── Zig ──────────────────────────────────────────
+                // Zig reuses `variable_declaration` for both declarations and
+                // locals, and has no `variable_declarator`: the binding name is
+                // a direct `identifier` child. `const Name = struct|union|
+                // enum|opaque {…}` is Zig's container-as-value idiom, whose
+                // members we walk under `[Name]`; a bare `const`/`var` binding
+                // at container scope is a `ConstDecl`.
+                if kind == "variable_declaration" && !saw_declarator {
+                    descended_with_new_parent = zig_visit_variable_declaration(
+                        node,
+                        source,
+                        current_parent,
+                        emit,
+                        &mut stack,
+                    );
+                }
+            }
+            "test_declaration" => {
+                // Zig `test "name" {…}` / `test Name {…}` → a `Function` named
+                // `test:"name"` / `test:Name` so risk-signal test-reachability
+                // treats them as tests.
+                let mut cursor = node.walk();
+                let test_name = node.children(&mut cursor).find_map(|c| match c.kind() {
+                    "string" | "identifier" => Some(format!("test:{}", node_text(&c, source))),
+                    _ => None,
+                });
+                if let Some(name) = test_name {
+                    emit(DefinitionSite {
+                        node,
+                        name,
+                        kind: DefinitionKind::Function,
+                        parent_name: current_parent.map(String::from),
+                        start_line: node.start_position().row as u32 + 1,
+                        end_line: node.end_position().row as u32 + 1,
+                    });
                 }
             }
 
             // ── C / C++ / Java ───────────────────────────────────
             "struct_specifier" | "class_specifier" => {
-                push_named_definition(&node, source, DefinitionKind::Class, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Class, current_parent, emit)
             }
             "namespace_definition" => {
-                push_named_definition(&node, source, DefinitionKind::Module, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Module, current_parent, emit)
             }
             "enum_specifier" => {
-                push_named_definition(&node, source, DefinitionKind::EnumDef, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::EnumDef, current_parent, emit)
             }
             "constructor_declaration" => {
-                push_named_definition(&node, source, DefinitionKind::Function, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Function, current_parent, emit)
             }
 
             _ => {}
@@ -363,6 +443,19 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
             }
         }
     }
+}
+
+/// Collect one [`Definition`] per definition node, in document order.
+fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Definition>) {
+    visit_definitions(root, source, &mut |site| {
+        out.push(Definition {
+            name: site.name,
+            kind: site.kind,
+            start_line: site.start_line,
+            end_line: site.end_line,
+            parent_name: site.parent_name,
+        });
+    });
 }
 
 fn extract_rust_impl_type_name(node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
@@ -398,6 +491,102 @@ fn extract_go_receiver_type(node: &tree_sitter::Node, source: &[u8]) -> Option<S
         }
     }
     None
+}
+
+/// Zig container scopes whose direct `variable_declaration` children are
+/// declarations rather than function-body locals: the file root and the four
+/// container-type bodies. Used to gate bare `const`/`var` bindings so a
+/// function's local variables don't each become a symbol.
+fn is_zig_container_scope(kind: &str) -> bool {
+    matches!(
+        kind,
+        "source_file"
+            | "struct_declaration"
+            | "union_declaration"
+            | "enum_declaration"
+            | "opaque_declaration"
+    )
+}
+
+/// Map a Zig container-declaration node kind to its symbol taxonomy kind.
+/// `struct`/`union`/`opaque` are `Type`; `enum` is `EnumDef`.
+fn zig_container_kind(kind: &str) -> Option<DefinitionKind> {
+    match kind {
+        "struct_declaration" | "union_declaration" | "opaque_declaration" => {
+            Some(DefinitionKind::Type)
+        }
+        "enum_declaration" => Some(DefinitionKind::EnumDef),
+        _ => None,
+    }
+}
+
+/// Handle a Zig `variable_declaration` (no `variable_declarator`). Returns
+/// `true` when it descended into a container body with a new `container_path`
+/// parent (so the caller skips the default same-parent descent).
+///
+/// `const Name = struct|union|enum|opaque {…}` emits `Name` with the matching
+/// kind and walks the container's members under `[Name]`. A bare `const`/`var`
+/// binding at container scope emits a `ConstDecl`; inside a function body it is
+/// a local and is skipped.
+fn zig_visit_variable_declaration<'tree>(
+    node: tree_sitter::Node<'tree>,
+    source: &[u8],
+    current_parent: Option<&str>,
+    emit: &mut impl FnMut(DefinitionSite<'tree>),
+    stack: &mut Vec<(tree_sitter::Node<'tree>, Option<Rc<str>>)>,
+) -> bool {
+    let mut cursor = node.walk();
+    let children: Vec<tree_sitter::Node<'tree>> = node.children(&mut cursor).collect();
+
+    // Binding name = first direct `identifier` child (it precedes `=`; a value
+    // identifier like `const A = B;` comes after and is never first).
+    let Some(name) = children
+        .iter()
+        .find(|c| c.kind() == "identifier")
+        .map(|c| node_text(c, source).to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+
+    if let Some(container) = children
+        .iter()
+        .find(|c| zig_container_kind(c.kind()).is_some())
+    {
+        let dk = zig_container_kind(container.kind()).expect("checked by find");
+        emit(DefinitionSite {
+            node,
+            name: name.clone(),
+            kind: dk,
+            parent_name: current_parent.map(String::from),
+            start_line: node.start_position().row as u32 + 1,
+            end_line: node.end_position().row as u32 + 1,
+        });
+        let child_parent: Rc<str> = Rc::from(name.as_str());
+        let mut member_cursor = container.walk();
+        let members: Vec<_> = container.children(&mut member_cursor).collect();
+        for member in members.into_iter().rev() {
+            stack.push((member, Some(child_parent.clone())));
+        }
+        return true;
+    }
+
+    // Bare binding: a declaration only at container scope; otherwise a local.
+    let at_container_scope = node
+        .parent()
+        .map(|p| is_zig_container_scope(p.kind()))
+        .unwrap_or(false);
+    if at_container_scope {
+        emit(DefinitionSite {
+            node,
+            name,
+            kind: DefinitionKind::ConstDecl,
+            parent_name: current_parent.map(String::from),
+            start_line: node.start_position().row as u32 + 1,
+            end_line: node.end_position().row as u32 + 1,
+        });
+    }
+    false
 }
 
 /// Resolve a symbol name to a line range in source code.
@@ -815,16 +1004,24 @@ pub mod outer {
 
         assert_definition(&defs, "LIMIT", DefinitionKind::ConstDecl, 1, 1, None);
         assert_definition(&defs, "outer", DefinitionKind::Module, 2, 23, None);
-        assert_definition(&defs, "Widget", DefinitionKind::Type, 3, 5, None);
-        assert_definition(&defs, "Mode", DefinitionKind::EnumDef, 7, 10, None);
-        assert_definition(&defs, "Runner", DefinitionKind::Trait, 12, 14, None);
+        // Items inside `mod outer` now carry `outer` as their container.
+        assert_definition(&defs, "Widget", DefinitionKind::Type, 3, 5, Some("outer"));
+        assert_definition(&defs, "Mode", DefinitionKind::EnumDef, 7, 10, Some("outer"));
+        assert_definition(
+            &defs,
+            "Runner",
+            DefinitionKind::Trait,
+            12,
+            14,
+            Some("outer"),
+        );
         assert_definition(
             &defs,
             "WidgetResult",
             DefinitionKind::TypeAlias,
             16,
             16,
-            None,
+            Some("outer"),
         );
         assert_definition(
             &defs,
@@ -923,10 +1120,16 @@ pub mod outer {
         let expected: &[(&str, DefinitionKind, u32, u32, Option<&str>)] = &[
             ("LIMIT", DefinitionKind::ConstDecl, 1, 1, None),
             ("outer", DefinitionKind::Module, 2, 23, None),
-            ("Widget", DefinitionKind::Type, 3, 5, None),
-            ("Mode", DefinitionKind::EnumDef, 7, 10, None),
-            ("Runner", DefinitionKind::Trait, 12, 14, None),
-            ("WidgetResult", DefinitionKind::TypeAlias, 16, 16, None),
+            ("Widget", DefinitionKind::Type, 3, 5, Some("outer")),
+            ("Mode", DefinitionKind::EnumDef, 7, 10, Some("outer")),
+            ("Runner", DefinitionKind::Trait, 12, 14, Some("outer")),
+            (
+                "WidgetResult",
+                DefinitionKind::TypeAlias,
+                16,
+                16,
+                Some("outer"),
+            ),
             ("build", DefinitionKind::Function, 19, 21, Some("Widget")),
         ];
 
@@ -970,6 +1173,89 @@ pub mod outer {
             defs.iter().any(|d| d.name == "target"),
             "deep target fn must be returned, not silently dropped; got {defs:?}"
         );
+    }
+
+    /// heddle#1068: Zig's container-as-value idiom, `fn`/`test` blocks, and
+    /// `const`/`var` bindings map onto the shared taxonomy — and function-body
+    /// locals (Zig reuses `const`/`var` for locals) must NOT leak as symbols.
+    #[cfg(feature = "lang-zig")]
+    #[test]
+    fn extract_definitions_reports_zig_taxonomy_parents_and_ranges() {
+        let source = br#"const std = @import("std");
+
+pub const MAX: usize = 100;
+var counter: u32 = 0;
+
+pub fn add(a: i32, b: i32) i32 {
+    const local = 1;
+    return a + b + local;
+}
+
+pub const Point = struct {
+    x: f64,
+    pub fn dist(self: Point) f64 {
+        const scale = 2.0;
+        return self.x * scale;
+    }
+};
+
+const Color = enum { red, green };
+
+const Shape = union(enum) { circle: f64 };
+
+const Handle = opaque {
+    pub fn get() void {}
+};
+
+test "addition works" {
+    const r = add(1, 2);
+    _ = r;
+}
+"#;
+
+        let defs = extract_definitions(source, Path::new("sample.zig")).unwrap();
+
+        assert_definition(&defs, "std", DefinitionKind::ConstDecl, 1, 1, None);
+        assert_definition(&defs, "MAX", DefinitionKind::ConstDecl, 3, 3, None);
+        assert_definition(&defs, "counter", DefinitionKind::ConstDecl, 4, 4, None);
+        assert_definition(&defs, "add", DefinitionKind::Function, 6, 9, None);
+        assert_definition(&defs, "Point", DefinitionKind::Type, 11, 17, None);
+        assert_definition(
+            &defs,
+            "dist",
+            DefinitionKind::Function,
+            13,
+            16,
+            Some("Point"),
+        );
+        assert_definition(&defs, "Color", DefinitionKind::EnumDef, 19, 19, None);
+        assert_definition(&defs, "Shape", DefinitionKind::Type, 21, 21, None);
+        assert_definition(&defs, "Handle", DefinitionKind::Type, 23, 25, None);
+        assert_definition(
+            &defs,
+            "get",
+            DefinitionKind::Function,
+            24,
+            24,
+            Some("Handle"),
+        );
+        assert_definition(
+            &defs,
+            "test:\"addition works\"",
+            DefinitionKind::Function,
+            27,
+            30,
+            None,
+        );
+
+        // Function-body / method-body / test-body locals must never surface as
+        // symbols — they are `variable_declaration`s at non-container scope.
+        for leaked in ["local", "scale", "r"] {
+            assert!(
+                !defs.iter().any(|d| d.name == leaked),
+                "local {leaked:?} leaked as a symbol: {defs:?}"
+            );
+        }
     }
 
     fn assert_definition(

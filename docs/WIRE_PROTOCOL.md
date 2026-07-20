@@ -24,8 +24,8 @@ The wire protocol is fully implemented and tested. All core VCS commands are ope
 Environment-based local testing:
 
 - `hosted` owns the server runtime and reads server config from its server config file or `HEDDLE_SERVER_*` overrides.
-- `heddle` client commands use user config plus `HEDDLE_REMOTE_*` overrides for remote auth and TLS profiles.
-- `HEDDLE_REMOTE_TOKEN=<token-id>` provides the token id used by `heddle push`/`heddle pull`.
+- `heddle` client commands use user config plus `HEDDLE_REMOTE_*` overrides for TLS profiles.
+- Client authentication follows a single precedence: `HEDDLE_CREDENTIAL=<path-to-.hcred>` (authoritative — a bad/expired/mismatched file is a hard error) → the per-server keystore entry (`heddle auth login`) → unauthenticated. There is no `HEDDLE_REMOTE_TOKEN` or `remote.token`; an agent authenticates by pointing `HEDDLE_CREDENTIAL` at a `.hcred` (see `heddle auth derive-agent --out` / `heddle auth create-service-token --out`).
 - `HEDDLE_REMOTE_TLS=1` enables TLS; `HEDDLE_REMOTE_INSECURE=1` allows cleartext to non-loopback hosts.
 
 ## Hosted Admin Operations
@@ -101,13 +101,16 @@ heddle push origin main
 heddle pull origin --thread main --local-thread main
 ```
 
-With token auth (local dev):
+With credential auth (local dev):
 
 ```bash
 export HEDDLE_SERVER_REQUIRE_AUTH=1
 export HEDDLE_SERVER_TOKEN=devtoken
 
-export HEDDLE_REMOTE_TOKEN=devtoken
+# Authenticate the client either by logging in (writes the keystore) …
+heddle auth login --server 127.0.0.1:8421
+# … or by pointing the runtime at a .hcred credential file:
+export HEDDLE_CREDENTIAL=/path/to/agent.hcred
 heddle push origin main
 heddle pull origin --thread main --local-thread main
 ```

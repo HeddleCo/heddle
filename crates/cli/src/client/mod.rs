@@ -15,7 +15,10 @@ pub mod review_sync;
 
 pub use cli_shared::ClientConfig;
 #[cfg(feature = "client")]
-pub use heddle_client::{HostedAuthMode, HostedClient, HostedSession};
+pub use heddle_client::{
+    CredentialSource, HostedAuthMode, HostedClient, HostedSession, ResolvedHostedCredential,
+    resolve_active_bearer, resolve_hosted_credential,
+};
 #[cfg(feature = "client")]
 pub use human_signature::cli_human_signature_callback;
 pub use local_sync::LocalSync;

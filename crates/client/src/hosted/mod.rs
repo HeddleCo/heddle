@@ -9,6 +9,7 @@ mod collaboration;
 mod connection;
 mod content;
 mod context;
+mod credential;
 mod error;
 pub(crate) mod helpers;
 mod human;
@@ -30,6 +31,9 @@ use cli_shared::ClientConfig;
 pub use collaboration::{HostedDiscussion, HostedDiscussionTurn};
 use connection::HostedConnection;
 pub use context::{CallContextFactory, SignedCallContext};
+pub use credential::{
+    CredentialSource, ResolvedHostedCredential, resolve_active_bearer, resolve_hosted_credential,
+};
 use crypto::{Ed25519Signer, Signer as _};
 pub use error::HostedError;
 pub use human::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion};

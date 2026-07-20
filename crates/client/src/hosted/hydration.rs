@@ -202,12 +202,16 @@ impl HydrationBridge {
         // Build + validate the session config on this thread so a rejected
         // TLS/auth config surfaces synchronously, before the worker thread is
         // spawned. The worker connects + rotates through `session.connect`.
-        let session = HostedSession::build(&user_config, None, HostedAuthMode::ConfigToken)
-            .map_err(|err| {
-                HeddleError::Config(format!(
-                    "lazy hosted hydrator: load TLS/auth client config: {err}"
-                ))
-            })?;
+        let session = HostedSession::build(
+            &user_config,
+            Some(endpoint.to_string()),
+            HostedAuthMode::CredentialFallback,
+        )
+        .map_err(|err| {
+            HeddleError::Config(format!(
+                "lazy hosted hydrator: load TLS/auth client config: {err}"
+            ))
+        })?;
 
         // Build the worker thread first so the bridge can store the
         // tx side immediately. The worker's runtime + client are
@@ -971,8 +975,7 @@ mod connect_path_tests {
     fn lazy_hosted_connect_opens_session_through_rotating_seam() {
         let source = include_str!("hydration.rs");
         assert!(
-            source
-                .contains("HostedSession::build(&user_config, None, HostedAuthMode::ConfigToken)"),
+            source.contains("HostedSession::build(&user_config, Some(endpoint.to_string()))"),
             "hydration.rs must build its session through the shared HostedSession seam",
         );
         assert!(

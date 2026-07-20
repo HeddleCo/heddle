@@ -3,7 +3,8 @@ use std::collections::{HashSet, VecDeque};
 
 use objects::{
     object::{
-        ContentHash, State, StateAttachment, StateAttachmentBody, StateAttachmentId, StateId,
+        ContentHash, SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode, State,
+        StateAttachment, StateAttachmentBody, StateAttachmentId, StateAttachmentKind, StateId,
         TreeEntryTarget,
     },
     store::{ObjectStore, pack::ObjectType as PackObjectType},
@@ -19,6 +20,12 @@ pub enum ObjectId {
     StateAttachment {
         state: StateId,
         id: StateAttachmentId,
+        /// The attachment's kind, a pure projection of its body
+        /// ([`StateAttachmentBody::kind`]). Carried through the wire so
+        /// descriptors self-describe their kind; the dedup/identity key is
+        /// still `(state, id)`, and kind is coherent under `Eq`/`Hash` because
+        /// it is a deterministic function of the same record.
+        kind: StateAttachmentKind,
     },
 }
 
@@ -314,6 +321,13 @@ fn walk_state_closure(
                     &mut seen_hashes,
                     &mut visit,
                 )?,
+                StateAttachmentBody::SemanticIndex(root) => walk_semantic_index_closure(
+                    store,
+                    root,
+                    &excluded_hashes,
+                    &mut seen_hashes,
+                    &mut visit,
+                )?,
                 StateAttachmentBody::Signature(_) => {}
             }
         }
@@ -412,6 +426,146 @@ fn walk_blob_filtered(
     Ok(())
 }
 
+/// Walk the merkle semantic-index closure rooted at `root_hash` (a
+/// `SemanticIndexRoot` blob), emitting every reachable semantic node blob.
+///
+/// All semantic-index nodes (root, tree nodes, file nodes) are stored as
+/// ordinary content-addressed blobs, so replication just enumerates them.
+/// Opaque entries point back at raw source blobs already covered by the state's
+/// tree closure, so they are not re-walked here.
+///
+/// Iterative (explicit stack) so a crafted deep `SemanticTreeNode` chain in a
+/// pushed state can't overflow the stack. A missing or undecodable node in the
+/// closure is a HARD failure (`ObjectNotFound`/`Serialization`) — a partial or
+/// corrupt semantic closure must never be shipped silently.
+fn walk_semantic_index_closure(
+    store: &impl ObjectStore,
+    root_hash: ContentHash,
+    excluded: &HashSet<ContentHash>,
+    seen: &mut HashSet<ContentHash>,
+    visit: &mut impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
+) -> Result<()> {
+    // Stack of (node_hash, is_tree_node): the root and dir nodes must be decoded
+    // to enumerate their children; file/opaque leaves are emitted only.
+    let mut stack: Vec<ContentHash> = vec![root_hash];
+    while let Some(node_hash) = stack.pop() {
+        if !emit_semantic_blob(store, node_hash, excluded, seen, visit)? {
+            continue; // excluded (present on the far side) or already seen.
+        }
+        let blob = store
+            .get_blob(&node_hash)?
+            .ok_or_else(|| ProtocolError::ObjectNotFound(node_hash.to_hex()))?;
+        // The root and tree nodes decode to the same `SemanticTreeNode.entries`
+        // shape after the root's one indirection; walk uniformly by decoding
+        // every interior node as a tree node, tolerating the root shape.
+        let node = decode_semantic_container(&blob, node_hash)?;
+        for child in node {
+            match child {
+                SemanticChild::Interior(hash) => stack.push(hash),
+                SemanticChild::Leaf(hash) => {
+                    // Emit the leaf (file node) blob; it has no children.
+                    emit_semantic_blob(store, hash, excluded, seen, visit)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The two child kinds encountered walking the semantic closure: an interior
+/// node to descend into, or a leaf (file node) blob to emit.
+enum SemanticChild {
+    Interior(ContentHash),
+    Leaf(ContentHash),
+}
+
+/// Decode a semantic-closure node — the root (which points at a tree node) or a
+/// tree node — into the child hashes to walk. Missing/corrupt is a hard error.
+fn decode_semantic_container(
+    blob: &objects::object::Blob,
+    node_hash: ContentHash,
+) -> Result<Vec<SemanticChild>> {
+    // Try the root shape first (it has an extra `tree` indirection), then the
+    // tree-node shape. Content-addressed hashes make this unambiguous in
+    // practice; a blob that decodes as neither is corrupt.
+    if let Ok(root) = SemanticIndexRoot::decode(blob.content()) {
+        return Ok(vec![SemanticChild::Interior(root.tree)]);
+    }
+    let node = SemanticTreeNode::decode(blob.content())
+        .map_err(|err| ProtocolError::Serialization(format!("semantic node {node_hash}: {err}")))?;
+    Ok(node
+        .entries
+        .iter()
+        .filter_map(|entry| match entry.kind {
+            SemanticEntryKind::Dir => Some(SemanticChild::Interior(entry.node)),
+            SemanticEntryKind::File => Some(SemanticChild::Leaf(entry.node)),
+            // Opaque `node` is the raw source blob, already in the tree closure.
+            SemanticEntryKind::Opaque => None,
+        })
+        .collect())
+}
+
+/// Emit a semantic node blob as state metadata. Returns `true` when the blob
+/// was newly visited (so the caller may descend into it), `false` when it was
+/// excluded (present on the far side) or already seen. A blob that is neither
+/// excluded nor present is a HARD failure — the closure must be complete.
+fn emit_semantic_blob(
+    store: &impl ObjectStore,
+    hash: ContentHash,
+    excluded: &HashSet<ContentHash>,
+    seen: &mut HashSet<ContentHash>,
+    visit: &mut impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
+) -> Result<bool> {
+    if excluded.contains(&hash) {
+        visit(StateClosureEvent::ExcludedHash { hash })?;
+        return Ok(false);
+    }
+    if !seen.insert(hash) {
+        return Ok(false);
+    }
+    if store.get_blob(&hash)?.is_none() {
+        return Err(ProtocolError::ObjectNotFound(hash.to_hex()));
+    }
+    visit(StateClosureEvent::Blob {
+        hash,
+        source: BlobSource::StateMetadata,
+    })?;
+    Ok(true)
+}
+
+/// Collect every semantic-index node blob hash reachable from `root_hash` into
+/// `excluded`, for the have-set computation. Iterative + tolerant (a broken
+/// have-set index is not fatal — it just means fewer objects are marked
+/// already-present, which is safe over-fetching, not corruption).
+fn collect_semantic_hashes(
+    store: &impl ObjectStore,
+    root_hash: ContentHash,
+    excluded: &mut HashSet<ContentHash>,
+) -> Result<()> {
+    let mut stack: Vec<ContentHash> = vec![root_hash];
+    while let Some(node_hash) = stack.pop() {
+        if !excluded.insert(node_hash) {
+            continue;
+        }
+        let Some(blob) = store.get_blob(&node_hash)? else {
+            continue;
+        };
+        let children = match decode_semantic_container(&blob, node_hash) {
+            Ok(children) => children,
+            Err(_) => continue,
+        };
+        for child in children {
+            match child {
+                SemanticChild::Interior(hash) => stack.push(hash),
+                SemanticChild::Leaf(hash) => {
+                    excluded.insert(hash);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn object_info_from_event(
     store: &impl ObjectStore,
     event: StateClosureEvent<'_>,
@@ -468,6 +622,7 @@ fn object_info_from_event(
                 id: ObjectId::StateAttachment {
                     state,
                     id: attachment.id(),
+                    kind: attachment.body.kind(),
                 },
                 obj_type: ObjectType::StateAttachment,
                 size: bytes.len() as u64,
@@ -519,6 +674,7 @@ fn planned_object_from_event(
             id: ObjectId::StateAttachment {
                 state,
                 id: attachment.id(),
+                kind: attachment.body.kind(),
             },
             obj_type: ObjectType::StateAttachment,
         })),
@@ -625,6 +781,9 @@ fn collect_excluded(
                 | StateAttachmentBody::Discussions(hash)
                 | StateAttachmentBody::StructuredConflicts(hash) => {
                     excluded_hashes.insert(hash);
+                }
+                StateAttachmentBody::SemanticIndex(root) => {
+                    collect_semantic_hashes(store, root, &mut excluded_hashes)?;
                 }
                 StateAttachmentBody::Signature(_) => {}
             }

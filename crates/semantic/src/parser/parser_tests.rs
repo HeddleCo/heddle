@@ -25,6 +25,10 @@ fn test_language_from_path() {
         Language::Python
     );
     assert_eq!(
+        Language::from_path(std::path::Path::new("foo.zig")),
+        Language::Zig
+    );
+    assert_eq!(
         Language::from_path(std::path::Path::new("foo.txt")),
         Language::Unknown
     );

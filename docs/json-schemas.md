@@ -1908,12 +1908,15 @@ no operation allowlist. When the server is unreachable, `reachable` is `false`,
   "output_kind": "auth_create_service_token",
   "name": "github-ci-main",
   "namespace": "heddle/platform",
-  "scope": "namespace:heddle/platform",
-  "token": "heddle_sa_...",
-  "private_key_pem": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
+  "scope": "repo:heddle/platform/*",
+  "credential_path": "/home/ci/.heddle/service-accounts/github-ci-main.hcred",
   "expires_in_days": 30
 }
 ```
+
+The token and proof key are written into the single `.hcred` file at
+`credential_path` (mode `0600`); they never appear on stdout or in this
+contract.
 
 ---
 
@@ -3040,8 +3043,8 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
     "advanced_scope_mutating_commands_total": 61,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 22,
-    "catalog_commands_total": 185,
-    "catalog_mutating_commands_total": 90,
+    "catalog_commands_total": 186,
+    "catalog_mutating_commands_total": 91,
     "json_commands_total": 149,
     "json_commands_with_accepted_opaque_schema": 39,
     "json_commands_with_schema": 110,
@@ -3055,7 +3058,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 39,
     "status": "available",
-    "summary": "185 command(s), 149 JSON command(s), 90 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+    "summary": "186 command(s), 149 JSON command(s), 91 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3093,7 +3096,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "185 command(s), 149 JSON command(s), 90 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+  "summary": "186 command(s), 149 JSON command(s), 91 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true

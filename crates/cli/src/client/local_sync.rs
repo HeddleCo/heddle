@@ -172,7 +172,7 @@ impl LocalSync {
     ) -> Result<usize> {
         let mut pending = Vec::new();
         for object in objects {
-            let ObjectId::StateAttachment { state, id } = &object.id else {
+            let ObjectId::StateAttachment { state, id, kind: _ } = &object.id else {
                 return Err(anyhow!(
                     "transfer plan object {:?} has incompatible type {:?}",
                     object.id,

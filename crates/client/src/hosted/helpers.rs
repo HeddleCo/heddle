@@ -2,12 +2,12 @@ use core::convert::TryFrom;
 
 use api::heddle::api::v1alpha1::{
     HostedGrant, HostedNamespace, HostedRepository, ObjectAvailabilityStatus, ObjectDescriptor,
-    RepositoryRef, StateId as ProtoStateId, TransferCheckpoint, TransportMode,
-    repository_ref::Reference,
+    RepositoryRef, StateAttachmentKind as ProtoStateAttachmentKind, StateId as ProtoStateId,
+    TransferCheckpoint, TransportMode, repository_ref::Reference,
 };
 use base64::Engine as _;
 use cli_shared::ClientConfig;
-use objects::object::{ContentHash, StateAttachmentId, StateId};
+use objects::object::{ContentHash, StateAttachmentId, StateAttachmentKind, StateId};
 use wire::{ObjectId, ObjectInfo, ObjectType, ProtocolError};
 
 use super::HostedError;
@@ -49,11 +49,57 @@ impl HostedTransportPolicy {
     }
 }
 
+/// Map a heddle [`StateAttachmentKind`] onto its proto counterpart. Exhaustive
+/// by construction: adding a kind forces an arm here.
+fn attachment_kind_to_proto(kind: StateAttachmentKind) -> ProtoStateAttachmentKind {
+    match kind {
+        StateAttachmentKind::Context => ProtoStateAttachmentKind::Context,
+        StateAttachmentKind::RiskSignals => ProtoStateAttachmentKind::RiskSignals,
+        StateAttachmentKind::ReviewSignatures => ProtoStateAttachmentKind::ReviewSignatures,
+        StateAttachmentKind::Discussions => ProtoStateAttachmentKind::Discussions,
+        StateAttachmentKind::StructuredConflicts => ProtoStateAttachmentKind::StructuredConflicts,
+        StateAttachmentKind::SemanticIndex => ProtoStateAttachmentKind::SemanticIndex,
+        StateAttachmentKind::Signature => ProtoStateAttachmentKind::Signature,
+    }
+}
+
+/// Map a proto attachment kind back onto its heddle counterpart. `Unspecified`
+/// carries no kind (`None`) — a descriptor for an attachment MUST name a
+/// concrete kind, so callers hard-error on `None`. Exhaustive, no `_ =>`.
+fn attachment_kind_from_proto(kind: ProtoStateAttachmentKind) -> Option<StateAttachmentKind> {
+    match kind {
+        ProtoStateAttachmentKind::Unspecified => None,
+        ProtoStateAttachmentKind::Context => Some(StateAttachmentKind::Context),
+        ProtoStateAttachmentKind::RiskSignals => Some(StateAttachmentKind::RiskSignals),
+        ProtoStateAttachmentKind::ReviewSignatures => Some(StateAttachmentKind::ReviewSignatures),
+        ProtoStateAttachmentKind::Discussions => Some(StateAttachmentKind::Discussions),
+        ProtoStateAttachmentKind::StructuredConflicts => {
+            Some(StateAttachmentKind::StructuredConflicts)
+        }
+        ProtoStateAttachmentKind::SemanticIndex => Some(StateAttachmentKind::SemanticIndex),
+        ProtoStateAttachmentKind::Signature => Some(StateAttachmentKind::Signature),
+    }
+}
+
 pub(super) fn parse_descriptor_to_info(
     descriptor: ObjectDescriptor,
 ) -> Result<ObjectInfo, ProtocolError> {
     let obj_type = parse_object_type(&descriptor.object_type)?;
-    let id = parse_object_id(&descriptor.id, obj_type)?;
+    // Resolve the carried attachment kind up front. For an attachment
+    // descriptor this MUST be a concrete kind — an `UNSPECIFIED` (or
+    // unrecognized) value is a hard error, not a silent default.
+    let attachment_kind = if obj_type == ObjectType::StateAttachment {
+        let proto_kind = ProtoStateAttachmentKind::try_from(descriptor.attachment_kind)
+            .unwrap_or(ProtoStateAttachmentKind::Unspecified);
+        Some(attachment_kind_from_proto(proto_kind).ok_or_else(|| {
+            ProtocolError::InvalidState(
+                "state attachment descriptor is missing attachment_kind (UNSPECIFIED)".to_string(),
+            )
+        })?)
+    } else {
+        None
+    };
+    let id = parse_object_id(&descriptor.id, obj_type, attachment_kind)?;
     Ok(ObjectInfo {
         id,
         obj_type,
@@ -78,6 +124,7 @@ pub(super) fn decode_blob_content(
 pub(super) fn parse_object_id(
     value: &str,
     obj_type: ObjectType,
+    attachment_kind: Option<StateAttachmentKind>,
 ) -> Result<ObjectId, ProtocolError> {
     match obj_type {
         // State and its per-state visibility sidecar are both keyed by StateId.
@@ -90,6 +137,14 @@ pub(super) fn parse_object_id(
             let (state, attachment) = value.split_once(':').ok_or_else(|| {
                 ProtocolError::InvalidState("invalid state attachment locator".to_string())
             })?;
+            // An attachment ObjectId is only constructible WITH a kind; the
+            // caller resolves it from the descriptor and hard-errors on
+            // UNSPECIFIED before reaching here.
+            let kind = attachment_kind.ok_or_else(|| {
+                ProtocolError::InvalidState(
+                    "state attachment descriptor is missing attachment_kind".to_string(),
+                )
+            })?;
             Ok(ObjectId::StateAttachment {
                 state: StateId::parse(state)
                     .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
@@ -97,6 +152,7 @@ pub(super) fn parse_object_id(
                     ContentHash::from_hex(attachment)
                         .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
                 ),
+                kind,
             })
         }
         ObjectType::Blob | ObjectType::Tree | ObjectType::Action | ObjectType::Redaction => {
@@ -120,17 +176,25 @@ pub(super) fn object_descriptor_with_status(
     availability_status: ObjectAvailabilityStatus,
     availability_note: impl Into<String>,
 ) -> ObjectDescriptor {
+    // Carry the attachment kind for attachment descriptors; every other
+    // object type leaves it UNSPECIFIED. Kind is carried, not keyed — the
+    // dedup key stays `(id, object_type)`.
+    let attachment_kind = match &info.id {
+        ObjectId::StateAttachment { kind, .. } => attachment_kind_to_proto(*kind),
+        ObjectId::Hash(_) | ObjectId::StateId(_) => ProtoStateAttachmentKind::Unspecified,
+    };
     ObjectDescriptor {
         id: match &info.id {
             ObjectId::Hash(hash) => hash.to_hex(),
             ObjectId::StateId(state_id) => state_id.to_string_full(),
-            ObjectId::StateAttachment { state, id } => {
+            ObjectId::StateAttachment { state, id, kind: _ } => {
                 format!("{}:{}", state.to_string_full(), id.as_hash().to_hex())
             }
         },
         object_type: object_type_name(info.obj_type).to_string(),
         availability_status: availability_status as i32,
         availability_note: availability_note.into(),
+        attachment_kind: attachment_kind as i32,
     }
 }
 
@@ -156,7 +220,7 @@ pub(super) fn descriptor_id_from_info(info: &ObjectInfo) -> (String, String) {
     let id = match &info.id {
         ObjectId::Hash(hash) => hash.to_hex(),
         ObjectId::StateId(state_id) => state_id.to_string_full(),
-        ObjectId::StateAttachment { state, id } => {
+        ObjectId::StateAttachment { state, id, kind: _ } => {
             format!("{}:{}", state.to_string_full(), id.as_hash().to_hex())
         }
     };

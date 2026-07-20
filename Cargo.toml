@@ -28,7 +28,7 @@ default-members = ["crates/cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.10.2"
+version = "0.10.3"
 edition = "2024"
 authors = ["Luke"]
 description = "An AI-native version control system"
@@ -129,6 +129,11 @@ tree-sitter-javascript = "0.25"
 tree-sitter-python = "0.25"
 tree-sitter-rust = "0.24"
 tree-sitter-typescript = "0.23"
+# Exact pin: unlike the 0.x grammars (where caret pins the minor), a caret on
+# this >=1.0 crate would admit 1.2+, changing parse trees without matching the
+# `@1.1` version recorded in semantic_index.rs — so a `cargo update` could drift
+# `semantic_hash` with no version-bust. Bump this and the recorded version together.
+tree-sitter-zig = "=1.1.2"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 walkdir = "2"
 windows-sys = "0.61"

@@ -414,6 +414,10 @@ mod fsck {
         // payload after its 8-byte magic+version header — the read
         // path will surface a hash mismatch, decompression error, or
         // structural failure. Fsck accepts any of those signals.
+        // Capture can install more than one pack (source blobs plus sidecar
+        // packs such as the semantic index). Corrupt every pack large enough
+        // to scramble so the source-object pack — the one fsck walks — is
+        // always hit, independent of read_dir order.
         let packs_dir = temp.path().join(".heddle/packs");
         let mut corrupted = false;
         for entry in fs::read_dir(&packs_dir).unwrap().filter_map(Result::ok) {
@@ -422,18 +426,15 @@ mod fsck {
                 continue;
             }
             let mut bytes = fs::read(&path).unwrap();
-            assert!(
-                bytes.len() > 32,
-                "pack {:?} too small to corrupt safely",
-                path
-            );
+            if bytes.len() <= 32 {
+                continue;
+            }
             let end = bytes.len().min(48);
             for b in &mut bytes[16..end] {
                 *b ^= 0xFF;
             }
             fs::write(&path, bytes).unwrap();
             corrupted = true;
-            break;
         }
         assert!(corrupted, "should have found a pack file to corrupt");
 

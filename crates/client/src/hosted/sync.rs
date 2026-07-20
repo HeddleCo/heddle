@@ -1521,7 +1521,7 @@ fn descriptor_id_from_plan(object: &PlannedObject) -> (String, String) {
     let id = match &object.id {
         wire::ObjectId::Hash(hash) => hash.to_hex(),
         wire::ObjectId::StateId(state_id) => state_id.to_string_full(),
-        wire::ObjectId::StateAttachment { state, id } => {
+        wire::ObjectId::StateAttachment { state, id, kind: _ } => {
             format!("{}:{}", state.to_string_full(), id.as_hash().to_hex())
         }
     };

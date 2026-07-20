@@ -271,8 +271,6 @@ pub async fn cmd_pull(
     }
 
     let user_config = UserConfig::load_default()?;
-    #[cfg(not(feature = "client"))]
-    let token = user_config.remote_token()?;
     #[cfg(feature = "client")]
     let (target, server_key) = resolve_remote_with_key(&repo, plan.remote.as_deref())?;
     #[cfg(not(feature = "client"))]
@@ -311,7 +309,7 @@ pub async fn cmd_pull(
             )
             .await?;
             #[cfg(not(feature = "client"))]
-            let _ = (addr, repo_path, token, insecure);
+            let _ = (addr, repo_path, insecure);
             #[cfg(not(feature = "client"))]
             anyhow::bail!(RecoveryAdvice::network_feature_unavailable("pull"));
         }
