@@ -50,7 +50,7 @@ impl HostedTransportPolicy {
 
 /// Map a heddle [`StateAttachmentKind`] onto its proto counterpart. Exhaustive
 /// by construction: adding a kind forces an arm here.
-fn attachment_kind_to_proto(kind: StateAttachmentKind) -> ProtoStateAttachmentKind {
+pub(super) fn attachment_kind_to_proto(kind: StateAttachmentKind) -> ProtoStateAttachmentKind {
     match kind {
         StateAttachmentKind::Context => ProtoStateAttachmentKind::Context,
         StateAttachmentKind::RiskSignals => ProtoStateAttachmentKind::RiskSignals,
