@@ -254,6 +254,12 @@ impl From<rmp_serde::decode::Error> for HeddleError {
     }
 }
 
+impl From<crate::object::SemanticIndexError> for HeddleError {
+    fn from(e: crate::object::SemanticIndexError) -> Self {
+        HeddleError::InvalidObject(e.to_string())
+    }
+}
+
 impl From<toml::de::Error> for HeddleError {
     fn from(e: toml::de::Error) -> Self {
         HeddleError::Config(e.to_string())
