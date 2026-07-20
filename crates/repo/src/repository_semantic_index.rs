@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Assembly, capture wiring, backfill and query primitives for the merkle
-//! semantic index (heddle#1067).
+//! Assembly, capture wiring and backfill for the merkle semantic index
+//! (heddle#1067) — the *compute* half, gated behind `tree-sitter-symbols`.
+//!
+//! The parse-free READ half (loading an attached index, resolving symbols,
+//! diffing two states) lives in the always-compiled
+//! [`repository_semantic_query`](crate::repository_semantic_query) module; a
+//! consumer that never parses (e.g. `weft`) links only that. This module owns
+//! everything that can *produce* index nodes: the [`SemanticIndexBuilder`],
+//! capture wiring, backfill, and the get-or-compute + self-heal `semantic_index`
+//! query family (which recomputes on a miss and therefore needs the parser).
 //!
 //! The node types and canonical digest layouts live in `objects`; the AST
 //! extraction lives in `semantic`. This layer mirrors the source blob/tree DAG
@@ -26,8 +34,7 @@ use std::collections::{BTreeMap, HashMap};
 use objects::{
     object::{
         ContentHash, SemanticEntryKind, SemanticFileNode, SemanticIndexRoot, SemanticTreeEntry,
-        SemanticTreeNode, State, StateId, SymbolAnchor, SymbolEntry, SymbolKindTag, Tree,
-        TreeEntryTarget,
+        SemanticTreeNode, State, StateId, SymbolAnchor, SymbolEntry, Tree, TreeEntryTarget,
     },
     store::ObjectStore,
 };
@@ -40,30 +47,13 @@ use semantic::{
 };
 use tracing::warn;
 
-use crate::{HeddleError, Repository, Result, StateAttachmentKind};
+use crate::repository_semantic_query::MAX_SEMANTIC_TREE_DEPTH;
+use crate::{HeddleError, Repository, Result, StateAttachmentKind, SymbolDelta};
 
 /// Source files above this size are recorded as `Opaque` rather than parsed —
 /// generated/vendored blobs dominate parse cost and rarely carry review-worthy
 /// symbols.
 const SEMANTIC_FILE_BUDGET_BYTES: usize = 1 << 20;
-
-/// Recursion ceiling for the merkle tree/dir walkers. Legitimate directory
-/// nesting is far below this; a crafted, pushed `SemanticTreeNode` chain deeper
-/// than this is treated as pathological rather than overflowing the stack
-/// (same hardening class as the AST walkers, heddle#876).
-const MAX_SEMANTIC_TREE_DEPTH: usize = 1024;
-
-/// A single-symbol delta between two states, produced by [`Repository::semantic_diff_symbols`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SymbolDelta {
-    /// File path + canonical symbol address (`container::name`).
-    pub anchor: SymbolAnchor,
-    pub kind: SymbolKindTag,
-    /// Fingerprint on the `a` side, `None` if the symbol did not exist there.
-    pub old_hash: Option<ContentHash>,
-    /// Fingerprint on the `b` side, `None` if the symbol does not exist there.
-    pub new_hash: Option<ContentHash>,
-}
 
 /// What a built subtree resolved to: the storage hash of the node blob (or the
 /// raw source blob, for opaque entries) plus its reformat-stable digest.
@@ -418,26 +408,6 @@ impl Repository {
         }
     }
 
-    /// Load a state's attached semantic index root, if present AND intact. A
-    /// missing or corrupt root blob (e.g. a partially-replicated push, or GC
-    /// that pruned the sidecar) is treated as ABSENT — `Ok(None)` — so callers
-    /// recompute+supersede instead of erroring forever on the dangling
-    /// attachment.
-    fn load_attached_index(&self, state_id: &StateId) -> Result<Option<SemanticIndexRoot>> {
-        let Some(attachment) =
-            self.latest_state_attachment(state_id, StateAttachmentKind::SemanticIndex)?
-        else {
-            return Ok(None);
-        };
-        let objects::object::StateAttachmentBody::SemanticIndex(root_hash) = attachment.body else {
-            return Ok(None);
-        };
-        let Some(blob) = self.store().get_blob(&root_hash)? else {
-            return Ok(None);
-        };
-        Ok(SemanticIndexRoot::decode(blob.content()).ok())
-    }
-
     /// Whether an attached root is current: extractor version and every grammar
     /// version match this binary's. A stale root is served as a MISS so a
     /// bump recomputes.
@@ -449,38 +419,11 @@ impl Repository {
                 .all(|(name, version)| grammar_version_by_name(name) == Some(version.as_str()))
     }
 
-    fn load_index_root(&self, root_hash: &ContentHash) -> Result<SemanticIndexRoot> {
-        let blob = self
-            .store()
-            .get_blob(root_hash)?
-            .ok_or_else(|| crate::HeddleError::NotFound(format!("semantic index root {root_hash}")))?;
-        SemanticIndexRoot::decode(blob.content())
-            .map_err(|err| crate::HeddleError::InvalidObject(err.to_string()))
-    }
-
-    fn load_semantic_tree(&self, node_hash: &ContentHash) -> Result<SemanticTreeNode> {
-        let blob = self
-            .store()
-            .get_blob(node_hash)?
-            .ok_or_else(|| crate::HeddleError::NotFound(format!("semantic tree node {node_hash}")))?;
-        SemanticTreeNode::decode(blob.content())
-            .map_err(|err| crate::HeddleError::InvalidObject(err.to_string()))
-    }
-
-    fn load_semantic_file(&self, node_hash: &ContentHash) -> Result<SemanticFileNode> {
-        let blob = self
-            .store()
-            .get_blob(node_hash)?
-            .ok_or_else(|| crate::HeddleError::NotFound(format!("semantic file node {node_hash}")))?;
-        SemanticFileNode::decode(blob.content())
-            .map_err(|err| crate::HeddleError::InvalidObject(err.to_string()))
-    }
-
     /// Materialize a parent state's index for reuse: its source tree + semantic
     /// top node + root. Returns `None` when the parent has no attached index
     /// (caller falls back to a full build).
     fn materialize_parent_index(&self, parent: &State) -> Result<Option<ParentIndex>> {
-        let Some(root) = self.load_attached_index(&parent.id())? else {
+        let Some(root) = self.attached_semantic_index(&parent.id())? else {
             return Ok(None);
         };
         let Some(source_tree) = self.store().get_tree(&parent.tree)? else {
@@ -498,7 +441,7 @@ impl Repository {
     /// attached, returns it; otherwise builds forward from the nearest ancestor
     /// that has an index (reusing it), attaches each, and returns the target's.
     pub fn semantic_index(&self, state_id: &StateId) -> Result<Option<SemanticIndexRoot>> {
-        if let Some(root) = self.load_attached_index(state_id)?
+        if let Some(root) = self.attached_semantic_index(state_id)?
             && self.index_is_current(&root)
         {
             return Ok(Some(root));
@@ -515,7 +458,7 @@ impl Repository {
         let mut base_state: Option<StateId> = None;
         let mut cursor = self.first_parent(state_id)?;
         while let Some(parent_id) = cursor {
-            if self.load_attached_index(&parent_id)?.is_some() {
+            if self.attached_semantic_index(&parent_id)?.is_some() {
                 base_state = Some(parent_id);
                 break;
             }
@@ -643,34 +586,6 @@ impl Repository {
         Ok(file.symbol_by_address(&anchor.symbol).cloned())
     }
 
-    /// Walk the semantic tree to the `File` node for `path`, returning its
-    /// storage hash. `None` if the path is absent or resolves to a dir/opaque.
-    fn resolve_file_node(
-        &self,
-        root: &SemanticIndexRoot,
-        path: &str,
-    ) -> Result<Option<ContentHash>> {
-        let components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
-        if components.is_empty() {
-            return Ok(None);
-        }
-        let mut node = self.load_semantic_tree(&root.tree)?;
-        for (i, comp) in components.iter().enumerate() {
-            let Some(entry) = node.get(comp) else {
-                return Ok(None);
-            };
-            let last = i + 1 == components.len();
-            match (last, entry.kind) {
-                (true, SemanticEntryKind::File) => return Ok(Some(entry.node)),
-                (false, SemanticEntryKind::Dir) => {
-                    node = self.load_semantic_tree(&entry.node)?;
-                }
-                _ => return Ok(None),
-            }
-        }
-        Ok(None)
-    }
-
     /// Whether the semantic content under `path_prefix` differs between two
     /// states, compared top-down by digest with identical subtrees pruned.
     /// ZERO source re-parse — only semantic node blobs along the prefix load.
@@ -696,34 +611,6 @@ impl Repository {
         let da = self.digest_at_path(&root_a, path_prefix)?;
         let db = self.digest_at_path(&root_b, path_prefix)?;
         Ok(da != db)
-    }
-
-    /// The reformat-stable digest at `path_prefix` within an index. Empty prefix
-    /// yields the whole-tree digest. Loads only the tree nodes along the path.
-    fn digest_at_path(
-        &self,
-        root: &SemanticIndexRoot,
-        path_prefix: &str,
-    ) -> Result<Option<ContentHash>> {
-        let components: Vec<&str> = path_prefix.split('/').filter(|c| !c.is_empty()).collect();
-        if components.is_empty() {
-            return Ok(Some(root.semantic_digest));
-        }
-        let mut node = self.load_semantic_tree(&root.tree)?;
-        for (i, comp) in components.iter().enumerate() {
-            let Some(entry) = node.get(comp) else {
-                return Ok(None);
-            };
-            let last = i + 1 == components.len();
-            if last {
-                return Ok(Some(entry.semantic_digest));
-            }
-            if entry.kind != SemanticEntryKind::Dir {
-                return Ok(None);
-            }
-            node = self.load_semantic_tree(&entry.node)?;
-        }
-        Ok(None)
     }
 
     /// Symbol-level delta between two states, via a merkle walk that descends
@@ -752,108 +639,6 @@ impl Repository {
         Ok(out)
     }
 
-    fn diff_tree_nodes(
-        &self,
-        a: &SemanticTreeNode,
-        b: &SemanticTreeNode,
-        prefix: &str,
-        depth: usize,
-        out: &mut Vec<SymbolDelta>,
-    ) -> Result<()> {
-        if depth > MAX_SEMANTIC_TREE_DEPTH {
-            return Err(HeddleError::InvalidObject(format!(
-                "semantic diff exceeds max depth {MAX_SEMANTIC_TREE_DEPTH}"
-            )));
-        }
-        let a_by_name: HashMap<&str, &SemanticTreeEntry> =
-            a.entries.iter().map(|e| (e.name.as_str(), e)).collect();
-        let b_by_name: HashMap<&str, &SemanticTreeEntry> =
-            b.entries.iter().map(|e| (e.name.as_str(), e)).collect();
-
-        for entry_a in &a.entries {
-            let path = join_path(prefix, &entry_a.name);
-            match b_by_name.get(entry_a.name.as_str()) {
-                None => self.emit_side(entry_a, &path, Side::Removed, depth, out)?,
-                Some(entry_b) => {
-                    if entry_a.semantic_digest == entry_b.semantic_digest {
-                        continue; // pruned — identical subtree/file.
-                    }
-                    match (entry_a.kind, entry_b.kind) {
-                        (SemanticEntryKind::Dir, SemanticEntryKind::Dir) => {
-                            let child_a = self.load_semantic_tree(&entry_a.node)?;
-                            let child_b = self.load_semantic_tree(&entry_b.node)?;
-                            self.diff_tree_nodes(&child_a, &child_b, &path, depth + 1, out)?;
-                        }
-                        (SemanticEntryKind::File, SemanticEntryKind::File) => {
-                            let file_a = self.load_semantic_file(&entry_a.node)?;
-                            let file_b = self.load_semantic_file(&entry_b.node)?;
-                            diff_file_symbols(&file_a, &file_b, &path, out);
-                        }
-                        // Kind flipped (file↔dir↔opaque): a full replace.
-                        _ => {
-                            self.emit_side(entry_a, &path, Side::Removed, depth, out)?;
-                            self.emit_side(entry_b, &path, Side::Added, depth, out)?;
-                        }
-                    }
-                }
-            }
-        }
-        // Names only on the b side are additions.
-        for entry_b in &b.entries {
-            if !a_by_name.contains_key(entry_b.name.as_str()) {
-                let path = join_path(prefix, &entry_b.name);
-                self.emit_side(entry_b, &path, Side::Added, depth, out)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Emit every symbol of a single-sided entry (whole file/subtree added or
-    /// removed). Opaque entries carry no symbols.
-    fn emit_side(
-        &self,
-        entry: &SemanticTreeEntry,
-        path: &str,
-        side: Side,
-        depth: usize,
-        out: &mut Vec<SymbolDelta>,
-    ) -> Result<()> {
-        if depth > MAX_SEMANTIC_TREE_DEPTH {
-            return Err(HeddleError::InvalidObject(format!(
-                "semantic diff exceeds max depth {MAX_SEMANTIC_TREE_DEPTH}"
-            )));
-        }
-        match entry.kind {
-            SemanticEntryKind::File => {
-                let file = self.load_semantic_file(&entry.node)?;
-                for sym in &file.symbols {
-                    out.push(side.delta(path, sym));
-                }
-            }
-            SemanticEntryKind::Dir => {
-                let node = self.load_semantic_tree(&entry.node)?;
-                for child in &node.entries {
-                    let child_path = join_path(path, &child.name);
-                    self.emit_side(child, &child_path, side, depth + 1, out)?;
-                }
-            }
-            SemanticEntryKind::Opaque => {}
-        }
-        Ok(())
-    }
-
-    /// Whether the symbol at `anchor` changed between `since` and `at`.
-    pub fn changed_since(
-        &self,
-        anchor: &SymbolAnchor,
-        since: &StateId,
-        at: &StateId,
-    ) -> Result<bool> {
-        let old = self.symbol_hash(since, anchor)?.map(|s| s.semantic_hash);
-        let new = self.symbol_hash(at, anchor)?.map(|s| s.semantic_hash);
-        Ok(old != new)
-    }
-
     /// Lazy backfill: compute-and-attach a semantic index for every state that
     /// lacks one, oldest-first (so parents are reused), restartable across runs
     /// (progress = the last state that gained an attachment). Returns the count
@@ -866,7 +651,7 @@ impl Repository {
         let ordered = self.order_states_oldest_first(states)?;
         let mut count = 0;
         for state_id in ordered {
-            let already = self.load_attached_index(&state_id)?.is_some();
+            let already = self.attached_semantic_index(&state_id)?.is_some();
             if already && !all {
                 continue; // restartable: skip states that already have one.
             }
@@ -920,96 +705,6 @@ impl Repository {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Side {
-    Added,
-    Removed,
-}
-
-impl Side {
-    fn delta(self, path: &str, sym: &SymbolEntry) -> SymbolDelta {
-        let anchor = SymbolAnchor::new(path, sym.address());
-        match self {
-            Side::Added => SymbolDelta {
-                anchor,
-                kind: sym.kind,
-                old_hash: None,
-                new_hash: Some(sym.semantic_hash),
-            },
-            Side::Removed => SymbolDelta {
-                anchor,
-                kind: sym.kind,
-                old_hash: Some(sym.semantic_hash),
-                new_hash: None,
-            },
-        }
-    }
-}
-
-/// The identity a symbol is matched on across two file versions:
-/// `(container_path, name, kind)`. Distinguishes `fn f` in `mod a` from `mod b`,
-/// `fn X` from `struct X`, so the diff never last-wins-collides distinct
-/// symbols into a mislabeled Modified or a silent skip.
-type SymbolKey = (Vec<String>, String, SymbolKindTag);
-
-fn symbol_key(sym: &SymbolEntry) -> SymbolKey {
-    (sym.container_path.clone(), sym.name.clone(), sym.kind)
-}
-
-/// Diff two file nodes by symbol identity (a `(container, name, kind)`
-/// MULTISET), emitting a delta per added/removed/changed symbol. Same-key
-/// entries (e.g. C++ overloads the extractor can't tell apart) are paired
-/// positionally in canonical order; unmatched extras become add/remove.
-/// Unchanged symbols (equal `semantic_hash`) are skipped.
-fn diff_file_symbols(
-    a: &SemanticFileNode,
-    b: &SemanticFileNode,
-    path: &str,
-    out: &mut Vec<SymbolDelta>,
-) {
-    // BTreeMap, not HashMap: the loops below emit into `out`, so key order must
-    // be deterministic — this is a public, determinism-centric API. (The
-    // pre-refactor code iterated `a.symbols` in canonical order; a HashMap here
-    // reintroduced nondeterministic delta ordering.)
-    let mut a_by_key: BTreeMap<SymbolKey, Vec<&SymbolEntry>> = BTreeMap::new();
-    for sym in &a.symbols {
-        a_by_key.entry(symbol_key(sym)).or_default().push(sym);
-    }
-    let mut b_by_key: BTreeMap<SymbolKey, Vec<&SymbolEntry>> = BTreeMap::new();
-    for sym in &b.symbols {
-        b_by_key.entry(symbol_key(sym)).or_default().push(sym);
-    }
-
-    for (key, a_syms) in &a_by_key {
-        let b_syms = b_by_key.get(key).map(Vec::as_slice).unwrap_or(&[]);
-        // Symbols arrive in the file node already sorted by
-        // (container, name, kind, span.0), so same-key lists are in a stable
-        // order; pair them positionally.
-        for pair in a_syms.iter().zip(b_syms.iter()) {
-            let (sym_a, sym_b) = pair;
-            if sym_a.semantic_hash != sym_b.semantic_hash {
-                out.push(SymbolDelta {
-                    anchor: SymbolAnchor::new(path, sym_b.address()),
-                    kind: sym_b.kind,
-                    old_hash: Some(sym_a.semantic_hash),
-                    new_hash: Some(sym_b.semantic_hash),
-                });
-            }
-        }
-        // Extra `a` occurrences with no `b` counterpart are removals.
-        for sym_a in a_syms.iter().skip(b_syms.len()) {
-            out.push(Side::Removed.delta(path, sym_a));
-        }
-    }
-    // Keys (or extra occurrences of a key) present only in `b` are additions.
-    for (key, b_syms) in &b_by_key {
-        let a_len = a_by_key.get(key).map(Vec::len).unwrap_or(0);
-        for sym_b in b_syms.iter().skip(a_len) {
-            out.push(Side::Added.delta(path, sym_b));
-        }
-    }
-}
-
 /// A missing (`NotFound`) or corrupt (`InvalidObject`) semantic node — the
 /// recoverable "broken index" class.
 fn is_broken_index_error(err: &HeddleError) -> bool {
@@ -1019,21 +714,13 @@ fn is_broken_index_error(err: &HeddleError) -> bool {
     )
 }
 
-fn join_path(prefix: &str, name: &str) -> String {
-    if prefix.is_empty() {
-        name.to_string()
-    } else {
-        format!("{prefix}/{name}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use chrono::Utc;
     use objects::object::{
-        Attribution, Blob, Principal, StateAttachment, StateAttachmentBody, TreeEntry,
+        Attribution, Blob, Principal, StateAttachment, StateAttachmentBody, SymbolKindTag, TreeEntry,
     };
     use tempfile::TempDir;
 

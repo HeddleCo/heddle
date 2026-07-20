@@ -52,3 +52,94 @@ impl StateAttachment {
         StateAttachmentId::from_hash(ContentHash::compute_typed("state-attachment", &bytes))
     }
 }
+
+#[cfg(test)]
+mod wire_compat_tests {
+    //! Cross-version decode guard for the `SemanticIndex` attachment variant
+    //! (heddle#1067 / heddle#1078).
+    //!
+    //! `StateAttachmentBody` is an externally-tagged rmp-named enum, so a
+    //! `SemanticIndex(hash)` value serializes as a one-key map keyed on the
+    //! variant name. A consumer built before the variant existed (heddle 0.10.2,
+    //! e.g. a `weft` that has not yet bumped its `heddle-objects` pin) has no
+    //! matching arm and therefore CANNOT decode such an attachment. This test
+    //! pins that hazard so the failure mode is a documented regression guard and
+    //! not a field surprise: weft must bump to `=0.10.3` before a heddle release
+    //! ships #1067.
+
+    use chrono::{DateTime, Utc};
+    use serde::Deserialize;
+
+    use super::*;
+    use crate::object::{Attribution, Principal};
+
+    /// A faithful mirror of the **0.10.2** `StateAttachmentBody`, i.e. the arm
+    /// set BEFORE `SemanticIndex` was introduced. This is exactly the shape an
+    /// older consumer's decoder would carry. The payloads exist only to shape
+    /// the decoder — they are never read.
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    enum LegacyBody {
+        Context(ContentHash),
+        RiskSignals(ContentHash),
+        ReviewSignatures(ContentHash),
+        Discussions(ContentHash),
+        StructuredConflicts(ContentHash),
+        Signature(StateSignature),
+    }
+
+    /// A 0.10.2 consumer's `StateAttachment`, structurally identical to the
+    /// current one but with the legacy (SemanticIndex-less) body enum.
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct LegacyAttachment {
+        state_id: StateId,
+        body: LegacyBody,
+        attribution: Attribution,
+        created_at: DateTime<Utc>,
+        supersedes: Option<StateAttachmentId>,
+    }
+
+    fn sample(body: StateAttachmentBody) -> StateAttachment {
+        StateAttachment {
+            state_id: StateId::from_bytes([7; 32]),
+            body,
+            attribution: Attribution::human(Principal::new("Test", "test@example.com")),
+            created_at: Utc::now(),
+            supersedes: None,
+        }
+    }
+
+    #[test]
+    fn semantic_index_attachment_is_undecodable_by_0_10_2_consumer() {
+        let attachment = sample(StateAttachmentBody::SemanticIndex(ContentHash::compute(b"root")));
+        let bytes = rmp_serde::to_vec_named(&attachment).expect("encode");
+
+        // A current (0.10.3+) consumer round-trips it cleanly.
+        let current: StateAttachment = rmp_serde::from_slice(&bytes).expect("current decoder");
+        assert_eq!(current, attachment);
+
+        // A 0.10.2 consumer, whose decoder has no `SemanticIndex` arm, MUST
+        // reject it — this is precisely why weft has to bump before a heddle
+        // release ships the SemanticIndex attachment.
+        let legacy: Result<LegacyAttachment, _> = rmp_serde::from_slice(&bytes);
+        assert!(
+            legacy.is_err(),
+            "a 0.10.2 decoder must fail on a SemanticIndex-tagged attachment"
+        );
+    }
+
+    #[test]
+    fn known_variant_still_decodes_on_0_10_2_consumer() {
+        // Control: an attachment kind the 0.10.2 consumer DOES know still
+        // decodes with the legacy enum, so the failure above is specifically the
+        // new variant and not a framing/format mismatch.
+        let attachment = sample(StateAttachmentBody::Context(ContentHash::compute(b"ctx")));
+        let bytes = rmp_serde::to_vec_named(&attachment).expect("encode");
+        let legacy: Result<LegacyAttachment, _> = rmp_serde::from_slice(&bytes);
+        assert!(
+            legacy.is_ok(),
+            "a 0.10.2 decoder must still handle the Context variant it knows"
+        );
+    }
+}
