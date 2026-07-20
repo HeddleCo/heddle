@@ -20,6 +20,7 @@ use connection::HostedConnection;
 pub use context::{CallContextFactory, SignedCallContext};
 pub use error::HostedError;
 use iroh::{Endpoint, EndpointAddr};
+pub use methods::HostedRoutes;
 use prost::Message;
 
 pub type Result<T> = std::result::Result<T, HostedError>;
@@ -32,6 +33,10 @@ pub struct HostedClient {
 }
 
 impl HostedClient {
+    pub fn routes(&self) -> HostedRoutes<'_> {
+        HostedRoutes::new(self)
+    }
+
     pub async fn connect(descriptor: &VerifiedEndpointDescriptor) -> Result<Self> {
         Ok(Self {
             connection: HostedConnection::connect_verified(descriptor).await?,

@@ -2,19 +2,31 @@ use api::heddle::api::v1alpha1::*;
 
 use super::{BidirectionalStream, HostedClient, Result, ServerStream};
 
+/// Exact generated-contract call surface used by higher-level hosted helpers.
+#[derive(Clone, Copy)]
+pub struct HostedRoutes<'a> {
+    client: &'a HostedClient,
+}
+
+impl<'a> HostedRoutes<'a> {
+    pub(super) fn new(client: &'a HostedClient) -> Self {
+        Self { client }
+    }
+}
+
 macro_rules! unary_method {
     ($name:ident, $service:literal, $rpc:literal, $request:ty, $response:ty) => {
         pub async fn $name(&self, request: &$request) -> Result<$response> {
-                    self.call_unary(
-                        concat!("/heddle.api.v1alpha1.", $service, "/", $rpc),
-                        request,
-                    )
-                    .await
-                }
+                    self.client.call_unary(
+                                concat!("/heddle.api.v1alpha1.", $service, "/", $rpc),
+                                request,
+                            )
+                            .await
+                        }
     };
 }
 
-impl HostedClient {
+impl HostedRoutes<'_> {
     unary_method!(
         begin_web_authn_authentication,
         "IdentityService",
@@ -341,30 +353,35 @@ impl HostedClient {
         &self,
         request: &WaitForDeviceAuthorizationRequest,
     ) -> Result<ServerStream<DeviceAuthorizationEvent>> {
-        self.call_server_stream(
-            "/heddle.api.v1alpha1.IdentityService/WaitForDeviceAuthorization",
-            request,
-            "",
-        )
-        .await
+        self.client
+            .call_server_stream(
+                "/heddle.api.v1alpha1.IdentityService/WaitForDeviceAuthorization",
+                request,
+                "",
+            )
+            .await
     }
 
     pub async fn push(
         &self,
         client_operation_id: impl Into<String>,
     ) -> Result<BidirectionalStream<PushClientFrame, PushServerFrame>> {
-        self.call_bidirectional(
-            "/heddle.api.v1alpha1.RepoSyncService/Push",
-            client_operation_id,
-        )
-        .await
-    }
-
-    pub async fn pull(&self) -> Result<BidirectionalStream<PullClientFrame, PullServerFrame>> {
-        self.call_bidirectional("/heddle.api.v1alpha1.RepoSyncService/Pull", "")
+        self.client
+            .call_bidirectional(
+                "/heddle.api.v1alpha1.RepoSyncService/Push",
+                client_operation_id,
+            )
             .await
     }
 
+    pub async fn pull(&self) -> Result<BidirectionalStream<PullClientFrame, PullServerFrame>> {
+        self.client
+            .call_bidirectional("/heddle.api.v1alpha1.RepoSyncService/Pull", "")
+            .await
+    }
+}
+
+impl HostedClient {
     pub fn stream_opening_proof(
         &self,
         method: &str,
