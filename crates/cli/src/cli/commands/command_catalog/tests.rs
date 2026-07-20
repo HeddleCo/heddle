@@ -340,6 +340,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["schemas"], &["schemas"]),
     #[cfg(feature = "semantic")]
     sample(&["semantic", "hot"], &["semantic", "hot"]),
+    sample(&["semantic", "index"], &["semantic", "index"]),
     sample(
         &["agent", "provenance", "begin"],
         &[

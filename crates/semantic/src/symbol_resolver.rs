@@ -115,24 +115,37 @@ fn node_text<'a>(node: &tree_sitter::Node, source: &'a [u8]) -> &'a str {
     std::str::from_utf8(&source[node.byte_range()]).unwrap_or("")
 }
 
-fn push_named_definition(
-    node: &tree_sitter::Node,
+/// One definition discovered by [`visit_definitions`], carrying the AST node
+/// itself so callers that need the definition's subtree (e.g. the semantic
+/// index token stream) can reach it, alongside the resolved metadata.
+pub(crate) struct DefinitionSite<'tree> {
+    pub node: tree_sitter::Node<'tree>,
+    pub name: String,
+    pub kind: DefinitionKind,
+    pub parent_name: Option<String>,
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
+fn emit_named_definition<'tree>(
+    node: tree_sitter::Node<'tree>,
     source: &[u8],
     dk: DefinitionKind,
     parent: Option<&str>,
-    out: &mut Vec<Definition>,
+    emit: &mut impl FnMut(DefinitionSite<'tree>),
 ) {
     if let Some(name_node) = node.child_by_field_name("name") {
         let name = node_text(&name_node, source).to_string();
         if name.is_empty() {
             return;
         }
-        out.push(Definition {
+        emit(DefinitionSite {
+            node,
             name,
             kind: dk,
+            parent_name: parent.map(String::from),
             start_line: node.start_position().row as u32 + 1,
             end_line: node.end_position().row as u32 + 1,
-            parent_name: parent.map(String::from),
         });
     }
 }
@@ -141,8 +154,16 @@ fn push_named_definition(
 /// [`symbol_extraction::find_definitions`]: a recursive walker would recurse
 /// for every child of every non-scope node, so deeply-parseable input drives
 /// call depth proportional to AST depth.
-fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Definition>) {
-    let mut stack: Vec<(tree_sitter::Node, Option<Rc<str>>)> = vec![(root, None)];
+///
+/// The single source of truth for the definition taxonomy. [`walk_definitions`]
+/// collects the metadata; the semantic index reuses the same walk to reach
+/// each definition's AST node without a second, drifting copy of these arms.
+pub(crate) fn visit_definitions<'tree>(
+    root: tree_sitter::Node<'tree>,
+    source: &[u8],
+    emit: &mut impl FnMut(DefinitionSite<'tree>),
+) {
+    let mut stack: Vec<(tree_sitter::Node<'tree>, Option<Rc<str>>)> = vec![(root, None)];
 
     while let Some((node, parent)) = stack.pop() {
         let current_parent = parent.as_deref();
@@ -152,33 +173,41 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
         match kind {
             // ── Rust ──────────────────────────────────────────────
             "function_item" => {
-                push_named_definition(&node, source, DefinitionKind::Function, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Function, current_parent, emit)
             }
             "struct_item" => {
-                push_named_definition(&node, source, DefinitionKind::Type, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Type, current_parent, emit)
             }
             "enum_item" => {
-                push_named_definition(&node, source, DefinitionKind::EnumDef, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::EnumDef, current_parent, emit)
             }
             "trait_item" => {
-                push_named_definition(&node, source, DefinitionKind::Trait, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Trait, current_parent, emit)
             }
-            "type_item" => push_named_definition(
-                &node,
-                source,
-                DefinitionKind::TypeAlias,
-                current_parent,
-                out,
-            ),
-            "const_item" | "static_item" => push_named_definition(
-                &node,
-                source,
-                DefinitionKind::ConstDecl,
-                current_parent,
-                out,
-            ),
+            "type_item" => {
+                emit_named_definition(node, source, DefinitionKind::TypeAlias, current_parent, emit)
+            }
+            "const_item" | "static_item" => {
+                emit_named_definition(node, source, DefinitionKind::ConstDecl, current_parent, emit)
+            }
             "mod_item" => {
-                push_named_definition(&node, source, DefinitionKind::Module, current_parent, out)
+                // Emit the module, then descend with the module name as the new
+                // container so `mod a { fn f }` yields `f` with `["a"]` — not
+                // the outer scope. Without this, `mod a::f` and `mod b::f`
+                // collapse to the same address.
+                let mod_name: Option<Rc<str>> = node
+                    .child_by_field_name("name")
+                    .map(|n| Rc::from(node_text(&n, source)))
+                    .filter(|name: &Rc<str>| !name.is_empty());
+                emit_named_definition(node, source, DefinitionKind::Module, current_parent, emit);
+                if let Some(name) = mod_name {
+                    let mut cursor = node.walk();
+                    let children: Vec<_> = node.children(&mut cursor).collect();
+                    for child in children.into_iter().rev() {
+                        stack.push((child, Some(name.clone())));
+                    }
+                    descended_with_new_parent = true;
+                }
             }
             "impl_item" => {
                 let parent_name: Option<Rc<str>> =
@@ -193,7 +222,7 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
 
             // ── Python ───────────────────────────────────────────
             "function_definition" => {
-                push_named_definition(&node, source, DefinitionKind::Function, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Function, current_parent, emit)
             }
             "class_definition" => {
                 let class_name: Option<Rc<str>> = node
@@ -202,12 +231,13 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
                 if let Some(ref name) = class_name
                     && !name.is_empty()
                 {
-                    out.push(Definition {
+                    emit(DefinitionSite {
+                        node,
                         name: name.to_string(),
                         kind: DefinitionKind::Class,
+                        parent_name: current_parent.map(String::from),
                         start_line: node.start_position().row as u32 + 1,
                         end_line: node.end_position().row as u32 + 1,
-                        parent_name: current_parent.map(String::from),
                     });
                 }
                 let mut cursor = node.walk();
@@ -220,19 +250,20 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
 
             // ── Go ───────────────────────────────────────────────
             "function_declaration" => {
-                push_named_definition(&node, source, DefinitionKind::Function, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Function, current_parent, emit)
             }
             "method_declaration" => {
                 if let Some(name_node) = node.child_by_field_name("name") {
                     let name = node_text(&name_node, source).to_string();
                     if !name.is_empty() {
                         let receiver = extract_go_receiver_type(&node, source);
-                        out.push(Definition {
+                        emit(DefinitionSite {
+                            node,
                             name,
                             kind: DefinitionKind::Function,
+                            parent_name: receiver.or_else(|| current_parent.map(String::from)),
                             start_line: node.start_position().row as u32 + 1,
                             end_line: node.end_position().row as u32 + 1,
-                            parent_name: receiver.or_else(|| current_parent.map(String::from)),
                         });
                     }
                 }
@@ -252,12 +283,13 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
                             Some("struct_type") => DefinitionKind::Type,
                             _ => DefinitionKind::TypeAlias,
                         };
-                        out.push(Definition {
+                        emit(DefinitionSite {
+                            node: child,
                             name,
                             kind: dk,
+                            parent_name: current_parent.map(String::from),
                             start_line: child.start_position().row as u32 + 1,
                             end_line: child.end_position().row as u32 + 1,
-                            parent_name: current_parent.map(String::from),
                         });
                     }
                 }
@@ -265,7 +297,7 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
 
             // ── JavaScript / TypeScript ──────────────────────────
             "method_definition" => {
-                push_named_definition(&node, source, DefinitionKind::Function, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Function, current_parent, emit)
             }
             "class_declaration" => {
                 let class_name: Option<Rc<str>> = node
@@ -274,12 +306,13 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
                 if let Some(ref name) = class_name
                     && !name.is_empty()
                 {
-                    out.push(Definition {
+                    emit(DefinitionSite {
+                        node,
                         name: name.to_string(),
                         kind: DefinitionKind::Class,
+                        parent_name: current_parent.map(String::from),
                         start_line: node.start_position().row as u32 + 1,
                         end_line: node.end_position().row as u32 + 1,
-                        parent_name: current_parent.map(String::from),
                     });
                 }
                 let mut cursor = node.walk();
@@ -289,22 +322,14 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
                 }
                 descended_with_new_parent = true;
             }
-            "interface_declaration" => push_named_definition(
-                &node,
-                source,
-                DefinitionKind::Interface,
-                current_parent,
-                out,
-            ),
-            "type_alias_declaration" => push_named_definition(
-                &node,
-                source,
-                DefinitionKind::TypeAlias,
-                current_parent,
-                out,
-            ),
+            "interface_declaration" => {
+                emit_named_definition(node, source, DefinitionKind::Interface, current_parent, emit)
+            }
+            "type_alias_declaration" => {
+                emit_named_definition(node, source, DefinitionKind::TypeAlias, current_parent, emit)
+            }
             "enum_declaration" => {
-                push_named_definition(&node, source, DefinitionKind::EnumDef, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::EnumDef, current_parent, emit)
             }
             "lexical_declaration" | "variable_declaration" => {
                 let mut cursor = node.walk();
@@ -326,12 +351,13 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
                             } else {
                                 DefinitionKind::ConstDecl
                             };
-                            out.push(Definition {
+                            emit(DefinitionSite {
+                                node,
                                 name,
                                 kind: dk,
+                                parent_name: current_parent.map(String::from),
                                 start_line: node.start_position().row as u32 + 1,
                                 end_line: node.end_position().row as u32 + 1,
-                                parent_name: current_parent.map(String::from),
                             });
                         }
                     }
@@ -340,16 +366,16 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
 
             // ── C / C++ / Java ───────────────────────────────────
             "struct_specifier" | "class_specifier" => {
-                push_named_definition(&node, source, DefinitionKind::Class, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Class, current_parent, emit)
             }
             "namespace_definition" => {
-                push_named_definition(&node, source, DefinitionKind::Module, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Module, current_parent, emit)
             }
             "enum_specifier" => {
-                push_named_definition(&node, source, DefinitionKind::EnumDef, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::EnumDef, current_parent, emit)
             }
             "constructor_declaration" => {
-                push_named_definition(&node, source, DefinitionKind::Function, current_parent, out)
+                emit_named_definition(node, source, DefinitionKind::Function, current_parent, emit)
             }
 
             _ => {}
@@ -363,6 +389,19 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
             }
         }
     }
+}
+
+/// Collect one [`Definition`] per definition node, in document order.
+fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Definition>) {
+    visit_definitions(root, source, &mut |site| {
+        out.push(Definition {
+            name: site.name,
+            kind: site.kind,
+            start_line: site.start_line,
+            end_line: site.end_line,
+            parent_name: site.parent_name,
+        });
+    });
 }
 
 fn extract_rust_impl_type_name(node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
@@ -815,16 +854,17 @@ pub mod outer {
 
         assert_definition(&defs, "LIMIT", DefinitionKind::ConstDecl, 1, 1, None);
         assert_definition(&defs, "outer", DefinitionKind::Module, 2, 23, None);
-        assert_definition(&defs, "Widget", DefinitionKind::Type, 3, 5, None);
-        assert_definition(&defs, "Mode", DefinitionKind::EnumDef, 7, 10, None);
-        assert_definition(&defs, "Runner", DefinitionKind::Trait, 12, 14, None);
+        // Items inside `mod outer` now carry `outer` as their container.
+        assert_definition(&defs, "Widget", DefinitionKind::Type, 3, 5, Some("outer"));
+        assert_definition(&defs, "Mode", DefinitionKind::EnumDef, 7, 10, Some("outer"));
+        assert_definition(&defs, "Runner", DefinitionKind::Trait, 12, 14, Some("outer"));
         assert_definition(
             &defs,
             "WidgetResult",
             DefinitionKind::TypeAlias,
             16,
             16,
-            None,
+            Some("outer"),
         );
         assert_definition(
             &defs,
@@ -923,10 +963,10 @@ pub mod outer {
         let expected: &[(&str, DefinitionKind, u32, u32, Option<&str>)] = &[
             ("LIMIT", DefinitionKind::ConstDecl, 1, 1, None),
             ("outer", DefinitionKind::Module, 2, 23, None),
-            ("Widget", DefinitionKind::Type, 3, 5, None),
-            ("Mode", DefinitionKind::EnumDef, 7, 10, None),
-            ("Runner", DefinitionKind::Trait, 12, 14, None),
-            ("WidgetResult", DefinitionKind::TypeAlias, 16, 16, None),
+            ("Widget", DefinitionKind::Type, 3, 5, Some("outer")),
+            ("Mode", DefinitionKind::EnumDef, 7, 10, Some("outer")),
+            ("Runner", DefinitionKind::Trait, 12, 14, Some("outer")),
+            ("WidgetResult", DefinitionKind::TypeAlias, 16, 16, Some("outer")),
             ("build", DefinitionKind::Function, 19, 21, Some("Widget")),
         ];
 

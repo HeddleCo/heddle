@@ -56,7 +56,14 @@ pub fn compute_similarity(a: &str, b: &str, method: SimilarityMethod) -> f64 {
 
             intersection.len() as f64 / union.len() as f64
         }
-        SimilarityMethod::Ast => compute_similarity(a, b, SimilarityMethod::Tokens),
+        // AST similarity is language-dependent: without a grammar there is no
+        // tree to compare. The language-free entry point therefore cannot
+        // honor `Ast` itself — it forwards to the one sanctioned AST path,
+        // which degrades to token similarity for `Language::Unknown` rather
+        // than silently masquerading token similarity as an AST result.
+        SimilarityMethod::Ast => {
+            compute_similarity_with_language(a, b, SimilarityMethod::Ast, Language::Unknown)
+        }
     }
 }
 

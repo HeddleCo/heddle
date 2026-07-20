@@ -46,6 +46,18 @@ pub enum SemanticCommands {
         #[arg(long)]
         include_actors: bool,
     },
+    /// Backfill the content-addressed merkle semantic index over history.
+    ///
+    /// Native captures already index eagerly; this backfills states that
+    /// predate the index (notably git-lane imports). Runs oldest-first and
+    /// is restartable — rerun after an interruption and it resumes.
+    Index {
+        /// Recompute every state's index, superseding any existing one
+        /// (e.g. after a grammar or extractor upgrade). Without this, only
+        /// states missing an index are computed.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 /// What dimension to group events on. Mirrors

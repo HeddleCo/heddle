@@ -7,7 +7,7 @@ use std::path::Path;
 use objects::object::{ChangeImportance, ModificationKind};
 
 use super::analysis_similarity::{SimilarityMethod, compute_similarity};
-use crate::parser::{Language, ParsedFile};
+use crate::parser::{Language, ParsedFile, walk_non_comment_leaves};
 
 /// Classification result: kind, importance, and confidence.
 pub type ClassificationResult = (ModificationKind, ChangeImportance, f64);
@@ -247,33 +247,10 @@ fn strip_comments(parsed: &ParsedFile) -> String {
 }
 
 fn collect_non_comment_text(node: tree_sitter::Node<'_>, source: &str, out: &mut String) {
-    let mut stack = vec![node];
-
-    while let Some(current) = stack.pop() {
-        if is_comment_node(current.kind()) {
-            continue;
-        }
-
-        if current.child_count() == 0 {
-            out.push_str(&source[current.byte_range()]);
-            out.push(' ');
-            continue;
-        }
-
-        let child_count = current.child_count();
-        for index in (0..child_count).rev() {
-            if let Some(child) = current.child(index as u32) {
-                stack.push(child);
-            }
-        }
-    }
-}
-
-fn is_comment_node(kind: &str) -> bool {
-    matches!(
-        kind,
-        "comment" | "line_comment" | "block_comment" | "doc_comment" | "string_comment"
-    )
+    walk_non_comment_leaves(node, |leaf| {
+        out.push_str(&source[leaf.byte_range()]);
+        out.push(' ');
+    });
 }
 
 /// Strip imports and function bodies, return remaining "scaffold" text.

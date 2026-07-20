@@ -32,6 +32,8 @@ pub enum StateAttachmentBody {
     ReviewSignatures(ContentHash),
     Discussions(ContentHash),
     StructuredConflicts(ContentHash),
+    /// Content hash of the state's `SemanticIndexRoot` blob (heddle#1067).
+    SemanticIndex(ContentHash),
     Signature(StateSignature),
 }
 

@@ -257,6 +257,8 @@ impl SnapshotMutation<'_> {
         let mut risk_signals = None;
         #[cfg(feature = "tree-sitter-symbols")]
         let mut discussions = None;
+        #[cfg(feature = "tree-sitter-symbols")]
+        let mut semantic_index = None;
 
         #[cfg(feature = "tree-sitter-symbols")]
         {
@@ -272,6 +274,19 @@ impl SnapshotMutation<'_> {
                 Ok(None) => {}
                 Err(err) => {
                     tracing::warn!(error = %err, "risk signal computation failed; continuing without signals");
+                }
+            }
+
+            // Eager semantic index: parse only changed blobs, reusing the
+            // parent index for unchanged subtrees. Never fails the capture.
+            match self
+                .repo
+                .compute_and_persist_semantic_index(prior_state.as_ref(), &state)
+            {
+                Ok(Some(hash)) => semantic_index = Some(hash),
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(error = %err, "semantic index computation failed; continuing without index");
                 }
             }
 
@@ -305,6 +320,7 @@ impl SnapshotMutation<'_> {
         for body in [
             risk_signals.map(StateAttachmentBody::RiskSignals),
             discussions.map(StateAttachmentBody::Discussions),
+            semantic_index.map(StateAttachmentBody::SemanticIndex),
         ]
         .into_iter()
         .flatten()
