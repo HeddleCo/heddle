@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Native signal-health queries used by the local CLI.
+//! Native signal-health queries used by local review commands.
 
 use std::collections::{HashMap, HashSet};
 

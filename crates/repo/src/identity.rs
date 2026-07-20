@@ -412,7 +412,7 @@ mod tests {
             &DeviceIdentity {
                 public_key: hex::encode(device_signer.public_key()),
                 private_key_pem: device_signer.to_pem().expect("device pem"),
-                server: "grpc.example".to_string(),
+                server: "api.example".to_string(),
                 linked_at: now_rfc3339(),
             },
         )
@@ -465,7 +465,7 @@ mod tests {
             &DeviceIdentity {
                 public_key: "deadbeef".to_string(),
                 private_key_pem: "not a valid pem".to_string(),
-                server: "grpc.example".to_string(),
+                server: "api.example".to_string(),
                 linked_at: now_rfc3339(),
             },
         )
@@ -491,7 +491,7 @@ mod tests {
             &DeviceIdentity {
                 public_key: hex::encode(signer.public_key()),
                 private_key_pem: signer.to_pem().expect("pem"),
-                server: "grpc.example".to_string(),
+                server: "api.example".to_string(),
                 linked_at: now_rfc3339(),
             },
         )
@@ -499,7 +499,7 @@ mod tests {
 
         let loaded = load_device(&path).expect("load").expect("present");
         assert_eq!(loaded.public_key, hex::encode(signer.public_key()));
-        assert_eq!(loaded.server, "grpc.example");
+        assert_eq!(loaded.server, "api.example");
     }
 
     /// A `0600` identity loads; loosening it to a group/world-readable mode
@@ -574,7 +574,7 @@ mod tests {
         let local = temp.path().join("identity.toml");
         let device = temp.path().join("device-identity.toml");
 
-        let device_signer = write_device_for(&device, "grpc.S");
+        let device_signer = write_device_for(&device, "api.S");
         let device_pubkey = hex::encode(device_signer.public_key());
 
         // Before logout the resolver prefers the device key.
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(hex::encode(pre.public_key()), device_pubkey);
 
         // Logout for the matching server removes the device identity.
-        let removed = unlink_device_key_at(&device, "grpc.S").expect("unlink");
+        let removed = unlink_device_key_at(&device, "api.S").expect("unlink");
         assert!(removed, "matching-server device identity must be removed");
         assert!(
             !device.exists(),
@@ -607,10 +607,10 @@ mod tests {
         let temp = TempDir::new().expect("temp dir");
         let device = temp.path().join("device-identity.toml");
 
-        let device_signer = write_device_for(&device, "grpc.S");
+        let device_signer = write_device_for(&device, "api.S");
         let device_pubkey = hex::encode(device_signer.public_key());
 
-        let removed = unlink_device_key_at(&device, "grpc.OTHER").expect("unlink");
+        let removed = unlink_device_key_at(&device, "api.OTHER").expect("unlink");
         assert!(
             !removed,
             "logging out of a different server must not remove this device identity",
@@ -622,7 +622,7 @@ mod tests {
 
         let still = load_device(&device).expect("load").expect("present");
         assert_eq!(still.public_key, device_pubkey);
-        assert_eq!(still.server, "grpc.S");
+        assert_eq!(still.server, "api.S");
     }
 
     /// Logout is a no-op (returns `false`, no error) when there is no device
@@ -631,7 +631,7 @@ mod tests {
     fn unlink_is_noop_when_no_device_identity() {
         let temp = TempDir::new().expect("temp dir");
         let device = temp.path().join("device-identity.toml");
-        let removed = unlink_device_key_at(&device, "grpc.S").expect("unlink");
+        let removed = unlink_device_key_at(&device, "api.S").expect("unlink");
         assert!(!removed, "nothing to remove when no device identity exists");
     }
 
@@ -672,7 +672,7 @@ mod tests {
         let dir = temp.path().join("home");
         std::fs::create_dir(&dir).expect("home dir");
         let device = dir.join("device-identity.toml");
-        write_device_for(&device, "grpc.S");
+        write_device_for(&device, "api.S");
 
         // Prime the device lock (materialises `<dir>/locks/device-identity.lock`)
         // while `dir` is still writable, so the unlink can ACQUIRE the lock and
@@ -684,7 +684,7 @@ mod tests {
         // unlinked (removal needs write on the directory).
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).expect("lock dir");
 
-        let result = unlink_device_key_at(&device, "grpc.S");
+        let result = unlink_device_key_at(&device, "api.S");
 
         // Restore perms before asserting so the TempDir can clean up.
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
@@ -714,7 +714,7 @@ mod tests {
             let device = temp.path().join("device-identity.toml");
 
             // The file starts as server A's identity.
-            write_device_for(&device, "grpc.A");
+            write_device_for(&device, "api.A");
 
             // Mint B's keypair up front so the login thread just writes it.
             let b = Ed25519Signer::generate().expect("b keypair");
@@ -723,11 +723,11 @@ mod tests {
             let b_pem = b.to_pem().expect("b pem");
 
             let logout_path = device.clone();
-            let logout = std::thread::spawn(move || unlink_device_key_at(&logout_path, "grpc.A"));
+            let logout = std::thread::spawn(move || unlink_device_key_at(&logout_path, "api.A"));
 
             let login_path = device.clone();
             let login = std::thread::spawn(move || {
-                link_device_key_at(&login_path, &b_pub, &b_pem, "grpc.B")
+                link_device_key_at(&login_path, &b_pub, &b_pem, "api.B")
             });
 
             logout.join().expect("logout thread").expect("unlink ok");
@@ -738,7 +738,7 @@ mod tests {
             let surviving = load_device(&device)
                 .expect("load device")
                 .expect("the concurrent login's identity must survive");
-            assert_eq!(surviving.server, "grpc.B");
+            assert_eq!(surviving.server, "api.B");
             assert_eq!(
                 surviving.public_key, b_pubkey,
                 "the concurrent login's identity must never be deleted by the unlink",
@@ -761,7 +761,7 @@ mod tests {
             &DeviceIdentity {
                 public_key: hex::encode(signer.public_key()),
                 private_key_pem: signer.to_pem().expect("pem"),
-                server: "grpc.example".to_string(),
+                server: "api.example".to_string(),
                 linked_at: now_rfc3339(),
             },
         )

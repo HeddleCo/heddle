@@ -2,22 +2,17 @@
 //! Hosted `StateReviewService` client methods.
 //!
 //! Review signatures are server-minted via caller-authenticated, PoP-signed
-//! RPCs (weft#549) — the object pack rejects client-pushed `ReviewSignatures`
-//! attachments, so `SignState`/`RecordVerdict` are the ONLY channel by which a
-//! signature reaches the hosted server. `heddle review sync` (push path) replays
-//! locally-recorded review signatures over these methods.
+//! calls (weft#549) — the object pack rejects client-pushed `ReviewSignatures`
+//! attachments. `heddle review sync` replays locally-recorded review signatures
+//! through the active `SignState` production route.
 
-use api::heddle::api::v1alpha1::{
-    ListSignaturesRequest, ListSignaturesResponse, RecordVerdictRequest, RecordVerdictResponse,
-    ReviewKind, ReviewScope, SignStateRequest, SignStateResponse, Verdict,
-};
+use api::heddle::api::v1alpha1::{ReviewKind, ReviewScope, SignStateRequest, SignStateResponse};
 use objects::object::StateId;
 use wire::ProtocolError;
 
 use super::{HostedClient, helpers::hosted_to_protocol_error, operation_id::ClientOperationId};
 
 const SIGN_STATE: &str = "heddle.api.v1alpha1.StateReviewService/SignState";
-const RECORD_VERDICT: &str = "heddle.api.v1alpha1.StateReviewService/RecordVerdict";
 
 impl HostedClient {
     /// Mint a hosted review signature over `state_id`. `signature`/`public_key`
@@ -56,63 +51,6 @@ impl HostedClient {
         };
         self.routes()
             .sign_state(&request)
-            .await
-            .map_err(hosted_to_protocol_error)
-    }
-
-    /// Record a signed SIGN/HOLD/REJECT reviewer verdict over `state_id`.
-    /// Decoupled from status — returns the same state. Same signing model as
-    /// [`Self::sign_state`].
-    #[allow(clippy::too_many_arguments)]
-    pub async fn record_verdict(
-        &mut self,
-        repo_path: &str,
-        state_id: &StateId,
-        verdict: Verdict,
-        scope: ReviewScope,
-        reason: &str,
-        algorithm: &str,
-        public_key: Vec<u8>,
-        signature: Vec<u8>,
-        signed_at_unix: i64,
-        client_operation_id: String,
-    ) -> Result<RecordVerdictResponse, ProtocolError> {
-        let operation_id =
-            ClientOperationId::for_required_method(RECORD_VERDICT, client_operation_id)?;
-        let request = RecordVerdictRequest {
-            repo_path: super::helpers::repository_ref(repo_path),
-            state_id: super::helpers::proto_state_id(*state_id),
-            verdict: verdict as i32,
-            scope: Some(scope),
-            reason: reason.to_string(),
-            algorithm: algorithm.to_string(),
-            public_key,
-            signature,
-            signed_at: Some(prost_types::Timestamp {
-                seconds: signed_at_unix,
-                nanos: 0,
-            }),
-            client_operation_id: operation_id.to_wire(),
-        };
-        self.routes()
-            .record_verdict(&request)
-            .await
-            .map_err(hosted_to_protocol_error)
-    }
-
-    /// List hosted review signatures recorded against `state_id`. Read-only,
-    /// authenticated (unsigned tier).
-    pub async fn list_review_signatures(
-        &mut self,
-        repo_path: &str,
-        state_id: &StateId,
-    ) -> Result<ListSignaturesResponse, ProtocolError> {
-        let request = ListSignaturesRequest {
-            repo_path: super::helpers::repository_ref(repo_path),
-            state_id: super::helpers::proto_state_id(*state_id),
-        };
-        self.routes()
-            .list_signatures(&request)
             .await
             .map_err(hosted_to_protocol_error)
     }

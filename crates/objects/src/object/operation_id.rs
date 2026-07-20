@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Client-supplied operation identifiers for idempotent state-changing calls.
 //!
-//! Every state-changing CLI verb and gRPC method accepts an [`OperationId`].
+//! Every state-changing CLI verb and hosted method accepts an [`OperationId`].
 //! Repeated calls with the same id return the original outcome rather than
 //! re-executing — the property the agent loop depends on for safe retry.
 //! The newtype keeps the dedup intent visible at every callsite instead of

@@ -21,8 +21,8 @@ use cli::cli::{
 };
 use cli::{
     cli::{
-        AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands, DaemonCommands,
-        DiffArgs, ExpandArgs, FsckCommands, FsckRepairCommands, IntegrationCommands, LogArgs,
+        Cli, CloneArgs, CollapseArgs, Commands, ContextCommands, DaemonCommands, DiffArgs,
+        ExpandArgs, FsckCommands, FsckRepairCommands, IntegrationCommands, LogArgs,
         MaintenanceCommands, ResolveArgs, RetroArgs, RevertArgs, RunArgs, ThreadCommands, UndoArgs,
         cli_args::LandArgs,
         commands::{
@@ -54,9 +54,8 @@ use tracing::debug;
 // `current_thread` flavor avoids spinning up a CPU-count-sized worker
 // pool on every CLI invocation. The foreground `heddle` binary is a
 // one-shot command — `heddle status`, `heddle capture`, etc. don't
-// fan out across cores. Daemon variants (`heddle daemon serve`,
-// `heddle agent serve`) override this with their own runtime setup
-// when they need real concurrency. Saves ~10-30ms of startup that the
+// fan out across cores. The mount daemon owns its own runtime setup
+// when it needs real concurrency. Saves ~10-30ms of startup that the
 // multi-thread flavor pays for thread-pool creation + teardown.
 fn main() -> Result<()> {
     install_broken_pipe_panic_hook();
@@ -85,7 +84,7 @@ async fn async_main() -> Result<()> {
     }
 
     // Install the ring crypto provider as the rustls default. Without this,
-    // any rustls TLS handshake (gRPC, GitHub REST, `import git
+    // any rustls TLS handshake (hosted API, GitHub REST, `import git
     // https://…`) panics in 0.23.x. We pin ring instead of aws-lc-rs to
     // keep the 80s aws-lc-sys C build out of release builds. Measured
     // ~0ms on macOS — defensive ordering rather than a perf hot spot.
@@ -1036,8 +1035,6 @@ fn is_daemon_invocation(command: &Commands) -> bool {
         command,
         Commands::Daemon {
             command: DaemonCommands::Serve
-        } | Commands::Agent {
-            command: AgentCommands::Serve(_)
         }
     )
 }

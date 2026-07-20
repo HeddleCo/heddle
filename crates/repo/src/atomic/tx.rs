@@ -55,7 +55,7 @@ pub struct RewindLedger {
 /// Holds the `Repository` handle, the checkout `scope`, the idempotency
 /// `transaction_id`, the nesting `depth`, and the reverse-order rewind ledger.
 /// Bound to the file-backed [`Repository`] (the local CLI path the primitive
-/// targets in impl-a); the hosted/Postgres path uses its own gRPC handlers.
+/// targets in impl-a); the hosted/Postgres path uses its own call handlers.
 pub struct Tx<'a> {
     repo: &'a Repository,
     scope: String,

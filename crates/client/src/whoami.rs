@@ -36,7 +36,7 @@ struct WhoamiOutput {
     /// `kind:path` (e.g. `repo:alice/api`, `namespace:alice`). Empty ⇒ full
     /// resource authority.
     scopes: Vec<String>,
-    /// The intersected gRPC operation ceiling from the delegation chain. `None`
+    /// The intersected hosted-operation ceiling from the delegation chain. `None`
     /// ⇒ no operation allowlist (full authority, minus the mandatory deny floor).
     operation_ceiling: Option<Vec<String>>,
     /// Effective token expiry (RFC3339), the earliest of the authority and every
@@ -243,7 +243,7 @@ fn token_resource_scopes(token: &str) -> Result<Vec<(String, String)>> {
     Ok(scopes)
 }
 
-/// The effective gRPC operation ceiling for a token: the INTERSECTION of every
+/// The effective hosted-operation ceiling for a token: the INTERSECTION of every
 /// `check if operation($op), $op == …` allowlist across the attenuation chain
 /// (each hop can only narrow). `None` means no operation allowlist is present —
 /// i.e. full-authority for operations (the mandatory deny floor still applies).

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Local-mode implementation of the [`StateReviewService`] gRPC contract.
+//! Local-mode implementation of the state-review contract.
 //!
 //! Reads and writes review-signature attachments. Verifies the client-supplied
 //! signature against the deterministic [`signing_payload`] before persisting.
 
 // `::state_review` disambiguates from this module's own name
-// (`grpc_local_impl::state_review`), the same way the hosted impl
+// (`local_review::state_review`), the same way the hosted impl
 // disambiguates by being in a sibling module.
 use ::state_review::{
     PathSymbol, ReadingOrderPartition, SymbolKind, build_review_payload_partition,
@@ -19,7 +19,7 @@ use api::heddle::api::v1alpha1::{
     ReviewPayload, ReviewScope as ProtoReviewScope, ReviewSignature as ProtoReviewSignature,
     ReviewSummary, RiskSignal as ProtoRiskSignal, SignStateRequest, SignStateResponse,
     SignalAnchor as ProtoSignalAnchor, SignalHealthEntry as ProtoSignalHealthEntry, SigningFooter,
-    Verdict as ProtoVerdict, state_review_service_server::StateReviewService,
+    Verdict as ProtoVerdict,
 };
 use crypto::verify_payload_signature;
 use objects::{
@@ -34,9 +34,8 @@ use objects::{
 };
 use prost::Message;
 use repo::{Repository, StateAttachmentKind};
-use tonic::{Request, Response, Status};
 
-use super::{GrpcLocalService, to_status, with_idempotency};
+use super::{LocalReviewContext, LocalReviewError as Status, to_status, with_idempotency};
 
 /// Maximum drift (seconds) between the client's `signed_at_unix` and the
 /// server's wall clock. Generous enough to absorb NTP skew, narrow enough
@@ -54,25 +53,23 @@ const VERDICT_ENVELOPE_TAG: &str = "\u{1}hd-verdict-v1\u{1}";
 /// Local-mode `StateReviewService` implementation.
 #[derive(Clone)]
 pub struct LocalStateReviewService {
-    inner: GrpcLocalService,
+    inner: LocalReviewContext,
 }
 
 impl LocalStateReviewService {
-    pub fn new(inner: GrpcLocalService) -> Self {
+    pub fn new(inner: LocalReviewContext) -> Self {
         Self { inner }
     }
 }
 
-#[tonic::async_trait]
-impl StateReviewService for LocalStateReviewService {
-    async fn get_repo_signal_health(
+impl LocalStateReviewService {
+    pub async fn get_repo_signal_health(
         &self,
-        request: Request<GetRepoSignalHealthRequest>,
-    ) -> Result<Response<RepoSignalHealthReport>, Status> {
-        let report =
-            super::get_repo_signal_health(self.inner.repo(), request.into_inner().window_states)
-                .map_err(to_status)?;
-        Ok(Response::new(RepoSignalHealthReport {
+        request: GetRepoSignalHealthRequest,
+    ) -> Result<RepoSignalHealthReport, Status> {
+        let report = super::get_repo_signal_health(self.inner.repo(), request.window_states)
+            .map_err(to_status)?;
+        Ok(RepoSignalHealthReport {
             entries: report
                 .entries
                 .into_iter()
@@ -83,14 +80,13 @@ impl StateReviewService for LocalStateReviewService {
                 })
                 .collect(),
             window_states: report.window_states,
-        }))
+        })
     }
 
-    async fn get_review_payload(
+    pub async fn get_review_payload(
         &self,
-        request: Request<GetReviewPayloadRequest>,
-    ) -> Result<Response<ReviewPayload>, Status> {
-        let req = request.into_inner();
+        req: GetReviewPayloadRequest,
+    ) -> Result<ReviewPayload, Status> {
         let state_id = parse_state_id(&req.state_id)?;
         let repo = self.inner.repo();
         let state = repo
@@ -279,14 +275,10 @@ impl StateReviewService for LocalStateReviewService {
             }),
         };
 
-        Ok(Response::new(payload))
+        Ok(payload)
     }
 
-    async fn sign_state(
-        &self,
-        request: Request<SignStateRequest>,
-    ) -> Result<Response<SignStateResponse>, Status> {
-        let req = request.into_inner();
+    pub async fn sign_state(&self, req: SignStateRequest) -> Result<SignStateResponse, Status> {
         let req_bytes = req.encode_to_vec();
         let client_operation_id = req.client_operation_id.clone();
         let inner = self.inner.clone();
@@ -303,14 +295,13 @@ impl StateReviewService for LocalStateReviewService {
         )
         .await?;
 
-        Ok(Response::new(response))
+        Ok(response)
     }
 
-    async fn list_signatures(
+    pub async fn list_signatures(
         &self,
-        request: Request<ListSignaturesRequest>,
-    ) -> Result<Response<ListSignaturesResponse>, Status> {
-        let req = request.into_inner();
+        req: ListSignaturesRequest,
+    ) -> Result<ListSignaturesResponse, Status> {
         let state_id = parse_state_id(&req.state_id)?;
         let repo = self.inner.repo();
         let state = repo
@@ -349,14 +340,13 @@ impl StateReviewService for LocalStateReviewService {
                 None => Vec::new(),
             };
 
-        Ok(Response::new(ListSignaturesResponse { signatures }))
+        Ok(ListSignaturesResponse { signatures })
     }
 
-    async fn record_verdict(
+    pub async fn record_verdict(
         &self,
-        request: Request<RecordVerdictRequest>,
-    ) -> Result<Response<RecordVerdictResponse>, Status> {
-        let req = request.into_inner();
+        req: RecordVerdictRequest,
+    ) -> Result<RecordVerdictResponse, Status> {
         let req_bytes = req.encode_to_vec();
         let client_operation_id = req.client_operation_id.clone();
         let inner = self.inner.clone();
@@ -373,22 +363,22 @@ impl StateReviewService for LocalStateReviewService {
         )
         .await?;
 
-        Ok(Response::new(response))
+        Ok(response)
     }
 
-    async fn record_check_ack(
+    pub async fn record_check_ack(
         &self,
-        _request: Request<RecordCheckAckRequest>,
-    ) -> Result<Response<RecordCheckAckResponse>, Status> {
+        _request: RecordCheckAckRequest,
+    ) -> Result<RecordCheckAckResponse, Status> {
         Err(Status::unimplemented(
             "record_check_ack is not available in local mode: local repositories do not persist review check acknowledgements",
         ))
     }
 
-    async fn get_review_progress(
+    pub async fn get_review_progress(
         &self,
-        _request: Request<GetReviewProgressRequest>,
-    ) -> Result<Response<GetReviewProgressResponse>, Status> {
+        _request: GetReviewProgressRequest,
+    ) -> Result<GetReviewProgressResponse, Status> {
         Err(Status::unimplemented(
             "get_review_progress is not available in local mode: local repositories do not persist review progress",
         ))
@@ -398,7 +388,7 @@ impl StateReviewService for LocalStateReviewService {
 /// Body of [`LocalStateReviewService::sign_state`]. Lifted out of the trait
 /// method so [`with_idempotency`] can re-execute it inside its closure.
 async fn execute_sign_state(
-    inner: &GrpcLocalService,
+    inner: &LocalReviewContext,
     req: SignStateRequest,
 ) -> Result<SignStateResponse, Status> {
     // 1. Validate the kind.
@@ -496,7 +486,7 @@ async fn execute_sign_state(
 }
 
 async fn execute_record_verdict(
-    inner: &GrpcLocalService,
+    inner: &LocalReviewContext,
     req: RecordVerdictRequest,
 ) -> Result<RecordVerdictResponse, Status> {
     let verdict = verdict_str_from_proto(req.verdict)?;
@@ -1232,6 +1222,10 @@ mod tests {
 
     use super::*;
 
+    fn local_request<T>(request: T) -> T {
+        request
+    }
+
     fn fresh_service() -> (LocalStateReviewService, Arc<Repository>, TempDir) {
         let temp = TempDir::new().expect("create tempdir");
         // SAFETY: tests run with a controlled environment; setting these
@@ -1245,7 +1239,7 @@ mod tests {
         let dedup = OperationDedupStore::open(repo.heddle_dir()).expect("open dedup");
         let repo = Arc::new(repo);
         let svc =
-            LocalStateReviewService::new(GrpcLocalService::new(repo.clone(), Arc::new(dedup)));
+            LocalStateReviewService::new(LocalReviewContext::new(repo.clone(), Arc::new(dedup)));
         (svc, repo, temp)
     }
 
@@ -1323,20 +1317,20 @@ mod tests {
         let state_id = capture_state(&repo);
 
         let resp = svc
-            .sign_state(Request::new(sign_request(&state_id, "")))
+            .sign_state(local_request(sign_request(&state_id, "")))
             .await
             .expect("sign_state");
-        assert!(!resp.get_ref().signature_id.is_empty());
-        assert_eq!(resp.get_ref().state_id, Some(api_state_id(&state_id)));
+        assert!(!resp.signature_id.is_empty());
+        assert_eq!(resp.state_id, Some(api_state_id(&state_id)));
 
         let listing = svc
-            .list_signatures(Request::new(ListSignaturesRequest {
+            .list_signatures(local_request(ListSignaturesRequest {
                 repo_path: None,
                 state_id: Some(api_state_id(&state_id)),
             }))
             .await
             .expect("list_signatures");
-        let sigs = &listing.get_ref().signatures;
+        let sigs = &listing.signatures;
         assert_eq!(sigs.len(), 1, "expected one signature, got {sigs:?}");
         assert_eq!(
             sigs[0].kind,
@@ -1361,25 +1355,25 @@ mod tests {
         let request = verdict_request(&state_id, ProtoVerdict::Hold, "needs another pass", &op_id);
 
         let first = svc
-            .record_verdict(Request::new(request.clone()))
+            .record_verdict(local_request(request.clone()))
             .await
             .expect("record verdict");
         let replay = svc
-            .record_verdict(Request::new(request))
+            .record_verdict(local_request(request))
             .await
             .expect("replay verdict");
-        assert_eq!(first.get_ref(), replay.get_ref());
-        assert_eq!(first.get_ref().state_id, Some(api_state_id(&state_id)));
+        assert_eq!(first, replay);
+        assert_eq!(first.state_id, Some(api_state_id(&state_id)));
         assert_eq!(repo.head().expect("read head"), Some(state_id));
 
         let listing = svc
-            .list_signatures(Request::new(ListSignaturesRequest {
+            .list_signatures(local_request(ListSignaturesRequest {
                 repo_path: None,
                 state_id: Some(api_state_id(&state_id)),
             }))
             .await
             .expect("list signatures");
-        let signatures = &listing.get_ref().signatures;
+        let signatures = &listing.signatures;
         assert_eq!(signatures.len(), 1, "idempotent replay must append once");
         assert_eq!(signatures[0].verdict, ProtoVerdict::Hold as i32);
         assert_eq!(signatures[0].reason, "needs another pass");
@@ -1399,10 +1393,13 @@ mod tests {
         request.reason = "different reason".to_string();
 
         let error = svc
-            .record_verdict(Request::new(request))
+            .record_verdict(local_request(request))
             .await
             .expect_err("changed signed reason must fail verification");
-        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            error.code(),
+            crate::local_review::LocalReviewCode::InvalidArgument
+        );
         assert!(error.message().contains("failed verification"));
     }
 
@@ -1411,26 +1408,32 @@ mod tests {
     async fn full_contract_routes_signal_health_and_stubs_review_progress() {
         let (svc, _repo, _tmp) = fresh_service();
         let health = svc
-            .get_repo_signal_health(Request::new(GetRepoSignalHealthRequest {
+            .get_repo_signal_health(local_request(GetRepoSignalHealthRequest {
                 repo_path: None,
                 window_states: 1,
             }))
             .await
             .expect("local signal health");
-        assert_eq!(health.get_ref().window_states, 1);
+        assert_eq!(health.window_states, 1);
 
         let ack_error = svc
-            .record_check_ack(Request::new(RecordCheckAckRequest::default()))
+            .record_check_ack(local_request(RecordCheckAckRequest::default()))
             .await
             .expect_err("local check acks are unsupported");
-        assert_eq!(ack_error.code(), tonic::Code::Unimplemented);
+        assert_eq!(
+            ack_error.code(),
+            crate::local_review::LocalReviewCode::Unimplemented
+        );
         assert!(ack_error.message().contains("not available in local mode"));
 
         let progress_error = svc
-            .get_review_progress(Request::new(GetReviewProgressRequest::default()))
+            .get_review_progress(local_request(GetReviewProgressRequest::default()))
             .await
             .expect_err("local review progress is unsupported");
-        assert_eq!(progress_error.code(), tonic::Code::Unimplemented);
+        assert_eq!(
+            progress_error.code(),
+            crate::local_review::LocalReviewCode::Unimplemented
+        );
         assert!(
             progress_error
                 .message()
@@ -1449,28 +1452,27 @@ mod tests {
         let req = sign_request(&state_id, &op_id);
 
         let first = svc
-            .sign_state(Request::new(req.clone()))
+            .sign_state(local_request(req.clone()))
             .await
             .expect("first sign_state");
         let second = svc
-            .sign_state(Request::new(req))
+            .sign_state(local_request(req))
             .await
             .expect("second sign_state");
         assert_eq!(
-            first.get_ref().signature_id,
-            second.get_ref().signature_id,
+            first.signature_id, second.signature_id,
             "replayed call must return the same signature_id"
         );
 
         let listing = svc
-            .list_signatures(Request::new(ListSignaturesRequest {
+            .list_signatures(local_request(ListSignaturesRequest {
                 repo_path: None,
                 state_id: Some(api_state_id(&state_id)),
             }))
             .await
             .expect("list_signatures");
         assert_eq!(
-            listing.get_ref().signatures.len(),
+            listing.signatures.len(),
             1,
             "idempotent replay must not append a duplicate signature"
         );
@@ -1487,10 +1489,14 @@ mod tests {
         req.signature[last] ^= 0xff;
 
         let err = svc
-            .sign_state(Request::new(req))
+            .sign_state(local_request(req))
             .await
             .expect_err("forged signature must be rejected");
-        assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
+        assert_eq!(
+            err.code(),
+            crate::local_review::LocalReviewCode::InvalidArgument,
+            "{err:?}"
+        );
         assert!(
             err.message().contains("failed verification"),
             "unexpected error message: {}",
@@ -1510,10 +1516,13 @@ mod tests {
         }
 
         let err = svc
-            .sign_state(Request::new(req))
+            .sign_state(local_request(req))
             .await
             .expect_err("skewed timestamp must be rejected");
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            err.code(),
+            crate::local_review::LocalReviewCode::InvalidArgument
+        );
         assert!(err.message().contains("too far from server time"));
     }
 
@@ -1538,18 +1547,18 @@ mod tests {
             std::env::set_var("HEDDLE_PRINCIPAL_EMAIL", "bob@example.com");
         }
 
-        svc.sign_state(Request::new(sign_request(&state_id, "")))
+        svc.sign_state(local_request(sign_request(&state_id, "")))
             .await
             .expect("sign_state");
 
         let listing = svc
-            .list_signatures(Request::new(ListSignaturesRequest {
+            .list_signatures(local_request(ListSignaturesRequest {
                 repo_path: None,
                 state_id: Some(api_state_id(&state_id)),
             }))
             .await
             .expect("list_signatures");
-        let sigs = &listing.get_ref().signatures;
+        let sigs = &listing.signatures;
         assert_eq!(sigs.len(), 1);
         assert_eq!(
             sigs[0].actor_name, "Bob Signer",
@@ -1580,21 +1589,21 @@ mod tests {
         let svc_a = svc.clone();
         let svc_b = svc.clone();
         let (a, b) = tokio::join!(
-            svc_a.sign_state(Request::new(req_a)),
-            svc_b.sign_state(Request::new(req_b)),
+            svc_a.sign_state(local_request(req_a)),
+            svc_b.sign_state(local_request(req_b)),
         );
         a.expect("first sign_state");
         b.expect("second sign_state");
 
         let listing = svc
-            .list_signatures(Request::new(ListSignaturesRequest {
+            .list_signatures(local_request(ListSignaturesRequest {
                 repo_path: None,
                 state_id: Some(api_state_id(&state_id)),
             }))
             .await
             .expect("list_signatures");
         assert_eq!(
-            listing.get_ref().signatures.len(),
+            listing.signatures.len(),
             2,
             "both concurrent signatures must land — neither should be lost \
              to a stale-blob clobber"
@@ -1622,14 +1631,14 @@ mod tests {
             .expect("first snapshot");
 
         let resp_first = svc
-            .get_review_payload(Request::new(GetReviewPayloadRequest {
+            .get_review_payload(local_request(GetReviewPayloadRequest {
                 repo_path: None,
                 state_id: Some(api_state_id(&first.state_id)),
                 include_all_signals: false,
             }))
             .await
             .expect("get_review_payload first");
-        let payload_first = resp_first.into_inner();
+        let payload_first = resp_first;
         let summary_first = payload_first.summary.as_ref().expect("summary present");
         assert!(
             summary_first.files_changed >= 1,
@@ -1667,14 +1676,14 @@ mod tests {
             .expect("second snapshot");
 
         let resp_second = svc
-            .get_review_payload(Request::new(GetReviewPayloadRequest {
+            .get_review_payload(local_request(GetReviewPayloadRequest {
                 repo_path: None,
                 state_id: Some(api_state_id(&second.state_id)),
                 include_all_signals: false,
             }))
             .await
             .expect("get_review_payload second");
-        let payload_second = resp_second.into_inner();
+        let payload_second = resp_second;
         let summary_second = payload_second.summary.as_ref().expect("summary present");
         assert_eq!(
             summary_second.files_changed, 1,
@@ -1755,14 +1764,14 @@ mod tests {
         repo.store().put_state(&changed).expect("put changed state");
 
         let resp = svc
-            .get_review_payload(Request::new(GetReviewPayloadRequest {
+            .get_review_payload(local_request(GetReviewPayloadRequest {
                 repo_path: None,
                 state_id: Some(api_state_id(&changed_id)),
                 include_all_signals: false,
             }))
             .await
             .expect("get_review_payload gitlink change");
-        let payload = resp.into_inner();
+        let payload = resp;
         let summary = payload.summary.as_ref().expect("summary present");
         assert_eq!(
             summary.files_changed, 1,
@@ -1822,16 +1831,16 @@ mod tests {
         repo.store().put_state(&mutated).expect("put mutated state");
 
         // The review payload must still come back — empty summary,
-        // but no Status::Internal error from the gRPC layer.
+        // but no internal contract failure from the local implementation.
         let resp = svc
-            .get_review_payload(Request::new(GetReviewPayloadRequest {
+            .get_review_payload(local_request(GetReviewPayloadRequest {
                 repo_path: None,
                 state_id: Some(api_state_id(&missing_tree_state_id)),
                 include_all_signals: false,
             }))
             .await
             .expect("missing tree must not block review payload");
-        let payload = resp.into_inner();
+        let payload = resp;
         let summary = payload.summary.as_ref().expect("summary present");
         assert_eq!(
             summary.files_changed, 0,

@@ -14,7 +14,7 @@ use super::{Head, RefExpectation, RefUpdate};
 /// directly instead of bridging through a worker-thread runtime. They're
 /// spelled as `-> impl Future + Send` rather than `async fn` so the
 /// returned future carries an explicit `Send` bound (required by the
-/// hosted server's Tower/tonic stack) and the trait stays clean under
+/// hosted server's call stack) and the trait stays clean under
 /// `-D warnings` (the `async_fn_in_trait` lint). This is a sealed
 /// interface — heddle is the sole implementer — so the lint's
 /// downstream-bound concern does not apply.

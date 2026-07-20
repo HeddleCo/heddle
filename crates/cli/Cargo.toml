@@ -41,7 +41,6 @@ daemon = { path = "../daemon", package = "heddle-daemon", version = "0.10" }
 # into it unconditionally.
 merge = { path = "../merge", package = "heddle-merge", version = "0.10" }
 api = { package = "heddle-api", git = "https://github.com/HeddleCo/api", rev = "194741782f449932d04bf743302ce75af480ad46" }
-grpc = { package = "heddle-api", version = "=0.1.2", features = ["client", "server"] }
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.10" }
 heddle-core = { path = "../core", version = "0.10", default-features = false }
 heddle-format = { path = "../format", version = "0.10" }
@@ -76,27 +75,12 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { workspace = true, optional = true }
 toml.workspace = true
-tonic.workspace = true
 # `uuid::Uuid::new_v4().simple()` suffixes rebase transaction ids
 # (`rebase_ops::mint_rebase_transaction_id`) so a nanosecond-resolution
 # clock collision can't silently drop the later rebase's batch via
 # `flush_rebase_batch`'s dedup (heddle#198 r3 / Codex PR #218 P2).
 # `v5` derives deterministic per-thread push client_operation_ids (remote::push).
 uuid = { workspace = true, features = ["v5"] }
-# Health.Check probe for the local daemon UDS handshake. Only
-# pulled in for the client side; the local daemon binary itself does
-# not (yet) install a health reporter — see `client::local_daemon`.
-tonic-health.workspace = true
-# `tower::service_fn` adapts `tokio::net::UnixStream::connect` into a
-# `tower::Service<Uri>` that tonic's `connect_with_connector` accepts.
-# 0.5 is what tonic itself resolves transitively; pinning to the same
-# major version keeps the trait impls compatible.
-tower = { version = "0.5", default-features = false, features = ["util"] }
-# `hyper-util`'s `TokioIo` adapter wraps a `UnixStream` into something
-# that satisfies hyper's `Read`/`Write` traits — required by tonic
-# 0.14's connector contract. Already a workspace dep used by the
-# server crate; promoting it here for first-class consumption.
-hyper-util.workspace = true
 rustls.workspace = true
 tracing.workspace = true
 tracing-opentelemetry = { workspace = true, optional = true }
@@ -134,7 +118,7 @@ mount = { path = "../mount", package = "heddle-mount", version = "0.10", optiona
 # turns these documented commands into an opaque error for first-run
 # users. The binary cost is the four `tree-sitter-*` parsers
 # (Rust/Python/JS/TS) — a small fraction of the existing footprint
-# from tonic + server.  `semantic-extended` (Go/C/C++/Java) stays
+# from the hosted client stack. `semantic-extended` (Go/C/C++/Java) stays
 # opt-in.
 # `mount` is in the default set so a stock `cargo install heddle-cli`
 # (or `cargo install --path crates/cli`) ships `heddle-fuse-worker`

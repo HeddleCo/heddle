@@ -133,9 +133,6 @@ schema_registry! {
     (&["agent presence list"], AgentPresenceListSchema),
     (&["agent presence complete"], AgentPresenceCompleteSchema),
     (&["agent presence explain"], AgentPresenceExplainSchema),
-    (&["agent serve"], AgentServeSchema),
-    (&["agent status"], AgentDaemonStatusSchema),
-    (&["agent stop"], AgentStopSchema),
     (&["agent reserve", "agent heartbeat", "agent release"], AgentReservationEnvelopeSchema),
     (&["agent capture"], CaptureSchema),
     (&["agent ready"], ReadySchema),
@@ -733,7 +730,7 @@ pub struct WhoamiSchema {
     pub token_kind: Option<String>,
     /// Resource scopes as `kind:path` (empty ⇒ full resource authority).
     pub scopes: Vec<String>,
-    /// Intersected gRPC operation ceiling; null ⇒ full authority.
+    /// Intersected hosted-operation ceiling; null ⇒ full authority.
     pub operation_ceiling: Option<Vec<String>>,
     pub expires_at: Option<String>,
     /// Seconds until expiry; negative when already expired.
@@ -1933,34 +1930,6 @@ pub struct ActorChainEntrySchema {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentServeSchema {
-    pub output_kind: String,
-    pub status: String,
-    pub socket_path: String,
-    pub pid_path: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentDaemonStatusSchema {
-    pub output_kind: String,
-    pub running: bool,
-    pub pid: Option<u32>,
-    pub socket_path: String,
-    pub pid_path: String,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentStopSchema {
-    pub output_kind: String,
-    pub stopped: bool,
-    pub swept_stale: bool,
-    pub pid: Option<i32>,
-    pub reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

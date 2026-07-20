@@ -24,7 +24,7 @@ pub const MAX_RECEIVED_REDACTIONS_BLOB_SIZE: u64 = 64 * 1024 * 1024;
 pub const MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE: u64 = 64 * 1024 * 1024;
 
 /// Envelope headroom added on top of the largest legitimate sidecar blob when
-/// sizing the pull-stream gRPC decode limit. Covers the protobuf fields that
+/// sizing the pull-stream frame decode limit. Covers the protobuf fields that
 /// wrap a max-size sidecar blob in a `PullMessage` — the oneof tag, the
 /// `blob_hash`/`state_id` string, and the transfer checkpoint — none of which
 /// approach a MiB. Kept deliberately tight (not generously round): the decode
@@ -39,13 +39,12 @@ const fn max_u64(a: u64, b: u64) -> u64 {
     if a > b { a } else { b }
 }
 
-/// Inbound gRPC decode limit for the pull stream (tonic's
-/// `max_decoding_message_size`).
+/// Inbound protobuf-frame decode limit for the pull stream.
 ///
 /// This is the *load-bearing* bound on the single-shot, server-controlled
-/// sidecar allocation. tonic refuses to decode an inbound `PullMessage` larger
-/// than this, so an oversized `redactions_blob` / `state_visibility_blob` is
-/// rejected at the decode boundary *before* its `Vec<u8>` is materialized.
+/// sidecar allocation. The hosted frame decoder refuses an inbound
+/// `PullServerFrame` larger than this, so an oversized `redactions_blob` /
+/// `state_visibility_blob` is rejected before its `Vec<u8>` is materialized.
 /// [`check_received_transfer_blob_size`] is retained as a cheap post-decode
 /// defense-in-depth check, but the allocation itself is bounded here.
 ///
@@ -55,7 +54,7 @@ const fn max_u64(a: u64, b: u64) -> u64 {
 /// [`PULL_DECODE_ENVELOPE_HEADROOM`]. Native pack chunks share this stream but
 /// are bounded far below this by the negotiated chunk size, so they are
 /// unaffected.
-pub const MAX_PULL_DECODE_MESSAGE_SIZE: usize = (max_u64(
+pub const MAX_PULL_FRAME_MESSAGE_SIZE: usize = (max_u64(
     MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
     MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE,
 ) + PULL_DECODE_ENVELOPE_HEADROOM) as usize;

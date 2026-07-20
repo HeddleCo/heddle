@@ -17,7 +17,7 @@
 //!
 //! Use [`resolve_state_id`] for the typed [`StateId`]. Use
 //! [`resolve_state_id_bytes`] when you need the wire-form 32-byte
-//! representation (e.g. when handing it to a gRPC service stub).
+//! representation (e.g. when handing it to a hosted service call).
 
 use anyhow::{Result, anyhow};
 use heddle_core::status::next_action::canonical_git_import_ref_command;
@@ -128,7 +128,7 @@ fn tip_only_tag_history_advice(tag: &str) -> RecoveryAdvice {
 /// Resolve a state spec to its wire-form 32-byte representation.
 ///
 /// Convenience wrapper used by services that hand state IDs across a
-/// gRPC boundary. Equivalent to `resolve_state_id(...)?.as_bytes().to_vec()`.
+/// hosted boundary. Equivalent to `resolve_state_id(...)?.as_bytes().to_vec()`.
 pub(crate) fn resolve_state_id_bytes(repo: &Repository, spec: &str) -> Result<Vec<u8>> {
     Ok(resolve_state_id(repo, spec)?.as_bytes().to_vec())
 }

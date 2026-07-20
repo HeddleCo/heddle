@@ -3032,7 +3032,7 @@ fn local_path_from_url(url: &str) -> GitProjectionResult<Option<PathBuf>> {
     // Defense in depth (push-routing no-op): the git-overlay exporter speaks
     // only the local/git network transports. A `heddle://` hosted URL must
     // NEVER reach this classifier — the hosted-sync path
-    // (`GrpcHostedClient`) is the only thing that can push to it. If routing
+    // (`HostedClient`) is the only thing that can push to it. If routing
     // upstream is correct this is unreachable; making it a hard error here
     // means a `heddle://` slipping into the git exporter can never again be a
     // silent success (it would otherwise fall through as a generic network

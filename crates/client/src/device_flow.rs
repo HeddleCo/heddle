@@ -307,7 +307,7 @@ impl AgentTemplate {
 ///
 /// Mirrors the server-side `weft_server::biscuit::AgentAttenuation`
 /// shape — duplicated here because `server` is a heavy dep
-/// (sqlx, tonic, axum, ...) we don't want to pull into the CLI's
+/// (sqlx, axum, ...) we don't want to pull into the CLI's
 /// production binary just for the attenuation machinery.
 #[derive(Debug, Clone)]
 pub struct AgentAttenuation {
@@ -320,7 +320,7 @@ pub struct AgentAttenuation {
     /// `expires_at`, the chain rejects regardless of the parent's
     /// own expiry.
     pub expires_at: DateTime<Utc>,
-    /// When `Some`, the agent is restricted to the listed gRPC
+    /// When `Some`, the agent is restricted to the listed hosted
     /// operations. Each entry is the bare method name (e.g.
     /// `"GetState"`, `"ListRefs"`).
     pub allowed_operations: Option<Vec<String>>,
@@ -605,7 +605,7 @@ fn build_attenuation_block(
     }
     if let Some(ops) = &restrictions.allowed_operations {
         let pred = if ops.is_empty() {
-            // A syntactically valid predicate that no real gRPC method can
+            // A syntactically valid predicate that no real hosted method can
             // match. `Some(vec![])` therefore means deny all, not unrestricted.
             "$op == \"__heddle_no_agent_operations__\"".to_string()
         } else {
@@ -792,8 +792,10 @@ mod tests {
         // grows a new op, this fails and forces a conscious decision about
         // whether the new op belongs to `contributor` (or should be withheld
         // from it, at which point contributor becomes a genuine proper subset).
-        let contributor: BTreeSet<String> =
-            AgentTemplate::Contributor.operations().into_iter().collect();
+        let contributor: BTreeSet<String> = AgentTemplate::Contributor
+            .operations()
+            .into_iter()
+            .collect();
         let safe: BTreeSet<String> = SAFE_AGENT_OPERATIONS
             .iter()
             .map(|op| (*op).to_string())
@@ -807,10 +809,11 @@ mod tests {
 
     #[test]
     fn template_privilege_ordering_holds() {
-        let reviewer: BTreeSet<String> =
-            AgentTemplate::Reviewer.operations().into_iter().collect();
-        let contributor: BTreeSet<String> =
-            AgentTemplate::Contributor.operations().into_iter().collect();
+        let reviewer: BTreeSet<String> = AgentTemplate::Reviewer.operations().into_iter().collect();
+        let contributor: BTreeSet<String> = AgentTemplate::Contributor
+            .operations()
+            .into_iter()
+            .collect();
         let ci: BTreeSet<String> = AgentTemplate::CiLanding.operations().into_iter().collect();
         // Reviewer is the read-only floor; both write templates are supersets.
         assert!(reviewer.is_subset(&contributor));
@@ -987,7 +990,7 @@ mod tests {
     fn identity_service_agent_policy_exactly_matches_the_shared_descriptor() {
         use prost::Message;
 
-        let descriptor = prost_types::FileDescriptorSet::decode(grpc::FILE_DESCRIPTOR_SET)
+        let descriptor = prost_types::FileDescriptorSet::decode(api::FILE_DESCRIPTOR_SET)
             .expect("the shared API descriptor must decode");
         let proto_operations = descriptor
             .file
@@ -1067,7 +1070,7 @@ mod tests {
     }
 
     /// Exercise the same Biscuit chain verification and request-fact shape as
-    /// the hosted server (`time` + bare gRPC `operation`).
+    /// the hosted server (`time` + bare hosted `operation`).
     fn server_authorizes(
         token: &str,
         root: &KeyPair,
@@ -1402,8 +1405,14 @@ mod tests {
         .expect("derive repo-scoped child");
 
         // In scope: the exact repo and any nested subtree path.
-        server_authorizes_resource(&child, &root, "GetState", ("repo", "alice/repoA"), Utc::now())
-            .expect("in-scope repo is admitted");
+        server_authorizes_resource(
+            &child,
+            &root,
+            "GetState",
+            ("repo", "alice/repoA"),
+            Utc::now(),
+        )
+        .expect("in-scope repo is admitted");
         server_authorizes_resource(
             &child,
             &root,
@@ -1466,10 +1475,22 @@ mod tests {
         );
 
         // Every repo under the namespace is reachable; a repo outside is not.
-        server_authorizes_resource(&child, &root, "GetState", ("repo", "alice/repoA"), Utc::now())
-            .expect("repoA under the namespace is admitted");
-        server_authorizes_resource(&child, &root, "GetState", ("repo", "alice/repoB"), Utc::now())
-            .expect("repoB under the namespace is admitted");
+        server_authorizes_resource(
+            &child,
+            &root,
+            "GetState",
+            ("repo", "alice/repoA"),
+            Utc::now(),
+        )
+        .expect("repoA under the namespace is admitted");
+        server_authorizes_resource(
+            &child,
+            &root,
+            "GetState",
+            ("repo", "alice/repoB"),
+            Utc::now(),
+        )
+        .expect("repoB under the namespace is admitted");
         assert!(
             server_authorizes_resource(
                 &child,

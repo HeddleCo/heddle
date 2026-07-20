@@ -1148,48 +1148,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(&["agent"], surface(GROUP, "automation")),
     entry(
-        &["agent", "serve"],
-        surface(
-            json_discriminators(
-                documented_schemas(DAEMON_MUTATION, &["agent serve"]),
-                &[json_discriminator(
-                    Some("agent serve"),
-                    "output_kind",
-                    "agent_serve",
-                )],
-            ),
-            "automation",
-        ),
-    ),
-    entry(
-        &["agent", "status"],
-        surface(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["agent status"]),
-                &[json_discriminator(
-                    Some("agent status"),
-                    "output_kind",
-                    "agent_status",
-                )],
-            ),
-            "automation",
-        ),
-    ),
-    entry(
-        &["agent", "stop"],
-        surface(
-            json_discriminators(
-                documented_schemas(DAEMON_MUTATION, &["agent stop"]),
-                &[json_discriminator(
-                    Some("agent stop"),
-                    "output_kind",
-                    "agent_stop",
-                )],
-            ),
-            "automation",
-        ),
-    ),
-    entry(
         &["agent", "reserve"],
         surface(
             documented_schemas(REF_AND_METADATA_MUTATION, &["agent reserve"]),
@@ -4617,9 +4575,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             DaemonCommands::Stop => vec!["daemon", "stop"],
         },
         Commands::Agent { command } => match command {
-            AgentCommands::Serve(_) => vec!["agent", "serve"],
-            AgentCommands::Status => vec!["agent", "status"],
-            AgentCommands::Stop => vec!["agent", "stop"],
             AgentCommands::Reserve(_) => vec!["agent", "reserve"],
             AgentCommands::Heartbeat(_) => vec!["agent", "heartbeat"],
             AgentCommands::Capture(_) => vec!["agent", "capture"],

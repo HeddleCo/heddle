@@ -199,6 +199,41 @@ impl HeddleExitCode {
             {
                 return Self::Config;
             }
+            if let Some(protocol) = cause.downcast_ref::<wire::ProtocolError>() {
+                if let Some(typed) =
+                    crate::hosted_failure::HostedFailureDetail::from_protocol_error(protocol)
+                    && let Some(code) = typed.exit_code()
+                {
+                    return code;
+                }
+                return match protocol {
+                    wire::ProtocolError::RemoteFailure { code, .. } => {
+                        crate::hosted_failure::exit_code_for_remote(*code)
+                    }
+                    wire::ProtocolError::AuthorizationFailed(_)
+                    | wire::ProtocolError::AuthenticationFailed(_) => Self::NoPerm,
+                    wire::ProtocolError::ObjectNotFound(_) => Self::Config,
+                    wire::ProtocolError::InvalidState(_)
+                    | wire::ProtocolError::AlreadyExists(_)
+                    | wire::ProtocolError::Serialization(_)
+                    | wire::ProtocolError::MessageTooLarge { .. }
+                    | wire::ProtocolError::InvalidMessageType(_)
+                    | wire::ProtocolError::VersionMismatch { .. }
+                    | wire::ProtocolError::CapabilityNotSupported(_) => Self::Protocol,
+                    wire::ProtocolError::Io(io) => match io.kind() {
+                        IoErrorKind::TimedOut
+                        | IoErrorKind::ConnectionRefused
+                        | IoErrorKind::ConnectionAborted
+                        | IoErrorKind::ConnectionReset
+                        | IoErrorKind::Interrupted => Self::TempFail,
+                        IoErrorKind::PermissionDenied => Self::NoPerm,
+                        _ => Self::IoErr,
+                    },
+                    wire::ProtocolError::Remote(_) | wire::ProtocolError::LockError(_) => {
+                        Self::IoErr
+                    }
+                };
+            }
             if let Some(io) = cause.downcast_ref::<std::io::Error>() {
                 return match io.kind() {
                     IoErrorKind::PermissionDenied => Self::NoPerm,
@@ -208,29 +243,6 @@ impl HeddleExitCode {
                     | IoErrorKind::ConnectionReset
                     | IoErrorKind::Interrupted => Self::TempFail,
                     IoErrorKind::NotFound | IoErrorKind::AlreadyExists => Self::CantCreat,
-                    _ => Self::IoErr,
-                };
-            }
-            if let Some(status) = cause.downcast_ref::<tonic::Status>() {
-                use tonic::Code;
-                // A typed conflict/cursor/stream detail (AX H4) overrides the
-                // bare-code mapping: a cursor/stream failure is a safe restart
-                // (TempFail 75) even though its status code is InvalidArgument /
-                // Unavailable, and a conflict is a protocol rejection.
-                if let Some(typed) = crate::hosted_typed_error::HostedTypedError::from_status(status)
-                    && let Some(code) = typed.exit_code()
-                {
-                    return code;
-                }
-                return match status.code() {
-                    Code::Unavailable | Code::DeadlineExceeded | Code::ResourceExhausted => {
-                        Self::TempFail
-                    }
-                    Code::InvalidArgument | Code::FailedPrecondition | Code::OutOfRange => {
-                        Self::Protocol
-                    }
-                    Code::PermissionDenied | Code::Unauthenticated => Self::NoPerm,
-                    Code::NotFound => Self::Config,
                     _ => Self::IoErr,
                 };
             }

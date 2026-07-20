@@ -2,7 +2,7 @@
 //! Isolated experiment carrying Heddle sync messages and native packs over Iroh.
 //!
 //! The experiment is a root-workspace member and consumes the public
-//! `heddle-api` messages without enabling its tonic client or server features.
+//! transport-neutral `heddle-api` messages over Iroh operation streams.
 //! This keeps the contract constant while testing Iroh as the transport.
 
 mod client;

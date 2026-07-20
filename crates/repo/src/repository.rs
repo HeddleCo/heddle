@@ -312,10 +312,10 @@ struct GitProjectionMappingFile {
 /// Two production implementations exist:
 /// - Git-overlay clones: `cli::commands::clone::GitOverlayBlobHydrator`
 ///   uses sley promisor-fetch semantics against the bare `.git/` repo.
-/// - Hosted clones: `heddle_client::grpc_hosted::LazyHostedHydrator`
-///   bridges sync `hydrate` calls to async gRPC via a dedicated worker
+/// - Hosted clones: `heddle_client::hosted::LazyHostedHydrator`
+///   bridges sync `hydrate` calls to an async hosted call via a dedicated worker
 ///   thread + private Tokio runtime; on each call the worker invokes
-///   `HostedGrpcClient::hydrate_pulled_state` for the current local-thread
+///   `HostedClient::hydrate_pulled_state` for the current local-thread
 ///   tip.
 ///
 /// On success the hydrator is expected to write the blob into

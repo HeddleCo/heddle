@@ -3,7 +3,7 @@ name = "heddle-daemon"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Heddle local-mode gRPC daemon and service implementations"
+description = "Heddle local typed review implementation"
 license.workspace = true
 repository.workspace = true
 keywords.workspace = true
@@ -13,7 +13,7 @@ categories.workspace = true
 chrono.workspace = true
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.10" }
 futures.workspace = true
-api = { package = "heddle-api", version = "=0.1.2", features = ["server"] }
+api = { package = "heddle-api", git = "https://github.com/HeddleCo/api", rev = "194741782f449932d04bf743302ce75af480ad46" }
 hex.workspace = true
 libc.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.10" }
@@ -27,7 +27,6 @@ serde_json.workspace = true
 state_review = { path = "../state_review", package = "heddle-state-review", version = "0.10" }
 tokio.workspace = true
 tokio-stream.workspace = true
-tonic.workspace = true
 toml.workspace = true
 tracing.workspace = true
 

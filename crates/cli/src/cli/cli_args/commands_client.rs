@@ -92,7 +92,7 @@ pub enum AuthCommands {
         #[arg(long = "scope")]
         scopes: Vec<String>,
 
-        /// Narrow the safe operation set (repeatable, using gRPC method names such as `Push`).
+        /// Narrow the safe operation set (repeatable, using hosted method names such as `Push`).
         #[arg(long = "allow")]
         allowed_operations: Vec<String>,
 
@@ -259,7 +259,7 @@ mod tests {
             "auth",
             "derive-agent",
             "--server",
-            "grpc.heddle.test",
+            "api.heddle.test",
             "--ttl",
             "900",
             "--scope",
@@ -286,7 +286,7 @@ mod tests {
         else {
             panic!("expected auth derive-agent");
         };
-        assert_eq!(server, "grpc.heddle.test");
+        assert_eq!(server, "api.heddle.test");
         assert_eq!(ttl_secs, 900);
         assert_eq!(scopes, ["repo:acme/api", "namespace:acme"]);
         assert_eq!(allowed_operations, ["Push", "GetState"]);
@@ -297,7 +297,7 @@ mod tests {
                 "auth",
                 "derive-agent",
                 "--server",
-                "grpc.heddle.test",
+                "api.heddle.test",
                 "--stdout",
             ])
             .is_err(),

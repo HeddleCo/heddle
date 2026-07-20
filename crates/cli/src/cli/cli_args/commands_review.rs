@@ -69,8 +69,8 @@ impl SignKindArg {
         }
     }
 
-    pub fn as_proto(&self) -> grpc::heddle::api::v1alpha1::ReviewKind {
-        use grpc::heddle::api::v1alpha1::ReviewKind;
+    pub fn as_proto(&self) -> api::heddle::api::v1alpha1::ReviewKind {
+        use api::heddle::api::v1alpha1::ReviewKind;
         match self {
             Self::Read => ReviewKind::Read,
             Self::AgentPreview => ReviewKind::AgentPreview,

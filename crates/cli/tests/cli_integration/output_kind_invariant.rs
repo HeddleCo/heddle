@@ -120,9 +120,6 @@ const SWEPT: &[&str] = &[
     "adopt",
     "agent capture",
     "agent ready",
-    "agent serve",
-    "agent status",
-    "agent stop",
     "agent task create",
     "agent task list",
     "agent task show",
@@ -527,7 +524,7 @@ fn clone_catalog_entry_advertises_both_clone_and_clone_connection() {
 }
 
 #[test]
-#[ignore = "requires a live hosted gRPC fixture; runtime equality is enforced \
+#[ignore = "requires a live hosted fixture; runtime equality is enforced \
             statically via CLONE_CONNECTION_OUTPUT_KIND (see \
             clone_catalog_entry_advertises_both_clone_and_clone_connection). \
             When a hosted-clone fixture lands, drop the #[ignore] and parse \

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Pure spool CLI display helpers (no gRPC / repo I/O).
+//! Pure spool CLI display helpers (no hosted network / repo I/O).
 //!
 //! Owns mount-name defaults, short ids, and child-edge status labels for
 //! `heddle spool …`. Hosted RPC and RecoveryAdvice stay CLI-owned.

@@ -22,7 +22,7 @@ use super::oplog_types::{
 /// instead of bridging through a worker-thread runtime. They're spelled
 /// as `-> impl Future + Send` rather than `async fn` so the returned
 /// future carries an explicit `Send` bound (required by the hosted
-/// server's Tower/tonic stack) and the trait stays clean under
+/// server's hosted-call stack) and the trait stays clean under
 /// `-D warnings` (the `async_fn_in_trait` lint). Sealed interface —
 /// heddle is the sole implementer.
 pub trait OpLogBackend: Send + Sync {

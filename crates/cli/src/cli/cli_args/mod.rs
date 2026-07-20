@@ -29,7 +29,7 @@ pub use cli_base::Cli;
 pub use cli_shared::OutputMode;
 pub use commands_agent::{
     AgentCommands, AgentFanoutCommands, AgentPresenceCommands, AgentProvenanceCommands,
-    AgentServeArgs, AgentTaskCommands,
+    AgentTaskCommands,
 };
 pub use commands_args::{
     AdoptArgs, AgentApiListArgs, AgentCaptureArgs, AgentFanoutPlanArgs, AgentFanoutStartArgs,

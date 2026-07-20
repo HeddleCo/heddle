@@ -10,7 +10,7 @@ use std::{
 
 use api::heddle::api::v1alpha1::{
     GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer, GitObjectAlgorithm,
-    GitObjectId as ProtoGitObjectId, GitPackTransfer, GitRefKind as GrpcGitRefKind,
+    GitObjectId as ProtoGitObjectId, GitPackTransfer, GitRefKind as ProtoGitRefKind,
     GitRefUpdateTransfer, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor, PackChunk,
     PackStreamKind, PartialFetchStatus, PullClientFrame, PullRequest, PullServerFrame,
     PushClientFrame, PushRequest, PushServerFrame, RedactionTransfer, StateVisibilityTransfer,
@@ -473,7 +473,7 @@ impl HostedClient {
             }) => ready,
             _ => {
                 return Err(ProtocolError::InvalidState(
-                    "expected PushReady from gRPC server".to_string(),
+                    "expected PushReady from hosted server".to_string(),
                 ));
             }
         };
@@ -614,7 +614,7 @@ impl HostedClient {
             },
             _ => {
                 return Err(ProtocolError::InvalidState(
-                    "expected PushComplete from gRPC server".to_string(),
+                    "expected PushComplete from hosted server".to_string(),
                 ));
             }
         };
@@ -942,7 +942,7 @@ impl HostedClient {
             }) => ready,
             _ => {
                 return Err(ProtocolError::InvalidState(
-                    "expected PullReady from gRPC server".to_string(),
+                    "expected PullReady from hosted server".to_string(),
                 ));
             }
         };
@@ -2126,7 +2126,7 @@ fn build_git_mirror_plan_from_sley(
             .cloned()
             .unwrap_or(GitRefRemoteExpectation::Missing);
 
-        let kind = grpc_git_ref_kind(GitRefName::new(&reference.name).wire_kind());
+        let kind = proto_git_ref_kind(GitRefName::new(&reference.name).wire_kind());
         let mut message =
             git_ref_update_message(&reference.name, kind, target_oid, peeled_oid, None);
         apply_git_ref_expectation_value(&mut message, &expectation);
@@ -2177,12 +2177,12 @@ fn build_git_mirror_plan_from_sley(
     })
 }
 
-fn grpc_git_ref_kind(kind: ClassifiedGitRefKind) -> GrpcGitRefKind {
+fn proto_git_ref_kind(kind: ClassifiedGitRefKind) -> ProtoGitRefKind {
     match kind {
-        ClassifiedGitRefKind::Branch => GrpcGitRefKind::Branch,
-        ClassifiedGitRefKind::Tag => GrpcGitRefKind::Tag,
-        ClassifiedGitRefKind::Note => GrpcGitRefKind::Note,
-        ClassifiedGitRefKind::Other => GrpcGitRefKind::Other,
+        ClassifiedGitRefKind::Branch => ProtoGitRefKind::Branch,
+        ClassifiedGitRefKind::Tag => ProtoGitRefKind::Tag,
+        ClassifiedGitRefKind::Note => ProtoGitRefKind::Note,
+        ClassifiedGitRefKind::Other => ProtoGitRefKind::Other,
     }
 }
 
@@ -2459,7 +2459,7 @@ impl Write for GitPackPushMessageWriter {
 /// is set for annotated-tag refs (the underlying object the tag names).
 fn git_ref_update_message(
     name: &str,
-    kind: GrpcGitRefKind,
+    kind: ProtoGitRefKind,
     target_oid: GitObjectId,
     peeled_oid: Option<GitObjectId>,
     checkpoint: Option<GitCheckpointTransfer>,

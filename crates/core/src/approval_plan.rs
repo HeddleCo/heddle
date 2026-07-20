@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Pure thread-approval display helpers (no gRPC / repo I/O).
+//! Pure thread-approval display helpers (no hosted network / repo I/O).
 //!
 //! Timestamp and change-id helpers take plain `i64` / bytes so callers can
 //! strip `prost` types at the CLI boundary. Recovery advice and network I/O

@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Local-mode gRPC services for `heddle agent serve`.
+//! Local typed review implementation used directly by the CLI.
 //!
-//! These services implement the gRPC contract over a single local
-//! [`Repository`]. They are distinct from `grpc_hosted_impl/` because they
+//! These operations implement the governed contract over a single local
+//! [`Repository`]. They are distinct from `hosted implementation/` because they
 //! - don't require Postgres, Biscuit auth, or the multi-tenant registry,
-//! - are reachable over a Unix-domain socket from the same user,
+//! - are invoked directly by the local CLI process,
 //! - share the dedup/idempotency middleware with the hosted variant via
 //!   [`repo::operation_dedup::OperationDedupStore`].
 //!
-//! Each service has its own file. The shared scaffolding (the
-//! [`GrpcLocalService`] struct, idempotency helpers) lives here.
+//! Shared repository and idempotency scaffolding lives here.
 
 mod signal;
 mod state_review;
@@ -23,16 +22,81 @@ use repo::{
 pub use signal::{SignalHealthEntry, SignalHealthReport, get_repo_signal_health};
 pub use state_review::LocalStateReviewService;
 
-/// Shared state for the local gRPC services. Handlers borrow the repository
-/// for the duration of a single RPC; the dedup store is consulted on every
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalReviewCode {
+    InvalidArgument,
+    NotFound,
+    FailedPrecondition,
+    Aborted,
+    Unimplemented,
+    Internal,
+}
+
+#[derive(Debug)]
+pub struct LocalReviewError {
+    code: LocalReviewCode,
+    message: String,
+}
+
+impl LocalReviewError {
+    fn new(code: LocalReviewCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn invalid_argument(message: impl Into<String>) -> Self {
+        Self::new(LocalReviewCode::InvalidArgument, message)
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::new(LocalReviewCode::NotFound, message)
+    }
+
+    pub fn failed_precondition(message: impl Into<String>) -> Self {
+        Self::new(LocalReviewCode::FailedPrecondition, message)
+    }
+
+    pub fn aborted(message: impl Into<String>) -> Self {
+        Self::new(LocalReviewCode::Aborted, message)
+    }
+
+    pub fn unimplemented(message: impl Into<String>) -> Self {
+        Self::new(LocalReviewCode::Unimplemented, message)
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(LocalReviewCode::Internal, message)
+    }
+
+    pub fn code(&self) -> LocalReviewCode {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for LocalReviewError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for LocalReviewError {}
+
+/// Shared state for the local review operations. Handlers borrow the repository
+/// for the duration of a single operation; the dedup store is consulted on every
 /// state-changing call.
 #[derive(Clone)]
-pub struct GrpcLocalService {
+pub struct LocalReviewContext {
     pub(super) repo: Arc<Repository>,
     pub(super) dedup: Arc<OperationDedupStore>,
 }
 
-impl GrpcLocalService {
+impl LocalReviewContext {
     pub fn new(repo: Arc<Repository>, dedup: Arc<OperationDedupStore>) -> Self {
         Self { repo, dedup }
     }
@@ -54,15 +118,15 @@ impl GrpcLocalService {
 /// must be a deterministic byte representation of the request (typically
 /// the protobuf-encoded request).
 pub(super) async fn with_idempotency<F, Fut, T>(
-    service: &GrpcLocalService,
+    service: &LocalReviewContext,
     client_operation_id: &str,
     verb: &'static str,
     request_body: &[u8],
     execute: F,
-) -> Result<T, tonic::Status>
+) -> Result<T, LocalReviewError>
 where
     F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<T, tonic::Status>>,
+    Fut: std::future::Future<Output = Result<T, LocalReviewError>>,
     T: prost::Message + Default,
 {
     use objects::object::OperationId;
@@ -72,7 +136,7 @@ where
         return execute().await;
     }
     let op_id: OperationId = client_operation_id.parse().map_err(|err| {
-        tonic::Status::invalid_argument(format!("invalid client_operation_id: {err}"))
+        LocalReviewError::invalid_argument(format!("invalid client_operation_id: {err}"))
     })?;
     let hash = hash_request_body(request_body);
     // The eager reservation atomically claims the (op_id, verb) slot before
@@ -81,14 +145,14 @@ where
     // second sees `InFlight` and surfaces a transient `Aborted` to the client.
     let dedup = Arc::clone(&service.dedup);
     let outcome = reserve_operation_id_eager(service.repo(), Arc::clone(&dedup), op_id, verb, hash)
-        .map_err(|err| tonic::Status::internal(format!("dedup reserve failed: {err}")))?;
+        .map_err(|err| LocalReviewError::internal(format!("dedup reserve failed: {err}")))?;
     match outcome {
         DedupOutcome::Replay { response } => T::decode(response.as_slice())
-            .map_err(|err| tonic::Status::internal(format!("decode replay failed: {err}"))),
-        DedupOutcome::Conflict => Err(tonic::Status::failed_precondition(
+            .map_err(|err| LocalReviewError::internal(format!("decode replay failed: {err}"))),
+        DedupOutcome::Conflict => Err(LocalReviewError::failed_precondition(
             "client_operation_id reused with a different request body",
         )),
-        DedupOutcome::InFlight => Err(tonic::Status::aborted(
+        DedupOutcome::InFlight => Err(LocalReviewError::aborted(
             "client_operation_id is in flight from another caller; retry once it completes",
         )),
         DedupOutcome::Reserved => {
@@ -100,7 +164,7 @@ where
                 Ok(result) => {
                     let encoded = result.encode_to_vec();
                     dedup.record(op_id, verb, hash, encoded).map_err(|err| {
-                        tonic::Status::internal(format!("dedup record failed: {err}"))
+                        LocalReviewError::internal(format!("dedup record failed: {err}"))
                     })?;
                     Ok(result)
                 }
@@ -118,19 +182,21 @@ where
 }
 
 /// Helper for translating a [`HeddleError`](objects::error::HeddleError) into
-/// a [`tonic::Status`] with consistent codes across the local services.
-pub(super) fn to_status(err: objects::error::HeddleError) -> tonic::Status {
+/// a [`LocalReviewError`] with consistent codes across the local services.
+pub(super) fn to_status(err: objects::error::HeddleError) -> LocalReviewError {
     use objects::error::HeddleError;
     match err {
-        HeddleError::NotFound(msg) => tonic::Status::not_found(msg),
-        HeddleError::StateNotFound(id) => tonic::Status::not_found(format!("state {id} not found")),
-        HeddleError::RepositoryNotFound(path) => {
-            tonic::Status::not_found(format!("repository not found at {}", path.display()))
+        HeddleError::NotFound(msg) => LocalReviewError::not_found(msg),
+        HeddleError::StateNotFound(id) => {
+            LocalReviewError::not_found(format!("state {id} not found"))
         }
-        HeddleError::InvalidObject(msg) => tonic::Status::invalid_argument(msg),
-        HeddleError::Conflict(msg) => tonic::Status::failed_precondition(msg),
-        HeddleError::Io(io) => tonic::Status::internal(format!("io error: {io}")),
-        other => tonic::Status::internal(other.to_string()),
+        HeddleError::RepositoryNotFound(path) => {
+            LocalReviewError::not_found(format!("repository not found at {}", path.display()))
+        }
+        HeddleError::InvalidObject(msg) => LocalReviewError::invalid_argument(msg),
+        HeddleError::Conflict(msg) => LocalReviewError::failed_precondition(msg),
+        HeddleError::Io(io) => LocalReviewError::internal(format!("io error: {io}")),
+        other => LocalReviewError::internal(other.to_string()),
     }
 }
 
@@ -138,7 +204,7 @@ pub(super) fn to_status(err: objects::error::HeddleError) -> tonic::Status {
 mod tests {
     //! End-to-end tests for [`with_idempotency`] that exercise the
     //! `Reserved` / `InFlight` / `Replay` / `Conflict` outcomes through the
-    //! same wrapper every gRPC handler calls.
+    //! same wrapper every local review operation calls.
 
     use std::{sync::Arc, time::Duration};
 
@@ -152,13 +218,13 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::oneshot;
 
-    use super::{GrpcLocalService, with_idempotency};
+    use super::{LocalReviewCode, LocalReviewContext, LocalReviewError, with_idempotency};
 
-    fn make_service() -> (TempDir, GrpcLocalService) {
+    fn make_service() -> (TempDir, LocalReviewContext) {
         let temp = TempDir::new().unwrap();
         let repo = Arc::new(Repository::init_default(temp.path()).unwrap());
         let store = Arc::new(OperationDedupStore::open(repo.heddle_dir()).unwrap());
-        (temp, GrpcLocalService::new(repo, store))
+        (temp, LocalReviewContext::new(repo, store))
     }
 
     /// A distinguishable prost response payload for the idempotency-flow
@@ -177,7 +243,7 @@ mod tests {
 
         // First call executes and records.
         let first = with_idempotency(&service, &op_id, "verb", body, || async {
-            Ok::<UpdateRefResponse, tonic::Status>(marker_response("42"))
+            Ok::<UpdateRefResponse, LocalReviewError>(marker_response("42"))
         })
         .await
         .unwrap();
@@ -187,7 +253,9 @@ mod tests {
         // execute closure panicking if invoked.
         let second = with_idempotency(&service, &op_id, "verb", body, || async {
             #[allow(unreachable_code)]
-            Ok::<UpdateRefResponse, tonic::Status>(panic!("execute must not be called on replay"))
+            Ok::<UpdateRefResponse, LocalReviewError>(panic!(
+                "execute must not be called on replay"
+            ))
         })
         .await
         .unwrap();
@@ -214,7 +282,7 @@ mod tests {
         let a_handle = tokio::spawn(async move {
             with_idempotency(&service_a, &op_a, "verb", body, || async move {
                 rx.await.expect("recv gate");
-                Ok::<UpdateRefResponse, tonic::Status>(marker_response("7"))
+                Ok::<UpdateRefResponse, LocalReviewError>(marker_response("7"))
             })
             .await
         });
@@ -226,7 +294,7 @@ mod tests {
 
         let service_b = service.clone();
         let op_b = op_id.clone();
-        let b_result: Result<UpdateRefResponse, tonic::Status> =
+        let b_result: Result<UpdateRefResponse, LocalReviewError> =
             with_idempotency(&service_b, &op_b, "verb", body, || async {
                 panic!("B's execute must not run while A holds the reservation");
             })
@@ -234,7 +302,7 @@ mod tests {
 
         // B sees the in-flight reservation and aborts.
         let err = b_result.expect_err("B should be aborted");
-        assert_eq!(err.code(), tonic::Code::Aborted);
+        assert_eq!(err.code(), LocalReviewCode::Aborted);
 
         // Now release A.
         tx.send(()).unwrap();
@@ -245,7 +313,7 @@ mod tests {
         // same body replays.
         let third = with_idempotency(&service, &op_id, "verb", body, || async {
             #[allow(unreachable_code)]
-            Ok::<UpdateRefResponse, tonic::Status>(panic!("execute must not run on replay"))
+            Ok::<UpdateRefResponse, LocalReviewError>(panic!("execute must not run on replay"))
         })
         .await
         .unwrap();
@@ -265,16 +333,16 @@ mod tests {
         let op_id = OperationId::new().to_string();
         let body = b"req";
 
-        let first: Result<UpdateRefResponse, tonic::Status> =
+        let first: Result<UpdateRefResponse, LocalReviewError> =
             with_idempotency(&service, &op_id, "verb", body, || async {
-                Err(tonic::Status::internal("transient"))
+                Err(LocalReviewError::internal("transient"))
             })
             .await;
         assert!(first.is_err());
 
         // Retry must succeed — the reservation was released.
         let second = with_idempotency(&service, &op_id, "verb", body, || async {
-            Ok::<UpdateRefResponse, tonic::Status>(marker_response("11"))
+            Ok::<UpdateRefResponse, LocalReviewError>(marker_response("11"))
         })
         .await
         .unwrap();

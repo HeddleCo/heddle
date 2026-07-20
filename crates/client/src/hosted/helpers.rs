@@ -166,21 +166,156 @@ pub(super) fn descriptor_id_from_info(info: &ObjectInfo) -> (String, String) {
 pub(super) fn hosted_to_protocol_error(error: HostedError) -> ProtocolError {
     use api::heddle::api::v1alpha1::CallFailureCode;
     match error {
-        HostedError::Call { code, message, .. } => match code {
-            CallFailureCode::Unauthenticated | CallFailureCode::PermissionDenied => {
-                ProtocolError::AuthorizationFailed(message)
+        HostedError::Call {
+            code,
+            message,
+            details,
+        } => {
+            if !details.is_empty() {
+                return ProtocolError::RemoteFailure {
+                    code: remote_failure_code(code),
+                    message,
+                    details: details.into_iter().map(remote_failure_detail).collect(),
+                };
             }
-            CallFailureCode::NotFound => ProtocolError::ObjectNotFound(message),
-            CallFailureCode::AlreadyExists => ProtocolError::AlreadyExists(message),
-            CallFailureCode::InvalidArgument | CallFailureCode::FailedPrecondition => {
-                ProtocolError::InvalidState(message)
+
+            match code {
+                CallFailureCode::Unauthenticated | CallFailureCode::PermissionDenied => {
+                    ProtocolError::AuthorizationFailed(message)
+                }
+                CallFailureCode::NotFound => ProtocolError::ObjectNotFound(message),
+                CallFailureCode::AlreadyExists => ProtocolError::AlreadyExists(message),
+                CallFailureCode::InvalidArgument | CallFailureCode::FailedPrecondition => {
+                    ProtocolError::InvalidState(message)
+                }
+                _ => ProtocolError::RemoteFailure {
+                    code: remote_failure_code(code),
+                    message,
+                    details: Vec::new(),
+                },
             }
-            _ => ProtocolError::Remote(message),
-        },
+        }
         HostedError::Decode(error) => ProtocolError::Serialization(error.to_string()),
         HostedError::Transport(message) => ProtocolError::Io(std::io::Error::other(message)),
         error => ProtocolError::Remote(error.to_string()),
     }
+}
+
+fn remote_failure_code(
+    code: api::heddle::api::v1alpha1::CallFailureCode,
+) -> wire::RemoteFailureCode {
+    use api::heddle::api::v1alpha1::CallFailureCode as Api;
+    use wire::RemoteFailureCode as Wire;
+    match code {
+        Api::Unspecified => Wire::Unspecified,
+        Api::Cancelled => Wire::Cancelled,
+        Api::Unknown => Wire::Unknown,
+        Api::InvalidArgument => Wire::InvalidArgument,
+        Api::DeadlineExceeded => Wire::DeadlineExceeded,
+        Api::NotFound => Wire::NotFound,
+        Api::AlreadyExists => Wire::AlreadyExists,
+        Api::PermissionDenied => Wire::PermissionDenied,
+        Api::ResourceExhausted => Wire::ResourceExhausted,
+        Api::FailedPrecondition => Wire::FailedPrecondition,
+        Api::Aborted => Wire::Aborted,
+        Api::OutOfRange => Wire::OutOfRange,
+        Api::Unimplemented => Wire::Unimplemented,
+        Api::Internal => Wire::Internal,
+        Api::Unavailable => Wire::Unavailable,
+        Api::DataLoss => Wire::DataLoss,
+        Api::Unauthenticated => Wire::Unauthenticated,
+    }
+}
+
+fn remote_duration(value: prost_types::Duration) -> wire::RemoteDuration {
+    wire::RemoteDuration {
+        seconds: value.seconds,
+        nanos: value.nanos,
+    }
+}
+
+fn remote_cursor(value: api::heddle::api::v1alpha1::CursorFailure) -> wire::RemoteCursorFailure {
+    use api::heddle::api::v1alpha1::cursor_failure::Reason as Api;
+    use wire::RemoteCursorReason as Wire;
+    let reason = match value.reason() {
+        Api::Unspecified => Wire::Unspecified,
+        Api::Stale => Wire::Stale,
+        Api::Expired => Wire::Expired,
+    };
+    wire::RemoteCursorFailure {
+        reason,
+        expired_at: value.expired_at.map(|timestamp| wire::RemoteTimestamp {
+            seconds: timestamp.seconds,
+            nanos: timestamp.nanos,
+        }),
+        restart_cursor: value.restart_cursor,
+    }
+}
+
+fn remote_failure_detail(detail: prost_types::Any) -> wire::RemoteFailureDetail {
+    use api::heddle::api::v1alpha1::{
+        CapabilityRequirement, ConflictDetail, CursorFailure, PolicyDenial, RetryAdvice,
+        StreamFailure,
+    };
+    use prost::Message as _;
+
+    let message_name = detail.type_url.rsplit('/').next().unwrap_or_default();
+    match message_name {
+        "heddle.api.v1alpha1.RetryAdvice" => {
+            RetryAdvice::decode(detail.value.as_slice()).map(|value| {
+                wire::RemoteFailureDetail::Retry {
+                    retry_after: value.retry_after.map(remote_duration),
+                }
+            })
+        }
+        "heddle.api.v1alpha1.ConflictDetail" => ConflictDetail::decode(detail.value.as_slice())
+            .map(|value| wire::RemoteFailureDetail::Conflict {
+                resource: value.resource,
+                expected_version: value.expected_version,
+                actual_version: value.actual_version,
+            }),
+        "heddle.api.v1alpha1.CursorFailure" => CursorFailure::decode(detail.value.as_slice())
+            .map(|value| wire::RemoteFailureDetail::Cursor(remote_cursor(value))),
+        "heddle.api.v1alpha1.CapabilityRequirement" => {
+            CapabilityRequirement::decode(detail.value.as_slice()).map(|value| {
+                wire::RemoteFailureDetail::CapabilityRequirement {
+                    capabilities: value.capabilities,
+                }
+            })
+        }
+        "heddle.api.v1alpha1.PolicyDenial" => {
+            PolicyDenial::decode(detail.value.as_slice()).map(|value| {
+                wire::RemoteFailureDetail::PolicyDenial {
+                    policy_id: value.policy_id,
+                    rule: value.rule,
+                    human_verification_can_override: value.human_verification_can_override,
+                }
+            })
+        }
+        "heddle.api.v1alpha1.StreamFailure" => {
+            StreamFailure::decode(detail.value.as_slice()).map(|value| {
+                wire::RemoteFailureDetail::Stream {
+                    code: remote_failure_code(value.code()),
+                    message: value.message,
+                    retry_after: value
+                        .retry
+                        .and_then(|retry| retry.retry_after)
+                        .map(remote_duration),
+                    cursor: value.cursor.map(remote_cursor),
+                }
+            })
+        }
+        _ => {
+            return wire::RemoteFailureDetail::Unknown {
+                type_url: detail.type_url,
+                value: detail.value,
+            };
+        }
+    }
+    .unwrap_or(wire::RemoteFailureDetail::Unknown {
+        type_url: detail.type_url,
+        value: detail.value,
+    })
 }
 
 pub(super) fn repository_ref(path: &str) -> Option<RepositoryRef> {
@@ -317,5 +452,46 @@ mod tests {
             details: Vec::new(),
         });
         assert!(matches!(error, ProtocolError::AuthorizationFailed(_)));
+    }
+
+    #[test]
+    fn native_call_failure_preserves_typed_and_unknown_details() {
+        use api::heddle::api::v1alpha1::ConflictDetail;
+        use prost::Message as _;
+
+        let conflict = ConflictDetail {
+            resource: "refs/heads/main".to_string(),
+            expected_version: "old".to_string(),
+            actual_version: "new".to_string(),
+        };
+        let error = hosted_to_protocol_error(HostedError::Call {
+            code: api::heddle::api::v1alpha1::CallFailureCode::AlreadyExists,
+            message: "ref changed".to_string(),
+            details: vec![
+                prost_types::Any {
+                    type_url: "type.googleapis.com/heddle.api.v1alpha1.ConflictDetail".to_string(),
+                    value: conflict.encode_to_vec(),
+                },
+                prost_types::Any {
+                    type_url: "type.example.test/FutureDetail".to_string(),
+                    value: vec![1, 2, 3],
+                },
+            ],
+        });
+
+        let ProtocolError::RemoteFailure { code, details, .. } = error else {
+            panic!("expected remote failure");
+        };
+        assert_eq!(code, wire::RemoteFailureCode::AlreadyExists);
+        assert!(matches!(
+            &details[0],
+            wire::RemoteFailureDetail::Conflict { resource, .. }
+                if resource == "refs/heads/main"
+        ));
+        assert!(matches!(
+            &details[1],
+            wire::RemoteFailureDetail::Unknown { type_url, value }
+                if type_url == "type.example.test/FutureDetail" && value == &[1, 2, 3]
+        ));
     }
 }

@@ -385,7 +385,7 @@ mod tests {
             crate::identity::link_device_key(
                 device.public_key(),
                 &device.to_pem().expect("device pem"),
-                "grpc.example",
+                "api.example",
             )
             .expect("link device key");
             assert_ne!(device_pubkey, local_pubkey, "device key is distinct");
@@ -432,13 +432,13 @@ mod tests {
         with_signing_home(home.path(), || {
             let (temp, repo) = setup_repo();
 
-            // Simulate `auth login --server grpc.S`: link a device key.
+            // Simulate `auth login --server api.S`: link a device key.
             let device = Ed25519Signer::generate().expect("device key");
             let device_pubkey = hex::encode(device.public_key());
             crate::identity::link_device_key(
                 device.public_key(),
                 &device.to_pem().expect("device pem"),
-                "grpc.S",
+                "api.S",
             )
             .expect("link device key");
 
@@ -453,8 +453,8 @@ mod tests {
                 "post-login capture uses the device key",
             );
 
-            // Simulate `auth logout grpc.S`: unlink the device identity.
-            let removed = crate::identity::unlink_device_key("grpc.S").expect("unlink device key");
+            // Simulate `auth logout api.S`: unlink the device identity.
+            let removed = crate::identity::unlink_device_key("api.S").expect("unlink device key");
             assert!(
                 removed,
                 "logout removes the matching-server device identity"
@@ -479,7 +479,7 @@ mod tests {
             );
 
             // Logout is idempotent: a second one finds nothing to remove.
-            let again = crate::identity::unlink_device_key("grpc.S").expect("idempotent unlink");
+            let again = crate::identity::unlink_device_key("api.S").expect("idempotent unlink");
             assert!(!again, "second logout finds nothing to remove");
         });
     }

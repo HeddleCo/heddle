@@ -442,7 +442,7 @@ fn init_otel(logging: &LoggingConfig) -> TelemetryInit {
     let resource = config.resource();
     let tracer_provider = config.trace_endpoint.as_ref().and_then(|endpoint| {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
+            .with_http()
             .with_endpoint(endpoint.to_string())
             .build()
             .map_err(|err| {
@@ -460,7 +460,7 @@ fn init_otel(logging: &LoggingConfig) -> TelemetryInit {
 
     let meter_provider = config.metrics_endpoint.as_ref().and_then(|endpoint| {
         let exporter = opentelemetry_otlp::MetricExporter::builder()
-            .with_tonic()
+            .with_http()
             .with_endpoint(endpoint.to_string())
             .build()
             .map_err(|err| {

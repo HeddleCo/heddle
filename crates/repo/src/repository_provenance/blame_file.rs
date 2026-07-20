@@ -53,7 +53,7 @@
 //!
 //! [`FileProvenance`] keyed by the target state's blob hash. Same
 //! shape `get_file_provenance_for_state` returned in the tree-oriented
-//! path, so every caller — `heddle blame`, the gRPC `GetBlame` RPC,
+//! path, so every caller — `heddle blame`, the hosted `GetBlame` call,
 //! the web app — benefits without any client-side change.
 
 use std::{collections::HashMap, path::Path};

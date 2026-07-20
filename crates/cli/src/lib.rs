@@ -17,7 +17,7 @@ pub mod client;
 pub mod exit;
 pub mod extensions;
 pub mod harness;
-pub mod hosted_typed_error;
+mod hosted_failure;
 pub mod operation_id;
 pub mod perf;
 #[cfg(feature = "semantic")]

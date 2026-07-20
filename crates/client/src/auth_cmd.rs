@@ -1116,7 +1116,7 @@ pub(crate) fn resolve_server(explicit: Option<&str>) -> Result<String> {
     if let Some(default) = credentials::default_server()? {
         return Ok(default);
     }
-    Ok("grpc.heddle.sh".to_string())
+    Ok("api.heddle.sh".to_string())
 }
 
 /// Connect the unauthenticated login flow through the same signed descriptor
@@ -1700,7 +1700,7 @@ mod tests {
     #[test]
     fn derive_agent_installs_fresh_pop_child_and_supports_narrower_subderivation() {
         with_isolated_home(|| {
-            let server = "grpc.S";
+            let server = "api.S";
             let (parent, private_key_pem) = stored_device_parent();
             credentials::store_server_credential(server, parent).expect("store parent");
 
@@ -1807,7 +1807,7 @@ mod tests {
     #[test]
     fn derive_agent_export_contains_token_metadata_and_a_fresh_child_key() {
         with_isolated_home(|| {
-            let server = "grpc.S";
+            let server = "api.S";
             let (parent, private_key_pem) = stored_device_parent();
             credentials::store_server_credential(server, parent).expect("store parent");
             let export_dir = repo::identity::heddle_home_dir().join("agent-export");
@@ -1969,7 +1969,7 @@ mod tests {
 
     #[test]
     fn auth_status_qualifies_a_credential_without_a_proof_key() {
-        let output = auth_status_output("grpc.S", Some(sample_credential()));
+        let output = auth_status_output("api.S", Some(sample_credential()));
 
         assert!(output.authenticated);
         assert!(!output.proof_key_available);
@@ -1977,7 +1977,7 @@ mod tests {
             output
                 .recommended_action
                 .as_deref()
-                .is_some_and(|action| action.contains("auth login --server grpc.S"))
+                .is_some_and(|action| action.contains("auth login --server api.S"))
         );
     }
 
@@ -2003,7 +2003,7 @@ mod tests {
     #[test]
     fn logout_removes_credential_and_device_identity_on_success() {
         with_isolated_home(|| {
-            credentials::store_server_credential("grpc.S", sample_credential())
+            credentials::store_server_credential("api.S", sample_credential())
                 .expect("store credential");
 
             // Record a matching device identity via the real link path.
@@ -2011,7 +2011,7 @@ mod tests {
             repo::identity::link_device_key(
                 signer.public_key(),
                 &signer.to_pem().expect("pem"),
-                "grpc.S",
+                "api.S",
             )
             .expect("link device key");
             assert!(repo::identity::device_identity_path().exists());
@@ -2021,7 +2021,7 @@ mod tests {
             cmd_auth_logout(&TextCtx, None).expect("logout succeeds");
 
             assert!(
-                credentials::get_server_credential("grpc.S")
+                credentials::get_server_credential("api.S")
                     .expect("load")
                     .is_none(),
                 "credential must be removed on a successful logout",
@@ -2042,7 +2042,7 @@ mod tests {
     #[test]
     fn logout_preserves_credential_when_device_unlink_fails() {
         with_isolated_home(|| {
-            credentials::store_server_credential("grpc.S", sample_credential())
+            credentials::store_server_credential("api.S", sample_credential())
                 .expect("store credential");
 
             let device_path = repo::identity::device_identity_path();
@@ -2060,14 +2060,14 @@ mod tests {
             );
 
             assert!(
-                credentials::get_server_credential("grpc.S")
+                credentials::get_server_credential("api.S")
                     .expect("load")
                     .is_some(),
                 "credential must be preserved when unlink fails, so logout is retryable",
             );
             assert_eq!(
                 credentials::default_server().expect("default").as_deref(),
-                Some("grpc.S"),
+                Some("api.S"),
                 "default server must be preserved so a no-arg retry re-targets the same server",
             );
         });

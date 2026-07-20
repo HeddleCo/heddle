@@ -42,9 +42,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["agent", "presence", "complete"],
         &["agent", "presence", "complete"],
     ),
-    sample(&["agent", "serve"], &["agent", "serve"]),
-    sample(&["agent", "status"], &["agent", "status"]),
-    sample(&["agent", "stop"], &["agent", "stop"]),
     sample(
         &["agent", "reserve"],
         &["agent", "reserve", "--thread", "main"],
@@ -133,7 +130,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
             "auth",
             "derive-agent",
             "--server",
-            "grpc.heddle.test",
+            "api.heddle.test",
             "--scope",
             "repo:acme/heddle",
         ],
@@ -1581,9 +1578,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // tests/cli_integration/output_kind_invariant.rs.
             "abort",
             "adopt",
-            "agent serve",
-            "agent status",
-            "agent stop",
             "agent capture",
             "agent ready",
             "agent task create",

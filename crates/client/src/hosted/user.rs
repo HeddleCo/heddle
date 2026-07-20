@@ -1,14 +1,14 @@
 use api::heddle::api::v1alpha1::{
     ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, CheckMergeEligibilityRequest,
-    CheckMergeEligibilityResponse, CreateGrantRequest, CreateInvitationRequest,
-    CreateRepositoryRequest, CreateServiceAccountRequest, DeleteGrantRequest,
-    DeleteNamespaceRequest, DeleteRepositoryRequest, GetCurrentUserNamespaceRequest,
-    GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
-    IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
-    ListSpoolsRequest, ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
-    ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
-    ServiceAccountResponse, SpoolSummary, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
-    UpdateNamespaceRequest, UpdateRepositoryRequest, grant_target_ref::Target as GrantTargetKind,
+    CheckMergeEligibilityResponse, CreateGrantRequest, CreateRepositoryRequest,
+    CreateServiceAccountRequest, DeleteGrantRequest, DeleteNamespaceRequest,
+    DeleteRepositoryRequest, GetCurrentUserNamespaceRequest, GrantSupportAccessRequest,
+    GrantTargetRef, IssueServiceAccountCredentialRequest, IssuedCredentialResponse,
+    ListGrantsRequest, ListSpoolsRequest, ListSupportAccessGrantsRequest,
+    ListThreadApprovalsRequest, MonorepoNode, ResolveMonorepoRequest, RevokeApprovalRequest,
+    RevokeSupportAccessRequest, ServiceAccountResponse, SpoolSummary, SupportAccessGrant,
+    ThreadApproval, UpdateGrantRequest, UpdateNamespaceRequest, UpdateRepositoryRequest,
+    grant_target_ref::Target as GrantTargetKind,
 };
 use wire::ProtocolError;
 
@@ -22,50 +22,40 @@ use super::{
 
 macro_rules! signed_call {
     ($self:ident, $client:ident, $rpc:ident, $path:expr, $msg:expr) => {{
-            let request = $msg;
-            $self
-                .routes()
-                .$rpc(&request)
-                .await
-                .map_err(hosted_to_protocol_error)?
-        }};
+        let request = $msg;
+        $self
+            .routes()
+            .$rpc(&request)
+            .await
+            .map_err(hosted_to_protocol_error)?
+    }};
 }
 
-/// Dispatch an authenticated unary RPC on `self.user`: wrap the message in a
-/// `tonic::Request`, stamp bearer auth AND the Tier-1 PoP request signature via
-/// `apply_signed_auth`, await the call, and — if the server rejects with
-/// `x-heddle-sig-required: human` — invoke the app-registered human-signature
-/// callback over the SAME action and retry ONCE. Maps a transport `Status` to a
-/// `ProtocolError` and unwraps the response.
-///
-/// `$rpc` is the snake_case tonic client method; `$grpc_method` is the PascalCase
-/// proto RPC name (used to build the signed `:path`). The message is bound once
-/// and cloned for the potential human retry (all hosted request protos derive
-/// `Clone`). Delegates to [`signed_call!`], the one chokepoint for the
-/// auth/sign/retry sequence; must be invoked inside an `async fn` returning
-/// `Result<_, ProtocolError>`.
+/// Dispatch an authenticated unary call through the native hosted chokepoint.
+/// The contract method path controls signing, human-verification retry, and
+/// transport-neutral failure mapping.
 macro_rules! authed_call {
-    ($self:ident, $rpc:ident, $grpc_method:literal, $msg:expr) => {{
-            signed_call!(
-                $self,
-                user,
-                $rpc,
-                concat!("/heddle.api.v1alpha1.RegistryService/", $grpc_method),
-                $msg
-            )
-        }};
+    ($self:ident, $rpc:ident, $method:literal, $msg:expr) => {{
+        signed_call!(
+            $self,
+            user,
+            $rpc,
+            concat!("/heddle.api.v1alpha1.RegistryService/", $method),
+            $msg
+        )
+    }};
 }
 
 macro_rules! workflow_call {
-    ($self:ident, $rpc:ident, $grpc_method:literal, $msg:expr) => {{
-            signed_call!(
-                $self,
-                workflow,
-                $rpc,
-                concat!("/heddle.api.v1alpha1.WorkflowService/", $grpc_method),
-                $msg
-            )
-        }};
+    ($self:ident, $rpc:ident, $method:literal, $msg:expr) => {{
+        signed_call!(
+            $self,
+            workflow,
+            $rpc,
+            concat!("/heddle.api.v1alpha1.WorkflowService/", $method),
+            $msg
+        )
+    }};
 }
 
 fn default_spool_settings_request() -> api::heddle::api::v1alpha1::SpoolSettings {
@@ -381,32 +371,6 @@ impl HostedClient {
             }
         );
         Ok(())
-    }
-
-    /// Track D — create a pending invitation. Returns the raw proto type
-    /// to keep the surface narrow until we settle on a domain shape.
-    pub async fn create_invitation(
-        &mut self,
-        email: &str,
-        namespace_path: &str,
-        role: &str,
-    ) -> Result<ProtoInvitation, ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateInvitation");
-        let invitation = authed_call!(
-            self,
-            create_invitation,
-            "CreateInvitation",
-            CreateInvitationRequest {
-                email: email.to_string(),
-                namespace_path: namespace_path.to_string(),
-                role: parse_hosted_role_arg(role)? as i32,
-                expires_at: None,
-                metadata: String::new(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        Ok(invitation)
     }
 
     /// Record an approval for `(source_thread → target_thread)` at

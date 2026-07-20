@@ -428,7 +428,7 @@ Examples:
 Examples:
   heddle whoami                       # human-readable identity summary
   heddle whoami --output json         # machine-readable, stable output_kind shape
-  heddle whoami --server grpc.heddle.sh")]
+  heddle whoami --server api.heddle.sh")]
     Whoami {
         /// Heddle server address (defaults to the configured server).
         #[arg(long)]
@@ -475,14 +475,11 @@ Examples:
         command: DaemonCommands,
     },
 
-    /// Agent control surface — daemon lifecycle and reservation API.
+    /// Agent reservation and one-shot orchestration API.
     ///
-    /// `heddle agent serve|status|stop` controls the local gRPC
-    /// daemon (Unix socket inside the repo). `heddle agent
-    /// reserve|capture|ready|release|list|heartbeat` is the stable
+    /// `heddle agent reserve|capture|ready|release|list|heartbeat` is the stable
     /// JSON contract orchestrators use to coordinate parallel
-    /// writers. Distinct from `heddle daemon` (FUSE mount control
-    /// plane) — different subsystem.
+    /// writers. `heddle daemon` remains the distinct FUSE mount control plane.
     Agent {
         #[command(subcommand)]
         command: AgentCommands,

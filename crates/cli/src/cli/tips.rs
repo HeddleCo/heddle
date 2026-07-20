@@ -24,9 +24,6 @@ pub enum Tip {
     /// "tip: `heddle query` searches saved change history."
     /// Emitted after the first heavy `heddle log` view.
     QueryFromLog,
-    /// "tip: `heddle agent serve` runs a local daemon for tight loops."
-    /// Emitted after the first state-changing verb in a fresh shell.
-    AgentServeForLatency,
     /// "tip: `heddle resolve --output json` returns conflicts as structured data."
     /// Emitted on a conflicted merge.
     ConflictForStructured,
@@ -37,7 +34,6 @@ impl Tip {
         match self {
             Self::CheckpointAfterCapture => "checkpoint_after_capture",
             Self::QueryFromLog => "query_from_log",
-            Self::AgentServeForLatency => "agent_serve_for_latency",
             Self::ConflictForStructured => "conflict_for_structured",
         }
     }
@@ -48,9 +44,6 @@ impl Tip {
                 "tip: in Git Overlay, run `heddle commit` when the captured state is ready"
             }
             Self::QueryFromLog => "tip: `heddle query` searches saved change history",
-            Self::AgentServeForLatency => {
-                "tip: `heddle agent serve` runs a local daemon that cuts per-command latency for agent loops"
-            }
             Self::ConflictForStructured => {
                 "tip: `heddle resolve --output json` returns conflicts as structured data agents can resolve programmatically"
             }
@@ -175,7 +168,6 @@ mod tests {
         let keys = [
             Tip::CheckpointAfterCapture.key(),
             Tip::QueryFromLog.key(),
-            Tip::AgentServeForLatency.key(),
             Tip::ConflictForStructured.key(),
         ];
         let unique: std::collections::HashSet<_> = keys.iter().collect();
@@ -203,7 +195,7 @@ mod tests {
         record_shown_at(&path, Tip::QueryFromLog).unwrap();
         assert!(already_shown_at(&path, Tip::CheckpointAfterCapture));
         assert!(already_shown_at(&path, Tip::QueryFromLog));
-        assert!(!already_shown_at(&path, Tip::AgentServeForLatency));
+        assert!(!already_shown_at(&path, Tip::ConflictForStructured));
     }
 
     #[test]

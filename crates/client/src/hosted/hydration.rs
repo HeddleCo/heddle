@@ -14,7 +14,7 @@ use wire::ProtocolError;
 
 use super::{HostedAuthMode, HostedClient, HostedSession};
 
-/// Default hosted lazy-hydration deadline.
+/// Default native hosted lazy-hydration deadline.
 ///
 /// This matches the hosted client config's 30s default connection timeout and
 /// gives lazy reads a bounded failure mode when a native request stalls.
@@ -41,7 +41,7 @@ const DEFAULT_HOSTED_HYDRATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// Instead, on first use we spawn a dedicated worker thread that owns its
 /// own current-thread Tokio runtime + a connected `HostedClient`. Each
 /// `hydrate()` call sends a request over an mpsc channel and blocks on the
-/// reply. The worker `block_on`s the gRPC call inside its private runtime,
+/// reply. The worker `block_on`s the hosted call inside its private runtime,
 /// avoiding any nesting. This pattern is robust regardless of what the
 /// caller's thread is doing.
 pub struct LazyHostedHydrator {
@@ -362,7 +362,7 @@ impl HydrationBridge {
         let repo = Arc::new(Repository::open(repo.root()).map_err(ProtocolError::from)?);
 
         // Bounded reply channel of capacity 1; each sync caller blocks until
-        // the worker returns the gRPC result for this request.
+        // the worker returns the hosted result for this request.
         let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<usize, ProtocolError>>(1);
         self.tx
             .send(HydrateMessage::Run {

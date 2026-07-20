@@ -7,7 +7,7 @@
 //!   native fan-out, default thread selection).
 //! - Transport result fields (CLI maps wire/protobuf → plain structs) →
 //!   [`PushExecutionFacts`] / [`PullExecutionFacts`], multi-ref progress, and
-//!   unstyled working/mirror/ref-list text. No tonic/gRPC types here.
+//!   unstyled working/mirror/ref-list text. No hosted transport types here.
 //! - Typed outcomes, failure kinds (map to RecoveryAdvice kinds), multi-ref
 //!   progress events, and unstyled human text assembly.
 //! - CLI probes the repo, plans, executes network I/O, maps failures, and styles.
@@ -1422,7 +1422,7 @@ pub fn multi_thread_push_execution_facts(
 }
 
 // ---------------------------------------------------------------------------
-// Transport result fields → execution facts (no gRPC / wire types in core)
+// Transport result fields → execution facts (no hosted/wire types in core)
 // ---------------------------------------------------------------------------
 //
 // CLI maps protobuf / `wire::*Complete` / local transfer counts into these

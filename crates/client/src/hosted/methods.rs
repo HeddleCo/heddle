@@ -17,12 +17,13 @@ impl<'a> HostedRoutes<'a> {
 macro_rules! unary_method {
     ($name:ident, $service:literal, $rpc:literal, $request:ty, $response:ty) => {
         pub async fn $name(&self, request: &$request) -> Result<$response> {
-                    self.client.call_unary(
-                                concat!("/heddle.api.v1alpha1.", $service, "/", $rpc),
-                                request,
-                            )
-                            .await
-                        }
+            self.client
+                .call_unary(
+                    concat!("/heddle.api.v1alpha1.", $service, "/", $rpc),
+                    request,
+                )
+                .await
+        }
     };
 }
 
@@ -83,13 +84,6 @@ impl HostedRoutes<'_> {
         "CreateGrant",
         CreateGrantRequest,
         HostedGrant
-    );
-    unary_method!(
-        create_invitation,
-        "RegistryService",
-        "CreateInvitation",
-        CreateInvitationRequest,
-        Invitation
     );
     unary_method!(
         create_namespace,
@@ -334,21 +328,6 @@ impl HostedRoutes<'_> {
         SignStateRequest,
         SignStateResponse
     );
-    unary_method!(
-        record_verdict,
-        "StateReviewService",
-        "RecordVerdict",
-        RecordVerdictRequest,
-        RecordVerdictResponse
-    );
-    unary_method!(
-        list_signatures,
-        "StateReviewService",
-        "ListSignatures",
-        ListSignaturesRequest,
-        ListSignaturesResponse
-    );
-
     pub async fn wait_for_device_authorization(
         &self,
         request: &WaitForDeviceAuthorizationRequest,
@@ -397,5 +376,95 @@ impl HostedClient {
             resume_cursor,
             capability_context,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::{
+        ALL_METHODS, MethodRoute, StreamingShape,
+        heddle::api::v1alpha1::{DeploymentTarget, ServiceMaturity},
+    };
+
+    #[test]
+    fn shipped_native_inventory_is_42_unary_one_server_stream_and_two_bidi() {
+        const ROUTES: &[MethodRoute] = &[
+            MethodRoute::CollaborationServiceAppendTurn,
+            MethodRoute::CollaborationServiceListByState,
+            MethodRoute::CollaborationServiceOpenDiscussion,
+            MethodRoute::IdentityServiceBeginWebAuthnAuthentication,
+            MethodRoute::IdentityServiceCreateDeviceAuthorization,
+            MethodRoute::IdentityServiceCreateServiceAccount,
+            MethodRoute::IdentityServiceExchangeDeviceAuthorization,
+            MethodRoute::IdentityServiceIssueServiceAccountCredential,
+            MethodRoute::IdentityServiceMintBiscuit,
+            MethodRoute::IdentityServiceWaitForDeviceAuthorization,
+            MethodRoute::IdentityServiceWhoAmI,
+            MethodRoute::RegistryServiceCreateGrant,
+            MethodRoute::RegistryServiceCreateNamespace,
+            MethodRoute::RegistryServiceCreateRepository,
+            MethodRoute::RegistryServiceDeleteGrant,
+            MethodRoute::RegistryServiceDeleteNamespace,
+            MethodRoute::RegistryServiceDeleteRepository,
+            MethodRoute::RegistryServiceGetCurrentUserNamespace,
+            MethodRoute::RegistryServiceGrantSupportAccess,
+            MethodRoute::RegistryServiceListGrants,
+            MethodRoute::RegistryServiceListSpools,
+            MethodRoute::RegistryServiceListSupportAccessGrants,
+            MethodRoute::RegistryServiceResolveMonorepo,
+            MethodRoute::RegistryServiceRevokeSupportAccess,
+            MethodRoute::RegistryServiceUpdateGrant,
+            MethodRoute::RegistryServiceUpdateNamespace,
+            MethodRoute::RegistryServiceUpdateRepository,
+            MethodRoute::RepoSyncServiceListRefs,
+            MethodRoute::RepoSyncServicePull,
+            MethodRoute::RepoSyncServicePush,
+            MethodRoute::RepoSyncServiceUpdateRef,
+            MethodRoute::RepositoryServiceGetBlame,
+            MethodRoute::RepositoryServiceGetBlob,
+            MethodRoute::RepositoryServiceGetCompare,
+            MethodRoute::RepositoryServiceGetContextHistory,
+            MethodRoute::RepositoryServiceListContext,
+            MethodRoute::RepositoryServiceListContextSuggestions,
+            MethodRoute::RepositoryServiceReviseContext,
+            MethodRoute::RepositoryServiceSetContext,
+            MethodRoute::RepositoryServiceSupersedeContext,
+            MethodRoute::StateReviewServiceSignState,
+            MethodRoute::WorkflowServiceApproveThread,
+            MethodRoute::WorkflowServiceCheckMergeEligibility,
+            MethodRoute::WorkflowServiceListThreadApprovals,
+            MethodRoute::WorkflowServiceRevokeApproval,
+        ];
+        let shipped = ALL_METHODS
+            .iter()
+            .filter(|method| {
+                method.maturity == ServiceMaturity::Shipped
+                    && method.deployment_targets.contains(&DeploymentTarget::Weft)
+                    && ROUTES.contains(&method.route)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(shipped.len(), 45);
+        assert_eq!(
+            shipped
+                .iter()
+                .filter(|method| method.streaming == StreamingShape::Unary)
+                .count(),
+            42
+        );
+        assert_eq!(
+            shipped
+                .iter()
+                .filter(|method| method.streaming == StreamingShape::ServerStreaming)
+                .count(),
+            1
+        );
+        assert_eq!(
+            shipped
+                .iter()
+                .filter(|method| method.streaming == StreamingShape::Bidirectional)
+                .count(),
+            2
+        );
     }
 }

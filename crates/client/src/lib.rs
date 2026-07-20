@@ -8,7 +8,6 @@ pub mod auth_cmd;
 pub mod auth_requests;
 pub mod credentials;
 pub mod device_flow;
-pub mod grpc_hosted;
 pub mod hosted;
 pub mod presence;
 pub mod support;

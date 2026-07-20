@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Idempotency dedup store for `client_operation_id`.
 //!
-//! Every state-changing CLI verb and gRPC method accepts an optional
+//! Every state-changing CLI verb and hosted method accepts an optional
 //! `client_operation_id` (UUID v4). The first time the server sees an id it
 //! processes the request and persists `(operation_id, request_hash, response)`.
 //! If the same id arrives again for the same verb with the same body hash, the
@@ -15,7 +15,7 @@
 //! routine) prunes entries older than the configured retention window.
 //!
 //! The hosted server uses a Postgres table with the same logical schema; see
-//! `crates/server/src/server/grpc_hosted_impl/idempotency.rs` for that
+//! Weft's hosted idempotency implementation for that
 //! adapter (W2). Both share the [`DedupOutcome`] return type so the
 //! middleware code is identical regardless of backend.
 
@@ -52,7 +52,7 @@ pub const DEFAULT_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DedupEntry {
     pub operation_id: OperationId,
-    /// gRPC method name or CLI verb name. Lets two distinct verbs share an
+    /// Hosted method name or CLI verb name. Lets two distinct verbs share an
     /// operation id without colliding (rare but supported).
     pub verb: String,
     /// BLAKE3-256 of the request body bytes. The server is responsible for
@@ -544,7 +544,7 @@ fn now_secs() -> i64 {
 }
 
 /// Compute the canonical request hash. Helper centralising the hashing
-/// scheme so all callers (CLI verbs, gRPC handlers) hash identically.
+/// scheme so all callers (CLI verbs, hosted handlers) hash identically.
 pub fn hash_request_body(bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
 }

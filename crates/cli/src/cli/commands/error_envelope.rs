@@ -696,19 +696,20 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                 _ => {}
             }
         }
-        // A hosted gRPC status carrying a typed conflict/cursor/stream detail
-        // (AX H4): project the machine-readable detail into the envelope so a
-        // JSON caller gets the conflicting resource / restart cursor / stream
-        // resumability instead of an opaque status string.
-        if let Some(status) = cause.downcast_ref::<tonic::Status>()
-            && let Some(typed) = crate::hosted_typed_error::HostedTypedError::from_status(status)
+        if let Some(protocol) = cause.downcast_ref::<wire::ProtocolError>()
+            && let Some(typed) =
+                crate::hosted_failure::HostedFailureDetail::from_protocol_error(protocol)
         {
+            let message = match protocol {
+                wire::ProtocolError::RemoteFailure { message, .. } => message.clone(),
+                _ => protocol.to_string(),
+            };
             return ErrorClassification {
                 kind: typed.kind().to_string(),
-                human_error: Some(status.message().to_string()),
+                human_error: Some(message),
                 hint: typed.hint(),
                 unsafe_condition:
-                    "the hosted server rejected the request with a typed conflict/cursor/stream detail"
+                    "the hosted server rejected the request with a typed contract failure detail"
                         .to_string(),
                 would_change:
                     "retrying unchanged may repeat the same rejection until the advised recovery is applied"

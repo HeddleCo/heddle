@@ -12,7 +12,6 @@ mod context;
 mod error;
 pub(crate) mod helpers;
 mod human;
-#[path = "../grpc_hosted/hydration.rs"]
 mod hydration;
 mod methods;
 pub mod monorepo;

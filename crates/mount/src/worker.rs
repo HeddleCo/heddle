@@ -22,17 +22,9 @@
 //!
 //! ## IPC protocol — minimal-by-design
 //!
-//! The spike picks gRPC-over-UDS in §3 because the *daemon-supervisor*
-//! model wants the same proto + tonic discipline as the rest of the
-//! daemon's RPCs. The current PR (heddle#190) ships the **CLI-dispatched
-//! variant** the issue AC calls for — the daemon-supervisor work lands
-//! later — and a single inherited socketpair with length-prefixed JSON
-//! frames is the right shape for that variant: no wire crate, no
-//! tonic, no `tokio` runtime in the worker, no per-mount UDS
-//! discovery file. We revisit gRPC when the daemon owns the
-//! supervisor and the [`SupervisorCommand`] surface needs to be
-//! reachable from any concurrent CLI invocation — see
-//! `docs/design/fuse-worker-ipc-decision.md` §6 for that follow-up.
+//! A single inherited socketpair with length-prefixed JSON frames is the
+//! process-local supervisor boundary: no wire crate, no async runtime in the
+//! worker, and no per-mount socket discovery file.
 //!
 //! Wire format on the socketpair: `u32` little-endian payload length
 //! followed by that many bytes of UTF-8 JSON. Each frame is one
