@@ -33,16 +33,25 @@ use objects::{
 };
 use semantic::{
     parser::Language,
-    semantic_index::{EXTRACTOR_VERSION, extract_semantic_file, grammar_version, language_name},
+    semantic_index::{
+        EXTRACTOR_VERSION, extract_semantic_file, grammar_version, grammar_version_by_name,
+        language_name,
+    },
 };
 use tracing::warn;
 
-use crate::{Repository, Result, StateAttachmentKind};
+use crate::{HeddleError, Repository, Result, StateAttachmentKind};
 
 /// Source files above this size are recorded as `Opaque` rather than parsed —
 /// generated/vendored blobs dominate parse cost and rarely carry review-worthy
 /// symbols.
 const SEMANTIC_FILE_BUDGET_BYTES: usize = 1 << 20;
+
+/// Recursion ceiling for the merkle tree/dir walkers. Legitimate directory
+/// nesting is far below this; a crafted, pushed `SemanticTreeNode` chain deeper
+/// than this is treated as pathological rather than overflowing the stack
+/// (same hardening class as the AST walkers, heddle#876).
+const MAX_SEMANTIC_TREE_DEPTH: usize = 1024;
 
 /// A single-symbol delta between two states, produced by [`Repository::semantic_diff_symbols`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,10 +81,11 @@ struct BuiltEntry {
 pub struct SemanticIndexBuilder<'store, S: ObjectStore> {
     store: &'store S,
     extractor_version: u32,
-    /// Per-build memo: source blob hash → its file/opaque entry. A blob that
-    /// appears at several paths (or is the unchanged sibling of a reformat) is
-    /// parsed once.
-    file_memo: HashMap<ContentHash, BuiltEntry>,
+    /// Per-build memo keyed by `(source blob hash, language)` — a blob that
+    /// appears at several paths is parsed once, but byte-identical blobs at
+    /// `a.js` and `b.py` get distinct nodes (a node is a pure function of
+    /// `(bytes, ext, grammar, extractor)`).
+    file_memo: HashMap<(ContentHash, Language), BuiltEntry>,
     /// Languages encountered while building, seeded from the parent root so
     /// pruned subtrees' grammars are not lost.
     grammars: BTreeMap<String, String>,
@@ -106,11 +116,15 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         tree: &Tree,
         parent: Option<&ParentIndex>,
     ) -> Result<(SemanticIndexRoot, ContentHash)> {
+        // Refuse node reuse across an extractor or grammar bump: reusing stale
+        // nodes would mix v1+v2 fingerprints in one index. A non-current parent
+        // is dropped entirely, forcing a clean full rebuild.
+        let parent = parent.filter(|p| self.parent_is_reusable(p));
         if let Some(parent) = parent {
             self.grammars = parent.root.grammars.clone();
         }
         let parent_ctx = parent.map(|p| (&p.source_tree, &p.semantic_tree));
-        let (node_hash, digest) = self.build_tree(tree, parent_ctx)?;
+        let (node_hash, digest) = self.build_tree(tree, parent_ctx, 0)?;
         let root = SemanticIndexRoot::new(
             self.extractor_version,
             std::mem::take(&mut self.grammars),
@@ -126,18 +140,31 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         Ok((root, root_hash))
     }
 
+    /// Whether a parent index may be reused: its extractor version and every
+    /// grammar version must match the builder's current ones.
+    fn parent_is_reusable(&self, parent: &ParentIndex) -> bool {
+        parent.root.extractor_version == self.extractor_version
+            && parent.root.grammars.iter().all(|(name, version)| {
+                grammar_version_by_name(name) == Some(version.as_str())
+            })
+    }
+
     fn build_tree(
         &mut self,
         tree: &Tree,
         parent: Option<(&Tree, &SemanticTreeNode)>,
+        depth: usize,
     ) -> Result<(ContentHash, ContentHash)> {
+        if depth > MAX_SEMANTIC_TREE_DEPTH {
+            return Err(HeddleError::InvalidObject(format!(
+                "semantic index tree exceeds max depth {MAX_SEMANTIC_TREE_DEPTH}"
+            )));
+        }
         let mut entries = Vec::with_capacity(tree.len());
         for entry in tree.entries() {
             let name = entry.name();
             let built = match entry.target() {
-                TreeEntryTarget::Tree { hash } => {
-                    self.build_dir(name, *hash, parent)?
-                }
+                TreeEntryTarget::Tree { hash } => self.build_dir(name, *hash, parent, depth)?,
                 TreeEntryTarget::Blob { hash, .. } => self.build_file(name, *hash, parent)?,
                 TreeEntryTarget::Symlink { hash } => BuiltEntry {
                     kind: SemanticEntryKind::Opaque,
@@ -172,6 +199,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         name: &str,
         source_hash: ContentHash,
         parent: Option<(&Tree, &SemanticTreeNode)>,
+        depth: usize,
     ) -> Result<BuiltEntry> {
         // Unchanged-subtree prune: same-named source dir with the same hash and
         // a matching parent semantic entry ⇒ reuse wholesale, no recurse, no
@@ -196,10 +224,8 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
 
         // Descend with the matching parent subtree as the reuse basis, if any.
         let child_parent = self.child_parent_ctx(name, parent)?;
-        let child_parent_ref = child_parent
-            .as_ref()
-            .map(|(t, n)| (t, n));
-        let (node, digest) = self.build_tree(&source_tree, child_parent_ref)?;
+        let child_parent_ref = child_parent.as_ref().map(|(t, n)| (t, n));
+        let (node, digest) = self.build_tree(&source_tree, child_parent_ref, depth + 1)?;
         Ok(BuiltEntry {
             kind: SemanticEntryKind::Dir,
             node,
@@ -247,8 +273,12 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         source_hash: ContentHash,
         parent: Option<(&Tree, &SemanticTreeNode)>,
     ) -> Result<BuiltEntry> {
-        // Parsed once per unique source blob.
-        if let Some(built) = self.file_memo.get(&source_hash) {
+        // A file node is a pure function of (bytes, ext/language, grammar,
+        // extractor), so memoize per `(source_hash, language)` — NOT bytes
+        // alone (byte-identical `a.js`/`b.py` must not share a node).
+        let language = Language::from_path(std::path::Path::new(name));
+        let memo_key = (source_hash, language);
+        if let Some(built) = self.file_memo.get(&memo_key) {
             return Ok(*built);
         }
 
@@ -264,23 +294,22 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
                 node: sem_entry.node,
                 semantic_digest: sem_entry.semantic_digest,
             };
-            self.file_memo.insert(source_hash, built);
+            self.file_memo.insert(memo_key, built);
             return Ok(built);
         }
 
-        let built = self.parse_file(name, source_hash)?;
-        self.file_memo.insert(source_hash, built);
+        let built = self.parse_file(language, source_hash)?;
+        self.file_memo.insert(memo_key, built);
         Ok(built)
     }
 
-    fn parse_file(&mut self, name: &str, source_hash: ContentHash) -> Result<BuiltEntry> {
+    fn parse_file(&mut self, language: Language, source_hash: ContentHash) -> Result<BuiltEntry> {
         let opaque = BuiltEntry {
             kind: SemanticEntryKind::Opaque,
             node: source_hash,
             semantic_digest: source_hash,
         };
 
-        let language = Language::from_path(std::path::Path::new(name));
         if language.parser_handle().is_none() {
             return Ok(opaque);
         }
@@ -298,13 +327,16 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
 
         let lang = language_name(extracted.language).to_string();
         let gv = grammar_version(extracted.language).to_string();
-        self.grammars.entry(lang.clone()).or_insert_with(|| gv.clone());
+        // Freshly-parsed grammar version wins in the root metadata (overwrite,
+        // not or_insert) so a stale seed from a current parent can't linger.
+        self.grammars.insert(lang.clone(), gv.clone());
 
         let node = SemanticFileNode::new(
             lang,
             gv,
             self.extractor_version,
             source_hash,
+            extracted.scaffold_hash,
             extracted.symbols,
         );
         let digest = node.semantic_digest;
@@ -386,7 +418,11 @@ impl Repository {
         }
     }
 
-    /// Load a state's attached semantic index root, if present.
+    /// Load a state's attached semantic index root, if present AND intact. A
+    /// missing or corrupt root blob (e.g. a partially-replicated push, or GC
+    /// that pruned the sidecar) is treated as ABSENT — `Ok(None)` — so callers
+    /// recompute+supersede instead of erroring forever on the dangling
+    /// attachment.
     fn load_attached_index(&self, state_id: &StateId) -> Result<Option<SemanticIndexRoot>> {
         let Some(attachment) =
             self.latest_state_attachment(state_id, StateAttachmentKind::SemanticIndex)?
@@ -396,7 +432,21 @@ impl Repository {
         let objects::object::StateAttachmentBody::SemanticIndex(root_hash) = attachment.body else {
             return Ok(None);
         };
-        self.load_index_root(&root_hash).map(Some)
+        let Some(blob) = self.store().get_blob(&root_hash)? else {
+            return Ok(None);
+        };
+        Ok(SemanticIndexRoot::decode(blob.content()).ok())
+    }
+
+    /// Whether an attached root is current: extractor version and every grammar
+    /// version match this binary's. A stale root is served as a MISS so a
+    /// bump recomputes.
+    fn index_is_current(&self, root: &SemanticIndexRoot) -> bool {
+        root.extractor_version == EXTRACTOR_VERSION
+            && root
+                .grammars
+                .iter()
+                .all(|(name, version)| grammar_version_by_name(name) == Some(version.as_str()))
     }
 
     fn load_index_root(&self, root_hash: &ContentHash) -> Result<SemanticIndexRoot> {
@@ -448,9 +498,13 @@ impl Repository {
     /// attached, returns it; otherwise builds forward from the nearest ancestor
     /// that has an index (reusing it), attaches each, and returns the target's.
     pub fn semantic_index(&self, state_id: &StateId) -> Result<Option<SemanticIndexRoot>> {
-        if let Some(root) = self.load_attached_index(state_id)? {
+        if let Some(root) = self.load_attached_index(state_id)?
+            && self.index_is_current(&root)
+        {
             return Ok(Some(root));
         }
+        // Absent, corrupt, or stale-version → recompute below (superseding any
+        // stale attachment).
         if self.store().get_state(state_id)?.is_none() {
             return Ok(None);
         }
@@ -508,6 +562,42 @@ impl Repository {
         Ok(Some(self.load_index_root(&root_hash)?))
     }
 
+    /// Rebuild a state's index from scratch with NO parent reuse — guaranteeing
+    /// a complete, self-contained node closure independent of any pruned or
+    /// broken parent nodes — and supersede the prior attachment. The recovery
+    /// path when a query hits a missing/corrupt semantic node.
+    fn force_recompute_index(&self, state_id: &StateId) -> Result<Option<SemanticIndexRoot>> {
+        let Some(state) = self.store().get_state(state_id)? else {
+            return Ok(None);
+        };
+        let Some(tree) = self.store().get_tree(&state.tree)? else {
+            return Ok(None);
+        };
+        let mut builder = SemanticIndexBuilder::new(self.store(), EXTRACTOR_VERSION);
+        let (_, root_hash) = builder.build_root(&tree, None)?;
+        self.attach_semantic_index(state_id, &state, root_hash)?;
+        Ok(Some(self.load_index_root(&root_hash)?))
+    }
+
+    /// Run a query; if it trips over a missing/corrupt semantic node (a pruned
+    /// or partially-replicated index), force-recompute the involved states'
+    /// indexes and retry ONCE, so queries self-heal instead of erroring forever.
+    fn recover_on_broken<T>(
+        &self,
+        states: &[&StateId],
+        op: impl Fn(&Self) -> Result<T>,
+    ) -> Result<T> {
+        match op(self) {
+            Err(err) if is_broken_index_error(&err) => {
+                for state in states {
+                    self.force_recompute_index(state)?;
+                }
+                op(self)
+            }
+            other => other,
+        }
+    }
+
     fn attach_semantic_index(
         &self,
         state_id: &StateId,
@@ -531,6 +621,14 @@ impl Repository {
     /// Resolve a symbol anchor (file path + symbol address) to its entry in a
     /// state's index. Get-or-computes the index on miss.
     pub fn symbol_hash(
+        &self,
+        state_id: &StateId,
+        anchor: &SymbolAnchor,
+    ) -> Result<Option<SymbolEntry>> {
+        self.recover_on_broken(&[state_id], |me| me.symbol_hash_inner(state_id, anchor))
+    }
+
+    fn symbol_hash_inner(
         &self,
         state_id: &StateId,
         anchor: &SymbolAnchor,
@@ -582,6 +680,15 @@ impl Repository {
         b: &StateId,
         path_prefix: &str,
     ) -> Result<bool> {
+        self.recover_on_broken(&[a, b], |me| me.semantic_changed_inner(a, b, path_prefix))
+    }
+
+    fn semantic_changed_inner(
+        &self,
+        a: &StateId,
+        b: &StateId,
+        path_prefix: &str,
+    ) -> Result<bool> {
         let (Some(root_a), Some(root_b)) = (self.semantic_index(a)?, self.semantic_index(b)?) else {
             // A missing index on either side is a difference iff the other exists.
             return Ok(self.semantic_index(a)?.is_some() != self.semantic_index(b)?.is_some());
@@ -623,6 +730,14 @@ impl Repository {
     /// only into differing digests (identical subtrees are pruned without
     /// loading their file nodes).
     pub fn semantic_diff_symbols(&self, a: &StateId, b: &StateId) -> Result<Vec<SymbolDelta>> {
+        self.recover_on_broken(&[a, b], |me| me.semantic_diff_symbols_inner(a, b))
+    }
+
+    fn semantic_diff_symbols_inner(
+        &self,
+        a: &StateId,
+        b: &StateId,
+    ) -> Result<Vec<SymbolDelta>> {
         let (root_a, root_b) = match (self.semantic_index(a)?, self.semantic_index(b)?) {
             (Some(ra), Some(rb)) => (ra, rb),
             _ => return Ok(Vec::new()),
@@ -633,7 +748,7 @@ impl Repository {
         let node_a = self.load_semantic_tree(&root_a.tree)?;
         let node_b = self.load_semantic_tree(&root_b.tree)?;
         let mut out = Vec::new();
-        self.diff_tree_nodes(&node_a, &node_b, "", &mut out)?;
+        self.diff_tree_nodes(&node_a, &node_b, "", 0, &mut out)?;
         Ok(out)
     }
 
@@ -642,8 +757,14 @@ impl Repository {
         a: &SemanticTreeNode,
         b: &SemanticTreeNode,
         prefix: &str,
+        depth: usize,
         out: &mut Vec<SymbolDelta>,
     ) -> Result<()> {
+        if depth > MAX_SEMANTIC_TREE_DEPTH {
+            return Err(HeddleError::InvalidObject(format!(
+                "semantic diff exceeds max depth {MAX_SEMANTIC_TREE_DEPTH}"
+            )));
+        }
         let a_by_name: HashMap<&str, &SemanticTreeEntry> =
             a.entries.iter().map(|e| (e.name.as_str(), e)).collect();
         let b_by_name: HashMap<&str, &SemanticTreeEntry> =
@@ -652,7 +773,7 @@ impl Repository {
         for entry_a in &a.entries {
             let path = join_path(prefix, &entry_a.name);
             match b_by_name.get(entry_a.name.as_str()) {
-                None => self.emit_side(entry_a, &path, Side::Removed, out)?,
+                None => self.emit_side(entry_a, &path, Side::Removed, depth, out)?,
                 Some(entry_b) => {
                     if entry_a.semantic_digest == entry_b.semantic_digest {
                         continue; // pruned — identical subtree/file.
@@ -661,7 +782,7 @@ impl Repository {
                         (SemanticEntryKind::Dir, SemanticEntryKind::Dir) => {
                             let child_a = self.load_semantic_tree(&entry_a.node)?;
                             let child_b = self.load_semantic_tree(&entry_b.node)?;
-                            self.diff_tree_nodes(&child_a, &child_b, &path, out)?;
+                            self.diff_tree_nodes(&child_a, &child_b, &path, depth + 1, out)?;
                         }
                         (SemanticEntryKind::File, SemanticEntryKind::File) => {
                             let file_a = self.load_semantic_file(&entry_a.node)?;
@@ -670,8 +791,8 @@ impl Repository {
                         }
                         // Kind flipped (file↔dir↔opaque): a full replace.
                         _ => {
-                            self.emit_side(entry_a, &path, Side::Removed, out)?;
-                            self.emit_side(entry_b, &path, Side::Added, out)?;
+                            self.emit_side(entry_a, &path, Side::Removed, depth, out)?;
+                            self.emit_side(entry_b, &path, Side::Added, depth, out)?;
                         }
                     }
                 }
@@ -681,7 +802,7 @@ impl Repository {
         for entry_b in &b.entries {
             if !a_by_name.contains_key(entry_b.name.as_str()) {
                 let path = join_path(prefix, &entry_b.name);
-                self.emit_side(entry_b, &path, Side::Added, out)?;
+                self.emit_side(entry_b, &path, Side::Added, depth, out)?;
             }
         }
         Ok(())
@@ -694,8 +815,14 @@ impl Repository {
         entry: &SemanticTreeEntry,
         path: &str,
         side: Side,
+        depth: usize,
         out: &mut Vec<SymbolDelta>,
     ) -> Result<()> {
+        if depth > MAX_SEMANTIC_TREE_DEPTH {
+            return Err(HeddleError::InvalidObject(format!(
+                "semantic diff exceeds max depth {MAX_SEMANTIC_TREE_DEPTH}"
+            )));
+        }
         match entry.kind {
             SemanticEntryKind::File => {
                 let file = self.load_semantic_file(&entry.node)?;
@@ -707,7 +834,7 @@ impl Repository {
                 let node = self.load_semantic_tree(&entry.node)?;
                 for child in &node.entries {
                     let child_path = join_path(path, &child.name);
-                    self.emit_side(child, &child_path, side, out)?;
+                    self.emit_side(child, &child_path, side, depth + 1, out)?;
                 }
             }
             SemanticEntryKind::Opaque => {}
@@ -819,40 +946,73 @@ impl Side {
     }
 }
 
-/// Diff two file nodes by symbol address, emitting a delta per added/removed/
-/// changed symbol. Unchanged symbols (equal `semantic_hash`) are skipped.
+/// The identity a symbol is matched on across two file versions:
+/// `(container_path, name, kind)`. Distinguishes `fn f` in `mod a` from `mod b`,
+/// `fn X` from `struct X`, so the diff never last-wins-collides distinct
+/// symbols into a mislabeled Modified or a silent skip.
+type SymbolKey = (Vec<String>, String, SymbolKindTag);
+
+fn symbol_key(sym: &SymbolEntry) -> SymbolKey {
+    (sym.container_path.clone(), sym.name.clone(), sym.kind)
+}
+
+/// Diff two file nodes by symbol identity (a `(container, name, kind)`
+/// MULTISET), emitting a delta per added/removed/changed symbol. Same-key
+/// entries (e.g. C++ overloads the extractor can't tell apart) are paired
+/// positionally in canonical order; unmatched extras become add/remove.
+/// Unchanged symbols (equal `semantic_hash`) are skipped.
 fn diff_file_symbols(
     a: &SemanticFileNode,
     b: &SemanticFileNode,
     path: &str,
     out: &mut Vec<SymbolDelta>,
 ) {
-    let a_by_addr: HashMap<String, &SymbolEntry> =
-        a.symbols.iter().map(|s| (s.address(), s)).collect();
-    let b_by_addr: HashMap<String, &SymbolEntry> =
-        b.symbols.iter().map(|s| (s.address(), s)).collect();
+    let mut a_by_key: HashMap<SymbolKey, Vec<&SymbolEntry>> = HashMap::new();
+    for sym in &a.symbols {
+        a_by_key.entry(symbol_key(sym)).or_default().push(sym);
+    }
+    let mut b_by_key: HashMap<SymbolKey, Vec<&SymbolEntry>> = HashMap::new();
+    for sym in &b.symbols {
+        b_by_key.entry(symbol_key(sym)).or_default().push(sym);
+    }
 
-    for sym_a in &a.symbols {
-        let addr = sym_a.address();
-        match b_by_addr.get(&addr) {
-            None => out.push(Side::Removed.delta(path, sym_a)),
-            Some(sym_b) => {
-                if sym_a.semantic_hash != sym_b.semantic_hash {
-                    out.push(SymbolDelta {
-                        anchor: SymbolAnchor::new(path, addr),
-                        kind: sym_b.kind,
-                        old_hash: Some(sym_a.semantic_hash),
-                        new_hash: Some(sym_b.semantic_hash),
-                    });
-                }
+    for (key, a_syms) in &a_by_key {
+        let b_syms = b_by_key.get(key).map(Vec::as_slice).unwrap_or(&[]);
+        // Symbols arrive in the file node already sorted by
+        // (container, name, kind, span.0), so same-key lists are in a stable
+        // order; pair them positionally.
+        for pair in a_syms.iter().zip(b_syms.iter()) {
+            let (sym_a, sym_b) = pair;
+            if sym_a.semantic_hash != sym_b.semantic_hash {
+                out.push(SymbolDelta {
+                    anchor: SymbolAnchor::new(path, sym_b.address()),
+                    kind: sym_b.kind,
+                    old_hash: Some(sym_a.semantic_hash),
+                    new_hash: Some(sym_b.semantic_hash),
+                });
             }
         }
+        // Extra `a` occurrences with no `b` counterpart are removals.
+        for sym_a in a_syms.iter().skip(b_syms.len()) {
+            out.push(Side::Removed.delta(path, sym_a));
+        }
     }
-    for sym_b in &b.symbols {
-        if !a_by_addr.contains_key(&sym_b.address()) {
+    // Keys (or extra occurrences of a key) present only in `b` are additions.
+    for (key, b_syms) in &b_by_key {
+        let a_len = a_by_key.get(key).map(Vec::len).unwrap_or(0);
+        for sym_b in b_syms.iter().skip(a_len) {
             out.push(Side::Added.delta(path, sym_b));
         }
     }
+}
+
+/// A missing (`NotFound`) or corrupt (`InvalidObject`) semantic node — the
+/// recoverable "broken index" class.
+fn is_broken_index_error(err: &HeddleError) -> bool {
+    matches!(
+        err,
+        HeddleError::NotFound(_) | HeddleError::InvalidObject(_)
+    )
 }
 
 fn join_path(prefix: &str, name: &str) -> String {
@@ -865,10 +1025,37 @@ fn join_path(prefix: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{Attribution, Blob, Principal, TreeEntry};
+    use std::collections::BTreeMap;
+
+    use chrono::Utc;
+    use objects::object::{
+        Attribution, Blob, Principal, StateAttachment, StateAttachmentBody, TreeEntry,
+    };
     use tempfile::TempDir;
 
     use super::*;
+
+    /// Attach `root_hash` as the (superseding) SemanticIndex on `state_id`.
+    fn attach(repo: &Repository, state_id: &StateId, root_hash: ContentHash) {
+        let state = repo.store().get_state(state_id).unwrap().unwrap();
+        let prior = repo
+            .latest_state_attachment(state_id, StateAttachmentKind::SemanticIndex)
+            .unwrap()
+            .map(|a| a.id());
+        repo.put_state_attachment(&StateAttachment {
+            state_id: *state_id,
+            body: StateAttachmentBody::SemanticIndex(root_hash),
+            attribution: state.attribution.clone(),
+            created_at: Utc::now(),
+            supersedes: prior,
+        })
+        .unwrap();
+    }
+
+    fn state_tree(repo: &Repository, state_id: &StateId) -> Tree {
+        let state = repo.store().get_state(state_id).unwrap().unwrap();
+        repo.store().get_tree(&state.tree).unwrap().unwrap()
+    }
 
     fn repo() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
@@ -1043,5 +1230,164 @@ mod tests {
         // --all recomputes every state.
         let total = repo.store().list_states().unwrap().len();
         assert_eq!(repo.backfill_semantic_index(true).unwrap(), total);
+    }
+
+    /// DEFECT 2: an extractor bump must refuse stale node reuse — an unchanged
+    /// blob is re-parsed into a fresh node, so no index mixes v1+v2 fingerprints.
+    #[test]
+    fn extractor_bump_refuses_stale_reuse() {
+        let (_temp, repo) = repo();
+        let blob = put_blob(&repo, b"fn a() -> i32 { 1 }\n");
+        let tree = Tree::from_entries(vec![TreeEntry::file("a.rs", blob, false).unwrap()]);
+
+        let mut b1 = SemanticIndexBuilder::new(repo.store(), 1);
+        let (root1, _) = b1.build_root(&tree, None).unwrap();
+        assert_eq!(root1.extractor_version, 1);
+
+        // Same source, extractor bumped to 2, parent (v1) offered for reuse.
+        let parent = parent_index(&repo, tree.clone(), root1);
+        let mut b2 = SemanticIndexBuilder::new(repo.store(), 2);
+        let (root2, _) = b2.build_root(&tree, Some(&parent)).unwrap();
+        assert_eq!(
+            b2.parse_count, 1,
+            "extractor bump must reparse, not reuse the v1 node"
+        );
+        assert_eq!(root2.extractor_version, 2);
+        let node_hash = repo.resolve_file_node(&root2, "a.rs").unwrap().unwrap();
+        assert_eq!(
+            repo.load_semantic_file(&node_hash).unwrap().extractor_version,
+            2,
+            "no mixed-version index"
+        );
+    }
+
+    /// DEFECT 2: `semantic_index()` must treat a stale-version attached root as
+    /// a MISS and recompute+supersede to the current extractor version.
+    #[test]
+    fn stale_attached_index_is_recomputed() {
+        let (temp, repo) = repo();
+        let a = snapshot(&repo, &temp, "m.rs", "fn f() {}\n");
+
+        // Force a stale (extractor 999) index onto the state.
+        let mut builder = SemanticIndexBuilder::new(repo.store(), 999);
+        let (stale_root, stale_hash) = builder.build_root(&state_tree(&repo, &a), None).unwrap();
+        assert_eq!(stale_root.extractor_version, 999);
+        attach(&repo, &a, stale_hash);
+
+        let root = repo.semantic_index(&a).unwrap().unwrap();
+        assert_eq!(
+            root.extractor_version, EXTRACTOR_VERSION,
+            "stale attached root must be recomputed to the current version"
+        );
+    }
+
+    /// DEFECT 3: a dangling attached index (root present but pointing at a
+    /// missing node — e.g. a partially-replicated push or a pruned sidecar)
+    /// must self-heal: queries recompute+supersede instead of erroring forever.
+    #[test]
+    fn dangling_index_recovers_on_query() {
+        let (temp, repo) = repo();
+        let a = snapshot(&repo, &temp, "m.rs", "fn f() -> i32 { 1 }\n");
+
+        // Attach a current-version root pointing at a node that does not exist.
+        let fake_tree = ContentHash::compute(b"missing-semantic-node");
+        let bogus = SemanticIndexRoot::new(
+            EXTRACTOR_VERSION,
+            BTreeMap::new(),
+            fake_tree,
+            ContentHash::compute(b"digest"),
+        );
+        let bogus_hash = repo
+            .store()
+            .put_blob(&Blob::new(bogus.encode().unwrap()))
+            .unwrap();
+        attach(&repo, &a, bogus_hash);
+
+        // The query descends the dangling tree, hits the missing node, and must
+        // recover — not propagate a NotFound.
+        let anchor = SymbolAnchor::new("m.rs", "f");
+        let sym = repo
+            .symbol_hash(&a, &anchor)
+            .expect("query must recover, not error");
+        assert!(sym.is_some(), "recomputed index resolves the symbol");
+
+        // And the state now carries a valid, resolvable index.
+        let root = repo.semantic_index(&a).unwrap().unwrap();
+        assert!(repo.resolve_file_node(&root, "m.rs").unwrap().is_some());
+    }
+
+    /// DEFECT 5: byte-identical blobs at `.js` and `.py` must get DISTINCT nodes
+    /// with the correct language — a node is a pure function of (bytes, ext,
+    /// grammar, extractor), not bytes alone.
+    #[test]
+    fn same_bytes_distinct_language_nodes() {
+        let (_temp, repo) = repo();
+        // `x = 1` parses (error-free) as both JavaScript and Python.
+        let blob = put_blob(&repo, b"x = 1\n");
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("a.js", blob, false).unwrap(),
+            TreeEntry::file("b.py", blob, false).unwrap(),
+        ]);
+        let mut builder = SemanticIndexBuilder::new(repo.store(), EXTRACTOR_VERSION);
+        let (root, _) = builder.build_root(&tree, None).unwrap();
+        assert_eq!(builder.parse_count, 2, "parsed once per (bytes, language)");
+
+        let js = repo.resolve_file_node(&root, "a.js").unwrap().unwrap();
+        let py = repo.resolve_file_node(&root, "b.py").unwrap().unwrap();
+        assert_ne!(js, py, "byte-identical files get distinct nodes per language");
+        assert_eq!(repo.load_semantic_file(&js).unwrap().language, "javascript");
+        assert_eq!(repo.load_semantic_file(&py).unwrap().language, "python");
+    }
+
+    /// DEFECT 6: same-name symbols of different KIND must not collide — editing
+    /// `fn X` must report exactly `fn X`, leaving `struct X` untouched.
+    #[test]
+    fn diff_decollides_same_name_different_kind() {
+        let (temp, repo) = repo();
+        let a = snapshot(
+            &repo,
+            &temp,
+            "m.rs",
+            "struct X { a: u8 }\nfn X() -> i32 { 1 }\n",
+        );
+        let b = snapshot(
+            &repo,
+            &temp,
+            "m.rs",
+            "struct X { a: u8 }\nfn X() -> i32 { 2 }\n",
+        );
+        let deltas = repo.semantic_diff_symbols(&a, &b).unwrap();
+        assert_eq!(deltas.len(), 1, "only fn X changed: {deltas:?}");
+        assert_eq!(deltas[0].anchor.symbol, "X");
+        assert_eq!(deltas[0].kind, SymbolKindTag::Function);
+    }
+
+    /// DEFECT 6: same-name symbols in different modules must not collide —
+    /// editing `mod a::f` must report `a::f` and NEVER `b::f`.
+    #[test]
+    fn diff_decollides_same_name_across_modules() {
+        let (temp, repo) = repo();
+        let a = snapshot(
+            &repo,
+            &temp,
+            "m.rs",
+            "mod a { pub fn f() -> i32 { 1 } }\nmod b { pub fn f() -> i32 { 9 } }\n",
+        );
+        let b = snapshot(
+            &repo,
+            &temp,
+            "m.rs",
+            "mod a { pub fn f() -> i32 { 2 } }\nmod b { pub fn f() -> i32 { 9 } }\n",
+        );
+        let deltas = repo.semantic_diff_symbols(&a, &b).unwrap();
+        let symbols: Vec<_> = deltas.iter().map(|d| d.anchor.symbol.clone()).collect();
+        assert!(
+            symbols.contains(&"a::f".to_string()),
+            "a::f must be reported: {symbols:?}"
+        );
+        assert!(
+            !symbols.contains(&"b::f".to_string()),
+            "b::f must NOT be reported (no cross-module address collision): {symbols:?}"
+        );
     }
 }

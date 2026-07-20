@@ -170,36 +170,63 @@ pub fn compute_symbol_semantic_hash(kind: SymbolKindTag, token_stream: &[u8]) ->
     ContentHash::compute_typed("hd-sem-sym-v1", &buf)
 }
 
-/// Compute a file node's `semantic_digest` over its (already sorted) symbols.
+/// Hash the file's *scaffold*: the residual non-definition top-level token
+/// stream (every leaf under the file root not covered by an extracted symbol's
+/// span). This is what binds `use`-decl swaps, `impl Trait` headers, attribute
+/// edits, `macro_rules!` bodies and definition-free files (re-export-only libs,
+/// top-level statements) into the file digest — semantic content that lives
+/// *outside* any extracted symbol.
 ///
-/// Canonical layout `hd-sem-file-v1`, per symbol:
-/// `u32-LE-len-prefixed(container_path joined by "::") ‖ name ‖ kind_tag ‖ semantic_hash`.
-/// Spans are EXCLUDED — that is what makes the digest reformat-stable.
-pub fn compute_file_semantic_digest(symbols: &[SymbolEntry]) -> ContentHash {
+/// Canonical layout `hd-sem-scaffold-v1`: the length-prefixed leaf token stream
+/// (same framing as a symbol hash's token stream), comments excluded.
+pub fn compute_file_scaffold_hash(token_stream: &[u8]) -> ContentHash {
+    ContentHash::compute_typed("hd-sem-scaffold-v1", token_stream)
+}
+
+/// Compute a file node's `semantic_digest` over its scaffold and (already
+/// sorted) symbols — so the digest covers ALL of a file's semantic content,
+/// not just its extracted definitions.
+///
+/// Canonical layout `hd-sem-file-v2`: `scaffold_hash`, then per symbol
+/// `u32-LE(container element count) ‖ (u32-LE-len ‖ bytes)* ‖ u32-LE(name len) ‖
+/// name ‖ kind_tag ‖ semantic_hash`. Every variable-length field is
+/// length-framed (no record-boundary ambiguity; `["a::b"]` no longer aliases
+/// `["a","b"]`). Spans are EXCLUDED — that is what makes the digest
+/// reformat-stable.
+pub fn compute_file_semantic_digest(
+    scaffold_hash: ContentHash,
+    symbols: &[SymbolEntry],
+) -> ContentHash {
     let mut buf = Vec::new();
+    buf.extend_from_slice(scaffold_hash.as_bytes());
     for symbol in symbols {
-        let joined = symbol.container_path.join("::");
-        buf.extend_from_slice(&(joined.len() as u32).to_le_bytes());
-        buf.extend_from_slice(joined.as_bytes());
+        buf.extend_from_slice(&(symbol.container_path.len() as u32).to_le_bytes());
+        for segment in &symbol.container_path {
+            buf.extend_from_slice(&(segment.len() as u32).to_le_bytes());
+            buf.extend_from_slice(segment.as_bytes());
+        }
+        buf.extend_from_slice(&(symbol.name.len() as u32).to_le_bytes());
         buf.extend_from_slice(symbol.name.as_bytes());
         buf.push(symbol.kind.tag_byte());
         buf.extend_from_slice(symbol.semantic_hash.as_bytes());
     }
-    ContentHash::compute_typed("hd-sem-file-v1", &buf)
+    ContentHash::compute_typed("hd-sem-file-v2", &buf)
 }
 
 /// Compute a directory node's `semantic_digest` over its entries.
 ///
-/// Canonical layout `hd-sem-dir-v1`, per entry:
-/// `name ‖ kind_tag ‖ child semantic_digest`.
+/// Canonical layout `hd-sem-dir-v2`, per entry:
+/// `u32-LE(name len) ‖ name ‖ kind_tag ‖ child semantic_digest`. The name is
+/// length-framed so entry boundaries are unambiguous.
 pub fn compute_dir_semantic_digest(entries: &[SemanticTreeEntry]) -> ContentHash {
     let mut buf = Vec::new();
     for entry in entries {
+        buf.extend_from_slice(&(entry.name.len() as u32).to_le_bytes());
         buf.extend_from_slice(entry.name.as_bytes());
         buf.push(entry.kind.tag_byte());
         buf.extend_from_slice(entry.semantic_digest.as_bytes());
     }
-    ContentHash::compute_typed("hd-sem-dir-v1", &buf)
+    ContentHash::compute_typed("hd-sem-dir-v2", &buf)
 }
 
 /// The per-file semantic node: the symbols a source blob defines plus the
@@ -212,6 +239,10 @@ pub struct SemanticFileNode {
     pub extractor_version: u32,
     /// Content hash of the raw source blob this node was extracted from.
     pub source_blob: ContentHash,
+    /// Hash of the file's residual non-definition token stream — see
+    /// [`compute_file_scaffold_hash`]. Binds semantic content that lives outside
+    /// any extracted symbol into the file digest.
+    pub scaffold_hash: ContentHash,
     /// Symbols sorted by `(container_path, name, kind, span.0)`.
     pub symbols: Vec<SymbolEntry>,
     /// Reformat-stable digest — see [`compute_file_semantic_digest`].
@@ -221,22 +252,25 @@ pub struct SemanticFileNode {
 impl SemanticFileNode {
     pub const FORMAT_VERSION: u8 = 1;
 
-    /// Build a node, sorting the symbols canonically and computing the digest.
+    /// Build a node, sorting the symbols canonically and computing the digest
+    /// over the scaffold plus the symbols.
     pub fn new(
         language: impl Into<String>,
         grammar_version: impl Into<String>,
         extractor_version: u32,
         source_blob: ContentHash,
+        scaffold_hash: ContentHash,
         mut symbols: Vec<SymbolEntry>,
     ) -> Self {
         symbols.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
-        let semantic_digest = compute_file_semantic_digest(&symbols);
+        let semantic_digest = compute_file_semantic_digest(scaffold_hash, &symbols);
         Self {
             format_version: Self::FORMAT_VERSION,
             language: language.into(),
             grammar_version: grammar_version.into(),
             extractor_version,
             source_blob,
+            scaffold_hash,
             symbols,
             semantic_digest,
         }
@@ -404,6 +438,7 @@ mod tests {
             "0.24",
             1,
             h(1),
+            h(0),
             vec![sym("foo", &[], SymbolKindTag::Function, (10, 20))],
         );
         // Same symbol, moved by a reformat (span shifted).
@@ -412,6 +447,7 @@ mod tests {
             "0.24",
             1,
             h(1),
+            h(0),
             vec![sym("foo", &[], SymbolKindTag::Function, (99, 120))],
         );
         assert_eq!(
@@ -423,10 +459,33 @@ mod tests {
     #[test]
     fn file_digest_changes_on_symbol_hash_change() {
         let mut s = sym("foo", &[], SymbolKindTag::Function, (1, 2));
-        let d1 = compute_file_semantic_digest(std::slice::from_ref(&s));
+        let d1 = compute_file_semantic_digest(h(0), std::slice::from_ref(&s));
         s.semantic_hash = ContentHash::compute(b"different-body");
-        let d2 = compute_file_semantic_digest(std::slice::from_ref(&s));
+        let d2 = compute_file_semantic_digest(h(0), std::slice::from_ref(&s));
         assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn file_digest_changes_on_scaffold_change() {
+        let syms = [sym("foo", &[], SymbolKindTag::Function, (1, 2))];
+        let d1 = compute_file_semantic_digest(compute_file_scaffold_hash(b"use a;"), &syms);
+        let d2 = compute_file_semantic_digest(compute_file_scaffold_hash(b"use b;"), &syms);
+        assert_ne!(
+            d1, d2,
+            "scaffold (non-definition top-level tokens) must affect the file digest"
+        );
+    }
+
+    #[test]
+    fn file_digest_framing_is_unambiguous() {
+        // `["a::b"]` must NOT collide with `["a","b"]` (per-element framing),
+        // and a name boundary shift must not alias across symbols.
+        let one = sym("f", &["a::b"], SymbolKindTag::Function, (0, 0));
+        let two = sym("f", &["a", "b"], SymbolKindTag::Function, (0, 0));
+        assert_ne!(
+            compute_file_semantic_digest(h(0), &[one]),
+            compute_file_semantic_digest(h(0), &[two]),
+        );
     }
 
     #[test]
@@ -446,6 +505,7 @@ mod tests {
             "0.24",
             1,
             h(1),
+            h(0),
             vec![
                 sym("zed", &[], SymbolKindTag::Function, (1, 1)),
                 sym("abe", &["Impl"], SymbolKindTag::Function, (2, 2)),

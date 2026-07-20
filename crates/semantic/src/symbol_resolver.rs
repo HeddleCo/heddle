@@ -191,7 +191,23 @@ pub(crate) fn visit_definitions<'tree>(
                 emit_named_definition(node, source, DefinitionKind::ConstDecl, current_parent, emit)
             }
             "mod_item" => {
-                emit_named_definition(node, source, DefinitionKind::Module, current_parent, emit)
+                // Emit the module, then descend with the module name as the new
+                // container so `mod a { fn f }` yields `f` with `["a"]` — not
+                // the outer scope. Without this, `mod a::f` and `mod b::f`
+                // collapse to the same address.
+                let mod_name: Option<Rc<str>> = node
+                    .child_by_field_name("name")
+                    .map(|n| Rc::from(node_text(&n, source)))
+                    .filter(|name: &Rc<str>| !name.is_empty());
+                emit_named_definition(node, source, DefinitionKind::Module, current_parent, emit);
+                if let Some(name) = mod_name {
+                    let mut cursor = node.walk();
+                    let children: Vec<_> = node.children(&mut cursor).collect();
+                    for child in children.into_iter().rev() {
+                        stack.push((child, Some(name.clone())));
+                    }
+                    descended_with_new_parent = true;
+                }
             }
             "impl_item" => {
                 let parent_name: Option<Rc<str>> =
@@ -838,16 +854,17 @@ pub mod outer {
 
         assert_definition(&defs, "LIMIT", DefinitionKind::ConstDecl, 1, 1, None);
         assert_definition(&defs, "outer", DefinitionKind::Module, 2, 23, None);
-        assert_definition(&defs, "Widget", DefinitionKind::Type, 3, 5, None);
-        assert_definition(&defs, "Mode", DefinitionKind::EnumDef, 7, 10, None);
-        assert_definition(&defs, "Runner", DefinitionKind::Trait, 12, 14, None);
+        // Items inside `mod outer` now carry `outer` as their container.
+        assert_definition(&defs, "Widget", DefinitionKind::Type, 3, 5, Some("outer"));
+        assert_definition(&defs, "Mode", DefinitionKind::EnumDef, 7, 10, Some("outer"));
+        assert_definition(&defs, "Runner", DefinitionKind::Trait, 12, 14, Some("outer"));
         assert_definition(
             &defs,
             "WidgetResult",
             DefinitionKind::TypeAlias,
             16,
             16,
-            None,
+            Some("outer"),
         );
         assert_definition(
             &defs,
@@ -946,10 +963,10 @@ pub mod outer {
         let expected: &[(&str, DefinitionKind, u32, u32, Option<&str>)] = &[
             ("LIMIT", DefinitionKind::ConstDecl, 1, 1, None),
             ("outer", DefinitionKind::Module, 2, 23, None),
-            ("Widget", DefinitionKind::Type, 3, 5, None),
-            ("Mode", DefinitionKind::EnumDef, 7, 10, None),
-            ("Runner", DefinitionKind::Trait, 12, 14, None),
-            ("WidgetResult", DefinitionKind::TypeAlias, 16, 16, None),
+            ("Widget", DefinitionKind::Type, 3, 5, Some("outer")),
+            ("Mode", DefinitionKind::EnumDef, 7, 10, Some("outer")),
+            ("Runner", DefinitionKind::Trait, 12, 14, Some("outer")),
+            ("WidgetResult", DefinitionKind::TypeAlias, 16, 16, Some("outer")),
             ("build", DefinitionKind::Function, 19, 21, Some("Widget")),
         ];
 

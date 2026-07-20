@@ -15,7 +15,10 @@
 //! leaves, so reformatting and comment edits leave the hash untouched — while a
 //! one-token change perturbs exactly the symbols that contain it.
 
-use objects::object::{ContentHash, SymbolEntry, SymbolKindTag, compute_symbol_semantic_hash};
+use objects::object::{
+    ContentHash, SymbolEntry, SymbolKindTag, compute_file_scaffold_hash,
+    compute_symbol_semantic_hash,
+};
 
 use crate::{
     parser::{Language, ParsedFile, walk_non_comment_leaves},
@@ -60,6 +63,24 @@ pub fn grammar_version(language: Language) -> &'static str {
     }
 }
 
+/// The current grammar version for a language *name* (as recorded in a
+/// [`SemanticIndexRoot`](objects::object::SemanticIndexRoot)'s grammar map).
+/// Used by the builder to detect a grammar bump and refuse stale node reuse.
+pub fn grammar_version_by_name(name: &str) -> Option<&'static str> {
+    let language = match name {
+        "rust" => Language::Rust,
+        "python" => Language::Python,
+        "javascript" => Language::JavaScript,
+        "typescript" => Language::TypeScript,
+        "go" => Language::Go,
+        "c" => Language::C,
+        "cpp" => Language::Cpp,
+        "java" => Language::Java,
+        _ => return None,
+    };
+    Some(grammar_version(language))
+}
+
 fn map_kind(kind: DefinitionKind) -> SymbolKindTag {
     match kind {
         DefinitionKind::Function => SymbolKindTag::Function,
@@ -75,20 +96,24 @@ fn map_kind(kind: DefinitionKind) -> SymbolKindTag {
     }
 }
 
-/// The symbols extracted from one source file, ready to be assembled into a
+/// The symbols extracted from one source file, plus the file scaffold hash,
+/// ready to be assembled into a
 /// [`SemanticFileNode`](objects::object::SemanticFileNode).
 pub struct ExtractedFile {
     pub language: Language,
+    /// Hash of the residual non-definition top-level token stream — binds
+    /// use-decls, impl/attribute/macro tokens and definition-free files into
+    /// the file digest. See [`compute_file_scaffold_hash`].
+    pub scaffold_hash: ContentHash,
     pub symbols: Vec<SymbolEntry>,
 }
 
 /// Parse `source` (as `language`) and extract its symbols with per-symbol
-/// normalization-stable hashes.
+/// normalization-stable hashes, plus the file scaffold hash.
 ///
 /// Returns `None` when the language is unsupported or the file fails to parse —
 /// the caller records those as `Opaque` in the index (fingerprint = raw source
-/// blob hash). `extractor_version` is threaded through for callers that want to
-/// pin a specific version (capture uses [`EXTRACTOR_VERSION`]).
+/// blob hash).
 pub fn extract_semantic_file(source: &[u8], language: Language) -> Option<ExtractedFile> {
     // Unsupported language → no grammar → Opaque.
     language.parser_handle()?;
@@ -96,13 +121,15 @@ pub fn extract_semantic_file(source: &[u8], language: Language) -> Option<Extrac
     let parsed = ParsedFile::parse(source_text, language)?;
 
     let mut symbols = Vec::new();
+    // Byte ranges of every extracted definition node — used to carve the
+    // residual scaffold (everything NOT covered by a symbol).
+    let mut covered: Vec<(usize, usize)> = Vec::new();
     visit_definitions(parsed.root_node(), source, &mut |site| {
         let kind = map_kind(site.kind);
         let semantic_hash = symbol_semantic_hash(site.node, source, kind);
-        let container_path = site
-            .parent_name
-            .map(|p| vec![p])
-            .unwrap_or_default();
+        let container_path = site.parent_name.map(|p| vec![p]).unwrap_or_default();
+        let range = site.node.byte_range();
+        covered.push((range.start, range.end));
         symbols.push(SymbolEntry {
             name: site.name,
             kind,
@@ -112,7 +139,56 @@ pub fn extract_semantic_file(source: &[u8], language: Language) -> Option<Extrac
         });
     });
 
-    Some(ExtractedFile { language, symbols })
+    let scaffold_hash = compute_scaffold(parsed.root_node(), source, covered);
+
+    Some(ExtractedFile {
+        language,
+        scaffold_hash,
+        symbols,
+    })
+}
+
+/// Hash the file scaffold: every non-comment leaf under the root NOT covered by
+/// an extracted symbol's byte range, length-prefixed in document order. This is
+/// what carries use-decl swaps, `impl Trait` headers, attribute edits,
+/// `macro_rules!` bodies and definition-free files into the file digest.
+fn compute_scaffold(
+    root: tree_sitter::Node<'_>,
+    source: &[u8],
+    mut covered: Vec<(usize, usize)>,
+) -> ContentHash {
+    // Merge symbol ranges into disjoint sorted intervals (they nest — a module
+    // covers its children).
+    covered.sort_by_key(|&(start, _)| start);
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(covered.len());
+    for (start, end) in covered {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+
+    let mut stream: Vec<u8> = Vec::new();
+    walk_non_comment_leaves(root, |leaf| {
+        let range = leaf.byte_range();
+        if is_covered(&merged, range.start, range.end) {
+            return;
+        }
+        let bytes = &source[range];
+        stream.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        stream.extend_from_slice(bytes);
+    });
+    compute_file_scaffold_hash(&stream)
+}
+
+/// Whether `[start, end)` lies fully within one of the disjoint sorted
+/// intervals in `merged`.
+fn is_covered(merged: &[(usize, usize)], start: usize, end: usize) -> bool {
+    match merged.binary_search_by(|&(interval_start, _)| interval_start.cmp(&start)) {
+        Ok(i) => merged[i].1 >= end,
+        Err(0) => false,
+        Err(i) => merged[i - 1].1 >= end,
+    }
 }
 
 /// Build the canonical `hd-sem-sym-v1` token stream for a definition node and
@@ -139,6 +215,59 @@ mod tests {
         extract_semantic_file(src.as_bytes(), Language::Rust)
             .expect("rust parse")
             .symbols
+    }
+
+    fn scaffold(src: &str) -> ContentHash {
+        extract_semantic_file(src.as_bytes(), Language::Rust)
+            .expect("rust parse")
+            .scaffold_hash
+    }
+
+    /// DEFECT 1: content that lives OUTSIDE any extracted symbol must still
+    /// perturb the file scaffold (and therefore the file digest). Covers all
+    /// five classes Fable flagged as digest false-negatives.
+    #[test]
+    fn scaffold_binds_non_definition_content() {
+        // 1. use-decl swap (same fn body)
+        assert_ne!(
+            scaffold("use a::x;\nfn f() { g(); }\n"),
+            scaffold("use b::x;\nfn f() { g(); }\n"),
+            "use-decl swap"
+        );
+        // 2. impl-trait change, identical method body
+        assert_ne!(
+            scaffold("struct S;\nimpl Display for S { fn fmt(&self) {} }\n"),
+            scaffold("struct S;\nimpl Debug for S { fn fmt(&self) {} }\n"),
+            "impl trait change"
+        );
+        // 3. attribute add/remove (attribute_item is a sibling of function_item)
+        assert_ne!(
+            scaffold("fn f() { g(); }\n"),
+            scaffold("#[inline]\nfn f() { g(); }\n"),
+            "attribute add"
+        );
+        // 4. macro_rules! body edit
+        assert_ne!(
+            scaffold("macro_rules! m { () => { 1 }; }\n"),
+            scaffold("macro_rules! m { () => { 2 }; }\n"),
+            "macro_rules body edit"
+        );
+        // 5. definition-free files (re-export only) — two different such files
+        //    must not share a digest.
+        assert_ne!(
+            scaffold("pub use crate::a::Foo;\n"),
+            scaffold("pub use crate::b::Bar;\n"),
+            "definition-free re-export files"
+        );
+    }
+
+    /// The scaffold must stay reformat- and comment-stable, like symbol hashes.
+    #[test]
+    fn scaffold_is_reformat_and_comment_stable() {
+        assert_eq!(
+            scaffold("use a::x;\nfn f() { g(); }\n"),
+            scaffold("use   a::x;\n\n// note\nfn f() {\n    g();\n}\n"),
+        );
     }
 
     #[test]
