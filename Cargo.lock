@@ -2275,7 +2275,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-iroh-transport-experiment"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "bytes",
  "heddle-api",
