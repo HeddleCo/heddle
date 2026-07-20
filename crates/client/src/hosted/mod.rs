@@ -68,6 +68,17 @@ impl HostedClient {
         })
     }
 
+    pub async fn connect_addr_with_context(
+        endpoint: Endpoint,
+        address: EndpointAddr,
+        context: CallContextFactory,
+    ) -> Result<Self> {
+        Ok(Self {
+            connection: HostedConnection::connect(endpoint, address).await?,
+            context,
+        })
+    }
+
     pub async fn call_unary<Request, Response>(
         &self,
         method: &str,

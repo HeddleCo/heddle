@@ -64,6 +64,11 @@ impl Default for CallContextFactory {
 }
 
 impl CallContextFactory {
+    pub fn with_bearer_capability(mut self, capability: impl Into<Vec<u8>>) -> Self {
+        self.bearer_capability = capability.into();
+        self
+    }
+
     pub fn from_client_config(config: &ClientConfig) -> Result<Self> {
         let signer = config
             .auth_proof_key_pem
