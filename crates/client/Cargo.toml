@@ -11,19 +11,23 @@ categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bytes.workspace = true
 base64.workspace = true
 biscuit-auth.workspace = true
 chrono.workspace = true
 futures.workspace = true
 hex.workspace = true
+iroh.workspace = true
 prost.workspace = true
 prost-types.workspace = true
 rand.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sley.workspace = true
 tempfile.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true }
 tokio-stream.workspace = true
 tokio-tungstenite.workspace = true
@@ -38,6 +42,7 @@ uuid.workspace = true
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.10" }
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.10" }
 grpc = { package = "heddle-api", version = "=0.1.2", features = ["client"] }
+api = { package = "heddle-api", git = "https://github.com/HeddleCo/api", rev = "4e323daf48baca043da5ab699d23089c373f38bf" }
 objects = { path = "../objects", package = "heddle-objects", version = "0.10" }
 wire = { path = "../wire", package = "heddle-wire", version = "0.10", default-features = false }
 refs = { path = "../refs", package = "heddle-refs", version = "0.10" }

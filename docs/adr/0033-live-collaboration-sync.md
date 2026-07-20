@@ -1,6 +1,6 @@
 # Live collaboration sync
 
-Synced discussions can receive live gRPC-backed updates while a Weft connection is active. Live collaboration sync updates the durable repository collaboration log and materialized views; it does not replace operation-log storage, push/pull catch-up, offline reconciliation, or capability policy.
+Synced discussions can receive live Iroh-backed updates while a Weft connection is active. Live collaboration sync updates the durable repository collaboration log and materialized views; it does not replace operation-log storage, push/pull catch-up, offline reconciliation, or capability policy. ADR 0049 defines the hosted transport and Weft relay path.
 
 Live sync starts as explicit foreground/watch command behavior, such as inbox or discussion watch modes. Daemon integration can come later once lifecycle, status, and recovery are clear; Heddle should not start invisible background collaboration sync.
 

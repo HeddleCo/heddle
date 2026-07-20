@@ -8,6 +8,7 @@ members = [
     "crates/daemon",
     "crates/devtools",
     "crates/ingest",
+    "experiments/iroh-transport",
     "crates/merge",
     "crates/mount",
     "crates/format",
@@ -56,6 +57,12 @@ sley-transport = "0.5.0"
 hex = "0.4"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 ignore = "0.4"
+iroh = {
+    git = "https://github.com/n0-computer/iroh.git",
+    rev = "cc876c75e53171dfcaf2e5fa0b81a417904694ba",
+    default-features = false,
+    features = ["tls-ring"],
+}
 libc = "0.2"
 lru = "0.18"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
