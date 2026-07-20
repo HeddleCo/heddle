@@ -16,9 +16,9 @@ use serde::Serialize;
 use weft_client_shim::CliContext;
 
 use crate::{
-    auth_cmd::{connect_channel, headless_token_metadata, resolve_server},
+    auth_cmd::{headless_token_metadata, resolve_server},
     credentials,
-    grpc_hosted::HostedSession,
+    hosted::HostedSession,
 };
 
 #[derive(Debug, Serialize)]
@@ -177,9 +177,8 @@ async fn fetch_identity(server: &str) -> Result<WhoamiIdentity> {
     let user_config = UserConfig::load_default()?;
     let session = HostedSession::build_stored_credential(&user_config, server)
         .map_err(|error| anyhow::anyhow!(error))?;
-    let channel = connect_channel(server).await?;
     let mut client = session
-        .connect_channel(channel)
+        .connect(([127, 0, 0, 1], 0).into())
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
     let response = client
@@ -302,7 +301,7 @@ fn biscuit_string_literals(fragment: &str) -> Vec<String> {
 }
 
 fn hosted_role_name(role: i32) -> &'static str {
-    use grpc::heddle::api::v1alpha1::HostedRole;
+    use api::heddle::api::v1alpha1::HostedRole;
     match HostedRole::try_from(role) {
         Ok(HostedRole::Reader) => "reader",
         Ok(HostedRole::Developer) => "developer",
@@ -343,7 +342,12 @@ fn print_human(output: &WhoamiOutput) {
             let roles = identity
                 .roles
                 .iter()
-                .map(|role| format!("{}:{}={}", role.resource_kind, role.resource_path, role.role))
+                .map(|role| {
+                    format!(
+                        "{}:{}={}",
+                        role.resource_kind, role.resource_path, role.role
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             println!("Roles:         {roles}");

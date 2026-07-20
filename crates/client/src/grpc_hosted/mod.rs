@@ -2,21 +2,19 @@
 
 mod collaboration;
 mod content;
-mod state_review;
 pub(crate) mod helpers;
-mod hydration;
 pub mod monorepo;
 pub(crate) mod operation_id;
 pub mod request_signing;
 mod session;
+mod state_review;
 mod sync;
 mod user;
 
 use cli_shared::{ClientConfig, cleartext_connect_allowed, cleartext_refused_message};
 use crypto::{Ed25519Signer, Signer};
 use grpc::heddle::api::v1alpha1::{
-    KeypairProof, MintBiscuitRequest,
-    collaboration_service_client::CollaborationServiceClient,
+    KeypairProof, MintBiscuitRequest, collaboration_service_client::CollaborationServiceClient,
     identity_service_client::IdentityServiceClient, mint_biscuit_request::Proof,
     registry_service_client::RegistryServiceClient,
     repo_sync_service_client::RepoSyncServiceClient,
@@ -34,6 +32,18 @@ use tonic::{
 use wire::ProtocolError;
 
 use crate::credentials;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PullMaterialization {
+    Full,
+    Lazy,
+}
+
+impl PullMaterialization {
+    pub(crate) fn allows_partial_fetch(self) -> bool {
+        matches!(self, Self::Lazy)
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RenewableAuthorityCredential {
@@ -616,7 +626,6 @@ impl HostedGrpcClient {
 }
 
 pub use collaboration::{HostedDiscussion, HostedDiscussionTurn};
-pub use hydration::{LazyHostedHydrator, PullMaterialization, register_hosted_factory};
 pub use monorepo::{MonorepoCloneOp, MonorepoClonePlan, SkippedChild};
 pub use session::{HostedAuthMode, HostedSession};
 pub use sync::HostedRefEntry;

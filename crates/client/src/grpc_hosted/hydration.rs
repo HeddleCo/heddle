@@ -12,39 +12,13 @@ use objects::{
 use repo::{BlobHydrator, Repository};
 use wire::ProtocolError;
 
-use super::{HostedAuthMode, HostedGrpcClient, HostedSession};
+use super::{HostedAuthMode, HostedClient, HostedSession};
 
 /// Default hosted lazy-hydration deadline.
 ///
 /// This matches the hosted client config's 30s default connection timeout and
-/// gives lazy reads a bounded failure mode when a gRPC request stalls without a
-/// transport-level TCP timeout.
+/// gives lazy reads a bounded failure mode when a native request stalls.
 const DEFAULT_HOSTED_HYDRATION_TIMEOUT: Duration = Duration::from_secs(30);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PullMaterialization {
-    Full,
-    Lazy,
-}
-
-impl PullMaterialization {
-    pub(crate) fn allows_partial_fetch(self) -> bool {
-        matches!(self, Self::Lazy)
-    }
-}
-
-impl HostedGrpcClient {
-    pub async fn hydrate_pulled_state(
-        &mut self,
-        repo: &Repository,
-        repo_path: &str,
-        remote_thread: &str,
-        target_state: StateId,
-    ) -> Result<usize, ProtocolError> {
-        self.hydrate_missing_blobs_for_state(repo, repo_path, remote_thread, target_state)
-            .await
-    }
-}
 
 /// Read-time blob hydrator for **hosted** lazy clones (issue #50).
 ///
@@ -57,7 +31,7 @@ impl HostedGrpcClient {
 ///
 /// ## Runtime bridge
 ///
-/// `Repository::require_blob` is sync. The underlying gRPC stack is async,
+/// `Repository::require_blob` is sync. The underlying Iroh stack is async,
 /// and the hydrator must be invocable from BOTH async contexts (the
 /// `#[tokio::main]` CLI command path) and plain non-Tokio threads (future
 /// FFI callers, test helpers). `Handle::block_on` invoked from within a
@@ -65,7 +39,7 @@ impl HostedGrpcClient {
 /// runtime"), so we cannot bridge in-place.
 ///
 /// Instead, on first use we spawn a dedicated worker thread that owns its
-/// own current-thread Tokio runtime + a connected `HostedGrpcClient`. Each
+/// own current-thread Tokio runtime + a connected `HostedClient`. Each
 /// `hydrate()` call sends a request over an mpsc channel and blocks on the
 /// reply. The worker `block_on`s the gRPC call inside its private runtime,
 /// avoiding any nesting. This pattern is robust regardless of what the
@@ -179,8 +153,8 @@ impl BlobHydrator for LazyHostedHydrator {
 }
 
 /// Background worker bridging sync `BlobHydrator::hydrate` calls to the
-/// async gRPC stack. Owns a dedicated current-thread Tokio runtime and a
-/// connected `HostedGrpcClient`. Callers reopen the repository root into
+/// async native stack. Owns a dedicated current-thread Tokio runtime and a
+/// connected `HostedClient`. Callers reopen the repository root into
 /// an owned handle, dispatch hydrate requests over an mpsc channel, and
 /// block on a per-request reply channel.
 ///
@@ -421,7 +395,7 @@ impl HydrationBridge {
 }
 
 async fn hydrate_with_rpc_timeout(
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo: &Repository,
     repo_path: &str,
     remote_thread: &str,
@@ -430,7 +404,7 @@ async fn hydrate_with_rpc_timeout(
 ) -> Result<usize, ProtocolError> {
     match tokio::time::timeout(
         timeout,
-        client.hydrate_pulled_state(repo, repo_path, remote_thread, target_state),
+        client.hydrate_missing_blobs_for_state(repo, repo_path, remote_thread, target_state),
     )
     .await
     {
@@ -471,7 +445,7 @@ fn format_duration(duration: Duration) -> String {
 /// Register the `"hosted"` factory in the global lazy-hydrator registry.
 /// Call once at process startup. The factory reads the hosted-section
 /// fields out of `lazy-hydrator.toml` and hands back a
-/// [`LazyHostedHydrator`] adapter that defers the actual gRPC connect (and
+/// [`LazyHostedHydrator`] adapter that defers the actual Iroh connect (and
 /// worker-thread spawn) until the first `require_blob` call needs it.
 pub fn register_hosted_factory() {
     use std::{path::Path as StdPath, sync::Arc as StdArc};
@@ -504,13 +478,9 @@ pub fn register_hosted_factory() {
 
 #[cfg(test)]
 mod tests {
-    //! These tests exercise the lazy-hydrator adapter against a worker
-    //! bridge that connects to a definitely-closed `127.0.0.1:1` endpoint
-    //! via `Endpoint::connect_lazy` — the channel doesn't actually dial
-    //! until the first RPC, at which point it fails predictably with a
-    //! transport-layer error. That's enough to drive the bridge's
-    //! sync→async hand-off, runtime construction, and error propagation
-    //! end-to-end without spinning up an in-process gRPC server.
+    //! These tests exercise the lazy-hydrator adapter against a hermetic
+    //! worker that returns a transport-shaped error. That is enough to drive
+    //! the sync-to-async hand-off and error propagation without networking.
     use std::{
         sync::{
             Arc,
@@ -521,50 +491,11 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use cli_shared::ClientConfig;
-    use grpc::heddle::api::v1alpha1::{
-        collaboration_service_client::CollaborationServiceClient,
-        state_review_service_client::StateReviewServiceClient,
-        identity_service_client::IdentityServiceClient,
-        registry_service_client::RegistryServiceClient,
-        repo_sync_service_client::RepoSyncServiceClient,
-        repository_service_client::RepositoryServiceClient,
-        workflow_service_client::WorkflowServiceClient,
-    };
     use objects::object::{Blob, StateId, ThreadName};
     use repo::Repository;
     use tempfile::TempDir;
-    use tonic::transport::Endpoint;
 
-    use super::{
-        super::{HostedGrpcClient, helpers::HostedTransportPolicy},
-        BlobHydrator, HydrationBridge, LazyHostedHydrator,
-    };
-
-    /// Build a `HostedGrpcClient` that points at a closed loopback port
-    /// via `connect_lazy`. RPCs fail with a transport error rather than
-    /// hanging. Must be called from inside a tokio runtime context.
-    fn fabricate_offline_client() -> HostedGrpcClient {
-        let endpoint = Endpoint::from_static("http://127.0.0.1:1");
-        let channel = endpoint.connect_lazy();
-        let config = ClientConfig::default();
-        let transport = HostedTransportPolicy::from_client_config(&config);
-        HostedGrpcClient {
-            inner: RepoSyncServiceClient::new(channel.clone()),
-            user: RegistryServiceClient::new(channel.clone()),
-            auth: IdentityServiceClient::new(channel.clone()),
-            content: RepositoryServiceClient::new(channel.clone()),
-            workflow: WorkflowServiceClient::new(channel.clone()),
-            collaboration: CollaborationServiceClient::new(channel.clone()),
-            review: StateReviewServiceClient::new(channel),
-            token_header: None,
-            transport,
-            auth_proof_key_pem: None,
-            authenticated_principal: None,
-            server_key: None,
-            on_human_signature: None,
-        }
-    }
+    use super::{BlobHydrator, HydrationBridge, LazyHostedHydrator};
 
     /// Build the smallest Heddle repo + seed the `main` thread to a real
     /// state so `hydrate` can resolve `local_thread`.
@@ -574,41 +505,22 @@ mod tests {
         (temp, repo)
     }
 
-    /// Spawn a `HydrationBridge` with a pre-built offline client, bypassing
-    /// the DNS / connect / credential paths so tests stay hermetic.
+    /// Spawn a `HydrationBridge` that returns a deterministic offline error,
+    /// bypassing DNS, credential, and connection setup so tests stay hermetic.
     fn offline_bridge() -> HydrationBridge {
         let (tx, rx) = mpsc::channel::<super::HydrateMessage>();
         let worker = thread::Builder::new()
             .name("test-lazy-hydrator".into())
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("worker runtime");
-                let mut client = runtime.block_on(async { fabricate_offline_client() });
-                runtime.block_on(async {
-                    while let Ok(message) = rx.recv() {
-                        match message {
-                            super::HydrateMessage::Run {
-                                repo,
-                                repo_path,
-                                remote_thread,
-                                target_state,
-                                reply,
-                            } => {
-                                let result = client
-                                    .hydrate_pulled_state(
-                                        repo.as_ref(),
-                                        &repo_path,
-                                        &remote_thread,
-                                        target_state,
-                                    )
-                                    .await;
-                                let _ = reply.send(result);
-                            }
+                while let Ok(message) = rx.recv() {
+                    match message {
+                        super::HydrateMessage::Run { reply, .. } => {
+                            let _ = reply.send(Err(wire::ProtocolError::Io(
+                                std::io::Error::other("simulated offline endpoint"),
+                            )));
                         }
                     }
-                });
+                }
             })
             .expect("spawn test worker");
         HydrationBridge {
@@ -661,7 +573,7 @@ mod tests {
             let blake3 = Blob::new(b"placeholder".to_vec()).hash();
             // Must not panic. The offline client surfaces a transport
             // error, which the trait reshapes into a HeddleError::Io. We
-            // assert "non-empty error" rather than pinning tonic wording.
+            // assert "non-empty error" rather than pinning transport wording.
             let err = hydrator
                 .hydrate(&repo, &blake3)
                 .expect_err("offline endpoint must produce an error");

@@ -99,7 +99,7 @@ async fn async_main() -> Result<()> {
     // `--lazy` clone would see `MissingObject` on every blob read.
     cli::cli::commands::register_git_overlay_factory();
     #[cfg(feature = "client")]
-    heddle_client::grpc_hosted::register_hosted_factory();
+    heddle_client::hosted::register_hosted_factory();
 
     // Pick the hosted authentication implementation at startup.
     #[cfg(feature = "client")]

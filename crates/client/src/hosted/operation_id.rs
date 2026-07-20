@@ -1,10 +1,10 @@
 use wire::ProtocolError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct ClientOperationId(String);
+pub(crate) struct ClientOperationId(String);
 
 impl ClientOperationId {
-    pub(super) fn fresh(method: &str) -> Self {
+    pub(crate) fn fresh(method: &str) -> Self {
         let path = if method.starts_with('/') {
             method.to_string()
         } else {
@@ -19,7 +19,7 @@ impl ClientOperationId {
         Self(uuid::Uuid::new_v4().to_string())
     }
 
-    pub(super) fn caller_or_fresh(method: &str, value: impl Into<String>) -> Self {
+    pub(crate) fn caller_or_fresh(method: &str, value: impl Into<String>) -> Self {
         let value = value.into();
         if value.is_empty() {
             Self::fresh(method)
@@ -29,7 +29,7 @@ impl ClientOperationId {
         }
     }
 
-    pub(super) fn for_required_method(
+    pub(crate) fn for_required_method(
         method: &str,
         value: impl Into<String>,
     ) -> Result<Self, ProtocolError> {
@@ -55,11 +55,11 @@ impl ClientOperationId {
         Ok(Self(value))
     }
 
-    pub(super) fn to_wire(&self) -> String {
+    pub(crate) fn to_wire(&self) -> String {
         self.0.clone()
     }
 
-    pub(super) fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
