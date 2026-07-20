@@ -58,4 +58,8 @@ impl ClientOperationId {
     pub(super) fn to_wire(&self) -> String {
         self.0.clone()
     }
+
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
 }

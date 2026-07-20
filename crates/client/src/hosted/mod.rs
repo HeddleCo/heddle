@@ -15,13 +15,14 @@ mod methods;
 pub mod monorepo;
 mod operation_id;
 mod state_review;
+mod sync;
 mod user;
 
 use std::sync::Arc;
 
 use api::heddle::api::v1alpha1::CallContext;
 pub use bootstrap::{DescriptorKeyring, VerifiedEndpointDescriptor, fetch_endpoint_descriptor};
-pub use call::{BidirectionalStream, ServerStream};
+pub use call::{BidirectionalRequestStream, BidirectionalStream, ServerStream};
 use cli_shared::ClientConfig;
 pub use collaboration::{HostedDiscussion, HostedDiscussionTurn};
 use connection::HostedConnection;
@@ -30,14 +31,28 @@ pub use error::HostedError;
 use iroh::{Endpoint, EndpointAddr};
 pub use methods::HostedRoutes;
 use prost::Message;
+pub use sync::{HostedRefEntry, PullObjectMix, PullProfile};
 
 pub type Result<T> = std::result::Result<T, HostedError>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PullMaterialization {
+    Full,
+    Lazy,
+}
+
+impl PullMaterialization {
+    pub(crate) fn allows_partial_fetch(self) -> bool {
+        matches!(self, Self::Lazy)
+    }
+}
 
 /// One reusable native connection to a terminating Weft application endpoint.
 #[derive(Debug, Clone)]
 pub struct HostedClient {
     connection: Arc<HostedConnection>,
     context: CallContextFactory,
+    transport: helpers::HostedTransportPolicy,
 }
 
 impl HostedClient {
@@ -49,6 +64,7 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect_verified(descriptor).await?,
             context: CallContextFactory::default(),
+            transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
         })
     }
 
@@ -59,6 +75,7 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect_verified(descriptor).await?,
             context: CallContextFactory::from_client_config(config)?,
+            transport: helpers::HostedTransportPolicy::from_client_config(config),
         })
     }
 
@@ -67,6 +84,7 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
             context: CallContextFactory::default(),
+            transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
         })
     }
 
@@ -78,6 +96,7 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
             context: CallContextFactory::from_client_config(config)?,
+            transport: helpers::HostedTransportPolicy::from_client_config(config),
         })
     }
 
@@ -89,6 +108,7 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
             context,
+            transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
         })
     }
 

@@ -172,11 +172,27 @@ pub struct BidirectionalStream<Request, Response> {
     request: PhantomData<Request>,
 }
 
+/// Request half of a bidirectional operation stream.
+pub struct BidirectionalRequestStream<Request> {
+    send: Option<iroh::endpoint::SendStream>,
+    request: PhantomData<Request>,
+}
+
 impl<Request, Response> BidirectionalStream<Request, Response>
 where
     Request: Message,
     Response: Message + Default,
 {
+    pub fn split(self) -> (BidirectionalRequestStream<Request>, ServerStream<Response>) {
+        (
+            BidirectionalRequestStream {
+                send: self.send,
+                request: PhantomData,
+            },
+            self.responses,
+        )
+    }
+
     pub async fn send(&mut self, request: &Request) -> Result<()> {
         let frame =
             encode_stream_message(&request.encode_to_vec()).map_err(HostedError::framing)?;
@@ -204,6 +220,36 @@ where
             send.reset(1u32.into()).map_err(HostedError::transport)?;
         }
         self.responses.cancel()
+    }
+}
+
+impl<Request> BidirectionalRequestStream<Request>
+where
+    Request: Message,
+{
+    pub async fn send(&mut self, request: &Request) -> Result<()> {
+        let frame =
+            encode_stream_message(&request.encode_to_vec()).map_err(HostedError::framing)?;
+        self.send
+            .as_mut()
+            .ok_or_else(|| HostedError::Framing("request stream is finished".to_string()))?
+            .write_chunk(Bytes::from(frame))
+            .await
+            .map_err(HostedError::transport)
+    }
+
+    pub fn finish(&mut self) -> Result<()> {
+        if let Some(mut send) = self.send.take() {
+            send.finish().map_err(HostedError::transport)?;
+        }
+        Ok(())
+    }
+
+    pub fn cancel(&mut self) -> Result<()> {
+        if let Some(mut send) = self.send.take() {
+            send.reset(1u32.into()).map_err(HostedError::transport)?;
+        }
+        Ok(())
     }
 }
 
