@@ -527,6 +527,26 @@ fn supplied_tree_snapshot_batches_new_blobs_into_a_pack() {
         0,
         "structured snapshot should not fan new blobs out into loose files"
     );
+
+    let tree_hex = execution.tree.hash().to_hex();
+    let loose_tree = temp_dir
+        .path()
+        .join(".heddle/objects/trees")
+        .join(&tree_hex[..2])
+        .join(&tree_hex[2..]);
+    assert!(
+        !loose_tree.exists(),
+        "structured snapshot tree should share the durable pack with its blobs"
+    );
+
+    let loose_state = temp_dir.path().join(format!(
+        ".heddle/objects/states/{}.state",
+        execution.state.id().to_string_full()
+    ));
+    assert!(
+        !loose_state.exists(),
+        "structured snapshot state should share the durable pack with its tree and blobs"
+    );
 }
 
 #[test]
