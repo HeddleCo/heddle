@@ -119,6 +119,7 @@ pub struct ServerStream<Response> {
     buffered: Vec<u8>,
     response: PhantomData<Response>,
     raw_remaining: u64,
+    finished: bool,
 }
 
 #[derive(Debug)]
@@ -138,6 +139,7 @@ where
             buffered: Vec::new(),
             response: PhantomData,
             raw_remaining: 0,
+            finished: false,
         }
     }
 
@@ -181,7 +183,10 @@ where
                 .map_err(HostedError::transport)?
             {
                 Some(chunk) => self.buffered.extend_from_slice(&chunk),
-                None if self.buffered.is_empty() => return Ok(None),
+                None if self.buffered.is_empty() => {
+                    self.finished = true;
+                    return Ok(None);
+                }
                 None => {
                     return Err(HostedError::Framing(
                         "server stream ended with a truncated frame".to_string(),
@@ -228,7 +233,21 @@ where
     }
 
     pub fn cancel(&mut self) -> Result<()> {
-        self.recv.stop(1u32.into()).map_err(HostedError::transport)
+        if !self.finished {
+            self.recv
+                .stop(1u32.into())
+                .map_err(HostedError::transport)?;
+            self.finished = true;
+        }
+        Ok(())
+    }
+}
+
+impl<Response> Drop for ServerStream<Response> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.recv.stop(1u32.into());
+        }
     }
 }
 
