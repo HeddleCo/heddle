@@ -182,6 +182,16 @@ pub struct PushProfile {
     pub sidecar_objects: usize,
 }
 
+/// Compare-and-set precondition for a native push target.
+///
+/// Callers that retain the head from a successful push or pull can provide it
+/// here and avoid a separate `ListRefs` request before every push.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ExpectedRemoteHead {
+    Missing,
+    State(StateId),
+}
+
 impl HostedClient {
     fn sync_stream_opening_proof(
         &self,
@@ -337,6 +347,61 @@ impl HostedClient {
             operation_id,
             RevisionAddress::heddle(local_state).to_string(),
             None,
+            None,
+            &Progress::null(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn push_with_expected_head(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        local_state: StateId,
+        target_thread: &str,
+        force: bool,
+        expected_remote_head: ExpectedRemoteHead,
+        client_operation_id: String,
+    ) -> Result<PushComplete, ProtocolError> {
+        self.push_with_expected_head_profiled(
+            repo,
+            repo_path,
+            local_state,
+            target_thread,
+            force,
+            expected_remote_head,
+            client_operation_id,
+        )
+        .await
+        .map(|(complete, _)| complete)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn push_with_expected_head_profiled(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        local_state: StateId,
+        target_thread: &str,
+        force: bool,
+        expected_remote_head: ExpectedRemoteHead,
+        client_operation_id: String,
+    ) -> Result<(PushComplete, PushProfile), ProtocolError> {
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.RepoSyncService/Push",
+            client_operation_id,
+        );
+        self.push_with_revision_profiled(
+            repo,
+            repo_path,
+            local_state,
+            target_thread,
+            force,
+            operation_id,
+            RevisionAddress::heddle(local_state).to_string(),
+            None,
+            Some(expected_remote_head),
             &Progress::null(),
         )
         .await
@@ -388,6 +453,7 @@ impl HostedClient {
             operation_id,
             local_revision_address,
             Some(git_lane),
+            None,
             progress,
         )
         .await
@@ -420,6 +486,7 @@ impl HostedClient {
         operation_id: ClientOperationId,
         local_revision_address: String,
         git_lane: Option<GitLanePushPlan>,
+        expected_remote_head: Option<ExpectedRemoteHead>,
         progress: &Progress,
     ) -> Result<PushComplete, ProtocolError> {
         self.push_with_revision_profiled(
@@ -431,6 +498,7 @@ impl HostedClient {
             operation_id,
             local_revision_address,
             git_lane,
+            expected_remote_head,
             progress,
         )
         .await
@@ -448,6 +516,7 @@ impl HostedClient {
         operation_id: ClientOperationId,
         local_revision_address: String,
         git_lane: Option<GitLanePushPlan>,
+        expected_remote_head: Option<ExpectedRemoteHead>,
         progress: &Progress,
     ) -> Result<(PushComplete, PushProfile), ProtocolError> {
         let total_started = std::time::Instant::now();
@@ -464,12 +533,21 @@ impl HostedClient {
             GitLaneTransferIntent::HeddleObjectsOnly
         };
         let remote_ref_discovery_started = std::time::Instant::now();
-        let native_boundaries = if git_lane.is_none() {
-            let remote_refs = self.list_refs(repo_path).await?;
-            native_push_boundaries(repo, &remote_refs, target_thread, local_state)?
+        let native_expected_remote_head = if git_lane.is_none() {
+            match expected_remote_head {
+                Some(expected) => Some(expected),
+                None => {
+                    let remote_refs = self.list_refs(repo_path).await?;
+                    Some(expected_remote_head_from_refs(&remote_refs, target_thread))
+                }
+            }
         } else {
-            Vec::new()
+            None
         };
+        let native_boundaries = native_expected_remote_head.map_or_else(
+            || Ok(Vec::new()),
+            |expected| native_push_boundaries_from_expected_head(repo, expected, local_state),
+        )?;
         profile.remote_ref_discovery = remote_ref_discovery_started.elapsed();
         let closure_planning_started = std::time::Instant::now();
         let closure = if native_boundaries.is_empty() {
@@ -504,36 +582,41 @@ impl HostedClient {
         );
         let transport_mode = preferred_transport_mode(&self.transport, object_count);
         let thread_metadata = load_thread_metadata(repo, target_thread, local_state)?;
+        let mut push_request = PushRequest {
+            repo_path: super::helpers::repository_ref(repo_path),
+            local_state: super::helpers::proto_state_id(local_state),
+            target_thread: target_thread.to_string(),
+            create_thread: true,
+            force,
+            objects: full_objects.as_ref().map_or_else(
+                || {
+                    object_plan
+                        .partitions
+                        .iter()
+                        .map(to_proto_planned_object)
+                        .collect()
+                },
+                |objects| objects.iter().map(to_proto_object_info).collect(),
+            ),
+            transfer: Some(self.transport.transfer_checkpoint_with_mode(
+                transfer_id.clone(),
+                transport_mode,
+                0,
+                0,
+                false,
+            )),
+            partial_fetch_status: partial_fetch_status_for_repo(repo),
+            allow_partial_fetch: true,
+            thread_metadata: thread_metadata.map(|metadata| to_proto_thread_metadata(&metadata)),
+            local_revision_address,
+            expected_remote_head: None,
+            expected_remote_head_missing: false,
+        };
+        if let Some(expected) = native_expected_remote_head {
+            apply_expected_remote_head(&mut push_request, expected);
+        }
         let request_message = PushClientFrame {
-            frame: Some(push_client_frame::Frame::Request(Box::new(PushRequest {
-                repo_path: super::helpers::repository_ref(repo_path),
-                local_state: super::helpers::proto_state_id(local_state),
-                target_thread: target_thread.to_string(),
-                create_thread: true,
-                force,
-                objects: full_objects.as_ref().map_or_else(
-                    || {
-                        object_plan
-                            .partitions
-                            .iter()
-                            .map(to_proto_planned_object)
-                            .collect()
-                    },
-                    |objects| objects.iter().map(to_proto_object_info).collect(),
-                ),
-                transfer: Some(self.transport.transfer_checkpoint_with_mode(
-                    transfer_id.clone(),
-                    transport_mode,
-                    0,
-                    0,
-                    false,
-                )),
-                partial_fetch_status: partial_fetch_status_for_repo(repo),
-                allow_partial_fetch: true,
-                thread_metadata: thread_metadata
-                    .map(|metadata| to_proto_thread_metadata(&metadata)),
-                local_revision_address,
-            }))),
+            frame: Some(push_client_frame::Frame::Request(Box::new(push_request))),
             client_operation_id: operation_id.to_wire(),
         };
 
@@ -1502,17 +1585,37 @@ impl HostedClient {
     }
 }
 
+#[cfg(test)]
 fn native_push_boundaries(
     repo: &Repository,
     remote_refs: &[RefEntry],
     target_thread: &str,
     local_state: StateId,
 ) -> Result<Vec<StateId>, ProtocolError> {
-    let Some(remote_head) = remote_refs
+    native_push_boundaries_from_expected_head(
+        repo,
+        expected_remote_head_from_refs(remote_refs, target_thread),
+        local_state,
+    )
+}
+
+fn expected_remote_head_from_refs(
+    remote_refs: &[RefEntry],
+    target_thread: &str,
+) -> ExpectedRemoteHead {
+    remote_refs
         .iter()
         .find(|entry| entry.is_thread && entry.name == target_thread)
         .map(|entry| entry.state_id)
-    else {
+        .map_or(ExpectedRemoteHead::Missing, ExpectedRemoteHead::State)
+}
+
+fn native_push_boundaries_from_expected_head(
+    repo: &Repository,
+    expected_remote_head: ExpectedRemoteHead,
+    local_state: StateId,
+) -> Result<Vec<StateId>, ProtocolError> {
+    let ExpectedRemoteHead::State(remote_head) = expected_remote_head else {
         return Ok(Vec::new());
     };
     // Keep an exact-tip push on the full path: Weft deliberately re-installs
@@ -1523,6 +1626,19 @@ fn native_push_boundaries(
         Ok(vec![remote_head])
     } else {
         Ok(Vec::new())
+    }
+}
+
+fn apply_expected_remote_head(request: &mut PushRequest, expected: ExpectedRemoteHead) {
+    match expected {
+        ExpectedRemoteHead::Missing => {
+            request.expected_remote_head = None;
+            request.expected_remote_head_missing = true;
+        }
+        ExpectedRemoteHead::State(state) => {
+            request.expected_remote_head = super::helpers::proto_state_id(state);
+            request.expected_remote_head_missing = false;
+        }
     }
 }
 
@@ -2286,7 +2402,10 @@ mod push_transfer_id_tests {
         let mut request = PushRequest::default();
         apply_expected_remote_head(&mut request, expected);
         assert_eq!(
-            request.expected_remote_head.map(|state| state.value),
+            request
+                .expected_remote_head
+                .as_ref()
+                .map(|state| state.value.clone()),
             Some(base.state_id.as_bytes().to_vec())
         );
         assert!(!request.expected_remote_head_missing);
