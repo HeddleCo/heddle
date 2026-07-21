@@ -498,6 +498,38 @@ fn snapshot_packs_blobs_and_leaves_no_loose_blob_files() {
 }
 
 #[test]
+fn supplied_tree_snapshot_batches_new_blobs_into_a_pack() {
+    let (temp_dir, repo) = create_test_repo();
+    let blob = Blob::from_slice(b"structured native authoring");
+    let hash = blob.hash();
+    let tree = Tree::from_entries(vec![TreeEntry::file("agent.txt", hash, false).unwrap()]);
+
+    let execution = repo
+        .snapshot_tree_with_blobs_with_attribution_profiled(
+            tree,
+            vec![blob],
+            Some("structured snapshot".to_string()),
+            None,
+            repo.get_attribution().unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(repo.head().unwrap(), Some(execution.state.id()));
+    assert_eq!(
+        repo.store().get_blob(&hash).unwrap().unwrap().content(),
+        b"structured native authoring"
+    );
+    let blobs_dir = temp_dir.path().join(".heddle/objects/blobs");
+    assert_eq!(
+        fs::read_dir(blobs_dir)
+            .map(|entries| entries.count())
+            .unwrap_or_default(),
+        0,
+        "structured snapshot should not fan new blobs out into loose files"
+    );
+}
+
+#[test]
 fn snapshot_preserves_unchanged_materialized_gitlink_placeholder() {
     let (temp_dir, repo) = create_test_repo();
     let target = gitlink_target_for_tests();

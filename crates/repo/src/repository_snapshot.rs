@@ -32,6 +32,11 @@ pub struct SnapshotProfile {
     pub blob_write_ms: u128,
     pub tree_write_ms: u128,
     pub state_ref_oplog_ms: u128,
+    /// Whole atomic executor, including the staged object phases above and the
+    /// durable oplog commit. Subtract the staged fields to isolate commit
+    /// overhead without perturbing the generic transaction executor.
+    pub atomic_execute_ms: u128,
+    pub ref_publish_ms: u128,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +49,7 @@ pub struct SnapshotExecution {
 enum SnapshotSource {
     Worktree { fingerprint: ContentHash },
     SuppliedTree(Tree),
+    SuppliedTreeWithBlobs { tree: Tree, blobs: Vec<Blob> },
 }
 
 struct SnapshotDetails {
@@ -218,6 +224,22 @@ impl SnapshotMutation<'_> {
         let (tree, tree_profile) = match &self.source {
             SnapshotSource::Worktree { .. } => self.build_worktree_tree()?,
             SnapshotSource::SuppliedTree(tree) => (tree.clone(), TreeBuildProfile::default()),
+            SnapshotSource::SuppliedTreeWithBlobs { tree, blobs } => {
+                let blob_write_started = std::time::Instant::now();
+                self.repo.store.put_blobs_packed(
+                    blobs
+                        .iter()
+                        .map(|blob| (blob.hash(), blob.content().to_vec()))
+                        .collect(),
+                )?;
+                (
+                    tree.clone(),
+                    TreeBuildProfile {
+                        blob_write_ms: blob_write_started.elapsed().as_millis(),
+                        ..TreeBuildProfile::default()
+                    },
+                )
+            }
         };
         debug!(duration_ms = tree_profile.tree_walk_ms, "Tree built");
 
@@ -512,7 +534,7 @@ fn snapshot_transaction_id(
             hasher.update(b"worktree\0");
             hasher.update(fingerprint.as_bytes());
         }
-        SnapshotSource::SuppliedTree(tree) => {
+        SnapshotSource::SuppliedTree(tree) | SnapshotSource::SuppliedTreeWithBlobs { tree, .. } => {
             hasher.update(b"tree\0");
             hasher.update(tree.hash().as_bytes());
         }
@@ -704,7 +726,8 @@ impl Repository {
         let head = self.head_ref()?;
         let prev_head = self.head()?;
         let fingerprint = self.snapshot_worktree_fingerprint()?;
-        let execution = execute(
+        let atomic_execute_started = std::time::Instant::now();
+        let mut execution = execute(
             self,
             SnapshotMutation::new(
                 self,
@@ -719,6 +742,7 @@ impl Repository {
                 head.clone(),
             ),
         )?;
+        execution.profile.atomic_execute_ms = atomic_execute_started.elapsed().as_millis();
 
         objects::fault_inject::maybe_panic_at("snapshot_after_atomic_commit_before_ref_publish");
         #[cfg(test)]
@@ -727,7 +751,9 @@ impl Repository {
         // Phase 5 is a materialized view, not the commit point: force the
         // success-path ref publish through the same per-read reconciliation that
         // recovers a crash after the atomic oplog append.
+        let ref_publish_started = std::time::Instant::now();
         let _ = self.head()?;
+        execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
         refresh_materialized_thread_manifest(self, &head, &execution.state, &execution.tree);
         Ok(execution)
     }
@@ -749,13 +775,38 @@ impl Repository {
         confidence: Option<f32>,
         attribution: Attribution,
     ) -> Result<SnapshotExecution> {
-        self.snapshot_tree_with_attribution_profiled_locked(tree, intent, confidence, attribution)
+        self.snapshot_tree_source_with_attribution_profiled_locked(
+            SnapshotSource::SuppliedTree(tree),
+            intent,
+            confidence,
+            attribution,
+        )
     }
 
-    #[instrument(skip(self, tree, attribution), fields(intent = ?intent, confidence))]
-    fn snapshot_tree_with_attribution_profiled_locked(
+    /// Create a caller-supplied tree and its newly-authored blobs in one durable
+    /// snapshot batch. This is the structured-authoring counterpart to a
+    /// worktree snapshot: blob files, trees, and state become durable before
+    /// the oplog commit, without one directory fsync per blob.
+    pub fn snapshot_tree_with_blobs_with_attribution_profiled(
         &self,
         tree: Tree,
+        blobs: Vec<Blob>,
+        intent: Option<String>,
+        confidence: Option<f32>,
+        attribution: Attribution,
+    ) -> Result<SnapshotExecution> {
+        self.snapshot_tree_source_with_attribution_profiled_locked(
+            SnapshotSource::SuppliedTreeWithBlobs { tree, blobs },
+            intent,
+            confidence,
+            attribution,
+        )
+    }
+
+    #[instrument(skip(self, source, attribution), fields(intent = ?intent, confidence))]
+    fn snapshot_tree_source_with_attribution_profiled_locked(
+        &self,
+        source: SnapshotSource,
         intent: Option<String>,
         confidence: Option<f32>,
         attribution: Attribution,
@@ -785,11 +836,12 @@ impl Repository {
 
         let head = self.head_ref()?;
         let prev_head = self.head()?;
-        let execution = execute(
+        let atomic_execute_started = std::time::Instant::now();
+        let mut execution = execute(
             self,
             SnapshotMutation::new(
                 self,
-                SnapshotSource::SuppliedTree(tree),
+                source,
                 SnapshotDetails {
                     intent,
                     confidence,
@@ -800,12 +852,15 @@ impl Repository {
                 head,
             ),
         )?;
+        execution.profile.atomic_execute_ms = atomic_execute_started.elapsed().as_millis();
 
         objects::fault_inject::maybe_panic_at("snapshot_after_atomic_commit_before_ref_publish");
         #[cfg(test)]
         maybe_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish);
 
+        let ref_publish_started = std::time::Instant::now();
         let _ = self.head()?;
+        execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
         Ok(execution)
     }
 
@@ -996,6 +1051,8 @@ fn snapshot_profile_from_tree(
         blob_write_ms: tree_profile.blob_write_ms,
         tree_write_ms: tree_profile.tree_write_ms + root_tree_write_ms,
         state_ref_oplog_ms,
+        atomic_execute_ms: 0,
+        ref_publish_ms: 0,
     }
 }
 
