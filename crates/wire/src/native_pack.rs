@@ -8,7 +8,7 @@ use std::{
 
 use objects::store::{
     CompressionConfig, ObjectStore,
-    pack::{PackBuilder, PackObjectId, StreamingPackBuilder},
+    pack::{PackBuilder, PackObjectId, PackReader, StreamingPackBuilder},
 };
 
 use crate::{
@@ -67,11 +67,73 @@ pub struct ReusedNativePackStats {
 /// authoritative local pack. `Ok(None)` means the caller must use the normal
 /// object-loading writer.
 pub fn reuse_native_pack_encoded_subset_in(
-    _root: &Path,
-    _source_pack_path: &Path,
-    _objects: &[ObjectInfo],
+    root: &Path,
+    source_pack_path: &Path,
+    objects: &[ObjectInfo],
 ) -> Result<Option<(NativePackFileBundle, ReusedNativePackStats)>> {
-    Ok(None)
+    if objects.is_empty()
+        || objects
+            .iter()
+            .any(|object| !object.obj_type.packable_for_push())
+    {
+        return Ok(None);
+    }
+    let source_index_path = source_pack_path.with_extension("idx");
+    if !source_pack_path.is_file() || !source_index_path.is_file() {
+        return Ok(None);
+    }
+    let reader = PackReader::open(source_pack_path, &source_index_path)?;
+    let expected = objects
+        .iter()
+        .map(|object| {
+            Ok((
+                to_pack_object_id(&object.id),
+                object.obj_type.pack_object_type()?,
+                object.size,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let Some(reused) = reader.copy_hosted_encoded_subset(&expected)? else {
+        return Ok(None);
+    };
+
+    let base = root.join("transfer-spool");
+    fs::create_dir_all(&base)?;
+    let dir = unique_spool_dir(&base)?;
+    let pack_path = dir.join("pack");
+    let index_path = dir.join("idx");
+    let write_result = (|| -> Result<(u64, u64)> {
+        fs::write(&pack_path, &reused.pack_data)?;
+        fs::write(&index_path, &reused.index_data)?;
+        Ok((
+            u64::try_from(reused.pack_data.len()).map_err(|_| {
+                ProtocolError::InvalidState("reused pack length exceeds u64".to_string())
+            })?,
+            u64::try_from(reused.index_data.len()).map_err(|_| {
+                ProtocolError::InvalidState("reused pack index length exceeds u64".to_string())
+            })?,
+        ))
+    })();
+    let (pack_len, index_len) = match write_result {
+        Ok(lengths) => lengths,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&dir);
+            return Err(error);
+        }
+    };
+    Ok(Some((
+        NativePackFileBundle {
+            dir,
+            pack_path,
+            index_path,
+            pack_len,
+            index_len,
+        },
+        ReusedNativePackStats {
+            object_count: objects.len(),
+            encoded_bytes_copied: reused.encoded_bytes_copied,
+        },
+    )))
 }
 
 impl Drop for NativePackFileBundle {
@@ -797,7 +859,6 @@ mod tests {
     fn encoded_snapshot_subset_is_wire_equivalent_without_local_artifacts_or_attachments() {
         let source = TempDir::new().unwrap();
         let spool = TempDir::new().unwrap();
-        let destination = TempDir::new().unwrap();
         let source_pack = source.path().join("snapshot.pack");
         let source_index = source.path().join("snapshot.idx");
         let blob = (
@@ -879,12 +940,20 @@ mod tests {
         assert!(!reused.has_object(&attachment_id));
         assert!(!reused.has_object(&artifact_id));
 
-        let destination_store = FsStore::new(destination.path().join(".heddle"));
-        destination_store.init().unwrap();
-        let installed = destination_store
-            .install_pack_streaming(&bundle.pack_path, &bundle.index_path)
-            .unwrap();
-        assert_eq!(installed.len(), wanted.len());
+        for path in [&bundle.pack_path, &bundle.index_path] {
+            let expected_wire_bytes = std::fs::read(path).unwrap();
+            let mut chunk_reader = PackFileChunkReader::open(path, 7).unwrap();
+            let mut wire_bytes = Vec::new();
+            while let Some((offset, chunk_index, data, is_final)) =
+                chunk_reader.next_chunk().unwrap()
+            {
+                assert_eq!(offset as usize, wire_bytes.len());
+                assert_eq!(chunk_index as usize, wire_bytes.len() / 7);
+                wire_bytes.extend_from_slice(&data);
+                assert_eq!(is_final, wire_bytes.len() == expected_wire_bytes.len());
+            }
+            assert_eq!(wire_bytes, expected_wire_bytes);
+        }
         for (id, _, expected) in [blob, tree, state] {
             assert_eq!(reused.get_object(&id).unwrap().unwrap().1, expected);
         }

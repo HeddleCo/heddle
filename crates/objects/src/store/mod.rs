@@ -312,6 +312,19 @@ impl AnyStore {
         }
     }
 
+    /// O(1) lookup for the authoritative snapshot pack associated with a
+    /// pushed state. The filesystem store maintains this index as packs are
+    /// installed so hosted Push does not scan historical snapshot artifacts.
+    #[doc(hidden)]
+    pub fn snapshot_commit_descriptor_for_state(
+        &self,
+        state: &StateId,
+    ) -> Result<Option<SnapshotCommitDescriptor>> {
+        match self {
+            Self::Fs(store) => store.snapshot_commit_descriptor_for_state_impl(state),
+        }
+    }
+
     /// Install a structured snapshot closure and its commit artifact through
     /// the filesystem store's single durable pack barrier.
     #[doc(hidden)]

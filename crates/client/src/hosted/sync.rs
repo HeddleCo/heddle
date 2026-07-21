@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     io::{self, Seek, SeekFrom, Write},
     sync::{
         Arc, Mutex,
@@ -104,11 +104,34 @@ const NATIVE_PACK_OBJECT_PREFETCH_LIMIT: usize = 32;
 const NATIVE_PACK_OBJECT_LOAD_WORKER_LIMIT: usize = 8;
 
 fn select_snapshot_pack_reuse_descriptor<'a>(
-    _descriptors: &'a [SnapshotCommitDescriptor],
-    _local_state: StateId,
-    _objects: &[ObjectInfo],
+    descriptors: &'a [SnapshotCommitDescriptor],
+    local_state: StateId,
+    objects: &[ObjectInfo],
 ) -> Option<&'a SnapshotCommitDescriptor> {
-    None
+    if objects.is_empty()
+        || objects
+            .iter()
+            .any(|object| !object.obj_type.packable_for_push())
+    {
+        return None;
+    }
+    let wanted = objects
+        .iter()
+        .map(|object| match &object.id {
+            wire::ObjectId::Hash(hash) => PackObjectId::Hash(*hash),
+            wire::ObjectId::StateId(state) => PackObjectId::StateId(*state),
+            wire::ObjectId::StateAttachment { id, .. } => PackObjectId::Hash(*id.as_hash()),
+        })
+        .collect::<HashSet<_>>();
+    if wanted.len() != objects.len() {
+        return None;
+    }
+    descriptors.iter().find(|descriptor| {
+        descriptor.artifact.state == local_state
+            && wanted
+                .iter()
+                .all(|wanted_id| descriptor.object_ids.contains(wanted_id))
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -188,6 +211,8 @@ pub struct PushProfile {
     pub objects_wanted: usize,
     pub pack_objects: usize,
     pub sidecar_objects: usize,
+    pub reused_pack: usize,
+    pub reused_pack_copy: Duration,
 }
 
 /// Compare-and-set precondition for a native push target.
@@ -719,9 +744,10 @@ impl HostedClient {
 
         let pack_and_send_started = std::time::Instant::now();
         if !pack_objects.is_empty() {
-            send_native_pack_streaming_messages(
+            let native_pack_profile = send_native_pack_streaming_messages(
                 &tx,
                 repo,
+                local_state,
                 &pack_objects,
                 PushWireIdentities {
                     transfer_id: &transfer_id,
@@ -732,6 +758,8 @@ impl HostedClient {
                 ready_transport_mode,
             )
             .await?;
+            profile.reused_pack = usize::from(native_pack_profile.reused_pack);
+            profile.reused_pack_copy = native_pack_profile.reused_pack_copy;
         }
         profile.pack_and_send = pack_and_send_started.elapsed();
 
@@ -2334,14 +2362,18 @@ fn push_transfer_id(
 
 #[cfg(test)]
 mod push_transfer_id_tests {
+    use std::time::Instant;
+
     use api::heddle::api::v1alpha1::PushRequest;
     use objects::{
-        object::{ContentHash, StateId},
+        object::{Blob, ContentHash, StateId, Tree, TreeEntry},
         store::{SnapshotCommitArtifact, SnapshotCommitDescriptor, pack::PackObjectId},
     };
     use repo::Repository;
     use tempfile::TempDir;
-    use wire::{ObjectId, ObjectInfo, ObjectType, RefEntry};
+    use wire::{
+        GitLaneTransferIntent, ObjectId, ObjectInfo, ObjectType, RefEntry, RepositoryTransferPlan,
+    };
 
     use super::{
         ExpectedRemoteHead, apply_expected_remote_head, native_push_boundaries,
@@ -2406,6 +2438,79 @@ mod push_transfer_id_tests {
         assert!(
             select_snapshot_pack_reuse_descriptor(&[matching], state, &duplicate_wants).is_none()
         );
+    }
+
+    #[test]
+    fn repeated_snapshot_incremental_push_selects_reused_pack_and_profiles_copy() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let attribution = repo.get_attribution().unwrap();
+        let mut previous = None;
+        let mut tip = None;
+        for ordinal in 0..32 {
+            let blob = Blob::from(format!("revision {ordinal}\n"));
+            let tree = Tree::from_entries(vec![
+                TreeEntry::file("story.txt", blob.hash(), false).unwrap(),
+            ]);
+            let snapshot = repo
+                .snapshot_tree_with_blobs_with_attribution_profiled(
+                    tree,
+                    vec![blob],
+                    Some(format!("snapshot {ordinal}")),
+                    None,
+                    attribution.clone(),
+                )
+                .unwrap();
+            previous = tip.replace(snapshot.state.id());
+        }
+        let tip = tip.unwrap();
+        let previous = previous.unwrap();
+        let closure = wire::enumerate_state_closure_transfer_from_boundaries(
+            repo.store(),
+            tip,
+            &[previous],
+            usize::MAX,
+        )
+        .unwrap();
+        let plan = RepositoryTransferPlan::from_object_infos(
+            closure.full_objects.unwrap(),
+            GitLaneTransferIntent::HeddleObjectsOnly,
+        );
+        let pack_objects = plan
+            .partitions
+            .packable_objects
+            .into_iter()
+            .filter(|object| object.obj_type.packable_for_push())
+            .collect::<Vec<_>>();
+        let descriptor = repo
+            .store()
+            .snapshot_commit_descriptor_for_state(&tip)
+            .unwrap()
+            .expect("tip snapshot has an authoritative pack descriptor");
+        assert!(
+            select_snapshot_pack_reuse_descriptor(
+                std::slice::from_ref(&descriptor),
+                tip,
+                &pack_objects,
+            )
+            .is_some(),
+            "incremental Push wants must be an exact safe subset of the tip snapshot pack"
+        );
+
+        let started = Instant::now();
+        let (_, stats) = wire::reuse_native_pack_encoded_subset_in(
+            repo.heddle_dir(),
+            &descriptor.pack_path,
+            &pack_objects,
+        )
+        .unwrap()
+        .expect("the repeated-snapshot fixture must take the raw encoded subset path");
+        let elapsed = started.elapsed();
+        eprintln!(
+            "reused {} incremental objects / {} encoded bytes in {:?}",
+            stats.object_count, stats.encoded_bytes_copied, elapsed
+        );
+        assert_eq!(stats.object_count, pack_objects.len());
     }
 
     #[test]
@@ -3404,15 +3509,72 @@ struct PushWireIdentities<'a> {
     client_operation_id: &'a str,
 }
 
+#[derive(Clone, Copy, Default)]
+struct NativePackSendProfile {
+    reused_pack: bool,
+    reused_pack_copy: Duration,
+}
+
 async fn send_native_pack_streaming_messages(
     tx: &mpsc::Sender<PushClientFrame>,
     repo: &Repository,
+    local_state: StateId,
     objects: &[ObjectInfo],
     identities: PushWireIdentities<'_>,
     chunk_size: usize,
     transport: &super::helpers::HostedTransportPolicy,
     transport_mode: TransportMode,
-) -> Result<(), ProtocolError> {
+) -> Result<NativePackSendProfile, ProtocolError> {
+    let source_pack_path = repo
+        .store()
+        .snapshot_commit_descriptor_for_state(&local_state)
+        .ok()
+        .flatten()
+        .and_then(|descriptor| {
+            select_snapshot_pack_reuse_descriptor(
+                std::slice::from_ref(&descriptor),
+                local_state,
+                objects,
+            )
+            .map(|descriptor| descriptor.pack_path.clone())
+        });
+    if let Some(source_pack_path) = source_pack_path {
+        let root = repo.heddle_dir().to_path_buf();
+        let reuse_objects = objects.to_vec();
+        let reuse_started = Instant::now();
+        let reused = tokio::task::spawn_blocking(move || {
+            wire::reuse_native_pack_encoded_subset_in(&root, &source_pack_path, &reuse_objects)
+        })
+        .await;
+        if let Ok(Ok(Some((bundle, _)))) = reused {
+            let reused_pack_copy = reuse_started.elapsed();
+            send_native_pack_file_stream(
+                tx,
+                &bundle.pack_path,
+                PackStreamKind::Pack,
+                identities,
+                chunk_size,
+                transport,
+                transport_mode,
+            )
+            .await?;
+            send_native_pack_file_stream(
+                tx,
+                &bundle.index_path,
+                PackStreamKind::Index,
+                identities,
+                chunk_size,
+                transport,
+                transport_mode,
+            )
+            .await?;
+            return Ok(NativePackSendProfile {
+                reused_pack: true,
+                reused_pack_copy,
+            });
+        }
+    }
+
     let object_count = u64::try_from(objects.len()).map_err(|_| {
         ProtocolError::InvalidState("native pack object count exceeds u64".to_string())
     })?;
@@ -3483,7 +3645,8 @@ async fn send_native_pack_streaming_messages(
         transport,
         transport_mode,
     )
-    .await
+    .await?;
+    Ok(NativePackSendProfile::default())
 }
 
 fn load_native_pack_objects_parallel(

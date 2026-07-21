@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pack reader for extracting objects from packfiles.
 
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use bytes::Bytes;
 use heddle_format::delta::{DeltaDecoder, MAX_DELTA_OUTPUT_SIZE};
 
 use super::{
-    ObjectType, PackObjectId, PackObjectRecord, decompress_pack_payload, has_zstd_magic,
-    pack_container_spec, pack_index::PackIndex, varint, verify_container,
+    ObjectType, PackObjectId, PackObjectRecord, append_container_checksum,
+    decode_tagged_entry_header, decompress_pack_payload, has_zstd_magic, pack_container_spec,
+    pack_index::PackIndex, varint, verify_container, write_container_header,
 };
 use crate::{
     object::ContentHash,
@@ -51,6 +52,13 @@ pub struct PackReader<'a> {
     data: PackData<'a>,
     index: PackIndex,
     content_end: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct EncodedPackSubset {
+    pub pack_data: Vec<u8>,
+    pub index_data: Vec<u8>,
+    pub encoded_bytes_copied: u64,
 }
 
 impl PackReader<'static> {
@@ -109,6 +117,92 @@ impl<'a> PackReader<'a> {
 
     pub fn has_object(&self, id: &PackObjectId) -> bool {
         self.index.find(id).is_some()
+    }
+
+    /// Copy a validated subset of non-delta encoded entries into a standalone
+    /// hosted transport pack without decoding or recompressing their bodies.
+    ///
+    /// `Ok(None)` is a safe fallback signal: an expected object is absent,
+    /// duplicated, has a different type/size, is delta encoded, or names a
+    /// repository-local entry that may not cross the hosted pack boundary.
+    pub fn copy_hosted_encoded_subset(
+        &self,
+        expected: &[(PackObjectId, ObjectType, u64)],
+    ) -> Result<Option<EncodedPackSubset>> {
+        if expected.is_empty() {
+            return Ok(None);
+        }
+        let mut unique = HashSet::with_capacity(expected.len());
+        if expected.iter().any(|(id, obj_type, _)| {
+            !unique.insert(*id)
+                || matches!(
+                    obj_type,
+                    ObjectType::Delta | ObjectType::StateAttachment | ObjectType::SnapshotCommit
+                )
+        }) {
+            return Ok(None);
+        }
+
+        let mut pack_data = Vec::new();
+        write_container_header(&mut pack_data, pack_container_spec(), expected.len() as u64);
+        let mut index = PackIndex::new();
+        let mut encoded_bytes_copied = 0u64;
+        for (expected_id, expected_type, expected_size) in expected {
+            let Some(offset) = self.index.find(expected_id) else {
+                return Ok(None);
+            };
+            let offset = checked_index_offset(offset)?;
+            if offset >= self.content_end {
+                return Err(StoreError::InvalidObject(
+                    "Entry offset out of bounds".to_string(),
+                ));
+            }
+            let header = decode_tagged_entry_header(self.content_from(offset)?)?;
+            let expected_size = usize::try_from(*expected_size).ok();
+            if header.id != *expected_id
+                || header.obj_type != *expected_type
+                || Some(header.uncompressed_size) != expected_size
+                || matches!(
+                    header.obj_type,
+                    ObjectType::Delta | ObjectType::StateAttachment | ObjectType::SnapshotCommit
+                )
+            {
+                return Ok(None);
+            }
+            let encoded_len = header
+                .header_len
+                .checked_add(header.compressed_size)
+                .ok_or_else(|| {
+                    StoreError::InvalidObject("pack entry length overflow".to_string())
+                })?;
+            let encoded_end = offset
+                .checked_add(encoded_len)
+                .ok_or_else(|| StoreError::InvalidObject("pack entry end overflow".to_string()))?;
+            if encoded_end > self.content_end {
+                return Err(StoreError::InvalidObject(
+                    "pack entry extends beyond content boundary".to_string(),
+                ));
+            }
+            let output_offset = u64::try_from(pack_data.len()).map_err(|_| {
+                StoreError::InvalidObject("reused pack offset exceeds u64".to_string())
+            })?;
+            index.add(*expected_id, output_offset);
+            pack_data.extend_from_slice(&self.data.as_slice()[offset..encoded_end]);
+            encoded_bytes_copied = encoded_bytes_copied
+                .checked_add(u64::try_from(encoded_len).map_err(|_| {
+                    StoreError::InvalidObject("encoded pack entry length exceeds u64".to_string())
+                })?)
+                .ok_or_else(|| {
+                    StoreError::InvalidObject("encoded reused byte count overflow".to_string())
+                })?;
+        }
+        index.sort();
+        append_container_checksum(&mut pack_data);
+        Ok(Some(EncodedPackSubset {
+            pack_data,
+            index_data: index.to_bytes(),
+            encoded_bytes_copied,
+        }))
     }
 
     /// Get an object from the pack.

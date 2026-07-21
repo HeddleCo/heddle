@@ -162,19 +162,25 @@ impl FsStore {
 
         let (pack_data, index_data, _stats) = builder.build()?;
         let packs = packs_dir(&self.root);
-        if commit_artifact.is_some() {
+        let installed_pack_name = if commit_artifact.is_some() {
             super::pack_install_journal::install_committed_snapshot_pack_bytes(
                 &packs,
                 pack_data,
                 index_data,
                 artifact_id.expect("commit artifact id is present"),
-            )?;
+            )?
         } else {
-            super::pack_install_journal::install_snapshot_pack_bytes(
-                &packs, pack_data, index_data,
+            super::pack_install_journal::install_snapshot_pack_bytes(&packs, pack_data, index_data)?
+        };
+        {
+            let mut manager = self.pack_manager().write().map_err(|_| {
+                HeddleError::Config("Failed to acquire pack manager lock".to_string())
+            })?;
+            manager.add_pack(
+                packs.join(format!("{installed_pack_name}.pack")),
+                packs.join(format!("{installed_pack_name}.idx")),
             )?;
         }
-        self.reload_packs()?;
         self.materialize_packed_attachment_index(&state_id, &attachment_ids, state_was_present)?;
 
         if let Ok(mut cache) = self.recent_blobs.write() {
@@ -196,9 +202,8 @@ impl FsStore {
                 .map_err(|_| {
                     HeddleError::Config("Failed to acquire pack manager lock".to_string())
                 })?
-                .snapshot_commit_descriptors()?
-                .into_iter()
-                .find(|descriptor| descriptor.artifact.id() == artifact_id)
+                .snapshot_commit_descriptor_for_state(&state_id)?
+                .filter(|descriptor| descriptor.artifact.id() == artifact_id)
         } else {
             None
         };

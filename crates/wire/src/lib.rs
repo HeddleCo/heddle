@@ -45,8 +45,9 @@ pub use native_pack::{
     GitPackChunkState, GrowingPackChunkReader, MAX_RECEIVED_GIT_PACK_SIZE,
     MAX_RECEIVED_PACK_INDEX_SIZE, MAX_RECEIVED_PACK_SIZE, NativePackBundle, NativePackFileBundle,
     NativePackStreamingWriter, PackChunkSpool, PackChunkState, PackFileChunkReader,
-    build_native_pack, install_received_pack, is_native_packable_object_type,
-    native_pack_excluded_object_types, next_pack_chunk, receive_pack_chunk,
+    ReusedNativePackStats, build_native_pack, install_received_pack,
+    is_native_packable_object_type, native_pack_excluded_object_types, next_pack_chunk,
+    receive_pack_chunk, reuse_native_pack_encoded_subset_in,
 };
 pub use object_availability::{ObjectAvailabilityPlan, has_object, plan_object_availability};
 pub use object_graph::{

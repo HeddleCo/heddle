@@ -577,6 +577,17 @@ impl FsStore {
             .map_err(|_| HeddleError::Config("Failed to acquire pack manager lock".to_string()))?;
         manager.snapshot_commit_descriptors()
     }
+
+    pub(crate) fn snapshot_commit_descriptor_for_state_impl(
+        &self,
+        state: &StateId,
+    ) -> Result<Option<SnapshotCommitDescriptor>> {
+        let manager = self
+            .pack_manager()
+            .read()
+            .map_err(|_| HeddleError::Config("Failed to acquire pack manager lock".to_string()))?;
+        manager.snapshot_commit_descriptor_for_state(state)
+    }
 }
 
 impl ObjectStore for FsStore {
