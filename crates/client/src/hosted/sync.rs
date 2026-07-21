@@ -748,11 +748,11 @@ impl HostedClient {
             let native_pack_profile = send_native_pack_streaming_messages(
                 &tx,
                 repo,
-                local_state,
                 &pack_objects,
                 PushWireIdentities {
                     transfer_id: &transfer_id,
                     client_operation_id: operation_id.as_str(),
+                    local_state,
                 },
                 self.transport.chunk_size.max(1),
                 &self.transport,
@@ -3526,6 +3526,7 @@ fn proto_git_oid_bytes(bytes: &[u8]) -> Option<ProtoGitObjectId> {
 struct PushWireIdentities<'a> {
     transfer_id: &'a str,
     client_operation_id: &'a str,
+    local_state: StateId,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -3537,7 +3538,6 @@ struct NativePackSendProfile {
 async fn send_native_pack_streaming_messages(
     tx: &mpsc::Sender<PushClientFrame>,
     repo: &Repository,
-    local_state: StateId,
     objects: &[ObjectInfo],
     identities: PushWireIdentities<'_>,
     chunk_size: usize,
@@ -3546,13 +3546,13 @@ async fn send_native_pack_streaming_messages(
 ) -> Result<NativePackSendProfile, ProtocolError> {
     let source_pack_path = repo
         .store()
-        .snapshot_commit_descriptor_for_state(&local_state)
+        .snapshot_commit_descriptor_for_state(&identities.local_state)
         .ok()
         .flatten()
         .and_then(|descriptor| {
             select_snapshot_pack_reuse_descriptor(
                 std::slice::from_ref(&descriptor),
-                local_state,
+                identities.local_state,
                 objects,
             )
             .map(|descriptor| descriptor.pack_path.clone())
