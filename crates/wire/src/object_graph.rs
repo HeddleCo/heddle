@@ -913,8 +913,10 @@ mod tests {
 
     use super::{
         ObjectId, ObjectInfo, ObjectType, PlannedObject, StateClosureOptions,
-        enumerate_state_closure_plan_with_options, enumerate_state_closure_transfer_with_options,
-        enumerate_state_closure_with_options, missing_blobs_in_tree,
+        enumerate_state_closure_plan_with_options,
+        enumerate_state_closure_transfer_from_boundaries,
+        enumerate_state_closure_transfer_with_options, enumerate_state_closure_with_options,
+        missing_blobs_in_tree,
     };
 
     fn pairs_from_full(objects: &[ObjectInfo]) -> HashSet<(ObjectId, ObjectType)> {
@@ -1088,6 +1090,46 @@ mod tests {
             full_pairs
                 .iter()
                 .any(|(id, _)| matches!(id, ObjectId::StateId(_)))
+        );
+    }
+
+    #[test]
+    fn transfer_boundary_stops_at_server_head_without_walking_its_history() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let path = temp.path().join("story.txt");
+
+        std::fs::write(&path, "base\n").unwrap();
+        let base = repo.snapshot(Some("base".to_string()), None).unwrap();
+        std::fs::write(&path, "middle\n").unwrap();
+        let middle = repo.snapshot(Some("middle".to_string()), None).unwrap();
+        std::fs::write(&path, "tip\n").unwrap();
+        let tip = repo.snapshot(Some("tip".to_string()), None).unwrap();
+
+        let counting = CountingStore::new(repo.store());
+        let transfer = enumerate_state_closure_transfer_from_boundaries(
+            &counting,
+            tip.state_id,
+            &[middle.state_id],
+            512,
+        )
+        .unwrap();
+        let states = transfer
+            .planned_objects
+            .iter()
+            .filter_map(|object| match object.id {
+                ObjectId::StateId(state) if object.obj_type == ObjectType::State => Some(state),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(states, vec![tip.state_id]);
+        assert!(!states.contains(&middle.state_id));
+        assert!(!states.contains(&base.state_id));
+        assert_eq!(
+            counting.state_reads(),
+            1,
+            "the advertised server boundary must stop the walk before reading old states"
         );
     }
 
