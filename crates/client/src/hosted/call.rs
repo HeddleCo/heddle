@@ -400,3 +400,63 @@ fn require_shape(method: &str, expected: StreamingShape) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{net::Ipv4Addr, sync::Arc, time::Duration};
+
+    use api::heddle::api::v1alpha1::PushServerFrame;
+    use iroh::{Endpoint, RelayMode, endpoint::presets};
+    use tokio::sync::oneshot;
+
+    use super::{super::HostedConnection, ServerStream};
+
+    #[tokio::test]
+    async fn dropping_an_open_server_stream_stops_the_remote_response_sender() {
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let server_addr = server.addr();
+        let (response_started_tx, response_started_rx) = oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let incoming = server.accept().await.expect("incoming connection");
+            let connection = incoming.await.expect("accept connection");
+            let (mut send, mut recv) = connection.accept_bi().await.expect("accept stream");
+            recv.read_chunk(1)
+                .await
+                .expect("read request byte")
+                .expect("request stream remains open");
+            send.write_all(b"pending response").await.unwrap();
+            response_started_tx.send(()).unwrap();
+            let stop_code = tokio::time::timeout(Duration::from_secs(2), send.stopped())
+                .await
+                .expect("dropping ServerStream must signal STOP_SENDING")
+                .expect("remote response sender observes the stop code");
+            assert_eq!(stop_code, Some(1u32.into()));
+        });
+
+        let client = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let connection = HostedConnection::connect(client, server_addr)
+            .await
+            .unwrap();
+        let (mut send, recv) = connection.connection.open_bi().await.unwrap();
+        send.write_all(b"x").await.unwrap();
+        send.finish().unwrap();
+        response_started_rx.await.unwrap();
+        let response = ServerStream::<PushServerFrame>::new(Arc::clone(&connection), recv);
+        drop(response);
+
+        server_task.await.unwrap();
+    }
+}
