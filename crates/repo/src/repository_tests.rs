@@ -853,6 +853,59 @@ fn packed_structured_snapshot_remains_invisible_until_oplog_commit() {
 }
 
 #[test]
+fn durable_snapshot_artifact_recovers_missing_oplog_and_ref_views_after_reopen() {
+    let (temp_dir, repo) = create_test_repo();
+    let baseline = repo.head().unwrap();
+    let before = repo
+        .store()
+        .list_states()
+        .unwrap()
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let blob = Blob::from_slice(b"authoritative snapshot artifact");
+    let tree = Tree::from_entries(vec![
+        TreeEntry::file("artifact.txt", blob.hash(), false).unwrap(),
+    ]);
+    let attribution = repo.get_attribution().unwrap();
+
+    let crashed = with_snapshot_fault(SnapshotFault::AfterArtifactCommitBeforeOplogView, || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = repo.snapshot_tree_with_blobs_with_attribution_profiled(
+                tree,
+                vec![blob],
+                Some("artifact committed".to_string()),
+                None,
+                attribution,
+            );
+        }))
+    });
+    assert!(crashed.is_err());
+    assert_eq!(repo.head().unwrap(), baseline);
+
+    let committed = repo
+        .store()
+        .list_states()
+        .unwrap()
+        .into_iter()
+        .find(|state| !before.contains(state))
+        .expect("durable artifact must contain the new state");
+    drop(repo);
+
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    assert_eq!(
+        reopened.head().unwrap(),
+        Some(committed),
+        "open must reconstruct the ref from the authoritative artifact"
+    );
+    assert!(
+        reopened.oplog().recent(16).unwrap().iter().any(|entry| {
+            matches!(entry.operation, OpRecord::Snapshot { new_state, .. } if new_state == committed)
+        }),
+        "open must reconstruct the oplog materialized view"
+    );
+}
+
+#[test]
 fn structured_snapshot_keeps_reconstructible_ref_watermark_at_durable_floor() {
     let (temp_dir, repo) = create_test_repo();
     let baseline = repo.head().unwrap().expect("initialized main head");

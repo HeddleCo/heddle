@@ -131,6 +131,8 @@ impl AtomicMutation for SnapshotMutation<'_> {
         objects::fault_inject::maybe_panic_at("snapshot_after_stage_before_atomic_commit");
         #[cfg(test)]
         maybe_snapshot_fault(SnapshotFault::AfterStageBeforeAtomicCommit);
+        #[cfg(test)]
+        maybe_snapshot_fault(SnapshotFault::AfterArtifactCommitBeforeOplogView);
 
         let mut records = vec![OpRecord::Snapshot {
             new_state: execution.state.id(),
@@ -589,6 +591,7 @@ fn snapshot_transaction_id(
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SnapshotFault {
     AfterStageBeforeAtomicCommit,
+    AfterArtifactCommitBeforeOplogView,
     AfterAtomicCommitBeforeRefPublish,
 }
 
