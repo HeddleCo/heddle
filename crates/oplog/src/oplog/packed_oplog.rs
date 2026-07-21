@@ -22,6 +22,7 @@ use heddle_schema::op_record::{
 use objects::{
     error::{HeddleError, Result},
     fs_atomic::{create_dir_all_durable, sync_directory, temp_path, write_file_atomic},
+    fs_clone::ReflinkOutcome,
 };
 
 use super::oplog_types::{OpBatch, OpEntry, OpRecord};
@@ -37,6 +38,16 @@ const FOOTER_LEN: u64 = 8 + 4 + 4 + (FOOTER_U64_FIELDS * 8);
 const ENTRY_OFFSET_RECORD_LEN: u64 = 16;
 const BATCH_DIR_RECORD_LEN: u64 = 48;
 const TX_DIR_RECORD_LEN: u64 = 32;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReconstructibleAppendStrategy {
+    CloneAndRewriteTail,
+    Rewrite,
+}
+
+fn reconstructible_append_strategy(_outcome: ReflinkOutcome) -> ReconstructibleAppendStrategy {
+    ReconstructibleAppendStrategy::Rewrite
+}
 
 fn validate_container_version(version: u32) -> Result<()> {
     if version < CURRENT_CONTAINER_VERSION {
@@ -2329,6 +2340,22 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn reconstructible_append_reuses_reflinked_entry_prefix_when_available() {
+        assert_eq!(
+            reconstructible_append_strategy(ReflinkOutcome::Cloned),
+            ReconstructibleAppendStrategy::CloneAndRewriteTail,
+        );
+        assert_eq!(
+            reconstructible_append_strategy(ReflinkOutcome::Unsupported),
+            ReconstructibleAppendStrategy::Rewrite,
+        );
+        assert_eq!(
+            reconstructible_append_strategy(ReflinkOutcome::SourceVanished),
+            ReconstructibleAppendStrategy::Rewrite,
+        );
+    }
 
     fn make_entry(id: u64, scope: Option<&str>) -> OpEntry {
         let state = crate::oplog::fresh_state_id();
