@@ -394,12 +394,27 @@ impl HostedClient {
         } else {
             GitLaneTransferIntent::HeddleObjectsOnly
         };
-        let closure = wire::enumerate_state_closure_transfer_with_options(
-            repo.store(),
-            local_state,
-            wire::StateClosureOptions::default(),
-            PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD,
-        )?;
+        let native_boundaries = if git_lane.is_none() {
+            let remote_refs = self.list_refs(repo_path).await?;
+            native_push_boundaries(repo, &remote_refs, target_thread, local_state)?
+        } else {
+            Vec::new()
+        };
+        let closure = if native_boundaries.is_empty() {
+            wire::enumerate_state_closure_transfer_with_options(
+                repo.store(),
+                local_state,
+                wire::StateClosureOptions::default(),
+                PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD,
+            )?
+        } else {
+            wire::enumerate_state_closure_transfer_from_boundaries(
+                repo.store(),
+                local_state,
+                &native_boundaries,
+                PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD,
+            )?
+        };
         let object_plan =
             RepositoryTransferPlan::from_planned_objects(closure.planned_objects, git_lane_intent);
         let full_objects = closure.full_objects;
@@ -1321,6 +1336,10 @@ impl HostedClient {
         repo_path: &str,
         pushed_state: StateId,
     ) -> Result<(), ProtocolError> {
+        let local_markers = repo.refs().list_markers()?;
+        if local_markers.is_empty() {
+            return Ok(());
+        }
         let remote_markers = self
             .list_refs(repo_path)
             .await?
@@ -1328,7 +1347,7 @@ impl HostedClient {
             .filter(|entry| !entry.is_thread)
             .map(|entry| (entry.name, entry.state_id))
             .collect::<HashMap<_, _>>();
-        for marker in repo.refs().list_markers()? {
+        for marker in local_markers {
             let Some(state_id) = repo.refs().get_marker(&marker)? else {
                 continue;
             };
@@ -1387,6 +1406,30 @@ impl HostedClient {
             }
         }
         Ok(())
+    }
+}
+
+fn native_push_boundaries(
+    repo: &Repository,
+    remote_refs: &[RefEntry],
+    target_thread: &str,
+    local_state: StateId,
+) -> Result<Vec<StateId>, ProtocolError> {
+    let Some(remote_head) = remote_refs
+        .iter()
+        .find(|entry| entry.is_thread && entry.name == target_thread)
+        .map(|entry| entry.state_id)
+    else {
+        return Ok(Vec::new());
+    };
+    // Keep an exact-tip push on the full path: Weft deliberately re-installs
+    // pushed state bodies so its live server-owned sidecars can be merged at
+    // the install chokepoint. A strict ancestor is a safe content-addressed
+    // boundary because the server ref proves that closure is already durable.
+    if remote_head != local_state && wire::is_ancestor(repo.store(), remote_head, local_state)? {
+        Ok(vec![remote_head])
+    } else {
+        Ok(Vec::new())
     }
 }
 
@@ -2075,8 +2118,11 @@ fn push_transfer_id(
 #[cfg(test)]
 mod push_transfer_id_tests {
     use objects::object::StateId;
+    use repo::Repository;
+    use tempfile::TempDir;
+    use wire::RefEntry;
 
-    use super::push_transfer_id;
+    use super::{native_push_boundaries, push_transfer_id};
 
     #[test]
     fn git_revision_distinguishes_pushes_reusing_one_heddle_anchor() {
@@ -2088,6 +2134,39 @@ mod push_transfer_id_tests {
         assert_eq!(
             first,
             push_transfer_id("org/repo", state, "agent-1", "git:111111")
+        );
+    }
+
+    #[test]
+    fn native_push_uses_only_a_strict_remote_ancestor_as_its_boundary() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let path = temp.path().join("story.txt");
+        std::fs::write(&path, "base\n").unwrap();
+        let base = repo.snapshot(Some("base".to_string()), None).unwrap();
+        std::fs::write(&path, "tip\n").unwrap();
+        let tip = repo.snapshot(Some("tip".to_string()), None).unwrap();
+        let remote = [RefEntry {
+            name: "main".to_string(),
+            state_id: base.state_id,
+            is_thread: true,
+        }];
+
+        assert_eq!(
+            native_push_boundaries(&repo, &remote, "main", tip.state_id).unwrap(),
+            vec![base.state_id]
+        );
+        assert!(
+            native_push_boundaries(&repo, &remote, "main", base.state_id)
+                .unwrap()
+                .is_empty(),
+            "an exact-tip push must retain the state re-install/sidecar merge path"
+        );
+        assert!(
+            native_push_boundaries(&repo, &remote, "other", tip.state_id)
+                .unwrap()
+                .is_empty(),
+            "a different remote thread cannot bound this push"
         );
     }
 }

@@ -262,6 +262,52 @@ pub fn enumerate_state_closure_transfer_with_options(
     })
 }
 
+/// Enumerate a transfer delta while treating `boundary_states` as complete
+/// server-held roots. Unlike [`StateClosureOptions::exclude_states`], this does
+/// not expand each boundary's tree/history to build a hash exclusion set: the
+/// walk stops as soon as it reaches the boundary state. Objects reused by the
+/// new tip may still be advertised, and the receiver's have-set filters them.
+/// This keeps incremental push planning proportional to the new history.
+pub fn enumerate_state_closure_transfer_from_boundaries(
+    store: &impl ObjectStore,
+    state_id: StateId,
+    boundary_states: &[StateId],
+    full_descriptor_object_threshold: usize,
+) -> Result<StateClosureTransferObjects> {
+    let mut planned_objects = Vec::new();
+    let mut full_objects = Some(Vec::new());
+    let excluded_states = boundary_states.iter().copied().collect();
+
+    walk_state_closure_with_exclusions(
+        store,
+        state_id,
+        None,
+        excluded_states,
+        HashSet::new(),
+        |event| {
+            if let Some(object) = planned_object_from_event(store, event)? {
+                planned_objects.push(object);
+            }
+
+            if full_objects.is_some() && planned_objects.len() > full_descriptor_object_threshold {
+                full_objects = None;
+            }
+            if let Some(objects) = full_objects.as_mut()
+                && let Some(info) = object_info_from_event(store, event)?
+            {
+                objects.push(info);
+            }
+
+            Ok(())
+        },
+    )?;
+
+    Ok(StateClosureTransferObjects {
+        planned_objects,
+        full_objects,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BlobSource {
     Tree,
@@ -304,10 +350,28 @@ fn walk_state_closure(
     store: &impl ObjectStore,
     state_id: StateId,
     options: StateClosureOptions,
-    mut visit: impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
+    visit: impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
 ) -> Result<()> {
     let (excluded_states, excluded_hashes) = collect_excluded(store, &options.exclude_states)?;
 
+    walk_state_closure_with_exclusions(
+        store,
+        state_id,
+        options.depth,
+        excluded_states,
+        excluded_hashes,
+        visit,
+    )
+}
+
+fn walk_state_closure_with_exclusions(
+    store: &impl ObjectStore,
+    state_id: StateId,
+    max_depth: Option<u32>,
+    excluded_states: HashSet<StateId>,
+    excluded_hashes: HashSet<ContentHash>,
+    mut visit: impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
+) -> Result<()> {
     let mut seen_states: HashSet<StateId> = HashSet::new();
     let mut seen_hashes: HashSet<ContentHash> = HashSet::new();
     let mut queue: VecDeque<(StateId, u32)> = VecDeque::new();
@@ -365,7 +429,7 @@ fn walk_state_closure(
             }
         }
 
-        if options.depth.map(|max| depth < max).unwrap_or(true) {
+        if max_depth.map(|max| depth < max).unwrap_or(true) {
             for parent in &state.parents {
                 queue.push_back((*parent, depth + 1));
             }

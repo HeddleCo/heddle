@@ -52,8 +52,9 @@ pub use object_availability::{ObjectAvailabilityPlan, has_object, plan_object_av
 pub use object_graph::{
     ObjectId, ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, StateClosureOptions,
     StateClosureTransferObjects, enumerate_state_closure, enumerate_state_closure_plan,
-    enumerate_state_closure_plan_with_options, enumerate_state_closure_transfer_with_options,
-    enumerate_state_closure_with_options, is_ancestor, missing_blobs_in_tree,
+    enumerate_state_closure_plan_with_options, enumerate_state_closure_transfer_from_boundaries,
+    enumerate_state_closure_transfer_with_options, enumerate_state_closure_with_options,
+    is_ancestor, missing_blobs_in_tree,
 };
 pub use object_transfer::{
     MAX_PULL_FRAME_MESSAGE_SIZE, MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
