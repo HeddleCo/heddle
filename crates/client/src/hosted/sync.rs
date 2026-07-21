@@ -406,7 +406,12 @@ impl HostedClient {
         let object_count = full_objects
             .as_ref()
             .map_or(object_plan.stats.total_objects, std::vec::Vec::len);
-        let transfer_id = push_transfer_id(repo_path, local_state, target_thread);
+        let transfer_id = push_transfer_id(
+            repo_path,
+            local_state,
+            target_thread,
+            &local_revision_address,
+        );
         let transport_mode = preferred_transport_mode(&self.transport, object_count);
         let thread_metadata = load_thread_metadata(repo, target_thread, local_state)?;
         let request_message = PushClientFrame {
@@ -2055,11 +2060,36 @@ fn pull_transfer_id(
     )
 }
 
-fn push_transfer_id(repo_path: &str, local_state: StateId, target_thread: &str) -> String {
+fn push_transfer_id(
+    repo_path: &str,
+    local_state: StateId,
+    target_thread: &str,
+    local_revision_address: &str,
+) -> String {
     format!(
-        "push:{repo_path}:{}:{target_thread}",
-        local_state.to_string_full()
+        "push:{repo_path}:{}:{local_revision_address}:{target_thread}",
+        local_state.to_string_full(),
     )
+}
+
+#[cfg(test)]
+mod push_transfer_id_tests {
+    use objects::object::StateId;
+
+    use super::push_transfer_id;
+
+    #[test]
+    fn git_revision_distinguishes_pushes_reusing_one_heddle_anchor() {
+        let state = StateId::from_bytes([7; 32]);
+        let first = push_transfer_id("org/repo", state, "agent-1", "git:111111");
+        let second = push_transfer_id("org/repo", state, "agent-1", "git:222222");
+
+        assert_ne!(first, second);
+        assert_eq!(
+            first,
+            push_transfer_id("org/repo", state, "agent-1", "git:111111")
+        );
+    }
 }
 
 /// Build the git-mirror push plan: read ALL refs from the git ODB, resolve
