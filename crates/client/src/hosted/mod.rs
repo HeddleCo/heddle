@@ -42,7 +42,7 @@ use iroh::{Endpoint, EndpointAddr};
 pub use methods::HostedRoutes;
 use prost::Message;
 pub use session::{HostedAuthMode, HostedSession};
-pub use sync::{HostedRefEntry, PullObjectMix, PullProfile};
+pub use sync::{HostedRefEntry, PullObjectMix, PullProfile, PushProfile};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RenewableAuthorityCredential {

@@ -164,6 +164,24 @@ pub struct PullProfile {
     pub object_mix: PullObjectMix,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PushProfile {
+    pub remote_ref_discovery: Duration,
+    pub closure_planning: Duration,
+    pub request_setup: Duration,
+    pub ready_wait: Duration,
+    pub pack_and_send: Duration,
+    pub sidecars_and_git_send: Duration,
+    pub request_finish: Duration,
+    pub complete_wait: Duration,
+    pub metadata_sync: Duration,
+    pub total: Duration,
+    pub objects_advertised: usize,
+    pub objects_wanted: usize,
+    pub pack_objects: usize,
+    pub sidecar_objects: usize,
+}
+
 impl HostedClient {
     fn sync_stream_opening_proof(
         &self,
@@ -285,11 +303,32 @@ impl HostedClient {
         force: bool,
         client_operation_id: String,
     ) -> Result<PushComplete, ProtocolError> {
+        self.push_profiled(
+            repo,
+            repo_path,
+            local_state,
+            target_thread,
+            force,
+            client_operation_id,
+        )
+        .await
+        .map(|(complete, _)| complete)
+    }
+
+    pub async fn push_profiled(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        local_state: StateId,
+        target_thread: &str,
+        force: bool,
+        client_operation_id: String,
+    ) -> Result<(PushComplete, PushProfile), ProtocolError> {
         let operation_id = ClientOperationId::caller_or_fresh(
             "heddle.api.v1alpha1.RepoSyncService/Push",
             client_operation_id,
         );
-        self.push_with_revision(
+        self.push_with_revision_profiled(
             repo,
             repo_path,
             local_state,
@@ -383,6 +422,36 @@ impl HostedClient {
         git_lane: Option<GitLanePushPlan>,
         progress: &Progress,
     ) -> Result<PushComplete, ProtocolError> {
+        self.push_with_revision_profiled(
+            repo,
+            repo_path,
+            local_state,
+            target_thread,
+            force,
+            operation_id,
+            local_revision_address,
+            git_lane,
+            progress,
+        )
+        .await
+        .map(|(complete, _)| complete)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn push_with_revision_profiled(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        local_state: StateId,
+        target_thread: &str,
+        force: bool,
+        operation_id: ClientOperationId,
+        local_revision_address: String,
+        git_lane: Option<GitLanePushPlan>,
+        progress: &Progress,
+    ) -> Result<(PushComplete, PushProfile), ProtocolError> {
+        let total_started = std::time::Instant::now();
+        let mut profile = PushProfile::default();
         let _ = self.transport.chunk_size;
         let _ = self.transport.resume_attempts;
         // TODO: Gate hosted Git-lane transfer planning on the Sley reachable-pack
@@ -394,12 +463,15 @@ impl HostedClient {
         } else {
             GitLaneTransferIntent::HeddleObjectsOnly
         };
+        let remote_ref_discovery_started = std::time::Instant::now();
         let native_boundaries = if git_lane.is_none() {
             let remote_refs = self.list_refs(repo_path).await?;
             native_push_boundaries(repo, &remote_refs, target_thread, local_state)?
         } else {
             Vec::new()
         };
+        profile.remote_ref_discovery = remote_ref_discovery_started.elapsed();
+        let closure_planning_started = std::time::Instant::now();
         let closure = if native_boundaries.is_empty() {
             wire::enumerate_state_closure_transfer_with_options(
                 repo.store(),
@@ -421,6 +493,9 @@ impl HostedClient {
         let object_count = full_objects
             .as_ref()
             .map_or(object_plan.stats.total_objects, std::vec::Vec::len);
+        profile.closure_planning = closure_planning_started.elapsed();
+        profile.objects_advertised = object_count;
+        let request_setup_started = std::time::Instant::now();
         let transfer_id = push_transfer_id(
             repo_path,
             local_state,
@@ -486,7 +561,9 @@ impl HostedClient {
             .map_err(hosted_to_protocol_error)?;
         let (requests, mut response) = stream.split();
         let request_pump = tokio::spawn(pump_push_requests(requests, rx));
+        profile.request_setup = request_setup_started.elapsed();
 
+        let ready_wait_started = std::time::Instant::now();
         let ready = match response.next().await.map_err(hosted_to_protocol_error)? {
             Some(PushServerFrame {
                 frame: Some(push_server_frame::Frame::Ready(ready)),
@@ -497,6 +574,7 @@ impl HostedClient {
                 ));
             }
         };
+        profile.ready_wait = ready_wait_started.elapsed();
         let object_index = match full_objects {
             Some(objects) => objects
                 .into_iter()
@@ -531,6 +609,7 @@ impl HostedClient {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        profile.objects_wanted = wanted_infos.len();
 
         let wanted_plan = RepositoryTransferPlan::from_object_infos(wanted_infos, git_lane_intent);
 
@@ -538,12 +617,16 @@ impl HostedClient {
         // split out of client-to-server packs so Weft's pack anti-forgery seal
         // can stay absolute. The inspectable sidecar lane is verified per kind
         // before the hosted ref moves.
+        profile.sidecar_objects = wanted_plan.partitions.sidecar_objects.len();
         let (pack_objects, push_sidecar_objects): (Vec<_>, Vec<_>) = wanted_plan
             .partitions
             .packable_objects
             .into_iter()
             .partition(|info| info.obj_type.packable_for_push());
+        profile.pack_objects = pack_objects.len();
+        profile.sidecar_objects += push_sidecar_objects.len();
 
+        let pack_and_send_started = std::time::Instant::now();
         if !pack_objects.is_empty() {
             send_native_pack_streaming_messages(
                 &tx,
@@ -559,7 +642,9 @@ impl HostedClient {
             )
             .await?;
         }
+        profile.pack_and_send = pack_and_send_started.elapsed();
 
+        let sidecars_and_git_send_started = std::time::Instant::now();
         for info in wanted_plan
             .partitions
             .sidecar_objects
@@ -602,12 +687,16 @@ impl HostedClient {
                 })?;
             }
         }
+        profile.sidecars_and_git_send = sidecars_and_git_send_started.elapsed();
         drop(tx);
+        let request_finish_started = std::time::Instant::now();
         request_pump
             .await
             .map_err(|err| ProtocolError::InvalidState(format!("push request task failed: {err}")))?
             .map_err(hosted_to_protocol_error)?;
+        profile.request_finish = request_finish_started.elapsed();
 
+        let complete_wait_started = std::time::Instant::now();
         let result = match response.next().await.map_err(hosted_to_protocol_error)? {
             Some(PushServerFrame {
                 frame: Some(push_server_frame::Frame::Complete(complete)),
@@ -653,12 +742,16 @@ impl HostedClient {
                 ));
             }
         };
+        profile.complete_wait = complete_wait_started.elapsed();
 
+        let metadata_sync_started = std::time::Instant::now();
         if result.success {
             self.sync_remote_markers(repo, repo_path, local_state)
                 .await?;
         }
-        Ok(result)
+        profile.metadata_sync = metadata_sync_started.elapsed();
+        profile.total = total_started.elapsed();
+        Ok((result, profile))
     }
 
     pub async fn pull(
