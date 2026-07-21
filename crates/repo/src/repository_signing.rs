@@ -217,7 +217,7 @@ impl Repository {
 #[cfg(test)]
 mod tests {
     use crypto::Ed25519Signer;
-    use objects::object::{Attribution, Principal};
+    use objects::object::{Attribution, Blob, Principal, Tree, TreeEntry};
     use tempfile::TempDir;
 
     use super::*;
@@ -380,6 +380,64 @@ mod tests {
             )
             .expect("read local identity");
             assert_eq!(sig_pubkey(&repo, &state.id()), local.public_key);
+        });
+    }
+
+    #[test]
+    fn structured_snapshot_packs_signature_and_rebuilds_lost_attachment_index() {
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (temp, repo) = setup_repo();
+            let blob = Blob::from_slice(b"packed snapshot signature");
+            let tree = Tree::from_entries(vec![
+                TreeEntry::file("agent.txt", blob.hash(), false).expect("tree entry"),
+            ]);
+            let state = repo
+                .snapshot_tree_with_blobs_with_attribution_profiled(
+                    tree,
+                    vec![blob],
+                    Some("packed signature".to_string()),
+                    None,
+                    repo.get_attribution().expect("attribution"),
+                )
+                .expect("structured snapshot")
+                .state;
+            let attachments = repo
+                .list_state_attachments(&state.id())
+                .expect("list signature attachment");
+            let signature = attachments
+                .iter()
+                .find(|attachment| matches!(attachment.body, StateAttachmentBody::Signature(_)))
+                .expect("snapshot signature");
+
+            let objects = temp.path().join(".heddle/objects");
+            let loose = objects
+                .join("state-attachments")
+                .join(state.id().to_string_full())
+                .join(format!("{}.attachment", signature.id().as_hash().to_hex()));
+            assert!(
+                !loose.exists(),
+                "the immutable signature must share the snapshot pack durability barrier"
+            );
+
+            let index = objects
+                .join("state-attachment-index")
+                .join(format!("{}.msgpack", state.id().to_string_full()));
+            assert!(
+                index.exists(),
+                "success path must materialize the derived index"
+            );
+            std::fs::remove_file(&index).expect("simulate loss of reconstructible index");
+            drop(repo);
+
+            let reopened = Repository::open(temp.path()).expect("reopen repository");
+            assert_eq!(
+                reopened
+                    .verify_state_signature(&state.id())
+                    .expect("verify rebuilt signature index"),
+                SignatureStatus::Valid,
+            );
+            assert!(index.exists(), "restart read must rebuild the lost index");
         });
     }
 
