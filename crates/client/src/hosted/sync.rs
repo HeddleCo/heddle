@@ -612,6 +612,7 @@ impl HostedClient {
             local_state,
             target_thread,
             &local_revision_address,
+            operation_id.as_str(),
         );
         let transport_mode = preferred_transport_mode(&self.transport, object_count);
         let thread_metadata = load_thread_metadata(repo, target_thread, local_state)?;
@@ -2353,6 +2354,7 @@ fn push_transfer_id(
     local_state: StateId,
     target_thread: &str,
     local_revision_address: &str,
+    _client_operation_id: &str,
 ) -> String {
     format!(
         "push:{repo_path}:{}:{local_revision_address}:{target_thread}",
@@ -2516,13 +2518,30 @@ mod push_transfer_id_tests {
     #[test]
     fn git_revision_distinguishes_pushes_reusing_one_heddle_anchor() {
         let state = StateId::from_bytes([7; 32]);
-        let first = push_transfer_id("org/repo", state, "agent-1", "git:111111");
-        let second = push_transfer_id("org/repo", state, "agent-1", "git:222222");
+        let first = push_transfer_id("org/repo", state, "agent-1", "git:111111", "op-1");
+        let second = push_transfer_id("org/repo", state, "agent-1", "git:222222", "op-1");
 
         assert_ne!(first, second);
         assert_eq!(
             first,
-            push_transfer_id("org/repo", state, "agent-1", "git:111111")
+            push_transfer_id("org/repo", state, "agent-1", "git:111111", "op-1")
+        );
+    }
+
+    #[test]
+    fn push_transfer_identity_is_unique_per_operation_and_stable_within_one_retry() {
+        let state = StateId::from_bytes([8; 32]);
+        let first = push_transfer_id("org/repo", state, "main", "heddle:state", "op-1");
+        let later_retry = push_transfer_id("org/repo", state, "main", "heddle:state", "op-2");
+
+        assert_ne!(
+            first, later_retry,
+            "a later caller retry must not reuse an anti-replay transfer identity"
+        );
+        assert_eq!(
+            first,
+            push_transfer_id("org/repo", state, "main", "heddle:state", "op-1"),
+            "transport reconnects inside one Push operation must resume the same transfer"
         );
     }
 
