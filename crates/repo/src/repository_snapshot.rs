@@ -752,7 +752,7 @@ impl Repository {
         // success-path ref publish through the same per-read reconciliation that
         // recovers a crash after the atomic oplog append.
         let ref_publish_started = std::time::Instant::now();
-        let _ = self.head()?;
+        reconcile_snapshot_ref(self, &head)?;
         execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
         refresh_materialized_thread_manifest(self, &head, &execution.state, &execution.tree);
         Ok(execution)
@@ -849,7 +849,7 @@ impl Repository {
                     lineage: Vec::new(),
                 },
                 prev_head,
-                head,
+                head.clone(),
             ),
         )?;
         execution.profile.atomic_execute_ms = atomic_execute_started.elapsed().as_millis();
@@ -859,7 +859,7 @@ impl Repository {
         maybe_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish);
 
         let ref_publish_started = std::time::Instant::now();
-        let _ = self.head()?;
+        reconcile_snapshot_ref(self, &head)?;
         execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
         Ok(execution)
     }
@@ -1054,6 +1054,23 @@ fn snapshot_profile_from_tree(
         atomic_execute_ms: 0,
         ref_publish_ms: 0,
     }
+}
+
+/// Drive the success-path materialization through the exact ref class changed
+/// by the snapshot record. An attached snapshot changes a shared thread ref,
+/// while a detached snapshot changes the worktree-local HEAD. Calling
+/// `Repository::head` for the attached case reconciled the unchanged local
+/// class first and durably advanced an unrelated watermark on every capture.
+fn reconcile_snapshot_ref(repo: &Repository, head: &Head) -> Result<()> {
+    match head {
+        Head::Attached { thread } => {
+            let _ = repo.refs.get_thread(thread)?;
+        }
+        Head::Detached { .. } => {
+            let _ = repo.refs.read_head()?;
+        }
+    }
+    Ok(())
 }
 
 fn refresh_materialized_thread_manifest(
