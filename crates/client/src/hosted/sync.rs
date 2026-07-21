@@ -2354,10 +2354,10 @@ fn push_transfer_id(
     local_state: StateId,
     target_thread: &str,
     local_revision_address: &str,
-    _client_operation_id: &str,
+    client_operation_id: &str,
 ) -> String {
     format!(
-        "push:{repo_path}:{}:{local_revision_address}:{target_thread}",
+        "push:{repo_path}:{}:{local_revision_address}:{target_thread}:{client_operation_id}",
         local_state.to_string_full(),
     )
 }
