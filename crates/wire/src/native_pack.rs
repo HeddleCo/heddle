@@ -193,7 +193,7 @@ impl NativePackStreamingWriter {
             .write(true)
             .create_new(true)
             .open(&pack_path)?;
-        let builder = StreamingPackBuilder::new_with_object_count(
+        let builder = StreamingPackBuilder::new_with_object_count_ephemeral(
             pack_file,
             index_path.clone(),
             sync_pack_compression(),
@@ -245,8 +245,8 @@ impl NativePackStreamingWriter {
         let builder = self.builder.take().ok_or_else(|| {
             ProtocolError::InvalidState("native pack streaming writer is finalized".to_string())
         })?;
-        let (file, _) = builder.finalize().map_err(ProtocolError::from)?;
-        file.sync_all()?;
+        let (mut file, _) = builder.finalize().map_err(ProtocolError::from)?;
+        file.flush()?;
         drop(file);
         let pack_len = fs::metadata(&self.pack_path)?.len();
         let index_len = fs::metadata(&self.index_path)?.len();

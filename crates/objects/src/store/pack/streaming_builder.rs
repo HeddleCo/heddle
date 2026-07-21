@@ -163,6 +163,7 @@ pub struct StreamingPackBuilder<W: Write + Read + Seek> {
     /// Set true on `finalize` so `Drop` knows the bucket dir was
     /// already cleaned and shouldn't be removed again.
     finalized: bool,
+    durable: bool,
 }
 
 struct BucketWriter {
@@ -218,7 +219,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         compression: CompressionConfig,
         bucket_dir: PathBuf,
     ) -> Result<Self> {
-        Self::new_inner(pack_writer, index_path, compression, bucket_dir, None)
+        Self::new_inner(pack_writer, index_path, compression, bucket_dir, None, true)
     }
 
     /// Open a streaming builder whose final object count is known up front.
@@ -240,6 +241,30 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
             compression,
             bucket_dir,
             Some(object_count),
+            true,
+        )
+    }
+
+    /// Open a known-count builder for a transient transfer spool.
+    ///
+    /// The source object store remains authoritative, so these files only need
+    /// to be flushed for same-process readers; crash durability would add an
+    /// fsync to the pack, index, and directory for every unary push without
+    /// making the transfer any safer.
+    pub fn new_with_object_count_ephemeral(
+        pack_writer: W,
+        index_path: PathBuf,
+        compression: CompressionConfig,
+        bucket_dir: PathBuf,
+        object_count: u64,
+    ) -> Result<Self> {
+        Self::new_inner(
+            pack_writer,
+            index_path,
+            compression,
+            bucket_dir,
+            Some(object_count),
+            false,
         )
     }
 
@@ -249,8 +274,13 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         compression: CompressionConfig,
         bucket_dir: PathBuf,
         declared_object_count: Option<u64>,
+        durable: bool,
     ) -> Result<Self> {
-        crate::fs_atomic::create_dir_all_durable(&bucket_dir).map_err(StoreError::from)?;
+        if durable {
+            crate::fs_atomic::create_dir_all_durable(&bucket_dir).map_err(StoreError::from)?;
+        } else {
+            std::fs::create_dir_all(&bucket_dir).map_err(StoreError::from)?;
+        }
         let header_offset = pack_writer.stream_position().map_err(StoreError::from)?;
 
         // Write a placeholder header with `count = 0` unless the caller knows
@@ -294,6 +324,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
             bucket_paths,
             index_path,
             finalized: false,
+            durable,
         })
     }
 
@@ -610,9 +641,11 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
             .map_err(StoreError::from)?;
         writer.flush().map_err(StoreError::from)?;
         // L7: durable staged pack before return (File fsync; Cursor no-op).
-        writer
-            .sync_data_for_durability()
-            .map_err(StoreError::from)?;
+        if self.durable {
+            writer
+                .sync_data_for_durability()
+                .map_err(StoreError::from)?;
+        }
 
         // 5. Stream the final sorted index directly to disk. We open
         //    a `BufWriter` against `index_path`, write the index
@@ -651,9 +684,11 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         let idx_file = idx_writer
             .into_inner()
             .map_err(|e| StoreError::from(std::io::Error::other(e.to_string())))?;
-        idx_file.sync_all().map_err(StoreError::from)?;
-        if let Some(parent) = self.index_path.parent() {
-            crate::fs_atomic::sync_directory(parent).map_err(StoreError::from)?;
+        if self.durable {
+            idx_file.sync_all().map_err(StoreError::from)?;
+            if let Some(parent) = self.index_path.parent() {
+                crate::fs_atomic::sync_directory(parent).map_err(StoreError::from)?;
+            }
         }
         debug_assert_eq!(
             entries_written, self.object_count,
