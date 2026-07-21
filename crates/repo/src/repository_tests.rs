@@ -901,6 +901,45 @@ fn structured_snapshot_keeps_reconstructible_ref_watermark_at_durable_floor() {
 }
 
 #[test]
+fn detached_snapshot_reconstructs_a_lost_nondurable_head() {
+    let (temp_dir, repo) = create_test_repo();
+    let baseline = repo.head().unwrap().expect("initialized main head");
+    repo.refs()
+        .write_head(&Head::Detached { state: baseline })
+        .unwrap();
+    assert_eq!(repo.head().unwrap(), Some(baseline));
+    let watermark_path = temp_dir.path().join(".heddle/RECONCILE_WATERMARK_LOCAL");
+    let durable_floor = fs::read_to_string(&watermark_path).unwrap();
+
+    let blob = Blob::from_slice(b"detached reconstructible head");
+    let tree = Tree::from_entries(vec![
+        TreeEntry::file("agent.txt", blob.hash(), false).unwrap(),
+    ]);
+    let latest = repo
+        .snapshot_tree_with_blobs_with_attribution_profiled(
+            tree,
+            vec![blob],
+            Some("detached reconstructible head".to_string()),
+            None,
+            repo.get_attribution().unwrap(),
+        )
+        .unwrap()
+        .state
+        .id();
+    assert_eq!(repo.head().unwrap(), Some(latest));
+    assert_eq!(fs::read_to_string(&watermark_path).unwrap(), durable_floor);
+
+    drop(repo);
+    fs::write(
+        temp_dir.path().join(".heddle/HEAD"),
+        Head::Detached { state: baseline }.to_text(),
+    )
+    .unwrap();
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    assert_eq!(reopened.head().unwrap(), Some(latest));
+}
+
+#[test]
 fn test_snapshot_with_parent() {
     let (temp_dir, repo) = create_test_repo();
 

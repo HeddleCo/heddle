@@ -3,6 +3,7 @@
 
 use std::{
     collections::HashSet,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -28,6 +29,12 @@ use crate::fs_atomic::{stage_temp_files_durable, sync_directory};
 enum PackedRemove {
     Thread(String),
     Marker(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RefPublishDurability {
+    Durable,
+    Reconstructible,
 }
 
 /// Map a planned thread write to its summary-index delta: a set when `new` is
@@ -412,17 +419,29 @@ impl RefManager {
     /// [`plan_ref_updates`](Self::plan_ref_updates) has validated the batch.
     pub(super) fn publish_ref_plans(
         &self,
-        mut plans: Vec<RefUpdatePlan>,
-        _lock: &RefsLock,
+        plans: Vec<RefUpdatePlan>,
+        lock: &RefsLock,
     ) -> Result<()> {
-        // Stage every new-content plan into a temp file, then make them all
-        // durable in ONE overlapped-writeback pass. The previous per-plan
-        // `write → fsync` loop paid one serial fsync barrier per ref, so a batch
-        // publishing N refs (the `heddle adopt` hot path: N branches → one
-        // `update_refs`) sat ~N fsyncs deep (~2.3s for 800 refs). Kicking every
-        // temp file's writeback up front and fsyncing them as a batch keeps the
-        // identical per-file durability guarantee — each temp is fsync'd before
-        // its rename — while overlapping the writeback I/O.
+        self.publish_ref_plans_with_durability(plans, lock, RefPublishDurability::Durable)
+    }
+
+    pub(super) fn publish_ref_plans_reconstructible(
+        &self,
+        plans: Vec<RefUpdatePlan>,
+        lock: &RefsLock,
+    ) -> Result<()> {
+        self.publish_ref_plans_with_durability(plans, lock, RefPublishDurability::Reconstructible)
+    }
+
+    fn publish_ref_plans_with_durability(
+        &self,
+        mut plans: Vec<RefUpdatePlan>,
+        lock: &RefsLock,
+        durability: RefPublishDurability,
+    ) -> Result<()> {
+        // Durable writes use the overlapped-writeback batch. Reconstructible
+        // post-oplog views only need complete temp bytes plus atomic rename;
+        // their persisted watermark deliberately stays behind for recovery.
         let mut temp_writes: Vec<(PathBuf, Vec<u8>)> = Vec::new();
         for plan in &mut plans {
             if let Some(ref content) = plan.new_content {
@@ -431,7 +450,12 @@ impl RefManager {
                 plan.temp_path = Some(temp_path);
             }
         }
-        stage_temp_files_durable(&temp_writes)?;
+        match durability {
+            RefPublishDurability::Durable => stage_temp_files_durable(&temp_writes)?,
+            RefPublishDurability::Reconstructible => {
+                stage_temp_files_reconstructible(&temp_writes)?;
+            }
+        }
 
         let packed_snapshot = self.read_optional_string(&self.packed_refs_path())?;
         let mut applied = Vec::new();
@@ -477,8 +501,10 @@ impl RefManager {
 
         // One directory fsync per distinct parent, making every rename in this
         // batch durable. On adopt this collapses ~N dir fsyncs into 1.
-        for parent in &dirty_parents {
-            sync_directory(parent)?;
+        if durability == RefPublishDurability::Durable {
+            for parent in &dirty_parents {
+                sync_directory(parent)?;
+            }
         }
 
         if let Err(err) = self.apply_packed_removals(&plans) {
@@ -502,10 +528,13 @@ impl RefManager {
             .iter()
             .filter_map(|plan| plan.summary_delta.clone())
             .collect();
-        if self
-            .update_ref_summary_index_with_deltas(_lock, &deltas)
-            .is_err()
-        {
+        let summary_result = if durability == RefPublishDurability::Durable {
+            self.update_ref_summary_index_with_deltas(lock, &deltas)
+        } else {
+            self.invalidate_ref_summary_index();
+            Ok(())
+        };
+        if summary_result.is_err() {
             self.invalidate_ref_summary_index();
         }
 
@@ -563,6 +592,20 @@ impl RefManager {
 
         Ok(())
     }
+}
+
+/// Stage reconstructible materialized-view bytes for atomic rename without a
+/// durability barrier. The authoritative oplog must already be committed, and
+/// its persisted watermark must remain behind this publication.
+fn stage_temp_files_reconstructible(files: &[(PathBuf, Vec<u8>)]) -> Result<()> {
+    for (path, bytes) in files {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.write_all(bytes)?;
+    }
+    Ok(())
 }
 
 /// Record `path`'s parent as a directory whose entries changed, so the batch can

@@ -30,10 +30,11 @@
 //! See `docs/program/L8_PACK_INSTALL_JOURNAL.md`.
 
 use std::{
-    fs::{self, File},
-    io::{self, Read},
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -42,8 +43,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     fault_inject,
     fs_atomic::{
-        create_dir_all_durable, publish_file_durable, stage_temp_files_durable, sync_directory,
-        temp_path, write_file_atomic,
+        create_dir_all_durable, publish_file_durable, sync_directory, temp_path, write_file_atomic,
     },
     lock::RepoLock,
 };
@@ -922,9 +922,8 @@ pub(crate) fn install_snapshot_pack_bytes(
 
     let tmp_pack = temp_path(&dst_pack);
     let tmp_idx = temp_path(&dst_idx);
-    let staged = vec![(tmp_pack.clone(), pack_data), (tmp_idx.clone(), index_data)];
     let result = (|| {
-        stage_temp_files_durable(&staged)?;
+        stage_snapshot_pack_pair_durable(&tmp_pack, pack_data, &tmp_idx, index_data)?;
         fs::rename(&tmp_pack, &dst_pack)?;
         fault_inject::maybe_fail_at("snapshot_pack_after_publish_pack")?;
         fs::rename(&tmp_idx, &dst_idx)?;
@@ -937,6 +936,33 @@ pub(crate) fn install_snapshot_pack_bytes(
         let _ = fs::remove_file(&tmp_idx);
     }
     result
+}
+
+fn stage_snapshot_pack_pair_durable(
+    pack_path: &Path,
+    pack_data: Vec<u8>,
+    index_path: &Path,
+    index_data: Vec<u8>,
+) -> io::Result<()> {
+    let mut pack = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(pack_path)?;
+    pack.write_all(&pack_data)?;
+    let mut index = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(index_path)?;
+    index.write_all(&index_data)?;
+
+    let (pack_sync, index_sync) = thread::scope(|scope| {
+        let pack_sync = scope.spawn(move || pack.sync_all());
+        let index_sync = scope.spawn(move || index.sync_all());
+        (pack_sync.join(), index_sync.join())
+    });
+    pack_sync.map_err(|_| io::Error::other("snapshot pack sync worker panicked"))??;
+    index_sync.map_err(|_| io::Error::other("snapshot index sync worker panicked"))??;
+    Ok(())
 }
 
 fn new_install_id() -> String {

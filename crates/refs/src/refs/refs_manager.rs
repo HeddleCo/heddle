@@ -243,6 +243,66 @@ impl RefManager {
         Ok(())
     }
 
+    /// Atomically publish a just-committed snapshot thread as a reconstructible
+    /// materialized view. The oplog is already authoritative, so this updates
+    /// both process-local class watermarks but deliberately leaves their
+    /// persisted values at the prior durable floor for fresh-process recovery.
+    pub fn materialize_snapshot_thread_after_commit(&self, thread: &ThreadName) -> Result<()> {
+        self.materialize_snapshot_ref_after_commit(LoadRequest::Thread(thread.clone()))
+    }
+
+    /// Detached-HEAD counterpart to
+    /// [`materialize_snapshot_thread_after_commit`](Self::materialize_snapshot_thread_after_commit).
+    pub fn materialize_snapshot_head_after_commit(&self) -> Result<()> {
+        self.materialize_snapshot_ref_after_commit(LoadRequest::Head)
+    }
+
+    fn materialize_snapshot_ref_after_commit(&self, req: LoadRequest) -> Result<()> {
+        let Some(reconciler) = self.reconciler.as_ref() else {
+            return Err(HeddleError::Config(
+                "snapshot ref materialization requires an oplog reconciler".to_string(),
+            ));
+        };
+        let lock = self.lock_refs()?;
+        let tip = reconciler.generation()?;
+        let class = req.ref_class();
+        self.materialize_reconstructible_request(&req, tip, reconciler.as_ref(), &lock)?;
+        let other_class = match class {
+            RefClass::Local => RefClass::Shared,
+            RefClass::Shared => RefClass::Local,
+        };
+        self.materialize_reconstructible_request(
+            &Self::class_probe(other_class),
+            tip,
+            reconciler.as_ref(),
+            &lock,
+        )?;
+        Ok(())
+    }
+
+    fn materialize_reconstructible_request(
+        &self,
+        req: &LoadRequest,
+        tip: u64,
+        reconciler: &dyn RefReconciler,
+        lock: &RefsLock,
+    ) -> Result<()> {
+        let class = req.ref_class();
+        self.refresh_persisted_watermark(class, lock)?;
+        let watermark = self.class_watermark(class);
+        let cached = watermark.load(Ordering::Acquire);
+        if tip == cached {
+            return Ok(());
+        }
+
+        let raw = self.raw_load(req)?;
+        let since = if cached == WATERMARK_UNSET { 0 } else { cached };
+        let outcome = reconciler.reconcile(req, raw, since)?;
+        self.materialize_with_ref_durability(&outcome, lock, false)?;
+        watermark.store(tip, Ordering::Release);
+        Ok(())
+    }
+
     /// Materialize one class's committed tail under the held lock — the
     /// class-scoped form of [`reconciled_load`](Self::reconciled_load)'s lag
     /// branch, driven by a lightweight probe request of the class (the
@@ -556,6 +616,15 @@ impl RefManager {
         outcome: &super::reconcile::ReconcileOutcome,
         lock: &RefsLock,
     ) -> Result<()> {
+        self.materialize_with_ref_durability(outcome, lock, true)
+    }
+
+    fn materialize_with_ref_durability(
+        &self,
+        outcome: &super::reconcile::ReconcileOutcome,
+        lock: &RefsLock,
+        durable_refs: bool,
+    ) -> Result<()> {
         // The whole materialization runs under the caller's single held lock so
         // the fold that produced `outcome` and these re-publishes are one atomic
         // unit vs a concurrent publish (cid 3329631077). The publish values are
@@ -563,7 +632,11 @@ impl RefManager {
         // canonical, computed inside `plan_materialization`.
         let plans = self.plan_materialization(&outcome.republish)?;
         if !plans.is_empty() {
-            self.publish_ref_plans(plans, lock)?;
+            if durable_refs {
+                self.publish_ref_plans(plans, lock)?;
+            } else {
+                self.publish_ref_plans_reconstructible(plans, lock)?;
+            }
         }
         for (remote, thread, value) in &outcome.remote_updates {
             if self.raw_get_remote_thread(remote, thread)? != *value {

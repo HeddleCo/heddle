@@ -1071,19 +1071,14 @@ fn snapshot_profile_from_tree(
     }
 }
 
-/// Drive the success-path materialization through the exact ref class changed
-/// by the snapshot record. An attached snapshot changes a shared thread ref,
-/// while a detached snapshot changes the worktree-local HEAD. Calling
-/// `Repository::head` for the attached case reconciled the unchanged local
-/// class first and durably advanced an unrelated watermark on every capture.
+/// Atomically materialize the committed snapshot ref without adding another
+/// durability barrier. The oplog is authoritative; the persisted ref watermark
+/// deliberately remains at its prior floor so a crash that loses this
+/// reconstructible view is recovered by a fresh process.
 fn reconcile_snapshot_ref(repo: &Repository, head: &Head) -> Result<()> {
     match head {
-        Head::Attached { thread } => {
-            let _ = repo.refs.get_thread(thread)?;
-        }
-        Head::Detached { .. } => {
-            let _ = repo.refs.read_head()?;
-        }
+        Head::Attached { thread } => repo.refs.materialize_snapshot_thread_after_commit(thread)?,
+        Head::Detached { .. } => repo.refs.materialize_snapshot_head_after_commit()?,
     }
     Ok(())
 }
