@@ -547,6 +547,19 @@ fn supplied_tree_snapshot_batches_new_blobs_into_a_pack() {
         !loose_state.exists(),
         "structured snapshot state should share the durable pack with its tree and blobs"
     );
+
+    let state_id = execution.state.id();
+    let tree_hash = execution.tree.hash();
+    drop(repo);
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    assert_eq!(
+        reopened.store().get_state(&state_id).unwrap(),
+        Some(execution.state)
+    );
+    assert_eq!(
+        reopened.store().get_tree(&tree_hash).unwrap(),
+        Some(execution.tree)
+    );
 }
 
 #[test]
@@ -792,6 +805,50 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
     assert_eq!(
         transaction_count, 1,
         "capture batch must contain one transaction marker"
+    );
+}
+
+#[test]
+fn packed_structured_snapshot_remains_invisible_until_oplog_commit() {
+    let (temp_dir, repo) = create_test_repo();
+    let baseline = repo.head().unwrap();
+    let blob = Blob::from_slice(b"packed structured crash recovery");
+    let tree = Tree::from_entries(vec![
+        TreeEntry::file("agent.txt", blob.hash(), false).unwrap(),
+    ]);
+    let attribution = repo.get_attribution().unwrap();
+
+    let crashed = with_snapshot_fault(SnapshotFault::AfterStageBeforeAtomicCommit, || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = repo.snapshot_tree_with_blobs_with_attribution_profiled(
+                tree.clone(),
+                vec![blob.clone()],
+                Some("packed structured retry".to_string()),
+                None,
+                attribution.clone(),
+            );
+        }))
+    });
+    assert!(crashed.is_err());
+    assert_eq!(repo.head().unwrap(), baseline);
+
+    let committed = repo
+        .snapshot_tree_with_blobs_with_attribution_profiled(
+            tree,
+            vec![blob],
+            Some("packed structured retry".to_string()),
+            None,
+            attribution,
+        )
+        .unwrap();
+    assert_eq!(repo.head().unwrap(), Some(committed.state.id()));
+
+    drop(repo);
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    assert_eq!(reopened.head().unwrap(), Some(committed.state.id()));
+    assert_eq!(
+        reopened.store().get_state(&committed.state.id()).unwrap(),
+        Some(committed.state)
     );
 }
 

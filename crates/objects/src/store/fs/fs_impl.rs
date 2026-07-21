@@ -1230,6 +1230,16 @@ impl ObjectStore for FsStore {
         self.put_blobs_packed_impl(blobs)
     }
 
+    #[instrument(skip(self, blobs, tree, state), fields(blob_count = blobs.len()))]
+    fn put_snapshot_objects_packed(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+    ) -> Result<()> {
+        self.put_snapshot_objects_packed_impl(blobs, tree, state)
+    }
+
     #[instrument(skip(self))]
     fn install_pack_streaming(
         &self,

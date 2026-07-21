@@ -71,6 +71,28 @@ impl Repository {
         Ok(())
     }
 
+    /// Persist a structured snapshot's immutable closure in one store batch,
+    /// then append the detached signature attachment when signing is available.
+    pub(crate) fn put_authored_snapshot_objects(
+        &self,
+        blobs: Vec<(objects::object::ContentHash, Vec<u8>)>,
+        tree: &objects::object::Tree,
+        state: &State,
+    ) -> Result<()> {
+        let signature = self.sign_state_best_effort(state);
+        self.store.put_snapshot_objects_packed(blobs, tree, state)?;
+        if let Some(signature) = signature {
+            self.put_state_attachment(&StateAttachment {
+                state_id: state.id(),
+                body: StateAttachmentBody::Signature(signature),
+                attribution: state.attribution.clone(),
+                created_at: chrono::Utc::now(),
+                supersedes: None,
+            })?;
+        }
+        Ok(())
+    }
+
     /// Sign a state with the given signer.
     ///
     /// This loads the immutable state and appends a signature attachment.

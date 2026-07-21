@@ -12,10 +12,10 @@ use super::{
     fs_paths::{blobs_dir, hash_path, packs_dir, trees_dir},
 };
 use crate::{
-    object::ContentHash,
+    object::{ContentHash, State, Tree},
     store::{
         HeddleError, ObjectStore, Result, codec,
-        pack::{ObjectType as PackObjectType, PackBuilder},
+        pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
     },
 };
 
@@ -75,6 +75,63 @@ fn remove_file_ignore_missing(path: &std::path::Path) -> Result<()> {
 }
 
 impl FsStore {
+    /// Install blobs, root tree, and state through one durable pack journal.
+    /// The oplog remains the snapshot commit point; this pack is immutable
+    /// staging and is safe to leave orphaned if the later commit fails.
+    pub(super) fn put_snapshot_objects_packed_impl(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+    ) -> Result<()> {
+        let mut compression = self.compression;
+        compression.max_delta_size = 0;
+        let mut builder = PackBuilder::new(compression);
+        let mut staged_blobs = Vec::with_capacity(blobs.len());
+
+        for (hash, data) in blobs {
+            if ObjectStore::has_blob_locally(self, &hash)? {
+                continue;
+            }
+            staged_blobs.push((hash, data.clone()));
+            builder.add(hash, PackObjectType::Blob, data);
+        }
+
+        let tree_hash = tree.hash();
+        if !ObjectStore::has_tree_locally(self, &tree_hash)? {
+            builder.add(
+                tree_hash,
+                PackObjectType::Tree,
+                rmp_serde::to_vec_named(tree)?,
+            );
+        }
+
+        let state_id = state.id();
+        builder.add_id(
+            PackObjectId::StateId(state_id),
+            PackObjectType::State,
+            rmp_serde::to_vec_named(state)?,
+        );
+
+        let (pack_data, index_data, _stats) = builder.build()?;
+        self.install_pack_files(&pack_data, &index_data)?;
+
+        if let Ok(mut cache) = self.recent_blobs.write() {
+            for (hash, data) in staged_blobs {
+                cache.insert(hash, crate::object::Blob::from_slice(&data));
+            }
+        }
+        if let Ok(mut cache) = self.recent_trees.write() {
+            cache.insert(tree_hash, tree.clone());
+        }
+        if let Ok(mut cache) = self.recent_states.write() {
+            let mut cached = state.clone();
+            cached.state_id = state_id;
+            cache.insert(state_id, cached);
+        }
+        Ok(())
+    }
+
     /// Bulk-install many blobs as a single packfile. Two fsyncs total
     /// (one for `.pack`, one for `.idx`) regardless of blob count —
     /// vs. N×fsync if each blob were written loose. Used by the

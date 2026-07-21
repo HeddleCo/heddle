@@ -217,6 +217,14 @@ impl ObjectStore for AnyStore {
     fn put_blobs_packed(&self, blobs: Vec<(ContentHash, Vec<u8>)>) -> Result<()> {
         any_store_dispatch!(self, put_blobs_packed(blobs))
     }
+    fn put_snapshot_objects_packed(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+    ) -> Result<()> {
+        any_store_dispatch!(self, put_snapshot_objects_packed(blobs, tree, state))
+    }
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<pack::PackObjectId>> {
         any_store_dispatch!(self, install_pack(pack_data, index_data))
     }
@@ -539,6 +547,21 @@ pub trait ObjectStore: Send + Sync {
             }
         }
         Ok(())
+    }
+
+    /// Durably install a snapshot's newly-authored immutable object closure as
+    /// one storage batch. Pack-capable backends override this to share one pack
+    /// installation across blobs, the root tree, and the state; other backends
+    /// preserve the same ordering through their ordinary object methods.
+    fn put_snapshot_objects_packed(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+    ) -> Result<()> {
+        self.put_blobs_packed(blobs)?;
+        self.put_tree(tree)?;
+        self.put_state(state)
     }
 
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<pack::PackObjectId>> {

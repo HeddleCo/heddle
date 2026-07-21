@@ -221,31 +221,32 @@ impl AtomicMutation for SnapshotMutation<'_> {
 impl SnapshotMutation<'_> {
     fn stage_snapshot_objects(&self) -> Result<SnapshotExecution> {
         debug!("Building tree from worktree");
-        let (tree, tree_profile) = match &self.source {
-            SnapshotSource::Worktree { .. } => self.build_worktree_tree()?,
-            SnapshotSource::SuppliedTree(tree) => (tree.clone(), TreeBuildProfile::default()),
-            SnapshotSource::SuppliedTreeWithBlobs { tree, blobs } => {
-                let blob_write_started = std::time::Instant::now();
-                self.repo.store.put_blobs_packed(
+        let (tree, mut tree_profile, supplied_blobs) = match &self.source {
+            SnapshotSource::Worktree { .. } => {
+                let (tree, profile) = self.build_worktree_tree()?;
+                (tree, profile, None)
+            }
+            SnapshotSource::SuppliedTree(tree) => (tree.clone(), TreeBuildProfile::default(), None),
+            SnapshotSource::SuppliedTreeWithBlobs { tree, blobs } => (
+                tree.clone(),
+                TreeBuildProfile::default(),
+                Some(
                     blobs
                         .iter()
                         .map(|blob| (blob.hash(), blob.content().to_vec()))
                         .collect(),
-                )?;
-                (
-                    tree.clone(),
-                    TreeBuildProfile {
-                        blob_write_ms: blob_write_started.elapsed().as_millis(),
-                        ..TreeBuildProfile::default()
-                    },
-                )
-            }
+                ),
+            ),
         };
         debug!(duration_ms = tree_profile.tree_walk_ms, "Tree built");
 
         debug!("Storing tree");
         let root_tree_write_start = std::time::Instant::now();
-        let tree_hash = self.repo.store.put_tree(&tree)?;
+        let tree_hash = if supplied_blobs.is_some() {
+            tree.hash()
+        } else {
+            self.repo.store.put_tree(&tree)?
+        };
         let root_tree_write_ms = root_tree_write_start.elapsed().as_millis();
 
         let parents = match self.prev_head {
@@ -326,9 +327,23 @@ impl SnapshotMutation<'_> {
             }
         }
 
+        // Structured native authoring owns the entire newly-authored immutable
+        // closure already. Install its blobs, root tree, and state through one
+        // pack journal instead of paying independent tree/state durability
+        // barriers. The oplog append below remains the sole commit point.
+        let packed_snapshot = supplied_blobs.is_some();
+        if let Some(blobs) = supplied_blobs {
+            let packed_write_started = std::time::Instant::now();
+            self.repo
+                .put_authored_snapshot_objects(blobs, &tree, &state)?;
+            tree_profile.blob_write_ms = packed_write_started.elapsed().as_millis();
+        }
+
         // Persist the immutable state before its independently-addressed metadata.
         let state_ref_oplog_start = std::time::Instant::now();
-        self.repo.put_authored_state(&state)?;
+        if !packed_snapshot {
+            self.repo.put_authored_state(&state)?;
+        }
         if let Some(context) = inherited_context {
             self.repo.put_state_attachment(&StateAttachment {
                 state_id: state.id(),
