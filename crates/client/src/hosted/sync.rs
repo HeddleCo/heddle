@@ -2210,12 +2210,16 @@ fn push_transfer_id(
 
 #[cfg(test)]
 mod push_transfer_id_tests {
+    use api::heddle::api::v1alpha1::PushRequest;
     use objects::object::StateId;
     use repo::Repository;
     use tempfile::TempDir;
     use wire::RefEntry;
 
-    use super::{native_push_boundaries, push_transfer_id};
+    use super::{
+        ExpectedRemoteHead, apply_expected_remote_head, native_push_boundaries,
+        native_push_boundaries_from_expected_head, push_transfer_id,
+    };
 
     #[test]
     fn git_revision_distinguishes_pushes_reusing_one_heddle_anchor() {
@@ -2261,6 +2265,35 @@ mod push_transfer_id_tests {
                 .is_empty(),
             "a different remote thread cannot bound this push"
         );
+    }
+
+    #[test]
+    fn known_remote_head_builds_the_boundary_and_wire_precondition_without_discovery() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let path = temp.path().join("story.txt");
+        std::fs::write(&path, "base\n").unwrap();
+        let base = repo.snapshot(Some("base".to_string()), None).unwrap();
+        std::fs::write(&path, "tip\n").unwrap();
+        let tip = repo.snapshot(Some("tip".to_string()), None).unwrap();
+        let expected = ExpectedRemoteHead::State(base.state_id);
+
+        assert_eq!(
+            native_push_boundaries_from_expected_head(&repo, expected, tip.state_id).unwrap(),
+            vec![base.state_id]
+        );
+
+        let mut request = PushRequest::default();
+        apply_expected_remote_head(&mut request, expected);
+        assert_eq!(
+            request.expected_remote_head.map(|state| state.value),
+            Some(base.state_id.as_bytes().to_vec())
+        );
+        assert!(!request.expected_remote_head_missing);
+
+        apply_expected_remote_head(&mut request, ExpectedRemoteHead::Missing);
+        assert!(request.expected_remote_head.is_none());
+        assert!(request.expected_remote_head_missing);
     }
 }
 
