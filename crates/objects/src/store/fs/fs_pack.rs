@@ -14,8 +14,9 @@ use super::{
 use crate::{
     object::{ContentHash, State, StateAttachment, StateAttachmentId, Tree},
     store::{
-        HeddleError, ObjectStore, Result, codec,
+        HeddleError, ObjectStore, Result, SnapshotCommitArtifact, SnapshotCommitDescriptor, codec,
         pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
+        snapshot_commit::snapshot_commit_marker_path,
     },
 };
 
@@ -75,17 +76,34 @@ fn remove_file_ignore_missing(path: &std::path::Path) -> Result<()> {
 }
 
 impl FsStore {
+    pub(crate) fn put_committed_snapshot_objects_packed_impl(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+        attachments: Vec<StateAttachment>,
+        artifact: SnapshotCommitArtifact,
+    ) -> Result<SnapshotCommitDescriptor> {
+        self.put_snapshot_objects_packed_impl(blobs, tree, state, attachments, Some(artifact))?
+            .ok_or_else(|| {
+                HeddleError::InvalidObject(
+                    "committed snapshot pack did not expose its artifact descriptor".to_string(),
+                )
+            })
+    }
+
     /// Install blobs, root tree, state, and immutable authored attachments
-    /// through one durable pack journal.
-    /// The oplog remains the snapshot commit point; this pack is immutable
-    /// staging and is safe to leave orphaned if the later commit fails.
+    /// through one pack publication. Ordinary callers treat the pack as
+    /// pre-oplog staging; committed structured snapshots add their local trust
+    /// marker in the same directory barrier and make the pack authoritative.
     pub(super) fn put_snapshot_objects_packed_impl(
         &self,
         blobs: Vec<(ContentHash, Vec<u8>)>,
         tree: &Tree,
         state: &State,
         attachments: Vec<StateAttachment>,
-    ) -> Result<()> {
+        commit_artifact: Option<SnapshotCommitArtifact>,
+    ) -> Result<Option<SnapshotCommitDescriptor>> {
         let state_was_present = <Self as ObjectStore>::has_state(self, &state.id())?;
         let mut compression = self.compression;
         compression.max_delta_size = 0;
@@ -93,7 +111,7 @@ impl FsStore {
         let mut staged_blobs = Vec::with_capacity(blobs.len());
 
         for (hash, data) in blobs {
-            if ObjectStore::has_blob_locally(self, &hash)? {
+            if commit_artifact.is_none() && ObjectStore::has_blob_locally(self, &hash)? {
                 continue;
             }
             staged_blobs.push((hash, data.clone()));
@@ -101,7 +119,7 @@ impl FsStore {
         }
 
         let tree_hash = tree.hash();
-        if !ObjectStore::has_tree_locally(self, &tree_hash)? {
+        if commit_artifact.is_some() || !ObjectStore::has_tree_locally(self, &tree_hash)? {
             builder.add(
                 tree_hash,
                 PackObjectType::Tree,
@@ -132,10 +150,30 @@ impl FsStore {
                 Ok(id)
             })
             .collect::<Result<Vec<StateAttachmentId>>>()?;
+        let artifact_id = commit_artifact.as_ref().map(SnapshotCommitArtifact::id);
+        if let Some(artifact) = &commit_artifact {
+            artifact.validate()?;
+            builder.add(
+                artifact.id(),
+                PackObjectType::SnapshotCommit,
+                rmp_serde::to_vec_named(artifact)?,
+            );
+        }
 
         let (pack_data, index_data, _stats) = builder.build()?;
         let packs = packs_dir(&self.root);
-        super::pack_install_journal::install_snapshot_pack_bytes(&packs, pack_data, index_data)?;
+        if commit_artifact.is_some() {
+            super::pack_install_journal::install_committed_snapshot_pack_bytes(
+                &packs,
+                pack_data,
+                index_data,
+                artifact_id.expect("commit artifact id is present"),
+            )?;
+        } else {
+            super::pack_install_journal::install_snapshot_pack_bytes(
+                &packs, pack_data, index_data,
+            )?;
+        }
         self.reload_packs()?;
         self.materialize_packed_attachment_index(&state_id, &attachment_ids, state_was_present)?;
 
@@ -152,7 +190,19 @@ impl FsStore {
             cached.state_id = state_id;
             cache.insert(state_id, cached);
         }
-        Ok(())
+        let descriptor = if let Some(artifact_id) = artifact_id {
+            self.pack_manager()
+                .read()
+                .map_err(|_| {
+                    HeddleError::Config("Failed to acquire pack manager lock".to_string())
+                })?
+                .snapshot_commit_descriptors()?
+                .into_iter()
+                .find(|descriptor| descriptor.artifact.id() == artifact_id)
+        } else {
+            None
+        };
+        Ok(descriptor)
     }
 
     /// Bulk-install many blobs as a single packfile. Two fsyncs total
@@ -240,17 +290,22 @@ impl FsStore {
 
         // Snapshot what the existing packs already hold, plus the file
         // paths we'll retire once the consolidated pack is installed.
-        let (existing_ids, old_pack_files) = {
+        let (existing_ids, old_pack_files, commit_artifact_ids) = {
             let manager = self.pack_manager().read().map_err(|_| {
                 HeddleError::Config("Failed to acquire pack manager lock".to_string())
             })?;
             let ids = manager.list_all_ids()?;
+            let commit_artifact_ids = manager
+                .snapshot_commit_descriptors()?
+                .into_iter()
+                .map(|descriptor| descriptor.artifact.id())
+                .collect::<Vec<_>>();
             let files: Vec<(std::path::PathBuf, std::path::PathBuf)> = manager
                 .pack_file_paths()
                 .into_iter()
                 .map(|(pack, index)| (pack.to_path_buf(), index.to_path_buf()))
                 .collect();
-            (ids, files)
+            (ids, files, commit_artifact_ids)
         };
 
         // Nothing loose and at most one pack already — the store is
@@ -334,7 +389,18 @@ impl FsStore {
         }
 
         let (pack_data, index_data, stats) = builder.build()?;
-        self.install_pack_files(&pack_data, &index_data)?;
+        let new_pack_name = blake3::hash(&pack_data).to_hex();
+        if commit_artifact_ids.is_empty() {
+            self.install_pack_files(&pack_data, &index_data)?;
+        } else {
+            super::pack_install_journal::install_snapshot_pack_bytes_with_commit_markers(
+                &packs_dir(&self.root),
+                pack_data,
+                index_data,
+                &commit_artifact_ids,
+            )?;
+            self.reload_packs()?;
+        }
         // GC packs *replace* loose objects (followed by
         // `prune_loose_objects`). Bust the recent-objects caches so
         // a subsequent get_* doesn't return a stale `Blob`/`Tree`
@@ -350,7 +416,6 @@ impl FsStore {
         // happened to hash-collide with an old pack (a store that was
         // already a single consolidated pack) that file is excluded here.
         // Stack hex digest; compare as &str — no format!/String intermediate.
-        let new_pack_name = blake3::hash(&pack_data).to_hex();
         for (pack_path, index_path) in &old_pack_files {
             let is_new_pack = pack_path
                 .file_stem()
@@ -362,6 +427,9 @@ impl FsStore {
             }
             remove_file_ignore_missing(pack_path)?;
             remove_file_ignore_missing(index_path)?;
+            for artifact_id in &commit_artifact_ids {
+                remove_file_ignore_missing(&snapshot_commit_marker_path(pack_path, artifact_id))?;
+            }
         }
         // Disk shrank (packs removed), so `reload_if_disk_grew` would
         // not pick this up — force a full reload of the pack list.

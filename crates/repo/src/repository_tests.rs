@@ -889,6 +889,9 @@ fn durable_snapshot_artifact_recovers_missing_oplog_and_ref_views_after_reopen()
         .into_iter()
         .find(|state| !before.contains(state))
         .expect("durable artifact must contain the new state");
+    repo.store()
+        .pack_objects(false)
+        .expect("GC must carry authoritative artifact markers into its consolidated pack");
     drop(repo);
 
     let reopened = Repository::open(temp_dir.path()).unwrap();

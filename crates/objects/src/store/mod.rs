@@ -16,6 +16,7 @@ pub mod liveness;
 pub mod memory;
 pub mod pack;
 pub mod shallow;
+mod snapshot_commit;
 pub mod source;
 pub mod store_compliance;
 pub mod writer_lease;
@@ -42,6 +43,10 @@ pub use liveness::{
 pub use memory::InMemoryStore;
 pub use pack::{PackBuilder, PackObjectId, PackReader, PackStats, StreamingPackBuilder, SyncData};
 pub use shallow::ShallowInfo;
+#[doc(hidden)]
+pub use snapshot_commit::{
+    SNAPSHOT_COMMIT_ARTIFACT_SCHEMA, SnapshotCommitArtifact, SnapshotCommitDescriptor,
+};
 #[cfg(feature = "async-source")]
 pub use source::AsyncObjectSource;
 pub use source::ObjectSource;
@@ -237,6 +242,7 @@ impl ObjectStore for AnyStore {
             put_snapshot_objects_and_attachments_packed(blobs, tree, state, attachments)
         )
     }
+
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<pack::PackObjectId>> {
         any_store_dispatch!(self, install_pack(pack_data, index_data))
     }
@@ -293,6 +299,38 @@ impl AnyStore {
     pub fn set_external_source(&mut self, source: Arc<dyn ExternalObjectSource>) {
         match self {
             Self::Fs(store) => store.set_external_source(source),
+        }
+    }
+
+    /// Internal repository seam for the local authoritative snapshot artifact.
+    /// Kept off `ObjectStore` so third-party backends do not acquire a Heddle
+    /// filesystem recovery contract.
+    #[doc(hidden)]
+    pub fn snapshot_commit_descriptors(&self) -> Result<Vec<SnapshotCommitDescriptor>> {
+        match self {
+            Self::Fs(store) => store.snapshot_commit_descriptors_impl(),
+        }
+    }
+
+    /// Install a structured snapshot closure and its commit artifact through
+    /// the filesystem store's single durable pack barrier.
+    #[doc(hidden)]
+    pub fn put_committed_snapshot_objects_packed(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+        attachments: Vec<StateAttachment>,
+        artifact: SnapshotCommitArtifact,
+    ) -> Result<SnapshotCommitDescriptor> {
+        match self {
+            Self::Fs(store) => store.put_committed_snapshot_objects_packed_impl(
+                blobs,
+                tree,
+                state,
+                attachments,
+                artifact,
+            ),
         }
     }
 }
@@ -592,7 +630,6 @@ pub trait ObjectStore: Send + Sync {
         }
         Ok(())
     }
-
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<pack::PackObjectId>> {
         let reader = pack::PackReader::from_slice(pack_data, index_data)?;
         let ids = reader.list_ids();

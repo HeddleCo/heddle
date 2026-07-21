@@ -55,6 +55,20 @@ impl Repository {
         }
     }
 
+    pub(crate) fn authored_state_signature_attachment(
+        &self,
+        state: &State,
+    ) -> Option<StateAttachment> {
+        self.sign_state_best_effort(state)
+            .map(|signature| StateAttachment {
+                state_id: state.id(),
+                body: StateAttachmentBody::Signature(signature),
+                attribution: state.attribution.clone(),
+                created_at: chrono::Utc::now(),
+                supersedes: None,
+            })
+    }
+
     /// Persist an authored state and its detached signature attachment.
     pub fn put_authored_state(&self, state: &State) -> Result<()> {
         let signature = self.sign_state_best_effort(state);
@@ -69,30 +83,6 @@ impl Repository {
             })?;
         }
         Ok(())
-    }
-
-    /// Persist a structured snapshot's immutable closure, including its
-    /// detached signature attachment when signing is available, in one store
-    /// batch.
-    pub(crate) fn put_authored_snapshot_objects(
-        &self,
-        blobs: Vec<(objects::object::ContentHash, Vec<u8>)>,
-        tree: &objects::object::Tree,
-        state: &State,
-    ) -> Result<()> {
-        let signature = self
-            .sign_state_best_effort(state)
-            .map(|signature| StateAttachment {
-                state_id: state.id(),
-                body: StateAttachmentBody::Signature(signature),
-                attribution: state.attribution.clone(),
-                created_at: chrono::Utc::now(),
-                supersedes: None,
-            })
-            .into_iter()
-            .collect();
-        self.store
-            .put_snapshot_objects_and_attachments_packed(blobs, tree, state, signature)
     }
 
     /// Sign a state with the given signer.

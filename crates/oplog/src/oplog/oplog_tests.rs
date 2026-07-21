@@ -1,14 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::{
     collections::BTreeSet,
-    sync::{Arc, Barrier},
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
 };
 
 use objects::object::{ContentHash, MarkerName, StateId, ThreadName};
 use tempfile::TempDir;
 
-use super::{OpLog, OpLogRecorder, OpRecord, oplog_backend::OpLogBackend};
+use super::{
+    IsolationKey, IsolationPrecondition, OpLog, OpLogRecorder, OpRecord,
+    ReconstructibleCommitOutcome, oplog_backend::OpLogBackend,
+};
 
 fn create_oplog() -> (TempDir, OpLog) {
     let temp_dir = TempDir::new().unwrap();
@@ -398,6 +404,108 @@ fn record_batch_exactly_once_dedups_past_any_window() {
         )
         .unwrap();
     assert!(other.is_some(), "a different transaction id must commit");
+}
+
+#[test]
+fn reconstructible_commit_validates_cas_before_install_and_dedups_retries() {
+    let (_temp, oplog) = create_oplog();
+    let old = crate::oplog::fresh_state_id();
+    let new = crate::oplog::fresh_state_id();
+    oplog
+        .record_batch(vec![OpRecord::ThreadUpdate {
+            name: "main".into(),
+            old_state: old,
+            new_state: new,
+            manager_snapshots: None,
+        }])
+        .unwrap();
+
+    let installed = AtomicBool::new(false);
+    let conflict = oplog
+        .commit_reconstructible_batch_if_unchanged(
+            vec![OpRecord::Snapshot {
+                new_state: new,
+                prev_head: Some(old),
+                head: None,
+                thread: Some("main".into()),
+            }],
+            Some("lane"),
+            "artifact-conflict",
+            &IsolationPrecondition {
+                since_head_id: 0,
+                keys: BTreeSet::from([IsolationKey::Thread("main".into())]),
+            },
+            |_, _| {
+                installed.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        conflict,
+        ReconstructibleCommitOutcome::IsolationConflict { .. }
+    ));
+    assert!(!installed.load(Ordering::SeqCst));
+
+    let current = oplog.head_id().unwrap();
+    let committed = oplog
+        .commit_reconstructible_batch_if_unchanged(
+            vec![OpRecord::Snapshot {
+                new_state: new,
+                prev_head: Some(old),
+                head: None,
+                thread: Some("main".into()),
+            }],
+            Some("lane"),
+            "artifact-ok",
+            &IsolationPrecondition {
+                since_head_id: current,
+                keys: BTreeSet::from([IsolationKey::Thread("main".into())]),
+            },
+            |base, records| {
+                assert_eq!(base, current);
+                assert!(matches!(
+                    records.last(),
+                    Some(OpRecord::TransactionCommit { transaction_id, op_count: 1 })
+                        if transaction_id == "artifact-ok"
+                ));
+                installed.store(true, Ordering::SeqCst);
+                Ok("descriptor")
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        committed,
+        ReconstructibleCommitOutcome::Committed("descriptor")
+    ));
+    assert!(installed.load(Ordering::SeqCst));
+
+    installed.store(false, Ordering::SeqCst);
+    let retry = oplog
+        .commit_reconstructible_batch_if_unchanged(
+            vec![OpRecord::Snapshot {
+                new_state: new,
+                prev_head: Some(old),
+                head: None,
+                thread: Some("main".into()),
+            }],
+            Some("lane"),
+            "artifact-ok",
+            &IsolationPrecondition {
+                since_head_id: current,
+                keys: BTreeSet::new(),
+            },
+            |_, _| {
+                installed.store(true, Ordering::SeqCst);
+                Ok("must-not-install")
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        retry,
+        ReconstructibleCommitOutcome::AlreadyCommitted(_)
+    ));
+    assert!(!installed.load(Ordering::SeqCst));
 }
 
 /// Finding 1 (heddle#354 r6, cid 3329711888) — the dedup-hit output

@@ -32,6 +32,7 @@ mod tests;
 
 pub use committer::OplogRefCommitter;
 pub use execute::execute;
+pub(crate) use execute::execute_reconstructible;
 pub use reconciler::OplogRefReconciler;
 pub use traits::{AtomicMutation, Compensator, DeferredMutation, EagerMutation, StagedCommit};
 pub use tx::{RewindLedger, Tx};

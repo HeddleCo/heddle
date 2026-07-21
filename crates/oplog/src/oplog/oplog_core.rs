@@ -32,6 +32,69 @@ pub struct OpLog {
 }
 
 impl OpLog {
+    /// Commit a batch through an independently durable artifact while holding
+    /// the same oplog lock used for exact-once and isolation validation.
+    ///
+    /// `install` is invoked only after dedup/CAS validation and receives the
+    /// current oplog head plus the canonical records (including the transaction
+    /// marker). Once it returns, the operation is committed; the oplog rewrite
+    /// is only a reconstructible materialized view.
+    #[doc(hidden)]
+    pub fn commit_reconstructible_batch_if_unchanged<T>(
+        &self,
+        mut operations: Vec<OpRecord>,
+        scope: Option<&str>,
+        transaction_id: &str,
+        precondition: &IsolationPrecondition,
+        install: impl FnOnce(u64, &[OpRecord]) -> Result<T>,
+    ) -> Result<ReconstructibleCommitOutcome<T>> {
+        let _lock = self.write_lock()?;
+        let index = self.open_index_for_write()?;
+
+        if index.transaction_commit(transaction_id)?.is_some() {
+            return Ok(ReconstructibleCommitOutcome::AlreadyCommitted(
+                index.committed_batch_records(transaction_id)?,
+            ));
+        }
+
+        if !precondition.keys.is_empty() && index.head_id() != precondition.since_head_id {
+            for entry in index.entries_after(precondition.since_head_id)? {
+                let touched = isolation_keys_for_record(&entry.operation, entry.scope.as_deref());
+                if let Some(key) = touched.intersection(&precondition.keys).next().cloned() {
+                    return Ok(ReconstructibleCommitOutcome::IsolationConflict {
+                        key,
+                        since_head_id: precondition.since_head_id,
+                        conflicting_entry_id: entry.id,
+                    });
+                }
+            }
+        }
+
+        let op_count = operations.len() as u32;
+        operations.push(OpRecord::TransactionCommit {
+            transaction_id: transaction_id.to_string(),
+            op_count,
+        });
+        let artifact = install(index.head_id(), &operations)?;
+
+        let start_id = index.head_id() + 1;
+        let timestamp = Utc::now();
+        let scope_owned = scope.map(str::to_string);
+        let entries =
+            Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
+        match index.append_entries_reconstructible(&entries) {
+            Ok(updated) => *self.cached.lock_or_poisoned() = Some(updated),
+            Err(_error) => {
+                // The pack install above is the commit point. A failed view
+                // rewrite cannot turn a committed snapshot into an error;
+                // invalidate the cache and let repository-open recovery replay
+                // the artifact before the next process relies on the view.
+                *self.cached.lock_or_poisoned() = None;
+            }
+        }
+        Ok(ReconstructibleCommitOutcome::Committed(artifact))
+    }
+
     pub fn new(heddle_dir: impl AsRef<Path>, actor: Principal) -> Self {
         Self {
             root: heddle_dir.as_ref().to_path_buf(),
@@ -541,6 +604,17 @@ impl OpLog {
             .unwrap()
             .collect_batches_scoped(count, predicate, scope)
     }
+}
+
+#[doc(hidden)]
+pub enum ReconstructibleCommitOutcome<T> {
+    Committed(T),
+    AlreadyCommitted(Vec<OpRecord>),
+    IsolationConflict {
+        key: super::oplog_types::IsolationKey,
+        since_head_id: u64,
+        conflicting_entry_id: u64,
+    },
 }
 
 impl OpLogBackend for OpLog {

@@ -9,7 +9,7 @@ use objects::{
         Attribution, Blob, ChangeLineage, ContentHash, State, StateAttachment, StateAttachmentBody,
         StateId, Tree, TreeEntry,
     },
-    store::ObjectStore,
+    store::{ObjectStore, SnapshotCommitArtifact, SnapshotCommitDescriptor},
 };
 use oplog::{IsolationKey, OpRecord};
 use refs::Head;
@@ -17,7 +17,7 @@ use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result, repository_tree::TreeBuildProfile};
 use crate::{
-    atomic::{AtomicMutation, RewindLedger, StagedCommit, Tx, execute},
+    atomic::{AtomicMutation, RewindLedger, StagedCommit, Tx, execute, execute_reconstructible},
     worktree_ignore::WorktreeIgnoreMatcher,
     worktree_walk::{
         WalkDirectory, WalkEntry, WorktreeWalkPolicy, read_file_hash, validate_symlink_target,
@@ -59,6 +59,13 @@ struct SnapshotDetails {
     lineage: Vec<ChangeLineage>,
 }
 
+struct PreparedSnapshotArtifact {
+    blobs: Vec<(ContentHash, Vec<u8>)>,
+    tree: Tree,
+    state: State,
+    attachments: Vec<StateAttachment>,
+}
+
 struct SnapshotMutation<'a> {
     repo: &'a Repository,
     source: SnapshotSource,
@@ -72,6 +79,7 @@ struct SnapshotMutation<'a> {
     /// sidecar to that before-image if the batch fails to commit, so a rewound
     /// snapshot never leaves its auto-applied tier behind.
     staged_visibility_rewind: Option<(StateId, Option<Vec<u8>>)>,
+    prepared_artifact: Option<PreparedSnapshotArtifact>,
 }
 
 impl<'a> SnapshotMutation<'a> {
@@ -91,6 +99,7 @@ impl<'a> SnapshotMutation<'a> {
             head,
             transaction_id,
             staged_visibility_rewind: None,
+            prepared_artifact: None,
         }
     }
 
@@ -131,8 +140,6 @@ impl AtomicMutation for SnapshotMutation<'_> {
         objects::fault_inject::maybe_panic_at("snapshot_after_stage_before_atomic_commit");
         #[cfg(test)]
         maybe_snapshot_fault(SnapshotFault::AfterStageBeforeAtomicCommit);
-        #[cfg(test)]
-        maybe_snapshot_fault(SnapshotFault::AfterArtifactCommitBeforeOplogView);
 
         let mut records = vec![OpRecord::Snapshot {
             new_state: execution.state.id(),
@@ -221,9 +228,9 @@ impl AtomicMutation for SnapshotMutation<'_> {
 }
 
 impl SnapshotMutation<'_> {
-    fn stage_snapshot_objects(&self) -> Result<SnapshotExecution> {
+    fn stage_snapshot_objects(&mut self) -> Result<SnapshotExecution> {
         debug!("Building tree from worktree");
-        let (tree, mut tree_profile, supplied_blobs) = match &self.source {
+        let (tree, tree_profile, supplied_blobs) = match &self.source {
             SnapshotSource::Worktree { .. } => {
                 let (tree, profile) = self.build_worktree_tree()?;
                 (tree, profile, None)
@@ -330,16 +337,18 @@ impl SnapshotMutation<'_> {
         }
 
         // Structured native authoring owns the entire newly-authored immutable
-        // closure already. Install its blobs, root tree, and state through one
-        // pack journal instead of paying independent tree/state durability
-        // barriers. The oplog append below remains the sole commit point.
+        // closure already. Keep it in memory until exact-once and isolation
+        // validation succeed under the oplog lock; its marked pack then becomes
+        // the single authoritative durable commit barrier.
         let packed_snapshot = supplied_blobs.is_some();
-        if let Some(blobs) = supplied_blobs {
-            let packed_write_started = std::time::Instant::now();
+        let mut attachments = if packed_snapshot {
             self.repo
-                .put_authored_snapshot_objects(blobs, &tree, &state)?;
-            tree_profile.blob_write_ms = packed_write_started.elapsed().as_millis();
-        }
+                .authored_state_signature_attachment(&state)
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
         // Persist the immutable state before its independently-addressed metadata.
         let state_ref_oplog_start = std::time::Instant::now();
@@ -347,13 +356,18 @@ impl SnapshotMutation<'_> {
             self.repo.put_authored_state(&state)?;
         }
         if let Some(context) = inherited_context {
-            self.repo.put_state_attachment(&StateAttachment {
+            let attachment = StateAttachment {
                 state_id: state.id(),
                 body: StateAttachmentBody::Context(context),
                 attribution: state.attribution.clone(),
                 created_at: chrono::Utc::now(),
                 supersedes: None,
-            })?;
+            };
+            if packed_snapshot {
+                attachments.push(attachment);
+            } else {
+                self.repo.put_state_attachment(&attachment)?;
+            }
         }
         #[cfg(feature = "tree-sitter-symbols")]
         for body in [
@@ -364,13 +378,26 @@ impl SnapshotMutation<'_> {
         .into_iter()
         .flatten()
         {
-            self.repo.put_state_attachment(&StateAttachment {
+            let attachment = StateAttachment {
                 state_id: state.id(),
                 body,
                 attribution: state.attribution.clone(),
                 created_at: chrono::Utc::now(),
                 supersedes: None,
-            })?;
+            };
+            if packed_snapshot {
+                attachments.push(attachment);
+            } else {
+                self.repo.put_state_attachment(&attachment)?;
+            }
+        }
+        if let Some(blobs) = supplied_blobs {
+            self.prepared_artifact = Some(PreparedSnapshotArtifact {
+                blobs,
+                tree: tree.clone(),
+                state: state.clone(),
+                attachments,
+            });
         }
         self.repo.store.flush_snapshot_write_batch()?;
 
@@ -383,6 +410,40 @@ impl SnapshotMutation<'_> {
                 state_ref_oplog_start.elapsed().as_millis(),
             ),
         })
+    }
+
+    fn install_prepared_artifact(
+        &mut self,
+        base_oplog_head_id: u64,
+        records: &[OpRecord],
+    ) -> Result<(SnapshotCommitDescriptor, u128)> {
+        let prepared = self.prepared_artifact.take().ok_or_else(|| {
+            HeddleError::Conflict("structured snapshot artifact was not staged".to_string())
+        })?;
+        let artifact = SnapshotCommitArtifact {
+            schema: objects::store::SNAPSHOT_COMMIT_ARTIFACT_SCHEMA,
+            transaction_id: self.transaction_id.clone(),
+            scope: self.repo.op_scope(),
+            base_oplog_head_id,
+            state: prepared.state.id(),
+            encoded_records: records
+                .iter()
+                .map(rmp_serde::to_vec_named)
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        };
+        let started = std::time::Instant::now();
+        let descriptor = self.repo.store.put_committed_snapshot_objects_packed(
+            prepared.blobs,
+            &prepared.tree,
+            &prepared.state,
+            prepared.attachments,
+            artifact,
+        )?;
+        let elapsed_ms = started.elapsed().as_millis();
+        objects::fault_inject::maybe_panic_at("snapshot_after_artifact_commit_before_oplog_view");
+        #[cfg(test)]
+        maybe_snapshot_fault(SnapshotFault::AfterArtifactCommitBeforeOplogView);
+        Ok((descriptor, elapsed_ms))
     }
 
     fn build_worktree_tree(&self) -> Result<(Tree, TreeBuildProfile)> {
@@ -852,24 +913,43 @@ impl Repository {
             }
         }
 
+        let authoritative_artifact =
+            matches!(&source, SnapshotSource::SuppliedTreeWithBlobs { .. });
         let head = self.head_ref()?;
         let prev_head = self.head()?;
         let atomic_execute_started = std::time::Instant::now();
-        let mut execution = execute(
+        let mutation = SnapshotMutation::new(
             self,
-            SnapshotMutation::new(
-                self,
-                source,
-                SnapshotDetails {
-                    intent,
-                    confidence,
-                    attribution,
-                    lineage: Vec::new(),
-                },
-                prev_head,
-                head.clone(),
-            ),
-        )?;
+            source,
+            SnapshotDetails {
+                intent,
+                confidence,
+                attribution,
+                lineage: Vec::new(),
+            },
+            prev_head,
+            head.clone(),
+        );
+        let mut execution = if authoritative_artifact {
+            let committed =
+                execute_reconstructible(self, mutation, |mutation, base_head_id, records| {
+                    mutation.install_prepared_artifact(base_head_id, records)
+                })?;
+            let mut output = committed.output;
+            if let Some((descriptor, artifact_write_ms)) = committed.artifact {
+                output.profile.blob_write_ms = artifact_write_ms;
+                debug!(
+                    pack = %descriptor.pack_name,
+                    path = %descriptor.pack_path.display(),
+                    objects = descriptor.object_ids.len(),
+                    state = %descriptor.artifact.state,
+                    "structured snapshot committed through authoritative pack artifact"
+                );
+            }
+            output
+        } else {
+            execute(self, mutation)?
+        };
         execution.profile.atomic_execute_ms = atomic_execute_started.elapsed().as_millis();
 
         objects::fault_inject::maybe_panic_at("snapshot_after_atomic_commit_before_ref_publish");

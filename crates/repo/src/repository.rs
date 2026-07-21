@@ -65,7 +65,7 @@ use objects::{
     sync::RwLockExt,
     worktree::WorktreeStatus,
 };
-use oplog::{OpLog, OpLogBackend, OpRecord};
+use oplog::{ConditionalCommitOutcome, IsolationPrecondition, OpLog, OpLogBackend, OpRecord};
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
 pub use refs::{RefSummaryIndexInspection, SpoolFacet};
 pub use repo_config::{
@@ -461,6 +461,45 @@ fn ensure_supported_repo_format(config_path: &Path, config: &RepoConfig) -> Resu
     Ok(())
 }
 
+fn validate_snapshot_artifact_records(
+    artifact: &objects::store::SnapshotCommitArtifact,
+    records: &[OpRecord],
+) -> Result<()> {
+    let expected_op_count = records.len().saturating_sub(1) as u32;
+    match records.last() {
+        Some(OpRecord::TransactionCommit {
+            transaction_id,
+            op_count,
+        }) if transaction_id == &artifact.transaction_id && *op_count == expected_op_count => {}
+        _ => {
+            return Err(HeddleError::InvalidObject(
+                "snapshot artifact has an invalid transaction marker".to_string(),
+            ));
+        }
+    }
+    let snapshots = records
+        .iter()
+        .filter_map(|record| match record {
+            OpRecord::Snapshot { new_state, .. } => Some(*new_state),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if snapshots.as_slice() != [artifact.state] {
+        return Err(HeddleError::InvalidObject(
+            "snapshot artifact records do not identify exactly its embedded state".to_string(),
+        ));
+    }
+    if records[..records.len().saturating_sub(1)]
+        .iter()
+        .any(|record| matches!(record, OpRecord::TransactionCommit { .. }))
+    {
+        return Err(HeddleError::InvalidObject(
+            "snapshot artifact contains an interior transaction marker".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
     fn open_raw(
         root: PathBuf,
@@ -505,6 +544,8 @@ impl Repository {
     /// `BlobHydrator` operate on the bare `Repository`), so they live here
     /// rather than in the generic `open_raw`.
     fn run_open_hooks(&self) -> Result<()> {
+        self.recover_snapshot_artifact_views()?;
+
         // Hot-path skip: when the schema ledger already records every
         // registered migration *and* there is no lazy-hydrator metadata,
         // both probes below are pure no-ops. Avoid the ledger parse /
@@ -552,6 +593,80 @@ impl Repository {
                     tracing::warn!("lazy hydrator reconstruction failed during open: {err}");
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Replay authoritative structured-snapshot artifacts whose oplog/ref
+    /// materialized views were lost before they reached stable storage.
+    fn recover_snapshot_artifact_views(&self) -> Result<()> {
+        let mut pending = self.store.snapshot_commit_descriptors()?;
+        pending.sort_by(|left, right| {
+            left.artifact
+                .base_oplog_head_id
+                .cmp(&right.artifact.base_oplog_head_id)
+                .then_with(|| left.pack_name.cmp(&right.pack_name))
+        });
+
+        while !pending.is_empty() {
+            let mut progressed = false;
+            let mut remaining = Vec::new();
+            for descriptor in pending {
+                let artifact = &descriptor.artifact;
+                if !self
+                    .oplog
+                    .committed_batch_records(&artifact.transaction_id)?
+                    .is_empty()
+                {
+                    progressed = true;
+                    continue;
+                }
+
+                let current_head = self.oplog.head_id()?;
+                if artifact.base_oplog_head_id > current_head {
+                    remaining.push(descriptor);
+                    continue;
+                }
+                if artifact.base_oplog_head_id < current_head {
+                    return Err(HeddleError::InvalidObject(format!(
+                        "snapshot artifact {} starts at oplog head {}, behind current head {}",
+                        descriptor.pack_name, artifact.base_oplog_head_id, current_head
+                    )));
+                }
+
+                let records = artifact
+                    .encoded_records
+                    .iter()
+                    .map(|bytes| rmp_serde::from_slice::<OpRecord>(bytes))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                validate_snapshot_artifact_records(artifact, &records)?;
+                let outcome = self.oplog.record_batch_exactly_once_if_unchanged(
+                    records,
+                    Some(&artifact.scope),
+                    &artifact.transaction_id,
+                    &IsolationPrecondition {
+                        since_head_id: current_head,
+                        keys: BTreeSet::new(),
+                    },
+                )?;
+                match outcome {
+                    ConditionalCommitOutcome::Committed(_)
+                    | ConditionalCommitOutcome::AlreadyCommitted(_) => progressed = true,
+                    ConditionalCommitOutcome::IsolationConflict { .. } => {
+                        unreachable!("empty recovery isolation set cannot produce a conflict")
+                    }
+                }
+            }
+            if !progressed {
+                let next = remaining
+                    .first()
+                    .map(|descriptor| descriptor.artifact.base_oplog_head_id)
+                    .unwrap_or_default();
+                return Err(HeddleError::InvalidObject(format!(
+                    "snapshot artifact chain has a gap before oplog head {next}"
+                )));
+            }
+            pending = remaining;
         }
         Ok(())
     }

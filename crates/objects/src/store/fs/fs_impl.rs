@@ -26,7 +26,7 @@ use crate::{
         Tree,
     },
     store::{
-        HeddleError, ObjectStore, Result, codec,
+        HeddleError, ObjectStore, Result, SnapshotCommitDescriptor, codec,
         pack::{ObjectType, PackManager, PackObjectId},
     },
 };
@@ -281,6 +281,16 @@ fn validate_pack_entry(id: &PackObjectId, obj_type: ObjectType, data: &[u8]) -> 
             if attachment.id().as_hash() != hash {
                 return Err(HeddleError::InvalidObject(
                     "state attachment pack id mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        (PackObjectId::Hash(hash), ObjectType::SnapshotCommit) => {
+            let artifact: crate::store::SnapshotCommitArtifact = rmp_serde::from_slice(data)?;
+            artifact.validate()?;
+            if artifact.id() != *hash {
+                return Err(HeddleError::InvalidObject(
+                    "snapshot commit artifact pack id mismatch".to_string(),
                 ));
             }
             Ok(())
@@ -556,6 +566,16 @@ impl FsStore {
         }
         let path = state_path(&self.root, id);
         self.loose_or_packed(&path, |m| m.has_object_id(&PackObjectId::StateId(*id)))
+    }
+}
+
+impl FsStore {
+    pub(crate) fn snapshot_commit_descriptors_impl(&self) -> Result<Vec<SnapshotCommitDescriptor>> {
+        let manager = self
+            .pack_manager()
+            .read()
+            .map_err(|_| HeddleError::Config("Failed to acquire pack manager lock".to_string()))?;
+        manager.snapshot_commit_descriptors()
     }
 }
 
@@ -1273,7 +1293,8 @@ impl ObjectStore for FsStore {
         tree: &Tree,
         state: &State,
     ) -> Result<()> {
-        self.put_snapshot_objects_packed_impl(blobs, tree, state, Vec::new())
+        self.put_snapshot_objects_packed_impl(blobs, tree, state, Vec::new(), None)
+            .map(|_| ())
     }
 
     fn put_snapshot_objects_and_attachments_packed(
@@ -1283,7 +1304,8 @@ impl ObjectStore for FsStore {
         state: &State,
         attachments: Vec<StateAttachment>,
     ) -> Result<()> {
-        self.put_snapshot_objects_packed_impl(blobs, tree, state, attachments)
+        self.put_snapshot_objects_packed_impl(blobs, tree, state, attachments, None)
+            .map(|_| ())
     }
 
     #[instrument(skip(self))]

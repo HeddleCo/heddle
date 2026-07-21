@@ -17,7 +17,7 @@ use oplog::IsolationPrecondition;
 
 use super::{
     traits::{AtomicMutation, StagedCommit},
-    tx::{CommitOutcome, Tx},
+    tx::{CommitOutcome, ReconstructibleTxCommit, Tx},
 };
 use crate::Repository;
 
@@ -41,6 +41,108 @@ where
     // double-applying.
     let transaction_id = m.transaction_id();
     execute_attempts(repo, m, transaction_id)
+}
+
+pub(crate) struct ReconstructibleExecution<O, A> {
+    pub output: O,
+    pub artifact: Option<A>,
+}
+
+/// Structured-snapshot executor whose immutable pack artifact is the commit
+/// point and whose oplog entries are a reconstructible materialized view.
+pub(crate) fn execute_reconstructible<'a, M, A>(
+    repo: &'a Repository,
+    m: M,
+    mut install: impl FnMut(&mut M, u64, &[oplog::OpRecord]) -> Result<A>,
+) -> Result<ReconstructibleExecution<M::Output, A>>
+where
+    M: AtomicMutation + 'a,
+{
+    const MAX_ATTEMPTS: u32 = 4;
+    let transaction_id = m.transaction_id();
+    let mut m = m;
+
+    for attempt in 0..MAX_ATTEMPTS {
+        let keys = m.isolation_keys(repo)?;
+        let since_head_id = repo.oplog().head_id()?;
+        let isolation = IsolationPrecondition {
+            since_head_id,
+            keys,
+        };
+        let mut tx = Tx::root(repo, transaction_id.clone(), isolation);
+        let mutation = tx.enroll_root(m);
+        let staged = match mutation.borrow_mut().apply(&mut tx) {
+            Ok(staged) => staged,
+            Err(error) => return rewind_error(&mut tx, error),
+        };
+        let StagedCommit { output, oplog } = staged;
+
+        let outcome = tx.commit_reconstructible(oplog, |base_head_id, records| {
+            install(&mut mutation.borrow_mut(), base_head_id, records)
+        });
+        match outcome {
+            Ok(ReconstructibleTxCommit::Committed(artifact)) => {
+                return Ok(ReconstructibleExecution {
+                    output,
+                    artifact: Some(artifact),
+                });
+            }
+            Ok(ReconstructibleTxCommit::AlreadyCommitted(prior_records)) => {
+                let reconstructed = mutation
+                    .borrow()
+                    .reconstruct_committed_output(&prior_records, output);
+                match (reconstructed, tx.rewind_all()) {
+                    (Ok(output), Ok(())) => {
+                        return Ok(ReconstructibleExecution {
+                            output,
+                            artifact: None,
+                        });
+                    }
+                    (Ok(_), Err(rewind_err)) => {
+                        return Err(HeddleError::Conflict(format!(
+                            "transaction {} was already committed, but replay rewind failed: {}",
+                            tx.transaction_id(),
+                            rewind_err
+                        )));
+                    }
+                    (Err(error), _) => return Err(error),
+                }
+            }
+            Ok(ReconstructibleTxCommit::IsolationConflict {
+                key,
+                since_head_id,
+                conflicting_entry_id,
+            }) => {
+                if let Err(rewind_err) = tx.rewind_all() {
+                    return Err(HeddleError::Conflict(format!(
+                        "transaction {} isolation conflict on {:?} since head {} at oplog entry {}; rewind failed: {}",
+                        tx.transaction_id(),
+                        key,
+                        since_head_id,
+                        conflicting_entry_id,
+                        rewind_err
+                    )));
+                }
+                if attempt + 1 == MAX_ATTEMPTS {
+                    return Err(HeddleError::Conflict(format!(
+                        "transaction {} isolation conflict on {:?} since head {} at oplog entry {} after {} attempts",
+                        tx.transaction_id(),
+                        key,
+                        since_head_id,
+                        conflicting_entry_id,
+                        MAX_ATTEMPTS
+                    )));
+                }
+                m = Rc::try_unwrap(mutation)
+                    .ok()
+                    .expect("root mutation must have no ledger clones after rewind")
+                    .into_inner();
+                sleep_full_jitter(attempt);
+            }
+            Err(error) => return rewind_error(&mut tx, error),
+        }
+    }
+    unreachable!("bounded retry loop always returns on final attempt")
 }
 
 fn execute_attempts<'a, M>(

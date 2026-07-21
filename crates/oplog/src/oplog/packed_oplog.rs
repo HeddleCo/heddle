@@ -519,6 +519,18 @@ impl PackedOpLogIndex {
     }
 
     pub(crate) fn append_entries(&self, new_entries: &[OpEntry]) -> Result<Self> {
+        self.append_entries_inner(new_entries, true)
+    }
+
+    /// Rewrite the packed oplog as a materialized view of an independently
+    /// durable commit artifact. The temp-file + rename keeps readers from
+    /// observing a partial container, but deliberately omits fsync: recovery
+    /// can reconstruct these entries from the authoritative snapshot pack.
+    pub(crate) fn append_entries_reconstructible(&self, new_entries: &[OpEntry]) -> Result<Self> {
+        self.append_entries_inner(new_entries, false)
+    }
+
+    fn append_entries_inner(&self, new_entries: &[OpEntry], durable: bool) -> Result<Self> {
         if new_entries.is_empty() {
             return Ok(self.clone());
         }
@@ -575,18 +587,20 @@ impl PackedOpLogIndex {
         let tmp = temp_path(&self.path);
         let write_result = self.write_appended_tmp(
             &tmp,
-            new_count,
-            new_head,
+            (new_count, new_head),
             &tmp_new_entry_bytes,
             &old_offsets,
             &batch_index,
+            durable,
         );
         if let Err(err) = write_result {
             let _ = std::fs::remove_file(&tmp);
             return Err(err);
         }
         std::fs::rename(&tmp, &self.path)?;
-        sync_directory(parent)?;
+        if durable {
+            sync_directory(parent)?;
+        }
 
         Self::open_v4(&self.path)
     }
@@ -594,12 +608,13 @@ impl PackedOpLogIndex {
     fn write_appended_tmp(
         &self,
         tmp: &Path,
-        new_count: u64,
-        new_head: u64,
+        new_header: (u64, u64),
         new_entry_bytes: &[u8],
         entry_offsets: &[EntryOffsetRecord],
         batch_index: &BuiltIndexSections,
+        durable: bool,
     ) -> Result<()> {
+        let (new_count, new_head) = new_header;
         let mut out = OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -628,7 +643,9 @@ impl PackedOpLogIndex {
                 head_id: new_head,
             },
         )?;
-        out.sync_all()?;
+        if durable {
+            out.sync_all()?;
+        }
         Ok(())
     }
 

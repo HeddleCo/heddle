@@ -11,8 +11,9 @@ use tracing::{debug, instrument, trace};
 use crate::{
     object::ContentHash,
     store::{
-        Result,
+        Result, SnapshotCommitArtifact, SnapshotCommitDescriptor,
         pack::{ObjectType, PackObjectId, PackReader},
+        snapshot_commit::snapshot_commit_marker_path,
     },
 };
 
@@ -28,6 +29,44 @@ struct CachedPack {
 }
 
 impl PackManager {
+    pub(crate) fn snapshot_commit_descriptors(&self) -> Result<Vec<SnapshotCommitDescriptor>> {
+        let mut descriptors = Vec::new();
+        for cached in &self.packs {
+            let object_ids = cached.reader.list_ids();
+            for id in &object_ids {
+                let Some((ObjectType::SnapshotCommit, bytes)) = cached.reader.get_object(id)?
+                else {
+                    continue;
+                };
+                let PackObjectId::Hash(expected) = id else {
+                    continue;
+                };
+                let artifact: SnapshotCommitArtifact = rmp_serde::from_slice(&bytes)?;
+                artifact.validate()?;
+                if artifact.id() != *expected {
+                    return Err(crate::store::StoreError::InvalidObject(
+                        "snapshot commit artifact address mismatch".to_string(),
+                    ));
+                }
+                if !snapshot_commit_marker_path(&cached.pack_path, expected).exists() {
+                    continue;
+                }
+                descriptors.push(SnapshotCommitDescriptor {
+                    artifact,
+                    pack_name: cached
+                        .pack_path
+                        .file_stem()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    pack_path: cached.pack_path.clone(),
+                    object_ids: object_ids.clone(),
+                });
+            }
+        }
+        Ok(descriptors)
+    }
+
     pub fn new(packs_dir: PathBuf) -> Self {
         let packs = Self::load_packs(&packs_dir).unwrap_or_default();
         Self { packs_dir, packs }

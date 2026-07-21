@@ -13,6 +13,7 @@ use std::{cell::RefCell, rc::Rc};
 use objects::error::{HeddleError, Result};
 use oplog::{
     ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpLogBackend, OpRecord,
+    ReconstructibleCommitOutcome,
 };
 
 use super::traits::{DeferredMutation, EagerMutation, StagedCommit};
@@ -375,6 +376,46 @@ impl<'a> Tx<'a> {
         }
     }
 
+    pub(crate) fn commit_reconstructible<T>(
+        &mut self,
+        records: Vec<OpRecord>,
+        install: impl FnOnce(u64, &[OpRecord]) -> Result<T>,
+    ) -> Result<ReconstructibleTxCommit<T>> {
+        if self.committed {
+            return Err(HeddleError::Conflict(
+                "transaction commit invoked more than once".to_string(),
+            ));
+        }
+        let outcome = self
+            .repo
+            .oplog()
+            .commit_reconstructible_batch_if_unchanged(
+                records,
+                Some(&self.scope),
+                &self.transaction_id,
+                &self.isolation,
+                install,
+            )?;
+        match outcome {
+            ReconstructibleCommitOutcome::Committed(artifact) => {
+                self.committed = true;
+                Ok(ReconstructibleTxCommit::Committed(artifact))
+            }
+            ReconstructibleCommitOutcome::AlreadyCommitted(prior) => {
+                Ok(ReconstructibleTxCommit::AlreadyCommitted(prior))
+            }
+            ReconstructibleCommitOutcome::IsolationConflict {
+                key,
+                since_head_id,
+                conflicting_entry_id,
+            } => Ok(ReconstructibleTxCommit::IsolationConflict {
+                key,
+                since_head_id,
+                conflicting_entry_id,
+            }),
+        }
+    }
+
     /// Walk the ledger in reverse (LIFO) order, running every inverse. Drains
     /// the ledger so a second call (e.g. from `Drop`) is a no-op. Surfaces the
     /// first rewind error after attempting every entry.
@@ -406,6 +447,16 @@ pub(crate) enum CommitOutcome {
     /// The transaction was already committed by a prior run; carries that
     /// committed batch's records (marker stripped) so the executor can
     /// reconstruct the originally-committed output (cid 3329631075).
+    AlreadyCommitted(Vec<OpRecord>),
+    IsolationConflict {
+        key: IsolationKey,
+        since_head_id: u64,
+        conflicting_entry_id: u64,
+    },
+}
+
+pub(crate) enum ReconstructibleTxCommit<T> {
+    Committed(T),
     AlreadyCommitted(Vec<OpRecord>),
     IsolationConflict {
         key: IsolationKey,
