@@ -22,7 +22,7 @@ use heddle_schema::op_record::{
 use objects::{
     error::{HeddleError, Result},
     fs_atomic::{create_dir_all_durable, sync_directory, temp_path, write_file_atomic},
-    fs_clone::ReflinkOutcome,
+    fs_clone::{ReflinkOutcome, try_reflink},
 };
 
 use super::oplog_types::{OpBatch, OpEntry, OpRecord};
@@ -45,8 +45,13 @@ enum ReconstructibleAppendStrategy {
     Rewrite,
 }
 
-fn reconstructible_append_strategy(_outcome: ReflinkOutcome) -> ReconstructibleAppendStrategy {
-    ReconstructibleAppendStrategy::Rewrite
+fn reconstructible_append_strategy(outcome: ReflinkOutcome) -> ReconstructibleAppendStrategy {
+    match outcome {
+        ReflinkOutcome::Cloned => ReconstructibleAppendStrategy::CloneAndRewriteTail,
+        ReflinkOutcome::Unsupported | ReflinkOutcome::SourceVanished => {
+            ReconstructibleAppendStrategy::Rewrite
+        }
+    }
 }
 
 fn validate_container_version(version: u32) -> Result<()> {
@@ -596,14 +601,35 @@ impl PackedOpLogIndex {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         create_dir_all_durable(parent)?;
         let tmp = temp_path(&self.path);
-        let write_result = self.write_appended_tmp(
-            &tmp,
-            (new_count, new_head),
-            &tmp_new_entry_bytes,
-            &old_offsets,
-            &batch_index,
-            durable,
-        );
+        let strategy = if durable {
+            ReconstructibleAppendStrategy::Rewrite
+        } else {
+            match try_reflink(&self.path, &tmp) {
+                Ok(outcome) => reconstructible_append_strategy(outcome),
+                Err(_) => ReconstructibleAppendStrategy::Rewrite,
+            }
+        };
+        let write_result = match strategy {
+            ReconstructibleAppendStrategy::CloneAndRewriteTail => self
+                .write_appended_reflinked_tmp(
+                    &tmp,
+                    (new_count, new_head),
+                    &tmp_new_entry_bytes,
+                    &old_offsets,
+                    &batch_index,
+                ),
+            ReconstructibleAppendStrategy::Rewrite => {
+                let _ = std::fs::remove_file(&tmp);
+                self.write_appended_tmp(
+                    &tmp,
+                    (new_count, new_head),
+                    &tmp_new_entry_bytes,
+                    &old_offsets,
+                    &batch_index,
+                    durable,
+                )
+            }
+        };
         if let Err(err) = write_result {
             let _ = std::fs::remove_file(&tmp);
             return Err(err);
@@ -614,6 +640,42 @@ impl PackedOpLogIndex {
         }
 
         Self::open_v4(&self.path)
+    }
+
+    /// Reuse the immutable historical entry prefix from a CoW clone, discard
+    /// the old derived indexes/footer, and write only the new tail. The source
+    /// oplog remains untouched; the completed temp still publishes through the
+    /// same atomic rename as the ordinary rewrite path.
+    fn write_appended_reflinked_tmp(
+        &self,
+        tmp: &Path,
+        new_header: (u64, u64),
+        new_entry_bytes: &[u8],
+        entry_offsets: &[EntryOffsetRecord],
+        batch_index: &BuiltIndexSections,
+    ) -> Result<()> {
+        let (new_count, new_head) = new_header;
+        let mut out = OpenOptions::new().read(true).write(true).open(tmp)?;
+        out.set_len(self.footer.entry_data_end)?;
+        out.seek(SeekFrom::Start(self.footer.entry_data_end))?;
+        out.write_all(new_entry_bytes)?;
+        let entry_data_end = out.stream_position()?;
+        write_index_sections(
+            &mut out,
+            IndexWritePlan {
+                entry_data_end,
+                entry_offsets,
+                batch_offsets: &batch_index.batch_offsets,
+                batch_dir: &batch_index.batch_dir,
+                tx_key_bytes: &batch_index.tx_key_bytes,
+                tx_dir: &batch_index.tx_dir,
+                entry_count: new_count,
+                head_id: new_head,
+            },
+        )?;
+        out.seek(SeekFrom::Start(0))?;
+        write_header(&mut out, CURRENT_CONTAINER_VERSION, new_count, new_head)?;
+        Ok(())
     }
 
     fn write_appended_tmp(
@@ -2920,6 +2982,40 @@ mod tests {
         assert_eq!(updated.head_id(), 1);
         assert_eq!(updated.last_entry().unwrap().unwrap().id, 1);
         assert_eq!(PackedOpLog::load(&path).unwrap().entries.len(), 1);
+    }
+
+    #[test]
+    fn reconstructible_append_preserves_history_and_rebuilds_current_indexes() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        let mut log = PackedOpLog::new(path.clone());
+        log.append(vec![
+            make_entry(1, Some("lane")),
+            make_entry(2, Some("lane")),
+        ]);
+        log.head_id = 2;
+        log.save().unwrap();
+
+        let index = PackedOpLogIndex::open(&path).unwrap();
+        let updated = index
+            .append_entries_reconstructible(&[
+                make_entry(3, Some("lane")),
+                make_entry(4, Some("lane")),
+            ])
+            .unwrap();
+
+        assert_eq!(updated.head_id(), 4);
+        assert_eq!(updated.last_entry().unwrap().unwrap().id, 4);
+        let loaded = PackedOpLog::load(&path).unwrap();
+        assert_eq!(loaded.entries.len(), 4);
+        assert_eq!(
+            loaded
+                .entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
     }
 
     #[test]
