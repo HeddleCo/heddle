@@ -540,6 +540,13 @@ impl FsStore {
     /// / `put_state` — those are the authoritative copy and must
     /// survive a crash.
     pub(super) fn write_loose_object_cache(&self, path: &Path, data: &[u8]) -> Result<()> {
+        self.write_reconstructible_cache(path, data)
+    }
+
+    /// Atomically publish reconstructible cache bytes without a durability
+    /// barrier. The caller must be able to rebuild the file from an
+    /// authoritative object after a crash.
+    pub(super) fn write_reconstructible_cache(&self, path: &Path, data: &[u8]) -> Result<()> {
         write_atomic(path, data, AtomicWriteMode::NoSync, None)
     }
 

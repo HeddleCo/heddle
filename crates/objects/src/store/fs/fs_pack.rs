@@ -12,7 +12,7 @@ use super::{
     fs_paths::{blobs_dir, hash_path, packs_dir, trees_dir},
 };
 use crate::{
-    object::{ContentHash, State, Tree},
+    object::{ContentHash, State, StateAttachment, StateAttachmentId, Tree},
     store::{
         HeddleError, ObjectStore, Result, codec,
         pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
@@ -75,7 +75,8 @@ fn remove_file_ignore_missing(path: &std::path::Path) -> Result<()> {
 }
 
 impl FsStore {
-    /// Install blobs, root tree, and state through one durable pack journal.
+    /// Install blobs, root tree, state, and immutable authored attachments
+    /// through one durable pack journal.
     /// The oplog remains the snapshot commit point; this pack is immutable
     /// staging and is safe to leave orphaned if the later commit fails.
     pub(super) fn put_snapshot_objects_packed_impl(
@@ -83,7 +84,9 @@ impl FsStore {
         blobs: Vec<(ContentHash, Vec<u8>)>,
         tree: &Tree,
         state: &State,
+        attachments: Vec<StateAttachment>,
     ) -> Result<()> {
+        let state_was_present = <Self as ObjectStore>::has_state(self, &state.id())?;
         let mut compression = self.compression;
         compression.max_delta_size = 0;
         let mut builder = PackBuilder::new(compression);
@@ -112,11 +115,29 @@ impl FsStore {
             PackObjectType::State,
             rmp_serde::to_vec_named(state)?,
         );
+        let attachment_ids = attachments
+            .iter()
+            .map(|attachment| {
+                if attachment.state_id != state_id {
+                    return Err(HeddleError::InvalidObject(
+                        "snapshot attachment targets a different state".to_string(),
+                    ));
+                }
+                let id = attachment.id();
+                builder.add(
+                    *id.as_hash(),
+                    PackObjectType::StateAttachment,
+                    rmp_serde::to_vec_named(attachment)?,
+                );
+                Ok(id)
+            })
+            .collect::<Result<Vec<StateAttachmentId>>>()?;
 
         let (pack_data, index_data, _stats) = builder.build()?;
         let packs = packs_dir(&self.root);
         super::pack_install_journal::install_snapshot_pack_bytes(&packs, pack_data, index_data)?;
         self.reload_packs()?;
+        self.materialize_packed_attachment_index(&state_id, &attachment_ids, state_was_present)?;
 
         if let Ok(mut cache) = self.recent_blobs.write() {
             for (hash, data) in staged_blobs {

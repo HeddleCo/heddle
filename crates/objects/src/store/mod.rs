@@ -225,6 +225,18 @@ impl ObjectStore for AnyStore {
     ) -> Result<()> {
         any_store_dispatch!(self, put_snapshot_objects_packed(blobs, tree, state))
     }
+    fn put_snapshot_objects_and_attachments_packed(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+        attachments: Vec<StateAttachment>,
+    ) -> Result<()> {
+        any_store_dispatch!(
+            self,
+            put_snapshot_objects_and_attachments_packed(blobs, tree, state, attachments)
+        )
+    }
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<pack::PackObjectId>> {
         any_store_dispatch!(self, install_pack(pack_data, index_data))
     }
@@ -562,6 +574,23 @@ pub trait ObjectStore: Send + Sync {
         self.put_blobs_packed(blobs)?;
         self.put_tree(tree)?;
         self.put_state(state)
+    }
+
+    /// Snapshot closure variant that also durably installs immutable authored
+    /// attachments. The separate method preserves the existing backend API;
+    /// pack-capable stores override it to share the snapshot pack barrier.
+    fn put_snapshot_objects_and_attachments_packed(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+        attachments: Vec<StateAttachment>,
+    ) -> Result<()> {
+        self.put_snapshot_objects_packed(blobs, tree, state)?;
+        for attachment in attachments {
+            self.put_state_attachment(&attachment)?;
+        }
+        Ok(())
     }
 
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<pack::PackObjectId>> {

@@ -128,12 +128,7 @@ impl FsStore {
         result
     }
 
-    fn rebuild_state_attachment_index(&self, state: &StateId) -> Result<Vec<StateAttachmentId>> {
-        #[cfg(test)]
-        fs::write(
-            state_attachment_index_path(&self.root, state).with_extension("rebuild-marker"),
-            b"rebuilt",
-        )?;
+    fn collect_state_attachment_ids(&self, state: &StateId) -> Result<Vec<StateAttachmentId>> {
         let mut ids = Vec::new();
         let dir = state_attachments_dir(&self.root, state);
         if let Ok(entries) = fs::read_dir(dir) {
@@ -165,9 +160,50 @@ impl FsStore {
         }
         ids.sort();
         ids.dedup();
+        Ok(ids)
+    }
+
+    fn rebuild_state_attachment_index(&self, state: &StateId) -> Result<Vec<StateAttachmentId>> {
+        #[cfg(test)]
+        fs::write(
+            state_attachment_index_path(&self.root, state).with_extension("rebuild-marker"),
+            b"rebuilt",
+        )?;
+        let ids = self.collect_state_attachment_ids(state)?;
         let path = state_attachment_index_path(&self.root, state);
         self.write_loose_object_atomic(&path, &rmp_serde::to_vec_named(&ids)?)?;
         Ok(ids)
+    }
+
+    /// Publish the attachment index for objects already made durable in a
+    /// snapshot pack. This sidecar is only a materialized view: if a crash
+    /// loses it, [`rebuild_state_attachment_index`](Self::rebuild_state_attachment_index)
+    /// reconstructs it by scanning authoritative loose objects and packs.
+    pub(super) fn materialize_packed_attachment_index(
+        &self,
+        state: &StateId,
+        packed_ids: &[StateAttachmentId],
+        state_was_present: bool,
+    ) -> Result<()> {
+        if packed_ids.is_empty() {
+            return Ok(());
+        }
+        self.with_state_attachment_index_lock(state, || {
+            let path = state_attachment_index_path(&self.root, state);
+            let mut ids = if state_was_present {
+                match read_file_bytes(&path)? {
+                    Some(bytes) => rmp_serde::from_slice(bytes.as_slice())?,
+                    None => self.collect_state_attachment_ids(state)?,
+                }
+            } else {
+                Vec::new()
+            };
+            ids.extend_from_slice(packed_ids);
+            ids.sort();
+            ids.dedup();
+            self.write_reconstructible_cache(&path, &rmp_serde::to_vec_named(&ids)?)?;
+            Ok(())
+        })
     }
 }
 
@@ -1237,7 +1273,17 @@ impl ObjectStore for FsStore {
         tree: &Tree,
         state: &State,
     ) -> Result<()> {
-        self.put_snapshot_objects_packed_impl(blobs, tree, state)
+        self.put_snapshot_objects_packed_impl(blobs, tree, state, Vec::new())
+    }
+
+    fn put_snapshot_objects_and_attachments_packed(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+        attachments: Vec<StateAttachment>,
+    ) -> Result<()> {
+        self.put_snapshot_objects_packed_impl(blobs, tree, state, attachments)
     }
 
     #[instrument(skip(self))]
