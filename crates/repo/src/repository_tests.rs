@@ -853,6 +853,54 @@ fn packed_structured_snapshot_remains_invisible_until_oplog_commit() {
 }
 
 #[test]
+fn structured_snapshot_keeps_reconstructible_ref_watermark_at_durable_floor() {
+    let (temp_dir, repo) = create_test_repo();
+    let baseline = repo.head().unwrap().expect("initialized main head");
+    let watermark_path = temp_dir.path().join(".heddle/RECONCILE_WATERMARK_SHARED");
+    let durable_floor = fs::read_to_string(&watermark_path).unwrap();
+    let attribution = repo.get_attribution().unwrap();
+
+    let mut latest = baseline;
+    for index in 0..2 {
+        let blob = Blob::from_slice(format!("reconstructible ref {index}").as_bytes());
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("agent.txt", blob.hash(), false).unwrap(),
+        ]);
+        latest = repo
+            .snapshot_tree_with_blobs_with_attribution_profiled(
+                tree,
+                vec![blob],
+                Some(format!("reconstructible ref {index}")),
+                None,
+                attribution.clone(),
+            )
+            .unwrap()
+            .state
+            .id();
+        assert_eq!(repo.head().unwrap(), Some(latest));
+    }
+
+    assert_eq!(
+        fs::read_to_string(&watermark_path).unwrap(),
+        durable_floor,
+        "a reconstructible success-path ref must not durably advance its watermark"
+    );
+
+    drop(repo);
+    fs::write(
+        temp_dir.path().join(".heddle/refs/threads/main"),
+        format!("{}\n", baseline.to_string_full()),
+    )
+    .unwrap();
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    assert_eq!(
+        reopened.head().unwrap(),
+        Some(latest),
+        "fresh-process reconciliation must recover a lost reconstructible ref publish"
+    );
+}
+
+#[test]
 fn test_snapshot_with_parent() {
     let (temp_dir, repo) = create_test_repo();
 
