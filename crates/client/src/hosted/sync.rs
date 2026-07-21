@@ -21,7 +21,7 @@ use api::heddle::api::v1alpha1::{
 use objects::{
     Progress,
     object::{ContentHash, MarkerName, StateId, ThreadName},
-    store::{AnyStore, ObjectStore, PackObjectId},
+    store::{AnyStore, ObjectStore, PackObjectId, SnapshotCommitDescriptor},
 };
 use repo::{
     GitRefKind as ClassifiedGitRefKind, GitRefName, Repository, RepositoryCapability,
@@ -102,6 +102,14 @@ const PULL_PACK_SPOOL_OBJECT_THRESHOLD: usize = 512;
 const NATIVE_PACK_DRAIN_OBJECT_INTERVAL: usize = 32;
 const NATIVE_PACK_OBJECT_PREFETCH_LIMIT: usize = 32;
 const NATIVE_PACK_OBJECT_LOAD_WORKER_LIMIT: usize = 8;
+
+fn select_snapshot_pack_reuse_descriptor<'a>(
+    _descriptors: &'a [SnapshotCommitDescriptor],
+    _local_state: StateId,
+    _objects: &[ObjectInfo],
+) -> Option<&'a SnapshotCommitDescriptor> {
+    None
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct PullObjectMix {
@@ -2327,15 +2335,78 @@ fn push_transfer_id(
 #[cfg(test)]
 mod push_transfer_id_tests {
     use api::heddle::api::v1alpha1::PushRequest;
-    use objects::object::StateId;
+    use objects::{
+        object::{ContentHash, StateId},
+        store::{SnapshotCommitArtifact, SnapshotCommitDescriptor, pack::PackObjectId},
+    };
     use repo::Repository;
     use tempfile::TempDir;
-    use wire::RefEntry;
+    use wire::{ObjectId, ObjectInfo, ObjectType, RefEntry};
 
     use super::{
         ExpectedRemoteHead, apply_expected_remote_head, native_push_boundaries,
         native_push_boundaries_from_expected_head, push_transfer_id,
+        select_snapshot_pack_reuse_descriptor,
     };
+
+    fn descriptor(state: StateId, object_ids: Vec<PackObjectId>) -> SnapshotCommitDescriptor {
+        SnapshotCommitDescriptor {
+            artifact: SnapshotCommitArtifact {
+                schema: 1,
+                transaction_id: "tx".to_string(),
+                scope: "snapshot".to_string(),
+                base_oplog_head_id: 0,
+                state,
+                encoded_records: vec![vec![1]],
+            },
+            pack_name: "pack".to_string(),
+            pack_path: "/unused/pack.pack".into(),
+            object_ids,
+        }
+    }
+
+    fn blob_info(byte: u8) -> ObjectInfo {
+        ObjectInfo {
+            id: ObjectId::Hash(ContentHash::from_bytes([byte; 32])),
+            obj_type: ObjectType::Blob,
+            size: 1,
+            delta_base: None,
+        }
+    }
+
+    #[test]
+    fn snapshot_pack_reuse_requires_matching_state_and_complete_unique_wanted_subset() {
+        let state = StateId::from_bytes([40; 32]);
+        let wanted = vec![blob_info(41), blob_info(42)];
+        let matching = descriptor(
+            state,
+            vec![
+                PackObjectId::Hash(ContentHash::from_bytes([41; 32])),
+                PackObjectId::Hash(ContentHash::from_bytes([42; 32])),
+                PackObjectId::Hash(ContentHash::from_bytes([43; 32])),
+            ],
+        );
+        assert!(
+            select_snapshot_pack_reuse_descriptor(std::slice::from_ref(&matching), state, &wanted,)
+                .is_some()
+        );
+
+        let wrong_state = descriptor(StateId::from_bytes([44; 32]), matching.object_ids.clone());
+        assert!(select_snapshot_pack_reuse_descriptor(&[wrong_state], state, &wanted).is_none());
+        let incomplete = descriptor(
+            state,
+            vec![PackObjectId::Hash(ContentHash::from_bytes([41; 32]))],
+        );
+        assert!(select_snapshot_pack_reuse_descriptor(&[incomplete], state, &wanted).is_none());
+        assert!(
+            select_snapshot_pack_reuse_descriptor(&[], state, &wanted).is_none(),
+            "descriptor loss after GC must select the normal writer"
+        );
+        let duplicate_wants = vec![blob_info(41), blob_info(41)];
+        assert!(
+            select_snapshot_pack_reuse_descriptor(&[matching], state, &duplicate_wants).is_none()
+        );
+    }
 
     #[test]
     fn git_revision_distinguishes_pushes_reusing_one_heddle_anchor() {

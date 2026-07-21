@@ -57,6 +57,23 @@ pub struct NativePackFileBundle {
     pub index_len: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReusedNativePackStats {
+    pub object_count: usize,
+    pub encoded_bytes_copied: u64,
+}
+
+/// Build a hosted transport pack by reusing non-delta encoded entries from an
+/// authoritative local pack. `Ok(None)` means the caller must use the normal
+/// object-loading writer.
+pub fn reuse_native_pack_encoded_subset_in(
+    _root: &Path,
+    _source_pack_path: &Path,
+    _objects: &[ObjectInfo],
+) -> Result<Option<(NativePackFileBundle, ReusedNativePackStats)>> {
+    Ok(None)
+}
+
 impl Drop for NativePackFileBundle {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
@@ -749,8 +766,11 @@ fn to_pack_object_id(id: &ObjectId) -> PackObjectId {
 #[cfg(test)]
 mod tests {
     use objects::{
-        object::Blob,
-        store::{FsStore, ObjectStore, pack::PackObjectId},
+        object::{Blob, ContentHash, StateId},
+        store::{
+            CompressionConfig, FsStore, ObjectStore,
+            pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId, PackReader},
+        },
     };
     use tempfile::TempDir;
 
@@ -759,6 +779,7 @@ mod tests {
         NativePackStreamingWriter, ObjectData, ObjectId, ObjectInfo, ObjectType, PackChunkSpool,
         PackChunkState, PackFileChunkReader, build_native_pack, install_received_pack,
         next_pack_chunk, receive_pack_chunk, receive_pack_chunk_with_limit,
+        reuse_native_pack_encoded_subset_in,
     };
 
     fn create_test_store() -> (TempDir, FsStore) {
@@ -766,6 +787,163 @@ mod tests {
         let store = FsStore::new(temp.path().join(".heddle"));
         store.init().unwrap();
         (temp, store)
+    }
+
+    fn hash(byte: u8) -> ContentHash {
+        ContentHash::from_bytes([byte; 32])
+    }
+
+    #[test]
+    fn encoded_snapshot_subset_is_wire_equivalent_without_local_artifacts_or_attachments() {
+        let source = TempDir::new().unwrap();
+        let spool = TempDir::new().unwrap();
+        let destination = TempDir::new().unwrap();
+        let source_pack = source.path().join("snapshot.pack");
+        let source_index = source.path().join("snapshot.idx");
+        let blob = (
+            PackObjectId::Hash(hash(1)),
+            PackObjectType::Blob,
+            b"blob body".to_vec(),
+        );
+        let tree = (
+            PackObjectId::Hash(hash(2)),
+            PackObjectType::Tree,
+            b"tree body".to_vec(),
+        );
+        let state_id = StateId::from_bytes([3; 32]);
+        let state = (
+            PackObjectId::StateId(state_id),
+            PackObjectType::State,
+            b"state body".to_vec(),
+        );
+        let attachment_id = PackObjectId::Hash(hash(4));
+        let artifact_id = PackObjectId::Hash(hash(5));
+        let mut builder = PackBuilder::new(CompressionConfig {
+            max_delta_size: 0,
+            ..CompressionConfig::default()
+        });
+        for (id, kind, body) in [
+            blob.clone(),
+            tree.clone(),
+            state.clone(),
+            (
+                attachment_id,
+                PackObjectType::StateAttachment,
+                b"local attachment".to_vec(),
+            ),
+            (
+                artifact_id,
+                PackObjectType::SnapshotCommit,
+                b"local commit artifact".to_vec(),
+            ),
+        ] {
+            builder.add_id(id, kind, body);
+        }
+        let (pack, index, _) = builder.build().unwrap();
+        std::fs::write(&source_pack, pack).unwrap();
+        std::fs::write(&source_index, index).unwrap();
+
+        let wanted = vec![
+            ObjectInfo {
+                id: ObjectId::Hash(hash(1)),
+                obj_type: ObjectType::Blob,
+                size: blob.2.len() as u64,
+                delta_base: None,
+            },
+            ObjectInfo {
+                id: ObjectId::Hash(hash(2)),
+                obj_type: ObjectType::Tree,
+                size: tree.2.len() as u64,
+                delta_base: None,
+            },
+            ObjectInfo {
+                id: ObjectId::StateId(state_id),
+                obj_type: ObjectType::State,
+                size: state.2.len() as u64,
+                delta_base: None,
+            },
+        ];
+        let (bundle, stats) =
+            reuse_native_pack_encoded_subset_in(spool.path(), &source_pack, &wanted)
+                .unwrap()
+                .expect("authoritative non-delta subset must be reusable");
+
+        assert_eq!(stats.object_count, wanted.len());
+        assert!(stats.encoded_bytes_copied > 0);
+        let reused = PackReader::open(&bundle.pack_path, &bundle.index_path).unwrap();
+        let mut reused_ids = reused.list_ids();
+        reused_ids.sort();
+        let mut wanted_ids = vec![blob.0, tree.0, state.0];
+        wanted_ids.sort();
+        assert_eq!(reused_ids, wanted_ids);
+        assert!(!reused.has_object(&attachment_id));
+        assert!(!reused.has_object(&artifact_id));
+
+        let destination_store = FsStore::new(destination.path().join(".heddle"));
+        destination_store.init().unwrap();
+        let installed = destination_store
+            .install_pack_streaming(&bundle.pack_path, &bundle.index_path)
+            .unwrap();
+        assert_eq!(installed.len(), wanted.len());
+        for (id, _, expected) in [blob, tree, state] {
+            assert_eq!(reused.get_object(&id).unwrap().unwrap().1, expected);
+        }
+    }
+
+    #[test]
+    fn encoded_snapshot_subset_falls_back_for_mismatch_delta_or_attachment_request() {
+        let source = TempDir::new().unwrap();
+        let spool = TempDir::new().unwrap();
+        let source_pack = source.path().join("snapshot.pack");
+        let source_index = source.path().join("snapshot.idx");
+        let first = b"This is the base content. ".repeat(100);
+        let second = b"This is modified content. ".repeat(100);
+        let mut builder = PackBuilder::new(CompressionConfig::default());
+        builder.add(hash(10), PackObjectType::Blob, first.clone());
+        builder.add(hash(11), PackObjectType::Blob, second.clone());
+        let (pack, index, stats) = builder.build().unwrap();
+        assert!(stats.delta_count > 0, "fixture must contain a delta");
+        std::fs::write(&source_pack, pack).unwrap();
+        std::fs::write(&source_index, index).unwrap();
+        let delta_wants = [ObjectInfo {
+            id: ObjectId::Hash(hash(11)),
+            obj_type: ObjectType::Blob,
+            size: second.len() as u64,
+            delta_base: None,
+        }];
+        assert!(
+            reuse_native_pack_encoded_subset_in(spool.path(), &source_pack, &delta_wants)
+                .unwrap()
+                .is_none()
+        );
+
+        let missing_wants = [ObjectInfo {
+            id: ObjectId::Hash(hash(12)),
+            obj_type: ObjectType::Blob,
+            size: 1,
+            delta_base: None,
+        }];
+        assert!(
+            reuse_native_pack_encoded_subset_in(spool.path(), &source_pack, &missing_wants)
+                .unwrap()
+                .is_none()
+        );
+
+        let attachment_wants = [ObjectInfo {
+            id: ObjectId::StateAttachment {
+                state: StateId::from_bytes([13; 32]),
+                id: objects::object::StateAttachmentId::from_hash(hash(14)),
+                kind: objects::object::StateAttachmentKind::SemanticIndex,
+            },
+            obj_type: ObjectType::StateAttachment,
+            size: 1,
+            delta_base: None,
+        }];
+        assert!(
+            reuse_native_pack_encoded_subset_in(spool.path(), &source_pack, &attachment_wants)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
