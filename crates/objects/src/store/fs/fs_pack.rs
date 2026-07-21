@@ -114,7 +114,9 @@ impl FsStore {
         );
 
         let (pack_data, index_data, _stats) = builder.build()?;
-        self.install_pack_files(&pack_data, &index_data)?;
+        let packs = packs_dir(&self.root);
+        super::pack_install_journal::install_snapshot_pack_bytes(&packs, pack_data, index_data)?;
+        self.reload_packs()?;
 
         if let Ok(mut cache) = self.recent_blobs.write() {
             for (hash, data) in staged_blobs {
