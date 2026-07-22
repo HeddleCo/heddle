@@ -874,6 +874,48 @@ mod chokepoint {
         );
     }
 
+    #[test]
+    fn committed_snapshot_materialization_uses_known_state_without_replay() {
+        let (_t, dir) = manager();
+        let calls = Arc::new(AtomicU64::new(0));
+        let reconciler = Arc::new(FakeReconciler {
+            generation: AtomicU64::new(1),
+            republish: Vec::new(),
+            remote_updates: Vec::new(),
+            undo_recovery: None,
+            calls: Arc::clone(&calls),
+        });
+        let refs = RefManager::new(&dir).with_reconciler(reconciler.clone());
+        refs.init().unwrap();
+
+        let thread = ThreadName::new("main");
+        let attached_state = crate::refs::fresh_state_id();
+        // The known view may briefly lead the on-disk reconstructible oplog
+        // while its background rewrite retains the oplog lock.
+        refs.materialize_snapshot_thread_after_commit(&thread, attached_state, 2)
+            .unwrap();
+        assert_eq!(refs.get_thread(&thread).unwrap(), Some(attached_state));
+        let summary = refs.inspect_ref_summary_index().unwrap();
+        assert!(summary.present && summary.valid);
+        assert_eq!(summary.threads, 1);
+
+        let detached_state = crate::refs::fresh_state_id();
+        reconciler.generation.store(3, Ordering::Release);
+        refs.materialize_snapshot_head_after_commit(detached_state, 3)
+            .unwrap();
+        assert_eq!(
+            refs.read_head().unwrap(),
+            super::super::Head::Detached {
+                state: detached_state
+            }
+        );
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            0,
+            "known committed snapshot state must not replay the oplog tail"
+        );
+    }
+
     /// The lag path drives `materialize`'s authoritative-apply branches: an
     /// absent thread + marker + remote-thread + undo-recovery are all published
     /// (create), a present-but-STALE thread is overwritten with the committed

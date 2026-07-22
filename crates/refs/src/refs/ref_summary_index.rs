@@ -418,6 +418,31 @@ impl RefManager {
         self.write_string(&path, &summary.to_text())
     }
 
+    /// Reconstructible counterpart to
+    /// [`update_ref_summary_index_with_deltas`](Self::update_ref_summary_index_with_deltas).
+    /// Snapshot publication has already committed the authoritative oplog, so
+    /// keeping this derived index current must not add another fsync barrier.
+    pub(super) fn update_ref_summary_index_with_deltas_reconstructible(
+        &self,
+        _lock: &RefsLock,
+        deltas: &[SummaryDelta],
+    ) -> Result<()> {
+        let mut summary = match self.read_ref_summary_index() {
+            Ok(Some(summary)) => summary,
+            Ok(None) | Err(_) => self.build_ref_summary_index_from_storage()?,
+        };
+
+        if !deltas.is_empty() {
+            let packed = self.load_packed_refs_cached()?;
+            for delta in deltas {
+                summary.apply_delta(delta, &packed);
+            }
+        }
+
+        let path = self.ref_summary_index_path();
+        self.write_string_reconstructible(&path, &summary.to_text())
+    }
+
     pub(super) fn list_threads_from_storage(&self) -> Result<Vec<ThreadName>> {
         let loose = self.scan_loose_threads()?;
         let packed = self.load_packed_refs_cached()?;

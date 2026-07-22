@@ -397,9 +397,9 @@ impl<'a> Tx<'a> {
                 install,
             )?;
         match outcome {
-            ReconstructibleCommitOutcome::Committed(artifact) => {
+            ReconstructibleCommitOutcome::Committed(artifact, tip) => {
                 self.committed = true;
-                Ok(ReconstructibleTxCommit::Committed(artifact))
+                Ok(ReconstructibleTxCommit::Committed(artifact, tip))
             }
             ReconstructibleCommitOutcome::AlreadyCommitted(prior) => {
                 Ok(ReconstructibleTxCommit::AlreadyCommitted(prior))
@@ -456,7 +456,7 @@ pub(crate) enum CommitOutcome {
 }
 
 pub(crate) enum ReconstructibleTxCommit<T> {
-    Committed(T),
+    Committed(T, u64),
     AlreadyCommitted(Vec<OpRecord>),
     IsolationConflict {
         key: IsolationKey,

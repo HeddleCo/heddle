@@ -528,11 +528,13 @@ impl RefManager {
             .iter()
             .filter_map(|plan| plan.summary_delta.clone())
             .collect();
-        let summary_result = if durability == RefPublishDurability::Durable {
-            self.update_ref_summary_index_with_deltas(lock, &deltas)
-        } else {
-            self.invalidate_ref_summary_index();
-            Ok(())
+        let summary_result = match durability {
+            RefPublishDurability::Durable => {
+                self.update_ref_summary_index_with_deltas(lock, &deltas)
+            }
+            RefPublishDurability::Reconstructible => {
+                self.update_ref_summary_index_with_deltas_reconstructible(lock, &deltas)
+            }
         };
         if summary_result.is_err() {
             self.invalidate_ref_summary_index();

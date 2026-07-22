@@ -46,6 +46,7 @@ where
 pub(crate) struct ReconstructibleExecution<O, A> {
     pub output: O,
     pub artifact: Option<A>,
+    pub committed_tip: u64,
 }
 
 /// Structured-snapshot executor whose immutable pack artifact is the commit
@@ -81,10 +82,11 @@ where
             install(&mut mutation.borrow_mut(), base_head_id, records)
         });
         match outcome {
-            Ok(ReconstructibleTxCommit::Committed(artifact)) => {
+            Ok(ReconstructibleTxCommit::Committed(artifact, committed_tip)) => {
                 return Ok(ReconstructibleExecution {
                     output,
                     artifact: Some(artifact),
+                    committed_tip,
                 });
             }
             Ok(ReconstructibleTxCommit::AlreadyCommitted(prior_records)) => {
@@ -96,6 +98,7 @@ where
                         return Ok(ReconstructibleExecution {
                             output,
                             artifact: None,
+                            committed_tip: repo.oplog().head_id()?,
                         });
                     }
                     (Ok(_), Err(rewind_err)) => {

@@ -822,6 +822,7 @@ impl Repository {
             ),
         )?;
         execution.profile.atomic_execute_ms = atomic_execute_started.elapsed().as_millis();
+        let committed_tip = self.oplog().head_id()?;
 
         objects::fault_inject::maybe_panic_at("snapshot_after_atomic_commit_before_ref_publish");
         #[cfg(test)]
@@ -831,7 +832,7 @@ impl Repository {
         // success-path ref publish through the same per-read reconciliation that
         // recovers a crash after the atomic oplog append.
         let ref_publish_started = std::time::Instant::now();
-        reconcile_snapshot_ref(self, &head)?;
+        reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
         execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
         refresh_materialized_thread_manifest(self, &head, &execution.state, &execution.tree);
         Ok(execution)
@@ -930,11 +931,12 @@ impl Repository {
             prev_head,
             head.clone(),
         );
-        let mut execution = if authoritative_artifact {
+        let (mut execution, committed_tip) = if authoritative_artifact {
             let committed =
                 execute_reconstructible(self, mutation, |mutation, base_head_id, records| {
                     mutation.install_prepared_artifact(base_head_id, records)
                 })?;
+            let committed_tip = committed.committed_tip;
             let mut output = committed.output;
             if let Some((descriptor, artifact_write_ms)) = committed.artifact {
                 output.profile.blob_write_ms = artifact_write_ms;
@@ -946,9 +948,11 @@ impl Repository {
                     "structured snapshot committed through authoritative pack artifact"
                 );
             }
-            output
+            (output, committed_tip)
         } else {
-            execute(self, mutation)?
+            let output = execute(self, mutation)?;
+            let committed_tip = self.oplog().head_id()?;
+            (output, committed_tip)
         };
         execution.profile.atomic_execute_ms = atomic_execute_started.elapsed().as_millis();
 
@@ -957,7 +961,7 @@ impl Repository {
         maybe_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish);
 
         let ref_publish_started = std::time::Instant::now();
-        reconcile_snapshot_ref(self, &head)?;
+        reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
         execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
         Ok(execution)
     }
@@ -1158,10 +1162,23 @@ fn snapshot_profile_from_tree(
 /// durability barrier. The oplog is authoritative; the persisted ref watermark
 /// deliberately remains at its prior floor so a crash that loses this
 /// reconstructible view is recovered by a fresh process.
-fn reconcile_snapshot_ref(repo: &Repository, head: &Head) -> Result<()> {
+fn reconcile_snapshot_ref(
+    repo: &Repository,
+    head: &Head,
+    state: &State,
+    committed_tip: u64,
+) -> Result<()> {
     match head {
-        Head::Attached { thread } => repo.refs.materialize_snapshot_thread_after_commit(thread)?,
-        Head::Detached { .. } => repo.refs.materialize_snapshot_head_after_commit()?,
+        Head::Attached { thread } => {
+            repo.refs.materialize_snapshot_thread_after_commit(
+                thread,
+                state.id(),
+                committed_tip,
+            )?;
+        }
+        Head::Detached { .. } => repo
+            .refs
+            .materialize_snapshot_head_after_commit(state.id(), committed_tip)?,
     }
     Ok(())
 }

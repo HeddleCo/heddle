@@ -476,7 +476,7 @@ fn reconstructible_commit_validates_cas_before_install_and_dedups_retries() {
         .unwrap();
     assert!(matches!(
         committed,
-        ReconstructibleCommitOutcome::Committed("descriptor")
+        ReconstructibleCommitOutcome::Committed("descriptor", tip) if tip == current + 2
     ));
     assert!(installed.load(Ordering::SeqCst));
 
