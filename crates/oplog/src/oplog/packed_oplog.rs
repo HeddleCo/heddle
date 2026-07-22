@@ -1716,6 +1716,7 @@ fn encode_current_container(data: &OplogData, out: &mut Vec<u8>) -> Result<()> {
     )?;
     write_index_sections_to_vec(
         out,
+        0,
         IndexWritePlan {
             entry_data_end,
             entry_offsets: &entry_offsets,
@@ -1726,7 +1727,7 @@ fn encode_current_container(data: &OplogData, out: &mut Vec<u8>) -> Result<()> {
             entry_count: data.entries.len() as u64,
             head_id: data.head_id,
         },
-    );
+    )?;
     Ok(())
 }
 
@@ -1745,24 +1746,61 @@ fn write_index_sections<W: Write + Seek>(
     out: &mut W,
     plan: IndexWritePlan<'_>,
 ) -> Result<PackedFooter> {
-    let entry_offsets_offset = out.stream_position()?;
+    let start_offset = out.stream_position()?;
+    let mut encoded = Vec::with_capacity(index_sections_encoded_len(&plan)?);
+    let footer = write_index_sections_to_vec(&mut encoded, start_offset, plan)?;
+    out.write_all(&encoded)?;
+    Ok(footer)
+}
+
+fn index_sections_encoded_len(plan: &IndexWritePlan<'_>) -> Result<usize> {
+    let sections = [
+        plan.entry_offsets
+            .len()
+            .checked_mul(ENTRY_OFFSET_RECORD_LEN as usize),
+        plan.batch_offsets.len().checked_mul(8),
+        plan.batch_dir
+            .len()
+            .checked_mul(BATCH_DIR_RECORD_LEN as usize),
+        Some(plan.tx_key_bytes.len()),
+        plan.tx_dir.len().checked_mul(TX_DIR_RECORD_LEN as usize),
+        Some(FOOTER_LEN as usize),
+    ];
+    sections
+        .into_iter()
+        .try_fold(0usize, |total, section| total.checked_add(section?))
+        .ok_or_else(|| HeddleError::InvalidObject("oplog index section too large".to_string()))
+}
+
+fn write_index_sections_to_vec(
+    out: &mut Vec<u8>,
+    base_offset: u64,
+    plan: IndexWritePlan<'_>,
+) -> Result<PackedFooter> {
+    out.reserve(index_sections_encoded_len(&plan)?);
+    let absolute_offset = |out: &Vec<u8>| {
+        base_offset.checked_add(out.len() as u64).ok_or_else(|| {
+            HeddleError::InvalidObject("oplog index section offset overflow".to_string())
+        })
+    };
+    let entry_offsets_offset = absolute_offset(out)?;
     for record in plan.entry_offsets {
-        out.write_all(&record.entry_id.to_le_bytes())?;
-        out.write_all(&record.entry_offset.to_le_bytes())?;
+        out.extend_from_slice(&record.entry_id.to_le_bytes());
+        out.extend_from_slice(&record.entry_offset.to_le_bytes());
     }
-    let batch_offsets_offset = out.stream_position()?;
+    let batch_offsets_offset = absolute_offset(out)?;
     for offset in plan.batch_offsets {
-        out.write_all(&offset.to_le_bytes())?;
+        out.extend_from_slice(&offset.to_le_bytes());
     }
-    let batch_dir_offset = out.stream_position()?;
+    let batch_dir_offset = absolute_offset(out)?;
     for record in plan.batch_dir {
-        write_batch_dir_record(out, record)?;
+        write_batch_dir_record_to_vec(out, record);
     }
-    let tx_key_bytes_offset = out.stream_position()?;
-    out.write_all(plan.tx_key_bytes)?;
-    let tx_dir_offset = out.stream_position()?;
+    let tx_key_bytes_offset = absolute_offset(out)?;
+    out.extend_from_slice(plan.tx_key_bytes);
+    let tx_dir_offset = absolute_offset(out)?;
     for record in plan.tx_dir {
-        write_tx_dir_record(out, record)?;
+        write_tx_dir_record_to_vec(out, record);
     }
     let footer = PackedFooter {
         entry_data_end: plan.entry_data_end,
@@ -1779,48 +1817,8 @@ fn write_index_sections<W: Write + Seek>(
         entry_count: plan.entry_count,
         head_id: plan.head_id,
     };
-    write_footer(out, &footer)?;
+    write_footer_to_vec(out, &footer);
     Ok(footer)
-}
-
-fn write_index_sections_to_vec(out: &mut Vec<u8>, plan: IndexWritePlan<'_>) {
-    let entry_offsets_offset = out.len() as u64;
-    for record in plan.entry_offsets {
-        out.extend_from_slice(&record.entry_id.to_le_bytes());
-        out.extend_from_slice(&record.entry_offset.to_le_bytes());
-    }
-    let batch_offsets_offset = out.len() as u64;
-    for offset in plan.batch_offsets {
-        out.extend_from_slice(&offset.to_le_bytes());
-    }
-    let batch_dir_offset = out.len() as u64;
-    for record in plan.batch_dir {
-        write_batch_dir_record_to_vec(out, record);
-    }
-    let tx_key_bytes_offset = out.len() as u64;
-    out.extend_from_slice(plan.tx_key_bytes);
-    let tx_dir_offset = out.len() as u64;
-    for record in plan.tx_dir {
-        write_tx_dir_record_to_vec(out, record);
-    }
-    write_footer_to_vec(
-        out,
-        &PackedFooter {
-            entry_data_end: plan.entry_data_end,
-            entry_offsets_offset,
-            entry_offsets_count: plan.entry_offsets.len() as u64,
-            batch_offsets_offset,
-            batch_offsets_count: plan.batch_offsets.len() as u64,
-            batch_dir_offset,
-            batch_dir_count: plan.batch_dir.len() as u64,
-            tx_key_bytes_offset,
-            tx_key_bytes_len: plan.tx_key_bytes.len() as u64,
-            tx_dir_offset,
-            tx_dir_count: plan.tx_dir.len() as u64,
-            entry_count: plan.entry_count,
-            head_id: plan.head_id,
-        },
-    );
 }
 
 fn build_index_sections(
@@ -2341,13 +2339,9 @@ fn encode_entry_with(
 }
 
 fn write_header<W: Write>(out: &mut W, version: u32, entry_count: u64, head_id: u64) -> Result<()> {
-    out.write_all(MAGIC)?;
-    out.write_all(&version.to_le_bytes())?;
-    if version == CURRENT_CONTAINER_VERSION {
-        out.write_all(&CURRENT_OP_RECORD_SCHEMA_VERSION.to_le_bytes())?;
-    }
-    out.write_all(&entry_count.to_le_bytes())?;
-    out.write_all(&head_id.to_le_bytes())?;
+    let mut encoded = Vec::with_capacity(V4_HEADER_LEN as usize);
+    write_header_to_vec(&mut encoded, version, entry_count, head_id);
+    out.write_all(&encoded)?;
     Ok(())
 }
 
@@ -2359,16 +2353,6 @@ fn write_header_to_vec(out: &mut Vec<u8>, version: u32, entry_count: u64, head_i
     }
     out.extend_from_slice(&entry_count.to_le_bytes());
     out.extend_from_slice(&head_id.to_le_bytes());
-}
-
-fn write_footer<W: Write>(out: &mut W, footer: &PackedFooter) -> Result<()> {
-    out.write_all(INDEX_MAGIC)?;
-    out.write_all(&INDEX_VERSION.to_le_bytes())?;
-    out.write_all(&(FOOTER_LEN as u32).to_le_bytes())?;
-    for value in footer_u64_values(footer) {
-        out.write_all(&value.to_le_bytes())?;
-    }
-    Ok(())
 }
 
 fn write_footer_to_vec(out: &mut Vec<u8>, footer: &PackedFooter) {
@@ -2398,19 +2382,6 @@ fn footer_u64_values(footer: &PackedFooter) -> [u64; FOOTER_U64_FIELDS as usize]
     ]
 }
 
-fn write_batch_dir_record<W: Write>(out: &mut W, record: &BatchDirRecord) -> Result<()> {
-    out.write_all(&record.batch_id.to_le_bytes())?;
-    out.write_all(&record.newest_entry_id.to_le_bytes())?;
-    out.write_all(&record.first_offset_index.to_le_bytes())?;
-    out.write_all(&record.entry_count.to_le_bytes())?;
-    out.write_all(&[record.scope_state])?;
-    out.write_all(&[0; 3])?;
-    out.write_all(&0u64.to_le_bytes())?;
-    out.write_all(&0u32.to_le_bytes())?;
-    out.write_all(&[0; 4])?;
-    Ok(())
-}
-
 fn write_batch_dir_record_to_vec(out: &mut Vec<u8>, record: &BatchDirRecord) {
     out.extend_from_slice(&record.batch_id.to_le_bytes());
     out.extend_from_slice(&record.newest_entry_id.to_le_bytes());
@@ -2421,15 +2392,6 @@ fn write_batch_dir_record_to_vec(out: &mut Vec<u8>, record: &BatchDirRecord) {
     out.extend_from_slice(&0u64.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&[0; 4]);
-}
-
-fn write_tx_dir_record<W: Write>(out: &mut W, record: &TxDirRecord) -> Result<()> {
-    out.write_all(&record.key_offset.to_le_bytes())?;
-    out.write_all(&record.key_len.to_le_bytes())?;
-    out.write_all(&[0; 4])?;
-    out.write_all(&record.commit_entry_id.to_le_bytes())?;
-    out.write_all(&record.batch_id.to_le_bytes())?;
-    Ok(())
 }
 
 fn write_tx_dir_record_to_vec(out: &mut Vec<u8>, record: &TxDirRecord) {
@@ -3125,6 +3087,126 @@ mod tests {
         assert_eq!(updated.head_id(), 1);
         assert_eq!(updated.last_entry().unwrap().unwrap().id, 1);
         assert_eq!(PackedOpLog::load(&path).unwrap().entries.len(), 1);
+    }
+
+    #[test]
+    fn buffered_append_matches_across_durable_and_reconstructible_paths() {
+        let tmp = TempDir::new().unwrap();
+        let base_entries = vec![
+            make_batch_entry(1, 1, 0, Some("lane")),
+            make_batch_entry(2, 1, 1, Some("lane")),
+        ];
+        let appended = vec![
+            make_batch_entry(3, 3, 0, Some("lane")),
+            make_commit_entry(4, "tx-buffered"),
+        ];
+        let mut outputs = Vec::new();
+
+        for (name, reconstructible) in [("durable", false), ("reconstructible", true)] {
+            let path = tmp.path().join(format!("{name}.bin"));
+            let mut log = PackedOpLog::new(path.clone());
+            log.append(base_entries.clone());
+            log.head_id = 2;
+            log.save().unwrap();
+
+            let index = PackedOpLogIndex::open(&path).unwrap();
+            if reconstructible {
+                index.append_entries_reconstructible(&appended).unwrap();
+            } else {
+                index.append_entries(&appended).unwrap();
+            }
+            assert_eq!(PackedOpLog::load(&path).unwrap().entries.len(), 4);
+            outputs.push(std::fs::read(&path).unwrap());
+        }
+        assert_eq!(outputs[0], outputs[1]);
+    }
+
+    #[test]
+    fn buffered_header_and_indexes_use_one_write_each() {
+        struct CountingWriter {
+            inner: std::io::Cursor<Vec<u8>>,
+            writes: usize,
+        }
+
+        impl Write for CountingWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.writes += 1;
+                self.inner.write(bytes)
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.inner.flush()
+            }
+        }
+
+        impl Seek for CountingWriter {
+            fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+                self.inner.seek(position)
+            }
+        }
+
+        let mut header_writer = CountingWriter {
+            inner: std::io::Cursor::new(Vec::new()),
+            writes: 0,
+        };
+        write_header(&mut header_writer, CURRENT_CONTAINER_VERSION, 2, 2).unwrap();
+        let mut expected_header = Vec::new();
+        write_header_to_vec(&mut expected_header, CURRENT_CONTAINER_VERSION, 2, 2);
+        assert_eq!(header_writer.writes, 1);
+        assert_eq!(header_writer.inner.into_inner(), expected_header);
+
+        let entry_offsets = vec![
+            EntryOffsetRecord {
+                entry_id: 1,
+                entry_offset: V4_HEADER_LEN,
+            },
+            EntryOffsetRecord {
+                entry_id: 2,
+                entry_offset: V4_HEADER_LEN + 100,
+            },
+        ];
+        let batch_offsets = vec![V4_HEADER_LEN, V4_HEADER_LEN + 100];
+        let batch_dir = vec![BatchDirRecord {
+            batch_id: 1,
+            newest_entry_id: 2,
+            first_offset_index: 0,
+            entry_count: 2,
+            scope_state: ScopeState::One as u8,
+        }];
+        let tx_key_bytes = b"tx-buffered".to_vec();
+        let tx_dir = vec![TxDirRecord {
+            key_offset: 0,
+            key_len: tx_key_bytes.len() as u32,
+            commit_entry_id: 2,
+            batch_id: 1,
+        }];
+        let entry_data_end = V4_HEADER_LEN + 200;
+        let plan = || IndexWritePlan {
+            entry_data_end,
+            entry_offsets: &entry_offsets,
+            batch_offsets: &batch_offsets,
+            batch_dir: &batch_dir,
+            tx_key_bytes: &tx_key_bytes,
+            tx_dir: &tx_dir,
+            entry_count: 2,
+            head_id: 2,
+        };
+
+        let mut writer = CountingWriter {
+            inner: std::io::Cursor::new(vec![0; entry_data_end as usize]),
+            writes: 0,
+        };
+        writer.inner.set_position(entry_data_end);
+        let footer = write_index_sections(&mut writer, plan()).unwrap();
+
+        let mut expected = vec![0; entry_data_end as usize];
+        let expected_footer = write_index_sections_to_vec(&mut expected, 0, plan()).unwrap();
+        assert_eq!(writer.writes, 1);
+        assert_eq!(writer.inner.into_inner(), expected);
+        assert_eq!(
+            footer_u64_values(&footer),
+            footer_u64_values(&expected_footer)
+        );
     }
 
     #[test]
