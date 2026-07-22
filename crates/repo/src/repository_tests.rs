@@ -17,7 +17,7 @@ use tempfile::TempDir;
 
 use super::{
     repo_config::SUPPORTED_REPO_FORMAT,
-    repository_snapshot::{SnapshotFault, with_snapshot_fault},
+    repository_snapshot::{SnapshotFault, with_snapshot_fault, with_snapshot_prepare_probe},
 };
 use crate::{
     ChangedPathFilters, HeddleError, HistoryQuery, RepoConfig, Repository, RepositoryCapability,
@@ -737,6 +737,43 @@ fn snapshot_failure_leaves_ref_unchanged() {
 
     // Clean up so the harness's drop doesn't trip on a stale merge.
     repo.merge_state_manager().abort().unwrap();
+}
+
+#[test]
+fn concurrent_snapshots_prepare_outside_the_repository_write_lock() {
+    let (temp_dir, repo) = create_test_repo();
+    fs::write(temp_dir.path().join("parallel.txt"), "parallel snapshot").unwrap();
+    drop(repo);
+    let root = temp_dir.path().to_path_buf();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+
+    let (results, max_parallel_prepare) =
+        with_snapshot_prepare_probe(std::time::Duration::from_millis(150), || {
+            let workers = (0..2)
+                .map(|worker| {
+                    let root = root.clone();
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        let repo = Repository::open(root).unwrap();
+                        barrier.wait();
+                        repo.snapshot(Some(format!("parallel-{worker}")), None)
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+    for result in results {
+        result.expect("both optimistic snapshots should commit after revalidation");
+    }
+    assert!(
+        max_parallel_prepare >= 2,
+        "immutable snapshot preparation remained serialized by the repository write lock"
+    );
 }
 
 #[test]

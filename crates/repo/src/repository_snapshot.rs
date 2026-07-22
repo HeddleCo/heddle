@@ -673,6 +673,45 @@ thread_local! {
 }
 
 #[cfg(test)]
+static SNAPSHOT_PREPARE_PROBE_DELAY_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static SNAPSHOT_PREPARE_PROBE_ACTIVE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static SNAPSHOT_PREPARE_PROBE_MAX: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn with_snapshot_prepare_probe<T>(
+    delay: std::time::Duration,
+    body: impl FnOnce() -> T,
+) -> (T, usize) {
+    use std::sync::atomic::Ordering;
+
+    SNAPSHOT_PREPARE_PROBE_ACTIVE.store(0, Ordering::SeqCst);
+    SNAPSHOT_PREPARE_PROBE_MAX.store(0, Ordering::SeqCst);
+    SNAPSHOT_PREPARE_PROBE_DELAY_MS.store(delay.as_millis() as u64, Ordering::SeqCst);
+    let output = body();
+    SNAPSHOT_PREPARE_PROBE_DELAY_MS.store(0, Ordering::SeqCst);
+    (output, SNAPSHOT_PREPARE_PROBE_MAX.load(Ordering::SeqCst))
+}
+
+#[cfg(test)]
+fn snapshot_prepare_probe() {
+    use std::sync::atomic::Ordering;
+
+    let delay = SNAPSHOT_PREPARE_PROBE_DELAY_MS.load(Ordering::SeqCst);
+    if delay == 0 {
+        return;
+    }
+    let active = SNAPSHOT_PREPARE_PROBE_ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
+    SNAPSHOT_PREPARE_PROBE_MAX.fetch_max(active, Ordering::SeqCst);
+    std::thread::sleep(std::time::Duration::from_millis(delay));
+    SNAPSHOT_PREPARE_PROBE_ACTIVE.fetch_sub(1, Ordering::SeqCst);
+}
+
+#[cfg(test)]
 pub(crate) fn with_snapshot_fault<T>(fault: SnapshotFault, body: impl FnOnce() -> T) -> T {
     SNAPSHOT_FAULT.with(|f| f.set(Some(fault)));
     let out = body();
@@ -816,6 +855,8 @@ impl Repository {
         let head = self.head_ref()?;
         let prev_head = self.head()?;
         let fingerprint = self.snapshot_worktree_fingerprint()?;
+        #[cfg(test)]
+        snapshot_prepare_probe();
         let atomic_execute_started = std::time::Instant::now();
         let mut execution = execute(
             self,
