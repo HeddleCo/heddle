@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Snapshot operations for Repository.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use objects::{
     lock::RepositoryLockExt,
@@ -18,6 +18,7 @@ use tracing::{debug, instrument};
 use super::{HeddleError, Repository, Result, repository_tree::TreeBuildProfile};
 use crate::{
     atomic::{AtomicMutation, RewindLedger, StagedCommit, Tx, execute, execute_reconstructible},
+    thread_manifest::ManifestFile,
     worktree_ignore::WorktreeIgnoreMatcher,
     worktree_walk::{
         WalkDirectory, WalkEntry, WorktreeWalkPolicy, read_file_hash, validate_symlink_target,
@@ -48,7 +49,7 @@ pub struct SnapshotExecution {
 
 #[derive(Clone)]
 enum SnapshotSource {
-    Worktree { fingerprint: ContentHash },
+    Worktree,
     SuppliedTree(Tree),
     SuppliedTreeWithBlobs { tree: Tree, blobs: Vec<Blob> },
 }
@@ -83,6 +84,7 @@ struct SnapshotMutation<'a> {
     staged_visibility_rewind: Option<(StateId, Option<Vec<u8>>)>,
     prepared_artifact: Option<PreparedSnapshotArtifact>,
     prepared_execution: Option<SnapshotExecution>,
+    worktree_revalidation_files: Option<BTreeMap<String, ManifestFile>>,
 }
 
 impl<'a> SnapshotMutation<'a> {
@@ -93,17 +95,17 @@ impl<'a> SnapshotMutation<'a> {
         prev_head: Option<StateId>,
         head: Head,
     ) -> Self {
-        let transaction_id = snapshot_transaction_id(repo, &source, &details, &head);
         Self {
             repo,
             source,
             details,
             prev_head,
             head,
-            transaction_id,
+            transaction_id: String::new(),
             staged_visibility_rewind: None,
             prepared_artifact: None,
             prepared_execution: None,
+            worktree_revalidation_files: None,
         }
     }
 
@@ -125,6 +127,13 @@ impl<'a> SnapshotMutation<'a> {
                 return Err(error);
             }
         };
+        self.transaction_id = snapshot_transaction_id(
+            self.repo,
+            &self.source,
+            &self.details,
+            &self.head,
+            Some(execution.tree.hash()),
+        );
         if let Err(error) = self.repo.store.flush_snapshot_write_batch() {
             self.repo.store.abort_snapshot_write_batch();
             return Err(error);
@@ -251,11 +260,28 @@ impl AtomicMutation for SnapshotMutation<'_> {
 }
 
 impl SnapshotMutation<'_> {
+    fn prepared_worktree_matches(&self) -> Result<bool> {
+        if !matches!(&self.source, SnapshotSource::Worktree) {
+            return Ok(true);
+        }
+        let execution = self.prepared_execution.as_ref().ok_or_else(|| {
+            HeddleError::Config("snapshot revalidation reached an unprepared mutation".to_string())
+        })?;
+        let files = self.worktree_revalidation_files.as_ref().ok_or_else(|| {
+            HeddleError::Config("snapshot preparation omitted its stat cache".to_string())
+        })?;
+        Ok(self
+            .repo
+            .snapshot_worktree_fingerprint(&execution.tree, files)?
+            == execution.tree.hash())
+    }
+
     fn stage_snapshot_objects(&mut self) -> Result<SnapshotExecution> {
         debug!("Building tree from worktree");
         let (tree, tree_profile, supplied_blobs) = match &self.source {
-            SnapshotSource::Worktree { .. } => {
-                let (tree, profile) = self.build_worktree_tree()?;
+            SnapshotSource::Worktree => {
+                let (tree, profile, revalidation_files) = self.build_worktree_tree()?;
+                self.worktree_revalidation_files = Some(revalidation_files);
                 (tree, profile, None)
             }
             SnapshotSource::SuppliedTree(tree) => (tree.clone(), TreeBuildProfile::default(), None),
@@ -478,7 +504,9 @@ impl SnapshotMutation<'_> {
         Ok((descriptor, elapsed_ms))
     }
 
-    fn build_worktree_tree(&self) -> Result<(Tree, TreeBuildProfile)> {
+    fn build_worktree_tree(
+        &self,
+    ) -> Result<(Tree, TreeBuildProfile, BTreeMap<String, ManifestFile>)> {
         let baseline_tree = match self.prev_head {
             Some(prev_head) => {
                 let state = self
@@ -514,16 +542,11 @@ impl SnapshotMutation<'_> {
                 Head::Detached { .. } => None,
             };
 
-        match manifest_context.as_ref() {
-            Some((_, manifest)) => self.repo.build_tree_profiled_with_stat_cache_against(
-                &self.repo.root,
-                baseline_tree.as_ref(),
-                manifest,
-            ),
-            None => self
-                .repo
-                .build_tree_profiled_against(&self.repo.root, baseline_tree.as_ref()),
-        }
+        self.repo.build_tree_profiled_for_snapshot_against(
+            &self.repo.root,
+            baseline_tree.as_ref(),
+            manifest_context.as_ref().map(|(_, manifest)| manifest),
+        )
     }
 }
 
@@ -538,11 +561,28 @@ struct SnapshotFingerprintOutput {
 
 struct SnapshotFingerprintPolicy<'a> {
     walk_root: &'a std::path::Path,
+    files: &'a BTreeMap<String, ManifestFile>,
 }
 
 impl<'a> SnapshotFingerprintPolicy<'a> {
-    fn new(walk_root: &'a std::path::Path) -> Self {
-        Self { walk_root }
+    fn new(walk_root: &'a std::path::Path, files: &'a BTreeMap<String, ManifestFile>) -> Self {
+        Self { walk_root, files }
+    }
+
+    fn cached_hash(&self, entry: &WalkEntry<'_>) -> Option<ContentHash> {
+        let rel = entry.path.strip_prefix(self.walk_root).ok()?;
+        let cached = self.files.get(&crate::worktree_walk::cache_key(rel))?;
+        let (size, inode, mtime_ns, ctime_ns, mode) =
+            crate::stat_signature::stat_signature(entry.path, &entry.metadata);
+        let current = ManifestFile {
+            hash: cached.hash,
+            size,
+            inode,
+            mtime_ns,
+            ctime_ns,
+            mode,
+        };
+        current.matches(cached).then_some(cached.hash)
     }
 }
 
@@ -561,10 +601,21 @@ impl WorktreeWalkPolicy for SnapshotFingerprintPolicy<'_> {
     fn visit_file(
         &mut self,
         entry: WalkEntry<'_>,
-        _tree_entry: Option<&TreeEntry>,
+        tree_entry: Option<&TreeEntry>,
         state: &mut Self::DirectoryState,
     ) -> Result<()> {
-        let hash = read_file_hash(entry.path, entry.metadata.len())?;
+        let hash = match self.cached_hash(&entry) {
+            Some(hash) => hash,
+            None => read_file_hash(entry.path, entry.metadata.len())?,
+        };
+        if let Some(target) = tree_entry.and_then(TreeEntry::gitlink_target)
+            && Blob::new(objects::util::gitlink_placeholder_bytes(&target)).hash() == hash
+        {
+            state
+                .entries
+                .push(TreeEntry::gitlink(entry.name.to_string(), target)?);
+            return Ok(());
+        }
         state.entries.push(TreeEntry::file(
             entry.name.to_string(),
             hash,
@@ -579,16 +630,19 @@ impl WorktreeWalkPolicy for SnapshotFingerprintPolicy<'_> {
         _tree_entry: Option<&TreeEntry>,
         state: &mut Self::DirectoryState,
     ) -> Result<()> {
-        let target = std::fs::read_link(entry.path)?;
-        let symlink_dir = entry.path.parent().unwrap_or(self.walk_root);
-        if !validate_symlink_target(self.walk_root, symlink_dir, &target) {
-            return Err(HeddleError::InvalidSymlinkTarget(target));
-        }
-
-        let blob = Blob::new(objects::util::symlink_target_bytes(&target));
+        let hash = if let Some(hash) = self.cached_hash(&entry) {
+            hash
+        } else {
+            let target = std::fs::read_link(entry.path)?;
+            let symlink_dir = entry.path.parent().unwrap_or(self.walk_root);
+            if !validate_symlink_target(self.walk_root, symlink_dir, &target) {
+                return Err(HeddleError::InvalidSymlinkTarget(target));
+            }
+            Blob::new(objects::util::symlink_target_bytes(&target)).hash()
+        };
         state
             .entries
-            .push(TreeEntry::symlink(entry.name.to_string(), blob.hash())?);
+            .push(TreeEntry::symlink(entry.name.to_string(), hash)?);
         Ok(())
     }
 
@@ -632,6 +686,7 @@ fn snapshot_transaction_id(
     source: &SnapshotSource,
     details: &SnapshotDetails,
     head: &Head,
+    prepared_tree: Option<ContentHash>,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"snapshot-v1\0");
@@ -640,9 +695,13 @@ fn snapshot_transaction_id(
     hasher.update(repo.root.to_string_lossy().as_bytes());
     hasher.update(b"\0");
     match source {
-        SnapshotSource::Worktree { fingerprint } => {
+        SnapshotSource::Worktree => {
             hasher.update(b"worktree\0");
-            hasher.update(fingerprint.as_bytes());
+            hasher.update(
+                prepared_tree
+                    .expect("worktree transaction id is computed after snapshot preparation")
+                    .as_bytes(),
+            );
         }
         SnapshotSource::SuppliedTree(tree) | SnapshotSource::SuppliedTreeWithBlobs { tree, .. } => {
             hasher.update(b"tree\0");
@@ -751,14 +810,18 @@ fn maybe_snapshot_fault(fault: SnapshotFault) {
 }
 
 impl Repository {
-    fn snapshot_worktree_fingerprint(&self) -> Result<ContentHash> {
+    fn snapshot_worktree_fingerprint(
+        &self,
+        tree: &Tree,
+        files: &BTreeMap<String, ManifestFile>,
+    ) -> Result<ContentHash> {
         let patterns = self.ignore_patterns()?;
         let nested_exclusions = self.nested_thread_worktree_exclusions(&self.root)?;
         let ignore_matcher = WorktreeIgnoreMatcher::new(&patterns)
             .with_nested_worktree_exclusions(nested_exclusions);
-        let mut policy = SnapshotFingerprintPolicy::new(&self.root);
+        let mut policy = SnapshotFingerprintPolicy::new(&self.root, files);
         Ok(
-            walk_worktree(self, &self.root, &ignore_matcher, None, &mut policy)?
+            walk_worktree(self, &self.root, &ignore_matcher, Some(tree), &mut policy)?
                 .tree
                 .hash(),
         )
@@ -823,9 +886,10 @@ impl Repository {
         attribution: Attribution,
         lineage: Vec<ChangeLineage>,
     ) -> Result<SnapshotExecution> {
-        const MAX_PREPARE_ATTEMPTS: usize = 4;
-        for attempt in 0..MAX_PREPARE_ATTEMPTS {
-            let (head, prev_head, fingerprint) = {
+        const MAX_WORKTREE_CHANGE_ATTEMPTS: usize = 4;
+        let mut worktree_change_attempts = 0;
+        loop {
+            let (head, prev_head) = {
                 let _lock = self
                     .locker()
                     .write()
@@ -875,16 +939,12 @@ impl Repository {
                     });
                 }
 
-                (
-                    self.head_ref()?,
-                    self.head()?,
-                    self.snapshot_worktree_fingerprint()?,
-                )
+                (self.head_ref()?, self.head()?)
             };
 
             let mut mutation = SnapshotMutation::new(
                 self,
-                SnapshotSource::Worktree { fingerprint },
+                SnapshotSource::Worktree,
                 SnapshotDetails {
                     intent: intent.clone(),
                     confidence,
@@ -895,14 +955,6 @@ impl Repository {
                 head.clone(),
             );
             mutation.prepare()?;
-            if self.snapshot_worktree_fingerprint()? != fingerprint {
-                if attempt + 1 == MAX_PREPARE_ATTEMPTS {
-                    return Err(HeddleError::Conflict(
-                        "worktree changed during snapshot preparation".to_string(),
-                    ));
-                }
-                continue;
-            }
 
             let _lock = self
                 .locker()
@@ -912,9 +964,13 @@ impl Repository {
                 || self.head_ref()? != head
                 || self.head()? != prev_head
             {
-                if attempt + 1 == MAX_PREPARE_ATTEMPTS {
+                continue;
+            }
+            if !mutation.prepared_worktree_matches()? {
+                worktree_change_attempts += 1;
+                if worktree_change_attempts == MAX_WORKTREE_CHANGE_ATTEMPTS {
                     return Err(HeddleError::Conflict(
-                        "repository head changed during snapshot preparation".to_string(),
+                        "worktree changed during snapshot preparation".to_string(),
                     ));
                 }
                 continue;
@@ -937,7 +993,6 @@ impl Repository {
             refresh_materialized_thread_manifest(self, &head, &execution.state, &execution.tree);
             return Ok(execution);
         }
-        unreachable!("bounded snapshot preparation loop returns on its final attempt")
     }
 
     /// Create a snapshot from a caller-supplied tree instead of walking
@@ -995,8 +1050,7 @@ impl Repository {
     ) -> Result<SnapshotExecution> {
         let authoritative_artifact =
             matches!(&source, SnapshotSource::SuppliedTreeWithBlobs { .. });
-        const MAX_PREPARE_ATTEMPTS: usize = 4;
-        for attempt in 0..MAX_PREPARE_ATTEMPTS {
+        loop {
             let (head, prev_head) = {
                 let _lock = self
                     .locker()
@@ -1025,12 +1079,6 @@ impl Repository {
                 .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
             reject_unresolved_snapshot_merge(self)?;
             if self.head_ref()? != head || self.head()? != prev_head {
-                if attempt + 1 == MAX_PREPARE_ATTEMPTS {
-                    return Err(HeddleError::Conflict(
-                        "repository head changed during structured snapshot preparation"
-                            .to_string(),
-                    ));
-                }
                 continue;
             }
 
@@ -1071,7 +1119,6 @@ impl Repository {
             execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
             return Ok(execution);
         }
-        unreachable!("bounded structured snapshot loop returns on its final attempt")
     }
 
     /// Create a merge state with two parents.

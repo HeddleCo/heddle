@@ -103,6 +103,29 @@ fn overlapping_snapshot_batch_flush_is_independently_durable() {
 }
 
 #[test]
+fn snapshot_batch_does_not_demote_an_unrelated_thread_writer() {
+    let (_temp, store) = create_test_store();
+    let store = std::sync::Arc::new(store);
+
+    store.begin_snapshot_write_batch().unwrap();
+    let writer = std::sync::Arc::clone(&store);
+    std::thread::spawn(move || {
+        writer
+            .put_blob(&Blob::from("unrelated durable writer"))
+            .unwrap();
+    })
+    .join()
+    .unwrap();
+
+    assert_eq!(
+        store.pending_directory_sync_count(),
+        0,
+        "another thread must retain the store's durable write mode"
+    );
+    store.abort_snapshot_write_batch();
+}
+
+#[test]
 fn test_abort_snapshot_write_batch_clears_pending_directory_syncs() {
     let (_temp, store) = create_test_store();
 

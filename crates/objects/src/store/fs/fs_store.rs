@@ -44,6 +44,11 @@ pub(super) const RECENT_BLOB_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// hot working set of small objects (the common case).
 pub(super) const RECENT_BLOB_CACHE_MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 
+thread_local! {
+    static SNAPSHOT_WRITE_BATCH_DEPTHS: std::cell::RefCell<HashMap<PathBuf, usize>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LooseObjectWriteMode {
     Durable,
@@ -240,7 +245,6 @@ pub struct FsStore {
     pub(super) recent_states: RwLock<RecentObjectCache<StateId, State>>,
     pub(super) external_source: Option<Arc<dyn super::super::ExternalObjectSource>>,
     loose_object_write_mode: LooseObjectWriteMode,
-    snapshot_write_batch_depth: Mutex<usize>,
     pending_directory_syncs: Mutex<BTreeSet<PathBuf>>,
     /// In-process trust cache for loose-blob cache mirrors. A hash
     /// enters this LRU when this process either (a) wrote the blob
@@ -296,7 +300,6 @@ impl FsStore {
             )),
             external_source: None,
             loose_object_write_mode: LooseObjectWriteMode::Durable,
-            snapshot_write_batch_depth: Mutex::new(0),
             pending_directory_syncs: Mutex::new(BTreeSet::new()),
             verified_loose_blobs: RwLock::new(RecentObjectCache::with_capacity(
                 VERIFIED_LOOSE_BLOB_CACHE_CAPACITY,
@@ -323,7 +326,6 @@ impl FsStore {
             )),
             external_source: None,
             loose_object_write_mode: LooseObjectWriteMode::Durable,
-            snapshot_write_batch_depth: Mutex::new(0),
             pending_directory_syncs: Mutex::new(BTreeSet::new()),
             verified_loose_blobs: RwLock::new(RecentObjectCache::with_capacity(
                 VERIFIED_LOOSE_BLOB_CACHE_CAPACITY,
@@ -494,15 +496,13 @@ impl FsStore {
     }
 
     pub(super) fn write_loose_object_atomic(&self, path: &Path, data: &[u8]) -> Result<()> {
-        let batch_active = self.snapshot_write_batch_depth.lock().map_err(|_| {
-            crate::store::HeddleError::Config("Failed to acquire snapshot batch lock".to_string())
-        })?;
-        let configured_mode = if *batch_active > 0 {
+        let batch_active = SNAPSHOT_WRITE_BATCH_DEPTHS
+            .with(|depths| depths.borrow().get(&self.root).copied().unwrap_or_default() > 0);
+        let configured_mode = if batch_active {
             LooseObjectWriteMode::BatchDirectorySync
         } else {
             self.loose_object_write_mode
         };
-        drop(batch_active);
 
         let mode = match configured_mode {
             LooseObjectWriteMode::Durable => AtomicWriteMode::Durable,
@@ -551,24 +551,26 @@ impl FsStore {
     }
 
     pub(super) fn begin_snapshot_write_batch_impl(&self) -> Result<()> {
-        let mut depth = self.snapshot_write_batch_depth.lock().map_err(|_| {
-            crate::store::HeddleError::Config("Failed to acquire snapshot batch lock".to_string())
-        })?;
-        *depth += 1;
+        SNAPSHOT_WRITE_BATCH_DEPTHS.with(|depths| {
+            *depths.borrow_mut().entry(self.root.clone()).or_default() += 1;
+        });
         Ok(())
     }
 
     pub(super) fn flush_snapshot_write_batch_impl(&self) -> Result<()> {
-        {
-            let mut depth = self.snapshot_write_batch_depth.lock().map_err(|_| {
-                crate::store::HeddleError::Config(
-                    "Failed to acquire snapshot batch lock".to_string(),
-                )
-            })?;
-            if *depth == 0 {
-                return Ok(());
-            }
+        let had_batch = SNAPSHOT_WRITE_BATCH_DEPTHS.with(|depths| {
+            let mut depths = depths.borrow_mut();
+            let Some(depth) = depths.get_mut(&self.root) else {
+                return false;
+            };
             *depth -= 1;
+            if *depth == 0 {
+                depths.remove(&self.root);
+            }
+            true
+        });
+        if !had_batch {
+            return Ok(());
         }
 
         // Batches may overlap across snapshot preparers. Each successful
@@ -582,14 +584,22 @@ impl FsStore {
     }
 
     pub(super) fn abort_snapshot_write_batch_impl(&self) {
-        let should_flush = if let Ok(mut depth) = self.snapshot_write_batch_depth.lock() {
-            if *depth > 0 {
-                *depth -= 1;
+        let should_flush = SNAPSHOT_WRITE_BATCH_DEPTHS.with(|depths| {
+            let mut depths = depths.borrow_mut();
+            let Some(depth) = depths.get_mut(&self.root) else {
+                // A preceding flush may have removed the thread-local batch
+                // before its directory sync failed. Preserve abort's
+                // conservative retry of those pending syncs.
+                return true;
+            };
+            *depth -= 1;
+            if *depth == 0 {
+                depths.remove(&self.root);
+                true
+            } else {
+                false
             }
-            *depth == 0
-        } else {
-            false
-        };
+        });
         // Immutable objects staged by a failed snapshot are harmless orphans.
         // Never clear another concurrent preparation's pending directory syncs;
         // when this was the last batch, conservatively make every staged rename

@@ -745,11 +745,12 @@ fn concurrent_snapshots_prepare_outside_the_repository_write_lock() {
     fs::write(temp_dir.path().join("parallel.txt"), "parallel snapshot").unwrap();
     drop(repo);
     let root = temp_dir.path().to_path_buf();
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let worker_count = 6;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(worker_count + 1));
 
     let (results, max_parallel_prepare) =
         with_snapshot_prepare_probe(std::time::Duration::from_millis(150), || {
-            let workers = (0..2)
+            let workers = (0..worker_count)
                 .map(|worker| {
                     let root = root.clone();
                     let barrier = std::sync::Arc::clone(&barrier);
@@ -768,7 +769,7 @@ fn concurrent_snapshots_prepare_outside_the_repository_write_lock() {
         });
 
     for result in results {
-        result.expect("both optimistic snapshots should commit after revalidation");
+        result.expect("every optimistic snapshot should retry head contention and commit");
     }
     assert!(
         max_parallel_prepare >= 2,

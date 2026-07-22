@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Tree building and materialization helpers.
 
-use std::{collections::HashSet, fs, path::Path, time::Instant};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fs,
+    path::Path,
+    time::Instant,
+};
 
 use objects::{
     object::{Blob, ContentHash, Tree, TreeEntry},
@@ -18,11 +23,12 @@ use super::{
 use crate::{
     FsMonitorSettings, WorktreeIndex, WorktreeStatusOptions,
     fsmonitor::ChangeMonitorSession,
+    thread_manifest::ManifestFile,
     worktree_ignore::WorktreeIgnoreMatcher,
     worktree_index::{WorktreeIndexLoadStats, WorktreeIndexSaveStats},
     worktree_walk::{
-        WalkDirectory, WalkEntry, WorktreeWalkPolicy, read_blob_with_hash, validate_symlink_target,
-        walk_worktree,
+        WalkDirectory, WalkEntry, WorktreeWalkPolicy, cache_key, read_blob_with_hash,
+        validate_symlink_target, walk_worktree,
     },
 };
 
@@ -72,6 +78,7 @@ pub struct TreeBuildProfile {
 struct TreeBuildOutput {
     tree: Tree,
     profile: TreeBuildProfile,
+    revalidation_files: BTreeMap<String, ManifestFile>,
 }
 
 impl Repository {
@@ -148,6 +155,26 @@ impl Repository {
         baseline_tree: Option<&Tree>,
         stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
     ) -> Result<(Tree, TreeBuildProfile)> {
+        self.build_tree_profiled_output(dir, baseline_tree, stat_cache)
+            .map(|output| (output.tree, output.profile))
+    }
+
+    pub(crate) fn build_tree_profiled_for_snapshot_against(
+        &self,
+        dir: &Path,
+        baseline_tree: Option<&Tree>,
+        stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
+    ) -> Result<(Tree, TreeBuildProfile, BTreeMap<String, ManifestFile>)> {
+        self.build_tree_profiled_output(dir, baseline_tree, stat_cache)
+            .map(|output| (output.tree, output.profile, output.revalidation_files))
+    }
+
+    fn build_tree_profiled_output(
+        &self,
+        dir: &Path,
+        baseline_tree: Option<&Tree>,
+        stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
+    ) -> Result<TreeBuildOutput> {
         let patterns = self.ignore_patterns()?;
         debug!(pattern_count = patterns.len(), "Starting tree build");
         let start = Instant::now();
@@ -156,10 +183,11 @@ impl Repository {
             self.build_tree_walk(dir, &patterns, nested_exclusions, baseline_tree, stat_cache);
         let elapsed = start.elapsed().as_millis();
         debug!(duration_ms = elapsed, "Tree build complete");
-        tree.map(|output| {
+        tree.map(|mut output| {
             let mut profile = output.profile;
             profile.tree_walk_ms = elapsed;
-            (output.tree, profile)
+            output.profile = profile;
+            output
         })
     }
 
@@ -409,6 +437,7 @@ impl Repository {
 struct TreeBuildState {
     entries: Vec<TreeEntry>,
     profile: TreeBuildProfile,
+    revalidation_files: BTreeMap<String, ManifestFile>,
 }
 
 struct TreeBuildPolicy<'a> {
@@ -502,6 +531,35 @@ impl<'a> TreeBuildPolicy<'a> {
         self.pending_blobs.push((hash, blob.into_content()));
         Ok(())
     }
+
+    fn record_revalidation_file(
+        &self,
+        entry: &WalkEntry<'_>,
+        hash: ContentHash,
+        state: &mut TreeBuildState,
+    ) -> Result<()> {
+        let rel = entry.path.strip_prefix(self.walk_root).map_err(|_| {
+            HeddleError::Config(format!(
+                "worktree entry {} escaped snapshot root {}",
+                entry.path.display(),
+                self.walk_root.display()
+            ))
+        })?;
+        let (size, inode, mtime_ns, ctime_ns, mode) =
+            crate::stat_signature::stat_signature(entry.path, &entry.metadata);
+        state.revalidation_files.insert(
+            cache_key(rel),
+            ManifestFile {
+                hash,
+                size,
+                inode,
+                mtime_ns,
+                ctime_ns,
+                mode,
+            },
+        );
+        Ok(())
+    }
 }
 
 impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
@@ -529,6 +587,7 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
             let (blob, hash) = read_blob_with_hash(entry.path, entry.metadata.len())?;
             let read_elapsed = read_start.elapsed().as_millis();
             if blob.content() == gitlink_placeholder_bytes(&target) {
+                self.record_revalidation_file(&entry, hash, state)?;
                 state.profile.file_count += 1;
                 state.profile.blob_prep_ms += read_elapsed;
                 state
@@ -543,6 +602,7 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
             state.profile.file_count += 1;
             state.profile.blob_prep_ms += read_elapsed;
             state.profile.blob_write_ms += enqueue_elapsed;
+            self.record_revalidation_file(&entry, hash, state)?;
             state.entries.push(TreeEntry::file(
                 entry.name.to_string(),
                 hash,
@@ -560,6 +620,7 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         if let Some(hash) = self.lookup_stat_cache_hash(&entry)
             && self.repo.store.has_blob_locally(&hash)?
         {
+            self.record_revalidation_file(&entry, hash, state)?;
             self.stat_cache_hits += 1;
             state.profile.file_count += 1;
             state.entries.push(TreeEntry::file(
@@ -586,6 +647,7 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         state.profile.file_count += 1;
         state.profile.blob_prep_ms += read_elapsed;
         state.profile.blob_write_ms += enqueue_elapsed;
+        self.record_revalidation_file(&entry, hash, state)?;
         state.entries.push(TreeEntry::file(
             entry.name.to_string(),
             hash,
@@ -622,6 +684,7 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         let enqueue_start = Instant::now();
         self.enqueue_blob(blob, hash)?;
         state.profile.blob_write_ms += enqueue_start.elapsed().as_millis();
+        self.record_revalidation_file(&entry, hash, state)?;
         state
             .entries
             .push(TreeEntry::symlink(entry.name.to_string(), hash)?);
@@ -641,6 +704,7 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         state.profile.tree_write_ms += subtree.profile.tree_write_ms;
         state.profile.file_count += subtree.profile.file_count;
         state.profile.dir_count += subtree.profile.dir_count + 1;
+        state.revalidation_files.extend(subtree.revalidation_files);
         let store_start = Instant::now();
         let hash = self.repo.store.put_tree(&subtree.tree)?;
         state.profile.tree_write_ms += store_start.elapsed().as_millis();
@@ -674,6 +738,7 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         Ok(TreeBuildOutput {
             tree: Tree::from_entries(state.entries),
             profile: state.profile,
+            revalidation_files: state.revalidation_files,
         })
     }
 }
