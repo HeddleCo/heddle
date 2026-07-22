@@ -40,6 +40,57 @@ pub struct SnapshotProfile {
     pub ref_publish_ms: u128,
 }
 
+#[cfg(test)]
+mod contention_retry_tests {
+    use std::collections::BTreeMap;
+
+    use objects::object::ContentHash;
+
+    use super::{MAX_HEAD_CHANGE_ATTEMPTS, SnapshotFingerprintPolicy, retry_after_head_contention};
+    use crate::{
+        stat_signature::stat_signature, thread_manifest::ManifestFile, worktree_walk::WalkEntry,
+    };
+
+    #[test]
+    fn head_contention_retry_has_a_bounded_escape() {
+        let mut attempts = MAX_HEAD_CHANGE_ATTEMPTS - 1;
+        let error = retry_after_head_contention(&mut attempts).unwrap_err();
+        assert!(error.to_string().contains("after 16 attempts"));
+        assert_eq!(attempts, MAX_HEAD_CHANGE_ATTEMPTS);
+    }
+
+    #[test]
+    fn racy_stat_match_forces_content_rehash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tracked");
+        std::fs::write(&path, b"old").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let (size, inode, mtime_ns, ctime_ns, mode) = stat_signature(&path, &metadata);
+        let cached_hash = ContentHash::compute(b"old");
+        let files = BTreeMap::from([(
+            "tracked".to_string(),
+            ManifestFile {
+                hash: cached_hash,
+                size,
+                inode,
+                mtime_ns,
+                ctime_ns,
+                mode,
+            },
+        )]);
+        let cutoff = mtime_ns.min(ctime_ns);
+        let policy = SnapshotFingerprintPolicy::new(dir.path(), &files, cutoff);
+        let entry = WalkEntry {
+            path: &path,
+            name: "tracked",
+            metadata,
+            executable: false,
+        };
+
+        assert_eq!(policy.cached_hash(&entry), None);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SnapshotExecution {
     pub state: State,
@@ -85,6 +136,7 @@ struct SnapshotMutation<'a> {
     prepared_artifact: Option<PreparedSnapshotArtifact>,
     prepared_execution: Option<SnapshotExecution>,
     worktree_revalidation_files: Option<BTreeMap<String, ManifestFile>>,
+    worktree_revalidation_cutoff_ns: Option<i64>,
 }
 
 impl<'a> SnapshotMutation<'a> {
@@ -106,6 +158,7 @@ impl<'a> SnapshotMutation<'a> {
             prepared_artifact: None,
             prepared_execution: None,
             worktree_revalidation_files: None,
+            worktree_revalidation_cutoff_ns: None,
         }
     }
 
@@ -117,6 +170,10 @@ impl<'a> SnapshotMutation<'a> {
     }
 
     fn prepare(&mut self) -> Result<()> {
+        if matches!(&self.source, SnapshotSource::Worktree) {
+            self.worktree_revalidation_cutoff_ns =
+                Some(crate::stat_signature::racy_timestamp_cutoff());
+        }
         self.repo.store.begin_snapshot_write_batch()?;
         #[cfg(test)]
         snapshot_prepare_probe();
@@ -270,9 +327,12 @@ impl SnapshotMutation<'_> {
         let files = self.worktree_revalidation_files.as_ref().ok_or_else(|| {
             HeddleError::Config("snapshot preparation omitted its stat cache".to_string())
         })?;
+        let cutoff_ns = self.worktree_revalidation_cutoff_ns.ok_or_else(|| {
+            HeddleError::Config("snapshot preparation omitted its timestamp cutoff".to_string())
+        })?;
         Ok(self
             .repo
-            .snapshot_worktree_fingerprint(&execution.tree, files)?
+            .snapshot_worktree_fingerprint(&execution.tree, files, cutoff_ns)?
             == execution.tree.hash())
     }
 
@@ -562,11 +622,20 @@ struct SnapshotFingerprintOutput {
 struct SnapshotFingerprintPolicy<'a> {
     walk_root: &'a std::path::Path,
     files: &'a BTreeMap<String, ManifestFile>,
+    racy_cutoff_ns: i64,
 }
 
 impl<'a> SnapshotFingerprintPolicy<'a> {
-    fn new(walk_root: &'a std::path::Path, files: &'a BTreeMap<String, ManifestFile>) -> Self {
-        Self { walk_root, files }
+    fn new(
+        walk_root: &'a std::path::Path,
+        files: &'a BTreeMap<String, ManifestFile>,
+        racy_cutoff_ns: i64,
+    ) -> Self {
+        Self {
+            walk_root,
+            files,
+            racy_cutoff_ns,
+        }
     }
 
     fn cached_hash(&self, entry: &WalkEntry<'_>) -> Option<ContentHash> {
@@ -582,7 +651,9 @@ impl<'a> SnapshotFingerprintPolicy<'a> {
             ctime_ns,
             mode,
         };
-        current.matches(cached).then_some(cached.hash)
+        (current.matches(cached)
+            && !crate::stat_signature::is_racy_timestamp(mtime_ns, ctime_ns, self.racy_cutoff_ns))
+        .then_some(cached.hash)
     }
 }
 
@@ -809,17 +880,34 @@ fn maybe_snapshot_fault(fault: SnapshotFault) {
     });
 }
 
+const MAX_HEAD_CHANGE_ATTEMPTS: usize = 16;
+const MAX_HEAD_CONTENTION_BACKOFF_MS: u64 = 32;
+
+fn retry_after_head_contention(attempts: &mut usize) -> Result<()> {
+    *attempts += 1;
+    if *attempts >= MAX_HEAD_CHANGE_ATTEMPTS {
+        return Err(HeddleError::Conflict(format!(
+            "repository head changed during snapshot preparation after {attempts} attempts"
+        )));
+    }
+    let shift = (*attempts - 1).min(5) as u32;
+    let delay_ms = (1_u64 << shift).min(MAX_HEAD_CONTENTION_BACKOFF_MS);
+    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+    Ok(())
+}
+
 impl Repository {
     fn snapshot_worktree_fingerprint(
         &self,
         tree: &Tree,
         files: &BTreeMap<String, ManifestFile>,
+        racy_cutoff_ns: i64,
     ) -> Result<ContentHash> {
         let patterns = self.ignore_patterns()?;
         let nested_exclusions = self.nested_thread_worktree_exclusions(&self.root)?;
         let ignore_matcher = WorktreeIgnoreMatcher::new(&patterns)
             .with_nested_worktree_exclusions(nested_exclusions);
-        let mut policy = SnapshotFingerprintPolicy::new(&self.root, files);
+        let mut policy = SnapshotFingerprintPolicy::new(&self.root, files, racy_cutoff_ns);
         Ok(
             walk_worktree(self, &self.root, &ignore_matcher, Some(tree), &mut policy)?
                 .tree
@@ -888,6 +976,7 @@ impl Repository {
     ) -> Result<SnapshotExecution> {
         const MAX_WORKTREE_CHANGE_ATTEMPTS: usize = 4;
         let mut worktree_change_attempts = 0;
+        let mut head_change_attempts = 0;
         loop {
             let (head, prev_head) = {
                 let _lock = self
@@ -960,10 +1049,12 @@ impl Repository {
                 .locker()
                 .write()
                 .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
-            if self.merge_state_manager().load()?.is_some()
+            let head_changed = self.merge_state_manager().load()?.is_some()
                 || self.head_ref()? != head
-                || self.head()? != prev_head
-            {
+                || self.head()? != prev_head;
+            if head_changed {
+                drop(_lock);
+                retry_after_head_contention(&mut head_change_attempts)?;
                 continue;
             }
             if !mutation.prepared_worktree_matches()? {
@@ -1050,6 +1141,7 @@ impl Repository {
     ) -> Result<SnapshotExecution> {
         let authoritative_artifact =
             matches!(&source, SnapshotSource::SuppliedTreeWithBlobs { .. });
+        let mut head_change_attempts = 0;
         loop {
             let (head, prev_head) = {
                 let _lock = self
@@ -1078,7 +1170,10 @@ impl Repository {
                 .write()
                 .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
             reject_unresolved_snapshot_merge(self)?;
-            if self.head_ref()? != head || self.head()? != prev_head {
+            let head_changed = self.head_ref()? != head || self.head()? != prev_head;
+            if head_changed {
+                drop(_lock);
+                retry_after_head_contention(&mut head_change_attempts)?;
                 continue;
             }
 
