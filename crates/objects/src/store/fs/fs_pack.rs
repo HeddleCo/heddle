@@ -104,7 +104,15 @@ impl FsStore {
         attachments: Vec<StateAttachment>,
         commit_artifact: Option<SnapshotCommitArtifact>,
     ) -> Result<Option<SnapshotCommitDescriptor>> {
-        let state_was_present = <Self as ObjectStore>::has_state(self, &state.id())?;
+        // A committed snapshot artifact is installed only after exact-once and
+        // isolation validation. Its freshly-authored StateId cannot be a retry
+        // (dedup returns before this callback), so avoid an expected-negative
+        // pack-directory rescan on every native capture.
+        let state_was_present = if commit_artifact.is_some() {
+            false
+        } else {
+            <Self as ObjectStore>::has_state(self, &state.id())?
+        };
         let mut compression = self.compression;
         compression.max_delta_size = 0;
         let mut builder = PackBuilder::new(compression);

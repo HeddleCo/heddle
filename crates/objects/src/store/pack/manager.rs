@@ -21,6 +21,7 @@ use crate::{
 pub struct PackManager {
     packs_dir: PathBuf,
     packs: Vec<CachedPack>,
+    object_locations: HashMap<PackObjectId, usize>,
     snapshot_commits: Vec<SnapshotCommitDescriptor>,
     snapshot_commits_by_state: HashMap<StateId, SnapshotCommitDescriptor>,
     snapshot_commit_index_error: Option<String>,
@@ -92,6 +93,7 @@ impl PackManager {
 
     pub fn new(packs_dir: PathBuf) -> Self {
         let packs = Self::load_packs(&packs_dir).unwrap_or_default();
+        let object_locations = Self::index_object_locations(&packs);
         let ((snapshot_commits, snapshot_commits_by_state), snapshot_commit_index_error) =
             match Self::index_snapshot_commits(&packs) {
                 Ok(index) => (index, None),
@@ -100,6 +102,7 @@ impl PackManager {
         Self {
             packs_dir,
             packs,
+            object_locations,
             snapshot_commits,
             snapshot_commits_by_state,
             snapshot_commit_index_error,
@@ -152,8 +155,10 @@ impl PackManager {
 
     pub fn reload(&mut self) -> Result<()> {
         let packs = Self::load_packs(&self.packs_dir)?;
+        let object_locations = Self::index_object_locations(&packs);
         let (snapshot_commits, snapshot_commits_by_state) = Self::index_snapshot_commits(&packs)?;
         self.packs = packs;
+        self.object_locations = object_locations;
         self.snapshot_commits = snapshot_commits;
         self.snapshot_commits_by_state = snapshot_commits_by_state;
         self.snapshot_commit_index_error = None;
@@ -177,6 +182,18 @@ impl PackManager {
         Ok((descriptors, by_state))
     }
 
+    fn index_object_locations(packs: &[CachedPack]) -> HashMap<PackObjectId, usize> {
+        let mut locations = HashMap::new();
+        for (pack_index, pack) in packs.iter().enumerate() {
+            for id in pack.reader.list_ids() {
+                // Preserve the historical first-pack-wins lookup behavior for
+                // duplicate immutable objects.
+                locations.entry(id).or_insert(pack_index);
+            }
+        }
+        locations
+    }
+
     pub(crate) fn add_pack(&mut self, pack_path: PathBuf, index_path: PathBuf) -> Result<()> {
         if self.packs.iter().any(|pack| pack.pack_path == pack_path) {
             return Ok(());
@@ -190,6 +207,10 @@ impl PackManager {
             self.snapshot_commits_by_state
                 .insert(descriptor.artifact.state, descriptor.clone());
             self.snapshot_commits.push(descriptor);
+        }
+        let pack_index = self.packs.len();
+        for id in cached.reader.list_ids() {
+            self.object_locations.entry(id).or_insert(pack_index);
         }
         self.packs.push(cached);
         Ok(())
@@ -224,15 +245,15 @@ impl PackManager {
     }
 
     pub fn get_object(&self, id: &PackObjectId) -> Result<Option<(ObjectType, Vec<u8>)>> {
-        for pack in &self.packs {
-            if let Some((obj_type, data)) = pack.reader.get_object(id)? {
-                trace!("Found object in pack");
-                return Ok(Some((obj_type, data)));
-            }
+        let Some(pack_index) = self.object_locations.get(id).copied() else {
+            trace!("Object not found in any pack");
+            return Ok(None);
+        };
+        let object = self.packs[pack_index].reader.get_object(id)?;
+        if object.is_some() {
+            trace!("Found object in pack");
         }
-
-        trace!("Object not found in any pack");
-        Ok(None)
+        Ok(object)
     }
 
     #[instrument(skip(self), fields(hash = %hash.short()))]
@@ -249,34 +270,30 @@ impl PackManager {
         hash: &ContentHash,
     ) -> Result<Option<(ObjectType, bytes::Bytes)>> {
         let id = PackObjectId::Hash(*hash);
-        for pack in &self.packs {
-            if let Some((obj_type, data)) = pack.reader.get_object_bytes(&id)? {
-                return Ok(Some((obj_type, data)));
-            }
-        }
-        Ok(None)
+        let Some(pack_index) = self.object_locations.get(&id).copied() else {
+            return Ok(None);
+        };
+        self.packs[pack_index].reader.get_object_bytes(&id)
     }
 
     pub fn has_object(&self, hash: &ContentHash) -> bool {
-        self.packs
-            .iter()
-            .any(|pack| pack.reader.has_object(&PackObjectId::Hash(*hash)))
+        self.object_locations
+            .contains_key(&PackObjectId::Hash(*hash))
     }
 
     /// Look up the uncompressed size of `hash` across all loaded
     /// packs without decompressing the payload. Returns `Ok(None)`
     /// when the object isn't in any loaded pack.
     pub fn get_hashed_object_size(&self, hash: &ContentHash) -> Result<Option<u64>> {
-        for pack in &self.packs {
-            if let Some(size) = pack.reader.get_hashed_object_size(hash)? {
-                return Ok(Some(size));
-            }
-        }
-        Ok(None)
+        let id = PackObjectId::Hash(*hash);
+        let Some(pack_index) = self.object_locations.get(&id).copied() else {
+            return Ok(None);
+        };
+        self.packs[pack_index].reader.get_hashed_object_size(hash)
     }
 
     pub fn has_object_id(&self, id: &PackObjectId) -> bool {
-        self.packs.iter().any(|pack| pack.reader.has_object(id))
+        self.object_locations.contains_key(id)
     }
 
     /// List all object hashes across all packs.
@@ -393,5 +410,29 @@ mod tests {
             128,
             "lookup must not reload the pack set"
         );
+    }
+
+    #[test]
+    fn object_locator_tracks_incremental_and_reloaded_packs() {
+        let temp = TempDir::new().unwrap();
+        let mut manager = PackManager::new(temp.path().to_path_buf());
+        for ordinal in 0..8 {
+            let (pack_path, index_path, _) = write_snapshot_pack(temp.path(), ordinal);
+            manager.add_pack(pack_path, index_path).unwrap();
+        }
+
+        let ids = manager.list_all_ids().unwrap();
+        assert_eq!(ids.len(), 8);
+        for id in &ids {
+            assert!(manager.has_object_id(id));
+            assert!(manager.get_object(id).unwrap().is_some());
+        }
+
+        let reloaded = PackManager::new(temp.path().to_path_buf());
+        assert_eq!(reloaded.pack_count(), 8);
+        for id in &ids {
+            assert!(reloaded.has_object_id(id));
+            assert!(reloaded.get_object(id).unwrap().is_some());
+        }
     }
 }
