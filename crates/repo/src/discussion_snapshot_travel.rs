@@ -193,7 +193,7 @@ mod tests {
 
     use objects::object::{
         Attribution, Discussion, DiscussionTurn, Principal, StateAttachment, StateId, SymbolAnchor,
-        VisibilityTier,
+        TreeEntry, VisibilityTier,
     };
     use tempfile::TempDir;
 
@@ -293,6 +293,51 @@ mod tests {
         let persisted = read_discussions(&repo, &second);
         assert!(persisted.discussions[0].body_changed_since_open);
         assert!(!persisted.discussions[0].orphaned);
+    }
+
+    #[test]
+    fn packed_snapshot_preserves_semantic_index_and_discussions() {
+        let (temp, repo) = create_test_repo();
+        fs::write(
+            temp.path().join("src.rs"),
+            "fn foo() {\n    let x = 1;\n}\n",
+        )
+        .unwrap();
+        let first = repo
+            .snapshot_with_attribution(
+                Some("first".to_string()),
+                None,
+                Attribution::human(Principal::new("Alice", "alice@example.com")),
+            )
+            .unwrap();
+        attach_discussions_to_main_head(
+            &repo,
+            &first,
+            vec![discussion("d1", first.id(), "src.rs", "foo")],
+        );
+
+        let blob = Blob::from_slice(b"fn foo() {\n    let x = 2;\n}\n");
+        let tree = Tree::from_entries(vec![TreeEntry::file("src.rs", blob.hash(), false).unwrap()]);
+        let second = repo
+            .snapshot_tree_with_blobs_with_attribution_profiled(
+                tree,
+                vec![blob],
+                Some("packed second".to_string()),
+                None,
+                Attribution::human(Principal::new("Alice", "alice@example.com")),
+            )
+            .unwrap()
+            .state;
+
+        assert!(
+            repo.attached_semantic_index(&second.id())
+                .unwrap()
+                .is_some(),
+            "packed capture must persist its eager semantic-index attachment"
+        );
+        let discussions = read_discussions(&repo, &second);
+        assert_eq!(discussions.discussions.len(), 1);
+        assert!(discussions.discussions[0].body_changed_since_open);
     }
 
     #[test]
