@@ -72,6 +72,7 @@ struct BuiltEntry {
 /// prune-without-reparse invariant.
 pub struct SemanticIndexBuilder<'store, S: ObjectStore> {
     store: &'store S,
+    source_blobs: Option<&'store HashMap<ContentHash, &'store [u8]>>,
     extractor_version: u32,
     /// Per-build memo keyed by `(source blob hash, language)` — a blob that
     /// appears at several paths is parsed once, but byte-identical blobs at
@@ -92,11 +93,23 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
     pub fn new(store: &'store S, extractor_version: u32) -> Self {
         Self {
             store,
+            source_blobs: None,
             extractor_version,
             file_memo: HashMap::new(),
             grammars: BTreeMap::new(),
             pending: Vec::new(),
             parse_count: 0,
+        }
+    }
+
+    pub(crate) fn with_source_blobs(
+        store: &'store S,
+        extractor_version: u32,
+        source_blobs: &'store HashMap<ContentHash, &'store [u8]>,
+    ) -> Self {
+        Self {
+            source_blobs: Some(source_blobs),
+            ..Self::new(store, extractor_version)
         }
     }
 
@@ -307,7 +320,14 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         if language.parser_handle().is_none() {
             return Ok(opaque);
         }
-        let Some(blob) = self.store.get_blob(&source_hash)? else {
+        let blob = match self
+            .source_blobs
+            .and_then(|blobs| blobs.get(&source_hash).copied())
+        {
+            Some(bytes) => Some(objects::object::Blob::from(bytes.to_vec())),
+            None => self.store.get_blob(&source_hash)?,
+        };
+        let Some(blob) = blob else {
             return Ok(opaque);
         };
         if blob.size() > SEMANTIC_FILE_BUDGET_BYTES {
@@ -394,6 +414,15 @@ impl Repository {
                 return Ok(None);
             }
         };
+        self.compute_and_persist_semantic_index_for_tree(prior, &tree, None)
+    }
+
+    pub(crate) fn compute_and_persist_semantic_index_for_tree(
+        &self,
+        prior: Option<&State>,
+        tree: &Tree,
+        source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
+    ) -> Result<Option<ContentHash>> {
         let parent = match prior.map(|p| self.materialize_parent_index(p)) {
             Some(Ok(Some(parent))) => Some(parent),
             Some(Ok(None)) | None => None,
@@ -402,8 +431,15 @@ impl Repository {
                 None
             }
         };
-        let mut builder = SemanticIndexBuilder::new(self.store(), EXTRACTOR_VERSION);
-        match builder.build_root(&tree, parent.as_ref()) {
+        let mut builder = match source_blobs {
+            Some(source_blobs) => SemanticIndexBuilder::with_source_blobs(
+                self.store(),
+                EXTRACTOR_VERSION,
+                source_blobs,
+            ),
+            None => SemanticIndexBuilder::new(self.store(), EXTRACTOR_VERSION),
+        };
+        match builder.build_root(tree, parent.as_ref()) {
             Ok((_, root_hash)) => Ok(Some(root_hash)),
             Err(err) => {
                 warn!(error = %err, "semantic index: build failed; skipping");

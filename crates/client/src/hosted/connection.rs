@@ -51,9 +51,15 @@ impl Drop for HostedConnection {
 }
 
 fn transport_config() -> QuicTransportConfig {
+    // Match Weft's WAN-oriented profile: enough BDP for a 1 Gbit/s, ~32 ms
+    // path while keeping per-stream memory well below the 16 MiB experiment.
+    const STREAM_RECEIVE_WINDOW: u32 = 4 * 1024 * 1024;
+    const CONNECTION_RECEIVE_WINDOW: u32 = 8 * STREAM_RECEIVE_WINDOW;
     let mut acknowledgements = AckFrequencyConfig::default();
     acknowledgements.ack_eliciting_threshold(50u32.into());
     QuicTransportConfig::builder()
+        .stream_receive_window(STREAM_RECEIVE_WINDOW.into())
+        .receive_window(CONNECTION_RECEIVE_WINDOW.into())
         .ack_frequency_config(Some(acknowledgements))
         .build()
 }

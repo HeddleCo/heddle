@@ -27,6 +27,7 @@ where
         &self,
         parent_state: &State,
         new_tree: &Tree,
+        source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
     ) -> Result<Option<ContentHash>> {
         let Some(parent_discussions_hash) = self
             .latest_state_attachment(&parent_state.id(), crate::StateAttachmentKind::Discussions)?
@@ -55,7 +56,7 @@ where
             return Ok(Some(parent_discussions_hash));
         }
 
-        let new_files = self.collect_tree_file_bytes(new_tree)?;
+        let new_files = self.collect_tree_file_bytes(new_tree, source_blobs)?;
         let baseline_files = self.collect_discussion_baseline_file_bytes(&open_discussions)?;
         let mut updates = Vec::new();
         for (opened_against_state, discussions) in
@@ -88,9 +89,13 @@ where
         Ok(Some(hash))
     }
 
-    fn collect_tree_file_bytes(&self, tree: &Tree) -> Result<HashMap<String, Vec<u8>>> {
+    fn collect_tree_file_bytes(
+        &self,
+        tree: &Tree,
+        source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
+    ) -> Result<HashMap<String, Vec<u8>>> {
         let mut files = HashMap::new();
-        self.collect_tree_file_bytes_inner(tree, PathBuf::new(), &mut files)?;
+        self.collect_tree_file_bytes_inner(tree, PathBuf::new(), source_blobs, &mut files)?;
         Ok(files)
     }
 
@@ -113,7 +118,7 @@ where
                 .ok_or_else(|| missing_object("tree", baseline_state.tree))?;
             baselines.insert(
                 discussion.opened_against_state,
-                self.collect_tree_file_bytes(&baseline_tree)?,
+                self.collect_tree_file_bytes(&baseline_tree, None)?,
             );
         }
         Ok(baselines)
@@ -123,6 +128,7 @@ where
         &self,
         tree: &Tree,
         prefix: PathBuf,
+        source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
         files: &mut HashMap<String, Vec<u8>>,
     ) -> Result<()> {
         for entry in tree.entries() {
@@ -135,11 +141,16 @@ where
                     let Some(hash) = entry.blob_hash() else {
                         continue;
                     };
-                    let blob = self
-                        .store()
-                        .get_blob(&hash)?
-                        .ok_or_else(|| missing_object("blob", hash))?;
-                    files.insert(path.to_string(), blob.content().to_vec());
+                    let bytes = match source_blobs.and_then(|blobs| blobs.get(&hash).copied()) {
+                        Some(bytes) => bytes.to_vec(),
+                        None => self
+                            .store()
+                            .get_blob(&hash)?
+                            .ok_or_else(|| missing_object("blob", hash))?
+                            .content()
+                            .to_vec(),
+                    };
+                    files.insert(path.to_string(), bytes);
                 }
                 EntryType::Tree => {
                     let Some(hash) = entry.tree_hash() else {
@@ -149,7 +160,7 @@ where
                         .store()
                         .get_tree(&hash)?
                         .ok_or_else(|| missing_object("tree", hash))?;
-                    self.collect_tree_file_bytes_inner(&subtree, path, files)?;
+                    self.collect_tree_file_bytes_inner(&subtree, path, source_blobs, files)?;
                 }
                 EntryType::Symlink => {}
                 EntryType::Gitlink => {}

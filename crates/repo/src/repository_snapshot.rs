@@ -294,6 +294,15 @@ impl SnapshotMutation<'_> {
 
         #[cfg(feature = "tree-sitter-symbols")]
         {
+            let source_blobs =
+                supplied_blobs
+                    .as_ref()
+                    .map(|blobs: &Vec<(ContentHash, Vec<u8>)>| {
+                        blobs
+                            .iter()
+                            .map(|(hash, bytes)| (*hash, bytes.as_slice()))
+                            .collect::<std::collections::HashMap<_, _>>()
+                    });
             let prior_state = match self.prev_head {
                 Some(id) => self.repo.store.get_state(&id).ok().flatten(),
                 None => None,
@@ -311,10 +320,11 @@ impl SnapshotMutation<'_> {
 
             // Eager semantic index: parse only changed blobs, reusing the
             // parent index for unchanged subtrees. Never fails the capture.
-            match self
-                .repo
-                .compute_and_persist_semantic_index(prior_state.as_ref(), &state)
-            {
+            match self.repo.compute_and_persist_semantic_index_for_tree(
+                prior_state.as_ref(),
+                &tree,
+                source_blobs.as_ref(),
+            ) {
                 Ok(Some(hash)) => semantic_index = Some(hash),
                 Ok(None) => {}
                 Err(err) => {
@@ -323,10 +333,11 @@ impl SnapshotMutation<'_> {
             }
 
             if let Some(parent_state) = prior_state.as_ref() {
-                match self
-                    .repo
-                    .compute_and_persist_discussion_anchor_travel(parent_state, &tree)
-                {
+                match self.repo.compute_and_persist_discussion_anchor_travel(
+                    parent_state,
+                    &tree,
+                    source_blobs.as_ref(),
+                ) {
                     Ok(Some(hash)) => discussions = Some(hash),
                     Ok(None) => {}
                     Err(err) => {
