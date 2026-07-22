@@ -559,7 +559,7 @@ impl FsStore {
     }
 
     pub(super) fn flush_snapshot_write_batch_impl(&self) -> Result<()> {
-        let should_flush = {
+        {
             let mut depth = self.snapshot_write_batch_depth.lock().map_err(|_| {
                 crate::store::HeddleError::Config(
                     "Failed to acquire snapshot batch lock".to_string(),
@@ -569,22 +569,33 @@ impl FsStore {
                 return Ok(());
             }
             *depth -= 1;
-            *depth == 0
-        };
-
-        if should_flush {
-            let _ = self.flush_pending_directory_syncs()?;
         }
 
+        // Batches may overlap across snapshot preparers. Each successful
+        // preparer must establish durability for its own writes before it can
+        // publish an oplog edge, even while another batch remains active.
+        // Draining the shared set is safe: entries taken by another flush are
+        // already durable, and every write from this batch was queued before
+        // this call acquired the set.
+        let _ = self.flush_pending_directory_syncs()?;
         Ok(())
     }
 
     pub(super) fn abort_snapshot_write_batch_impl(&self) {
-        if let Ok(mut depth) = self.snapshot_write_batch_depth.lock() {
-            *depth = 0;
-        }
-        if let Ok(mut pending) = self.pending_directory_syncs.lock() {
-            pending.clear();
+        let should_flush = if let Ok(mut depth) = self.snapshot_write_batch_depth.lock() {
+            if *depth > 0 {
+                *depth -= 1;
+            }
+            *depth == 0
+        } else {
+            false
+        };
+        // Immutable objects staged by a failed snapshot are harmless orphans.
+        // Never clear another concurrent preparation's pending directory syncs;
+        // when this was the last batch, conservatively make every staged rename
+        // durable before returning.
+        if should_flush {
+            let _ = self.flush_pending_directory_syncs();
         }
     }
 

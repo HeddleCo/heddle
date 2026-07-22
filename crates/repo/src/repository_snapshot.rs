@@ -46,12 +46,14 @@ pub struct SnapshotExecution {
     pub profile: SnapshotProfile,
 }
 
+#[derive(Clone)]
 enum SnapshotSource {
     Worktree { fingerprint: ContentHash },
     SuppliedTree(Tree),
     SuppliedTreeWithBlobs { tree: Tree, blobs: Vec<Blob> },
 }
 
+#[derive(Clone)]
 struct SnapshotDetails {
     intent: Option<String>,
     confidence: Option<f32>,
@@ -80,6 +82,7 @@ struct SnapshotMutation<'a> {
     /// snapshot never leaves its auto-applied tier behind.
     staged_visibility_rewind: Option<(StateId, Option<Vec<u8>>)>,
     prepared_artifact: Option<PreparedSnapshotArtifact>,
+    prepared_execution: Option<SnapshotExecution>,
 }
 
 impl<'a> SnapshotMutation<'a> {
@@ -100,6 +103,7 @@ impl<'a> SnapshotMutation<'a> {
             transaction_id,
             staged_visibility_rewind: None,
             prepared_artifact: None,
+            prepared_execution: None,
         }
     }
 
@@ -108,6 +112,25 @@ impl<'a> SnapshotMutation<'a> {
             Head::Attached { thread } => Some(thread.to_string()),
             Head::Detached { .. } => None,
         }
+    }
+
+    fn prepare(&mut self) -> Result<()> {
+        self.repo.store.begin_snapshot_write_batch()?;
+        #[cfg(test)]
+        snapshot_prepare_probe();
+        let execution = match self.stage_snapshot_objects() {
+            Ok(execution) => execution,
+            Err(error) => {
+                self.repo.store.abort_snapshot_write_batch();
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.repo.store.flush_snapshot_write_batch() {
+            self.repo.store.abort_snapshot_write_batch();
+            return Err(error);
+        }
+        self.prepared_execution = Some(execution);
+        Ok(())
     }
 }
 
@@ -134,8 +157,9 @@ impl AtomicMutation for SnapshotMutation<'_> {
     }
 
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<Self::Output>> {
-        self.repo.store.begin_snapshot_write_batch()?;
-        let execution = self.stage_snapshot_objects()?;
+        let execution = self.prepared_execution.clone().ok_or_else(|| {
+            HeddleError::Config("snapshot mutation reached commit before prepare".to_string())
+        })?;
 
         objects::fault_inject::maybe_panic_at("snapshot_after_stage_before_atomic_commit");
         #[cfg(test)]
@@ -168,7 +192,6 @@ impl AtomicMutation for SnapshotMutation<'_> {
     }
 
     fn rewind(&mut self, _ledger: &RewindLedger) -> Result<()> {
-        self.repo.store.abort_snapshot_write_batch();
         // Roll the folded default-visibility binding back to its before-image so
         // a rewound snapshot leaves no orphaned auto-applied tier (heddle#317).
         // Idempotent: `take` makes a second rewind a no-op, and
@@ -410,8 +433,6 @@ impl SnapshotMutation<'_> {
                 attachments,
             });
         }
-        self.repo.store.flush_snapshot_write_batch()?;
-
         Ok(SnapshotExecution {
             state,
             tree,
@@ -802,92 +823,121 @@ impl Repository {
         attribution: Attribution,
         lineage: Vec<ChangeLineage>,
     ) -> Result<SnapshotExecution> {
-        let _lock = self
-            .locker()
-            .write()
-            .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+        const MAX_PREPARE_ATTEMPTS: usize = 4;
+        for attempt in 0..MAX_PREPARE_ATTEMPTS {
+            let (head, prev_head, fingerprint) = {
+                let _lock = self
+                    .locker()
+                    .write()
+                    .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
 
-        if let Some(merge_state) = self.merge_state_manager().load()? {
-            let unresolved: Vec<_> = merge_state
-                .conflicts
-                .iter()
-                .filter(|path| !merge_state.resolved.contains(*path))
-                .collect();
-            if !unresolved.is_empty() {
-                return Err(HeddleError::Conflict(format!(
-                    "Unresolved conflicts: {}",
-                    unresolved
-                        .into_iter()
-                        .map(|path| path.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            }
-            let theirs = merge_state.theirs;
-            let base = merge_state.base;
-            let intent = intent.or_else(|| Some(format!("Merge {}", theirs.short())));
-            let state = self.snapshot_merge_with_attribution_and_lineage(
-                &theirs,
-                SnapshotDetails {
-                    intent,
-                    confidence,
-                    attribution,
-                    lineage,
-                },
-                base,
-                // We hold the snapshot write lock here; fold the default-
-                // visibility binding into the merge's batch (heddle#317).
-                true,
-                None,
-            )?;
-            self.merge_state_manager().finish()?;
-            let tree = self
-                .store
-                .get_tree(&state.tree)?
-                .ok_or_else(|| HeddleError::NotFound("merge snapshot tree missing".to_string()))?;
-            return Ok(SnapshotExecution {
-                state,
-                tree,
-                profile: SnapshotProfile::default(),
-            });
-        }
+                if let Some(merge_state) = self.merge_state_manager().load()? {
+                    let unresolved: Vec<_> = merge_state
+                        .conflicts
+                        .iter()
+                        .filter(|path| !merge_state.resolved.contains(*path))
+                        .collect();
+                    if !unresolved.is_empty() {
+                        return Err(HeddleError::Conflict(format!(
+                            "Unresolved conflicts: {}",
+                            unresolved
+                                .into_iter()
+                                .map(|path| path.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )));
+                    }
+                    let theirs = merge_state.theirs;
+                    let base = merge_state.base;
+                    let merge_intent = intent
+                        .clone()
+                        .or_else(|| Some(format!("Merge {}", theirs.short())));
+                    let state = self.snapshot_merge_with_attribution_and_lineage(
+                        &theirs,
+                        SnapshotDetails {
+                            intent: merge_intent,
+                            confidence,
+                            attribution: attribution.clone(),
+                            lineage: lineage.clone(),
+                        },
+                        base,
+                        true,
+                        None,
+                    )?;
+                    self.merge_state_manager().finish()?;
+                    let tree = self.store.get_tree(&state.tree)?.ok_or_else(|| {
+                        HeddleError::NotFound("merge snapshot tree missing".to_string())
+                    })?;
+                    return Ok(SnapshotExecution {
+                        state,
+                        tree,
+                        profile: SnapshotProfile::default(),
+                    });
+                }
 
-        let head = self.head_ref()?;
-        let prev_head = self.head()?;
-        let fingerprint = self.snapshot_worktree_fingerprint()?;
-        #[cfg(test)]
-        snapshot_prepare_probe();
-        let atomic_execute_started = std::time::Instant::now();
-        let mut execution = execute(
-            self,
-            SnapshotMutation::new(
+                (
+                    self.head_ref()?,
+                    self.head()?,
+                    self.snapshot_worktree_fingerprint()?,
+                )
+            };
+
+            let mut mutation = SnapshotMutation::new(
                 self,
                 SnapshotSource::Worktree { fingerprint },
                 SnapshotDetails {
-                    intent,
+                    intent: intent.clone(),
                     confidence,
-                    attribution,
-                    lineage,
+                    attribution: attribution.clone(),
+                    lineage: lineage.clone(),
                 },
                 prev_head,
                 head.clone(),
-            ),
-        )?;
-        execution.profile.atomic_execute_ms = atomic_execute_started.elapsed().as_millis();
-        let committed_tip = self.oplog().head_id()?;
+            );
+            mutation.prepare()?;
+            if self.snapshot_worktree_fingerprint()? != fingerprint {
+                if attempt + 1 == MAX_PREPARE_ATTEMPTS {
+                    return Err(HeddleError::Conflict(
+                        "worktree changed during snapshot preparation".to_string(),
+                    ));
+                }
+                continue;
+            }
 
-        objects::fault_inject::maybe_panic_at("snapshot_after_atomic_commit_before_ref_publish");
-        #[cfg(test)]
-        maybe_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish);
+            let _lock = self
+                .locker()
+                .write()
+                .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+            if self.merge_state_manager().load()?.is_some()
+                || self.head_ref()? != head
+                || self.head()? != prev_head
+            {
+                if attempt + 1 == MAX_PREPARE_ATTEMPTS {
+                    return Err(HeddleError::Conflict(
+                        "repository head changed during snapshot preparation".to_string(),
+                    ));
+                }
+                continue;
+            }
 
-        // Phase 5 is a materialized view, not the commit point: force the
-        // success-path ref publish through the same per-read reconciliation that
-        // recovers a crash after the atomic oplog append.
-        let ref_publish_started = std::time::Instant::now();
-        reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
-        execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
-        refresh_materialized_thread_manifest(self, &head, &execution.state, &execution.tree);
-        Ok(execution)
+            let atomic_execute_started = std::time::Instant::now();
+            let mut execution = execute(self, mutation)?;
+            execution.profile.atomic_execute_ms = atomic_execute_started.elapsed().as_millis();
+            let committed_tip = self.oplog().head_id()?;
+
+            objects::fault_inject::maybe_panic_at(
+                "snapshot_after_atomic_commit_before_ref_publish",
+            );
+            #[cfg(test)]
+            maybe_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish);
+
+            let ref_publish_started = std::time::Instant::now();
+            reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
+            execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
+            refresh_materialized_thread_manifest(self, &head, &execution.state, &execution.tree);
+            return Ok(execution);
+        }
+        unreachable!("bounded snapshot preparation loop returns on its final attempt")
     }
 
     /// Create a snapshot from a caller-supplied tree instead of walking
@@ -943,79 +993,85 @@ impl Repository {
         confidence: Option<f32>,
         attribution: Attribution,
     ) -> Result<SnapshotExecution> {
-        let _lock = self
-            .locker()
-            .write()
-            .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
-
-        if let Some(merge_state) = self.merge_state_manager().load()? {
-            let unresolved: Vec<_> = merge_state
-                .conflicts
-                .iter()
-                .filter(|path| !merge_state.resolved.contains(*path))
-                .collect();
-            if !unresolved.is_empty() {
-                return Err(HeddleError::Conflict(format!(
-                    "Unresolved conflicts: {}",
-                    unresolved
-                        .into_iter()
-                        .map(|path| path.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            }
-        }
-
         let authoritative_artifact =
             matches!(&source, SnapshotSource::SuppliedTreeWithBlobs { .. });
-        let head = self.head_ref()?;
-        let prev_head = self.head()?;
-        let atomic_execute_started = std::time::Instant::now();
-        let mutation = SnapshotMutation::new(
-            self,
-            source,
-            SnapshotDetails {
-                intent,
-                confidence,
-                attribution,
-                lineage: Vec::new(),
-            },
-            prev_head,
-            head.clone(),
-        );
-        let (mut execution, committed_tip) = if authoritative_artifact {
-            let committed =
-                execute_reconstructible(self, mutation, |mutation, base_head_id, records| {
-                    mutation.install_prepared_artifact(base_head_id, records)
-                })?;
-            let committed_tip = committed.committed_tip;
-            let mut output = committed.output;
-            if let Some((descriptor, artifact_write_ms)) = committed.artifact {
-                output.profile.blob_write_ms = artifact_write_ms;
-                debug!(
-                    pack = %descriptor.pack_name,
-                    path = %descriptor.pack_path.display(),
-                    objects = descriptor.object_ids.len(),
-                    state = %descriptor.artifact.state,
-                    "structured snapshot committed through authoritative pack artifact"
-                );
+        const MAX_PREPARE_ATTEMPTS: usize = 4;
+        for attempt in 0..MAX_PREPARE_ATTEMPTS {
+            let (head, prev_head) = {
+                let _lock = self
+                    .locker()
+                    .write()
+                    .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+                reject_unresolved_snapshot_merge(self)?;
+                (self.head_ref()?, self.head()?)
+            };
+            let mut mutation = SnapshotMutation::new(
+                self,
+                source.clone(),
+                SnapshotDetails {
+                    intent: intent.clone(),
+                    confidence,
+                    attribution: attribution.clone(),
+                    lineage: Vec::new(),
+                },
+                prev_head,
+                head.clone(),
+            );
+            mutation.prepare()?;
+
+            let _lock = self
+                .locker()
+                .write()
+                .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+            reject_unresolved_snapshot_merge(self)?;
+            if self.head_ref()? != head || self.head()? != prev_head {
+                if attempt + 1 == MAX_PREPARE_ATTEMPTS {
+                    return Err(HeddleError::Conflict(
+                        "repository head changed during structured snapshot preparation"
+                            .to_string(),
+                    ));
+                }
+                continue;
             }
-            (output, committed_tip)
-        } else {
-            let output = execute(self, mutation)?;
-            let committed_tip = self.oplog().head_id()?;
-            (output, committed_tip)
-        };
-        execution.profile.atomic_execute_ms = atomic_execute_started.elapsed().as_millis();
 
-        objects::fault_inject::maybe_panic_at("snapshot_after_atomic_commit_before_ref_publish");
-        #[cfg(test)]
-        maybe_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish);
+            let atomic_execute_started = std::time::Instant::now();
+            let (mut execution, committed_tip) = if authoritative_artifact {
+                let committed =
+                    execute_reconstructible(self, mutation, |mutation, base_head_id, records| {
+                        mutation.install_prepared_artifact(base_head_id, records)
+                    })?;
+                let committed_tip = committed.committed_tip;
+                let mut output = committed.output;
+                if let Some((descriptor, artifact_write_ms)) = committed.artifact {
+                    output.profile.blob_write_ms = artifact_write_ms;
+                    debug!(
+                        pack = %descriptor.pack_name,
+                        path = %descriptor.pack_path.display(),
+                        objects = descriptor.object_ids.len(),
+                        state = %descriptor.artifact.state,
+                        "structured snapshot committed through authoritative pack artifact"
+                    );
+                }
+                (output, committed_tip)
+            } else {
+                let output = execute(self, mutation)?;
+                let committed_tip = self.oplog().head_id()?;
+                (output, committed_tip)
+            };
+            execution.profile.atomic_execute_ms = atomic_execute_started.elapsed().as_millis();
 
-        let ref_publish_started = std::time::Instant::now();
-        reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
-        execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
-        Ok(execution)
+            objects::fault_inject::maybe_panic_at(
+                "snapshot_after_atomic_commit_before_ref_publish",
+            );
+            #[cfg(test)]
+            maybe_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish);
+
+            let ref_publish_started = std::time::Instant::now();
+            reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
+            execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
+            return Ok(execution);
+        }
+        unreachable!("bounded structured snapshot loop returns on its final attempt")
     }
 
     /// Create a merge state with two parents.
@@ -1207,6 +1263,26 @@ fn snapshot_profile_from_tree(
         state_ref_oplog_ms,
         atomic_execute_ms: 0,
         ref_publish_ms: 0,
+    }
+}
+
+fn reject_unresolved_snapshot_merge(repo: &Repository) -> Result<()> {
+    let Some(merge_state) = repo.merge_state_manager().load()? else {
+        return Ok(());
+    };
+    let unresolved = merge_state
+        .conflicts
+        .iter()
+        .filter(|path| !merge_state.resolved.contains(*path))
+        .map(|path| path.as_str())
+        .collect::<Vec<_>>();
+    if unresolved.is_empty() {
+        Ok(())
+    } else {
+        Err(HeddleError::Conflict(format!(
+            "Unresolved conflicts: {}",
+            unresolved.join(", ")
+        )))
     }
 }
 

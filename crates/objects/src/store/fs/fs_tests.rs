@@ -86,6 +86,23 @@ fn test_snapshot_write_batch_defers_directory_sync_until_flush() {
 }
 
 #[test]
+fn overlapping_snapshot_batch_flush_is_independently_durable() {
+    let (_temp, store) = create_test_store();
+
+    store.begin_snapshot_write_batch().unwrap();
+    store.begin_snapshot_write_batch().unwrap();
+    store.put_blob(&Blob::from("overlapping batch")).unwrap();
+    assert_eq!(store.pending_directory_sync_count(), 1);
+
+    // One preparer can proceed to its commit section without waiting for the
+    // other preparer to close its batch.
+    store.flush_snapshot_write_batch().unwrap();
+    assert_eq!(store.pending_directory_sync_count(), 0);
+
+    store.abort_snapshot_write_batch();
+}
+
+#[test]
 fn test_abort_snapshot_write_batch_clears_pending_directory_syncs() {
     let (_temp, store) = create_test_store();
 
