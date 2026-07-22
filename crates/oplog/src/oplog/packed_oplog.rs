@@ -6,6 +6,8 @@
 //! mutation; normal loads require the latest single-file container with an EOF
 //! index footer.
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, HashMap},
@@ -114,6 +116,54 @@ pub(crate) struct PackedOpLogIndex {
     path: PathBuf,
     header: PackedHeader,
     footer: PackedFooter,
+    file_stamp: Option<PackedFileStamp>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PackedFileStamp {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    len: u64,
+    #[cfg(unix)]
+    modified_seconds: i64,
+    #[cfg(unix)]
+    modified_nanoseconds: i64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+}
+
+fn packed_file_stamp(file: &File) -> Result<Option<PackedFileStamp>> {
+    #[cfg(unix)]
+    {
+        let metadata = file.metadata()?;
+        Ok(Some(PackedFileStamp {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            len: metadata.len(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            changed_seconds: metadata.ctime(),
+            changed_nanoseconds: metadata.ctime_nsec(),
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        Ok(None)
+    }
+}
+
+fn read_packed_file(path: &Path) -> Result<(Vec<u8>, Option<PackedFileStamp>)> {
+    let mut file = File::open(path)?;
+    let file_stamp = packed_file_stamp(&file)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok((bytes, file_stamp))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -314,13 +364,13 @@ impl PackedOpLogIndex {
     }
 
     fn open_v4(path: &Path) -> Result<Self> {
-        let bytes = std::fs::read(path)?;
-        match Self::open_v4_bytes(path, &bytes) {
+        let (bytes, file_stamp) = read_packed_file(path)?;
+        match Self::open_v4_bytes(path, &bytes, file_stamp) {
             Ok(index) => Ok(index),
             Err(err) => {
                 if recover_truncated_latest(path, &bytes, &err)?.is_some() {
-                    let bytes = std::fs::read(path)?;
-                    Self::open_v4_bytes(path, &bytes)
+                    let (bytes, file_stamp) = read_packed_file(path)?;
+                    Self::open_v4_bytes(path, &bytes, file_stamp)
                 } else {
                     Err(err)
                 }
@@ -328,13 +378,18 @@ impl PackedOpLogIndex {
         }
     }
 
-    fn open_v4_bytes(path: &Path, bytes: &[u8]) -> Result<Self> {
+    fn open_v4_bytes(
+        path: &Path,
+        bytes: &[u8],
+        file_stamp: Option<PackedFileStamp>,
+    ) -> Result<Self> {
         let header = parse_header(bytes)?;
         let footer = PackedFooter::parse(bytes, &header)?;
         let index = Self {
             path: path.to_path_buf(),
             header,
             footer,
+            file_stamp,
         };
         index.validate_index_records(bytes)?;
         Ok(index)
@@ -363,11 +418,20 @@ impl PackedOpLogIndex {
                 entry_count: 0,
                 head_id: 0,
             },
+            file_stamp: None,
         }
     }
 
     pub(crate) fn head_id(&self) -> u64 {
         self.header.head_id
+    }
+
+    pub(crate) fn matches_file_on_disk(&self) -> Result<bool> {
+        let Some(expected) = self.file_stamp else {
+            return Ok(false);
+        };
+        let file = File::open(&self.path)?;
+        Ok(packed_file_stamp(&file)? == Some(expected))
     }
 
     pub(crate) fn last_entry(&self) -> Result<Option<OpEntry>> {
@@ -630,16 +694,33 @@ impl PackedOpLogIndex {
                 )
             }
         };
-        if let Err(err) = write_result {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(err);
-        }
+        let footer = match write_result {
+            Ok(footer) => footer,
+            Err(err) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(err);
+            }
+        };
         std::fs::rename(&tmp, &self.path)?;
         if durable {
             sync_directory(parent)?;
+            return Self::open_v4(&self.path);
         }
 
-        Self::open_v4(&self.path)
+        // The snapshot pack is authoritative for this reconstructible view, so
+        // avoid rereading and revalidating the whole oplog after publishing the
+        // exact header/footer metadata that the writer just serialized. Durable
+        // appends retain the full readback above.
+        Ok(Self {
+            path: self.path.clone(),
+            header: PackedHeader {
+                entry_count: new_count,
+                head_id: new_head,
+                header_len: V4_HEADER_LEN,
+            },
+            footer,
+            file_stamp: packed_file_stamp(&File::open(&self.path)?)?,
+        })
     }
 
     /// Reuse the immutable historical entry prefix from a CoW clone, discard
@@ -653,14 +734,14 @@ impl PackedOpLogIndex {
         new_entry_bytes: &[u8],
         entry_offsets: &[EntryOffsetRecord],
         batch_index: &BuiltIndexSections,
-    ) -> Result<()> {
+    ) -> Result<PackedFooter> {
         let (new_count, new_head) = new_header;
         let mut out = OpenOptions::new().read(true).write(true).open(tmp)?;
         out.set_len(self.footer.entry_data_end)?;
         out.seek(SeekFrom::Start(self.footer.entry_data_end))?;
         out.write_all(new_entry_bytes)?;
         let entry_data_end = out.stream_position()?;
-        write_index_sections(
+        let footer = write_index_sections(
             &mut out,
             IndexWritePlan {
                 entry_data_end,
@@ -675,7 +756,7 @@ impl PackedOpLogIndex {
         )?;
         out.seek(SeekFrom::Start(0))?;
         write_header(&mut out, CURRENT_CONTAINER_VERSION, new_count, new_head)?;
-        Ok(())
+        Ok(footer)
     }
 
     fn write_appended_tmp(
@@ -686,7 +767,7 @@ impl PackedOpLogIndex {
         entry_offsets: &[EntryOffsetRecord],
         batch_index: &BuiltIndexSections,
         durable: bool,
-    ) -> Result<()> {
+    ) -> Result<PackedFooter> {
         let (new_count, new_head) = new_header;
         let mut out = OpenOptions::new()
             .create(true)
@@ -703,7 +784,7 @@ impl PackedOpLogIndex {
         out.write_all(new_entry_bytes)?;
 
         let entry_data_end = out.stream_position()?;
-        write_index_sections(
+        let footer = write_index_sections(
             &mut out,
             IndexWritePlan {
                 entry_data_end,
@@ -719,7 +800,7 @@ impl PackedOpLogIndex {
         if durable {
             out.sync_all()?;
         }
-        Ok(())
+        Ok(footer)
     }
 
     fn read_entry_offsets(&self) -> Result<Vec<EntryOffsetRecord>> {
@@ -1623,7 +1704,10 @@ struct IndexWritePlan<'a> {
     head_id: u64,
 }
 
-fn write_index_sections<W: Write + Seek>(out: &mut W, plan: IndexWritePlan<'_>) -> Result<()> {
+fn write_index_sections<W: Write + Seek>(
+    out: &mut W,
+    plan: IndexWritePlan<'_>,
+) -> Result<PackedFooter> {
     let entry_offsets_offset = out.stream_position()?;
     for record in plan.entry_offsets {
         out.write_all(&record.entry_id.to_le_bytes())?;
@@ -1643,25 +1727,23 @@ fn write_index_sections<W: Write + Seek>(out: &mut W, plan: IndexWritePlan<'_>) 
     for record in plan.tx_dir {
         write_tx_dir_record(out, record)?;
     }
-    write_footer(
-        out,
-        &PackedFooter {
-            entry_data_end: plan.entry_data_end,
-            entry_offsets_offset,
-            entry_offsets_count: plan.entry_offsets.len() as u64,
-            batch_offsets_offset,
-            batch_offsets_count: plan.batch_offsets.len() as u64,
-            batch_dir_offset,
-            batch_dir_count: plan.batch_dir.len() as u64,
-            tx_key_bytes_offset,
-            tx_key_bytes_len: plan.tx_key_bytes.len() as u64,
-            tx_dir_offset,
-            tx_dir_count: plan.tx_dir.len() as u64,
-            entry_count: plan.entry_count,
-            head_id: plan.head_id,
-        },
-    )?;
-    Ok(())
+    let footer = PackedFooter {
+        entry_data_end: plan.entry_data_end,
+        entry_offsets_offset,
+        entry_offsets_count: plan.entry_offsets.len() as u64,
+        batch_offsets_offset,
+        batch_offsets_count: plan.batch_offsets.len() as u64,
+        batch_dir_offset,
+        batch_dir_count: plan.batch_dir.len() as u64,
+        tx_key_bytes_offset,
+        tx_key_bytes_len: plan.tx_key_bytes.len() as u64,
+        tx_dir_offset,
+        tx_dir_count: plan.tx_dir.len() as u64,
+        entry_count: plan.entry_count,
+        head_id: plan.head_id,
+    };
+    write_footer(out, &footer)?;
+    Ok(footer)
 }
 
 fn write_index_sections_to_vec(out: &mut Vec<u8>, plan: IndexWritePlan<'_>) {
@@ -2997,15 +3079,26 @@ mod tests {
         log.save().unwrap();
 
         let index = PackedOpLogIndex::open(&path).unwrap();
+        let mut commit = make_entry(4, Some("lane"));
+        commit.operation = OpRecord::TransactionCommit {
+            transaction_id: "tx-reconstructible".into(),
+            op_count: 0,
+        };
         let updated = index
-            .append_entries_reconstructible(&[
-                make_entry(3, Some("lane")),
-                make_entry(4, Some("lane")),
-            ])
+            .append_entries_reconstructible(&[make_entry(3, Some("lane")), commit])
             .unwrap();
 
         assert_eq!(updated.head_id(), 4);
         assert_eq!(updated.last_entry().unwrap().unwrap().id, 4);
+        assert_eq!(
+            updated.transaction_commit("tx-reconstructible").unwrap(),
+            Some((4, 4))
+        );
+        let reopened = PackedOpLogIndex::open(&path).unwrap();
+        assert_eq!(
+            reopened.transaction_commit("tx-reconstructible").unwrap(),
+            Some((4, 4))
+        );
         let loaded = PackedOpLog::load(&path).unwrap();
         assert_eq!(loaded.entries.len(), 4);
         assert_eq!(

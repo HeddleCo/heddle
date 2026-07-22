@@ -275,6 +275,21 @@ impl OpLog {
     fn open_index_for_write(&self) -> Result<PackedOpLogIndex> {
         let path = self.oplog_path();
         if path.exists() {
+            let disk_head = PackedOpLog::read_head_id(&path);
+            let trailer_ok = PackedOpLog::trailer_ok(&path);
+            if let (Ok(disk_head), Ok(true)) = (disk_head, trailer_ok) {
+                let cached = self.cached.lock_or_poisoned();
+                if let Some(index) = cached.as_ref()
+                    && index.head_id() == disk_head
+                    && index.matches_file_on_disk().unwrap_or(false)
+                {
+                    return Ok(index.clone());
+                }
+            }
+
+            // A different process may have advanced or rewritten the file
+            // while this handle waited for the write lock. Header/trailer
+            // damage also comes here so the existing full open can salvage it.
             PackedOpLog::ensure_current(&path)?;
         } else {
             PackedOpLog::new(path.clone()).save()?;
@@ -999,5 +1014,40 @@ mod tests {
             !path.with_file_name("oplog.bin.corrupt").exists(),
             "healthy oplog must not be quarantined"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_index_for_write_reloads_same_head_file_replacement() {
+        let tmp = TempDir::new().unwrap();
+        let oplog = OpLog::new_unattributed(tmp.path());
+        oplog.init().unwrap();
+        oplog.record_batch(vec![snapshot_record()]).unwrap();
+        oplog.record_batch(vec![snapshot_record()]).unwrap();
+
+        {
+            let cached = oplog.cached.lock_or_poisoned();
+            assert!(cached.as_ref().unwrap().matches_file_on_disk().unwrap());
+        }
+
+        // Simulate a different process coalescing two batches. This replaces
+        // the file but deliberately keeps the same head_id, so a head-only
+        // cache gate would reuse stale footer offsets.
+        let path = oplog.oplog_path();
+        let mut rewritten = PackedOpLog::load(&path).unwrap();
+        rewritten.entries[1].batch_id = rewritten.entries[0].batch_id;
+        rewritten.entries[1].batch_index = 1;
+        rewritten.save().unwrap();
+        assert_eq!(PackedOpLog::read_head_id(&path).unwrap(), 2);
+        {
+            let cached = oplog.cached.lock_or_poisoned();
+            assert!(!cached.as_ref().unwrap().matches_file_on_disk().unwrap());
+        }
+
+        let _lock = oplog.write_lock().unwrap();
+        let index = oplog.open_index_for_write().unwrap();
+        let batches = index.collect_batches_scoped(10, |_| true, None).unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].entries.len(), 2);
     }
 }
