@@ -14,6 +14,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use chrono::{TimeZone, Utc};
@@ -117,6 +118,7 @@ pub(crate) struct PackedOpLogIndex {
     header: PackedHeader,
     footer: PackedFooter,
     file_stamp: Option<PackedFileStamp>,
+    validated_indexes: Arc<ValidatedIndexSections>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,6 +213,15 @@ struct TxDirRecord {
     key_len: u32,
     commit_entry_id: u64,
     batch_id: u64,
+}
+
+#[derive(Debug, Default)]
+struct ValidatedIndexSections {
+    entry_offsets: Vec<EntryOffsetRecord>,
+    batch_offsets: Vec<u64>,
+    batch_dir: Vec<BatchDirRecord>,
+    tx_key_bytes: Vec<u8>,
+    tx_dir: Vec<TxDirRecord>,
 }
 
 impl PackedOpLog {
@@ -385,13 +396,14 @@ impl PackedOpLogIndex {
     ) -> Result<Self> {
         let header = parse_header(bytes)?;
         let footer = PackedFooter::parse(bytes, &header)?;
-        let index = Self {
+        let mut index = Self {
             path: path.to_path_buf(),
             header,
             footer,
             file_stamp,
+            validated_indexes: Arc::default(),
         };
-        index.validate_index_records(bytes)?;
+        index.validated_indexes = Arc::new(index.validate_index_records(bytes)?);
         Ok(index)
     }
 
@@ -419,6 +431,7 @@ impl PackedOpLogIndex {
                 head_id: 0,
             },
             file_stamp: None,
+            validated_indexes: Arc::default(),
         }
     }
 
@@ -443,7 +456,7 @@ impl PackedOpLogIndex {
         if count == 0 || self.header.entry_count == 0 {
             return Ok(Vec::new());
         }
-        let offsets = self.read_entry_offsets()?;
+        let offsets = &self.validated_indexes.entry_offsets;
         let take = count.min(offsets.len());
         let mut file = File::open(&self.path)?;
         let mut out = Vec::with_capacity(take);
@@ -454,7 +467,7 @@ impl PackedOpLogIndex {
     }
 
     pub(crate) fn entries_after(&self, since_head_id: u64) -> Result<Vec<OpEntry>> {
-        let offsets = self.read_entry_offsets()?;
+        let offsets = &self.validated_indexes.entry_offsets;
         let start = offsets.partition_point(|record| record.entry_id <= since_head_id);
         let mut file = File::open(&self.path)?;
         let mut out = Vec::with_capacity(offsets.len().saturating_sub(start));
@@ -484,8 +497,8 @@ impl PackedOpLogIndex {
             return Ok(Vec::new());
         }
 
-        let batch_offsets = self.read_batch_offsets()?;
-        let batch_dir = self.read_batch_dir()?;
+        let batch_offsets = &self.validated_indexes.batch_offsets;
+        let batch_dir = &self.validated_indexes.batch_dir;
         let mut file = File::open(&self.path)?;
         let mut batches = Vec::new();
 
@@ -552,15 +565,15 @@ impl PackedOpLogIndex {
     }
 
     pub(crate) fn transaction_commit(&self, transaction_id: &str) -> Result<Option<(u64, u64)>> {
-        let key_bytes = self.read_tx_key_bytes()?;
-        let records = self.read_tx_dir()?;
+        let key_bytes = &self.validated_indexes.tx_key_bytes;
+        let records = &self.validated_indexes.tx_dir;
         let needle = transaction_id.as_bytes();
 
         let mut left = 0;
         let mut right = records.len();
         while left < right {
             let mid = left + ((right - left) / 2);
-            let key = tx_record_key(&key_bytes, &records[mid])?;
+            let key = tx_record_key(key_bytes, &records[mid])?;
             match key.cmp(needle) {
                 std::cmp::Ordering::Less => left = mid + 1,
                 std::cmp::Ordering::Greater => right = mid,
@@ -646,19 +659,19 @@ impl PackedOpLogIndex {
                 })?;
         }
 
-        let mut old_offsets = self.read_entry_offsets()?;
+        let mut old_offsets = self.validated_indexes.entry_offsets.clone();
         old_offsets.extend(new_entry_offsets);
-        let mut old_batch_offsets = self.read_batch_offsets()?;
+        let old_batch_offsets = self.validated_indexes.batch_offsets.clone();
         let new_entries_by_offset = new_entries
             .iter()
             .zip(old_offsets[self.header.entry_count as usize..].iter())
             .map(|(entry, offset)| (entry.clone(), offset.entry_offset))
             .collect::<Vec<_>>();
         let batch_index = build_index_sections_from_existing(
-            &mut old_batch_offsets,
-            &self.read_batch_dir()?,
-            &self.read_tx_key_bytes()?,
-            &self.read_tx_dir()?,
+            old_batch_offsets,
+            &self.validated_indexes.batch_dir,
+            &self.validated_indexes.tx_key_bytes,
+            &self.validated_indexes.tx_dir,
             &new_entries_by_offset,
         )?;
 
@@ -720,6 +733,13 @@ impl PackedOpLogIndex {
             },
             footer,
             file_stamp: packed_file_stamp(&File::open(&self.path)?)?,
+            validated_indexes: Arc::new(ValidatedIndexSections {
+                entry_offsets: old_offsets,
+                batch_offsets: batch_index.batch_offsets,
+                batch_dir: batch_index.batch_dir,
+                tx_key_bytes: batch_index.tx_key_bytes,
+                tx_dir: batch_index.tx_dir,
+            }),
         })
     }
 
@@ -804,6 +824,8 @@ impl PackedOpLogIndex {
     }
 
     fn read_entry_offsets(&self) -> Result<Vec<EntryOffsetRecord>> {
+        #[cfg(test)]
+        INDEX_SECTION_DISK_READS.with(|reads| reads.set(reads.get() + 1));
         let mut file = File::open(&self.path)?;
         file.seek(SeekFrom::Start(self.footer.entry_offsets_offset))?;
         let mut records = Vec::with_capacity(self.footer.entry_offsets_count as usize);
@@ -817,6 +839,8 @@ impl PackedOpLogIndex {
     }
 
     fn read_batch_offsets(&self) -> Result<Vec<u64>> {
+        #[cfg(test)]
+        INDEX_SECTION_DISK_READS.with(|reads| reads.set(reads.get() + 1));
         let mut file = File::open(&self.path)?;
         file.seek(SeekFrom::Start(self.footer.batch_offsets_offset))?;
         let mut offsets = Vec::with_capacity(self.footer.batch_offsets_count as usize);
@@ -827,6 +851,8 @@ impl PackedOpLogIndex {
     }
 
     fn read_batch_dir(&self) -> Result<Vec<BatchDirRecord>> {
+        #[cfg(test)]
+        INDEX_SECTION_DISK_READS.with(|reads| reads.set(reads.get() + 1));
         let mut file = File::open(&self.path)?;
         file.seek(SeekFrom::Start(self.footer.batch_dir_offset))?;
         let mut records = Vec::with_capacity(self.footer.batch_dir_count as usize);
@@ -852,6 +878,8 @@ impl PackedOpLogIndex {
     }
 
     fn read_tx_key_bytes(&self) -> Result<Vec<u8>> {
+        #[cfg(test)]
+        INDEX_SECTION_DISK_READS.with(|reads| reads.set(reads.get() + 1));
         let mut file = File::open(&self.path)?;
         file.seek(SeekFrom::Start(self.footer.tx_key_bytes_offset))?;
         let len = usize::try_from(self.footer.tx_key_bytes_len).map_err(|_| {
@@ -863,6 +891,8 @@ impl PackedOpLogIndex {
     }
 
     fn read_tx_dir(&self) -> Result<Vec<TxDirRecord>> {
+        #[cfg(test)]
+        INDEX_SECTION_DISK_READS.with(|reads| reads.set(reads.get() + 1));
         let mut file = File::open(&self.path)?;
         file.seek(SeekFrom::Start(self.footer.tx_dir_offset))?;
         let mut records = Vec::with_capacity(self.footer.tx_dir_count as usize);
@@ -882,7 +912,7 @@ impl PackedOpLogIndex {
         Ok(records)
     }
 
-    fn validate_index_records(&self, bytes: &[u8]) -> Result<()> {
+    fn validate_index_records(&self, bytes: &[u8]) -> Result<ValidatedIndexSections> {
         let offsets = self.read_entry_offsets()?;
         if offsets.len() as u64 != self.header.entry_count {
             return Err(HeddleError::InvalidObject(
@@ -1017,13 +1047,20 @@ impl PackedOpLogIndex {
                 }
             }
         }
-        Ok(())
+        Ok(ValidatedIndexSections {
+            entry_offsets: offsets,
+            batch_offsets,
+            batch_dir,
+            tx_key_bytes: key_bytes,
+            tx_dir,
+        })
     }
 }
 
 #[cfg(test)]
 thread_local! {
     static BATCH_DIR_RECORDS_VISITED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static INDEX_SECTION_DISK_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl PackedFooter {
@@ -1858,7 +1895,7 @@ fn build_index_sections(
 }
 
 fn build_index_sections_from_existing(
-    old_batch_offsets: &mut Vec<u64>,
+    mut old_batch_offsets: Vec<u64>,
     old_batch_dir: &[BatchDirRecord],
     old_tx_key_bytes: &[u8],
     old_tx_dir: &[TxDirRecord],
@@ -1884,48 +1921,63 @@ fn build_index_sections_from_existing(
         for (_entry, offset) in &entries {
             old_batch_offsets.push(*offset);
         }
-        batch_dir.push(BatchDirRecord {
+        let record = BatchDirRecord {
             batch_id,
             newest_entry_id,
             first_offset_index,
             entry_count: entries.len() as u32,
             scope_state: scope_state(entries.iter().map(|(entry, _)| entry.scope.as_deref())),
-        });
+        };
+        let insert_at =
+            batch_dir.partition_point(|existing| existing.newest_entry_id > newest_entry_id);
+        batch_dir.insert(insert_at, record);
     }
-    batch_dir.sort_by_key(|record| Reverse(record.newest_entry_id));
 
-    let mut tx_map = BTreeMap::new();
-    for record in old_tx_dir {
-        let key = tx_record_key(old_tx_key_bytes, record)?.to_vec();
-        tx_map.insert(key, (record.commit_entry_id, record.batch_id));
-    }
+    let mut tx_key_bytes = old_tx_key_bytes.to_vec();
+    let mut tx_dir = old_tx_dir.to_vec();
     for (entry, _offset) in new_entries {
         if let OpRecord::TransactionCommit { transaction_id, .. } = &entry.operation {
-            tx_map
-                .entry(transaction_id.as_bytes().to_vec())
-                .or_insert((entry.id, effective_batch_id(entry)));
+            let key = transaction_id.as_bytes();
+            if let Err(insert_at) = search_tx_dir(&tx_key_bytes, &tx_dir, key)? {
+                let key_offset = tx_key_bytes.len() as u64;
+                tx_key_bytes.extend_from_slice(key);
+                tx_dir.insert(
+                    insert_at,
+                    TxDirRecord {
+                        key_offset,
+                        key_len: key.len() as u32,
+                        commit_entry_id: entry.id,
+                        batch_id: effective_batch_id(entry),
+                    },
+                );
+            }
         }
     }
 
-    let mut tx_key_bytes = Vec::new();
-    let mut tx_dir = Vec::with_capacity(tx_map.len());
-    for (key, (commit_entry_id, batch_id)) in tx_map {
-        let key_offset = tx_key_bytes.len() as u64;
-        tx_key_bytes.extend_from_slice(&key);
-        tx_dir.push(TxDirRecord {
-            key_offset,
-            key_len: key.len() as u32,
-            commit_entry_id,
-            batch_id,
-        });
-    }
-
     Ok(BuiltIndexSections {
-        batch_offsets: old_batch_offsets.clone(),
+        batch_offsets: old_batch_offsets,
         batch_dir,
         tx_key_bytes,
         tx_dir,
     })
+}
+
+fn search_tx_dir(
+    key_bytes: &[u8],
+    records: &[TxDirRecord],
+    needle: &[u8],
+) -> Result<std::result::Result<usize, usize>> {
+    let mut left = 0;
+    let mut right = records.len();
+    while left < right {
+        let mid = left + ((right - left) / 2);
+        match tx_record_key(key_bytes, &records[mid])?.cmp(needle) {
+            std::cmp::Ordering::Less => left = mid + 1,
+            std::cmp::Ordering::Greater => right = mid,
+            std::cmp::Ordering::Equal => return Ok(Ok(mid)),
+        }
+    }
+    Ok(Err(left))
 }
 
 fn scope_state<'a>(scopes: impl Iterator<Item = Option<&'a str>>) -> u8 {
@@ -2528,6 +2580,15 @@ mod tests {
         entry
     }
 
+    fn make_commit_entry(id: u64, transaction_id: &str) -> OpEntry {
+        let mut entry = make_entry(id, Some("lane"));
+        entry.operation = OpRecord::TransactionCommit {
+            transaction_id: transaction_id.into(),
+            op_count: 0,
+        };
+        entry
+    }
+
     fn write_legacy_header(path: &Path, version: u32) {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
@@ -3084,6 +3145,7 @@ mod tests {
             transaction_id: "tx-reconstructible".into(),
             op_count: 0,
         };
+        INDEX_SECTION_DISK_READS.with(|reads| reads.set(0));
         let updated = index
             .append_entries_reconstructible(&[make_entry(3, Some("lane")), commit])
             .unwrap();
@@ -3094,6 +3156,7 @@ mod tests {
             updated.transaction_commit("tx-reconstructible").unwrap(),
             Some((4, 4))
         );
+        INDEX_SECTION_DISK_READS.with(|reads| assert_eq!(reads.get(), 0));
         let reopened = PackedOpLogIndex::open(&path).unwrap();
         assert_eq!(
             reopened.transaction_commit("tx-reconstructible").unwrap(),
@@ -3108,6 +3171,121 @@ mod tests {
                 .map(|entry| entry.id)
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn incremental_tx_index_inserts_out_of_order_keys_in_sorted_directory() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        PackedOpLog::new(path.clone()).save().unwrap();
+
+        let index = PackedOpLogIndex::open(&path).unwrap();
+        let updated = index
+            .append_entries_reconstructible(&[
+                make_commit_entry(1, "tx-zeta"),
+                make_commit_entry(2, "tx-alpha"),
+                make_commit_entry(3, "tx-middle"),
+            ])
+            .unwrap();
+
+        let keys = updated
+            .validated_indexes
+            .tx_dir
+            .iter()
+            .map(|record| {
+                std::str::from_utf8(
+                    tx_record_key(&updated.validated_indexes.tx_key_bytes, record).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["tx-alpha", "tx-middle", "tx-zeta"]);
+        assert_eq!(updated.transaction_commit("tx-zeta").unwrap(), Some((1, 1)));
+        assert_eq!(
+            updated.transaction_commit("tx-alpha").unwrap(),
+            Some((2, 2))
+        );
+        assert_eq!(
+            updated.transaction_commit("tx-middle").unwrap(),
+            Some((3, 3))
+        );
+
+        let reopened = PackedOpLogIndex::open(&path).unwrap();
+        assert_eq!(
+            reopened.transaction_commit("tx-alpha").unwrap(),
+            Some((2, 2))
+        );
+    }
+
+    #[test]
+    fn incremental_tx_index_keeps_first_duplicate_transaction() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        PackedOpLog::new(path.clone()).save().unwrap();
+
+        let index = PackedOpLogIndex::open(&path).unwrap();
+        let updated = index
+            .append_entries_reconstructible(&[
+                make_commit_entry(1, "tx-duplicate"),
+                make_commit_entry(2, "tx-duplicate"),
+            ])
+            .unwrap();
+        let updated = updated
+            .append_entries_reconstructible(&[make_commit_entry(3, "tx-duplicate")])
+            .unwrap();
+
+        assert_eq!(
+            updated.transaction_commit("tx-duplicate").unwrap(),
+            Some((1, 1))
+        );
+        assert_eq!(updated.validated_indexes.tx_dir.len(), 1);
+        assert_eq!(updated.validated_indexes.tx_key_bytes, b"tx-duplicate");
+        let reopened = PackedOpLogIndex::open(&path).unwrap();
+        assert_eq!(
+            reopened.transaction_commit("tx-duplicate").unwrap(),
+            Some((1, 1))
+        );
+    }
+
+    #[test]
+    fn incremental_batch_index_inserts_records_newest_first() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        let mut log = PackedOpLog::new(path.clone());
+        log.append(vec![
+            make_batch_entry(1, 10, 0, Some("lane")),
+            make_batch_entry(2, 10, 1, Some("lane")),
+        ]);
+        log.head_id = 2;
+        log.save().unwrap();
+
+        let index = PackedOpLogIndex::open(&path).unwrap();
+        let updated = index
+            .append_entries_reconstructible(&[
+                make_batch_entry(3, 900, 0, Some("lane")),
+                make_batch_entry(4, 5, 0, Some("lane")),
+            ])
+            .unwrap();
+
+        assert_eq!(
+            updated
+                .validated_indexes
+                .batch_dir
+                .iter()
+                .map(|record| (record.newest_entry_id, record.batch_id))
+                .collect::<Vec<_>>(),
+            vec![(4, 5), (3, 900), (2, 10)]
+        );
+        let reopened = PackedOpLogIndex::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .collect_batches_scoped(3, |_| true, Some("lane"))
+                .unwrap()
+                .iter()
+                .map(|batch| batch.id)
+                .collect::<Vec<_>>(),
+            vec![5, 900, 10]
         );
     }
 
