@@ -2003,7 +2003,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "heddle-api"
 version = "0.2.0"
-source = "git+https://github.com/HeddleCo/api?rev=3acac53f3527ba4a9ea510c331cfffa556f92e1b#3acac53f3527ba4a9ea510c331cfffa556f92e1b"
+source = "git+https://github.com/HeddleCo/api?rev=1c15b1a5d0e144859b41ac9036461a45783c3c3e#1c15b1a5d0e144859b41ac9036461a45783c3c3e"
 dependencies = [
  "bytes",
  "hex",
@@ -2019,7 +2019,7 @@ dependencies = [
 [[package]]
 name = "heddle-api"
 version = "0.2.0"
-source = "git+https://github.com/HeddleCo/api?rev=84716cbcc33751d089075eef62024f8427331d5f#84716cbcc33751d089075eef62024f8427331d5f"
+source = "git+https://github.com/HeddleCo/api?rev=3acac53f3527ba4a9ea510c331cfffa556f92e1b#3acac53f3527ba4a9ea510c331cfffa556f92e1b"
 dependencies = [
  "bytes",
  "hex",
@@ -2046,7 +2046,7 @@ dependencies = [
  "clap_complete",
  "criterion",
  "futures",
- "heddle-api 0.2.0 (git+https://github.com/HeddleCo/api?rev=84716cbcc33751d089075eef62024f8427331d5f)",
+ "heddle-api 0.2.0 (git+https://github.com/HeddleCo/api?rev=1c15b1a5d0e144859b41ac9036461a45783c3c3e)",
  "heddle-cli-shared",
  "heddle-client",
  "heddle-core",
@@ -2126,7 +2126,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
- "heddle-api 0.2.0 (git+https://github.com/HeddleCo/api?rev=84716cbcc33751d089075eef62024f8427331d5f)",
+ "heddle-api 0.2.0 (git+https://github.com/HeddleCo/api?rev=1c15b1a5d0e144859b41ac9036461a45783c3c3e)",
  "heddle-cli-shared",
  "heddle-crypto",
  "heddle-objects",
@@ -2203,7 +2203,7 @@ version = "0.10.4"
 dependencies = [
  "chrono",
  "futures",
- "heddle-api 0.2.0 (git+https://github.com/HeddleCo/api?rev=84716cbcc33751d089075eef62024f8427331d5f)",
+ "heddle-api 0.2.0 (git+https://github.com/HeddleCo/api?rev=1c15b1a5d0e144859b41ac9036461a45783c3c3e)",
  "heddle-crypto",
  "heddle-objects",
  "heddle-oplog",
