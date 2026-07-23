@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Helper utilities for semantic diff.
 
-use std::{cell::RefCell, collections::HashMap, path::Path};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, path::Path};
 
 use objects::{
     object::{Blob, ContentHash, Tree},
@@ -58,24 +58,27 @@ impl<'a, S: ObjectStore + ?Sized> TreeBlobContentLoader<'a, S> {
         tree: &Tree,
         parts: &[&str],
     ) -> Result<Option<Blob>, anyhow::Error> {
-        if parts.is_empty() {
-            return Ok(None);
-        }
+        let mut current_tree = Cow::Borrowed(tree);
 
-        let name = parts[0];
-        let entry = match tree.get(name) {
-            Some(e) => e,
-            None => return Ok(None),
-        };
+        for (index, name) in parts.iter().enumerate() {
+            let Some(entry) = current_tree.get(name) else {
+                return Ok(None);
+            };
 
-        if parts.len() == 1 {
-            if let Some(blob_hash) = entry.blob_hash() {
-                return Ok(self.store.get_blob(&blob_hash)?);
+            if index + 1 == parts.len() {
+                return match entry.blob_hash() {
+                    Some(blob_hash) => Ok(self.store.get_blob(&blob_hash)?),
+                    None => Ok(None),
+                };
             }
-        } else if let Some(tree_hash) = entry.tree_hash()
-            && let Some(subtree) = self.get_tree(&tree_hash)?
-        {
-            return self.get_blob_recursive(&subtree, &parts[1..]);
+
+            let Some(tree_hash) = entry.tree_hash() else {
+                return Ok(None);
+            };
+            let Some(subtree) = self.get_tree(&tree_hash)? else {
+                return Ok(None);
+            };
+            current_tree = Cow::Owned(subtree);
         }
 
         Ok(None)
