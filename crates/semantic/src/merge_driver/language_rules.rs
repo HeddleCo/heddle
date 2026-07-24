@@ -1291,34 +1291,29 @@ fn enclosing_template_param_lists(node: Node<'_>, source: &str) -> Vec<Vec<Strin
 /// recognise (e.g. parameter packs of template-template params) so
 /// the caller bails out conservatively and the enclosing
 /// `template_declaration`'s param list is dropped from matching.
-fn template_param_name(source: &str, param: Node<'_>) -> Option<String> {
+fn template_param_name(source: &str, mut param: Node<'_>) -> Option<String> {
     // Template-template parameters wrap the declared name inside a
     // trailing nested declaration node; the leading
     // `template_parameter_list` is the inner-template header (not
     // the parameter name) and must be skipped.
-    if param.kind() == "template_template_parameter_declaration" {
-        let mut cursor = param.walk();
-        let last_decl = param
-            .named_children(&mut cursor)
-            .filter(|c| {
+    while param.kind() == "template_template_parameter_declaration" {
+        param = (0..param.named_child_count())
+            .rev()
+            .filter_map(|i| u32::try_from(i).ok().and_then(|i| param.named_child(i)))
+            .find(|child| {
                 matches!(
-                    c.kind(),
+                    child.kind(),
                     "type_parameter_declaration"
                         | "variadic_type_parameter_declaration"
                         | "template_template_parameter_declaration"
                 )
-            })
-            .last();
-        return last_decl.and_then(|n| template_param_name(source, n));
+            })?;
     }
-    let mut last = None;
-    let mut cursor = param.walk();
-    for child in param.named_children(&mut cursor) {
-        if matches!(child.kind(), "identifier" | "type_identifier") {
-            last = Some(child);
-        }
-    }
-    last.map(|n| strip_whitespace(&source[n.byte_range()]))
+    (0..param.named_child_count())
+        .rev()
+        .filter_map(|i| u32::try_from(i).ok().and_then(|i| param.named_child(i)))
+        .find(|child| matches!(child.kind(), "identifier" | "type_identifier"))
+        .map(|node| strip_whitespace(&source[node.byte_range()]))
 }
 
 /// True iff every named child of `args` (a `template_argument_list`)
@@ -1360,25 +1355,17 @@ fn template_args_match_any_param_list(
 /// usage of an enclosing `class... Ts` reads as a bare parameter
 /// usage of `Ts` — matching the param-list name and letting
 /// `c_function_scope` strip the args (Codex r12 audit pre-fix A).
-fn parameter_usage_arg_name(source: &str, arg: Node<'_>) -> Option<String> {
-    if arg.kind() == "parameter_pack_expansion" {
-        let pattern = arg.child_by_field_name("pattern")?;
-        return parameter_usage_arg_name(source, pattern);
+fn parameter_usage_arg_name(source: &str, mut arg: Node<'_>) -> Option<String> {
+    while arg.kind() == "parameter_pack_expansion" {
+        arg = arg.child_by_field_name("pattern")?;
     }
     if arg.kind() != "type_descriptor" {
         return None;
     }
-    let mut cursor = arg.walk();
-    let mut only: Option<Node<'_>> = None;
-    let mut count = 0usize;
-    for child in arg.named_children(&mut cursor) {
-        count += 1;
-        only = Some(child);
-        if count > 1 {
-            return None;
-        }
+    if arg.named_child_count() != 1 {
+        return None;
     }
-    let only = only?;
+    let only = arg.named_child(0)?;
     if only.kind() != "type_identifier" {
         return None;
     }
@@ -1522,28 +1509,31 @@ fn c_name_bearing_function_declarator(declarator: Node<'_>) -> Option<Node<'_>> 
 /// silently collapse distinctions in rarer shapes (operator overloads
 /// with reference-qualifiers, structured-binding declarators, etc.).
 fn emit_c_declarator_shape(node: Node<'_>, out: &mut String) {
-    match node.kind() {
-        // Name leaves — strip across both named and abstract forms.
-        "identifier" | "field_identifier" | "type_identifier" => {}
-        "pointer_declarator" | "abstract_pointer_declarator" => out.push('*'),
-        "reference_declarator" | "abstract_reference_declarator" => out.push('&'),
-        "array_declarator" | "abstract_array_declarator" => out.push_str("[]"),
-        "function_declarator" | "abstract_function_declarator" => out.push_str("()"),
-        // Pass-through wrappers — no symbol of their own, just recurse.
-        "parenthesized_declarator" | "abstract_parenthesized_declarator" => {}
-        // Unknown shape — include verbatim so we don't lose signal.
-        k => {
-            out.push('<');
-            out.push_str(k);
-            out.push('>');
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            // Name leaves — strip across both named and abstract forms.
+            "identifier" | "field_identifier" | "type_identifier" => {}
+            "pointer_declarator" | "abstract_pointer_declarator" => out.push('*'),
+            "reference_declarator" | "abstract_reference_declarator" => out.push('&'),
+            "array_declarator" | "abstract_array_declarator" => out.push_str("[]"),
+            "function_declarator" | "abstract_function_declarator" => out.push_str("()"),
+            // Pass-through wrappers — no symbol of their own.
+            "parenthesized_declarator" | "abstract_parenthesized_declarator" => {}
+            // Unknown shape — include verbatim so we don't lose signal.
+            k => {
+                out.push('<');
+                out.push_str(k);
+                out.push('>');
+            }
         }
-    }
-    // Recurse into NAMED children so identifier leaves can be stripped
-    // by the leaf-clause above. Anonymous punctuation (`*`, `&`, etc.)
-    // is excluded from named-children iteration.
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        emit_c_declarator_shape(child, out);
+        // Push in reverse so the LIFO worklist visits named children in
+        // the same pre-order as the former recursive implementation.
+        for i in (0..node.named_child_count()).rev() {
+            if let Some(child) = u32::try_from(i).ok().and_then(|i| node.named_child(i)) {
+                stack.push(child);
+            }
+        }
     }
 }
 
@@ -1703,6 +1693,93 @@ mod tests {
             .iter()
             .map(|r| r.kind)
             .collect()
+    }
+
+    #[cfg(feature = "lang-cpp")]
+    fn first_named_descendant<'tree>(root: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if node.kind() == kind {
+                return Some(node);
+            }
+            for i in (0..node.named_child_count()).rev() {
+                if let Some(child) = u32::try_from(i).ok().and_then(|i| node.named_child(i)) {
+                    stack.push(child);
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(feature = "lang-cpp")]
+    fn parse_cpp(source: &str) -> tree_sitter::Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_cpp::LANGUAGE.into())
+            .expect("set C++ language");
+        parser.parse(source, None).expect("parse C++ source")
+    }
+
+    #[cfg(feature = "lang-cpp")]
+    #[test]
+    fn deeply_nested_cpp_declarators_templates_and_packs_do_not_stack_overflow() {
+        let depth = 2000usize;
+
+        let declarator_source = format!("void f(int {}value);", "*".repeat(depth));
+        let declarator_tree = parse_cpp(&declarator_source);
+        assert!(!declarator_tree.root_node().has_error());
+
+        let template_source = format!(
+            "{}class T{}> class Holder;",
+            "template<".repeat(depth + 1),
+            "> class T".repeat(depth)
+        );
+        let template_tree = parse_cpp(&template_source);
+        assert!(!template_tree.root_node().has_error());
+
+        let pack_source = format!(
+            "template<class... Ts> struct Holder; Holder<Ts{}> value;",
+            "...".repeat(depth)
+        );
+        let pack_tree = parse_cpp(&pack_source);
+        assert!(!pack_tree.root_node().has_error());
+
+        let handle = std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                let parameter =
+                    first_named_descendant(declarator_tree.root_node(), "parameter_declaration")
+                        .expect("deep parameter declaration");
+                let declarator = parameter
+                    .child_by_field_name("declarator")
+                    .expect("deep parameter declarator");
+                let mut shape = String::new();
+                emit_c_declarator_shape(declarator, &mut shape);
+                assert_eq!(shape, "*".repeat(depth));
+
+                let template_param = first_named_descendant(
+                    template_tree.root_node(),
+                    "template_template_parameter_declaration",
+                )
+                .expect("deep template-template parameter");
+                assert_eq!(
+                    template_param_name(&template_source, template_param).as_deref(),
+                    Some("T")
+                );
+
+                let pack =
+                    first_named_descendant(pack_tree.root_node(), "parameter_pack_expansion")
+                        .expect("deep parameter-pack expansion");
+                // Multiple consecutive expansions are parsed as a deep
+                // pack-expansion chain ending in an expression identifier,
+                // so this is intentionally not a bare type parameter usage.
+                assert_eq!(parameter_usage_arg_name(&pack_source, pack), None);
+            })
+            .expect("spawn small-stack thread");
+
+        handle
+            .join()
+            .expect("declarator, template, and parameter-pack helpers must not stack-overflow");
     }
 
     #[test]
