@@ -20,8 +20,8 @@ use objects::{
     object::{StateId, ThreadName},
     store::{ActorPresenceStore, ObjectStore, WriterLeaseStore},
 };
-use oplog::{OpLogRecorder, ThreadUpdateSnapshots};
-use refs::Head;
+use oplog::{OpLogRecorder, OpRecord, ThreadUpdateSnapshots};
+use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
     Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,
     describe_thread_advice,
@@ -133,21 +133,45 @@ pub(crate) fn save_thread_update_with_oplog(
     }
     let old_manager_records = encode_thread_records(manager, &before.manager_records)?;
     let new_manager_records = encode_thread_records(manager, &new_manager_records)?;
-    objects::fault_inject::maybe_fail_at("thread_manager_save_in_thread_update")?;
-    manager.save(thread)?;
-    repo.oplog().record_thread_update(
-        &ThreadName::new(&thread.thread),
-        &before.state,
-        &new_state,
-        ThreadUpdateSnapshots::from_record_sets(
-            before.manager_snapshot,
-            new_manager_snapshot,
-            old_manager_records,
-            new_manager_records,
-            before.ref_absent,
-        ),
-        Some(&repo.op_scope()),
-    )?;
+    let thread_name = ThreadName::new(&thread.thread);
+    let snapshots = ThreadUpdateSnapshots::from_record_sets(
+        before.manager_snapshot,
+        new_manager_snapshot,
+        old_manager_records,
+        new_manager_records,
+        before.ref_absent,
+    );
+    if repo.refs().get_thread(&thread_name)? == Some(new_state) {
+        objects::fault_inject::maybe_fail_at("thread_manager_save_in_thread_update")?;
+        manager.save(thread)?;
+        repo.oplog().record_thread_update(
+            &thread_name,
+            &before.state,
+            &new_state,
+            snapshots,
+            Some(&repo.op_scope()),
+        )?;
+    } else {
+        objects::fault_inject::maybe_fail_at("thread_manager_save_in_thread_update")?;
+        repo.commit_and_publish(
+            vec![OpRecord::ThreadUpdate {
+                name: thread_name.to_string(),
+                old_state: before.state,
+                new_state,
+                manager_snapshots: snapshots,
+            }],
+            &[RefUpdate::Thread {
+                name: thread_name,
+                expected: if before.ref_absent {
+                    RefExpectation::Missing
+                } else {
+                    RefExpectation::Value(before.state)
+                },
+                new: Some(new_state),
+            }],
+        )?;
+        manager.save(thread)?;
+    }
     Ok(())
 }
 
@@ -604,9 +628,7 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
             .is_some_and(|pending| pending != current_state)
         {
             fs::remove_file(&rebase_state_path)?;
-            thread_repo
-                .refs()
-                .set_thread(&ThreadName::new(&thread.thread), &current_state)?;
+            thread_repo.set_thread_recorded(&ThreadName::new(&thread.thread), &current_state)?;
             thread.integration_policy_result.status = Some("manual_resolved".to_string());
             thread.integration_policy_result.reason =
                 Some("manual integration resolution captured".to_string());
@@ -697,9 +719,8 @@ fn restore_refresh_rebase_abort(repo: &Repository, rebase_state_path: &Path) -> 
     let head_before = repo.head_ref()?;
     repo.goto_without_record_discard_local(&rebase_state.original_head)?;
     if let Head::Attached { thread } = head_before {
-        repo.refs()
-            .set_thread(&thread, &rebase_state.original_head)?;
-        repo.refs().write_head(&Head::Attached {
+        repo.set_thread_recorded(&thread, &rebase_state.original_head)?;
+        repo.write_head_recorded(&Head::Attached {
             thread: thread.clone(),
         })?;
         let manager = thread_manager(repo);
@@ -1149,12 +1170,8 @@ fn try_three_way_merge_refresh(
             Ok(ThreeWayMergeRefresh::Clean { new_state: target })
         }
         ThreeWayMergeOutcome::FastForward { target } => {
-            // Thread is strictly behind target — fast-forward the
-            // thread ref. We do this against the parent repo so the
-            // ref move is visible to the caller's bookkeeping.
-            parent_repo
-                .refs()
-                .set_thread(&ThreadName::new(&thread.thread), &target)?;
+            // Thread is strictly behind target. The caller advances the parent
+            // ref with the matching `ThreadUpdate` record after this returns.
             // Materialize the target tree to the thread's worktree.
             // Without this, HEAD metadata advances while the files on
             // disk stay stale and subsequent operations run against a
@@ -1188,9 +1205,6 @@ fn try_three_way_merge_refresh(
                 None,
                 false,
             )?;
-            parent_repo
-                .refs()
-                .set_thread(&ThreadName::new(&thread.thread), &new_state.state_id)?;
             Ok(ThreeWayMergeRefresh::Clean {
                 new_state: new_state.state_id,
             })
@@ -1464,7 +1478,7 @@ pub(crate) fn drop_thread_silent(
     WriterLeaseStore::new(repo.heddle_dir()).abandon_thread(&thread.thread, Utc::now())?;
     let tn = ThreadName::new(&thread.thread);
     if plan.delete_thread_ref && repo.refs().get_thread(&tn)?.is_some() {
-        repo.refs().delete_thread(&tn)?;
+        repo.delete_thread_recorded(&tn)?;
     }
     Ok(DropOutcome::Dropped(Box::new(thread)))
 }
@@ -1990,7 +2004,7 @@ fn apply_thread_drop(repo: &Repository, manager: &ThreadManager, thread: &Thread
     }
     let tn = ThreadName::new(&thread.thread);
     if plan.delete_thread_ref && repo.refs().get_thread(&tn)?.is_some() {
-        repo.refs().delete_thread(&tn)?;
+        repo.delete_thread_recorded(&tn)?;
     }
     if plan.strip_actor_presence {
         let registry = ActorPresenceStore::new(repo.heddle_dir());

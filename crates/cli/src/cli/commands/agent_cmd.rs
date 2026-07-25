@@ -20,7 +20,6 @@ use objects::{
         current_boot_id, validate_task_id,
     },
 };
-use oplog::OpLogRecorder;
 use refs::{Head, RefExpectation};
 use repo::{
     Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadId,
@@ -454,13 +453,9 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
 
     let thread = ThreadName::new(&thread_name);
     if let Some(existing) = existing_ref {
-        repo.refs()
-            .set_thread_cas(&thread, RefExpectation::Value(existing), &anchor)?;
+        repo.set_thread_recorded_cas(&thread, RefExpectation::Value(existing), &anchor)?;
     } else {
-        repo.refs()
-            .set_thread_cas(&thread, RefExpectation::Missing, &anchor)?;
-        repo.oplog()
-            .record_thread_create(&thread, &anchor, None, Some(&repo.op_scope()))?;
+        repo.set_thread_recorded_cas(&thread, RefExpectation::Missing, &anchor)?;
     }
     ensure_thread_record(&repo, &thread_name, &anchor, &args.task)?;
 

@@ -28,4 +28,10 @@ pub enum RefUpdate {
         expected: RefExpectation<Head>,
         new: Head,
     },
+    RemoteThread {
+        remote: String,
+        thread: ThreadName,
+        expected: RefExpectation<StateId>,
+        new: Option<StateId>,
+    },
 }

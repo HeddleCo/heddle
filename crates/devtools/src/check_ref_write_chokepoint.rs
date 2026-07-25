@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use syn::{Attribute, Expr, ImplItemFn, ItemFn, ItemMod, Meta, visit::Visit};
+use syn::{Attribute, Expr, ImplItemFn, ItemFn, ItemMod, Meta, TraitItemFn, visit::Visit};
 
 use crate::asserter::for_each_rs_file;
 
@@ -134,6 +134,14 @@ impl<'ast> Visit<'ast> for Finder<'_> {
             self.inspect(&node.sig.ident.to_string(), &node.block);
         }
     }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast TraitItemFn) {
+        if !is_cfg_test(&node.attrs)
+            && let Some(block) = &node.default
+        {
+            self.inspect(&node.sig.ident.to_string(), block);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -155,10 +163,9 @@ impl Collector {
                 }
                 Expr::MethodCall(call) => return call.method == "refs",
                 Expr::Path(path) => {
-                    return path
-                        .path
-                        .get_ident()
-                        .is_some_and(|ident| self.refs_aliases.contains(&ident.to_string()));
+                    return path.path.get_ident().is_some_and(|ident| {
+                        ident == "refs" || self.refs_aliases.contains(&ident.to_string())
+                    });
                 }
                 Expr::Reference(value) => current = &value.expr,
                 Expr::Try(value) => current = &value.expr,
@@ -230,6 +237,19 @@ mod tests {
         let hits = scan_dirs(&[dir.path().to_path_buf()]).expect("scan fixture");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].method, "set_thread");
+    }
+
+    #[test]
+    fn planted_refs_parameter_bypass_is_detected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("bypass.rs"),
+            "fn bypass(refs: &RefManager) { refs.write_head(&head).unwrap(); }",
+        )
+        .expect("write fixture");
+        let hits = scan_dirs(&[dir.path().to_path_buf()]).expect("scan fixture");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].method, "write_head");
     }
 
     #[test]

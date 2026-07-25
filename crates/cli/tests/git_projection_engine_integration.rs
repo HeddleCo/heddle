@@ -2105,7 +2105,7 @@ fn test_sync_mapping() {
 
 #[test]
 #[cfg(unix)]
-fn sync_branches_propagates_track_write_failures() {
+fn sync_branches_recovers_track_publish_failures_after_commit() {
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
     let (_git_temp, git_repo) = init_git_repo();
@@ -2131,12 +2131,20 @@ fn sync_branches_propagates_track_write_failures() {
     let result = sync_branches(&mut git_projection);
 
     std::fs::set_permissions(&threads_dir, std::fs::Permissions::from_mode(original_mode)).unwrap();
-    assert!(result.is_err(), "thread write failures should be returned");
+    assert!(
+        result.is_ok(),
+        "the committed ref update has linearized even when its loose publish fails"
+    );
+    assert_eq!(
+        repo.refs().get_thread(&ThreadName::new("main")).unwrap(),
+        Some(state_id),
+        "the next read must reconcile the committed thread update"
+    );
 }
 
 #[test]
 #[cfg(unix)]
-fn sync_tags_propagates_marker_write_failures() {
+fn sync_tags_recovers_marker_publish_failures_after_commit() {
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
     let (_git_temp, git_repo) = init_git_repo();
@@ -2163,7 +2171,15 @@ fn sync_tags_propagates_marker_write_failures() {
     let result = sync_tags(&mut git_projection);
 
     std::fs::set_permissions(&markers_dir, std::fs::Permissions::from_mode(original_mode)).unwrap();
-    assert!(result.is_err(), "marker write failures should be returned");
+    assert!(
+        result.is_ok(),
+        "the committed marker update has linearized even when its loose publish fails"
+    );
+    assert_eq!(
+        repo.refs().get_marker(&MarkerName::new("v1.0")).unwrap(),
+        Some(state_id),
+        "the next read must reconcile the committed marker update"
+    );
 }
 
 #[test]

@@ -338,7 +338,98 @@ impl CoreRefBackend for PgRefBackend {
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         let updates = updates.to_vec();
-        self.block(async move { let mut tx = pool.begin().await.map_err(sqlx_err)?; for update in &updates { match update { RefUpdate::Thread { name, expected, new } => match (expected, new) { (_, None) => { sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = true").bind(repo_id).bind(name.as_str()).execute(&mut *tx).await.map_err(sqlx_err)?; } (RefExpectation::Missing, Some(state)) => { sqlx::query("INSERT INTO refs (repo_id, name, is_thread, state_id, updated_at) VALUES ($1, $2, true, $3, NOW()) ON CONFLICT DO NOTHING").bind(repo_id).bind(name.as_str()).bind(Self::id_to_bytes(state)).execute(&mut *tx).await.map_err(sqlx_err)?; } (RefExpectation::Value(old), Some(new_state)) => { sqlx::query("UPDATE refs SET state_id = $4, updated_at = NOW() WHERE repo_id = $1 AND name = $2 AND is_thread = true AND state_id = $3").bind(repo_id).bind(name.as_str()).bind(Self::id_to_bytes(old)).bind(Self::id_to_bytes(new_state)).execute(&mut *tx).await.map_err(sqlx_err)?; } (_, Some(state)) => { sqlx::query("INSERT INTO refs (repo_id, name, is_thread, state_id, updated_at) VALUES ($1, $2, true, $3, NOW()) ON CONFLICT (repo_id, name) DO UPDATE SET state_id = EXCLUDED.state_id, updated_at = NOW()").bind(repo_id).bind(name.as_str()).bind(Self::id_to_bytes(state)).execute(&mut *tx).await.map_err(sqlx_err)?; } }, RefUpdate::Marker { name, expected: _, new } => match new { None => { sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = false").bind(repo_id).bind(name.as_str()).execute(&mut *tx).await.map_err(sqlx_err)?; } Some(state) => { sqlx::query("INSERT INTO refs (repo_id, name, is_thread, state_id, updated_at) VALUES ($1, $2, false, $3, NOW()) ON CONFLICT (repo_id, name) DO UPDATE SET state_id = EXCLUDED.state_id, updated_at = NOW()").bind(repo_id).bind(name.as_str()).bind(Self::id_to_bytes(state)).execute(&mut *tx).await.map_err(sqlx_err)?; } }, RefUpdate::Head { new, .. } => { let (thread, state_id): (Option<String>, Option<Vec<u8>>) = match new { Head::Attached { thread } => (Some(thread.to_string()), None), Head::Detached { state } => (None, Some(Self::id_to_bytes(state))), }; sqlx::query("INSERT INTO heads (repo_id, thread, state_id) VALUES ($1, $2, $3) ON CONFLICT (repo_id) DO UPDATE SET thread = EXCLUDED.thread, state_id = EXCLUDED.state_id").bind(repo_id).bind(thread).bind(state_id).execute(&mut *tx).await.map_err(sqlx_err)?; } } } tx.commit().await.map_err(sqlx_err)?; Ok(()) })
+        self.block(async move {
+            let mut tx = pool.begin().await.map_err(sqlx_err)?;
+            for update in &updates {
+                match update {
+                    RefUpdate::Thread {
+                        name,
+                        expected,
+                        new,
+                    } => match (expected, new) {
+                        (_, None) => {
+                            sqlx::query(
+                                "DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = true",
+                            )
+                            .bind(repo_id)
+                            .bind(name.as_str())
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(sqlx_err)?;
+                        }
+                        (RefExpectation::Missing, Some(state)) => {
+                            sqlx::query("INSERT INTO refs (repo_id, name, is_thread, state_id, updated_at) VALUES ($1, $2, true, $3, NOW()) ON CONFLICT DO NOTHING")
+                                .bind(repo_id)
+                                .bind(name.as_str())
+                                .bind(Self::id_to_bytes(state))
+                                .execute(&mut *tx)
+                                .await
+                                .map_err(sqlx_err)?;
+                        }
+                        (RefExpectation::Value(old), Some(new_state)) => {
+                            sqlx::query("UPDATE refs SET state_id = $4, updated_at = NOW() WHERE repo_id = $1 AND name = $2 AND is_thread = true AND state_id = $3")
+                                .bind(repo_id)
+                                .bind(name.as_str())
+                                .bind(Self::id_to_bytes(old))
+                                .bind(Self::id_to_bytes(new_state))
+                                .execute(&mut *tx)
+                                .await
+                                .map_err(sqlx_err)?;
+                        }
+                        (_, Some(state)) => {
+                            sqlx::query("INSERT INTO refs (repo_id, name, is_thread, state_id, updated_at) VALUES ($1, $2, true, $3, NOW()) ON CONFLICT (repo_id, name) DO UPDATE SET state_id = EXCLUDED.state_id, updated_at = NOW()")
+                                .bind(repo_id)
+                                .bind(name.as_str())
+                                .bind(Self::id_to_bytes(state))
+                                .execute(&mut *tx)
+                                .await
+                                .map_err(sqlx_err)?;
+                        }
+                    },
+                    RefUpdate::Marker { name, new, .. } => match new {
+                        None => {
+                            sqlx::query(
+                                "DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = false",
+                            )
+                            .bind(repo_id)
+                            .bind(name.as_str())
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(sqlx_err)?;
+                        }
+                        Some(state) => {
+                            sqlx::query("INSERT INTO refs (repo_id, name, is_thread, state_id, updated_at) VALUES ($1, $2, false, $3, NOW()) ON CONFLICT (repo_id, name) DO UPDATE SET state_id = EXCLUDED.state_id, updated_at = NOW()")
+                                .bind(repo_id)
+                                .bind(name.as_str())
+                                .bind(Self::id_to_bytes(state))
+                                .execute(&mut *tx)
+                                .await
+                                .map_err(sqlx_err)?;
+                        }
+                    },
+                    RefUpdate::Head { new, .. } => {
+                        let (thread, state_id): (Option<String>, Option<Vec<u8>>) = match new {
+                            Head::Attached { thread } => (Some(thread.to_string()), None),
+                            Head::Detached { state } => (None, Some(Self::id_to_bytes(state))),
+                        };
+                        sqlx::query("INSERT INTO heads (repo_id, thread, state_id) VALUES ($1, $2, $3) ON CONFLICT (repo_id) DO UPDATE SET thread = EXCLUDED.thread, state_id = EXCLUDED.state_id")
+                            .bind(repo_id)
+                            .bind(thread)
+                            .bind(state_id)
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(sqlx_err)?;
+                    }
+                    RefUpdate::RemoteThread { .. } => {
+                        return Err(HeddleError::Conflict(
+                            "remote threading refs are not supported on the server backend".into(),
+                        ));
+                    }
+                }
+            }
+            tx.commit().await.map_err(sqlx_err)?;
+            Ok(())
+        })
     }
     async fn resolve(&self, refspec: &str) -> Result<Option<StateId>> {
         if refspec == "@" || refspec == "HEAD" {

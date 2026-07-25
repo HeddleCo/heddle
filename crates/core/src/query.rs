@@ -8,7 +8,7 @@ use objects::{
     error::Result,
     object::{OperationId, StateId},
 };
-use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord};
+use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord, RecordedHead};
 use refs::refs::{IndexedOperation, OperationLogIndex, OperationLogQuery};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -238,6 +238,10 @@ fn thread_for(op: &OpRecord) -> Option<String> {
         OpRecord::GitCheckpoint { branch, .. } => Some(branch.clone()),
         OpRecord::RemoteThreadUpdate { thread, .. }
         | OpRecord::RemoteThreadDelete { thread, .. } => Some(thread.clone()),
+        OpRecord::HeadUpdate {
+            new: RecordedHead::Attached { thread },
+            ..
+        } => Some(thread.clone()),
         OpRecord::Goto { .. }
         | OpRecord::Fork { .. }
         | OpRecord::Collapse { .. }
@@ -248,6 +252,10 @@ fn thread_for(op: &OpRecord) -> Option<String> {
         | OpRecord::UndoRecoveryUpdate { .. }
         | OpRecord::StateVisibilitySet { .. }
         | OpRecord::StateVisibilityPromote { .. }
+        | OpRecord::HeadUpdate {
+            new: RecordedHead::Detached { .. },
+            ..
+        }
         | OpRecord::Purge { .. } => None,
     }
 }
@@ -273,10 +281,18 @@ fn primary_state_id(op: &OpRecord) -> Option<StateId> {
             Some(*state)
         }
         OpRecord::UndoRecoveryUpdate { state } => Some(*state),
+        OpRecord::HeadUpdate {
+            new: RecordedHead::Detached { state },
+            ..
+        } => Some(*state),
         OpRecord::TransactionAbort { .. }
         | OpRecord::TransactionCommit { .. }
         | OpRecord::ConflictResolved { .. }
         | OpRecord::Purge { .. }
-        | OpRecord::FastForward { .. } => None,
+        | OpRecord::FastForward { .. }
+        | OpRecord::HeadUpdate {
+            new: RecordedHead::Attached { .. },
+            ..
+        } => None,
     }
 }

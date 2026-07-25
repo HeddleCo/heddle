@@ -32,7 +32,7 @@ use objects::{
         WriterLeaseStore,
     },
 };
-use oplog::OpLogRecorder;
+use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
     AgentUsageSummary, Repository, Thread, ThreadCaptureOutcome, ThreadFreshness, ThreadId,
@@ -1604,9 +1604,6 @@ pub(crate) fn cmd_thread_create(
         )),
     )?;
 
-    repo.refs()
-        .set_thread_cas(&ThreadName::new(&name), RefExpectation::Missing, &current)?;
-
     // Persist a Thread record so subsequent commands that go through
     // `ThreadManager::load` (delegate, land, integration policy,
     // `thread show`'s record path) can find it. Without this the ref
@@ -1680,25 +1677,30 @@ pub(crate) fn cmd_thread_create(
         // promoted to materialized later can opt in then.
         shared_target_dir: None,
     };
-    thread_manager.save(&thread_state)?;
-
-    // Snapshot the just-saved record into the OpRecord so `heddle undo --redo`
+    // Encode the planned record into the OpRecord so `heddle undo --redo`
     // can recreate it after `heddle undo` destroys it. Without this,
     // redo restores only the ref and record-backed commands (`thread
     // cd`, delegate, integration policy) silently degrade. heddle#23 r2
     // Codex P1 (mirrors the heddle#99 r2 FastForward pattern — record
     // what redo needs).
     //
-    // Snapshot failure is fatal here: we just wrote the record, so a
-    // round-trip-encode that can't read its own write is a serde
-    // contract bug, not a runtime condition.
-    let manager_snapshot = thread_manager.snapshot_thread_record(&name)?;
-    repo.oplog().record_thread_create(
-        &ThreadName::new(&name),
-        &current,
-        manager_snapshot,
-        Some(&repo.op_scope()),
+    // Encoding failure is fatal before either the ref or manager record is
+    // persisted.
+    let manager_snapshot = Some(thread_manager.encode_thread_record_snapshot(&thread_state)?);
+    let thread_name = ThreadName::new(&name);
+    repo.commit_and_publish(
+        vec![OpRecord::ThreadCreate {
+            name: name.clone(),
+            state: current,
+            manager_snapshot,
+        }],
+        &[RefUpdate::Thread {
+            name: thread_name,
+            expected: RefExpectation::Missing,
+            new: Some(current),
+        }],
     )?;
+    thread_manager.save(&thread_state)?;
 
     let output = thread_op_output(
         "thread_create",
@@ -1956,7 +1958,7 @@ pub(crate) fn cmd_thread_switch(
         // inside a worktree.
         let head_target_repo = open_main_repo_from_worktree_if_needed(repo)?;
         let head_repo = head_target_repo.as_ref().unwrap_or(repo);
-        head_repo.refs().write_head(&Head::Attached {
+        head_repo.write_head_recorded(&Head::Attached {
             thread: ThreadName::new(&name),
         })?;
     } else if open_main_repo_from_worktree_if_needed(repo)?.is_some() {
@@ -1987,7 +1989,7 @@ pub(crate) fn cmd_thread_switch(
         } else {
             repo.goto(&state)?;
         }
-        repo.refs().write_head(&Head::Attached {
+        repo.write_head_recorded(&Head::Attached {
             thread: ThreadName::new(&name),
         })?;
         if repo.capability() == repo::RepositoryCapability::GitOverlay
@@ -2493,13 +2495,8 @@ pub(crate) fn cmd_thread_delete(cli: &Cli, repo: &Repository, name: String) -> R
     }
 
     let thread_name = ThreadName::new(&name);
-    let state = repo
-        .refs()
-        .delete_thread(&thread_name)?
+    repo.delete_thread_recorded(&thread_name)?
         .ok_or_else(|| anyhow!(thread_not_found_advice(&name, "delete thread")))?;
-
-    repo.oplog()
-        .record_thread_delete(&thread_name, &state, Some(&repo.op_scope()))?;
 
     let output = thread_op_output(
         "thread_drop",
@@ -2532,6 +2529,17 @@ pub(crate) fn cmd_thread_rename(
         .get_thread(&old_tn)?
         .ok_or_else(|| anyhow!(thread_not_found_advice(&old, "rename thread")))?;
 
+    let mut records = vec![
+        OpRecord::ThreadCreate {
+            name: new.clone(),
+            state,
+            manager_snapshot: None,
+        },
+        OpRecord::ThreadDelete {
+            name: old.clone(),
+            state,
+        },
+    ];
     let mut updates = vec![
         RefUpdate::Thread {
             name: new_tn.clone(),
@@ -2545,22 +2553,21 @@ pub(crate) fn cmd_thread_rename(
         },
     ];
 
-    if let Head::Attached { thread } = repo.head_ref()?
-        && thread == old
+    let previous_head = repo.head_ref()?;
+    if let Head::Attached { thread } = &previous_head
+        && thread == &old
     {
+        let new_head = Head::Attached {
+            thread: new_tn.clone(),
+        };
+        records.push(Repository::head_update_record(&previous_head, &new_head));
         updates.push(RefUpdate::Head {
-            expected: RefExpectation::Value(Head::Attached {
-                thread: old_tn.clone(),
-            }),
-            new: Head::Attached {
-                thread: new_tn.clone(),
-            },
+            expected: RefExpectation::Value(previous_head),
+            new: new_head,
         });
     }
 
-    repo.refs().update_refs(&updates)?;
-    repo.oplog()
-        .record_thread_rename(&old_tn, &new_tn, &state, Some(&repo.op_scope()))?;
+    repo.commit_and_publish(records, &updates)?;
 
     let output = thread_op_output(
         "thread_rename",

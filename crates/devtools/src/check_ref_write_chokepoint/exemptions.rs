@@ -22,6 +22,7 @@ pub(super) fn path_key(path: &Path) -> &str {
 pub(super) fn budget(path: &Path, function: &str, method: &str) -> usize {
     match (path_key(path), function, method) {
         ("repo/src/repository.rs", "init_git_overlay_sidecar", "write_head") => 1,
+        ("repo/src/repository.rs", "init_with_source_authority", "write_head") => 1,
         ("repo/src/repository.rs", "open", "write_head") => 2,
         ("repo/src/repository.rs", "seed_default_thread", "set_thread") => 1,
         ("repo/src/repository_goto.rs", "fast_forward_attached_internal", "set_thread") => 1,

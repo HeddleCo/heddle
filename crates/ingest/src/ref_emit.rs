@@ -31,6 +31,7 @@ use objects::{
     object::{MarkerName, StateId, ThreadName, Tree},
     store::ObjectStore,
 };
+use oplog::OpRecord;
 use refs::refs::{RefBackend, RefExpectation, RefUpdate};
 use tracing::warn;
 
@@ -124,11 +125,12 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
                     // The divergence check MUST run before the batch publish:
                     // a thread import that would move a thread across divergent
                     // history fails closed here, before any ref is written.
-                    if let Some(existing) = self
+                    let existing = self
                         .refs
                         .get_thread(&thread_name)
                         .await
-                        .map_err(IngestError::from)?
+                        .map_err(IngestError::from)?;
+                    if let Some(existing) = existing
                         && self.state_remaps.get(&existing) != Some(&cid)
                         && !self.thread_can_adopt_change(&existing, &cid)?
                     {
@@ -139,7 +141,7 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
                             incoming: cid,
                         });
                     }
-                    threads.push((thread_name, cid));
+                    threads.push((thread_name, cid, existing));
                 }
                 RefNamespace::Tag => {
                     let marker_name = MarkerName::from(head.short_name.as_str());
@@ -170,14 +172,29 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
         // ref list never repeats a full name, so each (kind, short_name) pair
         // is already unique across the batch.
         let mut updates: Vec<RefUpdate> = Vec::with_capacity(threads.len() + markers.len());
+        let mut records = Vec::with_capacity(threads.len() + markers.len());
 
-        for (thread_name, cid) in threads {
+        for (thread_name, cid, existing) in threads {
+            if existing == Some(cid) {
+                stats.threads_written += 1;
+                continue;
+            }
+            records.push(match existing {
+                Some(old_state) => OpRecord::ThreadUpdate {
+                    name: thread_name.to_string(),
+                    old_state,
+                    new_state: cid,
+                    manager_snapshots: None,
+                },
+                None => OpRecord::ThreadCreate {
+                    name: thread_name.to_string(),
+                    state: cid,
+                    manager_snapshot: None,
+                },
+            });
             updates.push(RefUpdate::Thread {
                 name: thread_name,
-                // The divergence check above already validated the move; there
-                // is no concurrent writer during import, so `Any` mirrors the
-                // single-ref `set_thread` it replaces.
-                expected: RefExpectation::Any,
+                expected: existing.map_or(RefExpectation::Missing, RefExpectation::Value),
                 new: Some(cid),
             });
             stats.threads_written += 1;
@@ -185,9 +202,19 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
 
         for (marker_name, cid, existing) in markers {
             if existing != Some(cid) {
+                if let Some(old_state) = existing {
+                    records.push(OpRecord::MarkerDelete {
+                        name: marker_name.to_string(),
+                        state: old_state,
+                    });
+                }
+                records.push(OpRecord::MarkerCreate {
+                    name: marker_name.to_string(),
+                    state: cid,
+                });
                 updates.push(RefUpdate::Marker {
                     name: marker_name,
-                    expected: RefExpectation::Any,
+                    expected: existing.map_or(RefExpectation::Missing, RefExpectation::Value),
                     new: Some(cid),
                 });
             }
@@ -196,7 +223,24 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
             stats.markers_written += 1;
         }
 
-        self.refs.update_refs(&updates).map_err(IngestError::from)?;
+        let encoded_records = if self.refs.can_commit_records() {
+            records
+                .iter()
+                .map(|record| {
+                    rmp_serde::to_vec(record).map_err(|error| IngestError::Other(error.to_string()))
+                })
+                .collect::<crate::Result<Vec<_>>>()?
+        } else {
+            // Mechanical/recordless import is an explicit supported mode.
+            // It still enters through commit_and_publish for the atomic ref
+            // batch, but cannot claim an oplog invariant its backend does not
+            // provide. Configured repository backends advertise the committer
+            // and receive the exact records above.
+            Vec::new()
+        };
+        self.refs
+            .commit_and_publish(&encoded_records, &updates, None)
+            .map_err(IngestError::from)?;
 
         Ok(stats)
     }
@@ -261,18 +305,34 @@ fn change_is_ancestor<S: ObjectStore>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use objects::{
+        error::Result as HeddleResult,
         object::{Attribution, Principal, State, StateId},
         store::{InMemoryStore, ObjectStore},
     };
-    use refs::refs::RefManager;
+    use refs::refs::{RefCommitter, RefManager};
     use tempfile::TempDir;
 
     use super::*;
 
+    struct TestCommitter;
+
+    impl RefCommitter for TestCommitter {
+        fn commit_records(
+            &self,
+            _encoded_records: &[Vec<u8>],
+            _scope: Option<&str>,
+        ) -> HeddleResult<()> {
+            Ok(())
+        }
+    }
+
     fn fresh_ref_manager() -> (TempDir, RefManager) {
         let tmp = TempDir::new().unwrap();
-        let mgr = RefManager::new(tmp.path());
+        let mgr = RefManager::new(tmp.path())
+            .with_committer(Arc::new(TestCommitter) as Arc<dyn RefCommitter>);
         mgr.init().unwrap();
         (tmp, mgr)
     }

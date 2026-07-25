@@ -2,21 +2,20 @@
 
 mod collaboration;
 mod content;
-mod state_review;
 pub(crate) mod helpers;
 mod hydration;
 pub mod monorepo;
 pub(crate) mod operation_id;
 pub mod request_signing;
 mod session;
+mod state_review;
 mod sync;
 mod user;
 
 use cli_shared::{ClientConfig, cleartext_connect_allowed, cleartext_refused_message};
 use crypto::{Ed25519Signer, Signer};
 use grpc::heddle::api::v1alpha1::{
-    KeypairProof, MintBiscuitRequest,
-    collaboration_service_client::CollaborationServiceClient,
+    KeypairProof, MintBiscuitRequest, collaboration_service_client::CollaborationServiceClient,
     identity_service_client::IdentityServiceClient, mint_biscuit_request::Proof,
     registry_service_client::RegistryServiceClient,
     repo_sync_service_client::RepoSyncServiceClient,
@@ -603,12 +602,12 @@ impl HostedGrpcClient {
             let marker_name = MarkerName::from(marker.name.as_str());
             match repo.refs().get_marker(&marker_name)? {
                 Some(existing) if existing == marker.state_id => {}
-                Some(existing) => repo.refs().set_marker_cas(
+                Some(existing) => repo.set_marker_recorded_cas(
                     &marker_name,
                     refs::RefExpectation::Value(existing),
                     &marker.state_id,
                 )?,
-                None => repo.refs().create_marker(&marker_name, &marker.state_id)?,
+                None => repo.create_marker_recorded(&marker_name, &marker.state_id)?,
             }
         }
         Ok(())
