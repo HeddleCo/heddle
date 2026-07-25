@@ -19,7 +19,7 @@ manifests=(
   crates/crypto/Cargo.toml
 )
 
-forbidden='clap|anstyle|anstream|indicatif|console|termcolor|owo-colors'
+forbidden='clap|anstyle|anstream|indicatif|console|termcolor|owo-colors|heddle-cli-render'
 fail=0
 
 for manifest in "${manifests[@]}"; do

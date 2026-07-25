@@ -1681,7 +1681,6 @@ dependencies = [
 name = "heddle-cli"
 version = "0.10.4"
 dependencies = [
- "anstyle",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
@@ -1693,6 +1692,7 @@ dependencies = [
  "futures",
  "heddle-api",
  "heddle-cli-args",
+ "heddle-cli-render",
  "heddle-cli-shared",
  "heddle-client",
  "heddle-core",
@@ -1757,6 +1757,27 @@ dependencies = [
  "heddle-objects",
  "heddle-repo",
  "weft-client-shim",
+]
+
+[[package]]
+name = "heddle-cli-render"
+version = "0.10.4"
+dependencies = [
+ "anstream",
+ "anstyle",
+ "anyhow",
+ "blake3",
+ "chrono",
+ "clap",
+ "heddle-cli-args",
+ "heddle-core",
+ "heddle-objects",
+ "heddle-repo",
+ "hex",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tempfile",
 ]
 
 [[package]]

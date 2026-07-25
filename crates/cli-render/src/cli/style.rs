@@ -29,7 +29,7 @@ use std::{
 
 use anstyle::{Color, Style};
 
-use super::cli_args::Cli;
+use heddle_cli_args::Cli;
 
 /// Process-wide gate, encoded as a tristate atomic so tests can
 /// override the value freely without rebuilding the cell.

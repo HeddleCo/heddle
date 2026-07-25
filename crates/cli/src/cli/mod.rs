@@ -5,14 +5,11 @@ use std::io::IsTerminal;
 
 pub mod commands;
 pub mod help;
-pub mod progress_render;
-pub mod render;
-pub mod style;
-pub mod tips;
 
 pub use heddle_cli_args as cli_args;
 pub use heddle_cli_args::*;
-use repo::{Config, OutputFormat};
+pub use heddle_cli_render::cli::{progress_render, render, style, tips};
+use repo::Config;
 
 use crate::config::UserConfig;
 
@@ -62,34 +59,6 @@ pub fn user_config_or_exit() -> &'static UserConfig {
 
 pub fn load_user_config_or_exit() -> UserConfig {
     user_config_or_exit().clone()
-}
-
-/// Determine if output should be JSON.
-///
-/// Resolution order (later wins):
-/// 1. user config `output.format` (default: `text`)
-/// 2. repo config `output.format` (falls back to user config)
-/// 3. `--output {json|text}` CLI flag
-///
-/// No TTY/pipe auto-detection: the default is always text, and JSON
-/// is opt-in. Surprises like `heddle status | less` rendering JSON
-/// are gone.
-pub fn should_output_json(cli: &Cli, config: Option<&Config>) -> bool {
-    let user_config = user_config_or_exit();
-    let mut format = config
-        .and_then(|cfg| cfg.output.format)
-        .unwrap_or(user_config.output.format);
-
-    if let Some(output) = cli.output_mode() {
-        format = match output {
-            // `json-compact` is still JSON output — it only narrows
-            // *which* fields are emitted (see `output_is_compact`).
-            OutputMode::Json | OutputMode::JsonCompact => OutputFormat::Json,
-            OutputMode::Text => OutputFormat::Text,
-        };
-    }
-
-    matches!(format, OutputFormat::Json)
 }
 
 /// Whether the caller asked for the compact decision-surface projection
