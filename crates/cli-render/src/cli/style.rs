@@ -69,8 +69,8 @@ pub fn color_enabled() -> bool {
 /// Test-only override. Use this from any test that wants to assert
 /// styled or unstyled output without depending on the ambient TTY
 /// state.
-#[cfg(test)]
-pub(crate) fn force_for_test(enabled: bool) {
+#[cfg(any(test, feature = "test-utils"))]
+pub fn force_for_test(enabled: bool) {
     COLOR_STATE.store(
         if enabled { STATE_ON } else { STATE_OFF },
         Ordering::Relaxed,

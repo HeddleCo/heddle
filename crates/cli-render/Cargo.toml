@@ -26,6 +26,7 @@ serde_json.workspace = true
 [features]
 default = []
 client = []
+test-utils = []
 
 [dev-dependencies]
 clap.workspace = true
