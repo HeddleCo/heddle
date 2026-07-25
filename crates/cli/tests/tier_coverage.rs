@@ -17,7 +17,11 @@ use cli::cli::commands::command_contract_root_commands;
 
 #[test]
 fn every_commands_variant_has_explicit_root_contract() {
+    // `cli_args` moved to the `heddle-cli-args` crate (heddle#1100 phase A1).
+    // CARGO_MANIFEST_DIR is `<repo>/crates/cli`, so hop to the sibling crate.
     let commands_rs = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("cli-args")
         .join("src")
         .join("cli")
         .join("cli_args")
