@@ -514,8 +514,25 @@ fn output_mode_auto_variant_is_absent_from_source() {
         .expect("crates dir")
         .join("repo")
         .join("src");
-    for root in [cli_src, repo_src] {
-        for entry in walkdir(&root) {
+    for (root, floor) in [(cli_src, 80usize), (repo_src, 40usize)] {
+        assert!(
+            root.is_dir(),
+            "output_mode_no_auto scan root missing at {}",
+            root.display()
+        );
+        let entries = walkdir(&root);
+        let rust_files = entries
+            .iter()
+            .filter(|entry| entry.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+            .count();
+        assert!(
+            rust_files >= floor,
+            "output_mode_no_auto scanned only {rust_files} Rust files under {} (floor {floor}) — \
+             did a crate-split move sources out of this scan root? Update the scan root, do not \
+             lower this floor.",
+            root.display()
+        );
+        for entry in entries {
             if entry.extension().and_then(|ext| ext.to_str()) != Some("rs") {
                 continue;
             }

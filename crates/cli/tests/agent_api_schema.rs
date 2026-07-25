@@ -15,6 +15,13 @@ use std::path::PathBuf;
 #[test]
 fn agent_api_schema_matches_committed_snapshot() {
     let actual = cli::cli::commands::agent_api_schema();
+    let discovered_items = actual.as_object().map_or(0, serde_json::Map::len);
+    assert!(
+        discovered_items >= 4,
+        "agent_api_schema discovered only {discovered_items} top-level schema items (floor 4) — \
+         did a crate-split disconnect the agent API registry? Update the discovery root, do not \
+         lower this floor."
+    );
     let actual_pretty = serde_json::to_string_pretty(&actual).unwrap();
 
     let snapshot_path = snapshot_path();
