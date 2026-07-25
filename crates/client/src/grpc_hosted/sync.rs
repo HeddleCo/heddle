@@ -14,10 +14,9 @@ use grpc::heddle::api::v1alpha1::{
     GitRefUpdateTransfer, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor, PackChunk,
     PackStreamKind, PartialFetchStatus, PullClientFrame, PullRequest, PullServerFrame,
     PushClientFrame, PushRequest, PushServerFrame, RedactionTransfer, StateAttachmentTransfer,
-    StateVisibilityTransfer,
-    StreamOpeningProof, ThreadConfidenceSummary, ThreadIntegrationPolicy, ThreadMetadata,
-    ThreadVerificationSummary, TransportMode, UpdateRefRequest, WantObjects, git_lane_transfer,
-    pull_client_frame, pull_server_frame, push_client_frame, push_server_frame,
+    StateVisibilityTransfer, StreamOpeningProof, ThreadConfidenceSummary, ThreadIntegrationPolicy,
+    ThreadMetadata, ThreadVerificationSummary, TransportMode, UpdateRefRequest, WantObjects,
+    git_lane_transfer, pull_client_frame, pull_server_frame, push_client_frame, push_server_frame,
 };
 use objects::{
     Progress,
@@ -1220,8 +1219,7 @@ impl HostedGrpcClient {
                         if let Some(local_thread) = options.local_thread
                             && let Some(state) = final_state
                         {
-                            repo.refs()
-                                .set_thread(&ThreadName::from(local_thread), &state)?;
+                            repo.set_thread_recorded(&ThreadName::from(local_thread), &state)?;
                         }
                         if let Some(state) = final_state
                             && allow_partial_fetch
@@ -1758,12 +1756,12 @@ fn apply_marker_snapshot(repo: &Repository, checkpoint: &[u8]) -> Result<bool, P
         let name = MarkerName::from(name);
         match repo.refs().get_marker(&name)? {
             Some(existing) if existing == state_id => {}
-            Some(existing) => repo.refs().set_marker_cas(
+            Some(existing) => repo.set_marker_recorded_cas(
                 &name,
                 refs::RefExpectation::Value(existing),
                 &state_id,
             )?,
-            None => repo.refs().create_marker(&name, &state_id)?,
+            None => repo.create_marker_recorded(&name, &state_id)?,
         }
     }
 
@@ -4226,11 +4224,15 @@ mod tests {
             .into_iter()
             .partition(|info| info.obj_type.packable_for_push());
         assert!(
-            pack_objects.iter().all(|info| info.obj_type != ObjectType::StateAttachment),
+            pack_objects
+                .iter()
+                .all(|info| info.obj_type != ObjectType::StateAttachment),
             "attachment record must never ride the push pack"
         );
         assert!(
-            pack_objects.iter().any(|info| info.obj_type == ObjectType::State),
+            pack_objects
+                .iter()
+                .any(|info| info.obj_type == ObjectType::State),
             "ordinary content-addressed objects still ride the push pack"
         );
         assert!(
@@ -4288,10 +4290,14 @@ mod tests {
             delta_base: None,
         };
 
-        let frame = sidecar_push_message(&repo, info, "op-1").expect("emit attachment sidecar frame");
+        let frame =
+            sidecar_push_message(&repo, info, "op-1").expect("emit attachment sidecar frame");
         assert_eq!(frame.client_operation_id, "op-1");
         let Some(push_client_frame::Frame::StateAttachment(transfer)) = frame.frame else {
-            panic!("expected a StateAttachmentTransfer frame, got {:?}", frame.frame);
+            panic!(
+                "expected a StateAttachmentTransfer frame, got {:?}",
+                frame.frame
+            );
         };
         assert_eq!(
             transfer.state_id,

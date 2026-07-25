@@ -159,7 +159,7 @@ impl LocalSync {
             let current = target.refs().get_marker(&name)?;
             if current != Some(state) {
                 let expected = current.map_or(RefExpectation::Missing, RefExpectation::Value);
-                target.refs().set_marker_cas(&name, expected, &state)?;
+                target.set_marker_recorded_cas(&name, expected, &state)?;
             }
         }
         Ok(copied)

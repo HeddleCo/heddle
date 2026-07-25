@@ -45,6 +45,16 @@ pub enum ConditionalCommitOutcome {
     },
 }
 
+/// A HEAD value captured in an operation record.
+///
+/// This mirrors the refs crate's `Head` without making the schema crate depend
+/// on the refs implementation. The repository layer owns the conversion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecordedHead {
+    Attached { thread: String },
+    Detached { state: StateId },
+}
+
 /// Record of an operation that can be undone.
 ///
 /// Variants must be appended at the tail. rmp-serde encodes enum variants by
@@ -325,6 +335,15 @@ pub enum OpRecord {
         #[serde(default)]
         new_sidecar: Option<Vec<u8>>,
     },
+    /// A direct HEAD publish that is not already represented by a more
+    /// specific operation such as `Snapshot`, `Fork`, `Collapse`, or `Goto`.
+    ///
+    /// Both images are recorded so reconciliation can recover a committed but
+    /// unpublished move and undo/redo can restore the exact attachment state.
+    HeadUpdate {
+        previous: RecordedHead,
+        new: RecordedHead,
+    },
 }
 
 /// True when `record` is the atomic transaction commit marker.
@@ -446,6 +465,7 @@ pub fn isolation_keys_for_record(record: &OpRecord, scope: Option<&str>) -> BTre
         OpRecord::Snapshot { thread: None, .. }
         | OpRecord::Checkpoint { thread: None, .. }
         | OpRecord::Goto { .. }
+        | OpRecord::HeadUpdate { .. }
         | OpRecord::UndoRecoveryUpdate { .. } => {
             if let Some(scope) = scope {
                 keys.insert(IsolationKey::LocalHead {
@@ -635,6 +655,12 @@ impl OpRecord {
             OpRecord::StateVisibilityPromote { state, tier, .. } => {
                 format!("promote visibility {} -> {}", state.short(), tier.as_str())
             }
+            OpRecord::HeadUpdate { new, .. } => match new {
+                RecordedHead::Attached { thread } => format!("attach HEAD to {}", thread),
+                RecordedHead::Detached { state } => {
+                    format!("detach HEAD at {}", state.short())
+                }
+            },
         }
     }
 }
@@ -708,6 +734,7 @@ op_verb_catalog! {
     UndoRecoveryUpdate => ("undo_recovery_update", checkpoint = false),
     StateVisibilitySet => ("state_visibility_set", checkpoint = false),
     StateVisibilityPromote => ("state_visibility_promote", checkpoint = false),
+    HeadUpdate => ("head_update", checkpoint = false),
 }
 
 impl OpRecord {
@@ -776,6 +803,10 @@ impl OpRecord {
             OpRecord::ThreadUpdate { old_state, .. } => vec![*old_state],
             OpRecord::MarkerDelete { state, .. } => vec![*state],
             OpRecord::FastForward { pre_target_id, .. } => vec![*pre_target_id],
+            OpRecord::HeadUpdate {
+                previous: RecordedHead::Detached { state },
+                ..
+            } => vec![*state],
             OpRecord::Snapshot {
                 prev_head: None, ..
             }
@@ -798,7 +829,11 @@ impl OpRecord {
             | OpRecord::RemoteThreadDelete { .. }
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
-            | OpRecord::StateVisibilityPromote { .. } => Vec::new(),
+            | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::HeadUpdate {
+                previous: RecordedHead::Attached { .. },
+                ..
+            } => Vec::new(),
         }
     }
 
@@ -814,6 +849,10 @@ impl OpRecord {
             OpRecord::ThreadUpdate { new_state, .. } => vec![*new_state],
             OpRecord::MarkerCreate { state, .. } => vec![*state],
             OpRecord::FastForward { post_target_id, .. } => vec![*post_target_id],
+            OpRecord::HeadUpdate {
+                new: RecordedHead::Detached { state },
+                ..
+            } => vec![*state],
             OpRecord::ThreadDelete { .. }
             | OpRecord::MarkerDelete { .. }
             | OpRecord::Fork { .. }
@@ -830,7 +869,11 @@ impl OpRecord {
             | OpRecord::RemoteThreadDelete { .. }
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
-            | OpRecord::StateVisibilityPromote { .. } => Vec::new(),
+            | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::HeadUpdate {
+                new: RecordedHead::Attached { .. },
+                ..
+            } => Vec::new(),
         }
     }
 
@@ -863,7 +906,8 @@ impl OpRecord {
             | OpRecord::RemoteThreadDelete { .. }
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
-            | OpRecord::StateVisibilityPromote { .. } => None,
+            | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::HeadUpdate { .. } => None,
         }
     }
 
@@ -896,7 +940,8 @@ impl OpRecord {
             | OpRecord::RemoteThreadDelete { .. }
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
-            | OpRecord::StateVisibilityPromote { .. } => RedactionUndoClass::Other,
+            | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::HeadUpdate { .. } => RedactionUndoClass::Other,
         }
     }
 
@@ -929,7 +974,8 @@ impl OpRecord {
             | OpRecord::RemoteThreadDelete { .. }
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
-            | OpRecord::StateVisibilityPromote { .. } => None,
+            | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::HeadUpdate { .. } => None,
         }
     }
 }
@@ -1042,7 +1088,8 @@ mod verb_catalog_tests {
             | OpRecord::RemoteThreadDelete { .. }
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
-            | OpRecord::StateVisibilityPromote { .. } => {}
+            | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::HeadUpdate { .. } => {}
         }
         vec![
             sample,
@@ -1159,6 +1206,12 @@ mod verb_catalog_tests {
                 tier: VisibilityTier::Public,
                 prior_sidecar: Some(vec![4, 5]),
                 new_sidecar: None,
+            },
+            OpRecord::HeadUpdate {
+                previous: RecordedHead::Detached { state: cid() },
+                new: RecordedHead::Attached {
+                    thread: "main".into(),
+                },
             },
         ]
     }

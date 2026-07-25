@@ -51,7 +51,7 @@ use heddle_core::watch_plan::{
 };
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use objects::{object::StateId, store::ObjectStore};
-use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord};
+use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord, RecordedHead};
 use repo::Repository;
 use serde::Serialize;
 
@@ -458,6 +458,10 @@ fn thread_for(op: &OpRecord, _kind: &str) -> Option<String> {
         OpRecord::GitCheckpoint { branch, .. } => Some(branch.clone()),
         OpRecord::RemoteThreadUpdate { thread, .. }
         | OpRecord::RemoteThreadDelete { thread, .. } => Some(thread.clone()),
+        OpRecord::HeadUpdate {
+            new: RecordedHead::Attached { thread },
+            ..
+        } => Some(thread.clone()),
         OpRecord::Goto { .. }
         | OpRecord::Fork { .. }
         | OpRecord::Collapse { .. }
@@ -468,6 +472,10 @@ fn thread_for(op: &OpRecord, _kind: &str) -> Option<String> {
         | OpRecord::UndoRecoveryUpdate { .. }
         | OpRecord::StateVisibilitySet { .. }
         | OpRecord::StateVisibilityPromote { .. }
+        | OpRecord::HeadUpdate {
+            new: RecordedHead::Detached { .. },
+            ..
+        }
         | OpRecord::Purge { .. } => None,
     }
 }
@@ -496,11 +504,19 @@ fn primary_state_id(op: &OpRecord) -> Option<StateId> {
             Some(*state)
         }
         OpRecord::UndoRecoveryUpdate { state } => Some(*state),
+        OpRecord::HeadUpdate {
+            new: RecordedHead::Detached { state },
+            ..
+        } => Some(*state),
         OpRecord::TransactionAbort { .. }
         | OpRecord::TransactionCommit { .. }
         | OpRecord::ConflictResolved { .. }
         | OpRecord::Purge { .. }
-        | OpRecord::FastForward { .. } => None,
+        | OpRecord::FastForward { .. }
+        | OpRecord::HeadUpdate {
+            new: RecordedHead::Attached { .. },
+            ..
+        } => None,
     }
 }
 

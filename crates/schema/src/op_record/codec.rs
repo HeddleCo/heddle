@@ -13,7 +13,7 @@ use objects::{
 };
 use serde::Deserialize;
 
-use super::{OpRecord, ThreadUpdateSnapshots};
+use super::{OpRecord, RecordedHead, ThreadUpdateSnapshots};
 
 pub const CURRENT_OP_RECORD_SCHEMA_VERSION: u32 = 4;
 const CURRENT_OP_RECORD_SCHEMA_NAME: &str = "state-id-v4";
@@ -184,6 +184,10 @@ enum StrictCurrentOpRecord {
         prior_sidecar: Option<Vec<u8>>,
         #[serde(default)]
         new_sidecar: Option<Vec<u8>>,
+    },
+    HeadUpdate {
+        previous: RecordedHead,
+        new: RecordedHead,
     },
 }
 
@@ -373,6 +377,7 @@ impl StrictCurrentOpRecord {
                 prior_sidecar,
                 new_sidecar,
             },
+            Self::HeadUpdate { previous, new } => OpRecord::HeadUpdate { previous, new },
         }
     }
 }
@@ -520,6 +525,12 @@ mod tests {
                 prior_sidecar: Some(vec![4]),
                 new_sidecar: Some(vec![5]),
             },
+            OpRecord::HeadUpdate {
+                previous: RecordedHead::Detached { state: state(26) },
+                new: RecordedHead::Attached {
+                    thread: "main".into(),
+                },
+            },
         ]
     }
 
@@ -548,6 +559,7 @@ mod tests {
             OpRecord::UndoRecoveryUpdate { .. } => "UndoRecoveryUpdate",
             OpRecord::StateVisibilitySet { .. } => "StateVisibilitySet",
             OpRecord::StateVisibilityPromote { .. } => "StateVisibilityPromote",
+            OpRecord::HeadUpdate { .. } => "HeadUpdate",
         }
     }
 
@@ -605,6 +617,7 @@ mod tests {
                 "UndoRecoveryUpdate",
                 "StateVisibilitySet",
                 "StateVisibilityPromote",
+                "HeadUpdate",
             ]
         );
         for record in records {

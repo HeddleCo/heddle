@@ -76,7 +76,7 @@ pub fn sync_branches(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
                 });
             }
 
-            bridge.heddle_repo.refs().set_thread(&tn, &state_id)?;
+            bridge.heddle_repo.set_thread_recorded(&tn, &state_id)?;
             stats += 1;
         }
     }
@@ -117,14 +117,13 @@ pub fn sync_tags(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
             match bridge.heddle_repo.refs().get_marker(&mn) {
                 Ok(Some(existing)) if existing != state_id => bridge
                     .heddle_repo
-                    .refs()
-                    .set_marker_cas(&mn, RefExpectation::Any, &state_id)?,
+                    .set_marker_recorded_cas(&mn, RefExpectation::Any, &state_id)?,
                 Ok(_) => {}
                 Err(err) => return Err(err.into()),
             }
 
             if bridge.heddle_repo.refs().get_marker(&mn)?.is_none() {
-                bridge.heddle_repo.refs().create_marker(&mn, &state_id)?;
+                bridge.heddle_repo.create_marker_recorded(&mn, &state_id)?;
             }
             stats += 1;
         }

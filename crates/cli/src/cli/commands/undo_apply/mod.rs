@@ -15,7 +15,9 @@ use objects::{
     lock::{RepoLock, WriteLockGuard},
     object::{ContentHash, MarkerName, StateId, ThreadName},
 };
-use oplog::{IsolationKey, OpBatch, OpEntry, OpLogBackend, OpRecord, isolation_keys_for_record};
+use oplog::{
+    IsolationKey, OpBatch, OpEntry, OpLogBackend, OpRecord, RecordedHead, isolation_keys_for_record,
+};
 use refs::Head;
 use repo::{
     CommitGraphIndex, Repository, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
@@ -786,6 +788,9 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         } => {
             apply_ff_undo(steps, source_thread, target_thread, pre_target_id)?;
         }
+        OpRecord::HeadUpdate { previous, .. } => {
+            steps.write_head(head_from_record(previous))?;
+        }
         OpRecord::GitCheckpoint {
             branch,
             previous_git_oid,
@@ -958,6 +963,9 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         } => {
             apply_ff_redo(steps, source_thread, target_thread, post_target_id)?;
         }
+        OpRecord::HeadUpdate { new, .. } => {
+            steps.write_head(head_from_record(new))?;
+        }
         OpRecord::GitCheckpoint {
             branch,
             previous_git_oid,
@@ -1017,6 +1025,15 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
     }
 
     Ok(())
+}
+
+fn head_from_record(head: &RecordedHead) -> Head {
+    match head {
+        RecordedHead::Attached { thread } => Head::Attached {
+            thread: ThreadName::new(thread),
+        },
+        RecordedHead::Detached { state } => Head::Detached { state: *state },
+    }
 }
 
 fn apply_ff_redo(

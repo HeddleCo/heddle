@@ -19,6 +19,17 @@ pub trait RefBackend: CoreRefBackend<Error = HeddleError> {
     fn list_remotes(&self) -> Result<Vec<String>>;
     fn list_remote_threads(&self, remote: &str) -> Result<Vec<ThreadName>>;
 
+    /// Whether this backend can durably commit a non-empty opaque operation
+    /// record batch at the [`commit_and_publish`](Self::commit_and_publish)
+    /// seam.
+    ///
+    /// Recordless/bootstrap backends still route ref batches through the same
+    /// chokepoint, but callers must pass an empty record batch. The default is
+    /// conservative so an unwired backend never claims it can preserve records.
+    fn can_commit_records(&self) -> bool {
+        false
+    }
+
     /// The write chokepoint (heddle#330 §2.2 r18): append the caller-supplied
     /// ref-carrying record batch (phase 4, opaque rmp-serde `OpRecord` bytes so
     /// `refs` names no `oplog` type) before publishing the atomic ref batch

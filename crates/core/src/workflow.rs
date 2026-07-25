@@ -503,7 +503,8 @@ pub fn op_targets_merge_state(op: &OpRecord, merge_state: &str) -> bool {
         | OpRecord::RemoteThreadDelete { .. }
         | OpRecord::UndoRecoveryUpdate { .. }
         | OpRecord::StateVisibilitySet { .. }
-        | OpRecord::StateVisibilityPromote { .. } => false,
+        | OpRecord::StateVisibilityPromote { .. }
+        | OpRecord::HeadUpdate { .. } => false,
     }
 }
 

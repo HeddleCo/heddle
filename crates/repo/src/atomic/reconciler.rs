@@ -16,7 +16,7 @@ use objects::{
     error::Result,
     object::{MarkerName, StateId, ThreadName},
 };
-use oplog::{OpLog, OpRecord};
+use oplog::{OpLog, OpRecord, RecordedHead};
 use refs::{
     Head, LoadRequest, Loaded, ReconcileOutcome, RefClass, RefExpectation, RefManager,
     RefReconciler, RefUpdate,
@@ -227,6 +227,14 @@ impl Fold {
             }
             OpRecord::Goto { head, .. } => {
                 self.head = HeadFold::Republish(Head::Detached { state: *head });
+            }
+            OpRecord::HeadUpdate { new, .. } => {
+                self.head = HeadFold::Republish(match new {
+                    RecordedHead::Attached { thread } => Head::Attached {
+                        thread: ThreadName::new(thread),
+                    },
+                    RecordedHead::Detached { state } => Head::Detached { state: *state },
+                });
             }
             // Records that do not move canonical HEAD: transaction markers,
             // conflict resolution, redaction bookkeeping, and the Git-overlay

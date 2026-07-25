@@ -185,7 +185,7 @@ fn repair_git_ref(
                 None,
             )?;
             if repo.git_overlay_current_branch()?.as_deref() == Some(ref_name) {
-                repo.refs().write_head(&Head::Attached {
+                repo.write_head_recorded(&Head::Attached {
                     thread: ThreadName::new(ref_name),
                 })?;
             }
@@ -206,7 +206,7 @@ fn repair_git_ref(
                 .get_thread(&tn)?
                 .ok_or_else(|| git_repair_missing_heddle_thread_advice(ref_name))?;
             repo.goto_without_record(&state)?;
-            repo.refs().write_head(&Head::Attached { thread: tn })?;
+            repo.write_head_recorded(&Head::Attached { thread: tn })?;
             let mut bridge = heddle_git_projection::GitProjection::new(repo);
             match bridge.write_through_current_checkout()? {
                 heddle_git_projection::WriteThroughOutcome::Wrote(git_oid) => {

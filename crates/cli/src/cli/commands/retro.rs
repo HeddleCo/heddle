@@ -294,7 +294,8 @@ pub async fn cmd_retro(cli: &Cli, options: RetroCommandOptions) -> Result<()> {
                 | OpRecord::RemoteThreadDelete { .. }
                 | OpRecord::UndoRecoveryUpdate { .. }
                 | OpRecord::StateVisibilitySet { .. }
-                | OpRecord::StateVisibilityPromote { .. } => {}
+                | OpRecord::StateVisibilityPromote { .. }
+                | OpRecord::HeadUpdate { .. } => {}
             }
         }
     }
@@ -403,7 +404,8 @@ fn find_recent_turn_ts(repo: &Repository) -> Result<Option<DateTime<Utc>>> {
                 | OpRecord::RemoteThreadDelete { .. }
                 | OpRecord::UndoRecoveryUpdate { .. }
                 | OpRecord::StateVisibilitySet { .. }
-                | OpRecord::StateVisibilityPromote { .. } => continue,
+                | OpRecord::StateVisibilityPromote { .. }
+                | OpRecord::HeadUpdate { .. } => continue,
             };
             if let Some(state) = repo.store().get_state(&new_state)?
                 && let Some(intent) = state.intent.as_deref()

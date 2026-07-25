@@ -25,9 +25,10 @@ use objects::{
         TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
         Tree,
     },
-    store::{ActorPresence, ActorPresenceStore, ActorPresenceStatus, AgentUsageSummary, ObjectStore},
+    store::{
+        ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, ObjectStore,
+    },
 };
-use oplog::OpLogRecorder;
 use refs::Head;
 use repo::{
     Repository, SessionManager, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
@@ -1340,18 +1341,7 @@ impl HarnessBridgeRuntime {
         let tn = ThreadName::new(name);
         if self.repo.refs().get_thread(&tn)?.is_none() {
             self.repo
-                .refs()
-                .set_thread_cas(&tn, refs::RefExpectation::Missing, &base_state)?;
-            // Harness writes the ThreadManager record later in this
-            // function (after materializing); no record exists to
-            // snapshot at recording time. `None` matches the pattern
-            // used by `cmd_start` / agent reservation. heddle#23 r2.
-            self.repo.oplog().record_thread_create(
-                &tn,
-                &base_state,
-                None,
-                Some(&self.repo.op_scope()),
-            )?;
+                .set_thread_recorded_cas(&tn, refs::RefExpectation::Missing, &base_state)?;
         }
 
         let workspace_mode = self
@@ -1893,9 +1883,9 @@ impl HarnessBridgeRuntime {
                 entry.status = status.clone();
                 entry.completed_at = match status {
                     ActorPresenceStatus::Active => None,
-                    ActorPresenceStatus::Abandoned | ActorPresenceStatus::Complete | ActorPresenceStatus::Merged => {
-                        Some(Utc::now())
-                    }
+                    ActorPresenceStatus::Abandoned
+                    | ActorPresenceStatus::Complete
+                    | ActorPresenceStatus::Merged => Some(Utc::now()),
                 };
             })?
         } else {
