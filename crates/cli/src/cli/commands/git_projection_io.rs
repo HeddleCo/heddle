@@ -182,13 +182,20 @@ fn print_failed_ref_exports(stats: &ExportStats) {
         return;
     }
     println!(
-        "{} {} left as Git has them (heddle did not overwrite them)",
+        "{} {} diverged; left untouched (heddle did not overwrite)",
         style::warn_marker(),
         style::count(stats.failed_refs.len(), "ref"),
     );
     for (name, reason) in &stats.failed_refs {
         println!("  {}: {reason}", style::bold(name));
     }
+}
+
+/// `"1 ref"` / `"2 refs"` without terminal styling -- this text also lands in
+/// JSON error envelopes and logs, where `style::count`'s escapes do not belong.
+fn plain_count(value: usize, noun: &str) -> String {
+    let suffix = if value == 1 { "" } else { "s" };
+    format!("{value} {noun}{suffix}")
 }
 
 /// The error that makes a partially-failed export exit non-zero, or `None`
@@ -206,9 +213,10 @@ fn failed_ref_export_error(stats: &ExportStats) -> Option<anyhow::Error> {
         .iter()
         .map(|(name, _)| name.as_str())
         .collect();
+    let exported = stats.branches.len() + stats.tags.len();
     Some(anyhow!(
-        "exported {} refs, {} diverged (concurrent git-side update): {}",
-        stats.branches.len() + stats.tags.len(),
+        "exported {}, {} diverged (concurrent git-side update): {}",
+        plain_count(exported, "ref"),
         stats.failed_refs.len(),
         names.join(", "),
     ))
