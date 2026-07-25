@@ -460,10 +460,7 @@ fn emit_push_dry_run(
         PushPath::NativeRemote { .. } => "native/hosted Heddle remote",
     };
 
-    let mut dry = DryRunPlan::new(
-        "push",
-        format!("push to {target_label} ({path_kind})"),
-    );
+    let mut dry = DryRunPlan::new("push", format!("push to {target_label} ({path_kind})"));
 
     if plan.all_threads {
         // Per-thread tips are read cheaply, but for a broad fan-out we keep
@@ -479,9 +476,7 @@ fn emit_push_dry_run(
             .flatten()
             .map(|state| state.state_id.short().to_string());
         if new_tip.is_none() {
-            dry.note(
-                "no current state yet; a real push would first bootstrap a state to publish",
-            );
+            dry.note("no current state yet; a real push would first bootstrap a state to publish");
         }
         dry.ref_updates.push(RefUpdatePreview {
             name: thread
@@ -1091,9 +1086,7 @@ async fn push_local(
     let sync = LocalSync::open(repo.root())?;
     let objects_copied = sync.fetch_state(&target_repo, state_id)?;
 
-    target_repo
-        .refs()
-        .set_thread(&ThreadName::new(track_name), state_id)?;
+    target_repo.set_thread_recorded(&ThreadName::new(track_name), state_id)?;
 
     if should_output_json(cli, Some(repo.config())) {
         let trust = build_repository_verification_state(repo);
@@ -1200,9 +1193,7 @@ async fn push_local_all_threads(
     for thread in &threads {
         let push_one = || -> Result<usize> {
             let copied = sync.fetch_state(&target_repo, &thread.state)?;
-            target_repo
-                .refs()
-                .set_thread(&ThreadName::new(&thread.name), &thread.state)?;
+            target_repo.set_thread_recorded(&ThreadName::new(&thread.name), &thread.state)?;
             Ok(copied)
         };
         match push_one() {
@@ -1503,8 +1494,8 @@ async fn push_network_all_threads(
             // strict UUID (a composite "{uuid}:push:{thread}" string is rejected as
             // InvalidArgument). Derive a deterministic, retry-stable per-thread
             // UUIDv5 from the root op-id (namespace) and the thread name.
-            let namespace = uuid::Uuid::parse_str(&root_operation_id)
-                .unwrap_or(uuid::Uuid::NAMESPACE_OID);
+            let namespace =
+                uuid::Uuid::parse_str(&root_operation_id).unwrap_or(uuid::Uuid::NAMESPACE_OID);
             uuid::Uuid::new_v5(&namespace, thread.name.as_bytes()).to_string()
         };
         let outcome = push_network_one_thread(

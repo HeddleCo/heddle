@@ -7,6 +7,8 @@ mod asserter;
 mod check_atomic_ledger_encapsulation;
 mod check_no_silent_default_tree_load;
 mod check_oprecord_exhaustiveness;
+#[cfg(test)]
+mod check_ref_write_chokepoint;
 mod check_snapshot_atomicity;
 mod check_verification_owner;
 mod fuse_dispatch_bench;

@@ -798,7 +798,7 @@ impl Repository {
         // is a real author capture that bypasses `stage_snapshot_objects`. Last
         // mutation before the write.
         self.put_authored_state(&state)?;
-        self.refs().set_thread(&thread_name, &state.id())?;
+        self.set_thread_recorded(&thread_name, &state.id())?;
 
         // 4. Rewrite the manifest to reflect the new state. `root` is
         //    the worktree being captured from — record its canonical

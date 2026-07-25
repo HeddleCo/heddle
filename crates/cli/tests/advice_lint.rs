@@ -408,6 +408,26 @@ fn recovery_phrase_allowed(rel: &Path, phrase: &str) -> bool {
 }
 
 fn walk_rust_files(dir: &Path, visit: &mut dyn FnMut(&Path)) {
+    const MIN_SCANNED_RUST_FILES: usize = 80;
+    assert!(
+        dir.is_dir(),
+        "advice_lint scan root missing at {}",
+        dir.display()
+    );
+    let mut files_scanned = 0usize;
+    walk_rust_files_inner(dir, &mut |path| {
+        files_scanned += 1;
+        visit(path);
+    });
+    assert!(
+        files_scanned >= MIN_SCANNED_RUST_FILES,
+        "advice_lint scanned only {files_scanned} files (floor {MIN_SCANNED_RUST_FILES}) — \
+         did a crate-split move CLI sources out of this scan root? Update the scan root, do not \
+         lower this floor."
+    );
+}
+
+fn walk_rust_files_inner(dir: &Path, visit: &mut dyn FnMut(&Path)) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -418,7 +438,7 @@ fn walk_rust_files(dir: &Path, visit: &mut dyn FnMut(&Path)) {
             continue;
         }
         if path.is_dir() {
-            walk_rust_files(&path, visit);
+            walk_rust_files_inner(&path, visit);
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
             visit(&path);
         }

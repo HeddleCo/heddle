@@ -482,9 +482,7 @@ fn pull_git_overlay(
         )?;
     }
     if old_state.as_ref() != Some(&new_state)
-        && let Err(error) = repo
-            .refs()
-            .set_thread(&ThreadName::new(local_branch), &new_state)
+        && let Err(error) = repo.set_thread_recorded(&ThreadName::new(local_branch), &new_state)
     {
         let rollback = changed.then(|| {
             rollback_git_pull_branch(
@@ -938,15 +936,14 @@ async fn pull_local(
             }
             (Head::Detached { .. }, _) => {
                 repo.goto(&state_id)?;
-                repo.refs().set_thread(&track_tn, &state_id)?;
+                repo.set_thread_recorded(&track_tn, &state_id)?;
             }
         }
     } else {
-        repo.refs().set_thread(&track_tn, &state_id)?;
+        repo.set_thread_recorded(&track_tn, &state_id)?;
     }
     if let Some(remote_name) = configured_remote_name {
-        repo.refs()
-            .set_remote_thread(remote_name, &ThreadName::new(remote_thread), &state_id)?;
+        repo.set_remote_thread_recorded(remote_name, &ThreadName::new(remote_thread), &state_id)?;
     }
 
     let remote_label = configured_remote_name
@@ -1070,11 +1067,11 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
                             }
                             (Head::Detached { .. }, _) => {
                                 repo.goto(&final_state_id)?;
-                                repo.refs().set_thread(&track_tn, &final_state_id)?;
+                                repo.set_thread_recorded(&track_tn, &final_state_id)?;
                             }
                         }
                     } else {
-                        repo.refs().set_thread(&track_tn, &final_state_id)?;
+                        repo.set_thread_recorded(&track_tn, &final_state_id)?;
                     }
                 }
             }
@@ -1085,9 +1082,7 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
             match crate::client::discussion_sync::pull_discussions(repo, &mut client, repo_path)
                 .await
             {
-                Ok(count)
-                    if count > 0 && !should_output_json(options.cli, Some(repo.config())) =>
-                {
+                Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                     println!(
                         "{} synced {count} discussion(s) from {}",
                         crate::cli::style::ok_marker(),
@@ -1104,9 +1099,7 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
             }
             // Read path for hosted context annotations — same seam as discussions.
             match crate::client::context_sync::pull_context(repo, &mut client, repo_path).await {
-                Ok(count)
-                    if count > 0 && !should_output_json(options.cli, Some(repo.config())) =>
-                {
+                Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                     println!(
                         "{} synced {count} annotation(s) from {}",
                         crate::cli::style::ok_marker(),

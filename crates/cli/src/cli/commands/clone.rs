@@ -613,7 +613,7 @@ fn finish_git_overlay_clone(
     // disk do not yet represent that target.
     repo.goto_from_materialized_state(&state_id, None)?;
     // Keep Git and Heddle attached to the same imported branch.
-    repo.refs().write_head(&Head::Attached {
+    repo.write_head_recorded(&Head::Attached {
         thread: ThreadName::new(&track_name),
     })?;
     write_git_head_branch(&local_path.join(".git"), &track_name)?;
@@ -1212,8 +1212,8 @@ async fn clone_local(
     local_repo.goto_from_materialized_state(&state_id, None)?;
     // Set up the thread locally after materialization so the dirty-worktree
     // guard does not mistake an empty fresh clone for deleted target files.
-    local_repo.refs().set_thread(&tn, &state_id)?;
-    local_repo.refs().write_head(&Head::Attached {
+    local_repo.set_thread_recorded(&tn, &state_id)?;
+    local_repo.write_head_recorded(&Head::Attached {
         thread: ThreadName::new(track_name),
     })?;
 
@@ -1501,10 +1501,7 @@ async fn clone_network(
     server_key: Option<String>,
     endpoint_spec: String,
 ) -> Result<()> {
-    use crate::{
-        client::HostedSession,
-        config::UserConfig,
-    };
+    use crate::{client::HostedSession, config::UserConfig};
 
     let CloneOptions {
         thread,
@@ -1630,7 +1627,10 @@ async fn clone_network(
         {
             Ok(_) => {}
             Err(error) => {
-                eprintln!("{} discussion sync skipped: {error:#}", style::warn_marker());
+                eprintln!(
+                    "{} discussion sync skipped: {error:#}",
+                    style::warn_marker()
+                );
             }
         }
         // Read path for hosted context annotations (heddle context): materialize
@@ -1709,10 +1709,7 @@ async fn clone_monorepo(
     server_key: Option<String>,
     endpoint_spec: String,
 ) -> Result<()> {
-    use crate::{
-        client::HostedSession,
-        config::UserConfig,
-    };
+    use crate::{client::HostedSession, config::UserConfig};
 
     // Monorepo clone materializes each node at a resolved state; the shallow /
     // lazy / partial knobs don't compose with the multi-spool walk in this
@@ -2353,14 +2350,14 @@ mod tests {
             "owner/repo",
         )
         .expect("thread selected");
-        assert_eq!(selected, "main", "companion refs/heads/* entries are ignored");
+        assert_eq!(
+            selected, "main",
+            "companion refs/heads/* entries are ignored"
+        );
 
-        let non_main = select_hosted_clone_thread(
-            None,
-            ["refs/heads/trunk", "trunk"],
-            "owner/repo",
-        )
-        .expect("thread selected");
+        let non_main =
+            select_hosted_clone_thread(None, ["refs/heads/trunk", "trunk"], "owner/repo")
+                .expect("thread selected");
         assert_eq!(
             non_main, "trunk",
             "a non-main default resolves to the short thread, not its companion"

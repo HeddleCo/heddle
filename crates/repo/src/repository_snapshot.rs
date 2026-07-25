@@ -194,7 +194,8 @@ impl AtomicMutation for SnapshotMutation<'_> {
             | OpRecord::RemoteThreadDelete { .. }
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
-            | OpRecord::StateVisibilityPromote { .. } => None,
+            | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::HeadUpdate { .. } => None,
         }) else {
             return Ok(this_run);
         };

@@ -250,7 +250,8 @@ fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result
                         | OpRecord::RemoteThreadDelete { .. }
                         | OpRecord::UndoRecoveryUpdate { .. }
                         | OpRecord::StateVisibilitySet { .. }
-                        | OpRecord::StateVisibilityPromote { .. } => {
+                        | OpRecord::StateVisibilityPromote { .. }
+                        | OpRecord::HeadUpdate { .. } => {
                             if for_abort {
                                 continue;
                             }

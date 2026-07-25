@@ -32,6 +32,8 @@ mod repository_partial_fetch;
 mod repository_provenance;
 #[path = "repository_recovery.rs"]
 mod repository_recovery;
+#[path = "repository_ref_mutation.rs"]
+mod repository_ref_mutation;
 #[path = "repository_resolve.rs"]
 mod repository_resolve;
 #[path = "repository_signing.rs"]
@@ -2304,7 +2306,7 @@ impl Repository {
             ));
         }
         let thread = ThreadName::from(facet.thread_ref(main_thread).as_str());
-        self.refs.set_thread(&thread, state)
+        self.set_thread_recorded(&thread, state)
     }
 
     /// The write chokepoint (heddle#330 §2.2): commit the ref-carrying

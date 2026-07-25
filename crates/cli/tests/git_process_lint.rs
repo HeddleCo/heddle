@@ -26,9 +26,19 @@ struct SpawnSite {
 fn runtime_git_process_spawns_match_reviewed_allowlist() {
     let workspace = workspace_root();
     let mut sites = Vec::new();
+    let mut files_scanned = 0usize;
     for dir in default_cli_runtime_source_dirs(&workspace) {
-        walk_rust_files(&dir, &mut |path| scan_file(&workspace, path, &mut sites));
+        walk_rust_files(&dir, &mut |path| {
+            files_scanned += 1;
+            scan_file(&workspace, path, &mut sites);
+        });
     }
+    assert!(
+        files_scanned >= 300,
+        "git_process_lint scanned only {files_scanned} Rust files (floor 300) — did a \
+         crate-split move runtime sources out of the configured scan roots? Update the scan \
+         roots, do not lower this floor."
+    );
 
     let allowed: BTreeMap<(&str, &str), &str> = ALLOWED_GIT_SPAWNS
         .iter()
@@ -88,6 +98,12 @@ fn git_engine_dependency_is_sley_not_gix() {
 
     let mut manifests = Vec::new();
     collect_manifest_files(&workspace, &mut manifests);
+    assert!(
+        manifests.len() >= 10,
+        "git_process_lint discovered only {} Cargo manifests (floor 10) — update the workspace \
+         scan root, do not lower this floor.",
+        manifests.len()
+    );
     let mut direct_gix_mentions = Vec::new();
     for manifest in manifests {
         let rel = manifest
