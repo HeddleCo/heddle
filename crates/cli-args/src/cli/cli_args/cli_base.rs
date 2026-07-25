@@ -109,23 +109,6 @@ impl Cli {
         };
         repo::Repository::open(repo_path).context("open Heddle repository")
     }
-
-    fn should_output_json_for_context(&self, repo_config: Option<&Config>) -> bool {
-        let mut format = repo_config
-            .and_then(|config| config.output.format)
-            .unwrap_or(Self::user_config_or_exit().output.format);
-
-        if let Some(output) = self.output_mode() {
-            format = match output {
-                cli_shared::OutputMode::Json | cli_shared::OutputMode::JsonCompact => {
-                    OutputFormat::Json
-                }
-                cli_shared::OutputMode::Text => OutputFormat::Text,
-            };
-        }
-
-        matches!(format, OutputFormat::Json)
-    }
 }
 
 impl weft_client_shim::CliContext for Cli {
@@ -138,6 +121,25 @@ impl weft_client_shim::CliContext for Cli {
     }
 
     fn should_output_json(&self, repo_config: Option<&Config>) -> bool {
-        self.should_output_json_for_context(repo_config)
+        should_output_json(self, repo_config)
     }
+}
+
+/// Resolve whether command output should use JSON after applying user,
+/// repository, and explicit CLI output settings.
+pub fn should_output_json(cli: &Cli, repo_config: Option<&Config>) -> bool {
+    let mut format = repo_config
+        .and_then(|config| config.output.format)
+        .unwrap_or(Cli::user_config_or_exit().output.format);
+
+    if let Some(output) = cli.output_mode() {
+        format = match output {
+            cli_shared::OutputMode::Json | cli_shared::OutputMode::JsonCompact => {
+                OutputFormat::Json
+            }
+            cli_shared::OutputMode::Text => OutputFormat::Text,
+        };
+    }
+
+    matches!(format, OutputFormat::Json)
 }
