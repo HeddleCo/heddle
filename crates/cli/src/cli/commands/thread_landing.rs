@@ -1,13 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared commands for the ready -> land thread landing loop.
 
-use super::command_catalog::{heddle_action, thread_flag_args};
-
-pub(crate) fn merge_preview_command(thread_id: &str) -> String {
-    let mut argv = vec!["ready".to_string()];
-    argv.extend(thread_flag_args(thread_id));
-    heddle_action(argv)
-}
+use super::command_catalog::heddle_action;
+pub(crate) use super::command_catalog::{land_local_command, merge_preview_command};
 
 pub(crate) fn switch_thread_command(thread_id: &str) -> String {
     let mut argv = vec!["thread".to_string(), "switch".to_string()];
@@ -20,12 +15,6 @@ pub(crate) fn switch_thread_command(thread_id: &str) -> String {
 
 pub(crate) fn land_command_for_thread(_repo: &repo::Repository, thread_id: &str) -> String {
     land_local_command(thread_id)
-}
-
-pub(crate) fn land_local_command(thread_id: &str) -> String {
-    let mut argv = vec!["land".to_string()];
-    argv.extend(thread_flag_args(thread_id));
-    heddle_action(argv)
 }
 
 #[cfg(test)]

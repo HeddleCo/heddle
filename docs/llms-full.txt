@@ -490,7 +490,7 @@ library choices that preserve the no-Git runtime contract.
 
 ### Tier 3 — Hand-write the 22 JSON schemas, drop `schemars`
 
-`schemars` (50 transitive deps) is used to derive JSON Schema for the 22 registered output schemas in [`crates/cli/src/cli/commands/schemas.rs`](crates/cli/src/cli/commands/schemas.rs). The schemas are stable contracts checked by `heddle doctor schemas` — the derive macro is fighting us as often as helping us.
+`schemars` (50 transitive deps) is used to derive JSON Schema for the 22 registered output schemas in [`crates/cli-contract/src/cli/commands/schemas.rs`](crates/cli-contract/src/cli/commands/schemas.rs). The schemas are stable contracts checked by `heddle doctor schemas` — the derive macro is fighting us as often as helping us.
 
 Replace with hand-written JSON Schema files checked into the repo + a tiny match-on-name lookup. `heddle doctor schemas` already does drift detection at runtime — that catches regressions.
 
@@ -1632,7 +1632,7 @@ line-oriented streaming.
 embedded in a tracked markdown file and reports drift: verbs that no
 longer exist, flags that aren't on a verb, literal values for
 `--workspace`, `--scope`, and `--kind` that aren't in the valid set
-([`crates/cli/src/cli/commands/doctor_docs.rs`](../crates/cli/src/cli/commands/doctor_docs.rs)).
+([`crates/cli-contract/src/cli/commands/doctor_docs.rs`](../crates/cli-contract/src/cli/commands/doctor_docs.rs)).
 It's built on clap's own `Cli::command()`, so it's always in sync with
 the binary you ship. Wire it into CI and the docs can't rot quietly.
 
@@ -2449,7 +2449,7 @@ meet first":
   must match the live binary.
 - `heddle doctor schemas` — every documented schema verb registered
   in the command contract table
-  ([`crates/cli/src/cli/commands/command_catalog.rs`](../crates/cli/src/cli/commands/command_catalog.rs))
+  ([`crates/cli-contract/src/cli/commands/command_catalog/mod.rs`](../crates/cli-contract/src/cli/commands/command_catalog/mod.rs))
   must produce a schema, and the JSON samples in
   [`docs/json-schemas.md`](json-schemas.md) must validate against
   the runtime registry. The output shapes are contracts; changes
@@ -3729,7 +3729,7 @@ transient failures can branch on the exit code without parsing stderr.
 The canonical mapping lives in
 [`crates/cli/src/exit.rs`](../crates/cli/src/exit.rs) as `HeddleExitCode`. Each
 command's catalogued codes live on its `CommandContract.exit_codes` entry in
-[`crates/cli/src/cli/commands/command_catalog.rs`](../crates/cli/src/cli/commands/command_catalog.rs).
+[`crates/cli-contract/src/cli/commands/command_catalog/mod.rs`](../crates/cli-contract/src/cli/commands/command_catalog/mod.rs).
 
 Classification is keyed on typed error kinds — the `RecoveryAdvice.kind`
 discriminator, `HeddleError` variants, and typed remote/config errors — never on
@@ -3973,7 +3973,7 @@ on.
 ## Runtime introspection
 
 Schemas in this document are mirrored at runtime by
-`crates/cli/src/cli/commands/schemas.rs`. Generate the canonical JSON
+`crates/cli-contract/src/cli/commands/schemas.rs`. Generate the canonical JSON
 Schema for any verb with:
 
     heddle schemas                    # list registered schema verbs

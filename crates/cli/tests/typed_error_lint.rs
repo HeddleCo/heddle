@@ -36,14 +36,16 @@ use std::{fs, path::Path};
 /// `merge_no_common_ancestor`, `rebase_referenced_state_missing`,
 /// `rebase_state_corrupted`, `thread_referenced_state_missing`, and
 /// `thread_checkout_unavailable`), dropping the count to 152. The current
-/// command tree carries five additional legacy untyped sites outside this
-/// CI-fix change; keep the budget aligned until the next typed-advice sweep.
+/// command tree carried five additional legacy untyped sites outside that
+/// CI-fix change. The CLI contract extraction (heddle#1100 phase A3) moved one
+/// of the measured 155 sites with the contract surface and re-ratcheted the
+/// remaining facade command tree to 154.
 ///
 /// Decrease when you migrate sites to typed `RecoveryAdvice` (PR C-3
 /// and follow-ups). Only increase with explicit justification — every
 /// new untyped site is a future Priya-style "run heddle status" dead
 /// end.
-const MAX_UNTYPED_ANYHOW_SITES: usize = 157;
+const MAX_UNTYPED_ANYHOW_SITES: usize = 154;
 const MIN_SCANNED_RUST_FILES: usize = 50;
 
 #[test]
@@ -82,7 +84,8 @@ fn untyped_error_sites_do_not_regress() {
         count <= MAX_UNTYPED_ANYHOW_SITES,
         "untyped anyhow/bail sites in cli/commands regressed: count={count} \
          max={MAX_UNTYPED_ANYHOW_SITES}. Either migrate the new site(s) to a \
-         typed `RecoveryAdvice` variant (see crates/cli/src/cli/commands/advice.rs), \
+         typed `RecoveryAdvice` variant (see \
+         crates/cli-contract/src/cli/commands/advice.rs), \
          or — with explicit justification — bump MAX_UNTYPED_ANYHOW_SITES.\n\
          Current sites:\n{}",
         sites.join("\n")

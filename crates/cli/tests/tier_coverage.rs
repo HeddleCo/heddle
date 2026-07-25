@@ -68,7 +68,7 @@ fn every_commands_variant_has_explicit_root_contract() {
          entry in the command contract table and would fall through to \
          runtime help/contract defaults:\n  {}\n\n\
          Add each root verb to CONTRACTS in \
-         crates/cli/src/cli/commands/command_catalog.rs.",
+         crates/cli-contract/src/cli/commands/command_catalog/mod.rs.",
         missing.join("\n  ")
     );
 }

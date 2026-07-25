@@ -63,7 +63,11 @@ use std::{
 // Dropped from 846 → 840 in the query facade exemplar:
 // `query.rs` now returns a `QueryReport` from `heddle_core` and routes
 // human/JSON output through `cli/render/query.rs`.
-const RENDER_VIOLATION_BASELINE: usize = 840;
+//
+// Re-measured from 840 → 647 when the CLI verb-contract surface moved to
+// `heddle-cli-contract` (heddle#1100 phase A3). The measured pre-move count
+// was 656; the eight moved command-tree files contained nine violations.
+const RENDER_VIOLATION_BASELINE: usize = 647;
 const MIN_SCANNED_RUST_FILES: usize = 50;
 
 #[test]

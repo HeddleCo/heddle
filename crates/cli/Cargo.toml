@@ -39,6 +39,7 @@ merge = { path = "../merge", package = "heddle-merge", version = "0.10" }
 api = { package = "heddle-api", version = "=0.1.4", features = ["client"] }
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.10" }
 heddle-cli-args = { path = "../cli-args", version = "0.10", default-features = false }
+heddle-cli-contract = { path = "../cli-contract", version = "0.10", default-features = false }
 heddle-cli-render = { path = "../cli-render", version = "0.10", default-features = false }
 heddle-core = { path = "../core", version = "0.10", default-features = false }
 heddle-format = { path = "../format", version = "0.10" }
@@ -154,22 +155,29 @@ local = []
 # existing Git repos; no native content-addressed init), `native` only
 # (pure content-addressed VCS; no Git Projection import/export surface),
 # or both — and each can drop `client` for a local-only CLI.
-git-overlay = ["repo/git-overlay", "ingest", "heddle-cli-args/git-overlay"]
+git-overlay = [
+    "repo/git-overlay",
+    "ingest",
+    "heddle-cli-args/git-overlay",
+    "heddle-cli-contract/git-overlay",
+]
 native = ["repo/native"]
 client = [
     "dep:heddle-client",
     "dep:tokio-tungstenite",
     "heddle-cli-args/client",
+    "heddle-cli-contract/client",
     "heddle-cli-render/client",
 ]
 # Deep git import + AI-session reasoning extraction now backs every Git
 # overlay import path. Kept as a feature name for existing feature sets,
 # but the dependency is always present so no legacy bridge importer is
 # compiled as a fallback.
-ingest = ["heddle-cli-args/ingest"]
+ingest = ["heddle-cli-args/ingest", "heddle-cli-contract/ingest"]
 semantic = [
     "dep:semantic",
     "heddle-cli-args/semantic",
+    "heddle-cli-contract/semantic",
     "heddle-core/semantic",
     "repo/tree-sitter-symbols",
 ]

@@ -8,7 +8,7 @@ Heuristic only: files under `crates/cli/src` defining `fn cmd_*`, sorted by LOC.
 | LOC | uses_heddle_core | path | cmd_* |
 |----:|:----------------:|------|-------|
 | 4284 | yes | `crates/cli/src/harness/mod.rs` | `cmd_harness_bridge` |
-| 3764 | yes | `crates/cli/src/cli/commands/schemas.rs` | `cmd_schemas` |
+| 3764 | yes | `crates/cli-contract/src/cli/commands/schemas.rs` | `cmd_schemas` |
 | 2895 | yes | `crates/cli/src/cli/commands/thread.rs` | `cmd_start`, `cmd_thread_captures`, `cmd_thread_cd`, `cmd_thread_create`, `cmd_thread_current`, `cmd_thread_delete`, `cmd_thread_list`, `cmd_thread_rename`, … (+2) |
 | 2545 | yes | `crates/cli/src/cli/commands/clone.rs` | `cmd_clone` |
 | 2128 | yes | `crates/cli/src/cli/commands/thread_cmd.rs` | `cmd_thread`, `cmd_thread_cleanup`, `cmd_thread_drop`, `cmd_thread_promote`, `cmd_thread_refresh` |
@@ -21,12 +21,12 @@ Heuristic only: files under `crates/cli/src` defining `fn cmd_*`, sorted by LOC.
 | 1315 | yes | `crates/cli/src/cli/commands/log.rs` | `cmd_log`, `cmd_log_reflog`, `cmd_log_timeline` |
 | 1269 | yes | `crates/cli/src/cli/commands/remote/remote_ops.rs` | `cmd_pull`, `cmd_remote` |
 | 1129 | yes | `crates/cli/src/cli/commands/git_projection.rs` | `cmd_commit_git_projection`, `cmd_switch_git_projection` |
-| 1038 | yes | `crates/cli/src/cli/commands/doctor_docs.rs` | `cmd_doctor_docs` |
+| 1038 | yes | `crates/cli-contract/src/cli/commands/doctor_docs.rs` | `cmd_doctor_docs` |
 | 1006 | yes | `crates/cli/src/cli/commands/watch.rs` | `cmd_watch` |
 | 992 | yes | `crates/cli/src/cli/commands/retro.rs` | `cmd_retro` |
 | 929 | yes | `crates/cli/src/cli/commands/redact.rs` | `cmd_redact`, `cmd_redact_apply`, `cmd_redact_list`, `cmd_redact_show`, `cmd_redact_trust`, `cmd_redact_trust_add`, `cmd_redact_trust_list`, `cmd_redact_trust_remove` |
 | 880 | yes | `crates/cli/src/cli/commands/ready_cmd.rs` | `cmd_ready` |
-| 856 | yes | `crates/cli/src/cli/commands/doctor_schemas.rs` | `cmd_doctor_schemas` |
+| 856 | yes | `crates/cli-contract/src/cli/commands/doctor_schemas.rs` | `cmd_doctor_schemas` |
 | 854 | yes | `crates/cli/src/cli/commands/timeline_cmd.rs` | `cmd_timeline`, `cmd_timeline_fork`, `cmd_timeline_record_finish`, `cmd_timeline_record_start`, `cmd_timeline_recover`, `cmd_timeline_reset`, `cmd_timeline_status` |
 | 829 | yes | `crates/cli/src/cli/commands/thread_shaping.rs` | `cmd_capture_split`, `cmd_thread_absorb`, `cmd_thread_move`, `cmd_thread_resolve` |
 | 818 | yes | `crates/cli/src/cli/commands/undo.rs` | `cmd_redo`, `cmd_undo` |

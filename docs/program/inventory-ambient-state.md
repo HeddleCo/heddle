@@ -6,16 +6,16 @@ Production-ish hits: **78** (test modules filtered heuristically).
 
 | path | line | kind | snippet |
 |------|-----:|------|---------|
-| `crates/cli/src/cli/commands/command_catalog/mod.rs` | 3148 | `\bOnceLock\b` | `static ACTIVE_COMMAND_CONTRACT_ENTRIES: OnceLock<Vec<&'static CommandContractEntry>> =` |
-| `crates/cli/src/cli/commands/command_catalog/mod.rs` | 3149 | `\bOnceLock\b` | `OnceLock::new();` |
-| `crates/cli/src/cli/commands/command_catalog/mod.rs` | 3151 | `\bOnceLock\b` | `static ADVERTISED_COMMAND_CONTRACT_ENTRIES: OnceLock<Vec<&'static CommandContractEntry>> =` |
-| `crates/cli/src/cli/commands/command_catalog/mod.rs` | 3152 | `\bOnceLock\b` | `OnceLock::new();` |
+| `crates/cli-contract/src/cli/commands/command_catalog/mod.rs` | 2957 | `\bOnceLock\b` | `static ACTIVE_COMMAND_CONTRACT_ENTRIES: OnceLock<Vec<&'static CommandContractEntry>> =` |
+| `crates/cli-contract/src/cli/commands/command_catalog/mod.rs` | 2958 | `\bOnceLock\b` | `OnceLock::new();` |
+| `crates/cli-contract/src/cli/commands/command_catalog/mod.rs` | 2960 | `\bOnceLock\b` | `static ADVERTISED_COMMAND_CONTRACT_ENTRIES: OnceLock<Vec<&'static CommandContractEntry>> =` |
+| `crates/cli-contract/src/cli/commands/command_catalog/mod.rs` | 2961 | `\bOnceLock\b` | `OnceLock::new();` |
 | `crates/cli/src/cli/commands/mount_lifecycle.rs` | 191 | `static\s+[A-Z_][A-Z0-9_]*\s*:\s*` | `static REGISTRY: OnceMap<String, std::sync::Arc<MountHandle>> = OnceMap::new();` |
 | `crates/cli/src/cli/commands/mount_lifecycle.rs` | 404 | `static\s+[A-Z_][A-Z0-9_]*\s*:\s*` | `static REGISTRY: OnceMap<String, std::sync::Arc<MountHandle>> = OnceMap::new();` |
 | `crates/cli/src/cli/commands/mount_lifecycle.rs` | 835 | `static\s+[A-Z_][A-Z0-9_]*\s*:\s*` | `static REGISTRY: OnceMap<String, std::sync::Arc<MountHandle>> = OnceMap::new();` |
-| `crates/cli/src/cli/commands/schemas.rs` | 28 | `\bOnceLock\b` | `static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();` |
-| `crates/cli/src/cli/commands/schemas.rs` | 29 | `\bOnceLock\b` | `static DOCUMENTED_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();` |
-| `crates/cli/src/cli/commands/schemas.rs` | 30 | `\bOnceLock\b` | `static OPAQUE_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();` |
+| `crates/cli-contract/src/cli/commands/schemas.rs` | 28 | `\bOnceLock\b` | `static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();` |
+| `crates/cli-contract/src/cli/commands/schemas.rs` | 29 | `\bOnceLock\b` | `static DOCUMENTED_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();` |
+| `crates/cli-contract/src/cli/commands/schemas.rs` | 30 | `\bOnceLock\b` | `static OPAQUE_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();` |
 | `crates/cli/src/cli/commands/start_atomic.rs` | 114 | `\bOnceLock\b` | `// forward without the env-var `OnceLock` caching hazard.` |
 | `crates/cli/src/cli/commands/start_atomic.rs` | 126 | `static\s+[A-Z_][A-Z0-9_]*\s*:\s*` | `static START_FAULT: std::cell::Cell<Option<StartFault>> = const { std::cell::Cell::new(None) };` |
 | `crates/cli/src/cli/commands/start_atomic.rs` | 181 | `static\s+[A-Z_][A-Z0-9_]*\s*:\s*` | `static START_TARGET_SWAP: std::cell::RefCell<Option<TargetSwapFault>> =` |

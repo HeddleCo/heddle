@@ -139,7 +139,7 @@ library choices that preserve the no-Git runtime contract.
 
 ### Tier 3 — Hand-write the 22 JSON schemas, drop `schemars`
 
-`schemars` (50 transitive deps) is used to derive JSON Schema for the 22 registered output schemas in [`crates/cli/src/cli/commands/schemas.rs`](crates/cli/src/cli/commands/schemas.rs). The schemas are stable contracts checked by `heddle doctor schemas` — the derive macro is fighting us as often as helping us.
+`schemars` (50 transitive deps) is used to derive JSON Schema for the 22 registered output schemas in [`crates/cli-contract/src/cli/commands/schemas.rs`](crates/cli-contract/src/cli/commands/schemas.rs). The schemas are stable contracts checked by `heddle doctor schemas` — the derive macro is fighting us as often as helping us.
 
 Replace with hand-written JSON Schema files checked into the repo + a tiny match-on-name lookup. `heddle doctor schemas` already does drift detection at runtime — that catches regressions.
 

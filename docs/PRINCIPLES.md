@@ -118,7 +118,7 @@ line-oriented streaming.
 embedded in a tracked markdown file and reports drift: verbs that no
 longer exist, flags that aren't on a verb, literal values for
 `--workspace`, `--scope`, and `--kind` that aren't in the valid set
-([`crates/cli/src/cli/commands/doctor_docs.rs`](../crates/cli/src/cli/commands/doctor_docs.rs)).
+([`crates/cli-contract/src/cli/commands/doctor_docs.rs`](../crates/cli-contract/src/cli/commands/doctor_docs.rs)).
 It's built on clap's own `Cli::command()`, so it's always in sync with
 the binary you ship. Wire it into CI and the docs can't rot quietly.
 

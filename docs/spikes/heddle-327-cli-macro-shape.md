@@ -48,10 +48,10 @@ sync by two PR-time gates rather than by construction:
 |---|---|---|---|
 | Clap args struct | `InitArgs` — `crates/cli/src/cli/cli_args/commands_args.rs:12` | `clap::Args` | parsing + `--help` |
 | Real output struct | `InitOutput` — `crates/cli/src/cli/commands/init.rs:23` | `serde::Serialize` only | the actual `--output json` bytes |
-| Schema mirror | `InitSchema` — `crates/cli/src/cli/commands/schemas.rs` (`pub struct InitSchema`) | `schemars::JsonSchema` | `heddle schemas init` + drift checks |
+| Schema mirror | `InitSchema` — `crates/cli-contract/src/cli/commands/schemas.rs` (`pub struct InitSchema`) | `schemars::JsonSchema` | `heddle schemas init` + drift checks |
 
 The mirror is registered by the hand-maintained `schema_registry!` macro table
-(`crates/cli/src/cli/commands/schemas.rs:58`, e.g. `(&["init"], InitSchema)` at
+(`crates/cli-contract/src/cli/commands/schemas.rs:58`, e.g. `(&["init"], InitSchema)` at
 :59). schemas.rs:1–14 states the mirror exists *deliberately* — to avoid
 threading `JsonSchema` through every workspace output type (`repo`, `objects`,
 …) — at the cost that "when a real output struct changes, the mirror here must
@@ -66,12 +66,12 @@ naive "derive on the real struct" migration loses (see §2 point 1).
 
 Drift is policed at PR time, not prevented:
 
-- `heddle doctor schemas` (`crates/cli/src/cli/commands/doctor_schemas.rs`)
+- `heddle doctor schemas` (`crates/cli-contract/src/cli/commands/doctor_schemas.rs`)
   extracts the literal sample under each `## heddle <verb> --output json`
   heading in `docs/json-schemas.md` and compares its **top-level keys** against
   the registered schema's `properties` keys (keys-only, by design —
   doctor_schemas.rs:15–19).
-- `heddle doctor docs` (`crates/cli/src/cli/commands/doctor_docs.rs`) walks
+- `heddle doctor docs` (`crates/cli-contract/src/cli/commands/doctor_docs.rs`) walks
   `heddle <verb> [flags]` invocations in markdown and flags clap-level drift,
   built on `Cli::command()` so it tracks the binary.
 
@@ -155,7 +155,7 @@ inequality check, never as a magic byte count.)
    `output_kind` as a bare `{"type":"string"}` — it cannot express the
    `"const":"init"` pin from a plain `String`/`&'static str` field. heddle
    routes machine consumers on `output_kind` (the `json_discriminators` list in
-   `crates/cli/src/cli/commands/command_catalog.rs`). The custom emitter pins
+   `crates/cli-contract/src/cli/commands/command_catalog/mod.rs`). The custom emitter pins
    it trivially. This is the single concrete thing schemars-as-derive costs us
    — and it's a *quality* gap, not a *correctness* one (the runtime output
    still carries the right value; only the schema under-describes it).

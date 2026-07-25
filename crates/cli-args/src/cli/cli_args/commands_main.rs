@@ -153,7 +153,7 @@ Examples:
     /// Contract-table introspection over CLI output shapes —
     /// useful when wiring tools that consume `heddle <verb>
     /// --output json` and want to validate or generate types. The schemas
-    /// live in `crates/cli/src/cli/commands/schemas.rs`; the
+    /// live in `crates/cli-contract/src/cli/commands/schemas.rs`; the
     /// command contract table registers available and documented
     /// schema verbs for `heddle doctor schemas` drift detection
     /// against `docs/json-schemas.md`.
