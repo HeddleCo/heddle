@@ -1048,6 +1048,13 @@ const fn surface(contract: CommandContract, surface: &'static str) -> CommandCon
     }
 }
 
+const fn user_scoped(contract: CommandContract) -> CommandContract {
+    CommandContract {
+        targets_current_repository: false,
+        ..contract
+    }
+}
+
 /// Assign the `heddle help advanced` area group for a native-surface
 /// advanced root command (heddle#652). See [`advanced_help_groups`] for
 /// the recognized ids and their display titles.
@@ -1421,16 +1428,19 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
-    entry(&["auth"], category(feature_gated(GROUP, "client"), "repo")),
+    entry(
+        &["auth"],
+        category(feature_gated(user_scoped(GROUP), "client"), "repo"),
+    ),
     entry(
         &["auth", "login"],
-        feature_gated(NETWORK_CONFIG_MUTATION_TEXT, "client"),
+        feature_gated(user_scoped(NETWORK_CONFIG_MUTATION_TEXT), "client"),
     ),
     entry(
         &["auth", "logout"],
         feature_gated(
             json_discriminators(
-                documented_schemas(CONFIG_MUTATION_NO_OP_ID, &["auth logout"]),
+                documented_schemas(user_scoped(CONFIG_MUTATION_NO_OP_ID), &["auth logout"]),
                 &[json_discriminator(
                     Some("auth logout"),
                     "output_kind",
@@ -1444,7 +1454,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["auth", "status"],
         feature_gated(
             json_discriminators(
-                documented_schemas(READ_JSON, &["auth status"]),
+                documented_schemas(user_scoped(READ_JSON), &["auth status"]),
                 &[json_discriminator(
                     Some("auth status"),
                     "output_kind",
@@ -1456,14 +1466,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["auth", "derive-agent"],
-        feature_gated(CONFIG_MUTATION_TEXT, "client"),
+        feature_gated(user_scoped(CONFIG_MUTATION_TEXT), "client"),
     ),
     entry(
         &["auth", "create-service-token"],
         feature_gated(
             json_discriminators(
                 documented_schemas(
-                    NETWORK_METADATA_MUTATION_NO_OP_ID,
+                    user_scoped(NETWORK_METADATA_MUTATION_NO_OP_ID),
                     &["auth create-service-token"],
                 ),
                 &[json_discriminator(
