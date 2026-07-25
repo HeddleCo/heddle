@@ -651,7 +651,7 @@ pub struct UndoArgs {
 }
 
 /// User-facing `--workspace` flag values. Vocabulary is the same as
-/// [`crate::cli::commands::repo::ThreadMode`] (and the on-wire
+/// [`repo::ThreadMode`] (and the on-wire
 /// `thread.mode` JSON field) so a single name carries through the
 /// CLI, the daemon, and the thread record on disk. See
 /// `docs/design/clonefile-threads.md` for the rationale.

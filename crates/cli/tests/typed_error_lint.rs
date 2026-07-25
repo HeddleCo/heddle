@@ -44,13 +44,21 @@ use std::{fs, path::Path};
 /// new untyped site is a future Priya-style "run heddle status" dead
 /// end.
 const MAX_UNTYPED_ANYHOW_SITES: usize = 157;
+const MIN_SCANNED_RUST_FILES: usize = 50;
 
 #[test]
 fn untyped_error_sites_do_not_regress() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli/commands");
+    assert!(
+        root.is_dir(),
+        "typed_error_lint scan root missing at {}",
+        root.display()
+    );
     let mut count = 0usize;
+    let mut files_scanned = 0usize;
     let mut sites = Vec::new();
     walk_rs_files(&root, &mut |path, contents| {
+        files_scanned += 1;
         for (line_no, line) in contents.lines().enumerate() {
             if is_untyped_error_site(line) {
                 count += 1;
@@ -60,7 +68,16 @@ fn untyped_error_sites_do_not_regress() {
         }
     });
 
-    eprintln!("typed_error_lint: current count = {count} (max = {MAX_UNTYPED_ANYHOW_SITES})");
+    eprintln!(
+        "typed_error_lint: current count = {count} (max = {MAX_UNTYPED_ANYHOW_SITES}); \
+         files scanned = {files_scanned}"
+    );
+    assert!(
+        files_scanned >= MIN_SCANNED_RUST_FILES,
+        "typed_error_lint scanned only {files_scanned} files (floor {MIN_SCANNED_RUST_FILES}) — \
+         did a crate-split move commands out of this scan root? Update the scan root, do not \
+         lower this floor."
+    );
     assert!(
         count <= MAX_UNTYPED_ANYHOW_SITES,
         "untyped anyhow/bail sites in cli/commands regressed: count={count} \
@@ -93,8 +110,15 @@ fn untyped_error_sites_do_not_regress() {
 #[test]
 fn argv_action_command_siblings_are_forbidden() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli/commands");
+    assert!(
+        root.is_dir(),
+        "typed_error_lint scan root missing at {}",
+        root.display()
+    );
+    let mut files_scanned = 0usize;
     let mut sites = Vec::new();
     walk_rs_files(&root, &mut |path, contents| {
+        files_scanned += 1;
         for (line_no, line) in contents.lines().enumerate() {
             if let Some(ident) = forbidden_argv_sibling(line) {
                 let rel = path.strip_prefix(&root).unwrap_or(path);
@@ -103,6 +127,12 @@ fn argv_action_command_siblings_are_forbidden() {
         }
     });
 
+    assert!(
+        files_scanned >= MIN_SCANNED_RUST_FILES,
+        "typed_error_lint scanned only {files_scanned} files (floor {MIN_SCANNED_RUST_FILES}) — \
+         did a crate-split move commands out of this scan root? Update the scan root, do not \
+         lower this floor."
+    );
     assert!(
         sites.is_empty(),
         "the `_argv` null-sibling trap was re-introduced (HeddleCo/heddle#254): a \
