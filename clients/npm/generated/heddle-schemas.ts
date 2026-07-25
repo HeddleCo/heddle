@@ -2234,6 +2234,7 @@ export interface StatusSchema {
   session_id?: string | null;
   state?: StateInfo | null;
   storage_model: string;
+  submodules: SubmoduleInfo[];
   target_thread?: string | null;
   task?: string | null;
   thinking_level?: string | null;
@@ -2245,6 +2246,11 @@ export interface StatusSchema {
   usage_summary?: unknown;
   verification: RepositoryVerificationState;
   worktree_changed_path_count: number;
+}
+
+export interface SubmoduleInfo {
+  commit: string;
+  path: string;
 }
 
 export interface SyncGitSchema {

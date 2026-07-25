@@ -28424,6 +28424,21 @@
           ],
           "type": "object"
         },
+        "SubmoduleInfo": {
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "commit"
+          ],
+          "type": "object"
+        },
         "VerificationCheck": {
           "properties": {
             "clean": {
@@ -28723,6 +28738,12 @@
         "storage_model": {
           "type": "string"
         },
+        "submodules": {
+          "items": {
+            "$ref": "#/$defs/SubmoduleInfo"
+          },
+          "type": "array"
+        },
         "target_thread": {
           "type": [
             "string",
@@ -28808,6 +28829,7 @@
         "is_isolated",
         "parallel_threads",
         "changes",
+        "submodules",
         "recommended_action"
       ],
       "title": "StatusSchema",

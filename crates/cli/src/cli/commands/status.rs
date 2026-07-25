@@ -730,6 +730,7 @@ fn render_long_status(output: &StatusOutput, verbose: bool) {
     render_status_details(output, verbose);
     render_status_advice(output);
     render_status_changes(output);
+    render_status_submodules(output);
     render_status_parallel(output);
     render_status_materialized(&output.materialized_threads, verbose);
 }
@@ -1385,6 +1386,22 @@ fn render_status_changes(output: &StatusOutput) {
         );
     } else if !has_changes {
         println!("{}", style::dim("No unsaved worktree changes detected"));
+    }
+}
+
+fn render_status_submodules(output: &StatusOutput) {
+    if output.submodules.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}", style::bold("Submodules"));
+    for submodule in &output.submodules {
+        let short_commit = submodule.commit.get(..12).unwrap_or(&submodule.commit);
+        println!(
+            "  submodule {} @ {}",
+            submodule.path,
+            style::dim(short_commit)
+        );
     }
 }
 
