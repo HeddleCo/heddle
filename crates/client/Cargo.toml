@@ -48,6 +48,7 @@ weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim",
 grpc = { package = "heddle-api", version = "=0.1.4", features = ["client", "server", "reflection"] }
 prost-reflect.workspace = true
 tempfile.workspace = true
+tonic-health.workspace = true
 
 [lib]
 path = "src/lib.rs"

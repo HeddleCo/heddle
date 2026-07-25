@@ -1455,6 +1455,8 @@ fn open_url(url: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use super::*;
 
     #[test]
@@ -1519,6 +1521,128 @@ mod tests {
             None => unsafe { std::env::remove_var("HEDDLE_REMOTE_INSECURE") },
         }
         out
+    }
+
+    static TLS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const TLS_ENV_KEYS: &[&str] = &[
+        "HEDDLE_CONFIG",
+        "HEDDLE_REMOTE_TLS",
+        "HEDDLE_REMOTE_TLS_CA_CERT",
+        "HEDDLE_REMOTE_TLS_DOMAIN",
+    ];
+
+    struct TlsEnvGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl TlsEnvGuard {
+        fn clean() -> Self {
+            let guard = TLS_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let saved = TLS_ENV_KEYS
+                .iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect();
+            for key in TLS_ENV_KEYS {
+                unsafe { std::env::remove_var(key) };
+            }
+            Self {
+                _guard: guard,
+                saved,
+            }
+        }
+
+        fn set(&self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        fn remove(&self, key: &str) {
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
+    impl Drop for TlsEnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                unsafe {
+                    if let Some(value) = value {
+                        std::env::set_var(key, value);
+                    } else {
+                        std::env::remove_var(key);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn test_tls_server() -> Option<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+        use tonic::transport::{Identity, Server, ServerTlsConfig};
+
+        let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping auth TLS test: TCP bind denied: {err}");
+                return None;
+            }
+            Err(err) => panic!("bind TLS test server: {err}"),
+        };
+        let addr = listener.local_addr().expect("TLS test server address");
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            match listener.accept().await {
+                Ok((stream, _addr)) => Some((Ok::<_, std::io::Error>(stream), listener)),
+                Err(err) => Some((Err(err), listener)),
+            }
+        });
+        let (_reporter, health) = tonic_health::server::health_reporter();
+        let identity = Identity::from_pem(
+            include_bytes!("grpc_hosted/testdata/server-cert.pem"),
+            include_bytes!("grpc_hosted/testdata/server-key.pem"),
+        );
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .tls_config(ServerTlsConfig::new().identity(identity))
+                .expect("configure TLS test server")
+                .add_service(health)
+                .serve_with_incoming(incoming)
+                .await
+                .expect("serve TLS test server");
+        });
+        Some((addr, handle))
+    }
+
+    #[tokio::test]
+    async fn auth_channel_uses_remote_tls_ca_and_rejects_untrusted_server() {
+        let env = TlsEnvGuard::clean();
+        let config_dir = tempfile::tempdir().expect("temporary config directory");
+        env.set("HEDDLE_CONFIG", config_dir.path().join("missing.toml"));
+        env.set("HEDDLE_REMOTE_TLS", "1");
+        env.set("HEDDLE_REMOTE_TLS_DOMAIN", "localhost");
+        let Some((addr, server)) = test_tls_server().await else {
+            return;
+        };
+        let server_uri = format!("https://{addr}");
+
+        let untrusted = connect_channel(&server_uri).await;
+        assert!(
+            untrusted.is_err(),
+            "the auth channel must reject a server outside its trust roots"
+        );
+
+        env.set(
+            "HEDDLE_REMOTE_TLS_CA_CERT",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/grpc_hosted/testdata/root-ca.pem"
+            ),
+        );
+        connect_channel(&server_uri)
+            .await
+            .expect("configured CA must establish the auth TLS channel");
+
+        server.abort();
+        env.remove("HEDDLE_REMOTE_TLS_CA_CERT");
     }
 
     #[test]
