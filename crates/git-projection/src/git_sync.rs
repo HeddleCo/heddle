@@ -281,13 +281,48 @@ fn set_ref(
 /// value that actually cost heddle the swap. `found` is therefore a faithful
 /// "what is there now", not a proof of "what beat us".
 fn classify_failed_ref_write(
-    _repo: &SleyRepository,
-    _name: &str,
-    _precondition: &RefPrecondition,
-    _intended: SleyObjectId,
+    repo: &SleyRepository,
+    name: &str,
+    precondition: &RefPrecondition,
+    intended: SleyObjectId,
     err: GitProjectionError,
 ) -> FailedRefExportReason {
-    FailedRefExportReason::FailedToSet(err.to_string())
+    // The ref's RAW target, not its peeled commit: the precondition heddle
+    // asserted was against the raw value, so peeling here could call an
+    // annotated tag "unchanged" when its wrapper object was in fact replaced.
+    let current = match repo.find_reference(name) {
+        Ok(reference) => reference.map(|reference| reference.target),
+        // The ref store cannot be read back, so nothing can be asserted about
+        // another writer. Report the original failure, not a guess.
+        Err(_) => return FailedRefExportReason::FailedToSet(err.to_string()),
+    };
+
+    match (precondition, current) {
+        // heddle required a specific existing value and the ref is now gone.
+        // Only `MustExistAndMatch` can conclude this: `ExistingMustMatch` is
+        // satisfied by absence, so a missing ref there is not a lost swap.
+        (RefPrecondition::MustExistAndMatch(_), None) => {
+            FailedRefExportReason::DeletedInGit { intended }
+        }
+        // heddle required a specific existing value and Git holds another one.
+        (
+            RefPrecondition::MustExistAndMatch(expected)
+            | RefPrecondition::ExistingMustMatch(expected),
+            Some(ReferenceTarget::Direct(found)),
+        ) if *expected != ReferenceTarget::Direct(found) => {
+            FailedRefExportReason::ModifiedConcurrentlyInGit { found, intended }
+        }
+        // heddle required the ref to be absent (a create) and Git has one now:
+        // another writer created it under the same name.
+        (RefPrecondition::MustNotExist, Some(ReferenceTarget::Direct(found))) => {
+            FailedRefExportReason::ModifiedConcurrentlyInGit { found, intended }
+        }
+        // What is on disk is CONSISTENT with what heddle asserted (or is a
+        // symref, which heddle never asserts against), so the failure is not
+        // attributable to another writer -- a locked ref, an IO error, an
+        // invalid name. Reporting it as a race would be a claim we cannot back.
+        _ => FailedRefExportReason::FailedToSet(err.to_string()),
+    }
 }
 
 fn ensure_commit_update_fast_forward(

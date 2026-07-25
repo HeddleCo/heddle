@@ -26,7 +26,7 @@ use crate::{
     git_reconstruct::{commit_object_id, reconstruct_commit_bytes, write_commit_object},
     git_residual::ResidualStore,
     git_sync::{sync_marker_to_tag, sync_track_to_branch},
-    git_util::{ExportStats, ExportedRef},
+    git_util::{ExportStats, ExportedRef, FailedRefExportReason},
 };
 
 /// Whether `state` carries a captured original git commit to reconstruct
@@ -743,34 +743,54 @@ fn export_scoped(
         ) {
             ReconcileOp::Write => {
                 let git_oid = desired_oid.expect("Write implies a desired target");
-                sync_track_to_branch(&repo, track_name, git_oid)?;
-                managed_record.insert(branch_ref.clone(), git_oid);
-                stats.threads_synced += 1;
-                stats.branches.push(ExportedRef {
-                    name: track_name.clone(),
-                    tip: git_oid,
-                });
+                match sync_track_to_branch(&repo, track_name, git_oid) {
+                    Ok(()) => {
+                        managed_record.insert(branch_ref.clone(), git_oid);
+                        stats.threads_synced += 1;
+                        stats.branches.push(ExportedRef {
+                            name: track_name.clone(),
+                            tip: git_oid,
+                        });
+                    }
+                    // COLLECT, don't halt (heddle#261). The ref is left exactly
+                    // as Git has it and the managed record is NOT updated -- so
+                    // heddle does not claim ownership of a tip it failed to
+                    // write, and the next run re-reconciles from the real state.
+                    Err(err) => stats
+                        .failed_refs
+                        .push((branch_ref.clone(), failed_set_reason(err))),
+                }
             }
             ReconcileOp::ForceRewind => {
                 let git_oid = desired_oid.expect("ForceRewind implies a desired target");
-                set_reference(
+                match set_reference(
                     &repo,
                     &branch_ref,
                     git_oid,
                     RefPrecondition::Any,
                     "heddle: retract embargoed thread frontier",
-                )?;
-                managed_record.insert(branch_ref.clone(), git_oid);
-                stats.threads_synced += 1;
-                stats.branches.push(ExportedRef {
-                    name: track_name.clone(),
-                    tip: git_oid,
-                });
+                ) {
+                    Ok(()) => {
+                        managed_record.insert(branch_ref.clone(), git_oid);
+                        stats.threads_synced += 1;
+                        stats.branches.push(ExportedRef {
+                            name: track_name.clone(),
+                            tip: git_oid,
+                        });
+                    }
+                    Err(err) => stats
+                        .failed_refs
+                        .push((branch_ref.clone(), failed_set_reason(err))),
+                }
             }
-            ReconcileOp::Delete => {
-                delete_reference_if_present(&repo, &branch_ref)?;
-                managed_record.remove(&branch_ref);
-            }
+            ReconcileOp::Delete => match delete_reference_if_present(&repo, &branch_ref) {
+                Ok(()) => {
+                    managed_record.remove(&branch_ref);
+                }
+                Err(err) => stats
+                    .failed_refs
+                    .push((branch_ref.clone(), failed_delete_reason(err))),
+            },
             // A head has no preserve path — `frontier_git_oid` recomputes the
             // target every run, so a head is always rewound/deleted, never kept at
             // a stale tip (Preserve is unreachable for `ReconcileNs::Head`).
@@ -840,18 +860,28 @@ fn export_scoped(
         ) {
             ReconcileOp::Write => {
                 let git_oid = desired_oid.expect("Write implies a desired target");
-                sync_marker_to_tag(&repo, name, git_oid)?;
-                managed_record.insert(tag_ref.clone(), git_oid);
-                stats.markers_synced += 1;
-                stats.tags.push(ExportedRef {
-                    name: name.clone(),
-                    tip: git_oid,
-                });
+                match sync_marker_to_tag(&repo, name, git_oid) {
+                    Ok(()) => {
+                        managed_record.insert(tag_ref.clone(), git_oid);
+                        stats.markers_synced += 1;
+                        stats.tags.push(ExportedRef {
+                            name: name.clone(),
+                            tip: git_oid,
+                        });
+                    }
+                    Err(err) => stats
+                        .failed_refs
+                        .push((tag_ref.clone(), failed_set_reason(err))),
+                }
             }
-            ReconcileOp::Delete => {
-                delete_reference_if_present(&repo, &tag_ref)?;
-                managed_record.remove(&tag_ref);
-            }
+            ReconcileOp::Delete => match delete_reference_if_present(&repo, &tag_ref) {
+                Ok(()) => {
+                    managed_record.remove(&tag_ref);
+                }
+                Err(err) => stats
+                    .failed_refs
+                    .push((tag_ref.clone(), failed_delete_reason(err))),
+            },
             // PRESERVE keeps the existing served tag (still managed → stays in the
             // record); SKIP is a no-op. A tag is free-move and never force-rewinds
             // (ForceRewind is unreachable for `ReconcileNs::Tag`).
@@ -913,6 +943,42 @@ enum ReconcileOp {
     /// Delete the ref — its line/marker has no served frontier (whole-line embargo,
     /// r19 embargoed-existing tag, or a deleted marker's stale tag).
     Delete,
+}
+
+/// Map a failed ref WRITE into the export's fail-soft vocabulary (heddle#261).
+///
+/// Two shapes of the same hazard converge here. `RefExportFailed` is a lost
+/// compare-and-swap, already classified in `git_sync::set_ref` against the
+/// precondition that lost. `NonFastForwardRef` is that hazard observed one step
+/// EARLIER: the Git tip had already diverged from heddle's projection when the
+/// export read it, so the fast-forward guard rejected the update before any
+/// swap was attempted. Both mean "the branch moved on the Git side", so both
+/// report as `ModifiedConcurrentlyInGit`.
+///
+/// Anything else is NOT demonstrably another writer's doing and stays generic,
+/// so `FailedToSet` never becomes a dumping ground that inflates the race count.
+fn failed_set_reason(err: GitProjectionError) -> FailedRefExportReason {
+    match err {
+        GitProjectionError::RefExportFailed { reason, .. } => reason,
+        GitProjectionError::NonFastForwardRef { old, new, .. } => {
+            FailedRefExportReason::ModifiedConcurrentlyInGit {
+                found: old,
+                intended: new,
+            }
+        }
+        other => FailedRefExportReason::FailedToSet(other.to_string()),
+    }
+}
+
+/// The delete-side counterpart of [`failed_set_reason`]. A delete that lost its
+/// own precondition still arrives pre-classified; everything else is reported
+/// as `FailedToDelete` so the summary distinguishes "could not retract" from
+/// "could not publish".
+fn failed_delete_reason(err: GitProjectionError) -> FailedRefExportReason {
+    match err {
+        GitProjectionError::RefExportFailed { reason, .. } => reason,
+        other => FailedRefExportReason::FailedToDelete(other.to_string()),
+    }
 }
 
 /// The mirror reconcile decision — IDENTICAL in shape for heads and tags
