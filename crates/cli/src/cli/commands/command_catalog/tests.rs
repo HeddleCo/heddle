@@ -1400,6 +1400,25 @@ fn credential_and_trust_effect_sets_are_config_scoped() {
 }
 
 #[test]
+fn auth_commands_are_user_scoped() {
+    for path in [
+        &["auth", "login"][..],
+        &["auth", "logout"],
+        &["auth", "status"],
+        &["auth", "derive-agent"],
+        &["auth", "create-service-token"],
+    ] {
+        let contract = raw_command_contract_for_path(path.iter().copied())
+            .unwrap_or_else(|| panic!("missing command contract for `{}`", path.join(" ")));
+        assert!(
+            !contract.targets_current_repository,
+            "`{}` must not discover or recover a repository",
+            path.join(" "),
+        );
+    }
+}
+
+#[test]
 fn fsck_observation_has_no_side_effects() {
     assert_command_effects(&["fsck"], &[CommandSideEffect::ObserveOnly]);
     let contract = raw_command_contract_for_path(["fsck"]).expect("fsck contract");
