@@ -128,6 +128,61 @@ pub struct ExportStats {
     pub branches: Vec<ExportedRef>,
     /// Tags written to the destination, paired with their tip commit.
     pub tags: Vec<ExportedRef>,
+    /// Refs this export could NOT publish, paired with why -- the fail-soft
+    /// counterpart of `branches`/`tags` (heddle#261). Export continues past a
+    /// failed ref and records it here rather than aborting on the first one,
+    /// so a single branch that moved on the Git side cannot mask the outcome
+    /// of every ref behind it. Keyed by FULL ref name (`refs/heads/foo`), the
+    /// same spelling the reconcile loops use. Mirrors the import side's
+    /// [`ImportStats::skipped_non_commit_refs`] reporting: the operation
+    /// succeeds at what it could do and reports the remainder, and the caller
+    /// exits non-zero when this is non-empty.
+    pub failed_refs: Vec<(String, FailedRefExportReason)>,
+}
+
+/// Why a single ref could not be published to the Git projection.
+///
+/// Every arm is a REPORT, never an attempted repair: heddle names what it found
+/// on the Git side and leaves the ref exactly as it is, for the operator to
+/// reconcile (import first, or force). Auto-resolving a ref another writer just
+/// moved is how that writer's commits get lost.
+///
+/// Variant names are heddle-native but map 1:1 onto jj's `FailedRefExportReason`
+/// (`lib/src/git.rs`), so a future port translates without re-deriving the
+/// taxonomy: `ModifiedConcurrentlyInGit` <-> jj `DeletedInJjModifiedInGit`,
+/// `DeletedInGit` <-> jj `ModifiedInJjDeletedInGit`, and `FailedToSet` /
+/// `FailedToDelete` <-> the same-named jj arms.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FailedRefExportReason {
+    /// The Git ref does not hold the value heddle based its update on: it moved
+    /// underneath the export (a `git push`, `git branch -f`, or another tool
+    /// writing the mirror). Covers both the tip that had ALREADY diverged when
+    /// export read it and the one that changed inside the read-write window.
+    #[error("modified concurrently in git: found {found}, heddle was publishing {intended}")]
+    ModifiedConcurrentlyInGit {
+        /// What Git holds -- the value that lost heddle the compare-and-swap.
+        found: GitObjectId,
+        /// The tip heddle was publishing when it lost the race.
+        intended: GitObjectId,
+    },
+
+    /// heddle read the ref, then found it gone by the time it wrote: deleted on
+    /// the Git side mid-export.
+    #[error("deleted in git while heddle was publishing {intended}")]
+    DeletedInGit {
+        /// The tip heddle was publishing when the ref disappeared.
+        intended: GitObjectId,
+    },
+
+    /// The ref write failed for a reason that is NOT a demonstrable race -- a
+    /// locked ref, an IO error, an invalid name. Kept distinct so a lost race
+    /// is never inferred from a failure we cannot attribute to another writer.
+    #[error("failed to set: {0}")]
+    FailedToSet(String),
+
+    /// The ref delete failed, likewise for a non-race reason.
+    #[error("failed to delete: {0}")]
+    FailedToDelete(String),
 }
 
 /// A ref written to the export destination, paired with the commit it
