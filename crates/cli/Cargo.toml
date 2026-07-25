@@ -220,6 +220,7 @@ mount = [
 
 [dev-dependencies]
 criterion = "0.8"
+heddle-cli-render = { path = "../cli-render", version = "0.10", features = ["test-utils"] }
 hyper-util.workspace = true
 ntest.workspace = true
 proptest.workspace = true

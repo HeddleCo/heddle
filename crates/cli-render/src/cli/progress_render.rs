@@ -132,6 +132,12 @@ impl TerminalSink {
     }
 }
 
+impl Default for TerminalSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Sink for TerminalSink {
     fn render(&self, snap: ProgressSnapshot) {
         // The phase label is the human line; the counters drive throttling and
