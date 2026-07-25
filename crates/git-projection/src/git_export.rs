@@ -10,7 +10,7 @@ use objects::{
 };
 use repo::{AudienceTier, Repository as HeddleRepository, visible};
 use sley::{
-    CommitObject, EntryKind, GitObjectType, ObjectId, RefPrecondition, ReferenceTarget,
+    CommitObject, EntryKind, GitObjectType, ObjectId, ReferenceTarget,
     Repository as SleyRepository, Signature, plumbing::sley_object::EncodedObject,
 };
 use tracing::debug;
@@ -20,12 +20,12 @@ use crate::{
         GitProjection, GitProjectionError, GitProjectionResult, LocalGitIdentity, SyncMapping,
         copy_reachable_objects, count_exported_commits, delete_reference_if_present,
         git_config_identity_with_global_fallback, git_err, principal_is_default_unknown,
-        read_or_seed_mirror_managed_refs, set_reference, write_mirror_managed_refs,
+        read_or_seed_mirror_managed_refs, write_mirror_managed_refs,
     },
     git_notes,
     git_reconstruct::{commit_object_id, reconstruct_commit_bytes, write_commit_object},
     git_residual::ResidualStore,
-    git_sync::{sync_marker_to_tag, sync_track_to_branch},
+    git_sync::{force_rewind_track_to_branch, sync_marker_to_tag, sync_track_to_branch},
     git_util::{ExportStats, ExportedRef, FailedRefExportReason},
 };
 
@@ -715,10 +715,12 @@ fn export_scoped(
     // the mirror, and stays in the managed record so the push still copies it. The
     // desired head target is the maximal served ancestor-or-self of the thread tip
     // (`frontier_git_oid`, via `project_desired_refs`). The existing tip is
-    // classified against the whole-mirror served-OID set, so a still-served tip
-    // fast-forwards, an embargoed tip force-rewinds to its served ancestor, and a
-    // whole-line-embargoed head is deleted. A scoped export reconciles every current
-    // thread but MATERIALIZES (creates) only the one it was scoped to.
+    // classified against the whole-mirror served-OID set and the name-keyed
+    // ownership record, so a still-served tip fast-forwards, Heddle's exact
+    // embargoed tip force-rewinds to its served ancestor, a foreign unserved tip
+    // is preserved+reported, and a whole-line-embargoed head is deleted. A scoped
+    // export reconciles every current thread but MATERIALIZES (creates) only the
+    // one it was scoped to.
     for track_name in &threads {
         if bridge
             .heddle_repo
@@ -733,10 +735,12 @@ fn export_scoped(
         let in_scope = thread.is_none() || thread == Some(track_name.as_str());
         let desired_oid = desired.get(&branch_ref).copied();
         let existing_oid = branch_tip_oid(&repo, &branch_ref);
+        let managed_oid = managed_record.get(&branch_ref).copied();
         match reconcile_ref(
             ReconcileNs::Head,
             desired_oid,
             existing_oid,
+            managed_oid,
             in_scope,
             /* marker_served_unminted */ false,
             &served_oids,
@@ -763,13 +767,8 @@ fn export_scoped(
             }
             ReconcileOp::ForceRewind => {
                 let git_oid = desired_oid.expect("ForceRewind implies a desired target");
-                match set_reference(
-                    &repo,
-                    &branch_ref,
-                    git_oid,
-                    RefPrecondition::Any,
-                    "heddle: retract embargoed thread frontier",
-                ) {
+                let expected_old = existing_oid.expect("ForceRewind implies an existing owned tip");
+                match force_rewind_track_to_branch(&repo, track_name, expected_old, git_oid) {
                     Ok(()) => {
                         managed_record.insert(branch_ref.clone(), git_oid);
                         stats.threads_synced += 1;
@@ -782,6 +781,15 @@ fn export_scoped(
                         .failed_refs
                         .push((branch_ref.clone(), failed_set_reason(err))),
                 }
+            }
+            ReconcileOp::Diverged => {
+                stats.failed_refs.push((
+                    branch_ref.clone(),
+                    FailedRefExportReason::ModifiedConcurrentlyInGit {
+                        found: existing_oid.expect("Diverged implies an existing tip"),
+                        intended: desired_oid.expect("Diverged implies a desired target"),
+                    },
+                ));
             }
             ReconcileOp::Delete => match delete_reference_if_present(&repo, &branch_ref) {
                 Ok(()) => {
@@ -854,6 +862,7 @@ fn export_scoped(
             ReconcileNs::Tag,
             desired_oid,
             existing_oid,
+            managed_record.get(&tag_ref).copied(),
             in_scope,
             marker_served_unminted,
             &served_oids,
@@ -884,8 +893,11 @@ fn export_scoped(
             },
             // PRESERVE keeps the existing served tag (still managed → stays in the
             // record); SKIP is a no-op. A tag is free-move and never force-rewinds
-            // (ForceRewind is unreachable for `ReconcileNs::Tag`).
-            ReconcileOp::Preserve | ReconcileOp::Skip | ReconcileOp::ForceRewind => {}
+            // (ForceRewind and Diverged are unreachable for `ReconcileNs::Tag`).
+            ReconcileOp::Preserve
+            | ReconcileOp::Skip
+            | ReconcileOp::ForceRewind
+            | ReconcileOp::Diverged => {}
         }
     }
 
@@ -923,9 +935,9 @@ enum ReconcileNs {
 }
 
 /// The op the mirror reconcile applies to a single ref. The SINGLE decision the
-/// head and tag reconciles share (heddle#316): a foreign ref never reaches here
-/// (the iteration set is current threads/markers ∪ heddle-managed names), so every
-/// arm acts on a ref heddle owns.
+/// head and tag reconciles share (heddle#316). A foreign ref can collide with a
+/// current thread/marker name and therefore reach this decision; the name-keyed
+/// managed tip distinguishes an owned embargo rewind from that collision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReconcileOp {
     /// Nothing to do — a scoped export declining to materialize an out-of-scope
@@ -937,6 +949,9 @@ enum ReconcileOp {
     /// Force-set a head to the desired target past the fast-forward guard — the
     /// embargo retract that rewinds an embargoed tip to its served ancestor.
     ForceRewind,
+    /// Preserve an unserved head whose current tip does not equal the OID Heddle
+    /// last recorded writing under this name, and report the Git-side divergence.
+    Diverged,
     /// Keep an existing served tag whose marker target is served-but-unminted this
     /// run (r18). A later all-thread export re-mints and advances it.
     Preserve,
@@ -991,13 +1006,16 @@ fn failed_delete_reason(err: GitProjectionError) -> FailedRefExportReason {
 /// brand-new one the caller did not ask for. `marker_served_unminted` is set only
 /// for a tag whose live marker target is served but was not minted this run — the
 /// sole axis that, combined with `existing_served`, splits r18-PRESERVE from
-/// r19-DELETE. `served_oids` is the whole-mirror served-OID set classifying the
-/// existing tip (NOT this run's purge drop-set, which omits a prior-run /
-/// out-of-scope embargo).
+/// r19-DELETE. `managed_oid` is the tip Heddle last recorded writing under this
+/// exact ref name; exact equality with an unserved head authorizes the embargo
+/// force, while a mismatch is foreign Git-side divergence. `served_oids` is the
+/// whole-mirror served-OID set classifying the existing tip (NOT this run's purge
+/// drop-set, which omits a prior-run / out-of-scope embargo).
 fn reconcile_ref(
     ns: ReconcileNs,
     desired_oid: Option<ObjectId>,
     existing_oid: Option<ObjectId>,
+    managed_oid: Option<ObjectId>,
     in_scope: bool,
     marker_served_unminted: bool,
     served_oids: &HashSet<ObjectId>,
@@ -1014,12 +1032,16 @@ fn reconcile_ref(
         // Create a fresh ref at the served target.
         (Some(_), None) => ReconcileOp::Write,
         // Head with an existing tip: a still-served tip fast-forwards (r17 FF guard
-        // applies); an embargoed tip is force-rewound to its served ancestor.
+        // applies); an unserved tip is force-rewound only when it is exactly the
+        // tip Heddle last published under this name. Any other unserved tip came
+        // from Git and is preserved+reported as divergence.
         (Some(_), Some(_)) if ns == ReconcileNs::Head => {
             if existing_served {
                 ReconcileOp::Write
-            } else {
+            } else if managed_oid == existing_oid {
                 ReconcileOp::ForceRewind
+            } else {
+                ReconcileOp::Diverged
             }
         }
         // Tag with an existing tip: free-move force-retarget to the served target.
