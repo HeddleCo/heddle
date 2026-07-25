@@ -8320,3 +8320,201 @@ fn non_utf8_git_fidelity_is_byte_identical_across_bridge_and_ingest() {
         assert!(String::from_utf8(value.clone()).is_err());
     }
 }
+
+/// heddle#261 -- a branch that moved on the GIT side between heddle's last
+/// observation and this export must be DETECTED and REPORTED, and it must not
+/// take the rest of the export down with it.
+///
+/// The hazard: heddle is a git-overlay VCS, so the mirror's `refs/heads/*` can
+/// be moved by anything holding the repo (a `git push`, a `git branch -f`,
+/// another tool). Export projects each thread's tip onto its branch; if the
+/// branch no longer holds what heddle projected from, heddle is about to
+/// publish over a commit it never minted.
+///
+/// The defect this pins: `export_scoped` used `?` on the per-ref sync, so the
+/// FIRST diverged branch aborted the whole run -- every later ref was never
+/// attempted and the operator got one stringly error instead of a complete
+/// succeeded-vs-diverged report. The fix is continue-and-collect.
+///
+/// Setup mirrors two concurrent Git-side writers: `alpha` and `beta` are each
+/// force-moved onto the OTHER line's tip (a real commit heddle minted and still
+/// serves, so the reconcile still routes it through the ref-sync rather than
+/// treating it as an embargo retraction). Neither new tip is an ancestor of the
+/// tip heddle wants to publish, so both lose. `gamma` is untouched and its
+/// heddle thread advances, so it proves the export kept going and still did its
+/// real work.
+#[test]
+fn concurrent_git_side_branch_updates_are_all_collected_and_export_continues() {
+    use heddle_git_projection::git_util::FailedRefExportReason;
+    use objects::object::{Attribution, Principal, State};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let put_state = |content: &[u8], parents: Vec<StateId>| -> State {
+        let store = repo.store();
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(content))
+            .expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(
+            tree_hash,
+            parents,
+            Attribution::human(Principal::new("Alice", "alice@example.com")),
+        );
+        store.put_state(&state).expect("put state");
+        state
+    };
+
+    // Three independent lines, one per thread.
+    let alpha_tip = put_state(b"alpha\n", Vec::new());
+    let beta_tip = put_state(b"beta\n", Vec::new());
+    let gamma_root = put_state(b"gamma root\n", Vec::new());
+    for (thread, tip) in [
+        ("alpha", alpha_tip.state_id),
+        ("beta", beta_tip.state_id),
+        ("gamma", gamma_root.state_id),
+    ] {
+        repo.refs()
+            .set_thread(&ThreadName::new(thread), &tip)
+            .expect("set thread");
+    }
+
+    // Run 1 -- publish all three branches cleanly.
+    let mut git_projection = GitProjection::new(&repo);
+    let first = export_all(&mut git_projection).expect("first export");
+    assert!(
+        first.failed_refs.is_empty(),
+        "a clean export must report no failed refs, got {:?}",
+        first.failed_refs
+    );
+    let oid_alpha = test_support::mapping(&git_projection)
+        .get_git(&alpha_tip.state_id)
+        .expect("alpha minted");
+    let oid_beta = test_support::mapping(&git_projection)
+        .get_git(&beta_tip.state_id)
+        .expect("beta minted");
+    let oid_gamma_root = test_support::mapping(&git_projection)
+        .get_git(&gamma_root.state_id)
+        .expect("gamma root minted");
+
+    // TWO concurrent Git-side writers move `alpha` and `beta` out from under
+    // heddle, each onto the other line's tip. Both targets are commits heddle
+    // minted and still serves, so the mirror reconcile classifies each existing
+    // tip as served and routes it to the ref-sync -- the same path a real
+    // concurrent push lands in.
+    {
+        let mirror = test_support::open_git_repo(&git_projection).expect("open mirror");
+        set_reference(
+            &mirror,
+            "refs/heads/alpha",
+            oid_beta,
+            RefPrecondition::Any,
+            "test: concurrent git-side push onto alpha",
+        )
+        .expect("move alpha");
+        set_reference(
+            &mirror,
+            "refs/heads/beta",
+            oid_alpha,
+            RefPrecondition::Any,
+            "test: concurrent git-side push onto beta",
+        )
+        .expect("move beta");
+    }
+
+    // `gamma` legitimately advances on the heddle side, so run 2 has real work
+    // to do on a ref nobody raced.
+    let gamma_tip = put_state(b"gamma tip\n", vec![gamma_root.state_id]);
+    repo.refs()
+        .set_thread(&ThreadName::new("gamma"), &gamma_tip.state_id)
+        .expect("advance gamma");
+
+    // Run 2 -- the export must SUCCEED as an operation while reporting both
+    // diverged refs. Halting on the first one is the bug.
+    let mut git_projection = GitProjection::new(&repo);
+    let stats = export_all(&mut git_projection)
+        .expect("export must continue past diverged refs, not abort on the first");
+
+    let mut failed: Vec<(String, FailedRefExportReason)> = stats.failed_refs.clone();
+    failed.sort_by(|a, b| a.0.cmp(&b.0));
+    let failed_names: Vec<&str> = failed.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        failed_names,
+        vec!["refs/heads/alpha", "refs/heads/beta"],
+        "BOTH concurrently-updated refs must be reported, got {failed:?}"
+    );
+    assert_eq!(
+        failed[0].1,
+        FailedRefExportReason::ModifiedConcurrentlyInGit {
+            found: oid_beta,
+            intended: oid_alpha,
+        },
+        "alpha must name what git holds and what heddle was publishing"
+    );
+    assert_eq!(
+        failed[1].1,
+        FailedRefExportReason::ModifiedConcurrentlyInGit {
+            found: oid_alpha,
+            intended: oid_beta,
+        },
+        "beta must name what git holds and what heddle was publishing"
+    );
+
+    let oid_gamma_tip = test_support::mapping(&git_projection)
+        .get_git(&gamma_tip.state_id)
+        .expect("gamma tip minted");
+    let mirror = test_support::open_git_repo(&git_projection).expect("reopen mirror");
+    let tip_of = |name: &str| -> ObjectId {
+        mirror
+            .find_reference(name)
+            .expect("read ref")
+            .unwrap_or_else(|| panic!("{name} must still exist"))
+            .peeled_oid(&mirror)
+            .expect("peel ref")
+            .expect("ref has a commit tip")
+    };
+
+    // The unaffected ref was still exported -- the collect kept the run alive.
+    assert_eq!(
+        tip_of("refs/heads/gamma"),
+        oid_gamma_tip,
+        "an unraced branch must still be exported after other refs diverged"
+    );
+    assert!(
+        stats
+            .branches
+            .iter()
+            .any(|exported| exported.name == "gamma" && exported.tip == oid_gamma_tip),
+        "gamma must be reported as exported, got {:?}",
+        stats.branches
+    );
+    assert!(
+        !stats
+            .branches
+            .iter()
+            .any(|exported| exported.name == "alpha" || exported.name == "beta"),
+        "a ref that failed must not also be reported as exported, got {:?}",
+        stats.branches
+    );
+
+    // Detection, NOT auto-resolution: the concurrently-written tips survive
+    // untouched. Clobbering them is exactly the data loss this guards.
+    assert_eq!(
+        tip_of("refs/heads/alpha"),
+        oid_beta,
+        "a diverged branch must be left alone, not overwritten"
+    );
+    assert_eq!(
+        tip_of("refs/heads/beta"),
+        oid_alpha,
+        "a diverged branch must be left alone, not overwritten"
+    );
+    assert_ne!(
+        oid_gamma_root, oid_gamma_tip,
+        "gamma must genuinely have advanced for this test to prove anything"
+    );
+}
