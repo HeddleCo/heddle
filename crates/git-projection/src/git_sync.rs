@@ -174,6 +174,29 @@ pub fn sync_track_to_branch(
     )
 }
 
+/// Force-rewind a Heddle-owned mirror branch to an embargo-lagged frontier.
+///
+/// The force bypasses the fast-forward guard, but never the ref transaction's
+/// compare-and-swap: `expected_old` is the exact tip Heddle's managed-ref record
+/// says it last published. A Git-side writer that moves the ref after reconcile
+/// classification loses this CAS and is reported through [`set_ref`]'s
+/// [`FailedRefExportReason`] classifier instead of being overwritten.
+pub(crate) fn force_rewind_track_to_branch(
+    repo: &SleyRepository,
+    track_name: &str,
+    expected_old: SleyObjectId,
+    git_oid: SleyObjectId,
+) -> GitProjectionResult<()> {
+    let branch_ref = format!("refs/heads/{track_name}");
+    set_ref(
+        repo,
+        &branch_ref,
+        git_oid,
+        RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(expected_old)),
+        "heddle: retract embargoed thread frontier",
+    )
+}
+
 /// Sync a Heddle marker to a Git tag.
 pub fn sync_marker_to_tag(
     repo: &SleyRepository,
