@@ -1596,12 +1596,12 @@ fn collect_status_submodules(
         let tree = repo.require_tree(&state.tree)?;
         collect_tree_submodules(repo, &tree, "", &mut submodules)?;
     } else if let Some(git) = repo.git_overlay_sley_repository()? {
-        let head = git.head().map_err(|error| {
+        let head = git.head_state().map_err(|error| {
             HeddleError::Config(format!(
                 "read Git HEAD while collecting submodules: {error}"
             ))
         })?;
-        if let Some(commit_oid) = head.oid {
+        if let Some(commit_oid) = head.oid() {
             let commit = git.read_commit(&commit_oid).map_err(|error| {
                 HeddleError::Config(format!(
                     "read Git commit {commit_oid} while collecting submodules: {error}"
