@@ -80,6 +80,10 @@ fn capture_status_snapshot(paths: &[&str]) -> SubmoduleStatusSnapshot {
     }
 
     heddle(&["init"], Some(superproject.path())).expect("initialize Heddle overlay");
+    for (path, _) in &submodules {
+        std::fs::remove_dir_all(superproject.path().join(path))
+            .expect("remove submodule checkout before status");
+    }
     let text =
         heddle(&["status", "--no-color"], Some(superproject.path())).expect("render text status");
     let json = heddle(
