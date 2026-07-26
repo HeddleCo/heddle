@@ -7,6 +7,7 @@ manifests=(
   crates/core/Cargo.toml
   crates/repo/Cargo.toml
   crates/objects/Cargo.toml
+  crates/fs-prims/Cargo.toml
   crates/object-model/Cargo.toml
   crates/merge/Cargo.toml
   crates/semantic/Cargo.toml

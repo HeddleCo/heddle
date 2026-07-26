@@ -24,8 +24,8 @@ use std::{
     thread::{self, ThreadId},
 };
 
-pub use crate::error::LockError;
 use fs2::FileExt;
+pub use heddle_object_model::error::LockError;
 
 pub type Result<T> = std::result::Result<T, LockError>;
 

@@ -1,0 +1,23 @@
+[package]
+name = "heddle-fs-prims"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Durable filesystem primitives for Heddle."
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+fs2.workspace = true
+heddle-object-model = { path = "../object-model", version = "0.10" }
+libc.workspace = true
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "heddle_fs_prims"

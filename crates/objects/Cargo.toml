@@ -17,6 +17,7 @@ bytes.workspace = true
 chrono.workspace = true
 fs2.workspace = true
 hex.workspace = true
+heddle-fs-prims = { path = "../fs-prims", version = "0.10" }
 heddle-format = { path = "../format", version = "0.10" }
 heddle-object-model = { path = "../object-model", version = "0.10" }
 ignore.workspace = true
@@ -32,9 +33,6 @@ thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-# Win32_Security: CreateFileW's binding is gated on it in windows-sys 0.61
-# (its signature takes a *const SECURITY_ATTRIBUTES from Win32::Security).
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }
 zstd = { workspace = true, optional = true }
 
 [features]

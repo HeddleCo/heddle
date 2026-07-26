@@ -1951,6 +1951,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "heddle-fs-prims"
+version = "0.10.4"
+dependencies = [
+ "fs2",
+ "heddle-object-model",
+ "libc",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "heddle-git-projection"
 version = "0.10.4"
 dependencies = [
@@ -2069,6 +2080,7 @@ dependencies = [
  "criterion",
  "fs2",
  "heddle-format",
+ "heddle-fs-prims",
  "heddle-object-model",
  "hex",
  "ignore",
@@ -2086,7 +2098,6 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "uuid",
- "windows-sys 0.61.2",
  "zstd",
 ]
 
