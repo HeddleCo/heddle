@@ -1692,6 +1692,7 @@ dependencies = [
  "criterion",
  "futures",
  "heddle-api",
+ "heddle-cli-args",
  "heddle-cli-shared",
  "heddle-client",
  "heddle-core",
@@ -1741,6 +1742,20 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "walkdir",
+ "weft-client-shim",
+]
+
+[[package]]
+name = "heddle-cli-args"
+version = "0.10.4"
+dependencies = [
+ "anyhow",
+ "clap",
+ "heddle-api",
+ "heddle-cli-shared",
+ "heddle-client",
+ "heddle-objects",
+ "heddle-repo",
  "weft-client-shim",
 ]
 

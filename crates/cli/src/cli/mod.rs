@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Command-line interface for Heddle.
 
-use std::{io::IsTerminal, sync::OnceLock};
+use std::io::IsTerminal;
 
-pub mod cli_args;
 pub mod commands;
 pub mod help;
 pub mod progress_render;
@@ -11,31 +10,8 @@ pub mod render;
 pub mod style;
 pub mod tips;
 
-#[cfg(feature = "client")]
-pub use cli_args::AuthCommands;
-pub use cli_args::{
-    AdoptArgs, AgentCommands, AgentPresenceCommands, AgentProvenanceCommands, Cli, CloneArgs,
-    CollapseArgs, Commands, CommitArgs, CompletionSubject, ContextCommands, DaemonCommands,
-    DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs, DoctorSchemasArgs, ExpandArgs, FsckArgs,
-    FsckCommands, FsckRepairCommands, FsckRepairGitArgs, HookCommands, HookInstallSource, InitArgs,
-    IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs, IntegrationTargetArgs,
-    LogArgs, MaintenanceCommands, OplogCommands, OutputMode, PullArgs, PurgeApplyArgs,
-    PurgeCommands, PurgeListArgs, PushArgs, ReadyArgs, RedactApplyArgs, RedactCommands,
-    RedactListArgs, RedactShowArgs, RedactTrustAddArgs, RedactTrustCommands, RedactTrustListArgs,
-    RedactTrustRemoveArgs, RemoteCommands, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
-    ShellCommands, ShellKind, SnapshotArgs, ThreadAbsorbArgs, ThreadCleanupArgs, ThreadCommands,
-    ThreadDropArgs, ThreadListArgs, ThreadMarkerCommands, ThreadMoveArgs, ThreadNameArgs,
-    ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadShowArgs, ThreadStartArgs,
-    TimelineArgs, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs,
-    TimelineRecordStartArgs, TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs,
-    TimelineStatusArgs, TimelineTargetArgs, TryArgs, UndoArgs, VisibilityCommands,
-    VisibilityListArgs, VisibilityPromoteArgs, VisibilitySetArgs, VisibilityShowArgs,
-    VisibilityTierArg, WatchArgs, WorkspaceModeArg,
-};
-#[cfg(feature = "git-overlay")]
-pub use cli_args::{ExportCommands, ImportCommands};
-#[cfg(feature = "semantic")]
-pub use cli_args::{HotEventKindArg, HotSpotKeyArg, SemanticCommands};
+pub use heddle_cli_args as cli_args;
+pub use heddle_cli_args::*;
 use repo::{Config, OutputFormat};
 
 use crate::config::UserConfig;
@@ -73,18 +49,15 @@ pub fn execution_context_from_cli(cli: &Cli) -> anyhow::Result<heddle_core::Exec
 }
 
 pub fn user_config_or_exit() -> &'static UserConfig {
-    static USER_CONFIG: OnceLock<UserConfig> = OnceLock::new();
-    USER_CONFIG.get_or_init(|| {
-        // Failure here MUST NOT short-circuit with a raw `eprintln` +
-        // exit(2) — that path bypassed the typed `Next:` envelope when
-        // the global user config carried `output.format = "auto"`
-        // (Codex R2 on #271). The early-load in `main` already routes
-        // that failure through `print_error_with_hint`; this fallback
-        // exists only so re-entrant callers (e.g. `should_output_json`
-        // invoked from inside the error printer itself) get a usable
-        // default instead of a recursive load failure.
-        UserConfig::load_default().unwrap_or_default()
-    })
+    // Failure here MUST NOT short-circuit with a raw `eprintln` +
+    // exit(2) — that path bypassed the typed `Next:` envelope when
+    // the global user config carried `output.format = "auto"`
+    // (Codex R2 on #271). The early-load in `main` already routes
+    // that failure through `print_error_with_hint`; this fallback
+    // exists only so re-entrant callers (e.g. `should_output_json`
+    // invoked from inside the error printer itself) get a usable
+    // default instead of a recursive load failure.
+    Cli::user_config_or_exit()
 }
 
 pub fn load_user_config_or_exit() -> UserConfig {
@@ -169,20 +142,6 @@ pub fn json_output_mode_for_kind(
         }
         "none" => JsonOutputMode::Text,
         _ => JsonOutputMode::Text,
-    }
-}
-
-impl weft_client_shim::CliContext for Cli {
-    fn repo_path(&self) -> Option<&std::path::Path> {
-        self.repo.as_deref()
-    }
-
-    fn operation_id_wire(&self) -> String {
-        crate::operation_id::wire(self)
-    }
-
-    fn should_output_json(&self, repo_config: Option<&Config>) -> bool {
-        should_output_json(self, repo_config)
     }
 }
 
