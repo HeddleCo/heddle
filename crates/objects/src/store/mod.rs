@@ -16,10 +16,12 @@ pub mod liveness;
 pub mod memory;
 pub mod pack;
 pub mod shallow;
-pub mod source;
 pub mod store_compliance;
 pub mod writer_lease;
 
+#[cfg(feature = "async-source")]
+pub use crate::object::AsyncObjectSource;
+pub use crate::object::ObjectSource;
 pub use actor_presence::{
     ActorChainNode, ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
     ContextQueryEntry, generate_actor_session_id,
@@ -42,9 +44,6 @@ pub use liveness::{
 pub use memory::InMemoryStore;
 pub use pack::{PackBuilder, PackObjectId, PackReader, PackStats, StreamingPackBuilder, SyncData};
 pub use shallow::ShallowInfo;
-#[cfg(feature = "async-source")]
-pub use source::AsyncObjectSource;
-pub use source::ObjectSource;
 pub use writer_lease::{
     WriterLease, WriterLeaseAuthOutcome, WriterLeaseDraft, WriterLeaseGrant,
     WriterLeaseReserveOutcome, WriterLeaseStatus, WriterLeaseStore, generate_writer_lease_id,

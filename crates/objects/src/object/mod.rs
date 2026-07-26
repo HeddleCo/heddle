@@ -19,6 +19,7 @@ mod risk_signal;
 mod semantic_change;
 mod semantic_index;
 mod session;
+mod source;
 mod spool_id;
 mod staleness_core;
 mod state_attachment;
@@ -64,6 +65,9 @@ pub use semantic_index::{
     compute_file_scaffold_hash, compute_file_semantic_digest, compute_symbol_semantic_hash,
 };
 pub use session::{Session, SessionSegment, generate_session_id};
+#[cfg(feature = "async-source")]
+pub use source::AsyncObjectSource;
+pub use source::ObjectSource;
 pub use spool_id::{SpoolId, SpoolIdParseError};
 pub use staleness_core::{
     StalenessStatus, annotation_status_for_source,

@@ -6,13 +6,9 @@
 
 use std::ops::ControlFlow;
 
-use super::FileChangeSet;
 #[cfg(feature = "async-source")]
-use crate::store::AsyncObjectSource;
-use crate::{
-    object::{ContentHash, DiffKind, FileChange, Tree},
-    store::ObjectSource,
-};
+use super::AsyncObjectSource;
+use super::{ContentHash, DiffKind, FileChange, FileChangeSet, ObjectSource, Tree};
 
 struct DiffFrame {
     from: Option<Tree>,
@@ -304,10 +300,8 @@ fn child_path(prefix: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        object::{Blob, ContentHash, EntryType, Tree, TreeEntry},
-        store::{InMemoryStore, ObjectStore},
-    };
+    use crate::object::{Blob, ContentHash, EntryType, Tree, TreeEntry};
+    use crate::store::{InMemoryStore, ObjectStore};
 
     fn create_blob(store: &InMemoryStore, content: &str) -> ContentHash {
         let blob = Blob::from_slice(content.as_bytes());
