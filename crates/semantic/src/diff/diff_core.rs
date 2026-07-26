@@ -5,7 +5,7 @@ use std::path::Path;
 
 use objects::{
     object::{ContentHash, FileChangeSet, diff_trees},
-    store::ObjectStore,
+    store::{ObjectSource, ObjectStore},
     worktree::WorktreeStatus,
 };
 
@@ -19,7 +19,7 @@ use crate::{
 };
 
 /// Perform a cheap semantic no-op check between two trees.
-pub fn semantic_check_only<S: ObjectStore + ?Sized>(
+pub fn semantic_check_only<S: ObjectStore + ObjectSource + ?Sized>(
     store: &S,
     from_tree_hash: &ContentHash,
     to_tree_hash: &ContentHash,
@@ -35,7 +35,7 @@ pub fn semantic_check_only<S: ObjectStore + ?Sized>(
 }
 
 /// Perform a cheap semantic no-op check between two trees using an injected cache.
-pub fn semantic_check_only_with_cache<S: ObjectStore + ?Sized>(
+pub fn semantic_check_only_with_cache<S: ObjectStore + ObjectSource + ?Sized>(
     store: &S,
     from_tree_hash: &ContentHash,
     to_tree_hash: &ContentHash,
@@ -94,7 +94,7 @@ pub fn semantic_check_only_worktree_with_cache<S: ObjectStore + ?Sized>(
 }
 
 /// Perform semantic summary analysis between two trees.
-pub fn semantic_diff_summary<S: ObjectStore + ?Sized>(
+pub fn semantic_diff_summary<S: ObjectStore + ObjectSource + ?Sized>(
     store: &S,
     from_tree_hash: &ContentHash,
     to_tree_hash: &ContentHash,
@@ -110,7 +110,7 @@ pub fn semantic_diff_summary<S: ObjectStore + ?Sized>(
 }
 
 /// Perform semantic summary analysis between two trees using an injected cache.
-pub fn semantic_diff_summary_with_cache<S: ObjectStore + ?Sized>(
+pub fn semantic_diff_summary_with_cache<S: ObjectStore + ObjectSource + ?Sized>(
     store: &S,
     from_tree_hash: &ContentHash,
     to_tree_hash: &ContentHash,
@@ -169,7 +169,7 @@ pub fn semantic_diff_summary_worktree_with_cache<S: ObjectStore + ?Sized>(
 }
 
 /// Perform semantic diff analysis between two trees.
-pub fn semantic_diff<S: ObjectStore + ?Sized>(
+pub fn semantic_diff<S: ObjectStore + ObjectSource + ?Sized>(
     store: &S,
     from_tree_hash: &ContentHash,
     to_tree_hash: &ContentHash,
@@ -185,7 +185,7 @@ pub fn semantic_diff<S: ObjectStore + ?Sized>(
 }
 
 /// Perform semantic diff analysis between two trees using an injected cache.
-pub fn semantic_diff_with_cache<S: ObjectStore + ?Sized>(
+pub fn semantic_diff_with_cache<S: ObjectStore + ObjectSource + ?Sized>(
     store: &S,
     from_tree_hash: &ContentHash,
     to_tree_hash: &ContentHash,

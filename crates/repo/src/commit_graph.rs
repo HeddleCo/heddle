@@ -67,7 +67,7 @@ pub struct CommitGraphIndex<'source, S: ObjectSource + ?Sized = AnyStore> {
 
 impl<'source, S> CommitGraphIndex<'source, S>
 where
-    S: ObjectStore,
+    S: ObjectStore + ObjectSource,
 {
     pub fn new<R, O>(repo: &'source Repository<R, O, S>) -> Self
     where
@@ -573,7 +573,7 @@ pub fn find_merge_base<R, O, S>(
 where
     R: RefBackend,
     O: OpLogBackend,
-    S: ObjectStore,
+    S: ObjectStore + ObjectSource,
 {
     let mut graph = CommitGraphIndex::new(repo);
     graph.find_merge_base(state_a, state_b)
