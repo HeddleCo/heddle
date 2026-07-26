@@ -68,12 +68,6 @@ pub trait ExternalObjectSource: Send + Sync {
 
 pub use crate::error::{HeddleError as StoreError, HeddleError, Result};
 
-impl From<CompressionError> for HeddleError {
-    fn from(e: CompressionError) -> Self {
-        HeddleError::Compression(e.to_string())
-    }
-}
-
 /// Static-dispatch enum over the concrete object stores Heddle ships.
 ///
 /// This is the default `S` for [`Repository`](crate) so the store backend

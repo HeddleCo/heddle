@@ -269,17 +269,6 @@ pub struct TreeEntry {
 }
 
 impl TreeEntry {
-    #[cfg(test)]
-    pub(crate) fn new_unchecked_for_tests(
-        name: impl Into<String>,
-        target: TreeEntryTarget,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            target,
-        }
-    }
-
     pub(crate) fn validate(&self) -> Result<(), TreeError> {
         validate_name(&self.name)
     }
@@ -486,11 +475,6 @@ impl Tree {
         Self { entries }
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_entries_unchecked_for_tests(entries: Vec<TreeEntry>) -> Self {
-        Self { entries }
-    }
-
     pub fn validate(&self) -> Result<(), TreeError> {
         let mut previous_name: Option<&str> = None;
         for entry in &self.entries {
@@ -610,7 +594,7 @@ impl<'de> Deserialize<'de> for Tree {
 }
 
 #[derive(Debug)]
-pub(crate) enum TreeDecodeError {
+pub enum TreeDecodeError {
     Decode(rmp_serde::decode::Error),
     Invalid(TreeError),
 }
@@ -714,7 +698,7 @@ impl TryFrom<EncodedTreeV2> for Tree {
 }
 
 impl Tree {
-    pub(crate) fn decode_current_msgpack(data: &[u8]) -> Result<Self, TreeDecodeError> {
+    pub fn decode_current_msgpack(data: &[u8]) -> Result<Self, TreeDecodeError> {
         let encoded: EncodedTreeV2 = rmp_serde::from_slice(data)?;
         Ok(Tree::try_from(encoded)?)
     }

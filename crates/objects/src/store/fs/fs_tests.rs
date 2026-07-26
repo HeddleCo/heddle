@@ -1044,17 +1044,40 @@ fn test_get_action_rejects_wrong_object_swap() {
 
 #[test]
 fn test_get_tree_rejects_invalid_deserialized_entry_name() {
+    #[derive(serde::Serialize)]
+    struct EncodedTree {
+        version: u8,
+        entries: Vec<EncodedTreeEntry>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct EncodedTreeEntry {
+        name: String,
+        kind: u8,
+        hash: Option<ContentHash>,
+        executable: Option<bool>,
+        git_format: Option<u8>,
+        git_oid: Option<Vec<u8>>,
+        spool_id: Option<crate::object::SpoolId>,
+        spool_state_id: Option<StateId>,
+    }
+
     let (_temp, store) = create_test_store();
 
-    let invalid_tree =
-        Tree::from_entries_unchecked_for_tests(vec![TreeEntry::new_unchecked_for_tests(
-            "bad/name",
-            crate::object::TreeEntryTarget::Blob {
-                hash: ContentHash::compute(b"blob"),
-                executable: false,
-            },
-        )]);
-    let tree_hash = invalid_tree.hash();
+    let invalid_tree = EncodedTree {
+        version: 3,
+        entries: vec![EncodedTreeEntry {
+            name: "bad/name".to_string(),
+            kind: 0,
+            hash: Some(ContentHash::compute(b"blob")),
+            executable: Some(false),
+            git_format: None,
+            git_oid: None,
+            spool_id: None,
+            spool_state_id: None,
+        }],
+    };
+    let tree_hash = ContentHash::compute(b"invalid tree fixture");
     let tree_path = store
         .root
         .join("objects/trees")

@@ -8,7 +8,7 @@ use std::{collections::HashMap, hint::black_box, sync::RwLock};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use objects::{
     object::{Action, ActionId, Blob, ContentHash, State, StateId, Tree, TreeEntry, diff_trees},
-    store::{ObjectStore, Result},
+    store::{ObjectSource, ObjectStore, Result},
     sync::RwLockExt,
 };
 
@@ -35,6 +35,20 @@ impl DeltaShape {
 struct BenchStore {
     blobs: RwLock<HashMap<ContentHash, Blob>>,
     trees: RwLock<HashMap<ContentHash, Tree>>,
+}
+
+impl ObjectSource for BenchStore {
+    fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
+        Ok(self.trees.read_or_poisoned().get(hash).cloned())
+    }
+
+    fn get_state(&self, _id: &StateId) -> Result<Option<State>> {
+        Ok(None)
+    }
+
+    fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
+        Ok(self.blobs.read_or_poisoned().get(hash).cloned())
+    }
 }
 
 impl ObjectStore for BenchStore {

@@ -19,22 +19,13 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io,
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock},
     thread::{self, ThreadId},
 };
 
+pub use crate::error::LockError;
 use fs2::FileExt;
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum LockError {
-    #[error("failed to acquire lock: {0}")]
-    Acquire(#[source] io::Error),
-    #[error("lock file not accessible: {0}")]
-    Io(#[source] io::Error),
-}
 
 pub type Result<T> = std::result::Result<T, LockError>;
 

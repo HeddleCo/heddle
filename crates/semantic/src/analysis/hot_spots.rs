@@ -42,7 +42,7 @@ use std::{
 
 use objects::{
     object::{SemanticChange, State, StateId},
-    store::ObjectStore,
+    store::{ObjectSource, ObjectStore},
 };
 
 use crate::{
@@ -216,7 +216,7 @@ pub struct HotSpotsReport {
 /// `(walk_from, walk_from.first_parent())`. If `walk_from` has no
 /// parent, the report is empty.
 pub fn analyze_hot_spots(
-    store: &impl ObjectStore,
+    store: &(impl ObjectStore + ObjectSource),
     walk_from: StateId,
     params: &HotSpotParams,
 ) -> Result<HotSpotsReport, anyhow::Error> {
@@ -231,7 +231,7 @@ pub fn analyze_hot_spots(
     let mut states_walked = 0usize;
 
     let mut current_id = walk_from;
-    let mut current = match store.get_state(&current_id)? {
+    let mut current = match ObjectStore::get_state(store, &current_id)? {
         Some(s) => s,
         None => return Ok(HotSpotsReport::default()),
     };
@@ -240,7 +240,7 @@ pub fn analyze_hot_spots(
         let Some(parent_id) = current.first_parent().copied() else {
             break;
         };
-        let parent = match store.get_state(&parent_id)? {
+        let parent = match ObjectStore::get_state(store, &parent_id)? {
             Some(s) => s,
             None => break,
         };

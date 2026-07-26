@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared error types across Heddle crates.
 
-use std::{error::Error, fmt, path::Path};
+use std::{error::Error, fmt, io, path::Path};
 
 use crate::object::{ContentHash, StateId, TreeError};
 
@@ -136,6 +136,19 @@ impl fmt::Display for RecoveryDetails {
 
 impl Error for RecoveryDetails {}
 
+/// Failure to acquire or access a repository lock.
+///
+/// The lock implementation lives in `heddle-objects`; this pure error value
+/// lives with [`HeddleError`] so the object-model crate does not depend on a
+/// storage backend.
+#[derive(Debug, thiserror::Error)]
+pub enum LockError {
+    #[error("failed to acquire lock: {0}")]
+    Acquire(#[source] io::Error),
+    #[error("lock file not accessible: {0}")]
+    Io(#[source] io::Error),
+}
+
 /// Error type for repository/storage-adjacent operations.
 #[derive(Debug, thiserror::Error)]
 pub enum HeddleError {
@@ -188,7 +201,7 @@ pub enum HeddleError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("repository lock unavailable: {0}")]
-    Lock(#[from] crate::lock::LockError),
+    Lock(#[from] LockError),
     #[error("serialization error: {0}")]
     Serialization(String),
     #[error("configuration error: {0}")]
@@ -275,6 +288,12 @@ impl From<toml::ser::Error> for HeddleError {
 impl From<serde_json::Error> for HeddleError {
     fn from(e: serde_json::Error) -> Self {
         HeddleError::Serialization(e.to_string())
+    }
+}
+
+impl From<heddle_format::compression::CompressionError> for HeddleError {
+    fn from(e: heddle_format::compression::CompressionError) -> Self {
+        HeddleError::Compression(e.to_string())
     }
 }
 
