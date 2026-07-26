@@ -16,7 +16,7 @@ use anyhow::Result;
 use repo::{Repository, Thread, ThreadManager};
 use serde::Serialize;
 
-use crate::cli::{cli_args::Cli, should_output_json};
+use heddle_cli_args::{Cli, should_output_json};
 
 pub mod fsck;
 pub mod query;

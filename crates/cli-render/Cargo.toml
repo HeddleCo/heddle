@@ -1,0 +1,38 @@
+[package]
+name = "heddle-cli-render"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Heddle's terminal presentation layer."
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anstream = "1"
+anstyle = "1"
+anyhow.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+heddle-cli-args = { path = "../cli-args", version = "0.10", default-features = false }
+heddle-core = { path = "../core", version = "0.10", default-features = false }
+hex.workspace = true
+objects = { path = "../objects", package = "heddle-objects", version = "0.10" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.10", default-features = false, features = ["git-overlay", "native"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[features]
+default = []
+client = []
+test-utils = []
+
+[dev-dependencies]
+clap.workspace = true
+serial_test.workspace = true
+tempfile.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "heddle_cli_render"

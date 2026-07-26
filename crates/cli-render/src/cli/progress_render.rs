@@ -22,14 +22,15 @@ use std::{
 use objects::{Progress, ProgressSnapshot, Sink};
 use repo::Repository;
 
-use crate::cli::{Cli, should_output_json, style};
+use crate::cli::style;
+use heddle_cli_args::{Cli, should_output_json};
 
 /// Redraw the live line at most once per this many completed units, so a large
 /// operation doesn't spend its time flushing the terminal. Matches the historic
 /// import cadence.
-pub(crate) const COMMIT_TICK_INTERVAL: usize = 64;
+pub const COMMIT_TICK_INTERVAL: usize = 64;
 
-pub(crate) fn format_transfer_bytes(bytes: u64) -> String {
+pub fn format_transfer_bytes(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = KIB * 1024;
     const GIB: u64 = MIB * 1024;
@@ -48,7 +49,7 @@ pub(crate) fn format_transfer_bytes(bytes: u64) -> String {
 /// (#550) exactly once at construction: JSON output → a null handle that
 /// renders nothing; otherwise → a [`TerminalSink`]. The guard is never checked
 /// again per update.
-pub(crate) fn progress_for(cli: &Cli, repo: &Repository) -> Progress {
+pub fn progress_for(cli: &Cli, repo: &Repository) -> Progress {
     if should_output_json(cli, Some(repo.config())) {
         Progress::null()
     } else {
@@ -67,7 +68,7 @@ pub(crate) fn progress_for(cli: &Cli, repo: &Repository) -> Progress {
 /// The sink is `Sync`; its small amount of interior state (last painted phase +
 /// tick bookkeeping) lives behind a `Mutex`. Renders are cheap and infrequent
 /// relative to `inc`, so the lock is not on any hot path.
-pub(crate) struct TerminalSink {
+pub struct TerminalSink {
     state: Mutex<RenderState>,
 }
 
@@ -81,7 +82,7 @@ struct RenderState {
 }
 
 impl TerminalSink {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             state: Mutex::new(RenderState::default()),
         }
@@ -131,6 +132,12 @@ impl TerminalSink {
     }
 }
 
+impl Default for TerminalSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Sink for TerminalSink {
     fn render(&self, snap: ProgressSnapshot) {
         // The phase label is the human line; the counters drive throttling and
@@ -151,7 +158,7 @@ impl Sink for TerminalSink {
 
 /// Clear an active TTY progress line before rendering command output.
 #[cfg(feature = "client")]
-pub(crate) fn clear_line(progress: &Progress) {
+pub fn clear_line(progress: &Progress) {
     if !progress.is_active() {
         return;
     }
@@ -164,7 +171,7 @@ pub(crate) fn clear_line(progress: &Progress) {
 /// Paint a terminal "done" line for a finished [`Progress`], clearing the live
 /// line first on a TTY. No-op for a null (inactive) handle. Used by consumers
 /// that want an explicit completion marker (e.g. import's `[done]` line).
-pub(crate) fn finish_line(progress: &Progress, message: &str) {
+pub fn finish_line(progress: &Progress, message: &str) {
     if !progress.is_active() {
         return;
     }
