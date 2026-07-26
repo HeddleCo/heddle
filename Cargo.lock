@@ -2036,6 +2036,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "heddle-object-model"
+version = "0.10.4"
+dependencies = [
+ "anyhow",
+ "base32",
+ "blake3",
+ "bytes",
+ "chrono",
+ "heddle-format",
+ "hex",
+ "proptest",
+ "rand 0.10.2",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "sley",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
+ "uuid",
+]
+
+[[package]]
 name = "heddle-objects"
 version = "0.10.4"
 dependencies = [
@@ -2047,6 +2069,7 @@ dependencies = [
  "criterion",
  "fs2",
  "heddle-format",
+ "heddle-object-model",
  "hex",
  "ignore",
  "libc",

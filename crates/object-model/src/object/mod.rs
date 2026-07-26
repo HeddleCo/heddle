@@ -109,7 +109,7 @@ pub use timeline::{
     TimelineOperationIdParseError, TimelineOperationKind, TimelineStepId, TimelineToolCallStatus,
     TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
 };
-pub(crate) use tree::TreeDecodeError;
+pub use tree::TreeDecodeError;
 pub use tree::{
     EntryType, FileMode, Tree, TreeEntry, TreeEntryTarget, TreeError,
     validate_name as validate_tree_entry_name,

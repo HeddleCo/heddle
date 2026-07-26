@@ -195,7 +195,7 @@ jobs:
           # inputs) so mount adapters and their read-path dependencies trigger
           # the kernel adapter checks.
           if printf '%s\n' "$diff_output" | grep -E \
-              '^(crates/(mount|objects|repo|refs|oplog|crypto|wire|runtime-bridge)/|\.github/workflows/rust-tests\.yml|Cargo\.lock$|Cargo\.toml$)' \
+              '^(crates/(mount|object-model|objects|repo|refs|oplog|crypto|wire|runtime-bridge)/|\.github/workflows/rust-tests\.yml|Cargo\.lock$|Cargo\.toml$)' \
               > /dev/null; then
             echo "mount=true" >> "$GITHUB_OUTPUT"
           else
