@@ -19,6 +19,7 @@ members = [
     "crates/object-model",
     "crates/objects",
     "crates/oplog",
+    "crates/pack",
     "crates/wire",
     "crates/refs",
     "crates/repo",

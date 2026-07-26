@@ -14,7 +14,7 @@ pub mod fs;
 pub mod liveness;
 #[cfg(any(test, feature = "memory-backend"))]
 pub mod memory;
-pub mod pack;
+pub use heddle_pack::store::pack;
 pub mod shallow;
 pub mod source;
 pub mod store_compliance;

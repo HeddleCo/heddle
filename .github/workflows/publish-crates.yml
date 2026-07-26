@@ -76,6 +76,9 @@ env:
   # accidentally flipping it would silently expand the public surface.
   PUBLISHABLE_CRATES: |
     heddle-format
+    heddle-object-model
+    heddle-fs-prims
+    heddle-pack
     heddle-objects
     heddle-crypto
     heddle-runtime-bridge

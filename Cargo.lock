@@ -2082,6 +2082,7 @@ dependencies = [
  "heddle-format",
  "heddle-fs-prims",
  "heddle-object-model",
+ "heddle-pack",
  "hex",
  "ignore",
  "libc",
@@ -2119,6 +2120,21 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "heddle-pack"
+version = "0.10.4"
+dependencies = [
+ "blake3",
+ "bytes",
+ "heddle-format",
+ "heddle-fs-prims",
+ "heddle-object-model",
+ "memmap2",
+ "tempfile",
+ "tracing",
+ "zstd",
 ]
 
 [[package]]
