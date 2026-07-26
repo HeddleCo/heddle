@@ -3,11 +3,9 @@
 
 use std::collections::HashSet;
 
-use crate::{
-    error::Result,
-    object::{ContentHash, Tree, TreeEntry},
-    store::ObjectSource,
-};
+use crate::error::Result;
+
+use super::{ContentHash, ObjectSource, Tree, TreeEntry};
 
 /// Events emitted while walking reachable trees for integrity checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,10 +93,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        object::{Blob, Tree, TreeEntry},
-        store::{InMemoryStore, ObjectStore},
-    };
+    use crate::object::{Blob, Tree, TreeEntry};
+    use crate::store::{InMemoryStore, ObjectStore};
 
     #[test]
     fn walk_tree_integrity_dedups_shared_subtrees() {

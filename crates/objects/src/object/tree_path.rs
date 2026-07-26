@@ -6,8 +6,10 @@ use std::{
     path::{Component, Path},
 };
 
-use super::{Blob, ContentHash, Tree, TreeEntry};
-use crate::{error::HeddleError, store::ObjectSource};
+#[cfg(feature = "async-source")]
+use super::AsyncObjectSource;
+use super::{Blob, ContentHash, ObjectSource, Tree, TreeEntry};
+use crate::error::HeddleError;
 
 /// How a tree-path walk classifies and materializes the terminal entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,7 +110,7 @@ pub fn resolve_tree_path<S: ObjectSource>(
 }
 
 #[cfg(feature = "async-source")]
-pub async fn resolve_tree_path_async<S: crate::store::AsyncObjectSource + ?Sized>(
+pub async fn resolve_tree_path_async<S: AsyncObjectSource + ?Sized>(
     store: &S,
     root: &ContentHash,
     path: &Path,
@@ -196,7 +198,7 @@ fn resolve_from_tree<S: ObjectSource>(
 }
 
 #[cfg(feature = "async-source")]
-async fn resolve_from_tree_async<S: crate::store::AsyncObjectSource + ?Sized>(
+async fn resolve_from_tree_async<S: AsyncObjectSource + ?Sized>(
     store: &S,
     tree: &Tree,
     segments: &[String],
@@ -273,7 +275,7 @@ fn resolve_leaf<S: ObjectSource>(
 }
 
 #[cfg(feature = "async-source")]
-async fn resolve_leaf_async<S: crate::store::AsyncObjectSource + ?Sized>(
+async fn resolve_leaf_async<S: AsyncObjectSource + ?Sized>(
     store: &S,
     entry: TreeEntry,
     policy: LeafPolicy,
@@ -353,7 +355,7 @@ fn load_subtree<S: ObjectSource>(
 }
 
 #[cfg(feature = "async-source")]
-async fn load_subtree_async<S: crate::store::AsyncObjectSource + ?Sized>(
+async fn load_subtree_async<S: AsyncObjectSource + ?Sized>(
     store: &S,
     hash: &ContentHash,
     policy: LeafPolicy,
@@ -381,10 +383,8 @@ async fn load_subtree_async<S: crate::store::AsyncObjectSource + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        object::{EntryType, TreeEntry},
-        store::{InMemoryStore, ObjectStore},
-    };
+    use crate::object::{EntryType, TreeEntry};
+    use crate::store::{InMemoryStore, ObjectStore};
 
     fn create_blob(store: &InMemoryStore, content: &[u8]) -> ContentHash {
         ObjectStore::put_blob(store, &Blob::from_slice(content)).unwrap()
