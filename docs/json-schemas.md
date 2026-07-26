@@ -8,7 +8,7 @@ on.
 ## Runtime introspection
 
 Schemas in this document are mirrored at runtime by
-`crates/cli/src/cli/commands/schemas.rs`. Generate the canonical JSON
+`crates/cli-contract/src/cli/commands/schemas.rs`. Generate the canonical JSON
 Schema for any verb with:
 
     heddle schemas                    # list registered schema verbs

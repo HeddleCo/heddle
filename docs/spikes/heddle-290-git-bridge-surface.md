@@ -88,7 +88,7 @@ as the routine catch-up**, not just a one-time conversion — the name connotes
 ### The machine surface already foregrounds the reverse path
 
 This is the key finding. The command-contract catalog
-(`crates/cli/src/cli/commands/command_catalog.rs`) already encodes a
+(`crates/cli-contract/src/cli/commands/command_catalog/mod.rs`) already encodes a
 de-emphasis tier for every bridge verb, and a redirect to the native canonical
 command for most of them. The remaining exception is `context reason git`,
 which is catalogued `surface(...)`-only and carries no

@@ -842,7 +842,11 @@ mod tests {
     // correct as verbs are added or removed.
     #[test]
     fn source_strings_reference_only_current_top_level_verbs() {
-        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let crates_root = manifest_dir
+            .parent()
+            .expect("cli-contract should live under the workspace crates directory");
+        let src_roots = [manifest_dir.join("src"), crates_root.join("cli/src")];
         let cli_command = cli();
 
         // The docs-drift checker's own surfaces intentionally embed
@@ -853,12 +857,19 @@ mod tests {
         const SELF_TEST_SURFACES: &[&str] = &["doctor_docs.rs", "doctor_schemas.rs"];
 
         let mut rs_files = Vec::new();
-        collect_rs_files(&src_root, &mut rs_files);
+        for src_root in &src_roots {
+            assert!(
+                src_root.is_dir(),
+                "expected CLI source root at {}",
+                src_root.display()
+            );
+            collect_rs_files(src_root, &mut rs_files);
+        }
         assert!(
             rs_files.len() > 50,
-            "expected to walk the cli source tree; only found {} .rs files under {}",
+            "expected to walk the cli + cli-contract source trees; only found {} .rs files under {:?}",
             rs_files.len(),
-            src_root.display(),
+            src_roots,
         );
 
         let mut stale = Vec::new();
@@ -871,7 +882,7 @@ mod tests {
             }
             let content = std::fs::read_to_string(&path).unwrap();
             let display = path
-                .strip_prefix(&src_root)
+                .strip_prefix(crates_root)
                 .unwrap_or(&path)
                 .display()
                 .to_string();

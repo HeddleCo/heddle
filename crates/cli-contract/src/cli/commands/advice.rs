@@ -8,7 +8,7 @@ use heddle_core::status::next_action::{
 };
 use serde_json::{Map, Value};
 
-pub(crate) const DIRTY_WORKTREE_CAPTURE_COMMAND: &str = "heddle capture -m \"...\"";
+pub const DIRTY_WORKTREE_CAPTURE_COMMAND: &str = "heddle capture -m \"...\"";
 pub(crate) const GIT_OVERLAY_CHECKPOINT_COMMAND: &str = "heddle commit -m \"...\"";
 
 #[derive(Debug, Clone)]
@@ -26,7 +26,7 @@ pub struct RecoveryAdvice {
 
 impl RecoveryAdvice {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn safety_refusal(
+    pub fn safety_refusal(
         kind: &'static str,
         error: impl Into<String>,
         hint: impl Into<String>,
@@ -55,7 +55,7 @@ impl RecoveryAdvice {
         }
     }
 
-    pub(crate) fn dirty_worktree(
+    pub fn dirty_worktree(
         action: &str,
         dirty_paths: Vec<String>,
         already_preserved: impl Into<String>,
@@ -94,7 +94,7 @@ impl RecoveryAdvice {
         }
     }
 
-    pub(crate) fn git_head_mismatch(
+    pub fn git_head_mismatch(
         action: &str,
         current_oid: impl Into<String>,
         expected_oid: impl Into<String>,
@@ -138,7 +138,7 @@ impl RecoveryAdvice {
         }
     }
 
-    pub(crate) fn destructive_requires_force(
+    pub fn destructive_requires_force(
         action: &str,
         unsafe_condition: impl Into<String>,
         would_change: impl Into<String>,
@@ -163,7 +163,7 @@ impl RecoveryAdvice {
         }
     }
 
-    pub(crate) fn op_id_conflict(
+    pub fn op_id_conflict(
         command: &str,
         dedup_scope: &str,
         incoming_argv: &[String],
@@ -238,7 +238,7 @@ impl RecoveryAdvice {
         }
     }
 
-    pub(crate) fn op_id_in_flight() -> Self {
+    pub fn op_id_in_flight() -> Self {
         Self {
             kind: "op_id_in_flight",
             error: "--op-id is currently being executed by another process".to_string(),
@@ -252,7 +252,7 @@ impl RecoveryAdvice {
         }
     }
 
-    pub(crate) fn op_id_unsupported(command: &str) -> Self {
+    pub fn op_id_unsupported(command: &str) -> Self {
         Self {
             kind: "op_id_unsupported",
             error: format!("--op-id is not supported by `heddle {command}`"),
@@ -266,7 +266,7 @@ impl RecoveryAdvice {
         }
     }
 
-    pub(crate) fn op_id_invalid(raw: &str, parse_error: impl fmt::Display) -> Self {
+    pub fn op_id_invalid(raw: &str, parse_error: impl fmt::Display) -> Self {
         Self {
             kind: "op_id_invalid",
             error: format!("invalid --op-id `{raw}`: {parse_error}"),
@@ -333,7 +333,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn stale_daemon_protocol(their_version: u32, our_version: u32) -> Self {
+    pub fn stale_daemon_protocol(their_version: u32, our_version: u32) -> Self {
         Self::safety_refusal(
             "daemon_protocol_version_mismatch",
             format!("heddled daemon is older (v{their_version}) than this CLI (v{our_version})"),
@@ -351,7 +351,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn git_import_metadata_required(map_path: &str, git_path: &str) -> Self {
+    pub fn git_import_metadata_required(map_path: &str, git_path: &str) -> Self {
         let command = format!("heddle import git --path {git_path}");
         Self::safety_refusal(
             "git_import_metadata_required",
@@ -365,7 +365,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn adopt_path_conflict(positional: &str, repo_path: &str) -> Self {
+    pub fn adopt_path_conflict(positional: &str, repo_path: &str) -> Self {
         Self::invalid_usage(
             "adopt_path_conflict",
             format!(
@@ -376,7 +376,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn adopt_requires_git_worktree(details: Option<String>) -> Self {
+    pub fn adopt_requires_git_worktree(details: Option<String>) -> Self {
         let error = match details {
             Some(details) => format!("`heddle adopt` needs a Git worktree: {details}"),
             None => "`heddle adopt` needs a Git worktree".to_string(),
@@ -393,7 +393,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn git_overlay_tip_bind_failed(details: impl Into<String>) -> Self {
+    pub fn git_overlay_tip_bind_failed(details: impl Into<String>) -> Self {
         let primary = "heddle adopt".to_string();
         Self::safety_refusal(
             "git_overlay_tip_bind_failed",
@@ -409,7 +409,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn init_path_conflict(positional: &str, repo_path: &str) -> Self {
+    pub fn init_path_conflict(positional: &str, repo_path: &str) -> Self {
         Self::invalid_usage(
             "init_path_conflict",
             format!(
@@ -420,7 +420,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn init_principal_field_required(field: &str) -> Self {
+    pub fn init_principal_field_required(field: &str) -> Self {
         Self::invalid_usage(
             "init_principal_field_required",
             format!("{field} is required when configuring a principal during init"),
@@ -430,7 +430,7 @@ impl RecoveryAdvice {
     }
 
     #[cfg(not(feature = "client"))]
-    pub(crate) fn network_feature_unavailable(operation: &str) -> Self {
+    pub fn network_feature_unavailable(operation: &str) -> Self {
         Self::safety_refusal(
             "network_feature_unavailable",
             format!(
@@ -448,7 +448,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn hook_veto(hook: &str, action: &str, reason: impl Into<String>) -> Self {
+    pub fn hook_veto(hook: &str, action: &str, reason: impl Into<String>) -> Self {
         let reason = reason.into();
         Self::safety_refusal(
             "hook_veto",
@@ -466,7 +466,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn invalid_usage(
+    pub fn invalid_usage(
         kind: &'static str,
         error: impl Into<String>,
         hint: impl Into<String>,
@@ -485,7 +485,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn missing_option(
+    pub fn missing_option(
         kind: &'static str,
         option: &'static str,
         required_for: &'static str,
@@ -500,7 +500,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn malformed_option_value(
+    pub fn malformed_option_value(
         kind: &'static str,
         option: &'static str,
         raw: &str,
@@ -540,7 +540,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn discuss_resolve_missing_dismiss_reason() -> Self {
+    pub fn discuss_resolve_missing_dismiss_reason() -> Self {
         Self::missing_option(
             "discuss_resolve_missing_dismiss_reason",
             "--reason",
@@ -549,7 +549,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn review_symbols_malformed(raw: &str) -> Self {
+    pub fn review_symbols_malformed(raw: &str) -> Self {
         Self::malformed_option_value(
             "review_symbols_malformed",
             "--symbols",
@@ -559,7 +559,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn thread_absorb_parent_required(thread: &str) -> Self {
+    pub fn thread_absorb_parent_required(thread: &str) -> Self {
         let primary_command = format!("heddle thread absorb {thread} --into <parent-thread>");
         Self::missing_integration_target(
             "thread_absorb_parent_required",
@@ -572,7 +572,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn repository_no_head_capture_first(action: &str) -> Self {
+    pub fn repository_no_head_capture_first(action: &str) -> Self {
         Self::safety_refusal(
             "repository_no_head",
             format!("Repository has no HEAD state for {action}"),
@@ -585,7 +585,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn repository_no_head_anchor_first(action: &str) -> Self {
+    pub fn repository_no_head_anchor_first(action: &str) -> Self {
         Self::safety_refusal(
             "repository_no_head",
             format!("Repository has no HEAD state for {action}"),
@@ -602,7 +602,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn context_empty() -> Self {
+    pub fn context_empty() -> Self {
         Self::safety_refusal(
             "context_annotations_empty",
             "No context annotations in this repository",
@@ -618,7 +618,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn annotation_not_found(annotation_id: &str) -> Self {
+    pub fn annotation_not_found(annotation_id: &str) -> Self {
         Self::safety_refusal(
             "context_annotation_not_found",
             format!("Annotation not found: {annotation_id}"),
@@ -634,7 +634,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn no_current_thread(
+    pub fn no_current_thread(
         command: &'static str,
         explicit_selector: Option<&'static str>,
         primary_command: impl Into<String>,
@@ -663,7 +663,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn no_current_session(
+    pub fn no_current_session(
         command: &'static str,
         explicit_selector: Option<&'static str>,
         primary_command: impl Into<String>,
@@ -694,7 +694,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn thread_worktree_unavailable(
+    pub fn thread_worktree_unavailable(
         thread: &str,
         action: &str,
         unsafe_condition: impl Into<String>,
@@ -717,7 +717,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn land_checkpoint_partial_failure(
+    pub fn land_checkpoint_partial_failure(
         thread: &str,
         checkpoint_error: impl fmt::Display,
         performed_steps: Vec<String>,
@@ -744,7 +744,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn land_checkpoint_rolled_back(
+    pub fn land_checkpoint_rolled_back(
         thread: &str,
         checkpoint_error: impl fmt::Display,
         performed_steps: Vec<String>,
@@ -754,7 +754,7 @@ impl RecoveryAdvice {
         } else {
             performed_steps.join(", ")
         };
-        let retry = super::thread_landing::land_local_command(thread);
+        let retry = super::command_catalog::land_local_command(thread);
         Self::safety_refusal(
             "land_checkpoint_rolled_back",
             format!(
@@ -771,7 +771,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn land_checkpoint_partial_failure_undo_failed(
+    pub fn land_checkpoint_partial_failure_undo_failed(
         thread: &str,
         checkpoint_error: impl fmt::Display,
         undo_error: impl fmt::Display,
@@ -799,7 +799,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn land_checkpoint_recovery_required(
+    pub fn land_checkpoint_recovery_required(
         thread: &str,
         checkpoint_error: impl fmt::Display,
         recovery_error: impl fmt::Display,
@@ -826,7 +826,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn land_checkpoint_rollback_marker_cleanup_failed(
+    pub fn land_checkpoint_rollback_marker_cleanup_failed(
         thread: &str,
         checkpoint_error: impl fmt::Display,
         cleanup_error: impl fmt::Display,
@@ -853,7 +853,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn from_git_projection_error(
+    pub fn from_git_projection_error(
         error: &heddle_git_projection::git_core::GitProjectionError,
     ) -> Option<Self> {
         use heddle_git_projection::git_core::GitProjectionError;
@@ -946,7 +946,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn git_heddle_thread_diverged(thread: &str, branch: &str) -> Self {
+    pub fn git_heddle_thread_diverged(thread: &str, branch: &str) -> Self {
         let primary_command = canonical_git_repair_ref_preview_command(None, branch);
         Self::safety_refusal(
             "git_heddle_thread_diverged",
@@ -1003,7 +1003,7 @@ impl RecoveryAdvice {
 
     pub(crate) fn git_overlay_remote_diverged(branch: &str, upstream: &str) -> Self {
         let import_command = canonical_git_import_ref_command(upstream);
-        let merge_preview = super::thread_landing::merge_preview_command(upstream);
+        let merge_preview = super::command_catalog::merge_preview_command(upstream);
         Self::safety_refusal(
             "git_overlay_remote_diverged",
             "Remote branch does not fast-forward the local Git checkpoint",
@@ -1020,7 +1020,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn remote_transport_mismatch(action: &str, remote: &str) -> Self {
+    pub fn remote_transport_mismatch(action: &str, remote: &str) -> Self {
         Self::safety_refusal(
             "remote_transport_mismatch",
             format!(
@@ -1040,7 +1040,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn remote_not_configured(action: &str) -> Self {
+    pub fn remote_not_configured(action: &str) -> Self {
         Self::safety_refusal(
             "remote_not_configured",
             format!("No default remote is configured for {action}"),
@@ -1061,7 +1061,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn remote_not_found(name: &str) -> Self {
+    pub fn remote_not_found(name: &str) -> Self {
         Self::safety_refusal(
             "remote_not_found",
             format!("Remote '{name}' not found"),
@@ -1077,7 +1077,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn local_lazy_pull_unsupported(source_path: &std::path::Path) -> Self {
+    pub fn local_lazy_pull_unsupported(source_path: &std::path::Path) -> Self {
         let source = source_path.display().to_string();
         let pull_without_lazy = format!("heddle pull {source}");
         Self::safety_refusal(
@@ -1095,7 +1095,7 @@ impl RecoveryAdvice {
     }
 
     #[cfg(feature = "client")]
-    pub(crate) fn remote_push_failed(track_name: &str, error: &str) -> Self {
+    pub fn remote_push_failed(track_name: &str, error: &str) -> Self {
         let primary_command = format!("heddle push {track_name}");
         Self::safety_refusal(
             "remote_push_failed",
@@ -1112,7 +1112,7 @@ impl RecoveryAdvice {
     }
 
     #[cfg(feature = "client")]
-    pub(crate) fn remote_pull_failed(
+    pub fn remote_pull_failed(
         remote_thread: &str,
         local_thread: Option<&str>,
         error: &str,
@@ -1137,7 +1137,7 @@ impl RecoveryAdvice {
     }
 
     #[cfg(feature = "client")]
-    pub(crate) fn network_clone_failed(error: &str, local_path: &std::path::Path) -> Self {
+    pub fn network_clone_failed(error: &str, local_path: &std::path::Path) -> Self {
         Self::safety_refusal(
             "network_clone_failed",
             format!("Clone failed: {error}"),
@@ -1164,7 +1164,7 @@ impl RecoveryAdvice {
     /// (`heddle thread show`, `heddle thread list`) and the
     /// re-configuration command shape so the JSON envelope's
     /// `recovery_action_templates` field carries executable argv.
-    pub(crate) fn missing_target_thread(thread_id: &str, attempted_verb: &str) -> Self {
+    pub fn missing_target_thread(thread_id: &str, attempted_verb: &str) -> Self {
         let show_command = format!("heddle thread show {thread_id}");
         let refresh_command = format!("heddle thread refresh {thread_id}");
         Self::safety_refusal(
@@ -1195,7 +1195,7 @@ impl RecoveryAdvice {
     /// `REBASE_STATE` references objects from a sibling repository.
     /// Abort recovers — the tolerant loader will rewind to
     /// `original_head` without needing the missing objects.
-    pub(crate) fn rebase_referenced_state_missing(state_id: &str, role: &str) -> Self {
+    pub fn rebase_referenced_state_missing(state_id: &str, role: &str) -> Self {
         let primary = "heddle abort".to_string();
         Self::safety_refusal(
             "rebase_referenced_state_missing",
@@ -1225,7 +1225,7 @@ impl RecoveryAdvice {
     /// cause when there is one (e.g. a hex/msgpack decode error) and may
     /// be empty. Tests assert on the `field` substring, so the user-
     /// visible `error` always starts with `field`.
-    pub(crate) fn rebase_state_corrupted(field: &str, detail: impl fmt::Display) -> Self {
+    pub fn rebase_state_corrupted(field: &str, detail: impl fmt::Display) -> Self {
         let primary = "heddle abort".to_string();
         let detail_str = detail.to_string();
         let error = if detail_str.trim().is_empty() {
@@ -1252,7 +1252,7 @@ impl RecoveryAdvice {
     /// `state_not_found` because the lookup happens inside thread
     /// command flow (start/create/anchor) rather than the generic state
     /// resolver.
-    pub(crate) fn thread_referenced_state_missing(state_id: &str, role: &str) -> Self {
+    pub fn thread_referenced_state_missing(state_id: &str, role: &str) -> Self {
         let show = format!("heddle thread show {state_id}");
         Self::safety_refusal(
             "thread_referenced_state_missing",
@@ -1277,7 +1277,7 @@ impl RecoveryAdvice {
     /// `cd` into. Lightweight (non-materialized) threads do not own a
     /// directory — the operator needs to materialize the thread or use
     /// a different command that doesn't require a checkout path.
-    pub(crate) fn thread_checkout_unavailable(thread_name: &str, attempted_verb: &str) -> Self {
+    pub fn thread_checkout_unavailable(thread_name: &str, attempted_verb: &str) -> Self {
         let start_command = format!("heddle thread start {thread_name} --path ../{thread_name}");
         let show_command = format!("heddle thread show {thread_name}");
         Self::safety_refusal(

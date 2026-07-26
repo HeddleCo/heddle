@@ -43,10 +43,9 @@ const RAW_THREAD_NOT_FOUND_PHRASES: &[&str] = &[
 
 #[test]
 fn error_envelopes_stay_centralized() {
-    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut violations = Vec::new();
-    walk_rust_files(&src_dir, &mut |path| {
-        let rel = path.strip_prefix(&src_dir).unwrap_or(path);
+    walk_rust_files(&mut |src_dir, path| {
+        let rel = path.strip_prefix(src_dir).unwrap_or(path);
         if rel == Path::new(ALLOWED_ENVELOPE_FILE) {
             return;
         }
@@ -75,10 +74,9 @@ fn error_envelopes_stay_centralized() {
 
 #[test]
 fn known_recovery_phrases_stay_in_typed_advice() {
-    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut violations = Vec::new();
-    walk_rust_files(&src_dir, &mut |path| {
-        let rel = path.strip_prefix(&src_dir).unwrap_or(path);
+    walk_rust_files(&mut |src_dir, path| {
+        let rel = path.strip_prefix(src_dir).unwrap_or(path);
         let Ok(source) = fs::read_to_string(path) else {
             return;
         };
@@ -220,10 +218,9 @@ fn verification_blocked_outputs_use_shared_action_policy() {
 
 #[test]
 fn next_action_priority_lives_in_shared_selector() {
-    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut violations = Vec::new();
-    walk_rust_files(&src_dir, &mut |path| {
-        let rel = path.strip_prefix(&src_dir).unwrap_or(path);
+    walk_rust_files(&mut |src_dir, path| {
+        let rel = path.strip_prefix(src_dir).unwrap_or(path);
         if rel == Path::new(ALLOWED_NEXT_ACTION_FILE) {
             return;
         }
@@ -256,10 +253,9 @@ fn next_action_priority_lives_in_shared_selector() {
 
 #[test]
 fn human_action_lines_use_shared_renderer() {
-    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut violations = Vec::new();
-    walk_rust_files(&src_dir, &mut |path| {
-        let rel = path.strip_prefix(&src_dir).unwrap_or(path);
+    walk_rust_files(&mut |src_dir, path| {
+        let rel = path.strip_prefix(src_dir).unwrap_or(path);
         if rel == Path::new(ALLOWED_ACTION_LINE_FILE) || rel == Path::new(ALLOWED_ENVELOPE_FILE) {
             return;
         }
@@ -407,18 +403,25 @@ fn recovery_phrase_allowed(rel: &Path, phrase: &str) -> bool {
         || (phrase == "State not found:" && rel == Path::new(ALLOWED_HISTORY_TARGET_FILE))
 }
 
-fn walk_rust_files(dir: &Path, visit: &mut dyn FnMut(&Path)) {
+fn walk_rust_files(visit: &mut dyn FnMut(&Path, &Path)) {
     const MIN_SCANNED_RUST_FILES: usize = 80;
-    assert!(
-        dir.is_dir(),
-        "advice_lint scan root missing at {}",
-        dir.display()
-    );
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let roots = [
+        manifest_dir.join("src"),
+        manifest_dir.join("../cli-contract/src"),
+    ];
     let mut files_scanned = 0usize;
-    walk_rust_files_inner(dir, &mut |path| {
-        files_scanned += 1;
-        visit(path);
-    });
+    for root in &roots {
+        assert!(
+            root.is_dir(),
+            "advice_lint scan root missing at {}",
+            root.display()
+        );
+        walk_rust_files_inner(root, &mut |path| {
+            files_scanned += 1;
+            visit(root, path);
+        });
+    }
     assert!(
         files_scanned >= MIN_SCANNED_RUST_FILES,
         "advice_lint scanned only {files_scanned} files (floor {MIN_SCANNED_RUST_FILES}) — \

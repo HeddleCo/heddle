@@ -99,7 +99,7 @@ Key implementation:
 
 - `crates/cli/src/cli/commands/workflow.rs`
 - `crates/cli/src/cli/commands/undo.rs`
-- `crates/cli/src/cli/commands/advice.rs`
+- `crates/cli-contract/src/cli/commands/advice.rs`
 - `crates/core/src/save.rs`
 - `crates/git-projection/src/git_core.rs`
 

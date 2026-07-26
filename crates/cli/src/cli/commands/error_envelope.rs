@@ -20,7 +20,7 @@ use crate::{
 /// Honours the resolved output format: when JSON is selected, emits a
 /// single-line structured envelope instead of freeform text so scripts can
 /// parse it cleanly. The envelope is a stderr-only contract — the stdout schemas in
-/// `crates/cli/src/cli/commands/schemas.rs` are untouched.
+/// `crates/cli-contract/src/cli/commands/schemas.rs` are untouched.
 pub fn print_error_with_hint(cli: &Cli, err: &anyhow::Error) {
     print_error_with_hint_inner(cli, err, None);
 }

@@ -7,7 +7,7 @@ transient failures can branch on the exit code without parsing stderr.
 The canonical mapping lives in
 [`crates/cli/src/exit.rs`](../crates/cli/src/exit.rs) as `HeddleExitCode`. Each
 command's catalogued codes live on its `CommandContract.exit_codes` entry in
-[`crates/cli/src/cli/commands/command_catalog.rs`](../crates/cli/src/cli/commands/command_catalog.rs).
+[`crates/cli-contract/src/cli/commands/command_catalog/mod.rs`](../crates/cli-contract/src/cli/commands/command_catalog/mod.rs).
 
 Classification is keyed on typed error kinds — the `RecoveryAdvice.kind`
 discriminator, `HeddleError` variants, and typed remote/config errors — never on

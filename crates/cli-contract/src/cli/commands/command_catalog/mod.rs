@@ -166,7 +166,7 @@ pub struct CommandCatalogArgument {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ActionFields {
+pub struct ActionFields {
     pub action: Option<String>,
     pub template: Option<ActionTemplate>,
 }
@@ -184,15 +184,15 @@ impl ActionFields {
         }
     }
 
-    pub(crate) fn from_optional_action_ref(action: Option<&str>) -> Self {
+    pub fn from_optional_action_ref(action: Option<&str>) -> Self {
         Self::from_optional_action(action.map(str::to_string))
     }
 
-    pub(crate) fn from_action(action: &str) -> Self {
+    pub fn from_action(action: &str) -> Self {
         Self::from_optional_action_ref(Some(action))
     }
 
-    pub(crate) fn none() -> Self {
+    pub fn none() -> Self {
         Self {
             action: None,
             template: None,
@@ -215,7 +215,7 @@ where
     action
 }
 
-pub(crate) fn heddle_action<I, S>(args: I) -> String
+pub fn heddle_action<I, S>(args: I) -> String
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -238,6 +238,20 @@ pub(crate) fn thread_flag_args(thread_id: &str) -> Vec<String> {
     } else {
         vec!["--thread".to_string(), thread_id.to_string()]
     }
+}
+
+/// Build the canonical non-mutating merge-preview command for a thread.
+pub fn merge_preview_command(thread_id: &str) -> String {
+    let mut argv = vec!["ready".to_string()];
+    argv.extend(thread_flag_args(thread_id));
+    heddle_action(argv)
+}
+
+/// Build the canonical local land command for a thread.
+pub fn land_local_command(thread_id: &str) -> String {
+    let mut argv = vec!["land".to_string()];
+    argv.extend(thread_flag_args(thread_id));
+    heddle_action(argv)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
@@ -4060,7 +4074,7 @@ fn advanced_help_group_id(contract: &CommandContract) -> &'static str {
     }
 }
 
-pub(crate) fn recommended_action_template(action: &str) -> Option<ActionTemplate> {
+pub fn recommended_action_template(action: &str) -> Option<ActionTemplate> {
     let trimmed = action.trim();
     if trimmed.is_empty() {
         return None;
@@ -4337,7 +4351,7 @@ pub fn command_contract_root_commands() -> Vec<&'static str> {
         .collect()
 }
 
-pub(crate) fn validate_recommended_action(action: &str) -> std::result::Result<(), String> {
+pub fn validate_recommended_action(action: &str) -> std::result::Result<(), String> {
     let trimmed = action.trim();
     if trimmed.is_empty() {
         return Ok(());
@@ -4376,7 +4390,7 @@ fn is_display_only_template(action: &str) -> bool {
     action.contains("...") || action.contains('…') || (action.contains('<') && action.contains('>'))
 }
 
-pub(crate) fn split_recommended_action(action: &str) -> std::result::Result<Vec<String>, String> {
+pub fn split_recommended_action(action: &str) -> std::result::Result<Vec<String>, String> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut chars = action.chars().peekable();

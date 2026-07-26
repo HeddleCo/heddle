@@ -1692,6 +1692,7 @@ dependencies = [
  "futures",
  "heddle-api",
  "heddle-cli-args",
+ "heddle-cli-contract",
  "heddle-cli-render",
  "heddle-cli-shared",
  "heddle-client",
@@ -1757,6 +1758,27 @@ dependencies = [
  "heddle-objects",
  "heddle-repo",
  "weft-client-shim",
+]
+
+[[package]]
+name = "heddle-cli-contract"
+version = "0.10.4"
+dependencies = [
+ "anyhow",
+ "clap",
+ "heddle-cli-args",
+ "heddle-cli-render",
+ "heddle-core",
+ "heddle-git-projection",
+ "heddle-objects",
+ "heddle-refs",
+ "heddle-repo",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sley",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

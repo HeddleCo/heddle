@@ -353,7 +353,7 @@ meet first":
   must match the live binary.
 - `heddle doctor schemas` — every documented schema verb registered
   in the command contract table
-  ([`crates/cli/src/cli/commands/command_catalog.rs`](../crates/cli/src/cli/commands/command_catalog.rs))
+  ([`crates/cli-contract/src/cli/commands/command_catalog/mod.rs`](../crates/cli-contract/src/cli/commands/command_catalog/mod.rs))
   must produce a schema, and the JSON samples in
   [`docs/json-schemas.md`](json-schemas.md) must validate against
   the runtime registry. The output shapes are contracts; changes
