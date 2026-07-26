@@ -98,6 +98,9 @@ env:
     heddle-core
     heddle-daemon
     heddle-mount
+    heddle-cli-args
+    heddle-cli-render
+    heddle-cli-contract
     heddle-cli
     heddle-devtools
 
