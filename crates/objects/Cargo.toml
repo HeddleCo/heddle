@@ -20,6 +20,7 @@ hex.workspace = true
 heddle-fs-prims = { path = "../fs-prims", version = "0.10" }
 heddle-format = { path = "../format", version = "0.10" }
 heddle-object-model = { path = "../object-model", version = "0.10" }
+heddle-pack = { path = "../pack", version = "0.10" }
 ignore.workspace = true
 libc = "0.2"
 memmap2.workspace = true
@@ -39,7 +40,7 @@ zstd = { workspace = true, optional = true }
 async-source = ["heddle-object-model/async-source"]
 bench = ["heddle-format/bench"]
 memory-backend = []
-zstd = ["dep:zstd", "heddle-format/zstd"]
+zstd = ["dep:zstd", "heddle-format/zstd", "heddle-pack/zstd"]
 
 [dev-dependencies]
 criterion = "0.8"

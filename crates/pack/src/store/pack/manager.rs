@@ -85,7 +85,7 @@ impl PackManager {
     /// half-installed packs (a `.pack` whose `.idx` sibling hasn't
     /// landed yet) are filtered out — otherwise we'd loop forever
     /// reloading a count we can never match.
-    pub(crate) fn needs_reload(&self) -> Result<bool> {
+    pub fn needs_reload(&self) -> Result<bool> {
         Ok(Self::discover_pack_paths(&self.packs_dir)?.len() > self.packs.len())
     }
 
@@ -99,7 +99,7 @@ impl PackManager {
     /// a new pack, the main repo's already-open `pack_manager`
     /// doesn't know about it; without this `get_blob`/`has_blob`
     /// from the main repo would surface "object not found".
-    pub(crate) fn reload_if_disk_grew(&mut self) -> Result<bool> {
+    pub fn reload_if_disk_grew(&mut self) -> Result<bool> {
         if !self.needs_reload()? {
             return Ok(false);
         }
