@@ -671,6 +671,9 @@ fn decode_native_pack(pack_data: &[u8], index_data: &[u8]) -> Vec<ObjectData> {
                 PackObjectType::Delta => {
                     panic!("decoded native pack should not surface delta type")
                 }
+                PackObjectType::SnapshotCommit => {
+                    panic!("decoded native pack should not surface local snapshot commit artifacts")
+                }
             };
             ObjectData {
                 id: object_id,
