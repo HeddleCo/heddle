@@ -9,14 +9,17 @@ use std::{
 };
 
 use api::heddle::api::v1alpha1::{
-    GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer, GitObjectAlgorithm,
-    GitObjectId as ProtoGitObjectId, GitPackTransfer, GitRefKind as ProtoGitRefKind,
-    GitRefUpdateTransfer, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor, PackChunk,
-    PackStreamKind, PartialFetchStatus, PullClientFrame, PullRequest, PullServerFrame,
-    PushClientFrame, PushRequest, PushServerFrame, RedactionTransfer, StateAttachmentTransfer,
-    StateVisibilityTransfer, StreamOpeningProof, ThreadConfidenceSummary, ThreadIntegrationPolicy,
-    ThreadMetadata, ThreadVerificationSummary, TransportMode, UpdateRefRequest, WantObjects,
-    git_lane_transfer, pull_client_frame, pull_server_frame, push_client_frame, push_server_frame,
+    ConfidenceBand as ProtoConfidenceBand, GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer,
+    GitObjectAlgorithm, GitObjectId as ProtoGitObjectId, GitPackTransfer,
+    GitRefKind as ProtoGitRefKind, GitRefUpdateTransfer,
+    IntegrationPolicyStatus as ProtoIntegrationPolicyStatus, ListRefsRequest,
+    ObjectAvailabilityStatus, ObjectDescriptor, PackChunk, PackStreamKind, PartialFetchStatus,
+    PullClientFrame, PullRequest, PullServerFrame, PushClientFrame, PushRequest, PushServerFrame,
+    RedactionTransfer, StateAttachmentTransfer, StateVisibilityTransfer, StreamOpeningProof,
+    ThreadConfidenceSummary, ThreadFreshness as ProtoThreadFreshness, ThreadIntegrationPolicy,
+    ThreadMetadata, ThreadMode as ProtoThreadMode, ThreadVerificationSummary, TransportMode,
+    UpdateRefRequest, WantObjects, git_lane_transfer, pull_client_frame, pull_server_frame,
+    push_client_frame, push_server_frame, thread_state::Kind as ProtoThreadState,
 };
 use objects::{
     Progress,
@@ -41,8 +44,8 @@ use super::{
     BidirectionalRequestStream, HostedClient, PullMaterialization, ServerStream, ServerStreamItem,
     helpers::{
         descriptor_id, descriptor_id_from_info, hosted_to_protocol_error,
-        object_descriptor_with_status, object_type_name, parse_descriptor_to_info,
-        to_proto_object_info, transport_mode_name,
+        object_descriptor_with_status, parse_descriptor_to_info, to_proto_object_info,
+        transport_mode_name,
     },
     operation_id::ClientOperationId,
 };
@@ -1122,6 +1125,7 @@ impl HostedClient {
             options.local_thread,
             options.depth,
             options.target_state,
+            uuid::Uuid::new_v4(),
         );
         let request_message = PullClientFrame {
             frame: Some(pull_client_frame::Frame::Request(PullRequest {
@@ -1825,15 +1829,8 @@ fn to_proto_planned_object(object: &PlannedObject) -> ObjectDescriptor {
     )
 }
 
-fn descriptor_id_from_plan(object: &PlannedObject) -> (String, String) {
-    let id = match &object.id {
-        wire::ObjectId::Hash(hash) => hash.to_hex(),
-        wire::ObjectId::StateId(state_id) => state_id.to_string_full(),
-        wire::ObjectId::StateAttachment { state, id, kind: _ } => {
-            format!("{}:{}", state.to_string_full(), id.as_hash().to_hex())
-        }
-    };
-    (id, object_type_name(object.obj_type).to_string())
+fn descriptor_id_from_plan(object: &PlannedObject) -> (String, i32) {
+    descriptor_id_from_info(&object_info_from_plan(object))
 }
 
 fn record_wanted_type(wanted_types: &mut WantedTypes, pack_id: PackObjectId, obj_type: ObjectType) {
@@ -2200,9 +2197,25 @@ fn to_proto_thread_metadata(metadata: &SyncedThreadMetadata) -> ThreadMetadata {
         target_thread: metadata.target_thread.clone(),
         parent_thread: metadata.parent_thread.clone(),
         task: metadata.task.clone(),
-        thread_mode: metadata.mode.to_string(),
-        thread_state: metadata.state.to_string(),
-        freshness: metadata.freshness.to_string(),
+        thread_mode: match metadata.mode {
+            repo::ThreadMode::Materialized => ProtoThreadMode::Materialized,
+            repo::ThreadMode::Virtualized => ProtoThreadMode::Virtualized,
+            repo::ThreadMode::Solid => ProtoThreadMode::Solid,
+        } as i32,
+        thread_state: match metadata.state {
+            repo::ThreadState::Draft => ProtoThreadState::ThreadStateDraft,
+            repo::ThreadState::Active => ProtoThreadState::ThreadStateActive,
+            repo::ThreadState::Ready => ProtoThreadState::ThreadStateReady,
+            repo::ThreadState::Blocked => ProtoThreadState::ThreadStateBlocked,
+            repo::ThreadState::Merged => ProtoThreadState::ThreadStateMerged,
+            repo::ThreadState::Abandoned => ProtoThreadState::ThreadStateAbandoned,
+            repo::ThreadState::Promoted => ProtoThreadState::ThreadStatePromoted,
+        } as i32,
+        freshness: match metadata.freshness {
+            repo::ThreadFreshness::Current => ProtoThreadFreshness::Current,
+            repo::ThreadFreshness::Stale => ProtoThreadFreshness::Stale,
+            repo::ThreadFreshness::Unknown => ProtoThreadFreshness::Unknown,
+        } as i32,
         base_state: StateId::parse(&metadata.base_state)
             .ok()
             .and_then(super::helpers::proto_state_id),
@@ -2236,18 +2249,22 @@ fn to_proto_thread_metadata(metadata: &SyncedThreadMetadata) -> ThreadMetadata {
         }),
         confidence_summary: Some(ThreadConfidenceSummary {
             value: metadata.confidence_summary.value,
-            band: metadata
-                .confidence_summary
-                .band
-                .as_ref()
-                .map(ToString::to_string),
+            band: match metadata.confidence_summary.band {
+                Some(repo::ConfidenceBand::Low) => ProtoConfidenceBand::Low,
+                Some(repo::ConfidenceBand::Medium) => ProtoConfidenceBand::Medium,
+                Some(repo::ConfidenceBand::High) => ProtoConfidenceBand::High,
+                None => ProtoConfidenceBand::Unspecified,
+            } as i32,
         }),
         integration_policy_result: Some(ThreadIntegrationPolicy {
-            status: metadata
-                .integration_policy_result
-                .status
-                .clone()
-                .unwrap_or_default(),
+            status: match metadata.integration_policy_result.status.as_deref() {
+                Some("previewed") => ProtoIntegrationPolicyStatus::Previewed,
+                Some("current") => ProtoIntegrationPolicyStatus::Current,
+                Some("blocked") => ProtoIntegrationPolicyStatus::Blocked,
+                Some("manual_resolved") => ProtoIntegrationPolicyStatus::ManualResolved,
+                Some("auto_integrated") => ProtoIntegrationPolicyStatus::AutoIntegrated,
+                _ => ProtoIntegrationPolicyStatus::Unspecified,
+            } as i32,
             reason: metadata
                 .integration_policy_result
                 .reason
@@ -2338,9 +2355,10 @@ fn pull_transfer_id(
     local_thread: Option<&str>,
     depth: Option<u32>,
     target_state: Option<StateId>,
+    stream_nonce: uuid::Uuid,
 ) -> String {
     format!(
-        "pull:{repo_path}:{remote_thread}:{}:{depth:?}:{}",
+        "pull:{repo_path}:{remote_thread}:{}:{depth:?}:{}:{stream_nonce}",
         local_thread.unwrap_or_default(),
         target_state
             .map(|value| value.to_string_full())
@@ -2362,7 +2380,7 @@ fn push_transfer_id(
 }
 
 #[cfg(test)]
-mod push_transfer_id_tests {
+mod transfer_id_tests {
     use std::time::Instant;
 
     use api::heddle::api::v1alpha1::PushRequest;
@@ -2378,7 +2396,7 @@ mod push_transfer_id_tests {
 
     use super::{
         ExpectedRemoteHead, apply_expected_remote_head, native_push_boundaries,
-        native_push_boundaries_from_expected_head, push_transfer_id,
+        native_push_boundaries_from_expected_head, pull_transfer_id, push_transfer_id,
         select_snapshot_pack_reuse_descriptor,
     };
 
@@ -2524,6 +2542,24 @@ mod push_transfer_id_tests {
         assert_eq!(
             first,
             push_transfer_id("org/repo", state, "agent-1", "git:111111", "op-1")
+        );
+    }
+
+    #[test]
+    fn pull_transfer_identity_is_unique_per_exchange_and_stable_for_one_stream() {
+        let first_nonce = uuid::Uuid::new_v4();
+        let later_nonce = uuid::Uuid::new_v4();
+        let first = pull_transfer_id("org/repo", "main", Some("main"), None, None, first_nonce);
+        let later = pull_transfer_id("org/repo", "main", Some("main"), None, None, later_nonce);
+
+        assert_ne!(
+            first, later,
+            "unrelated pull streams must not reuse an anti-replay identity"
+        );
+        assert_eq!(
+            first,
+            pull_transfer_id("org/repo", "main", Some("main"), None, None, first_nonce),
+            "one pull exchange must use one identity across all of its frames"
         );
     }
 

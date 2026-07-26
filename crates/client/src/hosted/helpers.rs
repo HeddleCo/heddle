@@ -1,9 +1,9 @@
 use core::convert::TryFrom;
 
 use api::heddle::api::v1alpha1::{
-    HostedGrant, HostedNamespace, HostedRepository, ObjectAvailabilityStatus, ObjectDescriptor,
-    RepositoryRef, StateAttachmentKind as ProtoStateAttachmentKind, StateId as ProtoStateId,
-    TransferCheckpoint, TransportMode, repository_ref::Reference,
+    HostedGrant, HostedNamespace, HostedObjectType, HostedRepository, ObjectAvailabilityStatus,
+    ObjectDescriptor, RepositoryRef, StateAttachmentKind as ProtoStateAttachmentKind,
+    StateId as ProtoStateId, TransferCheckpoint, TransportMode, repository_ref::Reference,
 };
 use base64::Engine as _;
 use cli_shared::ClientConfig;
@@ -84,7 +84,7 @@ fn attachment_kind_from_proto(kind: ProtoStateAttachmentKind) -> Option<StateAtt
 pub(super) fn parse_descriptor_to_info(
     descriptor: ObjectDescriptor,
 ) -> Result<ObjectInfo, ProtocolError> {
-    let obj_type = parse_object_type(&descriptor.object_type)?;
+    let obj_type = parse_object_type(descriptor.object_type)?;
     // Resolve the carried attachment kind up front. For an attachment
     // descriptor this MUST be a concrete kind — an `UNSPECIFIED` (or
     // unrecognized) value is a hard error, not a silent default.
@@ -163,8 +163,31 @@ pub(super) fn parse_object_id(
     }
 }
 
-pub(super) fn parse_object_type(value: &str) -> Result<ObjectType, ProtocolError> {
-    ObjectType::from_wire(value)
+pub(super) fn parse_object_type(value: i32) -> Result<ObjectType, ProtocolError> {
+    match HostedObjectType::try_from(value).unwrap_or_default() {
+        HostedObjectType::Blob => Ok(ObjectType::Blob),
+        HostedObjectType::Tree => Ok(ObjectType::Tree),
+        HostedObjectType::State => Ok(ObjectType::State),
+        HostedObjectType::Action => Ok(ObjectType::Action),
+        HostedObjectType::Redaction => Ok(ObjectType::Redaction),
+        HostedObjectType::StateVisibility => Ok(ObjectType::StateVisibility),
+        HostedObjectType::StateAttachment => Ok(ObjectType::StateAttachment),
+        HostedObjectType::Unspecified => Err(ProtocolError::InvalidState(
+            "object descriptor is missing object_type".to_string(),
+        )),
+    }
+}
+
+fn object_type_to_proto(obj_type: ObjectType) -> HostedObjectType {
+    match obj_type {
+        ObjectType::Blob => HostedObjectType::Blob,
+        ObjectType::Tree => HostedObjectType::Tree,
+        ObjectType::State => HostedObjectType::State,
+        ObjectType::Action => HostedObjectType::Action,
+        ObjectType::Redaction => HostedObjectType::Redaction,
+        ObjectType::StateVisibility => HostedObjectType::StateVisibility,
+        ObjectType::StateAttachment => HostedObjectType::StateAttachment,
+    }
 }
 
 pub(super) fn to_proto_object_info(info: &ObjectInfo) -> ObjectDescriptor {
@@ -191,7 +214,7 @@ pub(super) fn object_descriptor_with_status(
                 format!("{}:{}", state.to_string_full(), id.as_hash().to_hex())
             }
         },
-        object_type: object_type_name(info.obj_type).to_string(),
+        object_type: object_type_to_proto(info.obj_type) as i32,
         availability_status: availability_status as i32,
         availability_note: availability_note.into(),
         attachment_kind: attachment_kind as i32,
@@ -205,18 +228,14 @@ pub(super) fn transport_mode_name(mode: i32) -> &'static str {
     }
 }
 
-pub(super) fn object_type_name(obj_type: ObjectType) -> &'static str {
-    obj_type.wire_name()
-}
-
-pub(super) fn descriptor_id(descriptor: &ObjectDescriptor) -> (String, String) {
-    (descriptor.id.clone(), descriptor.object_type.clone())
+pub(super) fn descriptor_id(descriptor: &ObjectDescriptor) -> (String, i32) {
+    (descriptor.id.clone(), descriptor.object_type)
 }
 
 /// Compute the same `(id, object_type)` key as
 /// `descriptor_id(&to_proto_object_info(info))` without the throwaway full
 /// proto encode. Must stay byte-identical to the descriptor the server keys on.
-pub(super) fn descriptor_id_from_info(info: &ObjectInfo) -> (String, String) {
+pub(super) fn descriptor_id_from_info(info: &ObjectInfo) -> (String, i32) {
     let id = match &info.id {
         ObjectId::Hash(hash) => hash.to_hex(),
         ObjectId::StateId(state_id) => state_id.to_string_full(),
@@ -224,7 +243,7 @@ pub(super) fn descriptor_id_from_info(info: &ObjectInfo) -> (String, String) {
             format!("{}:{}", state.to_string_full(), id.as_hash().to_hex())
         }
     };
-    (id, object_type_name(info.obj_type).to_string())
+    (id, object_type_to_proto(info.obj_type) as i32)
 }
 
 pub(super) fn hosted_to_protocol_error(error: HostedError) -> ProtocolError {
@@ -233,13 +252,13 @@ pub(super) fn hosted_to_protocol_error(error: HostedError) -> ProtocolError {
         HostedError::Call {
             code,
             message,
-            details,
+            error,
         } => {
-            if !details.is_empty() {
+            if let Some(error) = error {
                 return ProtocolError::RemoteFailure {
                     code: remote_failure_code(code),
                     message,
-                    details: details.into_iter().map(remote_failure_detail).collect(),
+                    details: vec![remote_failure_detail(error)],
                 };
             }
 
@@ -316,70 +335,36 @@ fn remote_cursor(value: api::heddle::api::v1alpha1::CursorFailure) -> wire::Remo
     }
 }
 
-fn remote_failure_detail(detail: prost_types::Any) -> wire::RemoteFailureDetail {
-    use api::heddle::api::v1alpha1::{
-        CapabilityRequirement, ConflictDetail, CursorFailure, PolicyDenial, RetryAdvice,
-        StreamFailure,
-    };
+fn remote_failure_detail(
+    detail: api::heddle::api::v1alpha1::ErrorDetail,
+) -> wire::RemoteFailureDetail {
+    use api::heddle::api::v1alpha1::error_detail::Context;
     use prost::Message as _;
 
-    let message_name = detail.type_url.rsplit('/').next().unwrap_or_default();
-    match message_name {
-        "heddle.api.v1alpha1.RetryAdvice" => {
-            RetryAdvice::decode(detail.value.as_slice()).map(|value| {
-                wire::RemoteFailureDetail::Retry {
-                    retry_after: value.retry_after.map(remote_duration),
-                }
-            })
-        }
-        "heddle.api.v1alpha1.ConflictDetail" => ConflictDetail::decode(detail.value.as_slice())
-            .map(|value| wire::RemoteFailureDetail::Conflict {
-                resource: value.resource,
-                expected_version: value.expected_version,
-                actual_version: value.actual_version,
-            }),
-        "heddle.api.v1alpha1.CursorFailure" => CursorFailure::decode(detail.value.as_slice())
-            .map(|value| wire::RemoteFailureDetail::Cursor(remote_cursor(value))),
-        "heddle.api.v1alpha1.CapabilityRequirement" => {
-            CapabilityRequirement::decode(detail.value.as_slice()).map(|value| {
-                wire::RemoteFailureDetail::CapabilityRequirement {
-                    capabilities: value.capabilities,
-                }
-            })
-        }
-        "heddle.api.v1alpha1.PolicyDenial" => {
-            PolicyDenial::decode(detail.value.as_slice()).map(|value| {
-                wire::RemoteFailureDetail::PolicyDenial {
-                    policy_id: value.policy_id,
-                    rule: value.rule,
-                    human_verification_can_override: value.human_verification_can_override,
-                }
-            })
-        }
-        "heddle.api.v1alpha1.StreamFailure" => {
-            StreamFailure::decode(detail.value.as_slice()).map(|value| {
-                wire::RemoteFailureDetail::Stream {
-                    code: remote_failure_code(value.code()),
-                    message: value.message,
-                    retry_after: value
-                        .retry
-                        .and_then(|retry| retry.retry_after)
-                        .map(remote_duration),
-                    cursor: value.cursor.map(remote_cursor),
-                }
-            })
-        }
-        _ => {
-            return wire::RemoteFailureDetail::Unknown {
-                type_url: detail.type_url,
-                value: detail.value,
-            };
-        }
+    let encoded = detail.encode_to_vec();
+    match detail.context {
+        Some(Context::Retry(value)) => wire::RemoteFailureDetail::Retry {
+            retry_after: value.retry_after.map(remote_duration),
+        },
+        Some(Context::Conflict(value)) => wire::RemoteFailureDetail::Conflict {
+            resource: value.resource,
+            expected_version: value.expected_version,
+            actual_version: value.actual_version,
+        },
+        Some(Context::Cursor(value)) => wire::RemoteFailureDetail::Cursor(remote_cursor(value)),
+        Some(Context::Capability(value)) => wire::RemoteFailureDetail::CapabilityRequirement {
+            capabilities: value.capabilities,
+        },
+        Some(Context::Policy(value)) => wire::RemoteFailureDetail::PolicyDenial {
+            policy_id: value.policy_id,
+            rule: value.rule,
+            human_verification_can_override: value.human_verification_can_override,
+        },
+        Some(Context::HumanVerification(_)) | None => wire::RemoteFailureDetail::Unknown {
+            type_url: "type.googleapis.com/heddle.api.v1alpha1.ErrorDetail".to_string(),
+            value: encoded,
+        },
     }
-    .unwrap_or(wire::RemoteFailureDetail::Unknown {
-        type_url: detail.type_url,
-        value: detail.value,
-    })
 }
 
 pub(super) fn repository_ref(path: &str) -> Option<RepositoryRef> {
@@ -513,34 +498,28 @@ mod tests {
         let error = hosted_to_protocol_error(HostedError::Call {
             code: api::heddle::api::v1alpha1::CallFailureCode::Unauthenticated,
             message: "invalid proof".to_string(),
-            details: Vec::new(),
+            error: None,
         });
         assert!(matches!(error, ProtocolError::AuthorizationFailed(_)));
     }
 
     #[test]
-    fn native_call_failure_preserves_typed_and_unknown_details() {
-        use api::heddle::api::v1alpha1::ConflictDetail;
-        use prost::Message as _;
+    fn native_call_failure_preserves_typed_error_detail() {
+        use api::heddle::api::v1alpha1::{ConflictDetail, ErrorDetail, ErrorReason, error_detail};
 
-        let conflict = ConflictDetail {
-            resource: "refs/heads/main".to_string(),
-            expected_version: "old".to_string(),
-            actual_version: "new".to_string(),
-        };
         let error = hosted_to_protocol_error(HostedError::Call {
             code: api::heddle::api::v1alpha1::CallFailureCode::AlreadyExists,
             message: "ref changed".to_string(),
-            details: vec![
-                prost_types::Any {
-                    type_url: "type.googleapis.com/heddle.api.v1alpha1.ConflictDetail".to_string(),
-                    value: conflict.encode_to_vec(),
-                },
-                prost_types::Any {
-                    type_url: "type.example.test/FutureDetail".to_string(),
-                    value: vec![1, 2, 3],
-                },
-            ],
+            error: Some(ErrorDetail {
+                reason: ErrorReason::VersionConflict as i32,
+                resource: "refs/heads/main".to_string(),
+                field: String::new(),
+                context: Some(error_detail::Context::Conflict(ConflictDetail {
+                    resource: "refs/heads/main".to_string(),
+                    expected_version: "old".to_string(),
+                    actual_version: "new".to_string(),
+                })),
+            }),
         });
 
         let ProtocolError::RemoteFailure { code, details, .. } = error else {
@@ -551,11 +530,6 @@ mod tests {
             &details[0],
             wire::RemoteFailureDetail::Conflict { resource, .. }
                 if resource == "refs/heads/main"
-        ));
-        assert!(matches!(
-            &details[1],
-            wire::RemoteFailureDetail::Unknown { type_url, value }
-                if type_url == "type.example.test/FutureDetail" && value == &[1, 2, 3]
         ));
     }
 }

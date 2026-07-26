@@ -135,7 +135,7 @@ impl HostedSession {
             .as_deref()
             .map(str::to_string)
             .unwrap_or_else(|| fallback_addr.to_string());
-        let descriptor = fetch_endpoint_descriptor(&descriptor_url(&server)?, &keys)
+        let descriptor = fetch_endpoint_descriptor(&descriptor_url(&server)?, &keys, &self.config)
             .await
             .map_err(|error| ProtocolError::Remote(error.to_string()))?;
         let mut client = HostedClient::connect_with_config(&descriptor, &self.config)
@@ -164,7 +164,7 @@ impl HostedClient {
         })?;
         let mut keys = DescriptorKeyring::default();
         keys.insert(key_id, public_key, i64::MIN, i64::MAX)?;
-        let descriptor = fetch_endpoint_descriptor(&descriptor_url(server)?, &keys).await?;
+        let descriptor = fetch_endpoint_descriptor(&descriptor_url(server)?, &keys, config).await?;
         Ok(Self::connect_with_config(&descriptor, config).await?)
     }
 

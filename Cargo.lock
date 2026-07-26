@@ -2061,7 +2061,7 @@ dependencies = [
 [[package]]
 name = "heddle-api"
 version = "0.2.0"
-source = "git+https://github.com/HeddleCo/api?rev=1c15b1a5d0e144859b41ac9036461a45783c3c3e#1c15b1a5d0e144859b41ac9036461a45783c3c3e"
+source = "git+https://github.com/HeddleCo/api?rev=3acac53f3527ba4a9ea510c331cfffa556f92e1b#3acac53f3527ba4a9ea510c331cfffa556f92e1b"
 dependencies = [
  "bytes",
  "hex",
@@ -2077,7 +2077,7 @@ dependencies = [
 [[package]]
 name = "heddle-api"
 version = "0.2.0"
-source = "git+https://github.com/HeddleCo/api?rev=3acac53f3527ba4a9ea510c331cfffa556f92e1b#3acac53f3527ba4a9ea510c331cfffa556f92e1b"
+source = "git+https://github.com/HeddleCo/api?rev=4f032f4e25e8a2e1a211cd8bfe530dc867d5ca7e#4f032f4e25e8a2e1a211cd8bfe530dc867d5ca7e"
 dependencies = [
  "bytes",
  "hex",
@@ -2103,7 +2103,7 @@ dependencies = [
  "clap_complete",
  "criterion",
  "futures",
- "heddle-api 0.2.0 (git+https://github.com/HeddleCo/api?rev=1c15b1a5d0e144859b41ac9036461a45783c3c3e)",
+ "heddle-api 0.2.0 (git+https://github.com/HeddleCo/api?rev=4f032f4e25e8a2e1a211cd8bfe530dc867d5ca7e)",
  "heddle-cli-args",
  "heddle-cli-contract",
  "heddle-cli-render",
@@ -2242,7 +2242,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
- "heddle-api 0.2.0 (git+https://github.com/HeddleCo/api?rev=1c15b1a5d0e144859b41ac9036461a45783c3c3e)",
+ "heddle-api 0.2.0 (git+https://github.com/HeddleCo/api?rev=4f032f4e25e8a2e1a211cd8bfe530dc867d5ca7e)",
  "heddle-cli-shared",
  "heddle-crypto",
  "heddle-objects",
@@ -2256,6 +2256,7 @@ dependencies = [
  "prost-types 0.14.1",
  "rand 0.10.2",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2268,6 +2269,7 @@ dependencies = [
  "toml 1.1.3+spec-1.1.0",
  "tracing",
  "uuid",
+ "webpki-roots 1.0.9",
  "weft-client-shim",
 ]
 
@@ -2319,7 +2321,7 @@ version = "0.10.4"
 dependencies = [
  "chrono",
  "futures",
- "heddle-api 0.2.0 (git+https://github.com/HeddleCo/api?rev=1c15b1a5d0e144859b41ac9036461a45783c3c3e)",
+ "heddle-api 0.2.0 (git+https://github.com/HeddleCo/api?rev=4f032f4e25e8a2e1a211cd8bfe530dc867d5ca7e)",
  "heddle-crypto",
  "heddle-objects",
  "heddle-oplog",

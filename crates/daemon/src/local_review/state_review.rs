@@ -17,8 +17,9 @@ use api::heddle::api::v1alpha1::{
     ReadingOrderPartition as ProtoReadingOrderPartition, RecordCheckAckRequest,
     RecordCheckAckResponse, RecordVerdictRequest, RecordVerdictResponse, RepoSignalHealthReport,
     ReviewPayload, ReviewScope as ProtoReviewScope, ReviewSignature as ProtoReviewSignature,
-    ReviewSummary, RiskSignal as ProtoRiskSignal, SignStateRequest, SignStateResponse,
-    SignalAnchor as ProtoSignalAnchor, SignalHealthEntry as ProtoSignalHealthEntry, SigningFooter,
+    ReviewSummary, RiskSignal as ProtoRiskSignal, RiskSignalKind as ProtoRiskSignalKind,
+    SignStateRequest, SignStateResponse, SignalAnchor as ProtoSignalAnchor,
+    SignalHealthEntry as ProtoSignalHealthEntry, SignalVisibility, SigningFooter,
     Verdict as ProtoVerdict,
 };
 use crypto::verify_payload_signature;
@@ -146,17 +147,6 @@ impl LocalStateReviewService {
         // change, and the registry-driven path will simply layer real
         // signals alongside it.
         let mut in_budget_signals: Vec<ProtoRiskSignal> = Vec::new();
-        let summary_kind = match (
-            diff_summary.added_files,
-            diff_summary.modified_files,
-            diff_summary.deleted_files,
-        ) {
-            (a, 0, 0) if a > 0 => "diff_summary.added_only",
-            (0, m, 0) if m > 0 => "diff_summary.modified_only",
-            (0, 0, d) if d > 0 => "diff_summary.deleted_only",
-            (0, 0, 0) => "diff_summary.empty",
-            _ => "diff_summary.mixed",
-        };
         let summary_reason = format!(
             "{} files changed (+{}/-{}, {} added, {} modified, {} deleted)",
             diff_summary.files_changed,
@@ -173,7 +163,7 @@ impl LocalStateReviewService {
         const MAX_DIFF_SIGNAL_ANCHORS: usize = 32;
         if diff_summary.changed_paths.is_empty() {
             in_budget_signals.push(ProtoRiskSignal {
-                kind: summary_kind.to_string(),
+                kind: ProtoRiskSignalKind::Unspecified as i32,
                 anchor: Some(ProtoSignalAnchor {
                     file: String::new(),
                     symbol: String::new(),
@@ -184,7 +174,7 @@ impl LocalStateReviewService {
                 producer_module: "review_show.diff_summary".to_string(),
                 producer_version: 1,
                 computed_at: None,
-                visibility: "visible".to_string(),
+                visibility: SignalVisibility::Visible as i32,
             });
         } else {
             for (idx, path_kind) in diff_summary
@@ -199,7 +189,7 @@ impl LocalStateReviewService {
                     format!("{} ({})", path_kind.path, path_kind.kind_str())
                 };
                 in_budget_signals.push(ProtoRiskSignal {
-                    kind: summary_kind.to_string(),
+                    kind: ProtoRiskSignalKind::Unspecified as i32,
                     anchor: Some(ProtoSignalAnchor {
                         file: path_kind.path.clone(),
                         symbol: String::new(),
@@ -210,7 +200,7 @@ impl LocalStateReviewService {
                     producer_module: "review_show.diff_summary".to_string(),
                     producer_version: 1,
                     computed_at: None,
-                    visibility: "visible".to_string(),
+                    visibility: SignalVisibility::Visible as i32,
                 });
             }
         }
@@ -812,7 +802,21 @@ fn review_kind_to_proto(kind: ReviewKind) -> api::heddle::api::v1alpha1::ReviewK
 fn risk_signal_to_proto(sig: objects::object::RiskSignal, visibility: &str) -> ProtoRiskSignal {
     let (start_line, end_line) = sig.anchor.line_range.unwrap_or((0, 0));
     ProtoRiskSignal {
-        kind: sig.kind.as_str().to_string(),
+        kind: match sig.kind {
+            objects::object::RiskSignalKind::Novelty => ProtoRiskSignalKind::Novelty,
+            objects::object::RiskSignalKind::TestReachability => {
+                ProtoRiskSignalKind::TestReachability
+            }
+            objects::object::RiskSignalKind::PatternDeviation => {
+                ProtoRiskSignalKind::PatternDeviation
+            }
+            objects::object::RiskSignalKind::InvariantAdjacency => {
+                ProtoRiskSignalKind::InvariantAdjacency
+            }
+            objects::object::RiskSignalKind::SelfFlaggedUncertainty => {
+                ProtoRiskSignalKind::SelfFlaggedUncertainty
+            }
+        } as i32,
         anchor: Some(ProtoSignalAnchor {
             file: sig.anchor.file,
             symbol: sig.anchor.symbol.unwrap_or_default(),
@@ -826,7 +830,11 @@ fn risk_signal_to_proto(sig: objects::object::RiskSignal, visibility: &str) -> P
             seconds: sig.computed_at,
             nanos: 0,
         }),
-        visibility: visibility.to_string(),
+        visibility: match visibility {
+            "visible" => SignalVisibility::Visible,
+            "hidden" => SignalVisibility::Hidden,
+            _ => SignalVisibility::Unspecified,
+        } as i32,
     }
 }
 
@@ -1655,13 +1663,13 @@ mod tests {
             "in_budget_signals must include a diff_summary entry"
         );
         let first_signal = &payload_first.in_budget_signals[0];
-        assert!(
-            first_signal.kind.starts_with("diff_summary."),
-            "expected synthetic diff_summary signal kind, got {}",
-            first_signal.kind
+        assert_eq!(
+            first_signal.kind,
+            ProtoRiskSignalKind::Unspecified as i32,
+            "the typed API has no synthetic diff-summary kind"
         );
         assert_eq!(first_signal.producer_module, "review_show.diff_summary");
-        assert_eq!(first_signal.visibility, "visible");
+        assert_eq!(first_signal.visibility, SignalVisibility::Visible as i32);
 
         // Second capture: modify the file. Diff vs the first state's
         // tree should report a single modified file with at least one
@@ -1847,18 +1855,19 @@ mod tests {
             "missing tree must produce a zero-change summary, got {} files",
             summary.files_changed
         );
-        // Synthetic diff_summary signal should still be present (with
-        // the `empty` kind) so consumers always see at least one
-        // signal — keeps the wire shape stable.
+        // Synthetic diff_summary signal should still be present so
+        // consumers always see at least one signal.
         assert!(
             !payload.in_budget_signals.is_empty(),
             "in_budget_signals should always contain at least the synthetic diff_summary entry"
         );
-        let kind = &payload.in_budget_signals[0].kind;
-        assert!(
-            kind.starts_with("diff_summary."),
-            "expected synthetic diff_summary signal, got {kind}"
+        let signal = &payload.in_budget_signals[0];
+        assert_eq!(
+            signal.kind,
+            ProtoRiskSignalKind::Unspecified as i32,
+            "the typed API has no synthetic diff-summary kind"
         );
+        assert_eq!(signal.producer_module, "review_show.diff_summary");
     }
 
     /// `line_count` should match git-style line counts — trailing

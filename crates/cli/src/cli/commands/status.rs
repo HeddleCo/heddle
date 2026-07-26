@@ -27,9 +27,8 @@ use serde::Serialize;
 use sley::Repository as SleyRepository;
 use tokio::time::{Duration, sleep};
 #[cfg(feature = "client")]
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{client::IntoClientRequest, http::header::AUTHORIZATION, protocol::Message},
+use tokio_tungstenite::tungstenite::{
+    client::IntoClientRequest, http::header::AUTHORIZATION, protocol::Message,
 };
 use tracing::debug;
 
@@ -1524,7 +1523,11 @@ impl HostedPresenceWatch {
         request
             .headers_mut()
             .insert(AUTHORIZATION, auth.parse().ok()?);
-        let (mut stream, _) = connect_async(request).await.ok()?;
+        let user_config = cli_shared::UserConfig::load_default().ok()?;
+        let client_config = user_config.heddle_client_config(None).ok()?;
+        let (mut stream, _) = crate::client::connect_websocket(request, &client_config)
+            .await
+            .ok()?;
         let hello = serde_json::to_string(&PresenceClientFrame::Hello {
             role: "browser",
             subscribe: vec![namespace.to_string()],

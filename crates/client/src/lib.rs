@@ -13,6 +13,7 @@ pub mod hosted;
 pub mod presence;
 pub mod support;
 pub mod support_requests;
+pub mod websocket;
 pub mod whoami;
 
 pub use auth_cmd::cmd_auth;
@@ -31,4 +32,5 @@ pub use presence::{
 };
 pub use support::run as cmd_support;
 pub use support_requests::{SupportCommand, SupportGrant, SupportList, SupportRevoke};
+pub use websocket::connect_websocket;
 pub use whoami::cmd_whoami;

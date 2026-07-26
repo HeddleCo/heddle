@@ -332,9 +332,9 @@ impl HostedClient {
             Err(HostedError::Call {
                 code: api::heddle::api::v1alpha1::CallFailureCode::Unauthenticated,
                 message,
-                details,
-            }) if api::human_verification_challenge(&details).is_some() => {
-                let challenge = api::human_verification_challenge(&details)
+                error: Some(error),
+            }) if api::human_verification_challenge(&error).is_some() => {
+                let challenge = api::human_verification_challenge(&error)
                     .expect("guarded human-verification detail");
                 let canonical = signed
                     .canonical()
@@ -345,7 +345,7 @@ impl HostedClient {
                         .ok_or_else(|| HostedError::Call {
                             code: api::heddle::api::v1alpha1::CallFailureCode::Unauthenticated,
                             message,
-                            details,
+                            error: Some(error),
                         })?;
                 let assertion = callback(HumanSignatureRequest {
                     method_path: method.to_string(),
@@ -357,7 +357,7 @@ impl HostedClient {
                 .map_err(|error| HostedError::Call {
                     code: api::heddle::api::v1alpha1::CallFailureCode::PermissionDenied,
                     message: error.to_string(),
-                    details: Vec::new(),
+                    error: None,
                 })?;
                 let context = signed.with_human_verification(
                     assertion.signature,

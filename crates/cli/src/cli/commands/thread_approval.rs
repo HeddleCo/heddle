@@ -286,7 +286,14 @@ pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Re
         .into_iter()
         .map(|u| UnmetOutput {
             policy_id: u.policy_id,
-            kind: u.kind,
+            kind: match api::heddle::api::v1alpha1::UnmetRequirementKind::try_from(u.kind)
+                .unwrap_or_default()
+            {
+                api::heddle::api::v1alpha1::UnmetRequirementKind::FlatRole => "flat_role",
+                api::heddle::api::v1alpha1::UnmetRequirementKind::Group => "group",
+                api::heddle::api::v1alpha1::UnmetRequirementKind::Unspecified => "unspecified",
+            }
+            .to_string(),
             group_id: u.group_id,
             reason: u.reason,
             needed: u.needed,

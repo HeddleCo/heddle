@@ -17,8 +17,8 @@
 //! `Discussion.opened_against_state`.
 
 use api::heddle::api::v1alpha1::{
-    AppendTurnRequest, Discussion as ProtoDiscussion, ListDiscussionsByStateRequest,
-    OpenDiscussionRequest, PathSymbolRef, StateId as ProtoStateId,
+    AppendTurnRequest, Discussion as ProtoDiscussion, DiscussionStatusFilter,
+    ListDiscussionsByStateRequest, OpenDiscussionRequest, PathSymbolRef, StateId as ProtoStateId,
 };
 use objects::object::{ChangeId, StateId};
 use wire::ProtocolError;
@@ -161,7 +161,7 @@ impl HostedClient {
         let request = ListDiscussionsByStateRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             state_id: change_id_state_field(change_id),
-            status: status.to_string(),
+            status: discussion_status_filter(status)? as i32,
         };
         let response = self
             .routes()
@@ -173,5 +173,17 @@ impl HostedClient {
             .into_iter()
             .map(decode_discussion)
             .collect())
+    }
+}
+
+fn discussion_status_filter(status: &str) -> Result<DiscussionStatusFilter, ProtocolError> {
+    match status {
+        "all" => Ok(DiscussionStatusFilter::Unspecified),
+        "open" => Ok(DiscussionStatusFilter::Open),
+        "resolved" => Ok(DiscussionStatusFilter::Resolved),
+        "orphaned" => Ok(DiscussionStatusFilter::Orphaned),
+        other => Err(ProtocolError::InvalidState(format!(
+            "invalid discussion status filter: {other}"
+        ))),
     }
 }

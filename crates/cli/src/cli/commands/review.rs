@@ -464,14 +464,29 @@ fn open_state_review_service(cli: &Cli) -> Result<LocalStateReviewService> {
 }
 
 fn signal_view(s: &api::heddle::api::v1alpha1::RiskSignal) -> SignalView {
+    use api::heddle::api::v1alpha1::{RiskSignalKind, SignalVisibility};
+
     let anchor = s.anchor.clone().unwrap_or_default();
     SignalView {
-        kind: s.kind.clone(),
+        kind: match s.kind() {
+            RiskSignalKind::Novelty => "novelty",
+            RiskSignalKind::TestReachability => "test_reachability",
+            RiskSignalKind::PatternDeviation => "pattern_deviation",
+            RiskSignalKind::InvariantAdjacency => "invariant_adjacency",
+            RiskSignalKind::SelfFlaggedUncertainty => "self_flagged_uncertainty",
+            RiskSignalKind::Unspecified => "unspecified",
+        }
+        .to_string(),
         file: anchor.file,
         symbol: anchor.symbol,
         reason: s.reason.clone(),
         producer: s.producer_module.clone(),
-        visibility: s.visibility.clone(),
+        visibility: match s.visibility() {
+            SignalVisibility::Visible => "visible",
+            SignalVisibility::Hidden => "hidden",
+            SignalVisibility::Unspecified => "unspecified",
+        }
+        .to_string(),
     }
 }
 

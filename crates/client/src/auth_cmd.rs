@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, path::Path};
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha1::{
     CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, DeviceAuthProof,
-    DeviceAuthorizationResponse, ExchangeDeviceAuthorizationRequest,
+    DeviceAuthorizationResponse, DeviceAuthorizationStatus, ExchangeDeviceAuthorizationRequest,
     IssueServiceAccountCredentialRequest, MintBiscuitRequest, WaitForDeviceAuthorizationRequest,
     mint_biscuit_request::Proof,
 };
@@ -1079,13 +1079,13 @@ async fn poll_for_approval(
             .map_err(|_| anyhow::anyhow!("Authorization timed out. Please try again."))?
             .map_err(|error| anyhow::anyhow!("device authorization wait failed: {error}"))?;
 
-        match event {
-            Some(status) if status.status == "pending" => continue,
-            Some(status) if status.status == "approved" => break,
-            Some(status) if status.status == "expired" => {
+        match event.map(|status| status.status()) {
+            Some(DeviceAuthorizationStatus::Pending) => continue,
+            Some(DeviceAuthorizationStatus::Approved) => break,
+            Some(DeviceAuthorizationStatus::Expired) => {
                 bail!("Authorization expired before approval. Please try again.");
             }
-            Some(status) => bail!("Unexpected device authorization status: {}", status.status),
+            Some(status) => bail!("Unexpected device authorization status: {status:?}"),
             None => bail!("Device authorization ended before approval. Please try again."),
         }
     }
@@ -1486,7 +1486,7 @@ mod tests {
         let call_error = |code, message: &str| HostedError::Call {
             code,
             message: message.to_string(),
-            details: Vec::new(),
+            error: None,
         };
         let lagging = call_error(
             api::heddle::api::v1alpha1::CallFailureCode::Unimplemented,

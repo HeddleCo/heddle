@@ -1,4 +1,4 @@
-use api::heddle::api::v1alpha1::CallFailure;
+use api::heddle::api::v1alpha1::{CallFailure, ErrorDetail};
 
 /// Failure returned by the native hosted-call module.
 #[derive(Debug, thiserror::Error)]
@@ -17,7 +17,7 @@ pub enum HostedError {
     Call {
         code: api::heddle::api::v1alpha1::CallFailureCode,
         message: String,
-        details: Vec<prost_types::Any>,
+        error: Option<ErrorDetail>,
     },
     #[error("hosted protobuf decode failed: {0}")]
     Decode(#[from] prost::DecodeError),
@@ -52,7 +52,7 @@ impl From<CallFailure> for HostedError {
         Self::Call {
             code: failure.code(),
             message: failure.message,
-            details: failure.details,
+            error: failure.error,
         }
     }
 }
