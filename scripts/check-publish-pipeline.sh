@@ -336,11 +336,12 @@ elif [[ -z "$toml_module" ]]; then
   echo "skip: tomllib (Python 3.11+) and tomli both unavailable; consumer-version check skipped"
 else
   ok "toml parser available ($toml_module)"
-  consumer_report=$(TOML_MODULE="$toml_module" python3 - <<'PY'
+  consumer_report=$(TOML_MODULE="$toml_module" python3 - "$WF" <<'PY'
 import glob
 import importlib
 import os
 import re
+import sys
 tomllib = importlib.import_module(os.environ["TOML_MODULE"])
 
 with open("Cargo.toml", "rb") as f:
@@ -356,6 +357,7 @@ errors = []
 oks = []
 
 by_name = {}      # crate name → current version string
+toml_by_name = {}
 publishable = set()
 for cm, toml in crates:
     pkg = toml.get("package", {})
@@ -366,12 +368,96 @@ for cm, toml in crates:
     if not name or not isinstance(version, str):
         continue
     by_name[name] = version
+    toml_by_name[name] = toml
     # `publish` unset defaults to true (publishable). A non-empty list
     # restricts the registries but is still publishable. `false` /
     # empty list / explicit False means not publishable.
     pub = pkg.get("publish")
     if pub is None or pub is True or (isinstance(pub, list) and len(pub) > 0):
         publishable.add(name)
+
+
+workflow_lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+publish_list = []
+in_publish_list = False
+for line in workflow_lines:
+    if line == "  PUBLISHABLE_CRATES: |":
+        in_publish_list = True
+        continue
+    if in_publish_list:
+        if line.startswith("    "):
+            crate_name = line.strip()
+            if crate_name:
+                publish_list.append(crate_name)
+            continue
+        break
+
+publish_positions = {name: i for i, name in enumerate(publish_list)}
+if not publish_list:
+    errors.append("could not parse PUBLISHABLE_CRATES from workflow")
+elif len(publish_positions) != len(publish_list):
+    errors.append("PUBLISHABLE_CRATES contains a duplicate crate name")
+else:
+    dependency_pairs = 0
+    order_pairs = 0
+    # Versioned dev-dependencies are errors as well: they do not block
+    # `cargo publish` itself, but their path is stripped from the published
+    # manifest, so downstream source/test use must resolve them from the
+    # registry. They do not constrain publish order because Cargo does not
+    # resolve them while packaging/publishing the consumer.
+    for consumer in publish_list:
+        consumer_toml = toml_by_name.get(consumer)
+        if consumer_toml is None:
+            errors.append(
+                f"PUBLISHABLE_CRATES lists {consumer}, but no workspace package has that name"
+            )
+            continue
+
+        tables = []
+        for table_name in ("dependencies", "dev-dependencies", "build-dependencies"):
+            if isinstance(consumer_toml.get(table_name), dict):
+                tables.append((table_name, consumer_toml[table_name]))
+        for _target, target_toml in (consumer_toml.get("target", {}) or {}).items():
+            if not isinstance(target_toml, dict):
+                continue
+            for table_name in ("dependencies", "dev-dependencies", "build-dependencies"):
+                if isinstance(target_toml.get(table_name), dict):
+                    tables.append((table_name, target_toml[table_name]))
+
+        for table_name, deps in tables:
+            for dep_key, dep_val in deps.items():
+                if not isinstance(dep_val, dict):
+                    continue
+                if not isinstance(dep_val.get("path"), str) or not isinstance(
+                    dep_val.get("version"), str
+                ):
+                    continue
+                dependency = dep_val.get("package") or dep_key
+                dependency_pairs += 1
+                if dependency not in publish_positions:
+                    errors.append(
+                        f"publishable crate {consumer} depends on {dependency}, "
+                        f"which is not in PUBLISHABLE_CRATES"
+                    )
+                    continue
+                if table_name == "dev-dependencies":
+                    continue
+                order_pairs += 1
+                if publish_positions[dependency] >= publish_positions[consumer]:
+                    errors.append(
+                        f"PUBLISHABLE_CRATES order invalid: {consumer} depends on "
+                        f"{dependency}, which must appear earlier"
+                    )
+
+    if not errors:
+        oks.append(
+            f"publishable crates have publishable versioned path dependencies "
+            f"({dependency_pairs} dependency pairs)"
+        )
+        oks.append(
+            f"PUBLISHABLE_CRATES is topologically ordered "
+            f"({order_pairs} publish-order dependency pairs)"
+        )
 
 
 def parse_ver_full(s):
