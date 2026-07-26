@@ -25,7 +25,7 @@ mod commands_thread;
 mod commands_visibility;
 mod output_mode;
 
-pub use cli_base::Cli;
+pub use cli_base::{Cli, should_output_json};
 pub use cli_shared::OutputMode;
 pub use commands_agent::{
     AgentCommands, AgentFanoutCommands, AgentPresenceCommands, AgentProvenanceCommands,

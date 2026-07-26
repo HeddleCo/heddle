@@ -3,7 +3,6 @@
 
 mod action_line;
 mod adopt;
-mod advice;
 mod agent;
 mod agent_cmd;
 mod agent_presence;
@@ -14,7 +13,6 @@ mod checkpoint;
 mod child_env;
 mod clone;
 mod collapse;
-mod command_catalog;
 mod commit;
 pub(crate) mod compact;
 mod completion;
@@ -23,8 +21,6 @@ mod daemon;
 mod diff;
 mod discuss;
 mod doctor;
-mod doctor_docs;
-mod doctor_schemas;
 pub(crate) mod dry_run;
 mod error_envelope;
 mod expand;
@@ -60,7 +56,6 @@ mod retro;
 mod revert;
 mod review;
 mod run_cmd;
-mod schemas;
 #[cfg(feature = "semantic")]
 mod semantic_cmd;
 mod shell;
@@ -78,7 +73,6 @@ mod timeline_cmd;
 mod try_cmd;
 mod undo;
 mod undo_apply;
-mod verification_health;
 mod verify;
 mod visibility;
 mod watch;
@@ -131,6 +125,9 @@ pub use gc::cmd_gc;
 pub use git_projection_io::cmd_context_reason_git;
 #[cfg(feature = "git-overlay")]
 pub use git_projection_io::{cmd_export_git, cmd_import_git, cmd_sync_git};
+pub use heddle_cli_contract::cli::commands::{
+    advice, command_catalog, doctor_docs, doctor_schemas, schemas, verification_health,
+};
 #[cfg(feature = "client")]
 pub use heddle_client::cmd_auth;
 pub use hook::cmd_hook;

@@ -736,7 +736,11 @@ impl RefManager {
         }
     }
 
-    fn raw_get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<StateId>> {
+    pub(super) fn raw_get_remote_thread(
+        &self,
+        remote: &str,
+        thread: &ThreadName,
+    ) -> Result<Option<StateId>> {
         let path = self.remote_thread_path(remote, thread)?;
         self.read_state_id_at(&path, "remote thread", &format!("{}/{}", remote, thread))
     }
@@ -1234,6 +1238,10 @@ impl CoreRefBackend for RefManager {
 }
 
 impl RefBackend for RefManager {
+    fn can_commit_records(&self) -> bool {
+        self.committer.is_some()
+    }
+
     fn get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<StateId>> {
         RefManager::get_remote_thread(self, remote, thread)
     }

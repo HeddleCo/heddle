@@ -1040,7 +1040,8 @@ impl PackedOpLogIndex {
                 | OpRecord::RemoteThreadDelete { .. }
                 | OpRecord::UndoRecoveryUpdate { .. }
                 | OpRecord::StateVisibilitySet { .. }
-                | OpRecord::StateVisibilityPromote { .. } => {
+                | OpRecord::StateVisibilityPromote { .. }
+                | OpRecord::HeadUpdate { .. } => {
                     return Err(HeddleError::InvalidObject(
                         "oplog transaction directory references a non-commit entry".to_string(),
                     ));

@@ -44,7 +44,7 @@ use super::{
     git_notes,
     git_reconstruct::{commit_object_id, reconstruct_commit_bytes, write_commit_object},
     git_residual::{ResidualStore, resolve_lossy_object},
-    git_util::ImportStats,
+    git_util::{FailedRefExportReason, ImportStats},
 };
 
 /// Errors specific to Git Projection and Bridge Mirror operations.
@@ -128,6 +128,19 @@ pub enum GitProjectionError {
 
     #[error("change id parse error: {0}")]
     StateIdParse(#[from] StateIdParseError),
+
+    /// A SINGLE ref could not be published, already classified against the
+    /// compare-and-swap heddle asserted (heddle#261). Distinct from the errors
+    /// above because it is per-ref and recoverable at the export level: the
+    /// export reconcile catches it, records `reason` in
+    /// [`ExportStats::failed_refs`](super::git_util::ExportStats::failed_refs),
+    /// and keeps going with the remaining refs. It still surfaces as an error
+    /// for the ref-sync callers that legitimately want to stop.
+    #[error("ref {name}: {reason}")]
+    RefExportFailed {
+        name: String,
+        reason: FailedRefExportReason,
+    },
 }
 
 /// Type alias for Git Projection and Bridge Mirror results.

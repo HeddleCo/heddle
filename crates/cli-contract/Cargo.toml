@@ -1,0 +1,44 @@
+[package]
+name = "heddle-cli-contract"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Heddle's CLI verb catalog, schemas, help, and recovery contract."
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+heddle-cli-args = { path = "../cli-args", version = "0.10", default-features = false }
+heddle-cli-render = { path = "../cli-render", version = "0.10", default-features = false }
+heddle-core = { path = "../core", version = "0.10", default-features = false }
+heddle-git-projection = { path = "../git-projection", version = "0.10", default-features = false }
+objects = { path = "../objects", package = "heddle-objects", version = "0.10" }
+refs = { path = "../refs", package = "heddle-refs", version = "0.10" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.10", default-features = false }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sley.workspace = true
+tracing.workspace = true
+
+[features]
+default = ["client", "git-overlay", "ingest", "semantic"]
+client = ["heddle-cli-args/client", "heddle-cli-render/client"]
+git-overlay = ["heddle-cli-args/git-overlay", "repo/git-overlay"]
+ingest = ["heddle-cli-args/ingest"]
+semantic = [
+    "heddle-cli-args/semantic",
+    "heddle-core/semantic",
+    "repo/tree-sitter-symbols",
+]
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "heddle_cli_contract"

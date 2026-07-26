@@ -1,0 +1,31 @@
+[package]
+name = "heddle-cli-args"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Heddle's command-line argument surface."
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+api = { package = "heddle-api", version = "=0.1.4", features = ["client"] }
+clap.workspace = true
+cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.10" }
+heddle-client = { path = "../client", version = "0.10", optional = true }
+objects = { path = "../objects", package = "heddle-objects", version = "0.10" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.10", default-features = false, features = ["git-overlay", "native"] }
+weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.10" }
+
+[features]
+default = []
+client = ["dep:heddle-client"]
+git-overlay = []
+ingest = []
+semantic = []
+
+[lib]
+path = "src/lib.rs"
+name = "heddle_cli_args"

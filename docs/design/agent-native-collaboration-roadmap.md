@@ -81,7 +81,7 @@ Goal: make the CLI surface ready for agent-native collaboration before changing 
   - `collab_capability_interrupted`
   - `collab_anchor_ambiguous`
   - `collab_anchor_orphaned`
-- Update `docs/json-schemas.md` only after concrete schemas are registered in `crates/cli/src/cli/commands/schemas.rs`.
+- Update `docs/json-schemas.md` only after concrete schemas are registered in `crates/cli-contract/src/cli/commands/schemas.rs`.
 
 Exit criteria:
 
@@ -492,7 +492,7 @@ Exit criteria:
 
 ## Command schema sketches
 
-These are design sketches, not registered schemas. Concrete schemas belong in `crates/cli/src/cli/commands/schemas.rs` and documented samples belong in `docs/json-schemas.md`.
+These are design sketches, not registered schemas. Concrete schemas belong in `crates/cli-contract/src/cli/commands/schemas.rs` and documented samples belong in `docs/json-schemas.md`.
 
 ### Common success envelope
 

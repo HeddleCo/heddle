@@ -2,14 +2,14 @@
 use std::{collections::BTreeMap, path::Path, process::Command, time::Instant};
 
 use objects::{
-    object::{Blob, ContentHash, SemanticChange, Tree, TreeEntry},
+    object::{Blob, ContentHash, FileChangeSet, SemanticChange, Tree, TreeEntry},
     store::{InMemoryStore, ObjectStore},
 };
 
 use super::{
     SemanticBudget, SemanticCheckStatus, SemanticDiffOptions, SemanticFallbackReason,
     semantic_check_only, semantic_diff, semantic_diff_summary, semantic_diff_with_cache,
-    semantic_diff_worktree_with_cache,
+    semantic_diff_with_changes, semantic_diff_worktree_with_cache,
 };
 use crate::cache::SemanticParseCache;
 
@@ -494,6 +494,38 @@ fn full_diff_parse_cache_only_parses_changed_blobs() {
         stats.stores, 2,
         "semantic diff should parse only old/new changed blobs, not unchanged CAS-identical files: {stats:?}"
     );
+}
+
+#[test]
+fn full_diff_with_changes_uses_the_supplied_file_change_set() {
+    let store = InMemoryStore::new();
+    let from_tree = create_tree(
+        &store,
+        vec![(
+            "changed.rs",
+            create_blob(&store, "fn value() -> i32 { 1 }\n"),
+        )],
+    );
+    let to_tree = create_tree(
+        &store,
+        vec![(
+            "changed.rs",
+            create_blob(&store, "fn value() -> i32 { 2 }\n"),
+        )],
+    );
+
+    let result = semantic_diff_with_changes(
+        &store,
+        &from_tree,
+        &to_tree,
+        FileChangeSet::new(),
+        &SemanticDiffOptions::default(),
+        &SemanticParseCache::default(),
+    )
+    .unwrap_or_else(|err| panic!("full diff with supplied changes should succeed: {err}"));
+
+    assert!(result.file_changes.is_empty());
+    assert!(result.changes.is_empty());
 }
 
 fn assert_language_function_modified(path: &str, old: &str, new: &str, function_name: &str) {

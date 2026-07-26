@@ -193,6 +193,25 @@ pub fn semantic_diff_with_cache<S: ObjectStore + ?Sized>(
     cache: &SemanticParseCache,
 ) -> Result<SemanticDiffResult, anyhow::Error> {
     let file_changes = diff_trees(store, from_tree_hash, to_tree_hash)?;
+    semantic_diff_with_changes(
+        store,
+        from_tree_hash,
+        to_tree_hash,
+        file_changes,
+        options,
+        cache,
+    )
+}
+
+/// Perform semantic diff analysis using a pre-computed file change set.
+pub fn semantic_diff_with_changes<S: ObjectStore + ?Sized>(
+    store: &S,
+    from_tree_hash: &ContentHash,
+    to_tree_hash: &ContentHash,
+    file_changes: FileChangeSet,
+    options: &SemanticDiffOptions,
+    cache: &SemanticParseCache,
+) -> Result<SemanticDiffResult, anyhow::Error> {
     let old_loader = TreeBlobContentLoader::new(store, *from_tree_hash);
     let new_loader = TreeBlobContentLoader::new(store, *to_tree_hash);
     SemanticEngine::new(

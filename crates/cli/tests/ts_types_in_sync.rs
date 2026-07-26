@@ -30,9 +30,23 @@ mod full_feature {
             .expect("clients/npm/generated exists")
     }
 
+    fn assert_generated_set_has_floor(generated_json: &str) {
+        const MIN_GENERATED_VERBS: usize = 75;
+        let generated: serde_json::Value =
+            serde_json::from_str(generated_json).expect("generated schema JSON should parse");
+        let discovered_verbs = generated["verbs"].as_object().map_or(0, serde_json::Map::len);
+        assert!(
+            discovered_verbs >= MIN_GENERATED_VERBS,
+            "ts_types_in_sync discovered only {discovered_verbs} generated verbs (floor \
+             {MIN_GENERATED_VERBS}) — did a crate-split disconnect the command catalog? Update \
+             the discovery root, do not lower this floor."
+        );
+    }
+
     #[test]
     fn generated_typescript_is_in_sync() {
         let generated = cli::ts_codegen::generate();
+        assert_generated_set_has_floor(&generated.json);
         let path = generated_dir().join("heddle-schemas.ts");
         let on_disk = std::fs::read_to_string(&path).expect("read heddle-schemas.ts");
         assert_eq!(
@@ -46,6 +60,7 @@ mod full_feature {
     #[test]
     fn generated_json_is_in_sync() {
         let generated = cli::ts_codegen::generate();
+        assert_generated_set_has_floor(&generated.json);
         let path = generated_dir().join("heddle-schemas.json");
         let on_disk = std::fs::read_to_string(&path).expect("read heddle-schemas.json");
         assert_eq!(

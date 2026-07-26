@@ -699,20 +699,20 @@ fn point_overlay_head_at_mapped_tip(repo: &Repository, state_id: &StateId) -> Re
     {
         let thread = ThreadName::from(branch.as_str());
         if repo.refs().get_thread(&thread)?.as_ref() != Some(state_id) {
-            repo.refs().set_thread(&thread, state_id)?;
+            repo.set_thread_recorded(&thread, state_id)?;
         }
         let expected = Head::Attached {
             thread: thread.clone(),
         };
         if repo.refs().read_head()? != expected {
-            repo.refs().write_head(&expected)?;
+            repo.write_head_recorded(&expected)?;
         }
         return Ok(());
     }
 
     let expected = Head::Detached { state: *state_id };
     if repo.refs().read_head()? != expected {
-        repo.refs().write_head(&expected)?;
+        repo.write_head_recorded(&expected)?;
     }
     Ok(())
 }

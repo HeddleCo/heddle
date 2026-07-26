@@ -1429,8 +1429,7 @@ impl HostedClient {
                         if let Some(local_thread) = options.local_thread
                             && let Some(state) = final_state
                         {
-                            repo.refs()
-                                .set_thread(&ThreadName::from(local_thread), &state)?;
+                            repo.set_thread_recorded(&ThreadName::from(local_thread), &state)?;
                         }
                         if let Some(state) = final_state
                             && allow_partial_fetch
@@ -1610,12 +1609,12 @@ impl HostedClient {
             let marker_name = MarkerName::from(marker.name.as_str());
             match repo.refs().get_marker(&marker_name)? {
                 Some(existing) if existing == marker.state_id => {}
-                Some(existing) => repo.refs().set_marker_cas(
+                Some(existing) => repo.set_marker_recorded_cas(
                     &marker_name,
                     refs::RefExpectation::Value(existing),
                     &marker.state_id,
                 )?,
-                None => repo.refs().create_marker(&marker_name, &marker.state_id)?,
+                None => repo.create_marker_recorded(&marker_name, &marker.state_id)?,
             }
         }
         Ok(())
@@ -2174,12 +2173,12 @@ fn apply_marker_snapshot(repo: &Repository, checkpoint: &[u8]) -> Result<bool, P
         let name = MarkerName::from(name);
         match repo.refs().get_marker(&name)? {
             Some(existing) if existing == state_id => {}
-            Some(existing) => repo.refs().set_marker_cas(
+            Some(existing) => repo.set_marker_recorded_cas(
                 &name,
                 refs::RefExpectation::Value(existing),
                 &state_id,
             )?,
-            None => repo.refs().create_marker(&name, &state_id)?,
+            None => repo.create_marker_recorded(&name, &state_id)?,
         }
     }
 

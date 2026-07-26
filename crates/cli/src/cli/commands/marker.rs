@@ -8,7 +8,6 @@ use heddle_core::{
     marker_prefix_is_valid, plan_marker_delete_selector,
 };
 use objects::{object::MarkerName, store::ObjectStore};
-use oplog::OpLogRecorder;
 use repo::Repository;
 use serde::Serialize;
 
@@ -123,8 +122,7 @@ fn cmd_marker_create(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     )?;
 
     let mn = MarkerName::new(&name);
-    repo.refs().create_marker(&mn, &current)?;
-    repo.oplog().record_marker_create(&mn, &current)?;
+    repo.create_marker_recorded(&mn, &current)?;
 
     let output = MarkerOpOutput {
         output_kind: "thread_marker_create",
@@ -144,12 +142,8 @@ fn cmd_marker_create(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
 
 fn cmd_marker_delete(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     let mn = MarkerName::new(&name);
-    let state = repo
-        .refs()
-        .delete_marker(&mn)?
+    repo.delete_marker_recorded(&mn)?
         .ok_or_else(|| anyhow!("Marker not found: {}", name))?;
-
-    repo.oplog().record_marker_delete(&mn, &state)?;
 
     let output = MarkerOpOutput {
         output_kind: "thread_marker_delete",
@@ -181,8 +175,7 @@ fn cmd_marker_delete_prefix(cli: &Cli, repo: &Repository, prefix: String) -> Res
     let mut deleted: Vec<MarkerEntry> = Vec::with_capacity(matches.len());
     for name in &matches {
         // Skip if it disappeared between list and delete (concurrent delete).
-        if let Some(state) = repo.refs().delete_marker(name)? {
-            repo.oplog().record_marker_delete(name, &state)?;
+        if let Some(state) = repo.delete_marker_recorded(name)? {
             deleted.push(MarkerEntry {
                 name: name.to_string(),
                 state_id: state.short(),

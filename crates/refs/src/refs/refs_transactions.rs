@@ -24,7 +24,7 @@ use super::{
         matches_expectation,
     },
 };
-use crate::fs_atomic::{stage_temp_files_durable, sync_directory};
+use crate::fs_atomic::{create_dir_all_durable, stage_temp_files_durable, sync_directory};
 
 enum PackedRemove {
     Thread(String),
@@ -325,6 +325,59 @@ impl RefManager {
                         summary_delta: None,
                     });
                 }
+                RefUpdate::RemoteThread {
+                    remote,
+                    thread,
+                    expected,
+                    new,
+                } => {
+                    let path = self.remote_thread_path(remote, thread)?;
+                    if !seen.insert(path.clone()) {
+                        return Err(HeddleError::Conflict(format!(
+                            "duplicate ref update for remote thread {}/{}",
+                            remote, thread
+                        )));
+                    }
+
+                    let current =
+                        match self.reconciled_value_under_lock(&LoadRequest::RemoteThread {
+                            remote: remote.clone(),
+                            thread: thread.clone(),
+                        })? {
+                            Loaded::Point(id) => id,
+                            _ => unreachable!("RemoteThread request yields Point"),
+                        };
+                    if !matches_expectation(expected, current.as_ref(), current.is_some()) {
+                        return Err(HeddleError::Conflict(format!(
+                            "remote thread {}/{} expected {}, found {}",
+                            remote,
+                            thread,
+                            describe_expectation_state_id(expected),
+                            describe_state_id(current)
+                        )));
+                    }
+
+                    let summary_delta = Some(match new {
+                        Some(state_id) => SummaryDelta::SetRemoteThread {
+                            remote: remote.clone(),
+                            name: thread.to_string(),
+                            state_id: *state_id,
+                        },
+                        None => SummaryDelta::DeleteRemoteThread {
+                            remote: remote.clone(),
+                            name: thread.to_string(),
+                        },
+                    });
+                    plans.push(RefUpdatePlan {
+                        path,
+                        new_content: new.as_ref().map(format_state_id_text),
+                        previous_content: current.as_ref().map(format_state_id_text),
+                        description: format!("remote thread {}/{}", remote, thread),
+                        temp_path: None,
+                        packed_remove: None,
+                        summary_delta,
+                    });
+                }
             }
         }
 
@@ -407,6 +460,38 @@ impl RefManager {
                         summary_delta: None,
                     });
                 }
+                RefUpdate::RemoteThread {
+                    remote,
+                    thread,
+                    new,
+                    ..
+                } => {
+                    let path = self.remote_thread_path(remote, thread)?;
+                    let current = self.raw_get_remote_thread(remote, thread)?;
+                    if current == *new {
+                        continue;
+                    }
+                    let summary_delta = Some(match new {
+                        Some(state_id) => SummaryDelta::SetRemoteThread {
+                            remote: remote.clone(),
+                            name: thread.to_string(),
+                            state_id: *state_id,
+                        },
+                        None => SummaryDelta::DeleteRemoteThread {
+                            remote: remote.clone(),
+                            name: thread.to_string(),
+                        },
+                    });
+                    plans.push(RefUpdatePlan {
+                        path,
+                        new_content: new.as_ref().map(format_state_id_text),
+                        previous_content: current.as_ref().map(format_state_id_text),
+                        description: format!("remote thread {}/{}", remote, thread),
+                        temp_path: None,
+                        packed_remove: None,
+                        summary_delta,
+                    });
+                }
             }
         }
         Ok(plans)
@@ -445,6 +530,10 @@ impl RefManager {
         let mut temp_writes: Vec<(PathBuf, Vec<u8>)> = Vec::new();
         for plan in &mut plans {
             if let Some(ref content) = plan.new_content {
+                let parent = plan.path.parent().ok_or_else(|| {
+                    HeddleError::Config(format!("invalid ref path {}", plan.path.display()))
+                })?;
+                create_dir_all_durable(parent)?;
                 let temp_path = self.alloc_temp_path(&plan.path)?;
                 temp_writes.push((temp_path.clone(), content.clone().into_bytes()));
                 plan.temp_path = Some(temp_path);

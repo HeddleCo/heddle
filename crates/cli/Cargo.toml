@@ -18,10 +18,6 @@ exclude = [
 ]
 
 [dependencies]
-# `anstyle` 1.x is already in our transitive deps via clap. Pinning it
-# directly here makes `crates/cli/src/cli/style.rs` a first-class
-# consumer; the version range matches what `cargo tree` resolves.
-anstyle = "1"
 anyhow.workspace = true
 base64.workspace = true
 blake3.workspace = true
@@ -42,6 +38,9 @@ daemon = { path = "../daemon", package = "heddle-daemon", version = "0.10" }
 merge = { path = "../merge", package = "heddle-merge", version = "0.10" }
 api = { package = "heddle-api", git = "https://github.com/HeddleCo/api", rev = "1c15b1a5d0e144859b41ac9036461a45783c3c3e" }
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.10" }
+heddle-cli-args = { path = "../cli-args", version = "0.10", default-features = false }
+heddle-cli-contract = { path = "../cli-contract", version = "0.10", default-features = false }
+heddle-cli-render = { path = "../cli-render", version = "0.10", default-features = false }
 heddle-core = { path = "../core", version = "0.10", default-features = false }
 heddle-format = { path = "../format", version = "0.10" }
 heddle-client = { path = "../client", version = "0.10", optional = true }
@@ -141,15 +140,32 @@ local = []
 # existing Git repos; no native content-addressed init), `native` only
 # (pure content-addressed VCS; no Git Projection import/export surface),
 # or both — and each can drop `client` for a local-only CLI.
-git-overlay = ["repo/git-overlay", "ingest"]
+git-overlay = [
+    "repo/git-overlay",
+    "ingest",
+    "heddle-cli-args/git-overlay",
+    "heddle-cli-contract/git-overlay",
+]
 native = ["repo/native"]
-client = ["dep:heddle-client", "dep:tokio-tungstenite"]
+client = [
+    "dep:heddle-client",
+    "dep:tokio-tungstenite",
+    "heddle-cli-args/client",
+    "heddle-cli-contract/client",
+    "heddle-cli-render/client",
+]
 # Deep git import + AI-session reasoning extraction now backs every Git
 # overlay import path. Kept as a feature name for existing feature sets,
 # but the dependency is always present so no legacy bridge importer is
 # compiled as a fallback.
-ingest = []
-semantic = ["dep:semantic", "heddle-core/semantic", "repo/tree-sitter-symbols"]
+ingest = ["heddle-cli-args/ingest", "heddle-cli-contract/ingest"]
+semantic = [
+    "dep:semantic",
+    "heddle-cli-args/semantic",
+    "heddle-cli-contract/semantic",
+    "heddle-core/semantic",
+    "repo/tree-sitter-symbols",
+]
 semantic-extended = ["semantic", "heddle-core/semantic-extended", "semantic?/extended-languages"]
 observability = [
     "cli-shared/observability",
@@ -197,6 +213,7 @@ mount = [
 
 [dev-dependencies]
 criterion = "0.8"
+heddle-cli-render = { path = "../cli-render", version = "0.10", features = ["test-utils"] }
 hyper-util.workspace = true
 ntest.workspace = true
 proptest.workspace = true

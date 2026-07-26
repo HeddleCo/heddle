@@ -613,7 +613,7 @@ fn finish_git_overlay_clone(
     // disk do not yet represent that target.
     repo.goto_from_materialized_state(&state_id, None)?;
     // Keep Git and Heddle attached to the same imported branch.
-    repo.refs().write_head(&Head::Attached {
+    repo.write_head_recorded(&Head::Attached {
         thread: ThreadName::new(&track_name),
     })?;
     write_git_head_branch(&local_path.join(".git"), &track_name)?;
@@ -1212,8 +1212,8 @@ async fn clone_local(
     local_repo.goto_from_materialized_state(&state_id, None)?;
     // Set up the thread locally after materialization so the dirty-worktree
     // guard does not mistake an empty fresh clone for deleted target files.
-    local_repo.refs().set_thread(&tn, &state_id)?;
-    local_repo.refs().write_head(&Head::Attached {
+    local_repo.set_thread_recorded(&tn, &state_id)?;
+    local_repo.write_head_recorded(&Head::Attached {
         thread: ThreadName::new(track_name),
     })?;
 

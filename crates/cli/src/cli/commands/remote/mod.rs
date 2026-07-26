@@ -1089,9 +1089,7 @@ async fn push_local(
     let sync = LocalSync::open(repo.root())?;
     let objects_copied = sync.fetch_state(&target_repo, state_id)?;
 
-    target_repo
-        .refs()
-        .set_thread(&ThreadName::new(track_name), state_id)?;
+    target_repo.set_thread_recorded(&ThreadName::new(track_name), state_id)?;
 
     if should_output_json(cli, Some(repo.config())) {
         let trust = build_repository_verification_state(repo);
@@ -1198,9 +1196,7 @@ async fn push_local_all_threads(
     for thread in &threads {
         let push_one = || -> Result<usize> {
             let copied = sync.fetch_state(&target_repo, &thread.state)?;
-            target_repo
-                .refs()
-                .set_thread(&ThreadName::new(&thread.name), &thread.state)?;
+            target_repo.set_thread_recorded(&ThreadName::new(&thread.name), &thread.state)?;
             Ok(copied)
         };
         match push_one() {

@@ -85,8 +85,7 @@ struct RefSummaryEntry {
 /// The plan already knows exactly which thread/marker changed and its new
 /// state-id, so a publish that touches `k` refs costs `O(k)` index edits +
 /// one packed-refs load — not an `O(refs)` full-dir rescan. HEAD is not part of
-/// the summary index, so HEAD plans carry no target; remote threads are never
-/// produced by `publish_ref_plans`, so they stay untouched in the index.
+/// the summary index, so HEAD plans carry no target.
 #[derive(Debug, Clone)]
 pub(super) enum SummaryDelta {
     /// Loose thread set to a new state-id (the loose file now exists on disk).
@@ -98,6 +97,14 @@ pub(super) enum SummaryDelta {
     DeleteThread { name: String },
     /// Marker removed from both loose and packed storage.
     DeleteMarker { name: String },
+    /// Remote thread set to a new state-id.
+    SetRemoteThread {
+        remote: String,
+        name: String,
+        state_id: StateId,
+    },
+    /// Remote thread removed.
+    DeleteRemoteThread { remote: String, name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -259,7 +266,7 @@ impl RefSummaryIndex {
     /// recorded as `LooseAndPacked` (matching the from-storage rebuild).
     ///
     /// Entries stay sorted by name: set inserts at the sorted position (or
-    /// updates in place), delete removes. Remotes are never touched here.
+    /// updates in place), delete removes.
     fn apply_delta(&mut self, delta: &SummaryDelta, packed: &PackedRefs) {
         match delta {
             SummaryDelta::SetThread { name, state_id } => {
@@ -283,6 +290,49 @@ impl RefSummaryIndex {
             }
             SummaryDelta::DeleteMarker { name } => {
                 self.markers.retain(|entry| entry.name != *name);
+            }
+            SummaryDelta::SetRemoteThread {
+                remote,
+                name,
+                state_id,
+            } => {
+                let remote_index = match self
+                    .remotes
+                    .binary_search_by(|entry| entry.name.as_str().cmp(remote))
+                {
+                    Ok(index) => index,
+                    Err(index) => {
+                        self.remotes.insert(
+                            index,
+                            RemoteSummaryEntry {
+                                name: remote.clone(),
+                                threads: Vec::new(),
+                            },
+                        );
+                        index
+                    }
+                };
+                let threads = &mut self.remotes[remote_index].threads;
+                match threads.binary_search_by(|entry| entry.name.as_str().cmp(name)) {
+                    Ok(index) => threads[index].state_id = *state_id,
+                    Err(index) => threads.insert(
+                        index,
+                        RemoteThreadSummaryEntry {
+                            name: name.clone(),
+                            state_id: *state_id,
+                        },
+                    ),
+                }
+            }
+            SummaryDelta::DeleteRemoteThread { remote, name } => {
+                if let Ok(index) = self
+                    .remotes
+                    .binary_search_by(|entry| entry.name.as_str().cmp(remote))
+                {
+                    self.remotes[index]
+                        .threads
+                        .retain(|entry| entry.name != *name);
+                }
             }
         }
     }

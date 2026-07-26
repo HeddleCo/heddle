@@ -9,9 +9,6 @@
 
 use std::{collections::BTreeSet, path::Path, sync::OnceLock};
 
-// Re-exported for unit tests in operator/thread_shaping modules.
-#[cfg(test)]
-pub(crate) use heddle_core::VerificationCheck;
 use heddle_core::status::next_action::{
     canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
     heddle_action as core_heddle_action, import_guidance_includes_active_branch,
@@ -19,8 +16,10 @@ use heddle_core::status::next_action::{
 };
 pub(crate) use heddle_core::{
     ActionTemplate, MachineContractCoverage, MachineContractInput, PlainGitVerifyProbe,
+};
+pub use heddle_core::{
     RepositoryVerificationCheck, RepositoryVerificationHealth, RepositoryVerificationState,
-    repository_setup_guidance, verify::serialize_empty_action_as_null,
+    VerificationCheck, repository_setup_guidance, verify::serialize_empty_action_as_null,
 };
 use objects::{object::ThreadName, worktree::WorktreeStatus};
 use refs::Head;
@@ -37,13 +36,13 @@ use super::{
     schemas::opaque_schema_verbs,
 };
 
-pub(crate) type PlainGitVerificationProbe = PlainGitVerifyProbe;
+pub type PlainGitVerificationProbe = PlainGitVerifyProbe;
 
-pub(crate) fn primary_recovery_command(health: &RepositoryVerificationHealth) -> Option<&str> {
+pub fn primary_recovery_command(health: &RepositoryVerificationHealth) -> Option<&str> {
     health.recovery_commands.first().map(String::as_str)
 }
 
-pub(crate) fn override_trust_recommended_action(
+pub fn override_trust_recommended_action(
     trust: &mut RepositoryVerificationState,
     action: impl Into<String>,
 ) {
@@ -60,7 +59,7 @@ pub(crate) fn override_trust_recommended_action(
         check.recommended_action = Some(action);
     }
 }
-pub(crate) fn trust_visible_worktree_status(
+pub fn trust_visible_worktree_status(
     repo: &Repository,
     trust: &RepositoryVerificationState,
 ) -> anyhow::Result<Option<WorktreeStatus>> {
@@ -83,7 +82,7 @@ fn machine_contract_is_clean(coverage: &MachineContractCoverage) -> bool {
         && coverage.unaccepted_opaque_schema_verbs_total == 0
 }
 
-pub(crate) fn machine_contract_status(coverage: &MachineContractCoverage) -> &'static str {
+pub fn machine_contract_status(coverage: &MachineContractCoverage) -> &'static str {
     if !machine_contract_is_clean(coverage) {
         return "schema_gaps";
     } else if coverage.undocumented_schema_verbs_total > 0 {
@@ -94,9 +93,7 @@ pub(crate) fn machine_contract_status(coverage: &MachineContractCoverage) -> &'s
 
 /// CLI adapter: injects command-catalog Machine-Contract Proof into core's
 /// single Repository Verification State owner.
-pub(crate) fn build_repository_verification_state(
-    repo: &Repository,
-) -> RepositoryVerificationState {
+pub fn build_repository_verification_state(repo: &Repository) -> RepositoryVerificationState {
     match heddle_core::verify::build_repository_verification_state_with_machine_contract(
         repo,
         &MachineContractInput::from_coverage(machine_contract_coverage()),
@@ -109,7 +106,7 @@ pub(crate) fn build_repository_verification_state(
 /// Sub-phase timings for [`build_repository_verification_state_profiled`], in
 /// milliseconds. Used by `adopt`'s `HEDDLE_PROFILE=1` instrumentation.
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct VerificationProfile {
+pub struct VerificationProfile {
     pub worktree_status_ms: u128,
     pub health_ms: u128,
     pub from_health_ms: u128,
@@ -117,7 +114,7 @@ pub(crate) struct VerificationProfile {
 
 /// Profiled adapter around the core verification owner. Classification matches
 /// [`build_repository_verification_state`]; only wall-clock phase splits differ.
-pub(crate) fn build_repository_verification_state_profiled(
+pub fn build_repository_verification_state_profiled(
     repo: &Repository,
 ) -> (RepositoryVerificationState, VerificationProfile) {
     let total_start = std::time::Instant::now();
@@ -153,7 +150,7 @@ pub(crate) fn build_repository_verification_state_profiled(
 }
 
 /// Core-owned verification state with a reused worktree-status `Result`.
-pub(crate) fn build_repository_verification_state_with_worktree_status(
+pub fn build_repository_verification_state_with_worktree_status(
     repo: &Repository,
     worktree_status: &repo::Result<Option<WorktreeStatus>>,
 ) -> RepositoryVerificationState {
@@ -170,7 +167,7 @@ pub(crate) fn build_repository_verification_state_with_worktree_status(
 }
 
 /// Core-owned health proof (CLI may inspect recovery commands for doctor text).
-pub(crate) fn build_verification_health(repo: &Repository) -> RepositoryVerificationHealth {
+pub fn build_verification_health(repo: &Repository) -> RepositoryVerificationHealth {
     let worktree_status = worktree_status_for_verification(repo);
     heddle_core::status::build_repository_verification_health_with_worktree_status(
         repo,
@@ -268,7 +265,7 @@ fn degraded_repository_verification_state(
 /// across the preflight, the verification preflight, and the output build. The
 /// classification is byte-identical to [`build_repository_verification_state`]
 /// because it threads the exact `Result` from `git_overlay_worktree_status()`.
-pub(crate) fn unimported_git_history_advice(
+pub fn unimported_git_history_advice(
     repo: &Repository,
     action: &str,
 ) -> anyhow::Result<Option<RecoveryAdvice>> {
@@ -298,7 +295,7 @@ pub(crate) fn unimported_git_history_advice(
         vec![primary_command],
     )))
 }
-pub(crate) fn raw_git_operation_mutation_advice(
+pub fn raw_git_operation_mutation_advice(
     repo: &Repository,
     action: &str,
 ) -> anyhow::Result<Option<RecoveryAdvice>> {
@@ -424,14 +421,14 @@ fn mapped_change_relation(
     }
 }
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct GitOverlayMutationPreflight {
+pub struct GitOverlayMutationPreflight {
     pub check_detached_head: bool,
     pub check_unimported_git_history: bool,
     pub check_raw_git_operation: bool,
     pub check_verification: bool,
 }
 impl GitOverlayMutationPreflight {
-    pub(crate) fn capture_like() -> Self {
+    pub fn capture_like() -> Self {
         Self {
             check_detached_head: false,
             check_unimported_git_history: true,
@@ -440,7 +437,7 @@ impl GitOverlayMutationPreflight {
         }
     }
 
-    pub(crate) fn checkpoint_like() -> Self {
+    pub fn checkpoint_like() -> Self {
         Self {
             check_detached_head: true,
             check_unimported_git_history: true,
@@ -449,14 +446,14 @@ impl GitOverlayMutationPreflight {
         }
     }
 }
-pub(crate) fn plain_git_mutation_preflight_advice(
+pub fn plain_git_mutation_preflight_advice(
     start: &std::path::Path,
     action: &str,
 ) -> anyhow::Result<Option<RecoveryAdvice>> {
     Ok(build_plain_git_verification_probe(start)?
         .map(|probe| plain_git_mutation_advice(&probe, action)))
 }
-pub(crate) fn plain_git_setup_advice(
+pub fn plain_git_setup_advice(
     probe: &PlainGitVerificationProbe,
     command: &str,
     requested_target: Option<&str>,
@@ -513,7 +510,7 @@ pub(crate) fn plain_git_setup_advice(
     }
     advice
 }
-pub(crate) fn git_overlay_mutation_preflight_advice(
+pub fn git_overlay_mutation_preflight_advice(
     repo: &Repository,
     action: &str,
     preflight: GitOverlayMutationPreflight,
@@ -524,7 +521,7 @@ pub(crate) fn git_overlay_mutation_preflight_advice(
 /// that reuses an already-computed git-overlay worktree status for the
 /// `check_verification` branch instead of re-walking the worktree. All other
 /// branches and the resulting advice are identical.
-pub(crate) fn git_overlay_mutation_preflight_advice_with_worktree_status(
+pub fn git_overlay_mutation_preflight_advice_with_worktree_status(
     repo: &Repository,
     action: &str,
     preflight: GitOverlayMutationPreflight,
@@ -570,7 +567,7 @@ fn git_overlay_mutation_preflight_advice_inner(
     Ok(None)
 }
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn repository_verification_blocked_advice(
+pub fn repository_verification_blocked_advice(
     kind: &'static str,
     error: impl Into<String>,
     retry_context: impl Into<String>,
@@ -594,16 +591,14 @@ pub(crate) fn repository_verification_blocked_advice(
         recovery_commands,
     )
 }
-pub(crate) fn repository_verification_primary_command(
-    trust: &RepositoryVerificationState,
-) -> String {
+pub fn repository_verification_primary_command(trust: &RepositoryVerificationState) -> String {
     if trust.recommended_action.trim().is_empty() {
         "heddle verify".to_string()
     } else {
         trust.recommended_action.clone()
     }
 }
-pub(crate) fn repository_verification_blockers(trust: &RepositoryVerificationState) -> Vec<String> {
+pub fn repository_verification_blockers(trust: &RepositoryVerificationState) -> Vec<String> {
     trust
         .checks
         .iter()
@@ -750,7 +745,7 @@ fn detached_head_primary_recovery(repo: &Repository) -> String {
     }
     "heddle thread list".to_string()
 }
-pub(crate) fn build_plain_git_verification_probe(
+pub fn build_plain_git_verification_probe(
     start: &Path,
 ) -> anyhow::Result<Option<PlainGitVerificationProbe>> {
     Ok(
@@ -760,16 +755,16 @@ pub(crate) fn build_plain_git_verification_probe(
         )?,
     )
 }
-pub(crate) fn action_template(action: &str) -> Option<ActionTemplate> {
+pub fn action_template(action: &str) -> Option<ActionTemplate> {
     recommended_action_template(action)
 }
-pub(crate) fn action_templates(commands: &[String]) -> Vec<ActionTemplate> {
+pub fn action_templates(commands: &[String]) -> Vec<ActionTemplate> {
     commands
         .iter()
         .filter_map(|command| action_template(command))
         .collect()
 }
-pub(crate) fn machine_contract_coverage() -> MachineContractCoverage {
+pub fn machine_contract_coverage() -> MachineContractCoverage {
     static COVERAGE: OnceLock<MachineContractCoverage> = OnceLock::new();
     COVERAGE
         .get_or_init(build_machine_contract_coverage)
@@ -1040,14 +1035,14 @@ fn machine_contract_verified_scope(command: &super::command_catalog::CommandCata
         )
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RemoteDriftDecision {
+pub struct RemoteDriftDecision {
     pub status: &'static str,
     pub verified_as_clean: bool,
     pub primary_action: Option<String>,
     pub recovery_commands: Vec<String>,
     pub requires_clean_worktree: bool,
 }
-pub(crate) fn remote_drift_decision(
+pub fn remote_drift_decision(
     repo: &Repository,
     remote: &GitRemoteTrackingStatus,
 ) -> RemoteDriftDecision {
@@ -1158,13 +1153,13 @@ fn upstream_thread_matches_current_git_tip(repo: &Repository, upstream: &str) ->
         .flatten()
         .is_some_and(|mapped_tip| mapped_tip == thread_tip)
 }
-pub(crate) fn remote_drift_primary_action(repo: &Repository) -> Option<String> {
+pub fn remote_drift_primary_action(repo: &Repository) -> Option<String> {
     repo.git_remote_tracking_status()
         .ok()
         .flatten()
         .and_then(|remote| remote_drift_decision(repo, &remote).primary_action)
 }
-pub(crate) fn remote_tracking_with_verification_action(
+pub fn remote_tracking_with_verification_action(
     mut remote: GitRemoteTrackingStatus,
     trust: &RepositoryVerificationState,
 ) -> GitRemoteTrackingStatus {

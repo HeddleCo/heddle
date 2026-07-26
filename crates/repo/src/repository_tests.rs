@@ -397,6 +397,28 @@ fn test_open_finds_repo() {
 }
 
 #[test]
+fn test_open_rejects_bogus_ancestor_metadata_and_reports_matched_root() {
+    let temp_dir = TempDir::new().unwrap();
+    let bogus_root = temp_dir.path().canonicalize().unwrap();
+    fs::create_dir_all(bogus_root.join(".heddle/bootstrap-op-id")).unwrap();
+    let nested = bogus_root.join("projects/demo");
+    fs::create_dir_all(&nested).unwrap();
+
+    let error = match Repository::open(&nested) {
+        Ok(_) => panic!("bogus .heddle metadata must not be accepted as a repository"),
+        Err(error) => error,
+    };
+
+    match error {
+        HeddleError::RepositoryNotFound(path) => assert_eq!(
+            path, bogus_root,
+            "the error must identify the ancestor containing bogus .heddle metadata",
+        ),
+        other => panic!("expected repository-not-found for bogus metadata, got {other}"),
+    }
+}
+
+#[test]
 fn test_snapshot_creates_state() {
     let (temp_dir, repo) = create_test_repo();
     let initial_head = repo.head().unwrap().expect("init should seed main state");

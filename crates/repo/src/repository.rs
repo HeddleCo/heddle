@@ -32,6 +32,8 @@ mod repository_partial_fetch;
 mod repository_provenance;
 #[path = "repository_recovery.rs"]
 mod repository_recovery;
+#[path = "repository_ref_mutation.rs"]
+mod repository_ref_mutation;
 #[path = "repository_resolve.rs"]
 mod repository_resolve;
 #[path = "repository_signing.rs"]
@@ -891,6 +893,12 @@ impl Repository {
             let heddle_path = dir.join(".heddle");
 
             if heddle_path.is_dir() {
+                let pointer_path = heddle_path.join("objectstore");
+                let objects_dir = heddle_path.join("objects");
+                if !pointer_path.is_file() && !objects_dir.is_dir() {
+                    return Err(HeddleError::RepositoryNotFound(dir.to_path_buf()));
+                }
+
                 if let Some(git_root) = discovered_git_root.as_ref()
                     && git_root != dir
                     && git_root.starts_with(dir)
@@ -900,8 +908,6 @@ impl Repository {
                     Self::bootstrap_git_overlay(git_root)?;
                     return Self::open(git_root);
                 }
-                let pointer_path = heddle_path.join("objectstore");
-                let objects_dir = heddle_path.join("objects");
 
                 if pointer_path.is_file() {
                     // Worktree mode: pointer dir at <dir>/.heddle/, shared
@@ -1029,9 +1035,6 @@ impl Repository {
                     }
                     return Ok(repo);
                 }
-
-                // .heddle/ exists but is neither a worktree pointer nor a
-                // main repo. Treat as not-found and continue walking parents.
             }
 
             current = dir.parent();
@@ -2419,7 +2422,7 @@ impl Repository {
             ));
         }
         let thread = ThreadName::from(facet.thread_ref(main_thread).as_str());
-        self.refs.set_thread(&thread, state)
+        self.set_thread_recorded(&thread, state)
     }
 
     /// The write chokepoint (heddle#330 §2.2): commit the ref-carrying

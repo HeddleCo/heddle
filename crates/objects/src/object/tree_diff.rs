@@ -10,9 +10,119 @@ use super::FileChangeSet;
 #[cfg(feature = "async-source")]
 use crate::store::AsyncObjectSource;
 use crate::{
-    object::{DiffKind, FileChange, Tree, TreeEntry},
+    object::{ContentHash, DiffKind, FileChange, Tree},
     store::ObjectSource,
 };
+
+struct DiffFrame {
+    from: Option<Tree>,
+    to: Option<Tree>,
+    prefix: String,
+    from_index: usize,
+    to_index: usize,
+}
+
+enum DiffStep {
+    Emit(FileChange),
+    Descend {
+        from_hash: Option<ContentHash>,
+        to_hash: Option<ContentHash>,
+        name: String,
+    },
+    Done,
+}
+
+fn advance_merge(frame: &mut DiffFrame) -> DiffStep {
+    let from_entries = frame.from.as_ref().map_or(&[][..], Tree::entries);
+    let to_entries = frame.to.as_ref().map_or(&[][..], Tree::entries);
+
+    loop {
+        match (
+            from_entries.get(frame.from_index),
+            to_entries.get(frame.to_index),
+        ) {
+            (Some(from_entry), Some(to_entry)) => match from_entry.name().cmp(to_entry.name()) {
+                std::cmp::Ordering::Less => {
+                    frame.from_index += 1;
+                    if let Some(from_hash) = from_entry.tree_hash() {
+                        return DiffStep::Descend {
+                            from_hash: Some(from_hash),
+                            to_hash: None,
+                            name: from_entry.name().to_owned(),
+                        };
+                    }
+                    return DiffStep::Emit(FileChange::new(
+                        child_path(&frame.prefix, from_entry.name()),
+                        DiffKind::Deleted,
+                    ));
+                }
+                std::cmp::Ordering::Greater => {
+                    frame.to_index += 1;
+                    if let Some(to_hash) = to_entry.tree_hash() {
+                        return DiffStep::Descend {
+                            from_hash: None,
+                            to_hash: Some(to_hash),
+                            name: to_entry.name().to_owned(),
+                        };
+                    }
+                    return DiffStep::Emit(FileChange::new(
+                        child_path(&frame.prefix, to_entry.name()),
+                        DiffKind::Added,
+                    ));
+                }
+                std::cmp::Ordering::Equal => {
+                    frame.from_index += 1;
+                    frame.to_index += 1;
+                    if from_entry.target() == to_entry.target() {
+                        continue;
+                    }
+                    if let (Some(from_hash), Some(to_hash)) =
+                        (from_entry.tree_hash(), to_entry.tree_hash())
+                    {
+                        return DiffStep::Descend {
+                            from_hash: Some(from_hash),
+                            to_hash: Some(to_hash),
+                            name: to_entry.name().to_owned(),
+                        };
+                    }
+                    return DiffStep::Emit(FileChange::new(
+                        child_path(&frame.prefix, to_entry.name()),
+                        DiffKind::Modified,
+                    ));
+                }
+            },
+            (Some(from_entry), None) => {
+                frame.from_index += 1;
+                if let Some(from_hash) = from_entry.tree_hash() {
+                    return DiffStep::Descend {
+                        from_hash: Some(from_hash),
+                        to_hash: None,
+                        name: from_entry.name().to_owned(),
+                    };
+                }
+                return DiffStep::Emit(FileChange::new(
+                    child_path(&frame.prefix, from_entry.name()),
+                    DiffKind::Deleted,
+                ));
+            }
+            (None, Some(to_entry)) => {
+                frame.to_index += 1;
+                if let Some(to_hash) = to_entry.tree_hash() {
+                    return DiffStep::Descend {
+                        from_hash: None,
+                        to_hash: Some(to_hash),
+                        name: to_entry.name().to_owned(),
+                    };
+                }
+                return DiffStep::Emit(FileChange::new(
+                    child_path(&frame.prefix, to_entry.name()),
+                    DiffKind::Added,
+                ));
+            }
+            (None, None) => return DiffStep::Done,
+        }
+    }
+}
 
 /// Collect all file changes between two trees.
 ///
@@ -64,131 +174,53 @@ where
     }
     let from_tree = store.get_tree(from)?;
     let to_tree = store.get_tree(to)?;
-    diff_trees_recursive(store, &from_tree, &to_tree, "", &mut visitor)
-}
+    let mut stack = vec![DiffFrame {
+        from: from_tree,
+        to: to_tree,
+        prefix: String::new(),
+        from_index: 0,
+        to_index: 0,
+    }];
 
-/// Recursively diff two trees, invoking `visitor` for each change.
-///
-/// Returns `Ok(ControlFlow::Break(b))` as soon as the visitor breaks, so the
-/// caller can propagate the short-circuit up the recursion without walking the
-/// remaining entries or loading further subtrees.
-fn diff_trees_recursive<S, V, B>(
-    store: &S,
-    from: &Option<Tree>,
-    to: &Option<Tree>,
-    prefix: &str,
-    visitor: &mut V,
-) -> Result<ControlFlow<B>, anyhow::Error>
-where
-    S: ObjectSource + ?Sized,
-    V: FnMut(FileChange) -> ControlFlow<B>,
-{
-    let from_entries = from.as_ref().map_or(&[][..], Tree::entries);
-    let to_entries = to.as_ref().map_or(&[][..], Tree::entries);
-
-    let mut from_index = 0;
-    let mut to_index = 0;
-
-    while let (Some(from_entry), Some(to_entry)) =
-        (from_entries.get(from_index), to_entries.get(to_index))
-    {
-        match from_entry.name().cmp(to_entry.name()) {
-            std::cmp::Ordering::Less => {
-                if let ControlFlow::Break(b) =
-                    visit_deleted_entry(store, prefix, from_entry, visitor)?
-                {
+    while !stack.is_empty() {
+        match advance_merge(stack.last_mut().expect("stack is not empty")) {
+            DiffStep::Emit(change) => {
+                if let ControlFlow::Break(b) = visitor(change) {
                     return Ok(ControlFlow::Break(b));
                 }
-                from_index += 1;
             }
-            std::cmp::Ordering::Greater => {
-                if let ControlFlow::Break(b) = visit_added_entry(store, prefix, to_entry, visitor)?
-                {
-                    return Ok(ControlFlow::Break(b));
-                }
-                to_index += 1;
+            DiffStep::Descend {
+                from_hash,
+                to_hash,
+                name,
+            } => {
+                let from_subtree = from_hash
+                    .map(|hash| store.get_tree(&hash))
+                    .transpose()?
+                    .flatten();
+                let to_subtree = to_hash
+                    .map(|hash| store.get_tree(&hash))
+                    .transpose()?
+                    .flatten();
+                let prefix = child_path(
+                    &stack.last().expect("parent frame remains on stack").prefix,
+                    &name,
+                );
+                stack.push(DiffFrame {
+                    from: from_subtree,
+                    to: to_subtree,
+                    prefix,
+                    from_index: 0,
+                    to_index: 0,
+                });
             }
-            std::cmp::Ordering::Equal => {
-                if from_entry.target() != to_entry.target() {
-                    if let (Some(from_hash), Some(to_hash)) =
-                        (from_entry.tree_hash(), to_entry.tree_hash())
-                    {
-                        let from_subtree = store.get_tree(&from_hash)?;
-                        let to_subtree = store.get_tree(&to_hash)?;
-                        let path = child_path(prefix, to_entry.name());
-                        if let ControlFlow::Break(b) =
-                            diff_trees_recursive(store, &from_subtree, &to_subtree, &path, visitor)?
-                        {
-                            return Ok(ControlFlow::Break(b));
-                        }
-                    } else {
-                        let path = child_path(prefix, to_entry.name());
-                        if let ControlFlow::Break(b) =
-                            visitor(FileChange::new(path, DiffKind::Modified))
-                        {
-                            return Ok(ControlFlow::Break(b));
-                        }
-                    }
-                }
-                from_index += 1;
-                to_index += 1;
+            DiffStep::Done => {
+                stack.pop();
             }
-        }
-    }
-
-    for from_entry in &from_entries[from_index..] {
-        if let ControlFlow::Break(b) = visit_deleted_entry(store, prefix, from_entry, visitor)? {
-            return Ok(ControlFlow::Break(b));
-        }
-    }
-
-    for to_entry in &to_entries[to_index..] {
-        if let ControlFlow::Break(b) = visit_added_entry(store, prefix, to_entry, visitor)? {
-            return Ok(ControlFlow::Break(b));
         }
     }
 
     Ok(ControlFlow::Continue(()))
-}
-
-fn visit_added_entry<S, V, B>(
-    store: &S,
-    prefix: &str,
-    to_entry: &TreeEntry,
-    visitor: &mut V,
-) -> Result<ControlFlow<B>, anyhow::Error>
-where
-    S: ObjectSource + ?Sized,
-    V: FnMut(FileChange) -> ControlFlow<B>,
-{
-    // Symmetric with the delete branch below: if the added entry is itself a
-    // directory, recurse into it so callers see per-leaf `added` entries.
-    let path = child_path(prefix, to_entry.name());
-    if let Some(tree_hash) = to_entry.tree_hash() {
-        let to_subtree = store.get_tree(&tree_hash)?;
-        diff_trees_recursive(store, &None, &to_subtree, &path, visitor)
-    } else {
-        Ok(visitor(FileChange::new(path, DiffKind::Added)))
-    }
-}
-
-fn visit_deleted_entry<S, V, B>(
-    store: &S,
-    prefix: &str,
-    from_entry: &TreeEntry,
-    visitor: &mut V,
-) -> Result<ControlFlow<B>, anyhow::Error>
-where
-    S: ObjectSource + ?Sized,
-    V: FnMut(FileChange) -> ControlFlow<B>,
-{
-    let path = child_path(prefix, from_entry.name());
-    if let Some(tree_hash) = from_entry.tree_hash() {
-        let from_subtree = store.get_tree(&tree_hash)?;
-        diff_trees_recursive(store, &from_subtree, &None, &path, visitor)
-    } else {
-        Ok(visitor(FileChange::new(path, DiffKind::Deleted)))
-    }
 }
 
 #[cfg(feature = "async-source")]
@@ -208,155 +240,53 @@ where
     }
     let from_tree = store.get_tree(from).await?;
     let to_tree = store.get_tree(to).await?;
-    diff_trees_recursive_async(store, &from_tree, &to_tree, "", &mut visitor).await
-}
+    let mut stack = vec![DiffFrame {
+        from: from_tree,
+        to: to_tree,
+        prefix: String::new(),
+        from_index: 0,
+        to_index: 0,
+    }];
 
-#[cfg(feature = "async-source")]
-async fn diff_trees_recursive_async<S, V, B>(
-    store: &S,
-    from: &Option<Tree>,
-    to: &Option<Tree>,
-    prefix: &str,
-    visitor: &mut V,
-) -> Result<ControlFlow<B>, anyhow::Error>
-where
-    S: AsyncObjectSource + Sync + ?Sized,
-    V: FnMut(FileChange) -> ControlFlow<B> + Send,
-    B: Send,
-{
-    let from_entries = from.as_ref().map_or(&[][..], Tree::entries);
-    let to_entries = to.as_ref().map_or(&[][..], Tree::entries);
-
-    let mut from_index = 0;
-    let mut to_index = 0;
-
-    while let (Some(from_entry), Some(to_entry)) =
-        (from_entries.get(from_index), to_entries.get(to_index))
-    {
-        match from_entry.name().cmp(to_entry.name()) {
-            std::cmp::Ordering::Less => {
-                if let ControlFlow::Break(b) =
-                    visit_deleted_entry_async(store, prefix, from_entry, visitor).await?
-                {
+    while !stack.is_empty() {
+        match advance_merge(stack.last_mut().expect("stack is not empty")) {
+            DiffStep::Emit(change) => {
+                if let ControlFlow::Break(b) = visitor(change) {
                     return Ok(ControlFlow::Break(b));
                 }
-                from_index += 1;
             }
-            std::cmp::Ordering::Greater => {
-                if let ControlFlow::Break(b) =
-                    visit_added_entry_async(store, prefix, to_entry, visitor).await?
-                {
-                    return Ok(ControlFlow::Break(b));
-                }
-                to_index += 1;
+            DiffStep::Descend {
+                from_hash,
+                to_hash,
+                name,
+            } => {
+                let from_subtree = match from_hash {
+                    Some(hash) => store.get_tree(&hash).await?,
+                    None => None,
+                };
+                let to_subtree = match to_hash {
+                    Some(hash) => store.get_tree(&hash).await?,
+                    None => None,
+                };
+                let prefix = child_path(
+                    &stack.last().expect("parent frame remains on stack").prefix,
+                    &name,
+                );
+                stack.push(DiffFrame {
+                    from: from_subtree,
+                    to: to_subtree,
+                    prefix,
+                    from_index: 0,
+                    to_index: 0,
+                });
             }
-            std::cmp::Ordering::Equal => {
-                if from_entry.target() != to_entry.target() {
-                    if let (Some(from_hash), Some(to_hash)) =
-                        (from_entry.tree_hash(), to_entry.tree_hash())
-                    {
-                        let from_subtree = store.get_tree(&from_hash).await?;
-                        let to_subtree = store.get_tree(&to_hash).await?;
-                        let path = child_path(prefix, to_entry.name());
-                        if let ControlFlow::Break(b) = Box::pin(diff_trees_recursive_async(
-                            store,
-                            &from_subtree,
-                            &to_subtree,
-                            &path,
-                            visitor,
-                        ))
-                        .await?
-                        {
-                            return Ok(ControlFlow::Break(b));
-                        }
-                    } else {
-                        let path = child_path(prefix, to_entry.name());
-                        if let ControlFlow::Break(b) =
-                            visitor(FileChange::new(path, DiffKind::Modified))
-                        {
-                            return Ok(ControlFlow::Break(b));
-                        }
-                    }
-                }
-                from_index += 1;
-                to_index += 1;
+            DiffStep::Done => {
+                stack.pop();
             }
-        }
-    }
-
-    for from_entry in &from_entries[from_index..] {
-        if let ControlFlow::Break(b) =
-            visit_deleted_entry_async(store, prefix, from_entry, visitor).await?
-        {
-            return Ok(ControlFlow::Break(b));
-        }
-    }
-
-    for to_entry in &to_entries[to_index..] {
-        if let ControlFlow::Break(b) =
-            visit_added_entry_async(store, prefix, to_entry, visitor).await?
-        {
-            return Ok(ControlFlow::Break(b));
         }
     }
 
     Ok(ControlFlow::Continue(()))
-}
-
-#[cfg(feature = "async-source")]
-async fn visit_added_entry_async<S, V, B>(
-    store: &S,
-    prefix: &str,
-    to_entry: &TreeEntry,
-    visitor: &mut V,
-) -> Result<ControlFlow<B>, anyhow::Error>
-where
-    S: AsyncObjectSource + Sync + ?Sized,
-    V: FnMut(FileChange) -> ControlFlow<B> + Send,
-    B: Send,
-{
-    let path = child_path(prefix, to_entry.name());
-    if let Some(tree_hash) = to_entry.tree_hash() {
-        let to_subtree = store.get_tree(&tree_hash).await?;
-        Box::pin(diff_trees_recursive_async(
-            store,
-            &None,
-            &to_subtree,
-            &path,
-            visitor,
-        ))
-        .await
-    } else {
-        Ok(visitor(FileChange::new(path, DiffKind::Added)))
-    }
-}
-
-#[cfg(feature = "async-source")]
-async fn visit_deleted_entry_async<S, V, B>(
-    store: &S,
-    prefix: &str,
-    from_entry: &TreeEntry,
-    visitor: &mut V,
-) -> Result<ControlFlow<B>, anyhow::Error>
-where
-    S: AsyncObjectSource + Sync + ?Sized,
-    V: FnMut(FileChange) -> ControlFlow<B> + Send,
-    B: Send,
-{
-    let path = child_path(prefix, from_entry.name());
-    if let Some(tree_hash) = from_entry.tree_hash() {
-        let from_subtree = store.get_tree(&tree_hash).await?;
-        Box::pin(diff_trees_recursive_async(
-            store,
-            &from_subtree,
-            &None,
-            &path,
-            visitor,
-        ))
-        .await
-    } else {
-        Ok(visitor(FileChange::new(path, DiffKind::Deleted)))
-    }
 }
 
 fn child_path(prefix: &str, name: &str) -> String {
@@ -402,6 +332,28 @@ mod tests {
             .collect();
         let tree = Tree::from_entries(tree_entries);
         store.put_tree(&tree).unwrap()
+    }
+
+    fn create_deep_changed_trees(
+        store: &InMemoryStore,
+        depth: usize,
+    ) -> (ContentHash, ContentHash, String) {
+        let mut from_hash = create_tree(
+            store,
+            vec![("leaf.txt", create_blob(store, "old"), EntryType::Blob)],
+        );
+        let mut to_hash = create_tree(
+            store,
+            vec![("leaf.txt", create_blob(store, "new"), EntryType::Blob)],
+        );
+
+        for _ in 0..depth {
+            from_hash = create_tree(store, vec![("d", from_hash, EntryType::Tree)]);
+            to_hash = create_tree(store, vec![("d", to_hash, EntryType::Tree)]);
+        }
+
+        let expected_path = format!("{}leaf.txt", "d/".repeat(depth));
+        (from_hash, to_hash, expected_path)
     }
 
     #[test]
@@ -716,5 +668,106 @@ mod tests {
         // Broke on the very first leaf inside `dir`; `dir/y.txt` and `z.txt`
         // were never visited.
         assert_eq!(seen, vec!["dir/x.txt"]);
+    }
+
+    #[test]
+    fn test_deep_tree_diff_uses_constant_native_stack_sync() {
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(|| {
+                let store = InMemoryStore::new();
+                let (from_hash, to_hash, expected_path) = create_deep_changed_trees(&store, 10_000);
+
+                let changes = diff_trees(&store, &from_hash, &to_hash).unwrap();
+                assert_eq!(
+                    changes
+                        .into_iter()
+                        .map(FileChange::into_tuple)
+                        .collect::<Vec<_>>(),
+                    vec![(expected_path, DiffKind::Modified)]
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(feature = "async-source")]
+    struct AsyncInMemorySource(InMemoryStore);
+
+    #[cfg(feature = "async-source")]
+    impl AsyncObjectSource for AsyncInMemorySource {
+        async fn get_tree(
+            &self,
+            hash: &ContentHash,
+        ) -> crate::error::Result<Option<crate::object::Tree>> {
+            ObjectStore::get_tree(&self.0, hash)
+        }
+
+        async fn get_state(
+            &self,
+            id: &crate::object::StateId,
+        ) -> crate::error::Result<Option<crate::object::State>> {
+            ObjectStore::get_state(&self.0, id)
+        }
+
+        async fn get_blob(
+            &self,
+            hash: &ContentHash,
+        ) -> crate::error::Result<Option<crate::object::Blob>> {
+            ObjectStore::get_blob(&self.0, hash)
+        }
+    }
+
+    #[cfg(feature = "async-source")]
+    fn block_on_current_thread<F: std::future::Future>(future: F) -> F::Output {
+        struct ThreadWaker(std::thread::Thread);
+
+        impl std::task::Wake for ThreadWaker {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+
+        let waker =
+            std::task::Waker::from(std::sync::Arc::new(ThreadWaker(std::thread::current())));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                std::task::Poll::Ready(output) => return output,
+                std::task::Poll::Pending => std::thread::park(),
+            }
+        }
+    }
+
+    #[cfg(feature = "async-source")]
+    #[test]
+    fn test_deep_tree_diff_uses_constant_native_stack_async() {
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(|| {
+                let store = InMemoryStore::new();
+                let (from_hash, to_hash, expected_path) = create_deep_changed_trees(&store, 10_000);
+                let store = AsyncInMemorySource(store);
+                let mut changes = Vec::new();
+
+                let flow = block_on_current_thread(diff_trees_visit_async(
+                    &store,
+                    &from_hash,
+                    &to_hash,
+                    |change| {
+                        changes.push(change.into_tuple());
+                        ControlFlow::<()>::Continue(())
+                    },
+                ))
+                .unwrap();
+
+                assert!(flow.is_continue());
+                assert_eq!(changes, vec![(expected_path, DiffKind::Modified)]);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

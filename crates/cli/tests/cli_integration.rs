@@ -338,6 +338,8 @@ mod shared_target;
 mod state_id_acceptance;
 #[path = "cli_integration/stdout_stderr_split.rs"]
 mod stdout_stderr_split;
+#[path = "cli_integration/submodule_status.rs"]
+mod submodule_status;
 #[path = "cli_integration/thread_cleanup.rs"]
 mod thread_cleanup;
 #[path = "cli_integration/thread_default_current.rs"]

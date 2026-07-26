@@ -590,6 +590,104 @@ fn test_cli_export_git_writes_bare_repo() {
     assert!(find_reference(&dest_repo, "refs/heads/main").is_ok());
 }
 
+/// heddle#1096 -- an ordinary Git-side commit pushed onto a Heddle-managed
+/// mirror branch is foreign: Heddle never published that OID under the ref name.
+/// Export must report the divergence and leave the foreign tip untouched, not
+/// misclassify it as a now-embargoed tip and force-rewind it.
+#[test]
+fn test_cli_export_git_preserves_foreign_mirror_push_and_reports_divergence() {
+    let source = TempDir::new().unwrap();
+    let dest_holder = TempDir::new().unwrap();
+    let dest = dest_holder.path().join("export");
+
+    init_colocated_git_repo(source.path());
+    std::fs::write(source.path().join("file.txt"), "heddle tip\n").unwrap();
+    git_commit_all_in(source.path(), "Heddle tip");
+    init_direct_git_overlay(source.path());
+    std::fs::write(source.path().join("file.txt"), "Heddle projection tip\n").unwrap();
+    heddle(
+        &["capture", "-m", "Heddle projection tip"],
+        Some(source.path()),
+    )
+    .expect("capture projection tip");
+
+    let first = heddle_output(
+        &["export", "git", "--destination", dest.to_str().unwrap()],
+        Some(source.path()),
+    )
+    .expect("first export");
+    assert!(
+        first.status.success(),
+        "first export must succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+    );
+
+    let mirror = open_git(source.path().join(".heddle/git")).expect("open bridge mirror");
+    let heddle_tip = find_reference(&mirror, "refs/heads/main")
+        .expect("main after first export")
+        .peel_to_id()
+        .expect("peel Heddle tip");
+    let tree = mirror
+        .read_commit(&heddle_tip)
+        .expect("read Heddle tip")
+        .tree;
+    let foreign_tip = git_commit_with_tree(
+        &mirror,
+        Some("refs/heads/main"),
+        tree,
+        "foreign push",
+        &[heddle_tip],
+    );
+
+    let second = heddle_output(
+        &["export", "git", "--destination", dest.to_str().unwrap()],
+        Some(source.path()),
+    )
+    .expect("second export");
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    let mirror_tip_after = find_reference(&mirror, "refs/heads/main")
+        .expect("main after second export")
+        .peel_to_id()
+        .expect("peel mirror tip after second export");
+
+    let mut violations = Vec::new();
+    if mirror_tip_after != foreign_tip {
+        violations.push(format!(
+            "foreign tip was clobbered: expected {foreign_tip}, found {mirror_tip_after}"
+        ));
+    }
+    if second.status.code() != Some(74) {
+        violations.push(format!(
+            "second export must exit non-zero (74), got {:?}",
+            second.status.code()
+        ));
+    }
+    if !stdout.contains("[warn] 1 ref diverged; left untouched (heddle did not overwrite)") {
+        violations.push("stdout did not report one untouched diverged ref".to_string());
+    }
+    let expected_reason = format!(
+        "refs/heads/main: modified concurrently in git: found {foreign_tip}, heddle was publishing {heddle_tip}"
+    );
+    if !stdout.contains(&expected_reason) {
+        violations.push(format!(
+            "stdout did not classify the foreign tip as concurrent modification: expected `{expected_reason}`"
+        ));
+    }
+    if !stderr.contains("exported 0 refs, 1 diverged (concurrent git-side update): refs/heads/main")
+    {
+        violations.push("stderr did not summarize the diverged ref".to_string());
+    }
+
+    assert!(
+        violations.is_empty(),
+        "{}\nstatus={:?}\nstdout={stdout}\nstderr={stderr}",
+        violations.join("\n"),
+        second.status.code(),
+    );
+}
+
 #[test]
 fn test_cli_import_git_from_external_repo() {
     let heddle_repo_dir = TempDir::new().unwrap();

@@ -27,7 +27,10 @@
 //! preserving obsolete spellings. Add a short alias only when the letter is
 //! already reserved for that semantic in the current table above.
 
+use std::sync::OnceLock;
+
 use clap::Parser;
+use repo::{Config, OutputFormat};
 
 use super::{CliOutputMode, Commands};
 
@@ -81,6 +84,12 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// Load and cache the process-wide user configuration.
+    pub fn user_config_or_exit() -> &'static cli_shared::UserConfig {
+        static USER_CONFIG: OnceLock<cli_shared::UserConfig> = OnceLock::new();
+        USER_CONFIG.get_or_init(|| cli_shared::UserConfig::load_default().unwrap_or_default())
+    }
+
     pub fn output_mode(&self) -> Option<cli_shared::OutputMode> {
         self.output.map(Into::into)
     }
@@ -100,4 +109,37 @@ impl Cli {
         };
         repo::Repository::open(repo_path).context("open Heddle repository")
     }
+}
+
+impl weft_client_shim::CliContext for Cli {
+    fn repo_path(&self) -> Option<&std::path::Path> {
+        self.repo.as_deref()
+    }
+
+    fn operation_id_wire(&self) -> String {
+        self.op_id.clone().unwrap_or_default()
+    }
+
+    fn should_output_json(&self, repo_config: Option<&Config>) -> bool {
+        should_output_json(self, repo_config)
+    }
+}
+
+/// Resolve whether command output should use JSON after applying user,
+/// repository, and explicit CLI output settings.
+pub fn should_output_json(cli: &Cli, repo_config: Option<&Config>) -> bool {
+    let mut format = repo_config
+        .and_then(|config| config.output.format)
+        .unwrap_or(Cli::user_config_or_exit().output.format);
+
+    if let Some(output) = cli.output_mode() {
+        format = match output {
+            cli_shared::OutputMode::Json | cli_shared::OutputMode::JsonCompact => {
+                OutputFormat::Json
+            }
+            cli_shared::OutputMode::Text => OutputFormat::Text,
+        };
+    }
+
+    matches!(format, OutputFormat::Json)
 }

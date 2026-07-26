@@ -3,7 +3,7 @@
 //!
 //! Exercise the verb end-to-end against tiny markdown fixtures with
 //! known drift, asserting the JSON shape lines up with the public
-//! contract documented in `crates/cli/src/cli/commands/doctor_docs.rs`.
+//! contract documented in `crates/cli-contract/src/cli/commands/doctor_docs.rs`.
 
 use std::fs;
 

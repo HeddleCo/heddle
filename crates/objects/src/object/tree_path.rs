@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Typed tree path resolution with per-caller leaf policies.
 
-use std::path::{Component, Path};
+use std::{
+    borrow::Cow,
+    path::{Component, Path},
+};
 
 use super::{Blob, ContentHash, Tree, TreeEntry};
 use crate::{error::HeddleError, store::ObjectSource};
@@ -169,25 +172,27 @@ fn resolve_from_tree<S: ObjectSource>(
     segments: &[String],
     policy: LeafPolicy,
 ) -> std::result::Result<Option<ResolvedTreeTarget>, TreePathResolveError> {
-    let name = segments[0].as_str();
-    let Some(entry) = tree.get(name) else {
-        return Ok(None);
-    };
+    let mut current_tree = Cow::Borrowed(tree);
 
-    if segments.len() == 1 {
-        return resolve_leaf(store, entry.clone(), policy);
+    for (index, segment) in segments.iter().enumerate() {
+        let Some(entry) = current_tree.get(segment) else {
+            return Ok(None);
+        };
+
+        if index + 1 == segments.len() {
+            return resolve_leaf(store, entry.clone(), policy);
+        }
+
+        let Some(tree_hash) = entry.tree_hash() else {
+            return Ok(None);
+        };
+        let Some(subtree) = load_subtree(store, &tree_hash, policy)? else {
+            return Ok(None);
+        };
+        current_tree = Cow::Owned(subtree);
     }
 
-    if !entry.is_tree() {
-        return Ok(None);
-    }
-    let Some(tree_hash) = entry.tree_hash() else {
-        return Ok(None);
-    };
-    let Some(subtree) = load_subtree(store, &tree_hash, policy)? else {
-        return Ok(None);
-    };
-    resolve_from_tree(store, &subtree, &segments[1..], policy)
+    Ok(None)
 }
 
 #[cfg(feature = "async-source")]
@@ -197,31 +202,27 @@ async fn resolve_from_tree_async<S: crate::store::AsyncObjectSource + ?Sized>(
     segments: &[String],
     policy: LeafPolicy,
 ) -> std::result::Result<Option<ResolvedTreeTarget>, TreePathResolveError> {
-    let name = segments[0].as_str();
-    let Some(entry) = tree.get(name) else {
-        return Ok(None);
-    };
+    let mut current_tree = Cow::Borrowed(tree);
 
-    if segments.len() == 1 {
-        return resolve_leaf_async(store, entry.clone(), policy).await;
+    for (index, segment) in segments.iter().enumerate() {
+        let Some(entry) = current_tree.get(segment) else {
+            return Ok(None);
+        };
+
+        if index + 1 == segments.len() {
+            return resolve_leaf_async(store, entry.clone(), policy).await;
+        }
+
+        let Some(tree_hash) = entry.tree_hash() else {
+            return Ok(None);
+        };
+        let Some(subtree) = load_subtree_async(store, &tree_hash, policy).await? else {
+            return Ok(None);
+        };
+        current_tree = Cow::Owned(subtree);
     }
 
-    if !entry.is_tree() {
-        return Ok(None);
-    }
-    let Some(tree_hash) = entry.tree_hash() else {
-        return Ok(None);
-    };
-    let Some(subtree) = load_subtree_async(store, &tree_hash, policy).await? else {
-        return Ok(None);
-    };
-    Box::pin(resolve_from_tree_async(
-        store,
-        &subtree,
-        &segments[1..],
-        policy,
-    ))
-    .await
+    Ok(None)
 }
 
 fn resolve_leaf<S: ObjectSource>(

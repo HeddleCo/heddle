@@ -11,8 +11,11 @@ use heddle_core::git_projection_io_plan::{
     ExportedRefSummaryFact, export_commits_summary, exported_refs_summary,
 };
 use heddle_git_projection::{
-    GitProjection, git_core::clone_url_to_bare, git_export::export_all,
-    git_ingest::import_git_history, git_util::ExportedRef,
+    GitProjection,
+    git_core::clone_url_to_bare,
+    git_export::export_all,
+    git_ingest::import_git_history,
+    git_util::{ExportStats, ExportedRef},
 };
 use ingest::{ImportOptions, LossyImportEntry};
 use objects::object::{StateId, ThreadName};
@@ -166,6 +169,57 @@ fn exported_refs_summary_for_cli(refs: &[ExportedRef]) -> String {
         })
         .collect();
     exported_refs_summary(&facts)
+}
+
+/// Print the refs an export could NOT publish, one per line with the reason.
+/// No-op for a clean export.
+///
+/// Rendered ALONGSIDE the exported-refs lines, never instead of them
+/// (heddle#261): a partial export still did real work, and an operator who
+/// sees only the failure cannot tell what state the mirror is now in.
+fn print_failed_ref_exports(stats: &ExportStats) {
+    if stats.failed_refs.is_empty() {
+        return;
+    }
+    println!(
+        "{} {} diverged; left untouched (heddle did not overwrite)",
+        style::warn_marker(),
+        style::count(stats.failed_refs.len(), "ref"),
+    );
+    for (name, reason) in &stats.failed_refs {
+        println!("  {}: {reason}", style::bold(name));
+    }
+}
+
+/// `"1 ref"` / `"2 refs"` without terminal styling -- this text also lands in
+/// JSON error envelopes and logs, where `style::count`'s escapes do not belong.
+fn plain_count(value: usize, noun: &str) -> String {
+    let suffix = if value == 1 { "" } else { "s" };
+    format!("{value} {noun}{suffix}")
+}
+
+/// The error that makes a partially-failed export exit non-zero, or `None`
+/// when every ref was published.
+///
+/// The export itself returns `Ok` -- it deliberately completes every ref it
+/// can before reporting -- so the non-zero exit is applied here, at the command
+/// boundary, once the whole picture is known.
+fn failed_ref_export_error(stats: &ExportStats) -> Option<anyhow::Error> {
+    if stats.failed_refs.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = stats
+        .failed_refs
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let exported = stats.branches.len() + stats.tags.len();
+    Some(anyhow!(
+        "exported {}, {} diverged (concurrent git-side update): {}",
+        plain_count(exported, "ref"),
+        stats.failed_refs.len(),
+        names.join(", "),
+    ))
 }
 
 /// JSON projection of exported refs: `[{"name":..,"tip":<full sha>}]`.
@@ -343,19 +397,25 @@ fn run_git_export(
 ) -> Result<()> {
     let destination = destination.ok_or_else(|| anyhow!(missing_destination_message))?;
     let stats = bridge.export_to_path(&destination)?;
+    let failure = failed_ref_export_error(&stats);
 
     if should_output_json(cli, Some(repo.config())) {
-        let out = serde_json::json!({
-            "output_kind": "export_git",
-            "states_exported": stats.states_exported,
-            "commits_total": stats.commits_total,
-            "threads_synced": stats.threads_synced,
-            "markers_synced": stats.markers_synced,
-            "branches": exported_refs_json(&stats.branches),
-            "tags": exported_refs_json(&stats.tags),
-            "destination": destination.display().to_string(),
-        });
-        println!("{out}");
+        // A partial export leaves through the error envelope below instead, so
+        // a machine consumer is never handed a success payload for a run that
+        // could not publish every ref.
+        if failure.is_none() {
+            let out = serde_json::json!({
+                "output_kind": "export_git",
+                "states_exported": stats.states_exported,
+                "commits_total": stats.commits_total,
+                "threads_synced": stats.threads_synced,
+                "markers_synced": stats.markers_synced,
+                "branches": exported_refs_json(&stats.branches),
+                "tags": exported_refs_json(&stats.tags),
+                "destination": destination.display().to_string(),
+            });
+            println!("{out}");
+        }
     } else {
         println!(
             "{} exported to {}",
@@ -377,8 +437,12 @@ fn run_git_export(
             "  {}",
             style::field("tags", &exported_refs_summary_for_cli(&stats.tags))
         );
+        print_failed_ref_exports(&stats);
     }
-    Ok(())
+    match failure {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -542,11 +606,16 @@ fn run_git_sync(
         recovery_commands: trust.recovery_commands.clone(),
         trust,
     };
+    let failure = failed_ref_export_error(&export_stats);
     if should_output_json(cli, Some(repo.config())) {
-        write_full_command_json(
-            &sync_output,
-            NextActionValidationContext::new(command_path, repo.capability()),
-        )?;
+        // See `run_git_export`: a partial run reports through the error
+        // envelope rather than a success payload.
+        if failure.is_none() {
+            write_full_command_json(
+                &sync_output,
+                NextActionValidationContext::new(command_path, repo.capability()),
+            )?;
+        }
     } else {
         println!("{} synced Git overlay", style::ok_marker());
         println!(
@@ -599,8 +668,12 @@ fn run_git_sync(
             println!();
             print_next(&sync_output.recommended_action);
         }
+        print_failed_ref_exports(&export_stats);
     }
-    Ok(())
+    match failure {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 #[cfg(feature = "ingest")]

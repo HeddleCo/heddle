@@ -1,6 +1,9 @@
 [workspace]
 members = [
     "crates/cli",
+    "crates/cli-args",
+    "crates/cli-contract",
+    "crates/cli-render",
     "crates/cli-shared",
     "crates/client",
     "crates/core",

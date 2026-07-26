@@ -15,7 +15,7 @@ use chrono::Utc;
 use objects::{
     HeddleError,
     error::Result,
-    object::{Principal, State, ThreadName},
+    object::{Principal, State, ThreadName, Tree},
     store::{ActorPresence, ActorPresenceStatus, ActorPresenceStore},
     worktree::{WorktreeStatus, build_worktree_ignore},
 };
@@ -204,6 +204,7 @@ pub struct StatusReport {
     pub state: Option<StateInfo>,
     pub git_checkpoint: Option<GitCheckpointInfo>,
     pub changes: ChangesInfo,
+    pub submodules: Vec<SubmoduleInfo>,
     #[serde(default)]
     pub materialized_threads: Vec<MaterializedThreadInfo>,
     #[serde(skip)]
@@ -1578,6 +1579,95 @@ pub struct GitCheckpointInfo {
     pub committed_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct SubmoduleInfo {
+    pub path: String,
+    pub commit: String,
+}
+
+fn collect_status_submodules(
+    repo: &Repository,
+    state: Option<&State>,
+) -> Result<Vec<SubmoduleInfo>> {
+    let mut submodules = Vec::new();
+    if let Some(state) = state
+        && !is_synthetic_root(state)
+    {
+        let tree = repo.require_tree(&state.tree)?;
+        collect_tree_submodules(repo, &tree, "", &mut submodules)?;
+    } else if let Some(git) = repo.git_overlay_sley_repository()? {
+        let head = git.head_state().map_err(|error| {
+            HeddleError::Config(format!(
+                "read Git HEAD while collecting submodules: {error}"
+            ))
+        })?;
+        if let Some(commit_oid) = head.oid() {
+            let commit = git.read_commit(&commit_oid).map_err(|error| {
+                HeddleError::Config(format!(
+                    "read Git commit {commit_oid} while collecting submodules: {error}"
+                ))
+            })?;
+            collect_git_tree_submodules(&git, commit.tree, "", &mut submodules)?;
+        }
+    }
+    submodules.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(submodules)
+}
+
+fn collect_tree_submodules(
+    repo: &Repository,
+    tree: &Tree,
+    prefix: &str,
+    submodules: &mut Vec<SubmoduleInfo>,
+) -> Result<()> {
+    for entry in tree.entries() {
+        let path = format!("{prefix}{}", entry.name());
+        if let Some(target) = entry.gitlink_target() {
+            submodules.push(SubmoduleInfo {
+                path,
+                commit: target.to_string(),
+            });
+        } else if let Some(hash) = entry.tree_hash() {
+            let subtree = repo.require_tree(&hash)?;
+            collect_tree_submodules(repo, &subtree, &format!("{path}/"), submodules)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_git_tree_submodules(
+    git: &SleyRepository,
+    tree_oid: sley::ObjectId,
+    prefix: &str,
+    submodules: &mut Vec<SubmoduleInfo>,
+) -> Result<()> {
+    let tree = git.read_tree(&tree_oid).map_err(|error| {
+        HeddleError::Config(format!(
+            "read Git tree {tree_oid} while collecting submodules: {error}"
+        ))
+    })?;
+    for entry in tree.entries {
+        if !matches!(entry.mode, 0o040000 | 0o160000) {
+            continue;
+        }
+        let Ok(name) = String::from_utf8(entry.name.as_bytes().to_vec()) else {
+            continue;
+        };
+        let path = format!("{prefix}{name}");
+        match entry.mode {
+            0o040000 => {
+                collect_git_tree_submodules(git, entry.oid, &format!("{path}/"), submodules)?;
+            }
+            0o160000 => submodules.push(SubmoduleInfo {
+                path,
+                commit: entry.oid.to_string(),
+            }),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct ChangesInfo {
     pub modified: Vec<String>,
@@ -2082,6 +2172,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
             },
         }));
     }
+    let submodules = collect_status_submodules(repo, current_state.as_ref())?;
 
     let thread_summary_start = Instant::now();
     let track_name = repo.current_lane()?;
@@ -2278,6 +2369,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         state: state_info,
         git_checkpoint,
         changes,
+        submodules,
         materialized_threads,
         profile: StatusProfile::default(),
     };
@@ -2423,6 +2515,7 @@ fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
         state: None,
         git_checkpoint: None,
         changes: input.changes,
+        submodules: Vec::new(),
         materialized_threads: assess_materialized_threads(input.repo),
         profile: input.profile,
     }
