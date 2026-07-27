@@ -17,10 +17,7 @@ use super::{
 use crate::{
     fs_atomic::sync_directory,
     object::{Blob, ContentHash, State, StateId, Tree},
-    store::{
-        Result,
-        pack::{PackManager, PackObjectId},
-    },
+    store::{Result, SnapshotPackManager, pack::PackObjectId},
 };
 
 const RECENT_BLOB_CACHE_CAPACITY: usize = 2_048;
@@ -234,7 +231,7 @@ where
 pub struct FsStore {
     pub(super) root: PathBuf,
     pub(super) compression: CompressionConfig,
-    pack_manager: RwLock<PackManager>,
+    pack_manager: RwLock<SnapshotPackManager>,
     pub(super) recent_blobs: RwLock<RecentObjectCache<ContentHash, Blob>>,
     pub(super) recent_trees: RwLock<RecentObjectCache<ContentHash, Tree>>,
     pub(super) recent_states: RwLock<RecentObjectCache<StateId, State>>,
@@ -280,7 +277,7 @@ impl FsStore {
     /// The path should be the `.heddle` directory.
     pub fn new(root: impl AsRef<Path>) -> Self {
         let root = root.as_ref().to_path_buf();
-        let pack_manager = PackManager::new(packs_dir(&root));
+        let pack_manager = SnapshotPackManager::new(packs_dir(&root));
         Self {
             root,
             compression: CompressionConfig::default(),
@@ -307,7 +304,7 @@ impl FsStore {
     /// Create a new filesystem store with custom compression settings.
     pub fn with_compression(root: impl AsRef<Path>, compression: CompressionConfig) -> Self {
         let root = root.as_ref().to_path_buf();
-        let pack_manager = PackManager::new(packs_dir(&root));
+        let pack_manager = SnapshotPackManager::new(packs_dir(&root));
         Self {
             root,
             compression,
@@ -452,7 +449,7 @@ impl FsStore {
     }
 
     /// Get the pack manager for pack operations.
-    pub fn pack_manager(&self) -> &RwLock<PackManager> {
+    pub fn pack_manager(&self) -> &RwLock<SnapshotPackManager> {
         &self.pack_manager
     }
 

@@ -16,6 +16,7 @@ pub mod liveness;
 pub mod memory;
 pub use heddle_pack::store::pack;
 pub mod shallow;
+mod snapshot_commit;
 pub mod source;
 pub mod store_compliance;
 pub mod writer_lease;
@@ -42,6 +43,8 @@ pub use liveness::{
 pub use memory::InMemoryStore;
 pub use pack::{PackBuilder, PackObjectId, PackReader, PackStats, StreamingPackBuilder, SyncData};
 pub use shallow::ShallowInfo;
+#[doc(hidden)]
+pub use snapshot_commit::SnapshotPackManager;
 #[cfg(feature = "async-source")]
 pub use source::AsyncObjectSource;
 pub use source::ObjectSource;
