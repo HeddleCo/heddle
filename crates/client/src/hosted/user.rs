@@ -1,14 +1,14 @@
 use api::heddle::api::v1alpha1::{
     ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, CheckMergeEligibilityRequest,
-    CheckMergeEligibilityResponse, CreateGrantRequest, CreateRepositoryRequest,
-    CreateServiceAccountRequest, DeleteGrantRequest, DeleteNamespaceRequest,
-    DeleteRepositoryRequest, GetCurrentUserNamespaceRequest, GrantSupportAccessRequest,
-    GrantTargetRef, IssueServiceAccountCredentialRequest, IssuedCredentialResponse,
-    ListGrantsRequest, ListSpoolsRequest, ListSupportAccessGrantsRequest,
-    ListThreadApprovalsRequest, MonorepoNode, ResolveMonorepoRequest, RevokeApprovalRequest,
-    RevokeSupportAccessRequest, ServiceAccountResponse, SpoolSummary, SupportAccessGrant,
-    ThreadApproval, UpdateGrantRequest, UpdateNamespaceRequest, UpdateRepositoryRequest,
-    grant_target_ref::Target as GrantTargetKind,
+    CheckMergeEligibilityResponse, CreateGrantRequest, CreateInvitationRequest,
+    CreateRepositoryRequest, CreateServiceAccountRequest, DeleteGrantRequest,
+    DeleteNamespaceRequest, DeleteRepositoryRequest, GetCurrentUserNamespaceRequest,
+    GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
+    IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
+    ListSpoolsRequest, ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
+    ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
+    ServiceAccountResponse, SpoolSummary, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
+    UpdateNamespaceRequest, UpdateRepositoryRequest, grant_target_ref::Target as GrantTargetKind,
 };
 use wire::ProtocolError;
 
@@ -208,6 +208,29 @@ impl HostedClient {
             }
         );
         Ok(to_protocol_repository(repo))
+    }
+
+    pub async fn create_invitation(
+        &mut self,
+        email: &str,
+        namespace_path: &str,
+        role: &str,
+    ) -> Result<ProtoInvitation, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateInvitation");
+        Ok(authed_call!(
+            self,
+            create_invitation,
+            "CreateInvitation",
+            CreateInvitationRequest {
+                email: email.to_string(),
+                namespace_path: namespace_path.to_string(),
+                role: parse_hosted_role_arg(role)? as i32,
+                expires_at: None,
+                metadata: String::new(),
+                client_operation_id: operation_id.to_wire(),
+            }
+        ))
     }
 
     pub async fn update_namespace(

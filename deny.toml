@@ -50,6 +50,12 @@ ignore = [
     # proc-macro-error2 upstream.
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; transitive build-time proc-macro via biscuit-quote → biscuit-auth 6.0; no runtime exposure, no CVE. Remove when biscuit-auth drops it." },
 
+    # paste 1.0.15: unmaintained (RUSTSEC-2024-0436). Pulled transitively by
+    # Iroh's netlink discovery stack through netlink-packet-core. `paste` is a
+    # compile-time proc macro with no runtime attack surface, and the advisory
+    # does not report a vulnerability. Remove when netlink-packet-core drops it.
+    { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; transitive compile-time proc macro via Iroh netlink discovery; no runtime exposure and no vulnerability. Remove when netlink-packet-core drops it." },
+
     # quick-xml 0.26.0: unbounded namespace-declaration allocation in `NsReader`
     # → memory-exhaustion DoS (RUSTSEC-2026-0194 / -0195). Pulled ONLY via
     # inferno 0.11 → pprof 0.15 (`flamegraph` feature), which is a
@@ -158,4 +164,9 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # Temporary exact-revision API dependency while `heddle-api` 0.1.0 awaits its
 # crates.io publication. Consumer manifests pin the commit; remove this entry
 # when they move to the registry package.
-allow-git = ["https://github.com/HeddleCo/api"]
+allow-git = [
+    "https://github.com/HeddleCo/api",
+    # Native transport is pinned to an audited Iroh revision until the
+    # corresponding 1.0.2 crates.io release carries the required fixes.
+    "https://github.com/n0-computer/iroh",
+]

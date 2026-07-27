@@ -64,6 +64,7 @@ hex = "0.4"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 ignore = "0.4"
 iroh = {
+    version = "=1.0.2",
     git = "https://github.com/n0-computer/iroh.git",
     rev = "cc876c75e53171dfcaf2e5fa0b81a417904694ba",
     default-features = false,

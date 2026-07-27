@@ -86,6 +86,13 @@ impl HostedRoutes<'_> {
         HostedGrant
     );
     unary_method!(
+        create_invitation,
+        "RegistryService",
+        "CreateInvitation",
+        CreateInvitationRequest,
+        Invitation
+    );
+    unary_method!(
         create_namespace,
         "RegistryService",
         "CreateNamespace",
@@ -387,7 +394,7 @@ mod tests {
     };
 
     #[test]
-    fn shipped_native_inventory_is_42_unary_one_server_stream_and_two_bidi() {
+    fn shipped_native_inventory_is_43_unary_one_server_stream_and_two_bidi() {
         const ROUTES: &[MethodRoute] = &[
             MethodRoute::CollaborationServiceAppendTurn,
             MethodRoute::CollaborationServiceListByState,
@@ -401,6 +408,7 @@ mod tests {
             MethodRoute::IdentityServiceWaitForDeviceAuthorization,
             MethodRoute::IdentityServiceWhoAmI,
             MethodRoute::RegistryServiceCreateGrant,
+            MethodRoute::RegistryServiceCreateInvitation,
             MethodRoute::RegistryServiceCreateNamespace,
             MethodRoute::RegistryServiceCreateRepository,
             MethodRoute::RegistryServiceDeleteGrant,
@@ -444,13 +452,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(shipped.len(), 45);
+        assert_eq!(shipped.len(), 46);
         assert_eq!(
             shipped
                 .iter()
                 .filter(|method| method.streaming == StreamingShape::Unary)
                 .count(),
-            42
+            43
         );
         assert_eq!(
             shipped
