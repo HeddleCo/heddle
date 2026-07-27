@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use heddle_core::decide_harness_probe;
+use heddle_core::{HarnessKind, decide_harness_probe, detect_harness_kind};
 use wire::{TranscriptAttachmentRef, UsageTotals};
 
 use crate::attribution::clean_attribution_value;
@@ -167,6 +167,15 @@ pub(crate) fn argv_value(argv: &[String], flag: &str) -> Option<String> {
     None
 }
 
+pub(crate) fn argv_matches_harness(input: &HarnessProbeInput, expected: HarnessKind) -> bool {
+    let program = input
+        .argv
+        .as_ref()
+        .and_then(|argv| argv.first())
+        .map(String::as_str);
+    detect_harness_kind(program, &BTreeMap::new()) == expected
+}
+
 pub(crate) fn csv_paths(value: Option<&String>) -> Vec<String> {
     value
         .map(|raw| {
@@ -313,6 +322,46 @@ mod tests {
         assert_eq!(result.harness.as_deref(), Some("claude-code"));
         assert_eq!(result.provider.as_deref(), Some("anthropic"));
         assert_eq!(result.model.as_deref(), Some("claude-opus-4-7"));
+    }
+
+    #[test]
+    fn claude_code_probe_matches_only_claude_program_names() {
+        let input = |program: &str| HarnessProbeInput {
+            argv: Some(vec![program.to_string()]),
+            ..HarnessProbeInput::default()
+        };
+
+        assert!(!ClaudeCodeProbe.matches(&input(
+            "/home/u/dev/.claude/worktrees/x/target/debug/heddle"
+        )));
+        assert!(ClaudeCodeProbe.matches(&input("/usr/bin/claude")));
+        assert!(ClaudeCodeProbe.matches(&input("claude-code")));
+    }
+
+    #[test]
+    fn codex_probe_matches_only_codex_program_name() {
+        let input = |program: &str| HarnessProbeInput {
+            argv: Some(vec![program.to_string()]),
+            ..HarnessProbeInput::default()
+        };
+
+        assert!(!CodexProbe.matches(&input("/home/u/dev/codex/worktrees/x/target/debug/heddle")));
+        assert!(CodexProbe.matches(&input("/usr/bin/codex")));
+        assert!(CodexProbe.matches(&input("codex")));
+    }
+
+    #[test]
+    fn opencode_probe_matches_only_opencode_program_name() {
+        let input = |program: &str| HarnessProbeInput {
+            argv: Some(vec![program.to_string()]),
+            ..HarnessProbeInput::default()
+        };
+
+        assert!(!OpenCodeProbe.matches(&input(
+            "/home/u/dev/opencode/worktrees/x/target/debug/heddle"
+        )));
+        assert!(OpenCodeProbe.matches(&input("/usr/bin/opencode")));
+        assert!(OpenCodeProbe.matches(&input("opencode")));
     }
 
     #[test]

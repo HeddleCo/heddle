@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::Result;
+use heddle_core::HarnessKind;
 
 use super::{
     HarnessActorProbe, HarnessAttachHints, HarnessProbeInput, HarnessProbeResult, ProbeSource,
-    argv_value, attribution_env_hint, csv_paths, parse_u64,
+    argv_matches_harness, argv_value, attribution_env_hint, csv_paths, parse_u64,
 };
 
 pub(crate) struct ClaudeCodeProbe;
@@ -18,11 +19,7 @@ impl HarnessActorProbe for ClaudeCodeProbe {
             || input.probe_metadata.contains_key("session_id")
             || input.probe_metadata.contains_key("agent_id")
             || input.env_hints.contains_key("CLAUDECODE")
-            || input
-                .argv
-                .as_ref()
-                .and_then(|argv| argv.first())
-                .is_some_and(|program| program.to_ascii_lowercase().contains("claude"))
+            || argv_matches_harness(input, HarnessKind::ClaudeCode)
     }
 
     fn probe(&self, input: &HarnessProbeInput) -> Result<HarnessProbeResult> {

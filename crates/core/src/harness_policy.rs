@@ -11,6 +11,7 @@
 //! the returned decision.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Harness kind / fingerprint
@@ -92,22 +93,27 @@ pub fn detect_harness_kind(
     program: Option<&str>,
     env_hints: &BTreeMap<String, String>,
 ) -> HarnessKind {
-    let program = program.map(|p| p.to_ascii_lowercase()).unwrap_or_default();
+    let program = program
+        .and_then(|program| Path::new(program).file_name())
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let program = program.strip_suffix(".exe").unwrap_or(&program);
 
-    if program.contains("claude")
+    if matches!(program, "claude" | "claude-code")
         || env_hints.contains_key("CLAUDECODE")
         || env_hints.contains_key("CLAUDE_CODE")
     {
         HarnessKind::ClaudeCode
-    } else if program.contains("codex")
+    } else if program == "codex"
         || env_hints.contains_key("CODEX_SANDBOX")
         || env_hints.contains_key("CODEX_THREAD_ID")
         || env_hints.contains_key("CODEX_CI")
     {
         HarnessKind::Codex
-    } else if program.contains("opencode") || env_hints.contains_key("OPENCODE_CLIENT") {
+    } else if program == "opencode" || env_hints.contains_key("OPENCODE_CLIENT") {
         HarnessKind::OpenCode
-    } else if program.contains("aider") {
+    } else if program == "aider" {
         HarnessKind::Aider
     } else {
         HarnessKind::Unknown
@@ -604,6 +610,39 @@ mod tests {
         assert_eq!(
             detect_harness_kind(Some("bash"), &BTreeMap::new()),
             HarnessKind::Unknown
+        );
+    }
+
+    #[test]
+    fn detect_harness_kind_matches_program_file_name_only() {
+        let no_env = BTreeMap::new();
+
+        assert_eq!(
+            detect_harness_kind(
+                Some("/home/u/dev/.claude/worktrees/x/target/debug/heddle"),
+                &no_env,
+            ),
+            HarnessKind::Unknown
+        );
+        assert_eq!(
+            detect_harness_kind(Some("/usr/bin/claude"), &no_env),
+            HarnessKind::ClaudeCode
+        );
+        assert_eq!(
+            detect_harness_kind(Some("claude-code"), &no_env),
+            HarnessKind::ClaudeCode
+        );
+        assert_eq!(
+            detect_harness_kind(Some("/home/u/dev/codex/target/debug/heddle"), &no_env),
+            HarnessKind::Unknown
+        );
+        assert_eq!(
+            detect_harness_kind(Some("/usr/bin/codex"), &no_env),
+            HarnessKind::Codex
+        );
+        assert_eq!(
+            detect_harness_kind(Some("CODEX.EXE"), &no_env),
+            HarnessKind::Codex
         );
     }
 
