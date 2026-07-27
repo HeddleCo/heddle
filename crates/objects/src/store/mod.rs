@@ -16,6 +16,7 @@ pub mod liveness;
 pub mod memory;
 pub use heddle_pack::store::pack;
 pub mod shallow;
+mod snapshot_commit;
 pub mod source;
 pub mod store_compliance;
 pub mod writer_lease;
