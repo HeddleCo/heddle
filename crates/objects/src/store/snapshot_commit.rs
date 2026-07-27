@@ -1,5 +1,45 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{ops::Deref, path::PathBuf};
+
+use super::{Result, pack::PackManager};
+
+/// Objects-owned seam around the format-only pack manager.
+///
+/// Snapshot commit decoding and indexing can live here without making
+/// `heddle-pack` depend on objects-owned types or serializers.
+#[doc(hidden)]
+pub struct SnapshotPackManager {
+    format: PackManager,
+}
+
+impl SnapshotPackManager {
+    /// Open the format manager for `packs_dir`.
+    pub fn new(packs_dir: PathBuf) -> Self {
+        Self {
+            format: PackManager::new(packs_dir),
+        }
+    }
+
+    /// Reload pack-format state and any objects-owned indexes layered on it.
+    pub fn reload(&mut self) -> Result<()> {
+        self.format.reload()
+    }
+
+    /// Reload both layers when a complete pack/index pair appeared on disk.
+    pub fn reload_if_disk_grew(&mut self) -> Result<bool> {
+        self.format.reload_if_disk_grew()
+    }
+}
+
+impl Deref for SnapshotPackManager {
+    type Target = PackManager;
+
+    fn deref(&self) -> &Self::Target {
+        &self.format
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

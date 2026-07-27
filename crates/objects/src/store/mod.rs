@@ -43,6 +43,8 @@ pub use liveness::{
 pub use memory::InMemoryStore;
 pub use pack::{PackBuilder, PackObjectId, PackReader, PackStats, StreamingPackBuilder, SyncData};
 pub use shallow::ShallowInfo;
+#[doc(hidden)]
+pub use snapshot_commit::SnapshotPackManager;
 #[cfg(feature = "async-source")]
 pub use source::AsyncObjectSource;
 pub use source::ObjectSource;

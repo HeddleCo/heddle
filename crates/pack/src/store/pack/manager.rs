@@ -16,6 +16,9 @@ use crate::{
     },
 };
 
+/// Format-only coordinator for loaded pack and index files.
+///
+/// Object-domain indexes belong in a wrapper owned by the consuming crate.
 pub struct PackManager {
     packs_dir: PathBuf,
     packs: Vec<CachedPack>,
