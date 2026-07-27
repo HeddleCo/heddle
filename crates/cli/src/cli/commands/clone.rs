@@ -1593,6 +1593,9 @@ async fn clone_network(
         .await?;
     if result.success {
         let final_state = result.final_state;
+        if let Some(state) = final_state {
+            local_repo.set_thread_recorded(&ThreadName::new(&track_name), &state)?;
+        }
         // Lazy clone: persist the hydrator metadata so future
         // `Repository::open` calls (in any process) can reconstruct
         // the on-read hydrator. Without this, lazy clones would only

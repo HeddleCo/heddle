@@ -2,11 +2,7 @@
 //! Heddle core domain modules extracted from the monolith.
 
 pub mod fault_inject;
-pub mod fs_atomic;
-pub mod fs_clone;
-pub mod fs_ops;
 pub mod legacy;
-pub mod lock;
 pub mod observe;
 pub mod progress;
 pub mod store;
@@ -15,6 +11,7 @@ pub mod util;
 pub mod worktree;
 
 pub use error::{HeddleError, RecoveryDetails};
+pub use heddle_fs_prims::{fs_atomic, fs_clone, fs_ops, lock};
 pub use heddle_object_model::{error, object};
 pub use observe::{
     CollectingWarnings, NoopProgress, NoopWarnings, ProgressEvent, ProgressSink, TaskId, Warning,

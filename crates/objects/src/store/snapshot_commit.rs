@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    ops::Deref,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     object::{ContentHash, StateId},
-    store::{HeddleError, Result, pack::PackObjectId},
+    store::{
+        HeddleError, Result,
+        pack::{ObjectType, PackManager, PackObjectId, PackReader},
+    },
 };
 
 pub const SNAPSHOT_COMMIT_ARTIFACT_SCHEMA: u32 = 1;
@@ -63,5 +70,285 @@ impl SnapshotCommitArtifact {
             ));
         }
         Ok(())
+    }
+}
+
+/// Objects-owned seam around the format-only pack manager.
+///
+/// Snapshot commit decoding and indexing live here so `heddle-pack` remains
+/// independent of objects-owned types and serializers.
+#[doc(hidden)]
+pub struct SnapshotPackManager {
+    format: PackManager,
+    snapshot_commits: Vec<SnapshotCommitDescriptor>,
+    snapshot_commits_by_state: HashMap<StateId, SnapshotCommitDescriptor>,
+    snapshot_commit_index_error: Option<String>,
+}
+
+impl SnapshotPackManager {
+    /// Open the format manager and build the objects-owned snapshot index.
+    pub fn new(packs_dir: PathBuf) -> Self {
+        let format = PackManager::new(packs_dir);
+        let ((snapshot_commits, snapshot_commits_by_state), snapshot_commit_index_error) =
+            match Self::index_snapshot_commits(&format) {
+                Ok(index) => (index, None),
+                Err(error) => ((Vec::new(), HashMap::new()), Some(error.to_string())),
+            };
+        Self {
+            format,
+            snapshot_commits,
+            snapshot_commits_by_state,
+            snapshot_commit_index_error,
+        }
+    }
+
+    /// Reload pack-format state and the objects-owned snapshot index.
+    pub fn reload(&mut self) -> Result<()> {
+        let mut format = PackManager::new(self.format.packs_dir().to_path_buf());
+        format.reload()?;
+        let (snapshot_commits, snapshot_commits_by_state) = Self::index_snapshot_commits(&format)?;
+        self.format = format;
+        self.snapshot_commits = snapshot_commits;
+        self.snapshot_commits_by_state = snapshot_commits_by_state;
+        self.snapshot_commit_index_error = None;
+        Ok(())
+    }
+
+    /// Reload both layers when a complete pack/index pair appeared on disk.
+    pub fn reload_if_disk_grew(&mut self) -> Result<bool> {
+        if !self.format.needs_reload()? {
+            return Ok(false);
+        }
+        self.reload()?;
+        Ok(true)
+    }
+
+    pub(crate) fn add_pack(&mut self, pack_path: PathBuf, index_path: PathBuf) -> Result<()> {
+        if self
+            .format
+            .pack_file_paths()
+            .iter()
+            .any(|(loaded_path, _)| *loaded_path == pack_path)
+        {
+            return Ok(());
+        }
+        let descriptors = Self::snapshot_commit_descriptors_for_pack(&pack_path, &index_path)?;
+        self.format.add_pack(pack_path, index_path)?;
+        for descriptor in descriptors {
+            self.snapshot_commits_by_state
+                .insert(descriptor.artifact.state, descriptor.clone());
+            self.snapshot_commits.push(descriptor);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn snapshot_commit_descriptors(&self) -> Result<Vec<SnapshotCommitDescriptor>> {
+        self.ensure_snapshot_commit_index_valid()?;
+        Ok(self.snapshot_commits.clone())
+    }
+
+    pub(crate) fn snapshot_commit_descriptor_for_state(
+        &self,
+        state: &StateId,
+    ) -> Result<Option<SnapshotCommitDescriptor>> {
+        self.ensure_snapshot_commit_index_valid()?;
+        Ok(self.snapshot_commits_by_state.get(state).cloned())
+    }
+
+    fn ensure_snapshot_commit_index_valid(&self) -> Result<()> {
+        if let Some(error) = &self.snapshot_commit_index_error {
+            return Err(HeddleError::InvalidObject(error.clone()));
+        }
+        Ok(())
+    }
+
+    fn index_snapshot_commits(
+        format: &PackManager,
+    ) -> Result<(
+        Vec<SnapshotCommitDescriptor>,
+        HashMap<StateId, SnapshotCommitDescriptor>,
+    )> {
+        let mut descriptors = Vec::new();
+        let mut by_state = HashMap::new();
+        for (pack_path, index_path) in format.pack_file_paths() {
+            for descriptor in Self::snapshot_commit_descriptors_for_pack(pack_path, index_path)? {
+                by_state.insert(descriptor.artifact.state, descriptor.clone());
+                descriptors.push(descriptor);
+            }
+        }
+        Ok((descriptors, by_state))
+    }
+
+    fn snapshot_commit_descriptors_for_pack(
+        pack_path: &Path,
+        index_path: &Path,
+    ) -> Result<Vec<SnapshotCommitDescriptor>> {
+        let reader = PackReader::open(pack_path, index_path)?;
+        let mut descriptors = Vec::new();
+        let object_ids = reader.list_ids();
+        for id in &object_ids {
+            let Some((ObjectType::SnapshotCommit, bytes)) = reader.get_object(id)? else {
+                continue;
+            };
+            let PackObjectId::Hash(expected) = id else {
+                continue;
+            };
+            let artifact: SnapshotCommitArtifact = rmp_serde::from_slice(&bytes)?;
+            artifact.validate()?;
+            if artifact.id() != *expected {
+                return Err(HeddleError::InvalidObject(
+                    "snapshot commit artifact address mismatch".to_string(),
+                ));
+            }
+            if !snapshot_commit_marker_path(pack_path, expected).exists() {
+                continue;
+            }
+            descriptors.push(SnapshotCommitDescriptor {
+                artifact,
+                pack_name: pack_path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                pack_path: pack_path.to_path_buf(),
+                object_ids: object_ids.clone(),
+            });
+        }
+        Ok(descriptors)
+    }
+}
+
+impl Deref for SnapshotPackManager {
+    type Target = PackManager;
+
+    fn deref(&self) -> &Self::Target {
+        &self.format
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::Instant,
+    };
+
+    use heddle_format::compression::CompressionConfig;
+    use tempfile::TempDir;
+
+    use super::{
+        SNAPSHOT_COMMIT_ARTIFACT_SCHEMA, SnapshotCommitArtifact, SnapshotPackManager,
+        snapshot_commit_marker_path,
+    };
+    use crate::{
+        object::{ContentHash, StateId},
+        store::pack::{ObjectType, PackBuilder, PackManager},
+    };
+
+    fn write_snapshot_pack(root: &Path, ordinal: usize) -> (PathBuf, PathBuf, StateId) {
+        let state = StateId::from_bytes([u8::try_from(ordinal + 1).unwrap(); 32]);
+        let artifact = SnapshotCommitArtifact {
+            schema: SNAPSHOT_COMMIT_ARTIFACT_SCHEMA,
+            transaction_id: format!("tx-{ordinal}"),
+            scope: "snapshot".to_string(),
+            base_oplog_head_id: ordinal as u64,
+            state,
+            encoded_records: vec![vec![ordinal as u8]],
+        };
+        let artifact_id = artifact.id();
+        let mut builder = PackBuilder::new(CompressionConfig {
+            max_delta_size: 0,
+            ..CompressionConfig::default()
+        });
+        builder.add(
+            artifact_id,
+            ObjectType::SnapshotCommit,
+            rmp_serde::to_vec_named(&artifact).unwrap(),
+        );
+        let (pack_data, index_data, _) = builder.build().unwrap();
+        let pack_path = root.join(format!("snapshot-{ordinal:03}.pack"));
+        let index_path = root.join(format!("snapshot-{ordinal:03}.idx"));
+        fs::write(&pack_path, pack_data).unwrap();
+        fs::write(&index_path, index_data).unwrap();
+        fs::write(snapshot_commit_marker_path(&pack_path, &artifact_id), []).unwrap();
+        (pack_path, index_path, state)
+    }
+
+    #[test]
+    fn objects_owned_pack_wrapper_preserves_pack_bytes_and_reads() {
+        let temp = TempDir::new().unwrap();
+        let packs_dir = temp.path().join("packs");
+        fs::create_dir_all(&packs_dir).unwrap();
+
+        let payload = b"issue-1122-pack-snapshot-seam".to_vec();
+        let hash = ContentHash::compute(&payload);
+        let mut builder = PackBuilder::new(CompressionConfig::disabled());
+        builder.add(hash, ObjectType::Blob, payload.clone());
+        let (pack_data, index_data, _) = builder.build().unwrap();
+
+        assert_eq!(
+            blake3::hash(&pack_data).to_hex().as_str(),
+            "332afc6e60a35973800c50e7599bcb41ed055b730d41acfc7f9f1cd574408ccd",
+            "pack bytes must match the pre-refactor main baseline"
+        );
+        assert_eq!(
+            blake3::hash(&index_data).to_hex().as_str(),
+            "5baf8125e8db75055da475cc41f4bcc6ec90d0452c266adf3ebc440cce38b32b",
+            "index bytes must match the pre-refactor main baseline"
+        );
+
+        let pack_path = packs_dir.join("fixture.pack");
+        let index_path = packs_dir.join("fixture.idx");
+        fs::write(&pack_path, &pack_data).unwrap();
+        fs::write(&index_path, &index_data).unwrap();
+
+        let format_manager = PackManager::new(packs_dir.clone());
+        let mut snapshot_manager = SnapshotPackManager::new(packs_dir);
+        assert_eq!(
+            snapshot_manager.get_hashed_object(&hash).unwrap(),
+            format_manager.get_hashed_object(&hash).unwrap()
+        );
+        assert_eq!(
+            snapshot_manager.get_hashed_object(&hash).unwrap(),
+            Some((ObjectType::Blob, payload))
+        );
+
+        snapshot_manager.reload().unwrap();
+        assert_eq!(fs::read(pack_path).unwrap(), pack_data);
+        assert_eq!(fs::read(index_path).unwrap(), index_data);
+    }
+
+    #[test]
+    fn repeated_state_descriptor_lookup_stays_on_incremental_index_after_many_snapshots() {
+        let temp = TempDir::new().unwrap();
+        let mut manager = SnapshotPackManager::new(temp.path().to_path_buf());
+        let mut states = Vec::new();
+        for ordinal in 0..128 {
+            let (pack_path, index_path, state) = write_snapshot_pack(temp.path(), ordinal);
+            manager.add_pack(pack_path, index_path).unwrap();
+            states.push(state);
+        }
+        assert_eq!(manager.pack_count(), 128);
+        assert_eq!(manager.snapshot_commit_descriptors().unwrap().len(), 128);
+
+        let started = Instant::now();
+        for iteration in 0..100_000 {
+            let state = states[iteration % states.len()];
+            let descriptor = manager
+                .snapshot_commit_descriptor_for_state(&state)
+                .unwrap()
+                .expect("every incrementally installed snapshot is indexed");
+            assert_eq!(descriptor.artifact.state, state);
+        }
+        eprintln!(
+            "100k cached snapshot descriptor lookups across 128 packs: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            manager.pack_count(),
+            128,
+            "lookup must not reload the pack set"
+        );
     }
 }

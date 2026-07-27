@@ -1430,11 +1430,6 @@ impl HostedClient {
                         }
 
                         let metadata_start = Instant::now();
-                        if let Some(local_thread) = options.local_thread
-                            && let Some(state) = final_state
-                        {
-                            repo.set_thread_recorded(&ThreadName::from(local_thread), &state)?;
-                        }
                         if let Some(state) = final_state
                             && allow_partial_fetch
                         {

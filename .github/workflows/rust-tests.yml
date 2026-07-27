@@ -190,12 +190,13 @@ jobs:
           echo "coverage=false" >> "$GITHUB_OUTPUT"
 
           # mount: use the transitive mount-relevant path set (mount → repo →
-          # {crypto, oplog, wire, objects, refs} → optional runtime-bridge,
+          # {crypto, fs-prims, oplog, wire, objects, refs} → optional
+          # runtime-bridge,
           # plus the compare script, the workflow, and shared workspace
           # inputs) so mount adapters and their read-path dependencies trigger
           # the kernel adapter checks.
           if printf '%s\n' "$diff_output" | grep -E \
-              '^(crates/(mount|object-model|objects|repo|refs|oplog|crypto|wire|runtime-bridge)/|\.github/workflows/rust-tests\.yml|Cargo\.lock$|Cargo\.toml$)' \
+              '^(crates/(mount|fs-prims|object-model|objects|pack|repo|refs|oplog|crypto|wire|runtime-bridge)/|\.github/workflows/rust-tests\.yml|Cargo\.lock$|Cargo\.toml$)' \
               > /dev/null; then
             echo "mount=true" >> "$GITHUB_OUTPUT"
           else

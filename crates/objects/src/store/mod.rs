@@ -14,7 +14,7 @@ pub mod fs;
 pub mod liveness;
 #[cfg(any(test, feature = "memory-backend"))]
 pub mod memory;
-pub mod pack;
+pub use heddle_pack::store::pack;
 pub mod shallow;
 mod snapshot_commit;
 pub mod source;
@@ -46,6 +46,7 @@ pub use shallow::ShallowInfo;
 #[doc(hidden)]
 pub use snapshot_commit::{
     SNAPSHOT_COMMIT_ARTIFACT_SCHEMA, SnapshotCommitArtifact, SnapshotCommitDescriptor,
+    SnapshotPackManager,
 };
 #[cfg(feature = "async-source")]
 pub use source::AsyncObjectSource;

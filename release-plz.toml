@@ -16,6 +16,18 @@ name = "heddle-format"
 release = true
 
 [[package]]
+name = "heddle-object-model"
+release = true
+
+[[package]]
+name = "heddle-fs-prims"
+release = true
+
+[[package]]
+name = "heddle-pack"
+release = true
+
+[[package]]
 name = "heddle-objects"
 release = true
 

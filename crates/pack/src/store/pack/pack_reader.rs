@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pack reader for extracting objects from packfiles.
 
-use std::{collections::HashSet, path::Path};
+use std::{collections::HashSet, fs::File, io::Read, path::Path};
 
 use bytes::Bytes;
 use heddle_format::delta::{DeltaDecoder, MAX_DELTA_OUTPUT_SIZE};
@@ -18,6 +18,34 @@ use crate::{
 
 const MAX_PACK_DELTA_OUTPUT_SIZE: usize = MAX_DELTA_OUTPUT_SIZE;
 const MAX_DELTA_CHAIN_DEPTH: usize = 50;
+const MMAP_THRESHOLD_BYTES: u64 = 256 * 1024;
+
+fn read_file_bytes_for_pack(path: &Path) -> Result<Bytes> {
+    let file = File::open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(Bytes::new());
+    }
+    if len >= MMAP_THRESHOLD_BYTES {
+        let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
+        if mmap.len() != checked_file_len_to_usize(len)? {
+            return Err(StoreError::InvalidObject(
+                "pack file size changed during memory mapping".to_string(),
+            ));
+        }
+        return Ok(Bytes::from_owner(mmap));
+    }
+    let mut data = Vec::with_capacity(checked_file_len_to_usize(len)?);
+    let mut reader = file;
+    reader.read_to_end(&mut data)?;
+    Ok(Bytes::from(data))
+}
+
+fn checked_file_len_to_usize(len: u64) -> Result<usize> {
+    usize::try_from(len).map_err(|_| {
+        StoreError::InvalidObject(format!("file length {len} exceeds platform limits"))
+    })
+}
 
 /// Pack reader for extracting objects.
 ///
@@ -66,7 +94,7 @@ impl PackReader<'static> {
     /// to benefit (the same threshold the loose-blob path uses for
     /// its own mmap decision); read-into-heap otherwise.
     pub fn open(pack_path: &Path, index_path: &Path) -> Result<Self> {
-        let pack_bytes = crate::store::fs::read_file_bytes_for_pack(pack_path)?;
+        let pack_bytes = read_file_bytes_for_pack(pack_path)?;
         let index_data = std::fs::read(index_path)?;
         let (_, _, content_end) = verify_container(&pack_bytes, pack_container_spec())?;
         let index = PackIndex::from_bytes(&index_data)?;

@@ -48,7 +48,7 @@
 //!   is a non-issue for the call site that motivated this builder.
 //! - **No path-grouped reordering.** Entries land in the order added.
 //! - **Output is a pack file at a path** rather than `(Vec<u8>, Vec<u8>)`.
-//!   Callers pair this with [`crate::store::ObjectStore::install_pack_from_path`]
+//!   Callers pair this with `objects::store::ObjectStore::install_pack_from_path`
 //!   which moves/installs the pack without copying it through RAM.
 //! - **Re-reads the pack at finalize** to compute the BLAKE3 trailer
 //!   checksum (the pack format hashes header+body, and the count goes
@@ -277,7 +277,8 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         durable: bool,
     ) -> Result<Self> {
         if durable {
-            crate::fs_atomic::create_dir_all_durable(&bucket_dir).map_err(StoreError::from)?;
+            heddle_fs_prims::fs_atomic::create_dir_all_durable(&bucket_dir)
+                .map_err(StoreError::from)?;
         } else {
             std::fs::create_dir_all(&bucket_dir).map_err(StoreError::from)?;
         }
@@ -687,7 +688,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         if self.durable {
             idx_file.sync_all().map_err(StoreError::from)?;
             if let Some(parent) = self.index_path.parent() {
-                crate::fs_atomic::sync_directory(parent).map_err(StoreError::from)?;
+                heddle_fs_prims::fs_atomic::sync_directory(parent).map_err(StoreError::from)?;
             }
         }
         debug_assert_eq!(
