@@ -483,7 +483,29 @@ fn validate_snapshot_artifact_records(
         .iter()
         .filter_map(|record| match record {
             OpRecord::Snapshot { new_state, .. } => Some(*new_state),
-            _ => None,
+            OpRecord::Goto { .. }
+            | OpRecord::ThreadCreate { .. }
+            | OpRecord::ThreadDelete { .. }
+            | OpRecord::ThreadUpdate { .. }
+            | OpRecord::Fork { .. }
+            | OpRecord::Collapse { .. }
+            | OpRecord::MarkerCreate { .. }
+            | OpRecord::MarkerDelete { .. }
+            | OpRecord::Checkpoint { .. }
+            | OpRecord::TransactionAbort { .. }
+            | OpRecord::EphemeralThreadCollapse { .. }
+            | OpRecord::ConflictResolved { .. }
+            | OpRecord::TransactionCommit { .. }
+            | OpRecord::Redact { .. }
+            | OpRecord::Purge { .. }
+            | OpRecord::FastForward { .. }
+            | OpRecord::GitCheckpoint { .. }
+            | OpRecord::RemoteThreadUpdate { .. }
+            | OpRecord::RemoteThreadDelete { .. }
+            | OpRecord::UndoRecoveryUpdate { .. }
+            | OpRecord::StateVisibilitySet { .. }
+            | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::HeadUpdate { .. } => None,
         })
         .collect::<Vec<_>>();
     if snapshots.as_slice() != [artifact.state] {
