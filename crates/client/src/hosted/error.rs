@@ -17,7 +17,7 @@ pub enum HostedError {
     Call {
         code: api::heddle::api::v1alpha1::CallFailureCode,
         message: String,
-        error: Option<ErrorDetail>,
+        error: Option<Box<ErrorDetail>>,
     },
     #[error("hosted protobuf decode failed: {0}")]
     Decode(#[from] prost::DecodeError),
@@ -52,7 +52,7 @@ impl From<CallFailure> for HostedError {
         Self::Call {
             code: failure.code(),
             message: failure.message,
-            error: failure.error,
+            error: failure.error.map(Box::new),
         }
     }
 }

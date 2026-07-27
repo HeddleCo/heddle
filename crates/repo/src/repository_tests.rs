@@ -806,7 +806,7 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
     let baseline = repo.snapshot(Some("baseline".to_string()), None).unwrap();
 
     fs::write(temp_dir.path().join("tracked.txt"), "pre-commit crash").unwrap();
-    let crashed = with_snapshot_fault(SnapshotFault::AfterStageBeforeAtomicCommit, || {
+    let crashed = with_snapshot_fault(SnapshotFault::StageBeforeAtomicCommit, || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = repo.snapshot(Some("must not commit".to_string()), None);
         }))
@@ -822,12 +822,11 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
     );
 
     fs::write(temp_dir.path().join("tracked.txt"), "committed once").unwrap();
-    let committed_crash =
-        with_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish, || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = repo.snapshot(Some("committed exactly once".to_string()), None);
-            }))
-        });
+    let committed_crash = with_snapshot_fault(SnapshotFault::AtomicCommitBeforeRefPublish, || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = repo.snapshot(Some("committed exactly once".to_string()), None);
+        }))
+    });
     assert!(
         committed_crash.is_err(),
         "the post-commit checkpoint must crash after the oplog append"
@@ -878,7 +877,7 @@ fn packed_structured_snapshot_remains_invisible_until_oplog_commit() {
     ]);
     let attribution = repo.get_attribution().unwrap();
 
-    let crashed = with_snapshot_fault(SnapshotFault::AfterStageBeforeAtomicCommit, || {
+    let crashed = with_snapshot_fault(SnapshotFault::StageBeforeAtomicCommit, || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = repo.snapshot_tree_with_blobs_with_attribution_profiled(
                 tree.clone(),
@@ -928,7 +927,7 @@ fn durable_snapshot_artifact_recovers_missing_oplog_and_ref_views_after_reopen()
     ]);
     let attribution = repo.get_attribution().unwrap();
 
-    let crashed = with_snapshot_fault(SnapshotFault::AfterArtifactCommitBeforeOplogView, || {
+    let crashed = with_snapshot_fault(SnapshotFault::ArtifactCommitBeforeOplogView, || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = repo.snapshot_tree_with_blobs_with_attribution_profiled(
                 tree,

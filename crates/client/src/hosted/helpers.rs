@@ -258,7 +258,7 @@ pub(super) fn hosted_to_protocol_error(error: HostedError) -> ProtocolError {
                 return ProtocolError::RemoteFailure {
                     code: remote_failure_code(code),
                     message,
-                    details: vec![remote_failure_detail(error)],
+                    details: vec![remote_failure_detail(*error)],
                 };
             }
 
@@ -510,7 +510,7 @@ mod tests {
         let error = hosted_to_protocol_error(HostedError::Call {
             code: api::heddle::api::v1alpha1::CallFailureCode::AlreadyExists,
             message: "ref changed".to_string(),
-            error: Some(ErrorDetail {
+            error: Some(Box::new(ErrorDetail {
                 reason: ErrorReason::VersionConflict as i32,
                 resource: "refs/heads/main".to_string(),
                 field: String::new(),
@@ -519,7 +519,7 @@ mod tests {
                     expected_version: "old".to_string(),
                     actual_version: "new".to_string(),
                 })),
-            }),
+            })),
         });
 
         let ProtocolError::RemoteFailure { code, details, .. } = error else {

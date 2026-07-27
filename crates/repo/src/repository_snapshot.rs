@@ -229,7 +229,7 @@ impl AtomicMutation for SnapshotMutation<'_> {
 
         objects::fault_inject::maybe_panic_at("snapshot_after_stage_before_atomic_commit");
         #[cfg(test)]
-        maybe_snapshot_fault(SnapshotFault::AfterStageBeforeAtomicCommit);
+        maybe_snapshot_fault(SnapshotFault::StageBeforeAtomicCommit);
 
         let mut records = vec![OpRecord::Snapshot {
             new_state: execution.state.id(),
@@ -561,7 +561,7 @@ impl SnapshotMutation<'_> {
         let elapsed_ms = started.elapsed().as_millis();
         objects::fault_inject::maybe_panic_at("snapshot_after_artifact_commit_before_oplog_view");
         #[cfg(test)]
-        maybe_snapshot_fault(SnapshotFault::AfterArtifactCommitBeforeOplogView);
+        maybe_snapshot_fault(SnapshotFault::ArtifactCommitBeforeOplogView);
         Ok((descriptor, elapsed_ms))
     }
 
@@ -814,9 +814,9 @@ fn snapshot_transaction_id(
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SnapshotFault {
-    AfterStageBeforeAtomicCommit,
-    AfterArtifactCommitBeforeOplogView,
-    AfterAtomicCommitBeforeRefPublish,
+    StageBeforeAtomicCommit,
+    ArtifactCommitBeforeOplogView,
+    AtomicCommitBeforeRefPublish,
 }
 
 #[cfg(test)]
@@ -1077,7 +1077,7 @@ impl Repository {
                 "snapshot_after_atomic_commit_before_ref_publish",
             );
             #[cfg(test)]
-            maybe_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish);
+            maybe_snapshot_fault(SnapshotFault::AtomicCommitBeforeRefPublish);
 
             let ref_publish_started = std::time::Instant::now();
             reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
@@ -1208,7 +1208,7 @@ impl Repository {
                 "snapshot_after_atomic_commit_before_ref_publish",
             );
             #[cfg(test)]
-            maybe_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish);
+            maybe_snapshot_fault(SnapshotFault::AtomicCommitBeforeRefPublish);
 
             let ref_publish_started = std::time::Instant::now();
             reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
