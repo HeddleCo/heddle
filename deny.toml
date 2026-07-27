@@ -50,10 +50,12 @@ ignore = [
     # proc-macro-error2 upstream.
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; transitive build-time proc-macro via biscuit-quote → biscuit-auth 6.0; no runtime exposure, no CVE. Remove when biscuit-auth drops it." },
 
-    # paste 1.0.15: unmaintained (RUSTSEC-2024-0436). Pulled transitively by
-    # Iroh's netlink discovery stack through netlink-packet-core. `paste` is a
-    # compile-time proc macro with no runtime attack surface, and the advisory
-    # does not report a vulnerability. Remove when netlink-packet-core drops it.
+    # Accepted 2026-07-27: paste 1.0.15 is unmaintained
+    # (RUSTSEC-2024-0436). Pulled transitively by Iroh's netlink discovery
+    # stack through netlink-packet-core. `paste` is a compile-time proc macro
+    # with no runtime attack surface, and the advisory does not report a
+    # vulnerability. Remove when netlink-packet-core drops it.
+    # https://github.com/HeddleCo/heddle/issues/1124
     { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; transitive compile-time proc macro via Iroh netlink discovery; no runtime exposure and no vulnerability. Remove when netlink-packet-core drops it." },
 
     # quick-xml 0.26.0: unbounded namespace-declaration allocation in `NsReader`

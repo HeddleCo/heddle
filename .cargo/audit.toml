@@ -30,4 +30,10 @@ ignore = [
     # writes SVGs). Remove when pprof/inferno bump quick-xml. (Mirrors deny.toml.)
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+
+    # Accepted 2026-07-27: paste is an unmaintained compile-time proc macro,
+    # pulled transitively by Iroh's netlink discovery stack. No vulnerability
+    # is reported. Remove when netlink-packet-core drops it.
+    # https://github.com/HeddleCo/heddle/issues/1124
+    "RUSTSEC-2024-0436",
 ]
