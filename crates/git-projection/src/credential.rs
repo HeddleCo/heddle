@@ -447,7 +447,7 @@ mod tests {
     use std::{
         fs,
         os::unix::fs::PermissionsExt as _,
-        path::Path,
+        path::{Path, PathBuf},
         time::{Duration, Instant},
     };
 
@@ -457,14 +457,47 @@ mod tests {
 
     use super::EmbeddingSafeCredentialProvider;
 
-    fn write_helper(directory: &Path, name: &str, body: &str) {
+    fn write_helper(directory: &Path, name: &str, body: &str) -> PathBuf {
         let helper = directory.join(format!("git-credential-{name}"));
         fs::write(&helper, format!("#!/bin/sh\n{body}\n")).expect("write helper");
         let mut permissions = fs::metadata(&helper)
             .expect("helper metadata")
             .permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(helper, permissions).expect("make helper executable");
+        fs::set_permissions(&helper, permissions).expect("make helper executable");
+        helper
+    }
+
+    fn assert_helper_preconditions(
+        provider: &EmbeddingSafeCredentialProvider,
+        helper: &Path,
+        search_path: &Path,
+    ) {
+        assert!(
+            helper.is_file(),
+            "credential helper does not exist: {}",
+            helper.display()
+        );
+        assert!(
+            helper
+                .metadata()
+                .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0),
+            "credential helper is not executable: {}",
+            helper.display()
+        );
+        assert_eq!(
+            helper.parent(),
+            Some(search_path),
+            "credential helper directory is not on the provider search path"
+        );
+        assert!(
+            provider
+                .external_helpers
+                .iter()
+                .any(|resolved| resolved.executable.as_deref() == Some(helper)),
+            "credential helper was not resolved from the provider search path: {}",
+            helper.display()
+        );
     }
 
     fn https_credential(host: &str) -> GitCredential {
@@ -478,26 +511,23 @@ mod tests {
     #[test]
     fn https_transport_retries_with_bare_credential_helper_without_git_dispatch() {
         let temp = TempDir::new().expect("tempdir");
-        let helper = temp.path().join("git-credential-heddle-test");
-        fs::write(
-            &helper,
-            "#!/bin/sh\ncat >/dev/null\nprintf 'username=alice\\npassword=secret\\n'\n",
-        )
-        .expect("write helper");
-        let mut permissions = fs::metadata(&helper)
-            .expect("helper metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&helper, permissions).expect("make helper executable");
+        let helper = write_helper(
+            temp.path(),
+            "heddle-test",
+            "cat >/dev/null\nprintf 'username=alice\\npassword=secret\\n'",
+        );
 
-        let config = sley::GitConfig::parse(b"[credential]\n\thelper = heddle-test\n")
-            .expect("parse config");
+        let config = sley::GitConfig::parse(
+            b"[credential]\n\tinteractive = false\n\thelper = heddle-test\n",
+        )
+        .expect("parse config");
         let mut provider = EmbeddingSafeCredentialProvider::with_search_path(
             &config,
             Some(temp.path().as_os_str()),
         );
         let remote = parse_remote_url("https://example.test/repo.git").expect("HTTPS remote");
         let mut attempts = 0;
+        assert_helper_preconditions(&provider, &helper, temp.path());
         let response = http_send_with_auth(&remote, &mut provider, |authorization| {
             attempts += 1;
             let status = if attempts == 1 {
@@ -522,25 +552,20 @@ mod tests {
     #[test]
     fn missing_bare_helper_falls_through_to_the_next_helper() {
         let temp = TempDir::new().expect("tempdir");
-        let helper = temp.path().join("git-credential-heddle-fallback");
-        fs::write(
-            &helper,
-            "#!/bin/sh\ncat >/dev/null\nprintf 'username=fallback\npassword=secret\n'\n",
-        )
-        .expect("write helper");
-        let mut permissions = fs::metadata(&helper)
-            .expect("helper metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&helper, permissions).expect("make helper executable");
+        let helper = write_helper(
+            temp.path(),
+            "heddle-fallback",
+            "cat >/dev/null\nprintf 'username=fallback\\npassword=secret\\n'",
+        );
         let config = sley::GitConfig::parse(
-            b"[credential]\n\thelper = definitely-missing-heddle-helper\n\thelper = heddle-fallback\n",
+            b"[credential]\n\tinteractive = false\n\thelper = definitely-missing-heddle-helper\n\thelper = heddle-fallback\n",
         )
         .expect("parse config");
         let mut provider = EmbeddingSafeCredentialProvider::with_search_path(
             &config,
             Some(temp.path().as_os_str()),
         );
+        assert_helper_preconditions(&provider, &helper, temp.path());
         let credential = provider
             .fill(GitCredential {
                 protocol: Some("https".to_string()),
@@ -557,34 +582,23 @@ mod tests {
     #[test]
     fn failing_bare_helper_falls_through_to_the_next_helper() {
         let temp = TempDir::new().expect("tempdir");
-        let helper = temp.path().join("git-credential-heddle-fails");
-        fs::write(&helper, "#!/bin/sh\nexit 23\n").expect("write helper");
-        let mut permissions = fs::metadata(&helper)
-            .expect("helper metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&helper, permissions).expect("make helper executable");
-
-        let fallback = temp.path().join("git-credential-heddle-good");
-        fs::write(
-            &fallback,
-            "#!/bin/sh\ncat >/dev/null\nprintf 'username=alice\npassword=secret\n'\n",
-        )
-        .expect("write fallback helper");
-        let mut permissions = fs::metadata(&fallback)
-            .expect("fallback metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&fallback, permissions).expect("make fallback executable");
+        let helper = write_helper(temp.path(), "heddle-fails", "exit 23");
+        let fallback = write_helper(
+            temp.path(),
+            "heddle-good",
+            "cat >/dev/null\nprintf 'username=alice\\npassword=secret\\n'",
+        );
 
         let config = sley::GitConfig::parse(
-            b"[credential]\n\thelper = heddle-fails\n\thelper = heddle-good\n",
+            b"[credential]\n\tinteractive = false\n\thelper = heddle-fails\n\thelper = heddle-good\n",
         )
         .expect("parse config");
         let mut provider = EmbeddingSafeCredentialProvider::with_search_path(
             &config,
             Some(temp.path().as_os_str()),
         );
+        assert_helper_preconditions(&provider, &helper, temp.path());
+        assert_helper_preconditions(&provider, &fallback, temp.path());
         let credential = provider
             .fill(GitCredential {
                 protocol: Some("https".to_string()),
@@ -601,23 +615,23 @@ mod tests {
     #[test]
     fn url_scoped_reset_runs_only_helpers_selected_for_the_request() {
         let temp = TempDir::new().expect("tempdir");
-        write_helper(
+        let global = write_helper(
             temp.path(),
             "heddle-global",
             "cat >/dev/null\nprintf 'username=global\\npassword=wrong\\n'",
         );
-        write_helper(
+        let other = write_helper(
             temp.path(),
             "heddle-other",
             "cat >/dev/null\nprintf 'username=other\\npassword=wrong\\n'",
         );
-        write_helper(
+        let scoped = write_helper(
             temp.path(),
             "heddle-scoped",
             "cat >/dev/null\nprintf 'username=scoped\\npassword=secret\\n'",
         );
         let config = sley::GitConfig::parse(
-            b"[credential]\n\thelper = heddle-global\n\
+            b"[credential]\n\tinteractive = false\n\thelper = heddle-global\n\
               [credential \"https://example.test/other\"]\n\thelper = heddle-other\n\
               [credential \"https://example.test/org\"]\n\thelper =\n\thelper = heddle-scoped\n",
         )
@@ -629,6 +643,9 @@ mod tests {
 
         let mut request = https_credential("example.test");
         request.path = Some("org/repo.git".to_string());
+        assert_helper_preconditions(&provider, &global, temp.path());
+        assert_helper_preconditions(&provider, &other, temp.path());
+        assert_helper_preconditions(&provider, &scoped, temp.path());
         let credential = provider
             .fill(request)
             .expect("scoped helper runs")
@@ -641,18 +658,18 @@ mod tests {
     #[test]
     fn oversized_streaming_helper_is_killed_before_fallback_runs() {
         let temp = TempDir::new().expect("tempdir");
-        write_helper(
+        let oversized = write_helper(
             temp.path(),
             "heddle-oversized",
             "cat >/dev/null\nwhile :; do printf '0123456789abcdef'; done",
         );
-        write_helper(
+        let fallback = write_helper(
             temp.path(),
             "heddle-after-oversized",
             "cat >/dev/null\nprintf 'username=fallback\\npassword=secret\\n'",
         );
         let config = sley::GitConfig::parse(
-            b"[credential]\n\thelper = heddle-oversized\n\thelper = heddle-after-oversized\n",
+            b"[credential]\n\tinteractive = false\n\thelper = heddle-oversized\n\thelper = heddle-after-oversized\n",
         )
         .expect("parse config");
         let mut provider = EmbeddingSafeCredentialProvider::with_search_path_and_timeout(
@@ -662,6 +679,8 @@ mod tests {
         );
         let started = Instant::now();
 
+        assert_helper_preconditions(&provider, &oversized, temp.path());
+        assert_helper_preconditions(&provider, &fallback, temp.path());
         let credential = provider
             .fill(https_credential("example.test"))
             .expect("oversized helper falls through")
@@ -674,14 +693,14 @@ mod tests {
     #[test]
     fn nonterminating_helper_is_killed_at_the_deadline_before_fallback_runs() {
         let temp = TempDir::new().expect("tempdir");
-        write_helper(temp.path(), "heddle-hangs", "cat >/dev/null\nexec sleep 30");
-        write_helper(
+        let hanging = write_helper(temp.path(), "heddle-hangs", "cat >/dev/null\nexec sleep 30");
+        let fallback = write_helper(
             temp.path(),
             "heddle-after-hang",
             "cat >/dev/null\nprintf 'username=fallback\\npassword=secret\\n'",
         );
         let config = sley::GitConfig::parse(
-            b"[credential]\n\thelper = heddle-hangs\n\thelper = heddle-after-hang\n",
+            b"[credential]\n\tinteractive = false\n\thelper = heddle-hangs\n\thelper = heddle-after-hang\n",
         )
         .expect("parse config");
         let mut provider = EmbeddingSafeCredentialProvider::with_search_path_and_timeout(
@@ -691,6 +710,8 @@ mod tests {
         );
         let started = Instant::now();
 
+        assert_helper_preconditions(&provider, &hanging, temp.path());
+        assert_helper_preconditions(&provider, &fallback, temp.path());
         let credential = provider
             .fill(https_credential("example.test"))
             .expect("timed-out helper falls through")
