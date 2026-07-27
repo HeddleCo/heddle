@@ -396,7 +396,7 @@ fn bootstrap_op_id_store_dir(scope: &BootstrapOpIdScope) -> PathBuf {
 }
 
 /// Same as [`resolve_operation_id`] but returns the wire-string form
-/// expected by gRPC requests. `""` means "no idempotency for this call".
+/// expected by hosted requests. `""` means "no idempotency for this call".
 pub fn wire(cli: &Cli) -> String {
     cli.op_id.clone().unwrap_or_default()
 }

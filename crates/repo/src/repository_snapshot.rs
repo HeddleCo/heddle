@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Snapshot operations for Repository.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use objects::{
     lock::RepositoryLockExt,
@@ -9,7 +9,7 @@ use objects::{
         Attribution, Blob, ChangeLineage, ContentHash, State, StateAttachment, StateAttachmentBody,
         StateId, Tree, TreeEntry,
     },
-    store::ObjectStore,
+    store::{ObjectStore, SnapshotCommitArtifact, SnapshotCommitDescriptor},
 };
 use oplog::{IsolationKey, OpRecord};
 use refs::Head;
@@ -17,7 +17,8 @@ use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result, repository_tree::TreeBuildProfile};
 use crate::{
-    atomic::{AtomicMutation, RewindLedger, StagedCommit, Tx, execute},
+    atomic::{AtomicMutation, RewindLedger, StagedCommit, Tx, execute, execute_reconstructible},
+    thread_manifest::ManifestFile,
     worktree_ignore::WorktreeIgnoreMatcher,
     worktree_walk::{
         WalkDirectory, WalkEntry, WorktreeWalkPolicy, read_file_hash, validate_symlink_target,
@@ -32,6 +33,62 @@ pub struct SnapshotProfile {
     pub blob_write_ms: u128,
     pub tree_write_ms: u128,
     pub state_ref_oplog_ms: u128,
+    /// Whole atomic executor, including the staged object phases above and the
+    /// durable oplog commit. Subtract the staged fields to isolate commit
+    /// overhead without perturbing the generic transaction executor.
+    pub atomic_execute_ms: u128,
+    pub ref_publish_ms: u128,
+}
+
+#[cfg(test)]
+mod contention_retry_tests {
+    use std::collections::BTreeMap;
+
+    use objects::object::ContentHash;
+
+    use super::{MAX_HEAD_CHANGE_ATTEMPTS, SnapshotFingerprintPolicy, retry_after_head_contention};
+    use crate::{
+        stat_signature::stat_signature, thread_manifest::ManifestFile, worktree_walk::WalkEntry,
+    };
+
+    #[test]
+    fn head_contention_retry_has_a_bounded_escape() {
+        let mut attempts = MAX_HEAD_CHANGE_ATTEMPTS - 1;
+        let error = retry_after_head_contention(&mut attempts).unwrap_err();
+        assert!(error.to_string().contains("after 16 attempts"));
+        assert_eq!(attempts, MAX_HEAD_CHANGE_ATTEMPTS);
+    }
+
+    #[test]
+    fn racy_stat_match_forces_content_rehash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tracked");
+        std::fs::write(&path, b"old").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let (size, inode, mtime_ns, ctime_ns, mode) = stat_signature(&path, &metadata);
+        let cached_hash = ContentHash::compute(b"old");
+        let files = BTreeMap::from([(
+            "tracked".to_string(),
+            ManifestFile {
+                hash: cached_hash,
+                size,
+                inode,
+                mtime_ns,
+                ctime_ns,
+                mode,
+            },
+        )]);
+        let cutoff = mtime_ns.min(ctime_ns);
+        let policy = SnapshotFingerprintPolicy::new(dir.path(), &files, cutoff);
+        let entry = WalkEntry {
+            path: &path,
+            name: "tracked",
+            metadata,
+            executable: false,
+        };
+
+        assert_eq!(policy.cached_hash(&entry), None);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -41,16 +98,26 @@ pub struct SnapshotExecution {
     pub profile: SnapshotProfile,
 }
 
+#[derive(Clone)]
 enum SnapshotSource {
-    Worktree { fingerprint: ContentHash },
+    Worktree,
     SuppliedTree(Tree),
+    SuppliedTreeWithBlobs { tree: Tree, blobs: Vec<Blob> },
 }
 
+#[derive(Clone)]
 struct SnapshotDetails {
     intent: Option<String>,
     confidence: Option<f32>,
     attribution: Attribution,
     lineage: Vec<ChangeLineage>,
+}
+
+struct PreparedSnapshotArtifact {
+    blobs: Vec<(ContentHash, Vec<u8>)>,
+    tree: Tree,
+    state: State,
+    attachments: Vec<StateAttachment>,
 }
 
 struct SnapshotMutation<'a> {
@@ -66,6 +133,10 @@ struct SnapshotMutation<'a> {
     /// sidecar to that before-image if the batch fails to commit, so a rewound
     /// snapshot never leaves its auto-applied tier behind.
     staged_visibility_rewind: Option<(StateId, Option<Vec<u8>>)>,
+    prepared_artifact: Option<PreparedSnapshotArtifact>,
+    prepared_execution: Option<SnapshotExecution>,
+    worktree_revalidation_files: Option<BTreeMap<String, ManifestFile>>,
+    worktree_revalidation_cutoff_ns: Option<i64>,
 }
 
 impl<'a> SnapshotMutation<'a> {
@@ -76,15 +147,18 @@ impl<'a> SnapshotMutation<'a> {
         prev_head: Option<StateId>,
         head: Head,
     ) -> Self {
-        let transaction_id = snapshot_transaction_id(repo, &source, &details, &head);
         Self {
             repo,
             source,
             details,
             prev_head,
             head,
-            transaction_id,
+            transaction_id: String::new(),
             staged_visibility_rewind: None,
+            prepared_artifact: None,
+            prepared_execution: None,
+            worktree_revalidation_files: None,
+            worktree_revalidation_cutoff_ns: None,
         }
     }
 
@@ -93,6 +167,36 @@ impl<'a> SnapshotMutation<'a> {
             Head::Attached { thread } => Some(thread.to_string()),
             Head::Detached { .. } => None,
         }
+    }
+
+    fn prepare(&mut self) -> Result<()> {
+        if matches!(&self.source, SnapshotSource::Worktree) {
+            self.worktree_revalidation_cutoff_ns =
+                Some(crate::stat_signature::racy_timestamp_cutoff());
+        }
+        self.repo.store.begin_snapshot_write_batch()?;
+        #[cfg(test)]
+        snapshot_prepare_probe();
+        let execution = match self.stage_snapshot_objects() {
+            Ok(execution) => execution,
+            Err(error) => {
+                self.repo.store.abort_snapshot_write_batch();
+                return Err(error);
+            }
+        };
+        self.transaction_id = snapshot_transaction_id(
+            self.repo,
+            &self.source,
+            &self.details,
+            &self.head,
+            Some(execution.tree.hash()),
+        );
+        if let Err(error) = self.repo.store.flush_snapshot_write_batch() {
+            self.repo.store.abort_snapshot_write_batch();
+            return Err(error);
+        }
+        self.prepared_execution = Some(execution);
+        Ok(())
     }
 }
 
@@ -119,12 +223,13 @@ impl AtomicMutation for SnapshotMutation<'_> {
     }
 
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<Self::Output>> {
-        self.repo.store.begin_snapshot_write_batch()?;
-        let execution = self.stage_snapshot_objects()?;
+        let execution = self.prepared_execution.clone().ok_or_else(|| {
+            HeddleError::Config("snapshot mutation reached commit before prepare".to_string())
+        })?;
 
         objects::fault_inject::maybe_panic_at("snapshot_after_stage_before_atomic_commit");
         #[cfg(test)]
-        maybe_snapshot_fault(SnapshotFault::AfterStageBeforeAtomicCommit);
+        maybe_snapshot_fault(SnapshotFault::StageBeforeAtomicCommit);
 
         let mut records = vec![OpRecord::Snapshot {
             new_state: execution.state.id(),
@@ -153,7 +258,6 @@ impl AtomicMutation for SnapshotMutation<'_> {
     }
 
     fn rewind(&mut self, _ledger: &RewindLedger) -> Result<()> {
-        self.repo.store.abort_snapshot_write_batch();
         // Roll the folded default-visibility binding back to its before-image so
         // a rewound snapshot leaves no orphaned auto-applied tier (heddle#317).
         // Idempotent: `take` makes a second rewind a no-op, and
@@ -214,17 +318,54 @@ impl AtomicMutation for SnapshotMutation<'_> {
 }
 
 impl SnapshotMutation<'_> {
-    fn stage_snapshot_objects(&self) -> Result<SnapshotExecution> {
+    fn prepared_worktree_matches(&self) -> Result<bool> {
+        if !matches!(&self.source, SnapshotSource::Worktree) {
+            return Ok(true);
+        }
+        let execution = self.prepared_execution.as_ref().ok_or_else(|| {
+            HeddleError::Config("snapshot revalidation reached an unprepared mutation".to_string())
+        })?;
+        let files = self.worktree_revalidation_files.as_ref().ok_or_else(|| {
+            HeddleError::Config("snapshot preparation omitted its stat cache".to_string())
+        })?;
+        let cutoff_ns = self.worktree_revalidation_cutoff_ns.ok_or_else(|| {
+            HeddleError::Config("snapshot preparation omitted its timestamp cutoff".to_string())
+        })?;
+        Ok(self
+            .repo
+            .snapshot_worktree_fingerprint(&execution.tree, files, cutoff_ns)?
+            == execution.tree.hash())
+    }
+
+    fn stage_snapshot_objects(&mut self) -> Result<SnapshotExecution> {
         debug!("Building tree from worktree");
-        let (tree, tree_profile) = match &self.source {
-            SnapshotSource::Worktree { .. } => self.build_worktree_tree()?,
-            SnapshotSource::SuppliedTree(tree) => (tree.clone(), TreeBuildProfile::default()),
+        let (tree, tree_profile, supplied_blobs) = match &self.source {
+            SnapshotSource::Worktree => {
+                let (tree, profile, revalidation_files) = self.build_worktree_tree()?;
+                self.worktree_revalidation_files = Some(revalidation_files);
+                (tree, profile, None)
+            }
+            SnapshotSource::SuppliedTree(tree) => (tree.clone(), TreeBuildProfile::default(), None),
+            SnapshotSource::SuppliedTreeWithBlobs { tree, blobs } => (
+                tree.clone(),
+                TreeBuildProfile::default(),
+                Some(
+                    blobs
+                        .iter()
+                        .map(|blob| (blob.hash(), blob.content().to_vec()))
+                        .collect(),
+                ),
+            ),
         };
         debug!(duration_ms = tree_profile.tree_walk_ms, "Tree built");
 
         debug!("Storing tree");
         let root_tree_write_start = std::time::Instant::now();
-        let tree_hash = self.repo.store.put_tree(&tree)?;
+        let tree_hash = if supplied_blobs.is_some() {
+            tree.hash()
+        } else {
+            self.repo.store.put_tree(&tree)?
+        };
         let root_tree_write_ms = root_tree_write_start.elapsed().as_millis();
 
         let parents = match self.prev_head {
@@ -263,6 +404,15 @@ impl SnapshotMutation<'_> {
 
         #[cfg(feature = "tree-sitter-symbols")]
         {
+            let source_blobs =
+                supplied_blobs
+                    .as_ref()
+                    .map(|blobs: &Vec<(ContentHash, Vec<u8>)>| {
+                        blobs
+                            .iter()
+                            .map(|(hash, bytes)| (*hash, bytes.as_slice()))
+                            .collect::<std::collections::HashMap<_, _>>()
+                    });
             let prior_state = match self.prev_head {
                 Some(id) => self.repo.store.get_state(&id).ok().flatten(),
                 None => None,
@@ -280,10 +430,11 @@ impl SnapshotMutation<'_> {
 
             // Eager semantic index: parse only changed blobs, reusing the
             // parent index for unchanged subtrees. Never fails the capture.
-            match self
-                .repo
-                .compute_and_persist_semantic_index(prior_state.as_ref(), &state)
-            {
+            match self.repo.compute_and_persist_semantic_index_for_tree(
+                prior_state.as_ref(),
+                &tree,
+                source_blobs.as_ref(),
+            ) {
                 Ok(Some(hash)) => semantic_index = Some(hash),
                 Ok(None) => {}
                 Err(err) => {
@@ -292,10 +443,11 @@ impl SnapshotMutation<'_> {
             }
 
             if let Some(parent_state) = prior_state.as_ref() {
-                match self
-                    .repo
-                    .compute_and_persist_discussion_anchor_travel(parent_state, &tree)
-                {
+                match self.repo.compute_and_persist_discussion_anchor_travel(
+                    parent_state,
+                    &tree,
+                    source_blobs.as_ref(),
+                ) {
                     Ok(Some(hash)) => discussions = Some(hash),
                     Ok(None) => {}
                     Err(err) => {
@@ -305,17 +457,38 @@ impl SnapshotMutation<'_> {
             }
         }
 
+        // Structured native authoring owns the entire newly-authored immutable
+        // closure already. Keep it in memory until exact-once and isolation
+        // validation succeed under the oplog lock; its marked pack then becomes
+        // the single authoritative durable commit barrier.
+        let packed_snapshot = supplied_blobs.is_some();
+        let mut attachments = if packed_snapshot {
+            self.repo
+                .authored_state_signature_attachment(&state)
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
         // Persist the immutable state before its independently-addressed metadata.
         let state_ref_oplog_start = std::time::Instant::now();
-        self.repo.put_authored_state(&state)?;
+        if !packed_snapshot {
+            self.repo.put_authored_state(&state)?;
+        }
         if let Some(context) = inherited_context {
-            self.repo.put_state_attachment(&StateAttachment {
+            let attachment = StateAttachment {
                 state_id: state.id(),
                 body: StateAttachmentBody::Context(context),
                 attribution: state.attribution.clone(),
                 created_at: chrono::Utc::now(),
                 supersedes: None,
-            })?;
+            };
+            if packed_snapshot {
+                attachments.push(attachment);
+            } else {
+                self.repo.put_state_attachment(&attachment)?;
+            }
         }
         #[cfg(feature = "tree-sitter-symbols")]
         for body in [
@@ -326,16 +499,27 @@ impl SnapshotMutation<'_> {
         .into_iter()
         .flatten()
         {
-            self.repo.put_state_attachment(&StateAttachment {
+            let attachment = StateAttachment {
                 state_id: state.id(),
                 body,
                 attribution: state.attribution.clone(),
                 created_at: chrono::Utc::now(),
                 supersedes: None,
-            })?;
+            };
+            if packed_snapshot {
+                attachments.push(attachment);
+            } else {
+                self.repo.put_state_attachment(&attachment)?;
+            }
         }
-        self.repo.store.flush_snapshot_write_batch()?;
-
+        if let Some(blobs) = supplied_blobs {
+            self.prepared_artifact = Some(PreparedSnapshotArtifact {
+                blobs,
+                tree: tree.clone(),
+                state: state.clone(),
+                attachments,
+            });
+        }
         Ok(SnapshotExecution {
             state,
             tree,
@@ -347,7 +531,43 @@ impl SnapshotMutation<'_> {
         })
     }
 
-    fn build_worktree_tree(&self) -> Result<(Tree, TreeBuildProfile)> {
+    fn install_prepared_artifact(
+        &mut self,
+        base_oplog_head_id: u64,
+        records: &[OpRecord],
+    ) -> Result<(SnapshotCommitDescriptor, u128)> {
+        let prepared = self.prepared_artifact.take().ok_or_else(|| {
+            HeddleError::Conflict("structured snapshot artifact was not staged".to_string())
+        })?;
+        let artifact = SnapshotCommitArtifact {
+            schema: objects::store::SNAPSHOT_COMMIT_ARTIFACT_SCHEMA,
+            transaction_id: self.transaction_id.clone(),
+            scope: self.repo.op_scope(),
+            base_oplog_head_id,
+            state: prepared.state.id(),
+            encoded_records: records
+                .iter()
+                .map(rmp_serde::to_vec_named)
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        };
+        let started = std::time::Instant::now();
+        let descriptor = self.repo.store.put_committed_snapshot_objects_packed(
+            prepared.blobs,
+            &prepared.tree,
+            &prepared.state,
+            prepared.attachments,
+            artifact,
+        )?;
+        let elapsed_ms = started.elapsed().as_millis();
+        objects::fault_inject::maybe_panic_at("snapshot_after_artifact_commit_before_oplog_view");
+        #[cfg(test)]
+        maybe_snapshot_fault(SnapshotFault::ArtifactCommitBeforeOplogView);
+        Ok((descriptor, elapsed_ms))
+    }
+
+    fn build_worktree_tree(
+        &self,
+    ) -> Result<(Tree, TreeBuildProfile, BTreeMap<String, ManifestFile>)> {
         let baseline_tree = match self.prev_head {
             Some(prev_head) => {
                 let state = self
@@ -383,16 +603,11 @@ impl SnapshotMutation<'_> {
                 Head::Detached { .. } => None,
             };
 
-        match manifest_context.as_ref() {
-            Some((_, manifest)) => self.repo.build_tree_profiled_with_stat_cache_against(
-                &self.repo.root,
-                baseline_tree.as_ref(),
-                manifest,
-            ),
-            None => self
-                .repo
-                .build_tree_profiled_against(&self.repo.root, baseline_tree.as_ref()),
-        }
+        self.repo.build_tree_profiled_for_snapshot_against(
+            &self.repo.root,
+            baseline_tree.as_ref(),
+            manifest_context.as_ref().map(|(_, manifest)| manifest),
+        )
     }
 }
 
@@ -407,11 +622,39 @@ struct SnapshotFingerprintOutput {
 
 struct SnapshotFingerprintPolicy<'a> {
     walk_root: &'a std::path::Path,
+    files: &'a BTreeMap<String, ManifestFile>,
+    racy_cutoff_ns: i64,
 }
 
 impl<'a> SnapshotFingerprintPolicy<'a> {
-    fn new(walk_root: &'a std::path::Path) -> Self {
-        Self { walk_root }
+    fn new(
+        walk_root: &'a std::path::Path,
+        files: &'a BTreeMap<String, ManifestFile>,
+        racy_cutoff_ns: i64,
+    ) -> Self {
+        Self {
+            walk_root,
+            files,
+            racy_cutoff_ns,
+        }
+    }
+
+    fn cached_hash(&self, entry: &WalkEntry<'_>) -> Option<ContentHash> {
+        let rel = entry.path.strip_prefix(self.walk_root).ok()?;
+        let cached = self.files.get(&crate::worktree_walk::cache_key(rel))?;
+        let (size, inode, mtime_ns, ctime_ns, mode) =
+            crate::stat_signature::stat_signature(entry.path, &entry.metadata);
+        let current = ManifestFile {
+            hash: cached.hash,
+            size,
+            inode,
+            mtime_ns,
+            ctime_ns,
+            mode,
+        };
+        (current.matches(cached)
+            && !crate::stat_signature::is_racy_timestamp(mtime_ns, ctime_ns, self.racy_cutoff_ns))
+        .then_some(cached.hash)
     }
 }
 
@@ -430,10 +673,21 @@ impl WorktreeWalkPolicy for SnapshotFingerprintPolicy<'_> {
     fn visit_file(
         &mut self,
         entry: WalkEntry<'_>,
-        _tree_entry: Option<&TreeEntry>,
+        tree_entry: Option<&TreeEntry>,
         state: &mut Self::DirectoryState,
     ) -> Result<()> {
-        let hash = read_file_hash(entry.path, entry.metadata.len())?;
+        let hash = match self.cached_hash(&entry) {
+            Some(hash) => hash,
+            None => read_file_hash(entry.path, entry.metadata.len())?,
+        };
+        if let Some(target) = tree_entry.and_then(TreeEntry::gitlink_target)
+            && Blob::new(objects::util::gitlink_placeholder_bytes(&target)).hash() == hash
+        {
+            state
+                .entries
+                .push(TreeEntry::gitlink(entry.name.to_string(), target)?);
+            return Ok(());
+        }
         state.entries.push(TreeEntry::file(
             entry.name.to_string(),
             hash,
@@ -448,16 +702,19 @@ impl WorktreeWalkPolicy for SnapshotFingerprintPolicy<'_> {
         _tree_entry: Option<&TreeEntry>,
         state: &mut Self::DirectoryState,
     ) -> Result<()> {
-        let target = std::fs::read_link(entry.path)?;
-        let symlink_dir = entry.path.parent().unwrap_or(self.walk_root);
-        if !validate_symlink_target(self.walk_root, symlink_dir, &target) {
-            return Err(HeddleError::InvalidSymlinkTarget(target));
-        }
-
-        let blob = Blob::new(objects::util::symlink_target_bytes(&target));
+        let hash = if let Some(hash) = self.cached_hash(&entry) {
+            hash
+        } else {
+            let target = std::fs::read_link(entry.path)?;
+            let symlink_dir = entry.path.parent().unwrap_or(self.walk_root);
+            if !validate_symlink_target(self.walk_root, symlink_dir, &target) {
+                return Err(HeddleError::InvalidSymlinkTarget(target));
+            }
+            Blob::new(objects::util::symlink_target_bytes(&target)).hash()
+        };
         state
             .entries
-            .push(TreeEntry::symlink(entry.name.to_string(), blob.hash())?);
+            .push(TreeEntry::symlink(entry.name.to_string(), hash)?);
         Ok(())
     }
 
@@ -501,6 +758,7 @@ fn snapshot_transaction_id(
     source: &SnapshotSource,
     details: &SnapshotDetails,
     head: &Head,
+    prepared_tree: Option<ContentHash>,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"snapshot-v1\0");
@@ -509,11 +767,15 @@ fn snapshot_transaction_id(
     hasher.update(repo.root.to_string_lossy().as_bytes());
     hasher.update(b"\0");
     match source {
-        SnapshotSource::Worktree { fingerprint } => {
+        SnapshotSource::Worktree => {
             hasher.update(b"worktree\0");
-            hasher.update(fingerprint.as_bytes());
+            hasher.update(
+                prepared_tree
+                    .expect("worktree transaction id is computed after snapshot preparation")
+                    .as_bytes(),
+            );
         }
-        SnapshotSource::SuppliedTree(tree) => {
+        SnapshotSource::SuppliedTree(tree) | SnapshotSource::SuppliedTreeWithBlobs { tree, .. } => {
             hasher.update(b"tree\0");
             hasher.update(tree.hash().as_bytes());
         }
@@ -552,13 +814,53 @@ fn snapshot_transaction_id(
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SnapshotFault {
-    AfterStageBeforeAtomicCommit,
-    AfterAtomicCommitBeforeRefPublish,
+    StageBeforeAtomicCommit,
+    ArtifactCommitBeforeOplogView,
+    AtomicCommitBeforeRefPublish,
 }
 
 #[cfg(test)]
 thread_local! {
     static SNAPSHOT_FAULT: std::cell::Cell<Option<SnapshotFault>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+static SNAPSHOT_PREPARE_PROBE_DELAY_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static SNAPSHOT_PREPARE_PROBE_ACTIVE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static SNAPSHOT_PREPARE_PROBE_MAX: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn with_snapshot_prepare_probe<T>(
+    delay: std::time::Duration,
+    body: impl FnOnce() -> T,
+) -> (T, usize) {
+    use std::sync::atomic::Ordering;
+
+    SNAPSHOT_PREPARE_PROBE_ACTIVE.store(0, Ordering::SeqCst);
+    SNAPSHOT_PREPARE_PROBE_MAX.store(0, Ordering::SeqCst);
+    SNAPSHOT_PREPARE_PROBE_DELAY_MS.store(delay.as_millis() as u64, Ordering::SeqCst);
+    let output = body();
+    SNAPSHOT_PREPARE_PROBE_DELAY_MS.store(0, Ordering::SeqCst);
+    (output, SNAPSHOT_PREPARE_PROBE_MAX.load(Ordering::SeqCst))
+}
+
+#[cfg(test)]
+fn snapshot_prepare_probe() {
+    use std::sync::atomic::Ordering;
+
+    let delay = SNAPSHOT_PREPARE_PROBE_DELAY_MS.load(Ordering::SeqCst);
+    if delay == 0 {
+        return;
+    }
+    let active = SNAPSHOT_PREPARE_PROBE_ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
+    SNAPSHOT_PREPARE_PROBE_MAX.fetch_max(active, Ordering::SeqCst);
+    std::thread::sleep(std::time::Duration::from_millis(delay));
+    SNAPSHOT_PREPARE_PROBE_ACTIVE.fetch_sub(1, Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -579,15 +881,36 @@ fn maybe_snapshot_fault(fault: SnapshotFault) {
     });
 }
 
+const MAX_HEAD_CHANGE_ATTEMPTS: usize = 16;
+const MAX_HEAD_CONTENTION_BACKOFF_MS: u64 = 32;
+
+fn retry_after_head_contention(attempts: &mut usize) -> Result<()> {
+    *attempts += 1;
+    if *attempts >= MAX_HEAD_CHANGE_ATTEMPTS {
+        return Err(HeddleError::Conflict(format!(
+            "repository head changed during snapshot preparation after {attempts} attempts"
+        )));
+    }
+    let shift = (*attempts - 1).min(5) as u32;
+    let delay_ms = (1_u64 << shift).min(MAX_HEAD_CONTENTION_BACKOFF_MS);
+    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+    Ok(())
+}
+
 impl Repository {
-    fn snapshot_worktree_fingerprint(&self) -> Result<ContentHash> {
+    fn snapshot_worktree_fingerprint(
+        &self,
+        tree: &Tree,
+        files: &BTreeMap<String, ManifestFile>,
+        racy_cutoff_ns: i64,
+    ) -> Result<ContentHash> {
         let patterns = self.ignore_patterns()?;
         let nested_exclusions = self.nested_thread_worktree_exclusions(&self.root)?;
         let ignore_matcher = WorktreeIgnoreMatcher::new(&patterns)
             .with_nested_worktree_exclusions(nested_exclusions);
-        let mut policy = SnapshotFingerprintPolicy::new(&self.root);
+        let mut policy = SnapshotFingerprintPolicy::new(&self.root, files, racy_cutoff_ns);
         Ok(
-            walk_worktree(self, &self.root, &ignore_matcher, None, &mut policy)?
+            walk_worktree(self, &self.root, &ignore_matcher, Some(tree), &mut policy)?
                 .tree
                 .hash(),
         )
@@ -652,85 +975,116 @@ impl Repository {
         attribution: Attribution,
         lineage: Vec<ChangeLineage>,
     ) -> Result<SnapshotExecution> {
-        let _lock = self
-            .locker()
-            .write()
-            .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+        const MAX_WORKTREE_CHANGE_ATTEMPTS: usize = 4;
+        let mut worktree_change_attempts = 0;
+        let mut head_change_attempts = 0;
+        loop {
+            let (head, prev_head) = {
+                let _lock = self
+                    .locker()
+                    .write()
+                    .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
 
-        if let Some(merge_state) = self.merge_state_manager().load()? {
-            let unresolved: Vec<_> = merge_state
-                .conflicts
-                .iter()
-                .filter(|path| !merge_state.resolved.contains(*path))
-                .collect();
-            if !unresolved.is_empty() {
-                return Err(HeddleError::Conflict(format!(
-                    "Unresolved conflicts: {}",
-                    unresolved
-                        .into_iter()
-                        .map(|path| path.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            }
-            let theirs = merge_state.theirs;
-            let base = merge_state.base;
-            let intent = intent.or_else(|| Some(format!("Merge {}", theirs.short())));
-            let state = self.snapshot_merge_with_attribution_and_lineage(
-                &theirs,
-                SnapshotDetails {
-                    intent,
-                    confidence,
-                    attribution,
-                    lineage,
-                },
-                base,
-                // We hold the snapshot write lock here; fold the default-
-                // visibility binding into the merge's batch (heddle#317).
-                true,
-                None,
-            )?;
-            self.merge_state_manager().finish()?;
-            let tree = self
-                .store
-                .get_tree(&state.tree)?
-                .ok_or_else(|| HeddleError::NotFound("merge snapshot tree missing".to_string()))?;
-            return Ok(SnapshotExecution {
-                state,
-                tree,
-                profile: SnapshotProfile::default(),
-            });
-        }
+                if let Some(merge_state) = self.merge_state_manager().load()? {
+                    let unresolved: Vec<_> = merge_state
+                        .conflicts
+                        .iter()
+                        .filter(|path| !merge_state.resolved.contains(*path))
+                        .collect();
+                    if !unresolved.is_empty() {
+                        return Err(HeddleError::Conflict(format!(
+                            "Unresolved conflicts: {}",
+                            unresolved
+                                .into_iter()
+                                .map(|path| path.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )));
+                    }
+                    let theirs = merge_state.theirs;
+                    let base = merge_state.base;
+                    let merge_intent = intent
+                        .clone()
+                        .or_else(|| Some(format!("Merge {}", theirs.short())));
+                    let state = self.snapshot_merge_with_attribution_and_lineage(
+                        &theirs,
+                        SnapshotDetails {
+                            intent: merge_intent,
+                            confidence,
+                            attribution: attribution.clone(),
+                            lineage: lineage.clone(),
+                        },
+                        base,
+                        true,
+                        None,
+                    )?;
+                    self.merge_state_manager().finish()?;
+                    let tree = self.store.get_tree(&state.tree)?.ok_or_else(|| {
+                        HeddleError::NotFound("merge snapshot tree missing".to_string())
+                    })?;
+                    return Ok(SnapshotExecution {
+                        state,
+                        tree,
+                        profile: SnapshotProfile::default(),
+                    });
+                }
 
-        let head = self.head_ref()?;
-        let prev_head = self.head()?;
-        let fingerprint = self.snapshot_worktree_fingerprint()?;
-        let execution = execute(
-            self,
-            SnapshotMutation::new(
+                (self.head_ref()?, self.head()?)
+            };
+
+            let mut mutation = SnapshotMutation::new(
                 self,
-                SnapshotSource::Worktree { fingerprint },
+                SnapshotSource::Worktree,
                 SnapshotDetails {
-                    intent,
+                    intent: intent.clone(),
                     confidence,
-                    attribution,
-                    lineage,
+                    attribution: attribution.clone(),
+                    lineage: lineage.clone(),
                 },
                 prev_head,
                 head.clone(),
-            ),
-        )?;
+            );
+            mutation.prepare()?;
 
-        objects::fault_inject::maybe_panic_at("snapshot_after_atomic_commit_before_ref_publish");
-        #[cfg(test)]
-        maybe_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish);
+            let _lock = self
+                .locker()
+                .write()
+                .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+            let head_changed = self.merge_state_manager().load()?.is_some()
+                || self.head_ref()? != head
+                || self.head()? != prev_head;
+            if head_changed {
+                drop(_lock);
+                retry_after_head_contention(&mut head_change_attempts)?;
+                continue;
+            }
+            if !mutation.prepared_worktree_matches()? {
+                worktree_change_attempts += 1;
+                if worktree_change_attempts == MAX_WORKTREE_CHANGE_ATTEMPTS {
+                    return Err(HeddleError::Conflict(
+                        "worktree changed during snapshot preparation".to_string(),
+                    ));
+                }
+                continue;
+            }
 
-        // Phase 5 is a materialized view, not the commit point: force the
-        // success-path ref publish through the same per-read reconciliation that
-        // recovers a crash after the atomic oplog append.
-        let _ = self.head()?;
-        refresh_materialized_thread_manifest(self, &head, &execution.state, &execution.tree);
-        Ok(execution)
+            let atomic_execute_started = std::time::Instant::now();
+            let mut execution = execute(self, mutation)?;
+            execution.profile.atomic_execute_ms = atomic_execute_started.elapsed().as_millis();
+            let committed_tip = self.oplog().head_id()?;
+
+            objects::fault_inject::maybe_panic_at(
+                "snapshot_after_atomic_commit_before_ref_publish",
+            );
+            #[cfg(test)]
+            maybe_snapshot_fault(SnapshotFault::AtomicCommitBeforeRefPublish);
+
+            let ref_publish_started = std::time::Instant::now();
+            reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
+            execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
+            refresh_materialized_thread_manifest(self, &head, &execution.state, &execution.tree);
+            return Ok(execution);
+        }
     }
 
     /// Create a snapshot from a caller-supplied tree instead of walking
@@ -750,64 +1104,117 @@ impl Repository {
         confidence: Option<f32>,
         attribution: Attribution,
     ) -> Result<SnapshotExecution> {
-        self.snapshot_tree_with_attribution_profiled_locked(tree, intent, confidence, attribution)
+        self.snapshot_tree_source_with_attribution_profiled_locked(
+            SnapshotSource::SuppliedTree(tree),
+            intent,
+            confidence,
+            attribution,
+        )
     }
 
-    #[instrument(skip(self, tree, attribution), fields(intent = ?intent, confidence))]
-    fn snapshot_tree_with_attribution_profiled_locked(
+    /// Create a caller-supplied tree and its newly-authored blobs in one durable
+    /// snapshot batch. This is the structured-authoring counterpart to a
+    /// worktree snapshot: blob files, trees, and state become durable before
+    /// the oplog commit, without one directory fsync per blob.
+    pub fn snapshot_tree_with_blobs_with_attribution_profiled(
         &self,
         tree: Tree,
+        blobs: Vec<Blob>,
         intent: Option<String>,
         confidence: Option<f32>,
         attribution: Attribution,
     ) -> Result<SnapshotExecution> {
-        let _lock = self
-            .locker()
-            .write()
-            .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+        self.snapshot_tree_source_with_attribution_profiled_locked(
+            SnapshotSource::SuppliedTreeWithBlobs { tree, blobs },
+            intent,
+            confidence,
+            attribution,
+        )
+    }
 
-        if let Some(merge_state) = self.merge_state_manager().load()? {
-            let unresolved: Vec<_> = merge_state
-                .conflicts
-                .iter()
-                .filter(|path| !merge_state.resolved.contains(*path))
-                .collect();
-            if !unresolved.is_empty() {
-                return Err(HeddleError::Conflict(format!(
-                    "Unresolved conflicts: {}",
-                    unresolved
-                        .into_iter()
-                        .map(|path| path.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            }
-        }
-
-        let head = self.head_ref()?;
-        let prev_head = self.head()?;
-        let execution = execute(
-            self,
-            SnapshotMutation::new(
+    #[instrument(skip(self, source, attribution), fields(intent = ?intent, confidence))]
+    fn snapshot_tree_source_with_attribution_profiled_locked(
+        &self,
+        source: SnapshotSource,
+        intent: Option<String>,
+        confidence: Option<f32>,
+        attribution: Attribution,
+    ) -> Result<SnapshotExecution> {
+        let authoritative_artifact =
+            matches!(&source, SnapshotSource::SuppliedTreeWithBlobs { .. });
+        let mut head_change_attempts = 0;
+        loop {
+            let (head, prev_head) = {
+                let _lock = self
+                    .locker()
+                    .write()
+                    .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+                reject_unresolved_snapshot_merge(self)?;
+                (self.head_ref()?, self.head()?)
+            };
+            let mut mutation = SnapshotMutation::new(
                 self,
-                SnapshotSource::SuppliedTree(tree),
+                source.clone(),
                 SnapshotDetails {
-                    intent,
+                    intent: intent.clone(),
                     confidence,
-                    attribution,
+                    attribution: attribution.clone(),
                     lineage: Vec::new(),
                 },
                 prev_head,
-                head,
-            ),
-        )?;
+                head.clone(),
+            );
+            mutation.prepare()?;
 
-        objects::fault_inject::maybe_panic_at("snapshot_after_atomic_commit_before_ref_publish");
-        #[cfg(test)]
-        maybe_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish);
+            let _lock = self
+                .locker()
+                .write()
+                .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+            reject_unresolved_snapshot_merge(self)?;
+            let head_changed = self.head_ref()? != head || self.head()? != prev_head;
+            if head_changed {
+                drop(_lock);
+                retry_after_head_contention(&mut head_change_attempts)?;
+                continue;
+            }
 
-        let _ = self.head()?;
-        Ok(execution)
+            let atomic_execute_started = std::time::Instant::now();
+            let (mut execution, committed_tip) = if authoritative_artifact {
+                let committed =
+                    execute_reconstructible(self, mutation, |mutation, base_head_id, records| {
+                        mutation.install_prepared_artifact(base_head_id, records)
+                    })?;
+                let committed_tip = committed.committed_tip;
+                let mut output = committed.output;
+                if let Some((descriptor, artifact_write_ms)) = committed.artifact {
+                    output.profile.blob_write_ms = artifact_write_ms;
+                    debug!(
+                        pack = %descriptor.pack_name,
+                        path = %descriptor.pack_path.display(),
+                        objects = descriptor.object_ids.len(),
+                        state = %descriptor.artifact.state,
+                        "structured snapshot committed through authoritative pack artifact"
+                    );
+                }
+                (output, committed_tip)
+            } else {
+                let output = execute(self, mutation)?;
+                let committed_tip = self.oplog().head_id()?;
+                (output, committed_tip)
+            };
+            execution.profile.atomic_execute_ms = atomic_execute_started.elapsed().as_millis();
+
+            objects::fault_inject::maybe_panic_at(
+                "snapshot_after_atomic_commit_before_ref_publish",
+            );
+            #[cfg(test)]
+            maybe_snapshot_fault(SnapshotFault::AtomicCommitBeforeRefPublish);
+
+            let ref_publish_started = std::time::Instant::now();
+            reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
+            execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
+            return Ok(execution);
+        }
     }
 
     /// Create a merge state with two parents.
@@ -997,7 +1404,54 @@ fn snapshot_profile_from_tree(
         blob_write_ms: tree_profile.blob_write_ms,
         tree_write_ms: tree_profile.tree_write_ms + root_tree_write_ms,
         state_ref_oplog_ms,
+        atomic_execute_ms: 0,
+        ref_publish_ms: 0,
     }
+}
+
+fn reject_unresolved_snapshot_merge(repo: &Repository) -> Result<()> {
+    let Some(merge_state) = repo.merge_state_manager().load()? else {
+        return Ok(());
+    };
+    let unresolved = merge_state
+        .conflicts
+        .iter()
+        .filter(|path| !merge_state.resolved.contains(*path))
+        .map(|path| path.as_str())
+        .collect::<Vec<_>>();
+    if unresolved.is_empty() {
+        Ok(())
+    } else {
+        Err(HeddleError::Conflict(format!(
+            "Unresolved conflicts: {}",
+            unresolved.join(", ")
+        )))
+    }
+}
+
+/// Atomically materialize the committed snapshot ref without adding another
+/// durability barrier. The oplog is authoritative; the persisted ref watermark
+/// deliberately remains at its prior floor so a crash that loses this
+/// reconstructible view is recovered by a fresh process.
+fn reconcile_snapshot_ref(
+    repo: &Repository,
+    head: &Head,
+    state: &State,
+    committed_tip: u64,
+) -> Result<()> {
+    match head {
+        Head::Attached { thread } => {
+            repo.refs.materialize_snapshot_thread_after_commit(
+                thread,
+                state.id(),
+                committed_tip,
+            )?;
+        }
+        Head::Detached { .. } => repo
+            .refs
+            .materialize_snapshot_head_after_commit(state.id(), committed_tip)?,
+    }
+    Ok(())
 }
 
 fn refresh_materialized_thread_manifest(

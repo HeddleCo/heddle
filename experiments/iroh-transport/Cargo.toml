@@ -1,0 +1,24 @@
+[package]
+name = "heddle-iroh-transport-experiment"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+api = { package = "heddle-api", git = "https://github.com/HeddleCo/api", rev = "3acac53f3527ba4a9ea510c331cfffa556f92e1b" }
+bytes.workspace = true
+iroh.workspace = true
+objects = { path = "../../crates/objects", package = "heddle-objects" }
+prost.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+wire = { path = "../../crates/wire", package = "heddle-wire" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lib]
+path = "src/lib.rs"

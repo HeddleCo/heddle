@@ -90,7 +90,7 @@ pub enum AuthCommands {
         #[arg(long = "scope")]
         scopes: Vec<String>,
 
-        /// Narrow the safe operation set (repeatable, using gRPC method names such as `Push`).
+        /// Narrow the safe operation set (repeatable, using hosted method names such as `Push`).
         #[arg(long = "allow")]
         allowed_operations: Vec<String>,
 
@@ -209,7 +209,12 @@ mod tests {
     #[test]
     fn login_credential_conflicts_with_browser_flags() {
         for conflicting in [
-            vec!["--credential", "/run/secrets/agent.hcred", "--server", "grpc.heddle.sh"],
+            vec![
+                "--credential",
+                "/run/secrets/agent.hcred",
+                "--server",
+                "api.heddle.sh",
+            ],
             vec!["--credential", "/run/secrets/agent.hcred", "--open-browser"],
         ] {
             let mut args = vec!["heddle", "auth", "login"];
@@ -234,7 +239,7 @@ mod tests {
             "auth",
             "derive-agent",
             "--server",
-            "grpc.heddle.test",
+            "api.heddle.test",
             "--ttl",
             "900",
             "--scope",
@@ -261,7 +266,7 @@ mod tests {
         else {
             panic!("expected auth derive-agent");
         };
-        assert_eq!(server, "grpc.heddle.test");
+        assert_eq!(server, "api.heddle.test");
         assert_eq!(ttl_secs, 900);
         assert_eq!(scopes, ["repo:acme/api", "namespace:acme"]);
         assert_eq!(allowed_operations, ["Push", "GetState"]);
@@ -272,7 +277,7 @@ mod tests {
                 "auth",
                 "derive-agent",
                 "--server",
-                "grpc.heddle.test",
+                "api.heddle.test",
                 "--stdout",
             ])
             .is_err(),

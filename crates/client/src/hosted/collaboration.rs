@@ -16,15 +16,14 @@
 //! server echoes the genuine 32-byte `StateId` back in
 //! `Discussion.opened_against_state`.
 
-use grpc::heddle::api::v1alpha1::{
-    AppendTurnRequest, Discussion as ProtoDiscussion, ListDiscussionsByStateRequest,
-    OpenDiscussionRequest, PathSymbolRef, StateId as ProtoStateId,
+use api::heddle::api::v1alpha1::{
+    AppendTurnRequest, Discussion as ProtoDiscussion, DiscussionStatusFilter,
+    ListDiscussionsByStateRequest, OpenDiscussionRequest, PathSymbolRef, StateId as ProtoStateId,
 };
 use objects::object::{ChangeId, StateId};
-use tonic::Request;
 use wire::ProtocolError;
 
-use super::{HostedGrpcClient, helpers::status_to_protocol_error};
+use super::{HostedClient, helpers::hosted_to_protocol_error};
 
 /// One turn of a hosted discussion, decoded from the wire.
 #[derive(Debug, Clone)]
@@ -48,10 +47,6 @@ pub struct HostedDiscussion {
     pub visibility: String,
     pub turns: Vec<HostedDiscussionTurn>,
 }
-
-const OPEN_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/OpenDiscussion";
-const APPEND_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/AppendTurn";
-const LIST_BY_STATE_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/ListByState";
 
 fn decode_discussion(proto: ProtoDiscussion) -> HostedDiscussion {
     let anchor = proto.anchor.unwrap_or_default();
@@ -85,15 +80,15 @@ fn change_id_state_field(change_id: ChangeId) -> Option<ProtoStateId> {
     })
 }
 
-impl HostedGrpcClient {
+impl HostedClient {
     /// The authenticated hosted username (the bearer token's `principal:<subject>`
     /// subject). weft stamps discussion turns with `Principal::new(username, "")`,
     /// so this is the author name our own pushed turns carry server-side — the
     /// identity the discussion-sync bridge uses to recognize turns we published.
     /// `None` for an anonymous/unsigned client.
     pub fn authenticated_username(&self) -> Option<String> {
-        self.authenticated_principal
-            .as_deref()
+        self.context
+            .signing_identity()
             .and_then(|principal| principal.strip_prefix("principal:"))
             .map(|subject| subject.trim().to_string())
             .filter(|subject| !subject.is_empty())
@@ -112,7 +107,7 @@ impl HostedGrpcClient {
         visibility: &str,
         client_operation_id: String,
     ) -> Result<HostedDiscussion, ProtocolError> {
-        let mut request = Request::new(OpenDiscussionRequest {
+        let request = OpenDiscussionRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             state_id: change_id_state_field(change_id),
             anchor: Some(PathSymbolRef {
@@ -123,14 +118,12 @@ impl HostedGrpcClient {
             visibility: visibility.to_string(),
             thread_ref: String::new(),
             client_operation_id,
-        });
-        self.apply_signed_auth(&mut request, OPEN_METHOD)?;
+        };
         let response = self
-            .collaboration
-            .open_discussion(request)
+            .routes()
+            .open_discussion(&request)
             .await
-            .map_err(status_to_protocol_error)?
-            .into_inner();
+            .map_err(hosted_to_protocol_error)?;
         Ok(decode_discussion(response))
     }
 
@@ -143,19 +136,17 @@ impl HostedGrpcClient {
         body: &str,
         client_operation_id: String,
     ) -> Result<HostedDiscussion, ProtocolError> {
-        let mut request = Request::new(AppendTurnRequest {
+        let request = AppendTurnRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             discussion_id: discussion_id.to_string(),
             body: body.to_string(),
             client_operation_id,
-        });
-        self.apply_signed_auth(&mut request, APPEND_METHOD)?;
+        };
         let response = self
-            .collaboration
-            .append_turn(request)
+            .routes()
+            .append_turn(&request)
             .await
-            .map_err(status_to_protocol_error)?
-            .into_inner();
+            .map_err(hosted_to_protocol_error)?;
         Ok(decode_discussion(response))
     }
 
@@ -167,18 +158,32 @@ impl HostedGrpcClient {
         change_id: ChangeId,
         status: &str,
     ) -> Result<Vec<HostedDiscussion>, ProtocolError> {
-        let mut request = Request::new(ListDiscussionsByStateRequest {
+        let request = ListDiscussionsByStateRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             state_id: change_id_state_field(change_id),
-            status: status.to_string(),
-        });
-        self.apply_signed_auth(&mut request, LIST_BY_STATE_METHOD)?;
+            status: discussion_status_filter(status)? as i32,
+        };
         let response = self
-            .collaboration
-            .list_by_state(request)
+            .routes()
+            .list_discussions_by_state(&request)
             .await
-            .map_err(status_to_protocol_error)?
-            .into_inner();
-        Ok(response.discussions.into_iter().map(decode_discussion).collect())
+            .map_err(hosted_to_protocol_error)?;
+        Ok(response
+            .discussions
+            .into_iter()
+            .map(decode_discussion)
+            .collect())
+    }
+}
+
+fn discussion_status_filter(status: &str) -> Result<DiscussionStatusFilter, ProtocolError> {
+    match status {
+        "all" => Ok(DiscussionStatusFilter::Unspecified),
+        "open" => Ok(DiscussionStatusFilter::Open),
+        "resolved" => Ok(DiscussionStatusFilter::Resolved),
+        "orphaned" => Ok(DiscussionStatusFilter::Orphaned),
+        other => Err(ProtocolError::InvalidState(format!(
+            "invalid discussion status filter: {other}"
+        ))),
     }
 }

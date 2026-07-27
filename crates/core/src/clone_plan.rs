@@ -586,7 +586,7 @@ impl MonorepoEdgeSkipReason {
         }
     }
 
-    /// Map wire `EdgeSkip` discriminant (proto i32) without taking gRPC types.
+    /// Map wire `EdgeSkip` discriminant (proto i32) without generated API types.
     ///
     /// Proto layout: Unspecified=0, Unreadable=1, Cycle=2, DepthBounded=3.
     /// Unknown values map to [`None`] so callers can fall back or omit.
@@ -691,7 +691,7 @@ pub struct MonorepoEdgeFacts {
     pub skip_reason: Option<MonorepoEdgeSkipReason>,
 }
 
-/// Pure facts for one resolved monorepo node (no gRPC / network types).
+/// Pure facts for one resolved monorepo node (no hosted/network types).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonorepoNodeFacts {
     pub spool_id: String,

@@ -30,6 +30,23 @@
 
 use std::path::Path;
 
+/// Conservatively treat timestamps in the filesystem clock tick surrounding a
+/// snapshot preparation as racy. Two seconds covers common one-second and FAT
+/// two-second timestamp granularities without penalizing stable older files.
+const RACY_TIMESTAMP_WINDOW_NS: i64 = 2_000_000_000;
+
+pub(crate) fn racy_timestamp_cutoff() -> i64 {
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos().min(i64::MAX as u128) as i64)
+        .unwrap_or(0);
+    now_ns.saturating_sub(RACY_TIMESTAMP_WINDOW_NS)
+}
+
+pub(crate) fn is_racy_timestamp(mtime_ns: i64, ctime_ns: i64, cutoff_ns: i64) -> bool {
+    mtime_ns >= cutoff_ns || ctime_ns >= cutoff_ns
+}
+
 /// Stat signature for `metadata`: `(size, inode, mtime_ns, ctime_ns, mode)`.
 /// The five-tuple shape mirrors [`crate::thread_manifest::ManifestFile`]'s
 /// stat fields so call sites can splat into a struct literal.
@@ -274,6 +291,14 @@ fn synthesize_unix_mode(metadata: &std::fs::Metadata) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn racy_timestamp_guard_covers_coarse_filesystem_ticks() {
+        let cutoff = 10_000_000_000;
+        assert!(is_racy_timestamp(cutoff, 0, cutoff));
+        assert!(is_racy_timestamp(0, cutoff, cutoff));
+        assert!(!is_racy_timestamp(cutoff - 1, cutoff - 1, cutoff));
+    }
 
     /// The helper must return *something* on a freshly-created temp
     /// file, and the values should be stable across two reads of the

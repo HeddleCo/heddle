@@ -1,15 +1,16 @@
 use core::convert::TryFrom;
 
+use api::heddle::api::v1alpha1::{
+    HostedGrant, HostedNamespace, HostedObjectType, HostedRepository, ObjectAvailabilityStatus,
+    ObjectDescriptor, RepositoryRef, StateAttachmentKind as ProtoStateAttachmentKind,
+    StateId as ProtoStateId, TransferCheckpoint, TransportMode, repository_ref::Reference,
+};
 use base64::Engine as _;
 use cli_shared::ClientConfig;
-use grpc::heddle::api::v1alpha1::{
-    HostedGrant, HostedNamespace, HostedRepository, ObjectAvailabilityStatus, ObjectDescriptor,
-    RepositoryRef, StateAttachmentKind as ProtoStateAttachmentKind, StateId as ProtoStateId,
-    TransferCheckpoint, TransportMode, repository_ref::Reference,
-};
 use objects::object::{ContentHash, StateAttachmentId, StateAttachmentKind, StateId};
-use tonic::Status;
 use wire::{ObjectId, ObjectInfo, ObjectType, ProtocolError};
+
+use super::HostedError;
 
 #[derive(Debug, Clone)]
 pub(crate) struct HostedTransportPolicy {
@@ -83,7 +84,7 @@ fn attachment_kind_from_proto(kind: ProtoStateAttachmentKind) -> Option<StateAtt
 pub(super) fn parse_descriptor_to_info(
     descriptor: ObjectDescriptor,
 ) -> Result<ObjectInfo, ProtocolError> {
-    let obj_type = parse_object_type(&descriptor.object_type)?;
+    let obj_type = parse_object_type(descriptor.object_type)?;
     // Resolve the carried attachment kind up front. For an attachment
     // descriptor this MUST be a concrete kind — an `UNSPECIFIED` (or
     // unrecognized) value is a hard error, not a silent default.
@@ -162,8 +163,31 @@ pub(super) fn parse_object_id(
     }
 }
 
-pub(super) fn parse_object_type(value: &str) -> Result<ObjectType, ProtocolError> {
-    ObjectType::from_wire(value)
+pub(super) fn parse_object_type(value: i32) -> Result<ObjectType, ProtocolError> {
+    match HostedObjectType::try_from(value).unwrap_or_default() {
+        HostedObjectType::Blob => Ok(ObjectType::Blob),
+        HostedObjectType::Tree => Ok(ObjectType::Tree),
+        HostedObjectType::State => Ok(ObjectType::State),
+        HostedObjectType::Action => Ok(ObjectType::Action),
+        HostedObjectType::Redaction => Ok(ObjectType::Redaction),
+        HostedObjectType::StateVisibility => Ok(ObjectType::StateVisibility),
+        HostedObjectType::StateAttachment => Ok(ObjectType::StateAttachment),
+        HostedObjectType::Unspecified => Err(ProtocolError::InvalidState(
+            "object descriptor is missing object_type".to_string(),
+        )),
+    }
+}
+
+fn object_type_to_proto(obj_type: ObjectType) -> HostedObjectType {
+    match obj_type {
+        ObjectType::Blob => HostedObjectType::Blob,
+        ObjectType::Tree => HostedObjectType::Tree,
+        ObjectType::State => HostedObjectType::State,
+        ObjectType::Action => HostedObjectType::Action,
+        ObjectType::Redaction => HostedObjectType::Redaction,
+        ObjectType::StateVisibility => HostedObjectType::StateVisibility,
+        ObjectType::StateAttachment => HostedObjectType::StateAttachment,
+    }
 }
 
 pub(super) fn to_proto_object_info(info: &ObjectInfo) -> ObjectDescriptor {
@@ -190,7 +214,7 @@ pub(super) fn object_descriptor_with_status(
                 format!("{}:{}", state.to_string_full(), id.as_hash().to_hex())
             }
         },
-        object_type: object_type_name(info.obj_type).to_string(),
+        object_type: object_type_to_proto(info.obj_type) as i32,
         availability_status: availability_status as i32,
         availability_note: availability_note.into(),
         attachment_kind: attachment_kind as i32,
@@ -204,18 +228,14 @@ pub(super) fn transport_mode_name(mode: i32) -> &'static str {
     }
 }
 
-pub(super) fn object_type_name(obj_type: ObjectType) -> &'static str {
-    obj_type.wire_name()
-}
-
-pub(super) fn descriptor_id(descriptor: &ObjectDescriptor) -> (String, String) {
-    (descriptor.id.clone(), descriptor.object_type.clone())
+pub(super) fn descriptor_id(descriptor: &ObjectDescriptor) -> (String, i32) {
+    (descriptor.id.clone(), descriptor.object_type)
 }
 
 /// Compute the same `(id, object_type)` key as
 /// `descriptor_id(&to_proto_object_info(info))` without the throwaway full
 /// proto encode. Must stay byte-identical to the descriptor the server keys on.
-pub(super) fn descriptor_id_from_info(info: &ObjectInfo) -> (String, String) {
+pub(super) fn descriptor_id_from_info(info: &ObjectInfo) -> (String, i32) {
     let id = match &info.id {
         ObjectId::Hash(hash) => hash.to_hex(),
         ObjectId::StateId(state_id) => state_id.to_string_full(),
@@ -223,26 +243,127 @@ pub(super) fn descriptor_id_from_info(info: &ObjectInfo) -> (String, String) {
             format!("{}:{}", state.to_string_full(), id.as_hash().to_hex())
         }
     };
-    (id, object_type_name(info.obj_type).to_string())
+    (id, object_type_to_proto(info.obj_type) as i32)
 }
 
-pub(super) fn status_to_protocol_error(status: Status) -> ProtocolError {
-    let message = if status.message().contains("missing x-heddle-proof-ts") {
-        format!(
-            "{}; credential missing device proof key — re-login / re-install the credential with its matching private key",
-            status.message()
-        )
-    } else {
-        status.message().to_string()
-    };
-    match status.code() {
-        tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => {
-            ProtocolError::AuthorizationFailed(message)
+pub(super) fn hosted_to_protocol_error(error: HostedError) -> ProtocolError {
+    use api::heddle::api::v1alpha1::CallFailureCode;
+    match error {
+        HostedError::Call {
+            code,
+            message,
+            error,
+        } => {
+            if let Some(error) = error {
+                return ProtocolError::RemoteFailure {
+                    code: remote_failure_code(code),
+                    message,
+                    details: vec![remote_failure_detail(*error)],
+                };
+            }
+
+            match code {
+                CallFailureCode::Unauthenticated | CallFailureCode::PermissionDenied => {
+                    ProtocolError::AuthorizationFailed(message)
+                }
+                CallFailureCode::NotFound => ProtocolError::ObjectNotFound(message),
+                CallFailureCode::AlreadyExists => ProtocolError::AlreadyExists(message),
+                CallFailureCode::InvalidArgument | CallFailureCode::FailedPrecondition => {
+                    ProtocolError::InvalidState(message)
+                }
+                _ => ProtocolError::RemoteFailure {
+                    code: remote_failure_code(code),
+                    message,
+                    details: Vec::new(),
+                },
+            }
         }
-        tonic::Code::NotFound => ProtocolError::ObjectNotFound(message),
-        tonic::Code::AlreadyExists => ProtocolError::AlreadyExists(message),
-        tonic::Code::InvalidArgument => ProtocolError::InvalidState(message),
-        _ => ProtocolError::Remote(message),
+        HostedError::Decode(error) => ProtocolError::Serialization(error.to_string()),
+        HostedError::Transport(message) => ProtocolError::Io(std::io::Error::other(message)),
+        error => ProtocolError::Remote(error.to_string()),
+    }
+}
+
+fn remote_failure_code(
+    code: api::heddle::api::v1alpha1::CallFailureCode,
+) -> wire::RemoteFailureCode {
+    use api::heddle::api::v1alpha1::CallFailureCode as Api;
+    use wire::RemoteFailureCode as Wire;
+    match code {
+        Api::Unspecified => Wire::Unspecified,
+        Api::Cancelled => Wire::Cancelled,
+        Api::Unknown => Wire::Unknown,
+        Api::InvalidArgument => Wire::InvalidArgument,
+        Api::DeadlineExceeded => Wire::DeadlineExceeded,
+        Api::NotFound => Wire::NotFound,
+        Api::AlreadyExists => Wire::AlreadyExists,
+        Api::PermissionDenied => Wire::PermissionDenied,
+        Api::ResourceExhausted => Wire::ResourceExhausted,
+        Api::FailedPrecondition => Wire::FailedPrecondition,
+        Api::Aborted => Wire::Aborted,
+        Api::OutOfRange => Wire::OutOfRange,
+        Api::Unimplemented => Wire::Unimplemented,
+        Api::Internal => Wire::Internal,
+        Api::Unavailable => Wire::Unavailable,
+        Api::DataLoss => Wire::DataLoss,
+        Api::Unauthenticated => Wire::Unauthenticated,
+    }
+}
+
+fn remote_duration(value: prost_types::Duration) -> wire::RemoteDuration {
+    wire::RemoteDuration {
+        seconds: value.seconds,
+        nanos: value.nanos,
+    }
+}
+
+fn remote_cursor(value: api::heddle::api::v1alpha1::CursorFailure) -> wire::RemoteCursorFailure {
+    use api::heddle::api::v1alpha1::cursor_failure::Reason as Api;
+    use wire::RemoteCursorReason as Wire;
+    let reason = match value.reason() {
+        Api::Unspecified => Wire::Unspecified,
+        Api::Stale => Wire::Stale,
+        Api::Expired => Wire::Expired,
+    };
+    wire::RemoteCursorFailure {
+        reason,
+        expired_at: value.expired_at.map(|timestamp| wire::RemoteTimestamp {
+            seconds: timestamp.seconds,
+            nanos: timestamp.nanos,
+        }),
+        restart_cursor: value.restart_cursor,
+    }
+}
+
+fn remote_failure_detail(
+    detail: api::heddle::api::v1alpha1::ErrorDetail,
+) -> wire::RemoteFailureDetail {
+    use api::heddle::api::v1alpha1::error_detail::Context;
+    use prost::Message as _;
+
+    let encoded = detail.encode_to_vec();
+    match detail.context {
+        Some(Context::Retry(value)) => wire::RemoteFailureDetail::Retry {
+            retry_after: value.retry_after.map(remote_duration),
+        },
+        Some(Context::Conflict(value)) => wire::RemoteFailureDetail::Conflict {
+            resource: value.resource,
+            expected_version: value.expected_version,
+            actual_version: value.actual_version,
+        },
+        Some(Context::Cursor(value)) => wire::RemoteFailureDetail::Cursor(remote_cursor(value)),
+        Some(Context::Capability(value)) => wire::RemoteFailureDetail::CapabilityRequirement {
+            capabilities: value.capabilities,
+        },
+        Some(Context::Policy(value)) => wire::RemoteFailureDetail::PolicyDenial {
+            policy_id: value.policy_id,
+            rule: value.rule,
+            human_verification_can_override: value.human_verification_can_override,
+        },
+        Some(Context::HumanVerification(_)) | None => wire::RemoteFailureDetail::Unknown {
+            type_url: "type.googleapis.com/heddle.api.v1alpha1.ErrorDetail".to_string(),
+            value: encoded,
+        },
     }
 }
 
@@ -283,7 +404,7 @@ pub(super) fn parse_proto_state_id(
 }
 
 pub(super) fn to_protocol_namespace(namespace: HostedNamespace) -> wire::HostedNamespaceInfo {
-    use grpc::heddle::api::v1alpha1::NamespaceKind;
+    use api::heddle::api::v1alpha1::NamespaceKind;
     let kind = match NamespaceKind::try_from(namespace.kind).unwrap_or(NamespaceKind::Unspecified) {
         NamespaceKind::User => "user",
         NamespaceKind::Org => "namespace",
@@ -311,7 +432,7 @@ pub(super) fn to_protocol_repository(repository: HostedRepository) -> wire::Host
 }
 
 pub(super) fn to_protocol_grant(grant: HostedGrant) -> wire::HostedGrantInfo {
-    use grpc::heddle::api::v1alpha1::grant_target_ref::Target;
+    use api::heddle::api::v1alpha1::grant_target_ref::Target;
     let (namespace_path, repo_path) = match grant.target.and_then(|t| t.target) {
         Some(Target::NamespacePath(p)) if !p.is_empty() => (Some(p), None),
         Some(Target::RepoPath(p)) => (None, repository_ref_path(&p).map(ToOwned::to_owned)),
@@ -329,7 +450,7 @@ pub(super) fn to_protocol_grant(grant: HostedGrant) -> wire::HostedGrantInfo {
 /// CLI/web tier consumes (`reader` / `developer` / `maintainer` /
 /// `admin` / `owner`). Unknown / `UNSPECIFIED` becomes `""`.
 pub(super) fn hosted_role_proto_to_string(role: i32) -> String {
-    use grpc::heddle::api::v1alpha1::HostedRole;
+    use api::heddle::api::v1alpha1::HostedRole;
     match HostedRole::try_from(role).unwrap_or(HostedRole::Unspecified) {
         HostedRole::Reader => "reader".into(),
         HostedRole::Developer => "developer".into(),
@@ -346,7 +467,7 @@ mod tests {
 
     #[test]
     fn grant_repository_targets_preserve_both_reference_variants() {
-        use grpc::heddle::api::v1alpha1::{GrantTargetRef, HostedRole, grant_target_ref::Target};
+        use api::heddle::api::v1alpha1::{GrantTargetRef, HostedRole, grant_target_ref::Target};
 
         for reference in [
             Reference::HostedId("repo_123".to_string()),
@@ -373,13 +494,42 @@ mod tests {
     }
 
     #[test]
-    fn missing_proof_timestamp_error_explains_how_to_recover() {
-        let error = status_to_protocol_error(Status::unauthenticated(
-            "missing x-heddle-proof-ts metadata",
-        ));
-        let message = error.to_string();
+    fn native_auth_failure_maps_without_transport_status_types() {
+        let error = hosted_to_protocol_error(HostedError::Call {
+            code: api::heddle::api::v1alpha1::CallFailureCode::Unauthenticated,
+            message: "invalid proof".to_string(),
+            error: None,
+        });
+        assert!(matches!(error, ProtocolError::AuthorizationFailed(_)));
+    }
 
-        assert!(message.contains("credential missing device proof key"));
-        assert!(message.contains("re-login / re-install"));
+    #[test]
+    fn native_call_failure_preserves_typed_error_detail() {
+        use api::heddle::api::v1alpha1::{ConflictDetail, ErrorDetail, ErrorReason, error_detail};
+
+        let error = hosted_to_protocol_error(HostedError::Call {
+            code: api::heddle::api::v1alpha1::CallFailureCode::AlreadyExists,
+            message: "ref changed".to_string(),
+            error: Some(Box::new(ErrorDetail {
+                reason: ErrorReason::VersionConflict as i32,
+                resource: "refs/heads/main".to_string(),
+                field: String::new(),
+                context: Some(error_detail::Context::Conflict(ConflictDetail {
+                    resource: "refs/heads/main".to_string(),
+                    expected_version: "old".to_string(),
+                    actual_version: "new".to_string(),
+                })),
+            })),
+        });
+
+        let ProtocolError::RemoteFailure { code, details, .. } = error else {
+            panic!("expected remote failure");
+        };
+        assert_eq!(code, wire::RemoteFailureCode::AlreadyExists);
+        assert!(matches!(
+            &details[0],
+            wire::RemoteFailureDetail::Conflict { resource, .. }
+                if resource == "refs/heads/main"
+        ));
     }
 }

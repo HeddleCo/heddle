@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use objects::{
     object::{AnnotationKind, AnnotationScope, AnnotationStatus, ContextTarget},
-    store::{ActorPresenceStore, ActorPresenceStatus, ObjectStore},
+    store::{ActorPresenceStatus, ActorPresenceStore, ObjectStore},
 };
 use refs::Head;
 use repo::{Repository, RepositorySnapshot, SessionManager, StackNextAction, StateAttachmentKind};

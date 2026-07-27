@@ -2336,9 +2336,6 @@ fn core_loop_schemas_are_discoverable() {
         "agent provenance end",
         "agent provenance show",
         "agent provenance list",
-        "agent serve",
-        "agent status",
-        "agent stop",
         "agent reserve",
         "agent heartbeat",
         "agent capture",
@@ -8290,56 +8287,6 @@ fn integration_codex_repo_scope_uses_typed_advice_json() {
 }
 
 #[test]
-fn agent_serve_rejects_removed_foreground_flag() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).expect("init");
-    let output = heddle_output(
-        &["--output", "json", "agent", "serve", "--foreground"],
-        Some(temp.path()),
-    )
-    .expect("invoke agent serve");
-    assert!(!output.status.success(), "removed flag must be rejected");
-    assert!(
-        output.stdout.is_empty(),
-        "JSON-mode refusal must not write stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("--foreground"),
-        "clap should name the removed flag: {stderr}"
-    );
-}
-
-#[test]
-fn agent_stop_invalid_pidfile_uses_typed_advice_json() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).expect("init");
-    let sockets = temp.path().join(".heddle/sockets");
-    std::fs::create_dir_all(&sockets).expect("create sockets dir");
-    std::fs::write(sockets.join("grpc.pid"), "not-a-heddle-pidfile\n").expect("write pidfile");
-
-    let output = heddle_output(&["--output", "json", "agent", "stop"], Some(temp.path()))
-        .expect("invoke agent stop");
-    assert!(!output.status.success(), "invalid pidfile must refuse");
-    assert!(
-        output.stdout.is_empty(),
-        "JSON-mode refusal must not write stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let envelope: Value =
-        serde_json::from_str(&stderr).expect("stderr should be JSON error envelope");
-    assert_eq!(envelope["kind"], "agent_pidfile_invalid");
-    assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("pidfile")),
-        "typed advice should explain pidfile recovery: {stderr}"
-    );
-}
-
-#[test]
 fn agent_heartbeat_missing_lease_uses_typed_advice_json() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).expect("init");
@@ -8379,29 +8326,6 @@ fn agent_heartbeat_missing_lease_uses_typed_advice_json() {
 fn agent_api_json_outputs_match_registered_schemas_and_include_verification() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).expect("init");
-
-    let status = json_value(temp.path(), &["agent", "status", "--output", "json"]);
-    assert_schema_declares_runtime_top_level(&["agent", "status"], &status);
-    assert_eq!(status["output_kind"], "agent_status");
-    assert!(
-        status["verification"].is_object(),
-        "agent status should report repository verify: {status}"
-    );
-    assert!(
-        status["pid_path"]
-            .as_str()
-            .is_some_and(|path| path.starts_with(&canonical_path_string(temp.path()))),
-        "agent status should use the requested repo for daemon paths: {status}"
-    );
-
-    let stop = json_value(temp.path(), &["agent", "stop", "--output", "json"]);
-    assert_schema_declares_runtime_top_level(&["agent", "stop"], &stop);
-    assert_eq!(stop["output_kind"], "agent_stop");
-    assert_eq!(stop["stopped"], false);
-    assert!(
-        stop["verification"].is_object(),
-        "agent stop success should report repository verify: {stop}"
-    );
 
     let reserve = json_value(
         temp.path(),
@@ -8513,37 +8437,6 @@ fn agent_api_json_outputs_match_registered_schemas_and_include_verification() {
     assert!(
         release["verification"].is_object(),
         "agent release should prove post-mutation verify: {release}"
-    );
-}
-
-#[test]
-fn agent_daemon_status_honors_global_repo_argument() {
-    let cwd_repo = TempDir::new().unwrap();
-    let target_repo = TempDir::new().unwrap();
-    heddle(&["init"], Some(cwd_repo.path())).expect("init cwd repo");
-    heddle(&["init"], Some(target_repo.path())).expect("init target repo");
-
-    let target_arg = target_repo.path().to_str().expect("utf8 target path");
-    let target_path = canonical_path_string(target_repo.path());
-    let output = heddle(
-        &["--repo", target_arg, "agent", "status", "--output", "json"],
-        Some(cwd_repo.path()),
-    )
-    .expect("agent status with --repo should run");
-    let status: Value = serde_json::from_str(&output).expect("agent status JSON should parse");
-    assert_eq!(status["output_kind"], "agent_status");
-    let pid_path = status["pid_path"]
-        .as_str()
-        .expect("agent status should include pid_path");
-    assert!(
-        pid_path.starts_with(&target_path),
-        "agent status must inspect the global --repo target, not cwd: {status}"
-    );
-    assert!(
-        status["verification"]["repository_mode"]
-            .as_str()
-            .is_some_and(|mode| mode == "native-heddle"),
-        "agent status should verify the target repo: {status}"
     );
 }
 
@@ -9426,9 +9319,6 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         "agent provenance end",
         "agent provenance show",
         "agent provenance list",
-        "agent serve",
-        "agent status",
-        "agent stop",
         "agent reserve",
         "agent heartbeat",
         "agent capture",

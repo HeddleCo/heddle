@@ -55,6 +55,20 @@ impl Repository {
         }
     }
 
+    pub(crate) fn authored_state_signature_attachment(
+        &self,
+        state: &State,
+    ) -> Option<StateAttachment> {
+        self.sign_state_best_effort(state)
+            .map(|signature| StateAttachment {
+                state_id: state.id(),
+                body: StateAttachmentBody::Signature(signature),
+                attribution: state.attribution.clone(),
+                created_at: chrono::Utc::now(),
+                supersedes: None,
+            })
+    }
+
     /// Persist an authored state and its detached signature attachment.
     pub fn put_authored_state(&self, state: &State) -> Result<()> {
         let signature = self.sign_state_best_effort(state);
@@ -195,7 +209,7 @@ impl Repository {
 #[cfg(test)]
 mod tests {
     use crypto::Ed25519Signer;
-    use objects::object::{Attribution, Principal};
+    use objects::object::{Attribution, Blob, Principal, Tree, TreeEntry};
     use tempfile::TempDir;
 
     use super::*;
@@ -362,6 +376,64 @@ mod tests {
     }
 
     #[test]
+    fn structured_snapshot_packs_signature_and_rebuilds_lost_attachment_index() {
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (temp, repo) = setup_repo();
+            let blob = Blob::from_slice(b"packed snapshot signature");
+            let tree = Tree::from_entries(vec![
+                TreeEntry::file("agent.txt", blob.hash(), false).expect("tree entry"),
+            ]);
+            let state = repo
+                .snapshot_tree_with_blobs_with_attribution_profiled(
+                    tree,
+                    vec![blob],
+                    Some("packed signature".to_string()),
+                    None,
+                    repo.get_attribution().expect("attribution"),
+                )
+                .expect("structured snapshot")
+                .state;
+            let attachments = repo
+                .list_state_attachments(&state.id())
+                .expect("list signature attachment");
+            let signature = attachments
+                .iter()
+                .find(|attachment| matches!(attachment.body, StateAttachmentBody::Signature(_)))
+                .expect("snapshot signature");
+
+            let objects = temp.path().join(".heddle/objects");
+            let loose = objects
+                .join("state-attachments")
+                .join(state.id().to_string_full())
+                .join(format!("{}.attachment", signature.id().as_hash().to_hex()));
+            assert!(
+                !loose.exists(),
+                "the immutable signature must share the snapshot pack durability barrier"
+            );
+
+            let index = objects
+                .join("state-attachment-index")
+                .join(format!("{}.msgpack", state.id().to_string_full()));
+            assert!(
+                index.exists(),
+                "success path must materialize the derived index"
+            );
+            std::fs::remove_file(&index).expect("simulate loss of reconstructible index");
+            drop(repo);
+
+            let reopened = Repository::open(temp.path()).expect("reopen repository");
+            assert_eq!(
+                reopened
+                    .verify_state_signature(&state.id())
+                    .expect("verify rebuilt signature index"),
+                SignatureStatus::Valid,
+            );
+            assert!(index.exists(), "restart read must rebuild the lost index");
+        });
+    }
+
+    #[test]
     fn auth_login_reconciles_local_to_device_key() {
         let home = TempDir::new().expect("home temp");
         with_signing_home(home.path(), || {
@@ -385,7 +457,7 @@ mod tests {
             crate::identity::link_device_key(
                 device.public_key(),
                 &device.to_pem().expect("device pem"),
-                "grpc.example",
+                "api.example",
             )
             .expect("link device key");
             assert_ne!(device_pubkey, local_pubkey, "device key is distinct");
@@ -432,13 +504,13 @@ mod tests {
         with_signing_home(home.path(), || {
             let (temp, repo) = setup_repo();
 
-            // Simulate `auth login --server grpc.S`: link a device key.
+            // Simulate `auth login --server api.S`: link a device key.
             let device = Ed25519Signer::generate().expect("device key");
             let device_pubkey = hex::encode(device.public_key());
             crate::identity::link_device_key(
                 device.public_key(),
                 &device.to_pem().expect("device pem"),
-                "grpc.S",
+                "api.S",
             )
             .expect("link device key");
 
@@ -453,8 +525,8 @@ mod tests {
                 "post-login capture uses the device key",
             );
 
-            // Simulate `auth logout grpc.S`: unlink the device identity.
-            let removed = crate::identity::unlink_device_key("grpc.S").expect("unlink device key");
+            // Simulate `auth logout api.S`: unlink the device identity.
+            let removed = crate::identity::unlink_device_key("api.S").expect("unlink device key");
             assert!(
                 removed,
                 "logout removes the matching-server device identity"
@@ -479,7 +551,7 @@ mod tests {
             );
 
             // Logout is idempotent: a second one finds nothing to remove.
-            let again = crate::identity::unlink_device_key("grpc.S").expect("idempotent unlink");
+            let again = crate::identity::unlink_device_key("api.S").expect("idempotent unlink");
             assert!(!again, "second logout finds nothing to remove");
         });
     }

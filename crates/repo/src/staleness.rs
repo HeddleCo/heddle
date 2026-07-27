@@ -271,6 +271,7 @@ mod tests {
                 EntryType::Tree => TreeEntry::directory(name.to_string(), hash),
                 EntryType::Symlink => TreeEntry::symlink(name.to_string(), hash),
                 EntryType::Gitlink => unreachable!("staleness tests do not build gitlinks"),
+                EntryType::Spoollink => unreachable!("staleness tests do not build spoollinks"),
             })
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();

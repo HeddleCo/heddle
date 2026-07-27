@@ -47,8 +47,10 @@ use semantic::{
 };
 use tracing::warn;
 
-use crate::repository_semantic_query::MAX_SEMANTIC_TREE_DEPTH;
-use crate::{HeddleError, Repository, Result, StateAttachmentKind, SymbolDelta};
+use crate::{
+    HeddleError, Repository, Result, StateAttachmentKind, SymbolDelta,
+    repository_semantic_query::MAX_SEMANTIC_TREE_DEPTH,
+};
 
 /// Source files above this size are recorded as `Opaque` rather than parsed —
 /// generated/vendored blobs dominate parse cost and rarely carry review-worthy
@@ -70,6 +72,7 @@ struct BuiltEntry {
 /// prune-without-reparse invariant.
 pub struct SemanticIndexBuilder<'store, S: ObjectStore> {
     store: &'store S,
+    source_blobs: Option<&'store HashMap<ContentHash, &'store [u8]>>,
     extractor_version: u32,
     /// Per-build memo keyed by `(source blob hash, language)` — a blob that
     /// appears at several paths is parsed once, but byte-identical blobs at
@@ -90,11 +93,23 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
     pub fn new(store: &'store S, extractor_version: u32) -> Self {
         Self {
             store,
+            source_blobs: None,
             extractor_version,
             file_memo: HashMap::new(),
             grammars: BTreeMap::new(),
             pending: Vec::new(),
             parse_count: 0,
+        }
+    }
+
+    pub(crate) fn with_source_blobs(
+        store: &'store S,
+        extractor_version: u32,
+        source_blobs: &'store HashMap<ContentHash, &'store [u8]>,
+    ) -> Self {
+        Self {
+            source_blobs: Some(source_blobs),
+            ..Self::new(store, extractor_version)
         }
     }
 
@@ -134,9 +149,11 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
     /// grammar version must match the builder's current ones.
     fn parent_is_reusable(&self, parent: &ParentIndex) -> bool {
         parent.root.extractor_version == self.extractor_version
-            && parent.root.grammars.iter().all(|(name, version)| {
-                grammar_version_by_name(name) == Some(version.as_str())
-            })
+            && parent
+                .root
+                .grammars
+                .iter()
+                .all(|(name, version)| grammar_version_by_name(name) == Some(version.as_str()))
     }
 
     fn build_tree(
@@ -303,7 +320,14 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         if language.parser_handle().is_none() {
             return Ok(opaque);
         }
-        let Some(blob) = self.store.get_blob(&source_hash)? else {
+        let blob = match self
+            .source_blobs
+            .and_then(|blobs| blobs.get(&source_hash).copied())
+        {
+            Some(bytes) => Some(objects::object::Blob::from(bytes.to_vec())),
+            None => self.store.get_blob(&source_hash)?,
+        };
+        let Some(blob) = blob else {
             return Ok(opaque);
         };
         if blob.size() > SEMANTIC_FILE_BUDGET_BYTES {
@@ -390,6 +414,15 @@ impl Repository {
                 return Ok(None);
             }
         };
+        self.compute_and_persist_semantic_index_for_tree(prior, &tree, None)
+    }
+
+    pub(crate) fn compute_and_persist_semantic_index_for_tree(
+        &self,
+        prior: Option<&State>,
+        tree: &Tree,
+        source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
+    ) -> Result<Option<ContentHash>> {
         let parent = match prior.map(|p| self.materialize_parent_index(p)) {
             Some(Ok(Some(parent))) => Some(parent),
             Some(Ok(None)) | None => None,
@@ -398,8 +431,15 @@ impl Repository {
                 None
             }
         };
-        let mut builder = SemanticIndexBuilder::new(self.store(), EXTRACTOR_VERSION);
-        match builder.build_root(&tree, parent.as_ref()) {
+        let mut builder = match source_blobs {
+            Some(source_blobs) => SemanticIndexBuilder::with_source_blobs(
+                self.store(),
+                EXTRACTOR_VERSION,
+                source_blobs,
+            ),
+            None => SemanticIndexBuilder::new(self.store(), EXTRACTOR_VERSION),
+        };
+        match builder.build_root(tree, parent.as_ref()) {
             Ok((_, root_hash)) => Ok(Some(root_hash)),
             Err(err) => {
                 warn!(error = %err, "semantic index: build failed; skipping");
@@ -589,22 +629,13 @@ impl Repository {
     /// Whether the semantic content under `path_prefix` differs between two
     /// states, compared top-down by digest with identical subtrees pruned.
     /// ZERO source re-parse — only semantic node blobs along the prefix load.
-    pub fn semantic_changed(
-        &self,
-        a: &StateId,
-        b: &StateId,
-        path_prefix: &str,
-    ) -> Result<bool> {
+    pub fn semantic_changed(&self, a: &StateId, b: &StateId, path_prefix: &str) -> Result<bool> {
         self.recover_on_broken(&[a, b], |me| me.semantic_changed_inner(a, b, path_prefix))
     }
 
-    fn semantic_changed_inner(
-        &self,
-        a: &StateId,
-        b: &StateId,
-        path_prefix: &str,
-    ) -> Result<bool> {
-        let (Some(root_a), Some(root_b)) = (self.semantic_index(a)?, self.semantic_index(b)?) else {
+    fn semantic_changed_inner(&self, a: &StateId, b: &StateId, path_prefix: &str) -> Result<bool> {
+        let (Some(root_a), Some(root_b)) = (self.semantic_index(a)?, self.semantic_index(b)?)
+        else {
             // A missing index on either side is a difference iff the other exists.
             return Ok(self.semantic_index(a)?.is_some() != self.semantic_index(b)?.is_some());
         };
@@ -620,11 +651,7 @@ impl Repository {
         self.recover_on_broken(&[a, b], |me| me.semantic_diff_symbols_inner(a, b))
     }
 
-    fn semantic_diff_symbols_inner(
-        &self,
-        a: &StateId,
-        b: &StateId,
-    ) -> Result<Vec<SymbolDelta>> {
+    fn semantic_diff_symbols_inner(&self, a: &StateId, b: &StateId) -> Result<Vec<SymbolDelta>> {
         let (root_a, root_b) = match (self.semantic_index(a)?, self.semantic_index(b)?) {
             (Some(ra), Some(rb)) => (ra, rb),
             _ => return Ok(Vec::new()),
@@ -720,7 +747,8 @@ mod tests {
 
     use chrono::Utc;
     use objects::object::{
-        Attribution, Blob, Principal, StateAttachment, StateAttachmentBody, SymbolKindTag, TreeEntry,
+        Attribution, Blob, Principal, StateAttachment, StateAttachmentBody, SymbolKindTag,
+        TreeEntry,
     };
     use tempfile::TempDir;
 
@@ -808,7 +836,8 @@ mod tests {
     #[test]
     fn zig_file_indexes_to_real_node_and_reformat_is_digest_stable() {
         let (temp, repo) = repo();
-        let tight = "pub fn add(a: i32, b: i32) i32 { return a + b; }\ntest \"add\" { _ = add(1, 2); }\n";
+        let tight =
+            "pub fn add(a: i32, b: i32) i32 { return a + b; }\ntest \"add\" { _ = add(1, 2); }\n";
         let loose = "pub fn add(a: i32,   b: i32) i32 {\n    // sum\n    return a + b;\n}\n\ntest \"add\" {\n    _ = add(1, 2);\n}\n";
 
         let a = snapshot(&repo, &temp, "math.zig", tight);
@@ -911,7 +940,10 @@ mod tests {
 
         let mut parent_builder = SemanticIndexBuilder::new(repo.store(), EXTRACTOR_VERSION);
         let (root_a, _) = parent_builder.build_root(&tree_a, None).unwrap();
-        assert_eq!(parent_builder.parse_count, 2, "cold build parses both files");
+        assert_eq!(
+            parent_builder.parse_count, 2,
+            "cold build parses both files"
+        );
 
         // Only b.rs changes.
         let blob_b2 = put_blob(&repo, b"fn b() -> i32 { 99 }\n");
@@ -989,7 +1021,9 @@ mod tests {
         assert_eq!(root2.extractor_version, 2);
         let node_hash = repo.resolve_file_node(&root2, "a.rs").unwrap().unwrap();
         assert_eq!(
-            repo.load_semantic_file(&node_hash).unwrap().extractor_version,
+            repo.load_semantic_file(&node_hash)
+                .unwrap()
+                .extractor_version,
             2,
             "no mixed-version index"
         );
@@ -1068,7 +1102,10 @@ mod tests {
 
         let js = repo.resolve_file_node(&root, "a.js").unwrap().unwrap();
         let py = repo.resolve_file_node(&root, "b.py").unwrap().unwrap();
-        assert_ne!(js, py, "byte-identical files get distinct nodes per language");
+        assert_ne!(
+            js, py,
+            "byte-identical files get distinct nodes per language"
+        );
         assert_eq!(repo.load_semantic_file(&js).unwrap().language, "javascript");
         assert_eq!(repo.load_semantic_file(&py).unwrap().language, "python");
     }

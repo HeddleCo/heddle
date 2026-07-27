@@ -30,10 +30,11 @@
 //! See `docs/program/L8_PACK_INSTALL_JOURNAL.md`.
 
 use std::{
-    fs::{self, File},
-    io::{self, Read},
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -41,8 +42,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     fault_inject,
-    fs_atomic::{create_dir_all_durable, publish_file_durable, sync_directory, write_file_atomic},
+    fs_atomic::{
+        create_dir_all_durable, publish_file_durable, sync_directory, temp_path, write_file_atomic,
+    },
     lock::RepoLock,
+    object::ContentHash,
+    store::snapshot_commit::snapshot_commit_marker_path,
 };
 
 /// Intent schema version (v2 = identifiers only; paths reconstructed).
@@ -882,6 +887,130 @@ fn path_mtime_unix(path: &Path) -> Option<i64> {
 // Install
 // ---------------------------------------------------------------------------
 
+/// Install an immutable snapshot pack with the minimum durability barriers.
+///
+/// Unlike a received pack, this closure is still pre-commit: if the process
+/// stops during publication, no oplog record can point at it. Both files are
+/// fsynced as temps, renamed under the per-pack lock, then made discoverable
+/// with one directory fsync. A crash can therefore leave only an ignored
+/// unpaired pack or a GC-safe complete orphan, never a committed missing
+/// object. The ordinary journal remains mandatory for independently committed
+/// received packs.
+pub(crate) fn install_snapshot_pack_bytes(
+    packs_dir: &Path,
+    pack_data: Vec<u8>,
+    index_data: Vec<u8>,
+) -> io::Result<String> {
+    install_snapshot_pack_bytes_inner(packs_dir, pack_data, index_data, &[])
+}
+
+pub(crate) fn install_committed_snapshot_pack_bytes(
+    packs_dir: &Path,
+    pack_data: Vec<u8>,
+    index_data: Vec<u8>,
+    artifact_id: ContentHash,
+) -> io::Result<String> {
+    install_snapshot_pack_bytes_inner(packs_dir, pack_data, index_data, &[artifact_id])
+}
+
+pub(crate) fn install_snapshot_pack_bytes_with_commit_markers(
+    packs_dir: &Path,
+    pack_data: Vec<u8>,
+    index_data: Vec<u8>,
+    artifact_ids: &[ContentHash],
+) -> io::Result<String> {
+    install_snapshot_pack_bytes_inner(packs_dir, pack_data, index_data, artifact_ids)
+}
+
+fn install_snapshot_pack_bytes_inner(
+    packs_dir: &Path,
+    pack_data: Vec<u8>,
+    index_data: Vec<u8>,
+    artifact_ids: &[ContentHash],
+) -> io::Result<String> {
+    ensure_journal_layout_safe(packs_dir)?;
+    let digest = *blake3::hash(&pack_data).as_bytes();
+    let pack_name = digest_to_pack_name(&digest);
+    let _guard = acquire_pack_name_lock(packs_dir, &pack_name)?;
+
+    let pack_path = dst_pack_path(packs_dir, &pack_name);
+    if existing_pair_matches_digest(packs_dir, &pack_name, &digest)? {
+        for artifact_id in artifact_ids {
+            let marker = snapshot_commit_marker_path(&pack_path, artifact_id);
+            if !marker.exists() {
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(marker)?;
+            }
+        }
+        sync_directory(packs_dir)?;
+        return Ok(pack_name);
+    }
+
+    let dst_pack = dst_pack_path(packs_dir, &pack_name);
+    let dst_idx = dst_idx_path(packs_dir, &pack_name);
+    assert_under_packs(packs_dir, &dst_pack)?;
+    assert_under_packs(packs_dir, &dst_idx)?;
+    if dst_pack.exists() {
+        fs::remove_file(&dst_pack)?;
+    }
+    if dst_idx.exists() {
+        fs::remove_file(&dst_idx)?;
+    }
+
+    let tmp_pack = temp_path(&dst_pack);
+    let tmp_idx = temp_path(&dst_idx);
+    let result = (|| {
+        stage_snapshot_pack_pair_durable(&tmp_pack, pack_data, &tmp_idx, index_data)?;
+        fs::rename(&tmp_pack, &dst_pack)?;
+        fault_inject::maybe_fail_at("snapshot_pack_after_publish_pack")?;
+        fs::rename(&tmp_idx, &dst_idx)?;
+        fault_inject::maybe_fail_at("snapshot_pack_after_publish_idx")?;
+        for artifact_id in artifact_ids {
+            let marker = snapshot_commit_marker_path(&dst_pack, artifact_id);
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(marker)?;
+        }
+        sync_directory(packs_dir)?;
+        Ok(pack_name.clone())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp_pack);
+        let _ = fs::remove_file(&tmp_idx);
+    }
+    result
+}
+
+fn stage_snapshot_pack_pair_durable(
+    pack_path: &Path,
+    pack_data: Vec<u8>,
+    index_path: &Path,
+    index_data: Vec<u8>,
+) -> io::Result<()> {
+    let mut pack = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(pack_path)?;
+    pack.write_all(&pack_data)?;
+    let mut index = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(index_path)?;
+    index.write_all(&index_data)?;
+
+    let (pack_sync, index_sync) = thread::scope(|scope| {
+        let pack_sync = scope.spawn(move || pack.sync_all());
+        let index_sync = scope.spawn(move || index.sync_all());
+        (pack_sync.join(), index_sync.join())
+    });
+    pack_sync.map_err(|_| io::Error::other("snapshot pack sync worker panicked"))??;
+    index_sync.map_err(|_| io::Error::other("snapshot index sync worker panicked"))??;
+    Ok(())
+}
+
 fn new_install_id() -> String {
     let t = unix_now() as u64;
     let r: u64 = rand::random();
@@ -1542,6 +1671,72 @@ mod tests {
 
         let name2 = install_pack_bytes_journaled(&packs, pack_bytes, &idx_bytes).unwrap();
         assert_eq!(name2, expected_name);
+    }
+
+    #[test]
+    fn snapshot_pack_install_publishes_pair_without_an_intent() {
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        let pack_bytes = b"snapshot-pack-body".to_vec();
+        let idx_bytes = empty_idx_bytes();
+        let expected_name = format!("{}", blake3::hash(&pack_bytes).to_hex());
+
+        let name = install_snapshot_pack_bytes(&packs, pack_bytes, idx_bytes).unwrap();
+        assert_eq!(name, expected_name);
+        assert!(existing_pair_matches_pack_name(&packs, &name).unwrap());
+        assert_eq!(intent_count_json(&packs), 0);
+    }
+
+    #[test]
+    fn snapshot_pack_install_repairs_an_interrupted_pair_before_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        let pack_bytes = b"interrupted-snapshot-pack".to_vec();
+        let idx_bytes = empty_idx_bytes();
+        let expected_name = format!("{}", blake3::hash(&pack_bytes).to_hex());
+
+        let err = fault_inject::with_fault_points(&["snapshot_pack_after_publish_pack"], || {
+            install_snapshot_pack_bytes(&packs, pack_bytes.clone(), idx_bytes.clone())
+        })
+        .expect_err("fault should stop publication before the index rename");
+        assert!(err.to_string().contains("snapshot_pack_after_publish_pack"));
+        assert!(dst_pack_path(&packs, &expected_name).exists());
+        assert!(!dst_idx_path(&packs, &expected_name).exists());
+
+        let repaired = install_snapshot_pack_bytes(&packs, pack_bytes, idx_bytes).unwrap();
+        assert_eq!(repaired, expected_name);
+        assert!(existing_pair_matches_pack_name(&packs, &repaired).unwrap());
+    }
+
+    #[test]
+    fn committed_snapshot_marker_appears_only_after_the_complete_pair() {
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        let pack_bytes = b"authoritative-snapshot-pack".to_vec();
+        let idx_bytes = empty_idx_bytes();
+        let expected_name = format!("{}", blake3::hash(&pack_bytes).to_hex());
+        let artifact_id = ContentHash::compute(b"snapshot artifact");
+        let marker =
+            snapshot_commit_marker_path(&dst_pack_path(&packs, &expected_name), &artifact_id);
+
+        let err = fault_inject::with_fault_points(&["snapshot_pack_after_publish_idx"], || {
+            install_committed_snapshot_pack_bytes(
+                &packs,
+                pack_bytes.clone(),
+                idx_bytes.clone(),
+                artifact_id,
+            )
+        })
+        .expect_err("fault should stop publication before the commit marker");
+        assert!(err.to_string().contains("snapshot_pack_after_publish_idx"));
+        assert!(existing_pair_matches_pack_name(&packs, &expected_name).unwrap());
+        assert!(!marker.exists());
+
+        let repaired =
+            install_committed_snapshot_pack_bytes(&packs, pack_bytes, idx_bytes, artifact_id)
+                .unwrap();
+        assert_eq!(repaired, expected_name);
+        assert!(marker.exists());
     }
 
     #[test]

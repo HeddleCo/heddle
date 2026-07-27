@@ -31,6 +31,10 @@ use crate::fs_atomic::{create_dir_all_durable, sync_directory};
 /// `head_id` so the first read after a reconciler is injected always reconciles.
 const WATERMARK_UNSET: u64 = u64::MAX;
 
+fn watermark_covers(cached: u64, tip: u64) -> bool {
+    cached != WATERMARK_UNSET && cached >= tip
+}
+
 /// Per-worktree persisted **local**-class watermark (HEAD + undo-recovery),
 /// stored beside the per-checkout `HEAD`. Local refs are worktree-private, so
 /// each checkout tracks its own.
@@ -243,6 +247,57 @@ impl RefManager {
         Ok(())
     }
 
+    /// Atomically publish a just-committed attached snapshot as a
+    /// reconstructible materialized view. The caller already owns the
+    /// authoritative state and oplog tip, so replaying the same oplog tail
+    /// through a fresh reconciler here only adds file/index I/O to every
+    /// capture. The persisted watermarks deliberately remain at their prior
+    /// durable floor for fresh-process recovery.
+    pub fn materialize_snapshot_thread_after_commit(
+        &self,
+        thread: &ThreadName,
+        state: StateId,
+        tip: u64,
+    ) -> Result<()> {
+        let lock = self.lock_refs()?;
+        let outcome = super::reconcile::ReconcileOutcome {
+            loaded: Loaded::Point(Some(state)),
+            republish: vec![RefUpdate::Thread {
+                name: thread.clone(),
+                expected: RefExpectation::Any,
+                new: Some(state),
+            }],
+            remote_updates: Vec::new(),
+            undo_recovery: None,
+        };
+        self.materialize_with_ref_durability(&outcome, &lock, false)?;
+        self.cached_shared_generation.store(tip, Ordering::Release);
+        // Attached snapshots do not change HEAD's identity; this commit has no
+        // other local-class effect, so the local view is complete at `tip` too.
+        self.cached_local_generation.store(tip, Ordering::Release);
+        Ok(())
+    }
+
+    /// Detached-HEAD counterpart to
+    /// [`materialize_snapshot_thread_after_commit`](Self::materialize_snapshot_thread_after_commit).
+    pub fn materialize_snapshot_head_after_commit(&self, state: StateId, tip: u64) -> Result<()> {
+        let lock = self.lock_refs()?;
+        let outcome = super::reconcile::ReconcileOutcome {
+            loaded: Loaded::Head(Head::Detached { state }),
+            republish: vec![RefUpdate::Head {
+                expected: RefExpectation::Any,
+                new: Head::Detached { state },
+            }],
+            remote_updates: Vec::new(),
+            undo_recovery: None,
+        };
+        self.materialize_with_ref_durability(&outcome, &lock, false)?;
+        self.cached_local_generation.store(tip, Ordering::Release);
+        // Detached snapshots do not touch a shared ref.
+        self.cached_shared_generation.store(tip, Ordering::Release);
+        Ok(())
+    }
+
     /// Materialize one class's committed tail under the held lock — the
     /// class-scoped form of [`reconciled_load`](Self::reconciled_load)'s lag
     /// branch, driven by a lightweight probe request of the class (the
@@ -255,7 +310,7 @@ impl RefManager {
         };
         let watermark = self.class_watermark(class);
         let tip = reconciler.generation()?;
-        if tip == watermark.load(Ordering::Acquire) {
+        if watermark_covers(watermark.load(Ordering::Acquire), tip) {
             return Ok(());
         }
         // Re-read the persisted (possibly sibling-advanced) last-clean point
@@ -263,7 +318,7 @@ impl RefManager {
         // sibling already materialized past (cid 3329765075).
         self.refresh_persisted_watermark(class, lock)?;
         let cached = watermark.load(Ordering::Acquire);
-        if tip == cached {
+        if watermark_covers(cached, tip) {
             return Ok(());
         }
         let req = Self::class_probe(class);
@@ -351,7 +406,7 @@ impl RefManager {
         // A `generation()` error propagates (cid 3329631081) — never silently
         // treated as generation 0.
         let tip = reconciler.generation()?;
-        if tip == watermark.load(Ordering::Acquire) {
+        if watermark_covers(watermark.load(Ordering::Acquire), tip) {
             return self.raw_load(&req);
         }
 
@@ -373,7 +428,7 @@ impl RefManager {
         self.refresh_persisted_watermark(req.ref_class(), &lock)?;
         let cached = watermark.load(Ordering::Acquire);
         let raw = self.raw_load(&req)?;
-        if tip == cached {
+        if watermark_covers(cached, tip) {
             // A concurrent reconcile materialized the lag while we waited for the
             // lock; the freshly-read canonical is now authoritative.
             return Ok(raw);
@@ -414,7 +469,7 @@ impl RefManager {
             RefClass::Shared => &self.cached_shared_generation,
         };
         let cached = watermark.load(Ordering::Acquire);
-        if tip == cached {
+        if watermark_covers(cached, tip) {
             return Ok(raw);
         }
         let since = if cached == WATERMARK_UNSET { 0 } else { cached };
@@ -556,6 +611,15 @@ impl RefManager {
         outcome: &super::reconcile::ReconcileOutcome,
         lock: &RefsLock,
     ) -> Result<()> {
+        self.materialize_with_ref_durability(outcome, lock, true)
+    }
+
+    fn materialize_with_ref_durability(
+        &self,
+        outcome: &super::reconcile::ReconcileOutcome,
+        lock: &RefsLock,
+        durable_refs: bool,
+    ) -> Result<()> {
         // The whole materialization runs under the caller's single held lock so
         // the fold that produced `outcome` and these re-publishes are one atomic
         // unit vs a concurrent publish (cid 3329631077). The publish values are
@@ -563,7 +627,11 @@ impl RefManager {
         // canonical, computed inside `plan_materialization`.
         let plans = self.plan_materialization(&outcome.republish)?;
         if !plans.is_empty() {
-            self.publish_ref_plans(plans, lock)?;
+            if durable_refs {
+                self.publish_ref_plans(plans, lock)?;
+            } else {
+                self.publish_ref_plans_reconstructible(plans, lock)?;
+            }
         }
         for (remote, thread, value) in &outcome.remote_updates {
             if self.raw_get_remote_thread(remote, thread)? != *value {

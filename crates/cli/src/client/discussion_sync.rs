@@ -70,18 +70,20 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use objects::fs_atomic::write_file_atomic;
-use objects::object::{
-    Attribution, CollabOpId, CollaborationAnchor, CollaborationIdempotencyKey,
-    CollaborationOperationBodyV1, CollaborationOperationEnvelope, DiscussionRecordId,
-    DiscussionTurnV1, MaterializedDiscussion, Principal, StateId, VisibilityTier,
+use heddle_client::hosted::{HostedDiscussion, HostedDiscussionTurn};
+use objects::{
+    fs_atomic::write_file_atomic,
+    object::{
+        Attribution, CollabOpId, CollaborationAnchor, CollaborationIdempotencyKey,
+        CollaborationOperationBodyV1, CollaborationOperationEnvelope, DiscussionRecordId,
+        DiscussionTurnV1, MaterializedDiscussion, Principal, StateId, VisibilityTier,
+    },
+    store::ObjectStore,
 };
-use objects::store::ObjectStore;
 use repo::{CollaborationStore, Repository, mark_legacy_discussions_migrated};
 use serde::{Deserialize, Serialize};
 
-use crate::client::HostedGrpcClient;
-use heddle_client::grpc_hosted::{HostedDiscussion, HostedDiscussionTurn};
+use crate::client::HostedClient;
 
 /// Deterministic namespace for the derived client-operation-ids so a retried
 /// push replays (server-side idempotent) rather than duplicating a turn.
@@ -157,7 +159,11 @@ fn save_mirror(heddle_dir: &Path, mirror: &HostedMirror) -> Result<()> {
 }
 
 fn open_op_id(repo_path: &str, local_id: &str) -> String {
-    uuid::Uuid::new_v5(&OP_NAMESPACE, format!("open:{repo_path}:{local_id}").as_bytes()).to_string()
+    uuid::Uuid::new_v5(
+        &OP_NAMESPACE,
+        format!("open:{repo_path}:{local_id}").as_bytes(),
+    )
+    .to_string()
 }
 
 fn append_op_id(repo_path: &str, server_id: &str, turn_id: &str) -> String {
@@ -228,11 +234,13 @@ fn collect_local_turns(
 /// past a per-discussion failure (warn-and-skip).
 pub async fn push_discussions(
     repo: &Repository,
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
 ) -> Result<usize> {
     let store = CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?;
-    let materialized = store.materialize().context("materialize local discussions")?;
+    let materialized = store
+        .materialize()
+        .context("materialize local discussions")?;
     if materialized.discussions.is_empty() {
         return Ok(0);
     }
@@ -274,7 +282,7 @@ pub async fn push_discussions(
 
 #[allow(clippy::too_many_arguments)]
 async fn push_one(
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     store: &CollaborationStore,
     repo: &Repository,
     repo_path: &str,
@@ -419,7 +427,7 @@ async fn push_one(
 /// past a per-discussion failure.
 pub async fn pull_discussions(
     repo: &Repository,
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
 ) -> Result<usize> {
     // Hosted discussions arrive as server-minted `Discussions` state-attachments
@@ -552,7 +560,9 @@ fn pull_one(
                     heads.clone(),
                     turn_attribution(turn),
                     turn_ms(turn),
-                    CollaborationOperationBodyV1::AppendTurn { turn: turn_body(turn)? },
+                    CollaborationOperationBodyV1::AppendTurn {
+                        turn: turn_body(turn)?,
+                    },
                 )?;
                 heads = vec![op_id];
                 push_link(mirror, repo_path, index, turn_identity(&op_id, 0), ordinal);
@@ -604,7 +614,9 @@ fn pull_one(
                     heads.clone(),
                     turn_attribution(server_turn),
                     turn_ms(server_turn),
-                    CollaborationOperationBodyV1::AppendTurn { turn: turn_body(server_turn)? },
+                    CollaborationOperationBodyV1::AppendTurn {
+                        turn: turn_body(server_turn)?,
+                    },
                 )?;
                 heads = vec![op_id];
                 push_link(mirror, repo_path, index, turn_identity(&op_id, 0), ordinal);
@@ -674,9 +686,15 @@ fn write_local_operation(
 ) -> Result<CollabOpId> {
     let key = CollaborationIdempotencyKey::new(uuid::Uuid::new_v4().to_string())
         .map_err(|e| anyhow!("invalid idempotency key: {e}"))?;
-    let operation =
-        CollaborationOperationEnvelope::new(discussion_id, parents, key, author, occurred_at_ms, body)
-            .map_err(|e| anyhow!("build collaboration operation: {e}"))?;
+    let operation = CollaborationOperationEnvelope::new(
+        discussion_id,
+        parents,
+        key,
+        author,
+        occurred_at_ms,
+        body,
+    )
+    .map_err(|e| anyhow!("build collaboration operation: {e}"))?;
     Ok(store
         .write_operation(&operation)
         .context("write collaboration operation")?
@@ -730,16 +748,21 @@ fn parse_visibility_token(token: &str) -> VisibilityTier {
 #[cfg(test)]
 mod tests {
     use objects::object::{
-        CollaborationAnchor, CollaborationIdempotencyKey, CollaborationOperationBodyV1,
-        CollaborationOperationEnvelope, DiscussionRecordId, DiscussionTurnV1, LegacyDiscussionId,
-        LegacyDiscussionResolutionV1, LegacySourceLocator, Principal, StateAttachmentId, StateId,
-        VisibilityTier,
+        Attribution, CollaborationAnchor, CollaborationIdempotencyKey,
+        CollaborationOperationBodyV1, CollaborationOperationEnvelope, ContentHash,
+        DiscussionRecordId, DiscussionTurnV1, LegacyDiscussionId, LegacyDiscussionResolutionV1,
+        LegacySourceLocator, Principal, StateAttachmentId, StateId, VisibilityTier,
     };
-    use objects::object::{Attribution, ContentHash};
 
     use super::*;
 
-    fn local(body: &str, author_name: &str, author_email: &str, is_self: bool, ms: i64) -> LocalTurn {
+    fn local(
+        body: &str,
+        author_name: &str,
+        author_email: &str,
+        is_self: bool,
+        ms: i64,
+    ) -> LocalTurn {
         LocalTurn {
             turn_id: format!("co-{author_name}#0"),
             body: body.to_string(),
@@ -750,7 +773,12 @@ mod tests {
         }
     }
 
-    fn server(body: &str, author_name: &str, author_email: &str, posted_at_secs: i64) -> HostedDiscussionTurn {
+    fn server(
+        body: &str,
+        author_name: &str,
+        author_email: &str,
+        posted_at_secs: i64,
+    ) -> HostedDiscussionTurn {
         HostedDiscussionTurn {
             author_name: author_name.to_string(),
             author_email: author_email.to_string(),
@@ -839,7 +867,10 @@ mod tests {
         .unwrap();
         store.write_operation(&op).unwrap();
 
-        let materialized = store.materialize_discussion(&discussion_id).unwrap().unwrap();
+        let materialized = store
+            .materialize_discussion(&discussion_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(materialized.turns.len(), 3);
         let self_attr = Attribution::human(Principal::new("Importer", "importer@x"));
         let turns = collect_local_turns(&store, &materialized, Some(&self_attr)).unwrap();
@@ -852,7 +883,11 @@ mod tests {
             .iter()
             .map(|t| append_op_id("ns/repo", "server-1", &t.turn_id))
             .collect();
-        assert_eq!(keys.len(), 3, "each turn must get a distinct idempotency key");
+        assert_eq!(
+            keys.len(),
+            3,
+            "each turn must get a distinct idempotency key"
+        );
         // All authored by the importer (self) → all are push candidates.
         assert!(turns.iter().all(|t| t.is_self));
     }
@@ -882,7 +917,10 @@ mod tests {
         )
         .unwrap();
         store.write_operation(&op).unwrap();
-        let materialized = store.materialize_discussion(&discussion_id).unwrap().unwrap();
+        let materialized = store
+            .materialize_discussion(&discussion_id)
+            .unwrap()
+            .unwrap();
         let turns = collect_local_turns(&store, &materialized, None).unwrap();
         assert!(
             turns.iter().all(|t| !t.is_self),

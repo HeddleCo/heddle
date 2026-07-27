@@ -184,12 +184,20 @@ pub(crate) fn visit_definitions<'tree>(
             "trait_item" => {
                 emit_named_definition(node, source, DefinitionKind::Trait, current_parent, emit)
             }
-            "type_item" => {
-                emit_named_definition(node, source, DefinitionKind::TypeAlias, current_parent, emit)
-            }
-            "const_item" | "static_item" => {
-                emit_named_definition(node, source, DefinitionKind::ConstDecl, current_parent, emit)
-            }
+            "type_item" => emit_named_definition(
+                node,
+                source,
+                DefinitionKind::TypeAlias,
+                current_parent,
+                emit,
+            ),
+            "const_item" | "static_item" => emit_named_definition(
+                node,
+                source,
+                DefinitionKind::ConstDecl,
+                current_parent,
+                emit,
+            ),
             "mod_item" => {
                 // Emit the module, then descend with the module name as the new
                 // container so `mod a { fn f }` yields `f` with `["a"]` — not
@@ -322,12 +330,20 @@ pub(crate) fn visit_definitions<'tree>(
                 }
                 descended_with_new_parent = true;
             }
-            "interface_declaration" => {
-                emit_named_definition(node, source, DefinitionKind::Interface, current_parent, emit)
-            }
-            "type_alias_declaration" => {
-                emit_named_definition(node, source, DefinitionKind::TypeAlias, current_parent, emit)
-            }
+            "interface_declaration" => emit_named_definition(
+                node,
+                source,
+                DefinitionKind::Interface,
+                current_parent,
+                emit,
+            ),
+            "type_alias_declaration" => emit_named_definition(
+                node,
+                source,
+                DefinitionKind::TypeAlias,
+                current_parent,
+                emit,
+            ),
             "enum_declaration" => {
                 emit_named_definition(node, source, DefinitionKind::EnumDef, current_parent, emit)
             }
@@ -372,8 +388,13 @@ pub(crate) fn visit_definitions<'tree>(
                 // members we walk under `[Name]`; a bare `const`/`var` binding
                 // at container scope is a `ConstDecl`.
                 if kind == "variable_declaration" && !saw_declarator {
-                    descended_with_new_parent =
-                        zig_visit_variable_declaration(node, source, current_parent, emit, &mut stack);
+                    descended_with_new_parent = zig_visit_variable_declaration(
+                        node,
+                        source,
+                        current_parent,
+                        emit,
+                        &mut stack,
+                    );
                 }
             }
             "test_declaration" => {
@@ -528,7 +549,10 @@ fn zig_visit_variable_declaration<'tree>(
         return false;
     };
 
-    if let Some(container) = children.iter().find(|c| zig_container_kind(c.kind()).is_some()) {
+    if let Some(container) = children
+        .iter()
+        .find(|c| zig_container_kind(c.kind()).is_some())
+    {
         let dk = zig_container_kind(container.kind()).expect("checked by find");
         emit(DefinitionSite {
             node,
@@ -983,7 +1007,14 @@ pub mod outer {
         // Items inside `mod outer` now carry `outer` as their container.
         assert_definition(&defs, "Widget", DefinitionKind::Type, 3, 5, Some("outer"));
         assert_definition(&defs, "Mode", DefinitionKind::EnumDef, 7, 10, Some("outer"));
-        assert_definition(&defs, "Runner", DefinitionKind::Trait, 12, 14, Some("outer"));
+        assert_definition(
+            &defs,
+            "Runner",
+            DefinitionKind::Trait,
+            12,
+            14,
+            Some("outer"),
+        );
         assert_definition(
             &defs,
             "WidgetResult",
@@ -1092,7 +1123,13 @@ pub mod outer {
             ("Widget", DefinitionKind::Type, 3, 5, Some("outer")),
             ("Mode", DefinitionKind::EnumDef, 7, 10, Some("outer")),
             ("Runner", DefinitionKind::Trait, 12, 14, Some("outer")),
-            ("WidgetResult", DefinitionKind::TypeAlias, 16, 16, Some("outer")),
+            (
+                "WidgetResult",
+                DefinitionKind::TypeAlias,
+                16,
+                16,
+                Some("outer"),
+            ),
             ("build", DefinitionKind::Function, 19, 21, Some("Widget")),
         ];
 
@@ -1183,11 +1220,25 @@ test "addition works" {
         assert_definition(&defs, "counter", DefinitionKind::ConstDecl, 4, 4, None);
         assert_definition(&defs, "add", DefinitionKind::Function, 6, 9, None);
         assert_definition(&defs, "Point", DefinitionKind::Type, 11, 17, None);
-        assert_definition(&defs, "dist", DefinitionKind::Function, 13, 16, Some("Point"));
+        assert_definition(
+            &defs,
+            "dist",
+            DefinitionKind::Function,
+            13,
+            16,
+            Some("Point"),
+        );
         assert_definition(&defs, "Color", DefinitionKind::EnumDef, 19, 19, None);
         assert_definition(&defs, "Shape", DefinitionKind::Type, 21, 21, None);
         assert_definition(&defs, "Handle", DefinitionKind::Type, 23, 25, None);
-        assert_definition(&defs, "get", DefinitionKind::Function, 24, 24, Some("Handle"));
+        assert_definition(
+            &defs,
+            "get",
+            DefinitionKind::Function,
+            24,
+            24,
+            Some("Handle"),
+        );
         assert_definition(
             &defs,
             "test:\"addition works\"",

@@ -281,8 +281,8 @@ impl SemanticFileNode {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, SemanticIndexError> {
-        let node: Self =
-            rmp_serde::from_slice(bytes).map_err(|err| SemanticIndexError::Encoding(err.to_string()))?;
+        let node: Self = rmp_serde::from_slice(bytes)
+            .map_err(|err| SemanticIndexError::Encoding(err.to_string()))?;
         if node.format_version != Self::FORMAT_VERSION {
             return Err(SemanticIndexError::UnsupportedVersion(node.format_version));
         }
@@ -343,8 +343,8 @@ impl SemanticTreeNode {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, SemanticIndexError> {
-        let node: Self =
-            rmp_serde::from_slice(bytes).map_err(|err| SemanticIndexError::Encoding(err.to_string()))?;
+        let node: Self = rmp_serde::from_slice(bytes)
+            .map_err(|err| SemanticIndexError::Encoding(err.to_string()))?;
         if node.format_version != Self::FORMAT_VERSION {
             return Err(SemanticIndexError::UnsupportedVersion(node.format_version));
         }
@@ -396,8 +396,8 @@ impl SemanticIndexRoot {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, SemanticIndexError> {
-        let root: Self =
-            rmp_serde::from_slice(bytes).map_err(|err| SemanticIndexError::Encoding(err.to_string()))?;
+        let root: Self = rmp_serde::from_slice(bytes)
+            .map_err(|err| SemanticIndexError::Encoding(err.to_string()))?;
         if root.format_version != Self::FORMAT_VERSION {
             return Err(SemanticIndexError::UnsupportedVersion(root.format_version));
         }
@@ -532,7 +532,10 @@ mod tests {
 
     #[test]
     fn address_spelling() {
-        assert_eq!(sym("foo", &[], SymbolKindTag::Function, (0, 0)).address(), "foo");
+        assert_eq!(
+            sym("foo", &[], SymbolKindTag::Function, (0, 0)).address(),
+            "foo"
+        );
         assert_eq!(
             sym("open", &["Repository"], SymbolKindTag::Function, (0, 0)).address(),
             "Repository::open"

@@ -37,7 +37,7 @@ use crate::{
         },
         should_output_json,
     },
-    client::HostedGrpcClient,
+    client::{HostedAuthMode, HostedClient},
     config::UserConfig,
     remote::{RemoteTarget, resolve_remote_with_key},
 };
@@ -102,7 +102,7 @@ struct ApprovalRevokeOutput {
 async fn open_heddle_client(
     repo: &Repository,
     remote_name: &str,
-) -> Result<(HostedGrpcClient, String)> {
+) -> Result<(HostedClient, String)> {
     let (target, server_key) = resolve_remote_with_key(repo, Some(remote_name))?;
     let (addr, repo_path) = match target {
         RemoteTarget::Network { addr, repo_path } => (
@@ -124,11 +124,17 @@ async fn open_heddle_client(
     };
 
     let user_config = UserConfig::load_default()?;
-    // Authenticated thread-workflow RPCs are proof-of-possession gated; the
-    // single resolver attaches the credential's proof key.
-    let client = HostedGrpcClient::open_session(addr, &user_config, server_key)
-        .await?
-        .with_human_signature_callback(crate::client::cli_human_signature_callback());
+    // Authenticated thread-workflow RPCs are proof-of-possession gated, so use
+    // CredentialFallback (resolves the credential store's proof key) rather
+    // than a token-only ConfigToken session.
+    let client = HostedClient::open_session(
+        addr,
+        &user_config,
+        server_key,
+        HostedAuthMode::CredentialFallback,
+    )
+    .await?
+    .with_human_signature_callback(crate::client::cli_human_signature_callback());
     Ok((client, repo_path))
 }
 
@@ -280,7 +286,14 @@ pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Re
         .into_iter()
         .map(|u| UnmetOutput {
             policy_id: u.policy_id,
-            kind: u.kind,
+            kind: match api::heddle::api::v1alpha1::UnmetRequirementKind::try_from(u.kind)
+                .unwrap_or_default()
+            {
+                api::heddle::api::v1alpha1::UnmetRequirementKind::FlatRole => "flat_role",
+                api::heddle::api::v1alpha1::UnmetRequirementKind::Group => "group",
+                api::heddle::api::v1alpha1::UnmetRequirementKind::Unspecified => "unspecified",
+            }
+            .to_string(),
             group_id: u.group_id,
             reason: u.reason,
             needed: u.needed,

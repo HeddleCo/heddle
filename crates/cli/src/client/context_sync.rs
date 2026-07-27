@@ -76,20 +76,24 @@ use std::{
 
 use anyhow::{Context, Result};
 use api::heddle::api::v1alpha1::{
-    AnnotationScope as ProtoScope, ContextAnnotation, ContextAnnotationKind, ContextAnnotationStatus,
-    LineRange, SymbolScope, annotation_scope::Scope,
+    AnnotationScope as ProtoScope, ContextAnnotation, ContextAnnotationKind,
+    ContextAnnotationStatus, LineRange, SymbolScope, annotation_scope::Scope,
 };
-use objects::fs_atomic::write_file_atomic;
-use objects::object::{
-    Annotation, AnnotationKind, AnnotationRevision, AnnotationScope, AnnotationStatus, ContentHash,
-    ContextBlob, ContextTarget, State, StateId,
+use objects::{
+    fs_atomic::write_file_atomic,
+    object::{
+        Annotation, AnnotationKind, AnnotationRevision, AnnotationScope, AnnotationStatus,
+        ContentHash, ContextBlob, ContextTarget, State, StateId,
+    },
+    store::ObjectStore,
 };
-use objects::store::ObjectStore;
 use repo::Repository;
 use serde::{Deserialize, Serialize};
 
-use crate::cli::commands::context::{context_root_for_state, put_context_attachment};
-use crate::client::HostedGrpcClient;
+use crate::{
+    cli::commands::context::{context_root_for_state, put_context_attachment},
+    client::HostedClient,
+};
 
 // =========================================================================
 // Mirror map
@@ -346,13 +350,17 @@ fn hosted_attribution(username: Option<&str>) -> Option<String> {
 /// Publish local annotations we authored to the hosted `RepositoryService`.
 pub async fn push_context(
     repo: &Repository,
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
 ) -> Result<usize> {
     let Some(head_id) = repo.head().context("resolve repository head")? else {
         return Ok(0);
     };
-    let Some(head_state) = repo.store().get_state(&head_id).context("load head state")? else {
+    let Some(head_state) = repo
+        .store()
+        .get_state(&head_id)
+        .context("load head state")?
+    else {
         return Ok(0);
     };
     let Some(context_root) = context_root_for_state(repo, &head_state)? else {
@@ -413,7 +421,7 @@ pub async fn push_context(
 
 #[allow(clippy::too_many_arguments)]
 async fn push_one(
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
     heddle_dir: &Path,
     target: &ContextTarget,
@@ -450,10 +458,13 @@ async fn push_one(
             return Ok(false);
         }
         // Resolve the superseded LOCAL id → SERVER id through the mirror (P1-3).
-        let superseded_server = annotation.supersedes_annotation_id.as_ref().and_then(|local| {
-            server_id_for_local(mirror, repo_path, local)
-                .or_else(|| server_ann_ids.contains(local).then(|| local.clone()))
-        });
+        let superseded_server = annotation
+            .supersedes_annotation_id
+            .as_ref()
+            .and_then(|local| {
+                server_id_for_local(mirror, repo_path, local)
+                    .or_else(|| server_ann_ids.contains(local).then(|| local.clone()))
+            });
 
         // Write-ahead: persist a create nonce to DISK before the RPC so a
         // crash-retry replays with the same client_operation_id (P2-5).
@@ -513,7 +524,7 @@ async fn push_one(
 /// first_server_revision_id)`.
 #[allow(clippy::too_many_arguments)]
 async fn create_on_server(
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
     target: &ContextTarget,
     annotation: &Annotation,
@@ -594,7 +605,7 @@ async fn create_on_server(
 /// Forward local revisions the server does not yet hold. Returns the count
 /// actually pushed. Author-aware recovery links each minted server revision id.
 async fn sync_revisions_push(
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
     server_id: &str,
     annotation: &Annotation,
@@ -616,7 +627,13 @@ async fn sync_revisions_push(
                 .iter()
                 .find(|e| e.local_id == annotation.annotation_id)
         })
-        .map(|entry| entry.revision_links.iter().map(|l| l.local.clone()).collect())
+        .map(|entry| {
+            entry
+                .revision_links
+                .iter()
+                .map(|l| l.local.clone())
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut pushed = 0usize;
@@ -693,7 +710,7 @@ async fn sync_revisions_push(
 
 /// Oldest server revision id for an annotation (the create revision).
 async fn first_server_revision_id(
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
     server_id: &str,
 ) -> Result<String> {
@@ -713,13 +730,17 @@ async fn first_server_revision_id(
 /// `Context` attachment, rebuilding revision order to match the server.
 pub async fn pull_context(
     repo: &Repository,
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
 ) -> Result<usize> {
     let Some(head_id) = repo.head().context("resolve repository head")? else {
         return Ok(0);
     };
-    let Some(head_state) = repo.store().get_state(&head_id).context("load head state")? else {
+    let Some(head_state) = repo
+        .store()
+        .get_state(&head_id)
+        .context("load head state")?
+    else {
         return Ok(0);
     };
 
@@ -769,7 +790,7 @@ pub async fn pull_context(
 #[allow(clippy::too_many_arguments)]
 async fn pull_one(
     repo: &Repository,
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
     head_state: &State,
     target: &ContextTarget,
@@ -799,7 +820,11 @@ async fn pull_one(
         .map(|index| blob.annotations[index].revisions.clone())
         .unwrap_or_default();
     let existing_links: Vec<RevisionLink> = entry_index(mirror, repo_path, &local_id)
-        .map(|index| mirror.repos[repo_path].annotations[index].revision_links.clone())
+        .map(|index| {
+            mirror.repos[repo_path].annotations[index]
+                .revision_links
+                .clone()
+        })
         .unwrap_or_default();
 
     let (new_revisions, new_links) = reconcile_revisions_pull(
@@ -881,9 +906,9 @@ fn reconcile_revisions_pull(
     for server_rev in server_revs {
         // (a) existing link by server id.
         if let Some(local_rev_id) = link_by_server.get(server_rev.revision_id.as_str())
-            && let Some(local) = existing
-                .iter()
-                .find(|rev| rev.revision_id == *local_rev_id && !consumed.contains(&rev.revision_id))
+            && let Some(local) = existing.iter().find(|rev| {
+                rev.revision_id == *local_rev_id && !consumed.contains(&rev.revision_id)
+            })
         {
             consumed.insert(local.revision_id.clone());
             new_revisions.push(local.clone());
@@ -970,7 +995,7 @@ fn reconcile_ok(
 // =========================================================================
 
 async fn list_server_annotations(
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
 ) -> Result<Vec<ContextAnnotation>> {
     Ok(list_server_targets(client, repo_path)
@@ -981,7 +1006,7 @@ async fn list_server_annotations(
 }
 
 async fn list_server_targets(
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
 ) -> Result<Vec<(ContextTarget, ContextAnnotation)>> {
     let response = client
@@ -1012,7 +1037,7 @@ async fn list_server_targets(
 /// `GetContextHistory` returns revisions newest-first; local storage is
 /// oldest-first, so reverse.
 async fn fetch_history(
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
     annotation_id: &str,
 ) -> Result<Vec<AnnotationRevision>> {
@@ -1137,7 +1162,10 @@ mod tests {
             Some("Alice <a@x>"),
             Some("alice"),
         );
-        let ids: Vec<&str> = new_revisions.iter().map(|r| r.revision_id.as_str()).collect();
+        let ids: Vec<&str> = new_revisions
+            .iter()
+            .map(|r| r.revision_id.as_str())
+            .collect();
         // Server order, Alice's local id preserved for sA3, Bob materialized.
         assert_eq!(ids, vec!["sA1", "sB2", "rA3-local"]);
         let contents: Vec<&str> = new_revisions.iter().map(|r| r.content.as_str()).collect();
@@ -1164,9 +1192,15 @@ mod tests {
             Some("Alice <a@x>"),
             Some("alice"),
         );
-        let ids: HashSet<&str> = new_revisions.iter().map(|r| r.revision_id.as_str()).collect();
+        let ids: HashSet<&str> = new_revisions
+            .iter()
+            .map(|r| r.revision_id.as_str())
+            .collect();
         assert_eq!(new_revisions.len(), 2, "both must survive, none collapsed");
-        assert!(ids.contains("sBob"), "Bob's revision materialized distinctly");
+        assert!(
+            ids.contains("sBob"),
+            "Bob's revision materialized distinctly"
+        );
         assert!(ids.contains("rLocal"), "Alice's local revision preserved");
     }
 
@@ -1245,7 +1279,8 @@ mod tests {
             Some("srv-pulled".to_string()),
         );
         // An in-flight create (empty server id) does not resolve.
-        get_or_create_entry(&mut mirror, "ns/repo", "in-flight").pending_create_op = Some("op".into());
+        get_or_create_entry(&mut mirror, "ns/repo", "in-flight").pending_create_op =
+            Some("op".into());
         assert_eq!(server_id_for_local(&mirror, "ns/repo", "in-flight"), None);
     }
 

@@ -14,10 +14,11 @@ use objects::{
 };
 use tracing::{instrument, trace};
 
-use crate::repository::commit_graph_persistence::NullCommitGraphCache;
 use crate::{
     HeddleError, Repository, Result,
-    repository::commit_graph_persistence::{CommitGraphCache, FsCommitGraphCache},
+    repository::commit_graph_persistence::{
+        CommitGraphCache, FsCommitGraphCache, NullCommitGraphCache,
+    },
 };
 
 /// A normalized changed-path filter for history traversal.
@@ -637,6 +638,9 @@ mod tests {
                 EntryType::Symlink => TreeEntry::symlink(name.to_string(), hash),
                 EntryType::Gitlink => {
                     unreachable!("repository history tests do not build gitlinks")
+                }
+                EntryType::Spoollink => {
+                    unreachable!("repository history tests do not build spoollinks")
                 }
             })
             .collect::<std::result::Result<Vec<_>, _>>()

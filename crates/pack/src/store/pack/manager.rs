@@ -2,6 +2,7 @@
 //! Pack file manager for coordinating multiple pack files.
 
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -22,6 +23,7 @@ use crate::{
 pub struct PackManager {
     packs_dir: PathBuf,
     packs: Vec<CachedPack>,
+    object_locations: HashMap<PackObjectId, usize>,
 }
 
 struct CachedPack {
@@ -33,7 +35,12 @@ struct CachedPack {
 impl PackManager {
     pub fn new(packs_dir: PathBuf) -> Self {
         let packs = Self::load_packs(&packs_dir).unwrap_or_default();
-        Self { packs_dir, packs }
+        let object_locations = Self::index_object_locations(&packs);
+        Self {
+            packs_dir,
+            packs,
+            object_locations,
+        }
     }
 
     fn discover_pack_paths(packs_dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
@@ -54,6 +61,8 @@ impl PackManager {
                 }
             }
         }
+
+        packs.sort_by(|left, right| left.0.cmp(&right.0));
 
         debug!(count = packs.len(), "Discovered pack files");
         Ok(packs)
@@ -79,7 +88,40 @@ impl PackManager {
     }
 
     pub fn reload(&mut self) -> Result<()> {
-        self.packs = Self::load_packs(&self.packs_dir)?;
+        let packs = Self::load_packs(&self.packs_dir)?;
+        let object_locations = Self::index_object_locations(&packs);
+        self.packs = packs;
+        self.object_locations = object_locations;
+        Ok(())
+    }
+
+    fn index_object_locations(packs: &[CachedPack]) -> HashMap<PackObjectId, usize> {
+        let mut locations = HashMap::new();
+        for (pack_index, pack) in packs.iter().enumerate() {
+            for id in pack.reader.list_ids() {
+                // Preserve the historical first-pack-wins lookup behavior for
+                // duplicate immutable objects.
+                locations.entry(id).or_insert(pack_index);
+            }
+        }
+        locations
+    }
+
+    /// Add a complete pack/index pair to the in-memory format index.
+    pub fn add_pack(&mut self, pack_path: PathBuf, index_path: PathBuf) -> Result<()> {
+        if self.packs.iter().any(|pack| pack.pack_path == pack_path) {
+            return Ok(());
+        }
+        let cached = CachedPack {
+            reader: PackReader::open(&pack_path, &index_path)?,
+            pack_path,
+            index_path,
+        };
+        let pack_index = self.packs.len();
+        for id in cached.reader.list_ids() {
+            self.object_locations.entry(id).or_insert(pack_index);
+        }
+        self.packs.push(cached);
         Ok(())
     }
 
@@ -112,15 +154,15 @@ impl PackManager {
     }
 
     pub fn get_object(&self, id: &PackObjectId) -> Result<Option<(ObjectType, Vec<u8>)>> {
-        for pack in &self.packs {
-            if let Some((obj_type, data)) = pack.reader.get_object(id)? {
-                trace!("Found object in pack");
-                return Ok(Some((obj_type, data)));
-            }
+        let Some(pack_index) = self.object_locations.get(id).copied() else {
+            trace!("Object not found in any pack");
+            return Ok(None);
+        };
+        let object = self.packs[pack_index].reader.get_object(id)?;
+        if object.is_some() {
+            trace!("Found object in pack");
         }
-
-        trace!("Object not found in any pack");
-        Ok(None)
+        Ok(object)
     }
 
     #[instrument(skip(self), fields(hash = %hash.short()))]
@@ -137,34 +179,30 @@ impl PackManager {
         hash: &ContentHash,
     ) -> Result<Option<(ObjectType, bytes::Bytes)>> {
         let id = PackObjectId::Hash(*hash);
-        for pack in &self.packs {
-            if let Some((obj_type, data)) = pack.reader.get_object_bytes(&id)? {
-                return Ok(Some((obj_type, data)));
-            }
-        }
-        Ok(None)
+        let Some(pack_index) = self.object_locations.get(&id).copied() else {
+            return Ok(None);
+        };
+        self.packs[pack_index].reader.get_object_bytes(&id)
     }
 
     pub fn has_object(&self, hash: &ContentHash) -> bool {
-        self.packs
-            .iter()
-            .any(|pack| pack.reader.has_object(&PackObjectId::Hash(*hash)))
+        self.object_locations
+            .contains_key(&PackObjectId::Hash(*hash))
     }
 
     /// Look up the uncompressed size of `hash` across all loaded
     /// packs without decompressing the payload. Returns `Ok(None)`
     /// when the object isn't in any loaded pack.
     pub fn get_hashed_object_size(&self, hash: &ContentHash) -> Result<Option<u64>> {
-        for pack in &self.packs {
-            if let Some(size) = pack.reader.get_hashed_object_size(hash)? {
-                return Ok(Some(size));
-            }
-        }
-        Ok(None)
+        let id = PackObjectId::Hash(*hash);
+        let Some(pack_index) = self.object_locations.get(&id).copied() else {
+            return Ok(None);
+        };
+        self.packs[pack_index].reader.get_hashed_object_size(hash)
     }
 
     pub fn has_object_id(&self, id: &PackObjectId) -> bool {
-        self.packs.iter().any(|pack| pack.reader.has_object(id))
+        self.object_locations.contains_key(id)
     }
 
     /// List all object hashes across all packs.
@@ -198,5 +236,60 @@ impl PackManager {
 
     pub fn packs_dir(&self) -> &Path {
         &self.packs_dir
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use heddle_format::compression::CompressionConfig;
+    use tempfile::TempDir;
+
+    use super::PackManager;
+    use crate::{
+        object::ContentHash,
+        store::pack::{ObjectType, PackBuilder},
+    };
+
+    fn write_pack(
+        root: &std::path::Path,
+        ordinal: usize,
+    ) -> (std::path::PathBuf, std::path::PathBuf, ContentHash) {
+        let payload = format!("pack-object-{ordinal}").into_bytes();
+        let object_id = ContentHash::compute(&payload);
+        let mut builder = PackBuilder::new(CompressionConfig {
+            max_delta_size: 0,
+            ..CompressionConfig::default()
+        });
+        builder.add(object_id, ObjectType::Blob, payload);
+        let (pack_data, index_data, _) = builder.build().unwrap();
+        let pack_path = root.join(format!("format-{ordinal:03}.pack"));
+        let index_path = root.join(format!("format-{ordinal:03}.idx"));
+        std::fs::write(&pack_path, pack_data).unwrap();
+        std::fs::write(&index_path, index_data).unwrap();
+        (pack_path, index_path, object_id)
+    }
+
+    #[test]
+    fn object_locator_tracks_incremental_and_reloaded_packs() {
+        let temp = TempDir::new().unwrap();
+        let mut manager = PackManager::new(temp.path().to_path_buf());
+        for ordinal in 0..8 {
+            let (pack_path, index_path, _) = write_pack(temp.path(), ordinal);
+            manager.add_pack(pack_path, index_path).unwrap();
+        }
+
+        let ids = manager.list_all_ids().unwrap();
+        assert_eq!(ids.len(), 8);
+        for id in &ids {
+            assert!(manager.has_object_id(id));
+            assert!(manager.get_object(id).unwrap().is_some());
+        }
+
+        let reloaded = PackManager::new(temp.path().to_path_buf());
+        assert_eq!(reloaded.pack_count(), 8);
+        for id in &ids {
+            assert!(reloaded.has_object_id(id));
+            assert!(reloaded.get_object(id).unwrap().is_some());
+        }
     }
 }

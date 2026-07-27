@@ -27,6 +27,7 @@ where
         &self,
         parent_state: &State,
         new_tree: &Tree,
+        source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
     ) -> Result<Option<ContentHash>> {
         let Some(parent_discussions_hash) = self
             .latest_state_attachment(&parent_state.id(), crate::StateAttachmentKind::Discussions)?
@@ -55,7 +56,7 @@ where
             return Ok(Some(parent_discussions_hash));
         }
 
-        let new_files = self.collect_tree_file_bytes(new_tree)?;
+        let new_files = self.collect_tree_file_bytes(new_tree, source_blobs)?;
         let baseline_files = self.collect_discussion_baseline_file_bytes(&open_discussions)?;
         let mut updates = Vec::new();
         for (opened_against_state, discussions) in
@@ -88,9 +89,13 @@ where
         Ok(Some(hash))
     }
 
-    fn collect_tree_file_bytes(&self, tree: &Tree) -> Result<HashMap<String, Vec<u8>>> {
+    fn collect_tree_file_bytes(
+        &self,
+        tree: &Tree,
+        source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
+    ) -> Result<HashMap<String, Vec<u8>>> {
         let mut files = HashMap::new();
-        self.collect_tree_file_bytes_inner(tree, PathBuf::new(), &mut files)?;
+        self.collect_tree_file_bytes_inner(tree, PathBuf::new(), source_blobs, &mut files)?;
         Ok(files)
     }
 
@@ -113,7 +118,7 @@ where
                 .ok_or_else(|| missing_object("tree", baseline_state.tree))?;
             baselines.insert(
                 discussion.opened_against_state,
-                self.collect_tree_file_bytes(&baseline_tree)?,
+                self.collect_tree_file_bytes(&baseline_tree, None)?,
             );
         }
         Ok(baselines)
@@ -123,6 +128,7 @@ where
         &self,
         tree: &Tree,
         prefix: PathBuf,
+        source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
         files: &mut HashMap<String, Vec<u8>>,
     ) -> Result<()> {
         for entry in tree.entries() {
@@ -135,11 +141,16 @@ where
                     let Some(hash) = entry.blob_hash() else {
                         continue;
                     };
-                    let blob = self
-                        .store()
-                        .get_blob(&hash)?
-                        .ok_or_else(|| missing_object("blob", hash))?;
-                    files.insert(path.to_string(), blob.content().to_vec());
+                    let bytes = match source_blobs.and_then(|blobs| blobs.get(&hash).copied()) {
+                        Some(bytes) => bytes.to_vec(),
+                        None => self
+                            .store()
+                            .get_blob(&hash)?
+                            .ok_or_else(|| missing_object("blob", hash))?
+                            .content()
+                            .to_vec(),
+                    };
+                    files.insert(path.to_string(), bytes);
                 }
                 EntryType::Tree => {
                     let Some(hash) = entry.tree_hash() else {
@@ -149,7 +160,7 @@ where
                         .store()
                         .get_tree(&hash)?
                         .ok_or_else(|| missing_object("tree", hash))?;
-                    self.collect_tree_file_bytes_inner(&subtree, path, files)?;
+                    self.collect_tree_file_bytes_inner(&subtree, path, source_blobs, files)?;
                 }
                 EntryType::Symlink => {}
                 EntryType::Gitlink => {}
@@ -193,7 +204,7 @@ mod tests {
 
     use objects::object::{
         Attribution, Discussion, DiscussionTurn, Principal, StateAttachment, StateId, SymbolAnchor,
-        VisibilityTier,
+        TreeEntry, VisibilityTier,
     };
     use tempfile::TempDir;
 
@@ -293,6 +304,51 @@ mod tests {
         let persisted = read_discussions(&repo, &second);
         assert!(persisted.discussions[0].body_changed_since_open);
         assert!(!persisted.discussions[0].orphaned);
+    }
+
+    #[test]
+    fn packed_snapshot_preserves_semantic_index_and_discussions() {
+        let (temp, repo) = create_test_repo();
+        fs::write(
+            temp.path().join("src.rs"),
+            "fn foo() {\n    let x = 1;\n}\n",
+        )
+        .unwrap();
+        let first = repo
+            .snapshot_with_attribution(
+                Some("first".to_string()),
+                None,
+                Attribution::human(Principal::new("Alice", "alice@example.com")),
+            )
+            .unwrap();
+        attach_discussions_to_main_head(
+            &repo,
+            &first,
+            vec![discussion("d1", first.id(), "src.rs", "foo")],
+        );
+
+        let blob = Blob::from_slice(b"fn foo() {\n    let x = 2;\n}\n");
+        let tree = Tree::from_entries(vec![TreeEntry::file("src.rs", blob.hash(), false).unwrap()]);
+        let second = repo
+            .snapshot_tree_with_blobs_with_attribution_profiled(
+                tree,
+                vec![blob],
+                Some("packed second".to_string()),
+                None,
+                Attribution::human(Principal::new("Alice", "alice@example.com")),
+            )
+            .unwrap()
+            .state;
+
+        assert!(
+            repo.attached_semantic_index(&second.id())
+                .unwrap()
+                .is_some(),
+            "packed capture must persist its eager semantic-index attachment"
+        );
+        let discussions = read_discussions(&repo, &second);
+        assert_eq!(discussions.discussions.len(), 1);
+        assert!(discussions.discussions[0].body_changed_since_open);
     }
 
     #[test]

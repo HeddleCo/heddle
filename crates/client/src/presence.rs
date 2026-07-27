@@ -24,7 +24,7 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
-use cli_shared::UserConfig;
+use cli_shared::{ClientConfig, UserConfig};
 use futures::{SinkExt, StreamExt};
 use objects::store::{ActorPresence, ActorPresenceStore};
 use repo::{HostedConfig, Repository};
@@ -34,13 +34,10 @@ use tokio::{
     sync::Mutex,
     time::{self, Instant},
 };
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{
-        client::IntoClientRequest,
-        http::header::AUTHORIZATION,
-        protocol::{CloseFrame, Message, frame::coding::CloseCode},
-    },
+use tokio_tungstenite::tungstenite::{
+    client::IntoClientRequest,
+    http::header::AUTHORIZATION,
+    protocol::{CloseFrame, Message, frame::coding::CloseCode},
 };
 use tracing::{debug, info, warn};
 use weft_client_shim::CliContext;
@@ -129,6 +126,7 @@ pub struct PublisherConfig {
     pub token: String,
     pub ws_url: String,
     pub interval: Duration,
+    pub client_config: ClientConfig,
 }
 
 /// Entry point used by `main.rs`.
@@ -200,7 +198,7 @@ pub fn resolve_publisher_config(
         return Ok(None);
     };
 
-    let resolved = crate::grpc_hosted::resolve_hosted_credential(Some(upstream))
+    let resolved = crate::hosted::resolve_hosted_credential(Some(upstream))
         .with_context(|| format!("resolving credential for {upstream}"))?;
     let (token, credential_subject) = match resolved.token {
         Some(token) => (token.id, resolved.subject),
@@ -212,6 +210,7 @@ pub fn resolve_publisher_config(
     };
 
     let ws_url = normalize_ws_url(upstream)?;
+    let client_config = user_config.heddle_client_config(None)?;
 
     // Biscuit tokens are intentionally opaque to the CLI. Use the configured
     // principal as the subject we publish, and let the server validate it
@@ -234,6 +233,7 @@ pub fn resolve_publisher_config(
         token,
         ws_url,
         interval,
+        client_config,
     }))
 }
 
@@ -401,7 +401,7 @@ async fn connect_and_stream(
             .map_err(|e| ConnectError::Fatal(anyhow!("invalid bearer token: {e}")))?,
     );
 
-    let (ws, _resp) = match connect_async(request).await {
+    let (ws, _resp) = match crate::connect_websocket(request, &config.client_config).await {
         Ok(pair) => pair,
         Err(tokio_tungstenite::tungstenite::Error::Http(resp)) if resp.status() == 401 => {
             return Err(ConnectError::Unauthorized);
@@ -770,7 +770,10 @@ mod tests {
             format!("{err}")
         });
 
-        assert!(msg.contains("no credential available"), "unexpected err: {msg}");
+        assert!(
+            msg.contains("no credential available"),
+            "unexpected err: {msg}"
+        );
         assert!(msg.contains("HEDDLE_CREDENTIAL"), "unexpected err: {msg}");
     }
 }

@@ -26,10 +26,7 @@ repo = { path = "../repo", package = "heddle-repo", version = "0.10" }
 # the `heddle-fuse-worker` subprocess and its supervisor (CLI or
 # daemon). The framing lives in `src/worker.rs`; both ends of the
 # Unix socketpair encode/decode the same `WorkerEvent` / `Supervisor
-# Command` enum. JSON is the pragmatic first-cut transport — gRPC is
-# the spike's recommendation but it pulls tonic + a proto into the
-# `heddle-mount` build for what is currently a four-message surface;
-# we revisit when the daemon-supervisor (heddle#88 §4) lands.
+# Command` enum. JSON remains the local supervisor/worker control format.
 serde = { workspace = true }
 serde_json.workspace = true
 thiserror.workspace = true

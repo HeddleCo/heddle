@@ -56,9 +56,9 @@ use super::{
 #[cfg(feature = "client")]
 use crate::cli::progress_render::clear_line;
 #[cfg(feature = "client")]
-use crate::client::HostedGrpcClient;
+use crate::client::HostedClient;
 #[cfg(feature = "client")]
-use crate::client::HostedSession;
+use crate::client::{HostedAuthMode, HostedSession};
 #[cfg(feature = "client")]
 use crate::remote::Remote;
 use crate::{
@@ -366,7 +366,10 @@ pub async fn cmd_push(
     let network_session = if matches!(target, RemoteTarget::Network { .. }) {
         let allow_insecure =
             insecure || cli_shared::remote_allows_insecure(&repo, remote.as_deref());
-        Some(HostedSession::build(&user_config, server_key)?.with_allow_insecure(allow_insecure))
+        Some(
+            HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
+                .with_allow_insecure(allow_insecure),
+        )
     } else {
         None
     };
@@ -1431,7 +1434,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
 #[allow(clippy::too_many_arguments)]
 async fn push_network_one_thread(
     repo: &Repository,
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
     state_id: &objects::object::StateId,
     track_name: &str,
@@ -1473,7 +1476,7 @@ async fn push_network_one_thread(
 #[cfg(feature = "client")]
 async fn push_network_all_threads(
     repo: &Repository,
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     repo_path: &str,
     options: &PushNetworkOptions<'_>,
 ) -> Result<()> {
@@ -1595,7 +1598,7 @@ async fn push_network_all_threads(
 #[cfg(feature = "client")]
 async fn auto_provision_hosted_repo(
     repo: &Repository,
-    client: &mut HostedGrpcClient,
+    client: &mut HostedClient,
     options: &PushNetworkOptions<'_>,
 ) -> Result<String> {
     let namespace = client.get_current_user_namespace().await?;

@@ -126,13 +126,9 @@
 //!
 //! ### IPC protocol — minimal-by-design
 //!
-//! The spike's locked decision is gRPC-over-UDS (heddle#88 §3) for
-//! the *daemon-supervisor* shape. heddle#190 ships the
-//! CLI-dispatched variant the issue AC requires — the daemon
-//! follow-up adds gRPC + per-mount sockets — and a single
-//! inherited socketpair carrying length-prefixed JSON frames is
-//! the right shape for the CLI variant: no wire crate, no
-//! `tokio` in the worker, no UDS discovery file. Each frame is a
+//! A single inherited socketpair carrying length-prefixed JSON frames is
+//! the local supervisor/worker boundary: no wire crate, no async runtime in
+//! the worker, and no socket discovery file. Each frame is a
 //! [`worker::SupervisorCommand`] (parent → worker; today
 //! `Stop` + `Status`, with `Capture` + `Invalidate` joining when
 //! the daemon-side surface lands) or a [`worker::WorkerEvent`]

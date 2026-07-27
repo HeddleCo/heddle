@@ -3,21 +3,16 @@
 use std::{collections::BTreeSet, path::Path};
 
 use anyhow::{Context, Result, bail};
+use api::heddle::api::v1alpha1::{
+    CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, DeviceAuthProof,
+    DeviceAuthorizationResponse, DeviceAuthorizationStatus, ExchangeDeviceAuthorizationRequest,
+    IssueServiceAccountCredentialRequest, MintBiscuitRequest, WaitForDeviceAuthorizationRequest,
+    mint_biscuit_request::Proof,
+};
 use cli_shared::UserConfig;
 use crypto::{Ed25519Signer, Signer};
-use grpc::heddle::api::v1alpha1::{
-    CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, DeviceAuthProof,
-    DeviceAuthorizationResponse, ExchangeDeviceAuthorizationRequest,
-    IssueServiceAccountCredentialRequest, MintBiscuitRequest, WaitForDeviceAuthorizationRequest,
-    identity_service_client::IdentityServiceClient, mint_biscuit_request::Proof,
-};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tonic::{
-    Request,
-    metadata::MetadataValue,
-    transport::{Channel, Endpoint},
-};
 use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
 use crate::{
@@ -29,7 +24,9 @@ use crate::{
         AgentAttenuation, AgentTemplate, SAFE_AGENT_OPERATIONS, attenuate_for_agent,
         effective_pop_public_key_hex,
     },
-    grpc_hosted::{HostedSession, operation_id::ClientOperationId},
+    hosted::{
+        HostedAuthMode, HostedClient, HostedError, HostedSession, operation_id::ClientOperationId,
+    },
 };
 
 /// Top-level dispatch for `heddle auth <subcommand>`. The CLI context supplies
@@ -79,8 +76,6 @@ const DERIVED_TOKEN_SECURITY_NOTE: &str = "Derived credential has its own proof 
 const SERVICE_TOKEN_TTL_DAYS: u32 = 30;
 const SERVICE_TOKEN_TTL_SECS: i64 = SERVICE_TOKEN_TTL_DAYS as i64 * 24 * 3600;
 const ISSUE_SA_PROOF_DOMAIN: &[u8] = b"heddle-sa-credential-issue-v1";
-const ISSUE_SA_PROOF_TS_HEADER: &str = "x-heddle-issue-sa-proof-ts";
-const ISSUE_SA_PROOF_SIG_HEADER: &str = "x-heddle-issue-sa-proof-sig-bin";
 
 pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> {
     match command {
@@ -310,7 +305,11 @@ fn resolve_agent_operations(
             };
             bail!(
                 "operation {operation:?} is outside {ceiling}; --allow can only narrow the {} set",
-                if template.is_some() { "template" } else { "default" }
+                if template.is_some() {
+                    "template"
+                } else {
+                    "default"
+                }
             );
         }
         selected.insert(operation);
@@ -560,7 +559,7 @@ async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to export private key: {e}"))?;
 
     // 2. Connect to the auth service.
-    let mut auth_client: IdentityServiceClient<Channel> = connect_auth_client(server).await?;
+    let mut auth_client = connect_auth_client(server).await?;
 
     // 3. Create device authorization.
     let hostname = std::env::var("HOSTNAME")
@@ -568,17 +567,15 @@ async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
         .unwrap_or_else(|_| "heddle-cli".to_string());
 
     let response: DeviceAuthorizationResponse = auth_client
-        .create_device_authorization(CreateDeviceAuthorizationRequest {
+        .routes()
+        .create_device_authorization(&CreateDeviceAuthorizationRequest {
             device_name: hostname,
             device_public_key: public_key_bytes.clone(),
             scope: "repo:*".to_string(),
             client_operation_id: String::new(),
         })
         .await
-        .map_err(|status: tonic::Status| {
-            anyhow::anyhow!("create_device_authorization failed: {}", status.message())
-        })?
-        .into_inner();
+        .map_err(|error| anyhow::anyhow!("create_device_authorization failed: {error}"))?;
 
     let verification_uri = &response.verification_uri;
     let user_code = &response.user_code;
@@ -703,7 +700,7 @@ fn cmd_auth_status(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
     // Report through the SAME precedence the runtime authenticates with, so
     // `auth status` reflects what a hosted op would actually use — including a
     // `HEDDLE_CREDENTIAL` that overrides the keystore.
-    let resolved = crate::grpc_hosted::resolve_hosted_credential(Some(&server))?;
+    let resolved = crate::hosted::resolve_hosted_credential(Some(&server))?;
     let output = auth_status_output(&server, &resolved);
     if ctx.should_output_json(None) {
         println!("{}", serde_json::to_string(&output)?);
@@ -741,7 +738,7 @@ fn cmd_auth_status(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
 
 fn auth_status_output(
     server: &str,
-    resolved: &crate::grpc_hosted::ResolvedHostedCredential,
+    resolved: &crate::hosted::ResolvedHostedCredential,
 ) -> AuthStatusOutput {
     let source = resolved.source.label();
     if resolved.token.is_some() {
@@ -810,8 +807,7 @@ async fn cmd_create_service_token(
     // before generating the new service-account key.
     let user_config = UserConfig::load_default()?;
     let session = HostedSession::build_stored_credential(&user_config, &server)?;
-    let channel = connect_channel(&server).await?;
-    let mut auth_client = session.connect_channel(channel).await?;
+    let mut auth_client = session.connect(([127, 0, 0, 1], 0).into()).await?;
     let create_operation_id = ClientOperationId::caller_or_fresh(
         "heddle.api.v1alpha1.IdentityService/CreateServiceAccount",
         ctx.operation_id_wire(),
@@ -860,6 +856,8 @@ async fn cmd_create_service_token(
             nanos: 0,
         }),
         client_operation_id: issue_operation_id.to_wire(),
+        proof_timestamp_seconds: 0,
+        proof_signature: Vec::new(),
     };
     let credential_request = issue_service_account_credential_request(credential_request, &signer)?;
     let issued = auth_client
@@ -871,9 +869,8 @@ async fn cmd_create_service_token(
     // self-consistent (`load_credential_file` re-checks this on every read).
     let subject = crate::device_flow::authenticated_subject(&issued.token)
         .context("reading the issued service token's authenticated subject")?;
-    let expires_at = (chrono::Utc::now()
-        + chrono::Duration::seconds(SERVICE_TOKEN_TTL_SECS))
-    .to_rfc3339();
+    let expires_at =
+        (chrono::Utc::now() + chrono::Duration::seconds(SERVICE_TOKEN_TTL_SECS)).to_rfc3339();
 
     let verified = VerifiedCredential {
         server: server.clone(),
@@ -946,34 +943,24 @@ fn resolve_service_account_credential_path(name: &str, out: Option<&Path>) -> st
 fn issue_service_account_credential_request(
     request: IssueServiceAccountCredentialRequest,
     signer: &Ed25519Signer,
-) -> Result<Request<IssueServiceAccountCredentialRequest>> {
+) -> Result<IssueServiceAccountCredentialRequest> {
     let timestamp = current_unix_timestamp_i64()?;
     issue_service_account_credential_request_at(request, signer, timestamp)
 }
 
 fn issue_service_account_credential_request_at(
-    request: IssueServiceAccountCredentialRequest,
+    mut request: IssueServiceAccountCredentialRequest,
     signer: &Ed25519Signer,
     timestamp: i64,
-) -> Result<Request<IssueServiceAccountCredentialRequest>> {
+) -> Result<IssueServiceAccountCredentialRequest> {
     let signature = issue_service_account_credential_signature(
         signer,
         timestamp,
         &request.service_account_id,
         &request.public_key,
     )?;
-    let mut request = Request::new(request);
-    request.metadata_mut().insert(
-        ISSUE_SA_PROOF_TS_HEADER,
-        timestamp
-            .to_string()
-            .parse()
-            .map_err(|err| anyhow::anyhow!("invalid proof timestamp metadata: {err}"))?,
-    );
-    request.metadata_mut().insert_bin(
-        ISSUE_SA_PROOF_SIG_HEADER,
-        MetadataValue::from_bytes(&signature),
-    );
+    request.proof_timestamp_seconds = timestamp;
+    request.proof_signature = signature;
     Ok(request)
 }
 
@@ -1029,142 +1016,27 @@ pub(crate) fn resolve_server(explicit: Option<&str>) -> Result<String> {
     if let Some(default) = credentials::default_server()? {
         return Ok(default);
     }
-    Ok("grpc.heddle.sh".to_string())
+    Ok("api.heddle.sh".to_string())
 }
 
-/// Connect a raw gRPC channel to the given server.
-pub(crate) async fn connect_channel(server: &str) -> Result<Channel> {
-    let uri = infer_server_uri(server);
-    // F2: the auth-login / service-token connect path sends the device key and
-    // receives the bearer biscuit. Refuse cleartext (`http://`) to a
-    // non-loopback address unless the operator explicitly opts in, mirroring
-    // the remote paths' `cleartext_connect_allowed` gate. Loopback stays free.
-    enforce_auth_cleartext_gate(&uri)?;
-    let endpoint = Endpoint::from_shared(uri.clone())
-        .map_err(|e| anyhow::anyhow!("invalid server address '{server}': {e}"))?;
-    endpoint
-        .connect()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to connect to {server}: {e}"))
-}
-
-/// Refuse a cleartext (`http://`) auth connection to a non-loopback address
-/// unless the operator has opted in via `HEDDLE_REMOTE_INSECURE`.
-///
-/// This routes the auth-login / service-token connect path through the same
-/// `cleartext_connect_allowed` semantics the remote paths use: TLS is always
-/// allowed, cleartext to loopback is allowed, cleartext to a non-loopback
-/// address is rejected unless the insecure opt-in is set. Fail-closed: an
-/// `http://` URI whose host is not a parseable loopback IP literal is treated
-/// as non-loopback and refused without the opt-in.
-fn enforce_auth_cleartext_gate(uri: &str) -> Result<()> {
-    // Only cleartext connections are gated; `https://` is always permitted.
-    let Some(rest) = uri.strip_prefix("http://") else {
-        return Ok(());
-    };
-
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    // Drop userinfo if present, then split host[:port].
-    let hostport = authority.rsplit('@').next().unwrap_or(authority);
-    let host = if let Some(inner) = hostport.strip_prefix('[') {
-        // IPv6 literal: [::1]:port
-        inner.split(']').next().unwrap_or(inner)
-    } else {
-        hostport
-            .rsplit_once(':')
-            .map(|(host, _port)| host)
-            .unwrap_or(hostport)
-    };
-
-    // `localhost` resolves to loopback but is not an `IpAddr`; treat it as
-    // allowed. Any host that does not parse as a loopback IP literal is
-    // fail-closed non-loopback.
-    if host.eq_ignore_ascii_case("localhost") {
-        return Ok(());
-    }
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if cli_shared::is_loopback_ip(ip) {
-            return Ok(());
-        }
-        // Non-loopback cleartext: honor the insecure opt-in and reuse the
-        // remote gate's error message verbatim.
-        let allow_insecure = auth_cleartext_insecure_opt_in()?;
-        let addr = std::net::SocketAddr::new(ip, 0);
-        if cli_shared::cleartext_connect_allowed(addr, false, allow_insecure) {
-            return Ok(());
-        }
-        bail!(cli_shared::cleartext_refused_message(addr));
-    }
-
-    // Non-IP-literal cleartext host (e.g. `localhost`-alias or bare name that
-    // `infer_server_uri` chose `http://` for): fail-closed unless opted in.
-    if auth_cleartext_insecure_opt_in()? {
-        return Ok(());
-    }
-    bail!(
-        "refusing cleartext connection to non-loopback host {host:?}; \
-enable TLS or set HEDDLE_REMOTE_INSECURE=1 for intentional cleartext"
-    );
-}
-
-/// Whether the operator opted in to non-loopback cleartext for the auth path.
-///
-/// There is no `--insecure` flag on the auth subcommands, so this honors the
-/// same `HEDDLE_REMOTE_INSECURE` environment opt-in the remote paths accept.
-fn auth_cleartext_insecure_opt_in() -> Result<bool> {
-    match std::env::var("HEDDLE_REMOTE_INSECURE") {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => Ok(true),
-            "0" | "false" | "no" | "off" | "" => Ok(false),
-            other => bail!(
-                "invalid HEDDLE_REMOTE_INSECURE value {other:?}; \
-expected one of 1/0, true/false, yes/no, or on/off"
-            ),
-        },
-        Err(std::env::VarError::NotPresent) => Ok(false),
-        Err(err @ std::env::VarError::NotUnicode(_)) => {
-            bail!("failed to read HEDDLE_REMOTE_INSECURE: {err}")
-        }
-    }
-}
-
-/// Connect an unauthenticated `IdentityServiceClient` to the given server.
-async fn connect_auth_client(server: &str) -> Result<IdentityServiceClient<Channel>> {
-    Ok(IdentityServiceClient::new(connect_channel(server).await?))
-}
-
-fn infer_server_uri(server: &str) -> String {
-    if server.starts_with("http://") || server.starts_with("https://") {
-        return server.to_string();
-    }
-
-    let authority = server.split('/').next().unwrap_or(server);
-    let host = authority
-        .strip_prefix('[')
-        .and_then(|value| value.split_once(']'))
-        .map(|(value, _)| value)
-        .unwrap_or_else(|| {
-            authority
-                .rsplit_once(':')
-                .map(|(value, _)| value)
-                .unwrap_or(authority)
-        });
-
-    let use_http = host.contains("localhost")
-        || host.parse::<std::net::IpAddr>().is_ok()
-        || authority.parse::<std::net::SocketAddr>().is_ok();
-
-    if use_http {
-        format!("http://{server}")
-    } else {
-        format!("https://{server}")
-    }
+/// Connect the unauthenticated login flow through the same signed descriptor
+/// bootstrap used by every other native hosted session.
+async fn connect_auth_client(server: &str) -> Result<HostedClient> {
+    let user_config = UserConfig::load_default()?;
+    HostedSession::build(
+        &user_config,
+        Some(server.to_string()),
+        HostedAuthMode::Unauthenticated,
+    )?
+    .connect(([127, 0, 0, 1], 0).into())
+    .await
+    .map_err(Into::into)
 }
 
 /// Poll `MintBiscuit(DeviceAuthProof)` until the device code is approved or
 /// the authorization expires.
 async fn poll_for_approval(
-    client: &mut IdentityServiceClient<Channel>,
+    client: &mut HostedClient,
     device_code: &str,
     public_key: &[u8],
     signer: &Ed25519Signer,
@@ -1189,14 +1061,12 @@ async fn poll_for_approval(
         );
 
     let mut events = client
-        .wait_for_device_authorization(WaitForDeviceAuthorizationRequest {
+        .routes()
+        .wait_for_device_authorization(&WaitForDeviceAuthorizationRequest {
             device_code: device_code.to_string(),
         })
         .await
-        .map_err(|status| {
-            anyhow::anyhow!("wait_for_device_authorization failed: {}", status.message())
-        })?
-        .into_inner();
+        .map_err(|error| anyhow::anyhow!("wait_for_device_authorization failed: {error}"))?;
 
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -1204,20 +1074,18 @@ async fn poll_for_approval(
             bail!("Authorization timed out. Please try again.");
         }
 
-        let event = tokio::time::timeout(remaining, events.message())
+        let event = tokio::time::timeout(remaining, events.next())
             .await
             .map_err(|_| anyhow::anyhow!("Authorization timed out. Please try again."))?
-            .map_err(|status| {
-                anyhow::anyhow!("device authorization wait failed: {}", status.message())
-            })?;
+            .map_err(|error| anyhow::anyhow!("device authorization wait failed: {error}"))?;
 
-        match event {
-            Some(status) if status.status == "pending" => continue,
-            Some(status) if status.status == "approved" => break,
-            Some(status) if status.status == "expired" => {
+        match event.map(|status| status.status()) {
+            Some(DeviceAuthorizationStatus::Pending) => continue,
+            Some(DeviceAuthorizationStatus::Approved) => break,
+            Some(DeviceAuthorizationStatus::Expired) => {
                 bail!("Authorization expired before approval. Please try again.");
             }
-            Some(status) => bail!("Unexpected device authorization status: {}", status.status),
+            Some(status) => bail!("Unexpected device authorization status: {status:?}"),
             None => bail!("Device authorization ended before approval. Please try again."),
         }
     }
@@ -1225,34 +1093,25 @@ async fn poll_for_approval(
     match mint_biscuit_with_device_auth(client, device_code, public_key, proof_bytes.clone()).await
     {
         Ok(token) => Ok(token),
-        Err(status) if should_fallback_to_exchange_device_authorization(&status) => {
+        Err(error) if should_fallback_to_exchange_device_authorization(&error) => {
             tracing::debug!(
-                status = %status.message(),
+                error = %error,
                 "falling back to ExchangeDeviceAuthorization for lagging auth server"
             );
             exchange_device_authorization(client, device_code, public_key, proof_bytes).await
         }
-        Err(status) => Err(anyhow::anyhow!(
-            "device authorization failed: {}",
-            status.message()
-        )),
+        Err(error) => Err(anyhow::anyhow!("device authorization failed: {error}")),
     }
 }
 
 async fn mint_biscuit_with_device_auth(
-    client: &mut IdentityServiceClient<Channel>,
+    client: &mut HostedClient,
     device_code: &str,
     public_key: &[u8],
     signature: Vec<u8>,
-) -> std::result::Result<AccessToken, tonic::Status> {
-    let inner = client
-        .mint_biscuit(device_auth_mint_biscuit_request(
-            device_code,
-            public_key,
-            signature,
-        ))
-        .await?
-        .into_inner();
+) -> std::result::Result<AccessToken, HostedError> {
+    let request = device_auth_mint_biscuit_request(device_code, public_key, signature);
+    let inner = client.routes().mint_biscuit(&request).await?;
 
     Ok(AccessToken {
         token: inner.token,
@@ -1263,20 +1122,20 @@ async fn mint_biscuit_with_device_auth(
 }
 
 async fn exchange_device_authorization(
-    client: &mut IdentityServiceClient<Channel>,
+    client: &mut HostedClient,
     device_code: &str,
     public_key: &[u8],
     proof: Vec<u8>,
 ) -> Result<AccessToken> {
     let inner = client
-        .exchange_device_authorization(ExchangeDeviceAuthorizationRequest {
+        .routes()
+        .exchange_device_authorization(&ExchangeDeviceAuthorizationRequest {
             device_code: device_code.to_string(),
             device_public_key: public_key.to_vec(),
             proof,
         })
         .await
-        .map_err(|status| anyhow::anyhow!("device authorization failed: {}", status.message()))?
-        .into_inner();
+        .map_err(|error| anyhow::anyhow!("device authorization failed: {error}"))?;
 
     Ok(AccessToken {
         token: inner.token,
@@ -1311,10 +1170,16 @@ fn device_authorization_signature(device_code: &str, signer: &Ed25519Signer) -> 
         .map_err(|e| anyhow::anyhow!("failed to sign proof: {e}"))
 }
 
-fn should_fallback_to_exchange_device_authorization(status: &tonic::Status) -> bool {
-    status.code() == tonic::Code::Unimplemented
-        && status.message().contains("DeviceAuthProof")
-        && status.message().contains("ExchangeDeviceAuthorization")
+fn should_fallback_to_exchange_device_authorization(error: &HostedError) -> bool {
+    matches!(
+        error,
+        HostedError::Call {
+            code: api::heddle::api::v1alpha1::CallFailureCode::Unimplemented,
+            message,
+            ..
+        } if message.contains("DeviceAuthProof")
+            && message.contains("ExchangeDeviceAuthorization")
+    )
 }
 
 /// Extracted token fields from `AccessTokenResponse`.
@@ -1503,109 +1368,11 @@ mod tests {
         assert!(validate_browser_url("https://evil.com/?x=%TEMP%>out").is_err());
     }
 
-    /// Serializes tests that mutate `HEDDLE_REMOTE_INSECURE`.
-    static INSECURE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn with_insecure_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
-        let _guard = INSECURE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("HEDDLE_REMOTE_INSECURE").ok();
-        match value {
-            Some(v) => unsafe { std::env::set_var("HEDDLE_REMOTE_INSECURE", v) },
-            None => unsafe { std::env::remove_var("HEDDLE_REMOTE_INSECURE") },
-        }
-        let out = f();
-        match prev {
-            Some(v) => unsafe { std::env::set_var("HEDDLE_REMOTE_INSECURE", v) },
-            None => unsafe { std::env::remove_var("HEDDLE_REMOTE_INSECURE") },
-        }
-        out
-    }
-
-    #[test]
-    fn cleartext_gate_allows_https_and_loopback() {
-        with_insecure_env(None, || {
-            enforce_auth_cleartext_gate("https://grpc.heddle.sh").expect("https always allowed");
-            enforce_auth_cleartext_gate("http://127.0.0.1:8421").expect("loopback v4 allowed");
-            enforce_auth_cleartext_gate("http://[::1]:8421").expect("loopback v6 allowed");
-            enforce_auth_cleartext_gate("http://localhost:8421").expect("localhost allowed");
-        });
-    }
-
-    #[test]
-    fn cleartext_gate_rejects_nonloopback_without_insecure() {
-        with_insecure_env(None, || {
-            let err = enforce_auth_cleartext_gate("http://192.168.1.44:8421")
-                .expect_err("non-loopback cleartext must be refused");
-            let msg = err.to_string();
-            assert!(
-                msg.contains("refusing cleartext connection to non-loopback"),
-                "unexpected message: {msg}"
-            );
-            // Fail-closed: a bare non-loopback host that inferred http:// is also
-            // refused.
-            assert!(enforce_auth_cleartext_gate("http://server.internal:8421").is_err());
-        });
-    }
-
-    #[test]
-    fn cleartext_gate_allows_nonloopback_with_insecure_opt_in() {
-        with_insecure_env(Some("1"), || {
-            enforce_auth_cleartext_gate("http://192.168.1.44:8421")
-                .expect("insecure opt-in permits non-loopback cleartext");
-        });
-    }
-
-    #[test]
-    fn cleartext_gate_rejects_invalid_insecure_value() {
-        with_insecure_env(Some("maybe"), || {
-            assert!(
-                enforce_auth_cleartext_gate("http://192.168.1.44:8421").is_err(),
-                "an ambiguous opt-in value must fail closed"
-            );
-        });
-    }
-
     #[test]
     fn percent_encode_query_component_encodes_reserved() {
         assert_eq!(percent_encode_query_component("ABCD-1234"), "ABCD-1234");
         assert_eq!(percent_encode_query_component("a b"), "a%20b");
         assert_eq!(percent_encode_query_component("x&y"), "x%26y");
-    }
-
-    #[test]
-    fn infers_http_for_plain_ip_targets() {
-        assert_eq!(
-            infer_server_uri("192.168.1.44:8421"),
-            "http://192.168.1.44:8421"
-        );
-        assert_eq!(infer_server_uri("10.0.0.8"), "http://10.0.0.8");
-    }
-
-    #[test]
-    fn infers_http_for_loopback_targets() {
-        assert_eq!(infer_server_uri("localhost:8421"), "http://localhost:8421");
-        assert_eq!(infer_server_uri("[::1]:8421"), "http://[::1]:8421");
-    }
-
-    #[test]
-    fn keeps_https_default_for_hostnames() {
-        assert_eq!(infer_server_uri("grpc.heddle.sh"), "https://grpc.heddle.sh");
-        assert_eq!(
-            infer_server_uri("example.internal:8443"),
-            "https://example.internal:8443"
-        );
-    }
-
-    #[test]
-    fn preserves_explicit_scheme() {
-        assert_eq!(
-            infer_server_uri("http://example.internal:8421"),
-            "http://example.internal:8421"
-        );
-        assert_eq!(
-            infer_server_uri("https://grpc.heddle.sh"),
-            "https://grpc.heddle.sh"
-        );
     }
 
     #[test]
@@ -1649,7 +1416,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_service_account_request_attaches_pop_metadata() {
+    fn issue_service_account_request_attaches_pop_fields() {
         let signer = Ed25519Signer::generate().expect("signer");
         let public_key = signer.public_key().to_vec();
         let request = IssueServiceAccountCredentialRequest {
@@ -1661,51 +1428,36 @@ mod tests {
                 nanos: 0,
             }),
             client_operation_id: "op-1".to_string(),
+            proof_timestamp_seconds: 0,
+            proof_signature: Vec::new(),
         };
 
         let timestamp = 1_700_000_000;
         let request = issue_service_account_credential_request_at(request, &signer, timestamp)
             .expect("request with proof");
 
-        assert_eq!(
-            request
-                .metadata()
-                .get(ISSUE_SA_PROOF_TS_HEADER)
-                .expect("proof timestamp")
-                .to_str()
-                .expect("ascii timestamp"),
-            timestamp.to_string(),
-        );
-        let signature = request
-            .metadata()
-            .get_bin(ISSUE_SA_PROOF_SIG_HEADER)
-            .expect("proof signature")
-            .to_bytes()
-            .expect("binary signature");
+        assert_eq!(request.proof_timestamp_seconds, timestamp);
+        let signature = &request.proof_signature;
         let canonical =
             derive_issue_service_account_credential_canonical(timestamp, "sa-123", &public_key);
-        Ed25519Signer::verify_with_public_key(&canonical, &public_key, signature.as_ref())
+        Ed25519Signer::verify_with_public_key(&canonical, &public_key, signature)
             .expect("proof must be signed by the new service-account key");
 
-        let body = request.get_ref();
-        assert_eq!(body.service_account_id, "sa-123");
-        assert_eq!(body.public_key, public_key);
-        assert_eq!(body.scope, "repo:heddle/platform/*");
+        assert_eq!(request.service_account_id, "sa-123");
+        assert_eq!(request.public_key, public_key);
+        assert_eq!(request.scope, "repo:heddle/platform/*");
     }
 
     #[test]
     fn authenticated_identity_mutations_cannot_use_a_direct_bearer_interceptor() {
         let source = include_str!("auth_cmd.rs");
         assert!(
-            !source.contains(concat!("IdentityServiceClient", "::with_interceptor")),
-            "authenticated IdentityService mutations must route through HostedGrpcClient signed auth"
+            !source.contains(concat!("IdentityService", "Client")),
+            "identity mutations must use the transport-neutral hosted client"
         );
-        assert_eq!(
-            source
-                .matches(concat!("IdentityServiceClient", "::new("))
-                .count(),
-            1,
-            "the only direct IdentityService client is the bootstrap-login connector"
+        assert!(
+            !source.contains(concat!("ton", "ic::")),
+            "authentication must not depend on the retired product transport"
         );
     }
 
@@ -1731,17 +1483,27 @@ mod tests {
 
     #[test]
     fn device_auth_fallback_is_limited_to_lagging_weft_stub() {
-        let lagging = tonic::Status::unimplemented(
+        let call_error = |code, message: &str| HostedError::Call {
+            code,
+            message: message.to_string(),
+            error: None,
+        };
+        let lagging = call_error(
+            api::heddle::api::v1alpha1::CallFailureCode::Unimplemented,
             "MintBiscuit DeviceAuthProof is not implemented yet; use ExchangeDeviceAuthorization for now",
         );
         assert!(should_fallback_to_exchange_device_authorization(&lagging));
 
-        let unrelated = tonic::Status::unimplemented("some other endpoint is missing");
+        let unrelated = call_error(
+            api::heddle::api::v1alpha1::CallFailureCode::Unimplemented,
+            "some other endpoint is missing",
+        );
         assert!(!should_fallback_to_exchange_device_authorization(
             &unrelated
         ));
 
-        let denied = tonic::Status::permission_denied(
+        let denied = call_error(
+            api::heddle::api::v1alpha1::CallFailureCode::PermissionDenied,
             "MintBiscuit DeviceAuthProof signature verification failed",
         );
         assert!(!should_fallback_to_exchange_device_authorization(&denied));
@@ -1838,7 +1600,7 @@ mod tests {
     #[test]
     fn derive_agent_installs_fresh_pop_child_and_supports_narrower_subderivation() {
         with_isolated_home(|| {
-            let server = "grpc.S";
+            let server = "api.S";
             let (parent, private_key_pem) = stored_device_parent();
             credentials::store_server_credential(server, parent).expect("store parent");
 
@@ -1945,7 +1707,7 @@ mod tests {
     #[test]
     fn derive_agent_out_writes_one_verifiable_hcred_with_a_fresh_child_key() {
         with_isolated_home(|| {
-            let server = "grpc.S";
+            let server = "api.S";
             let (parent, private_key_pem) = stored_device_parent();
             credentials::store_server_credential(server, parent).expect("store parent");
             let out = repo::identity::heddle_home_dir().join("agent-export.hcred");
@@ -2059,35 +1821,31 @@ mod tests {
     #[test]
     fn explicit_allow_only_narrows_a_template() {
         // `--allow GetState` intersects the reviewer set: result is just GetState.
-        let narrowed = resolve_agent_operations(
-            Some(AgentTemplate::Reviewer),
-            vec!["GetState".to_string()],
-        )
-        .expect("narrowing within the template is allowed");
+        let narrowed =
+            resolve_agent_operations(Some(AgentTemplate::Reviewer), vec!["GetState".to_string()])
+                .expect("narrowing within the template is allowed");
         assert_eq!(narrowed, vec!["GetState".to_string()]);
 
         // `--allow Push` is outside the reviewer set, so it cannot widen it.
-        let error = resolve_agent_operations(
-            Some(AgentTemplate::Reviewer),
-            vec!["Push".to_string()],
-        )
-        .expect_err("a template cannot be widened by --allow");
+        let error =
+            resolve_agent_operations(Some(AgentTemplate::Reviewer), vec!["Push".to_string()])
+                .expect_err("a template cannot be widened by --allow");
         assert!(error.to_string().contains("outside"));
     }
 
     #[test]
     fn auth_status_qualifies_a_credential_without_a_proof_key() {
         let credential = sample_credential();
-        let resolved = crate::grpc_hosted::ResolvedHostedCredential {
+        let resolved = crate::hosted::ResolvedHostedCredential {
             token: Some(wire::AuthToken::new(credential.token, "credential-store")),
             proof_key_pem: credential.private_key_pem,
             renewable: None,
             subject: Some(credential.subject),
             credential_id: credential.credential_id,
             expires_at: credential.expires_at,
-            source: crate::grpc_hosted::CredentialSource::Keystore,
+            source: crate::hosted::CredentialSource::Keystore,
         };
-        let output = auth_status_output("grpc.S", &resolved);
+        let output = auth_status_output("api.S", &resolved);
 
         assert!(output.authenticated);
         assert_eq!(output.source, "keystore");
@@ -2096,7 +1854,7 @@ mod tests {
             output
                 .recommended_action
                 .as_deref()
-                .is_some_and(|action| action.contains("auth login --server grpc.S"))
+                .is_some_and(|action| action.contains("auth login --server api.S"))
         );
     }
 
@@ -2129,7 +1887,7 @@ mod tests {
         }
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let server = "grpc.device";
+            let server = "api.device";
             let signer = Ed25519Signer::generate().expect("device key");
             let expires_at = chrono::Utc::now() + chrono::Duration::hours(2);
             let token = biscuit_auth::Biscuit::builder()
@@ -2197,7 +1955,7 @@ mod tests {
     #[test]
     fn logout_removes_credential_and_device_identity_on_success() {
         with_isolated_home(|| {
-            credentials::store_server_credential("grpc.S", sample_credential())
+            credentials::store_server_credential("api.S", sample_credential())
                 .expect("store credential");
 
             // Record a matching device identity via the real link path.
@@ -2205,7 +1963,7 @@ mod tests {
             repo::identity::link_device_key(
                 signer.public_key(),
                 &signer.to_pem().expect("pem"),
-                "grpc.S",
+                "api.S",
             )
             .expect("link device key");
             assert!(repo::identity::device_identity_path().exists());
@@ -2215,7 +1973,7 @@ mod tests {
             cmd_auth_logout(&TextCtx, None).expect("logout succeeds");
 
             assert!(
-                credentials::get_server_credential("grpc.S")
+                credentials::get_server_credential("api.S")
                     .expect("load")
                     .is_none(),
                 "credential must be removed on a successful logout",
@@ -2236,7 +1994,7 @@ mod tests {
     #[test]
     fn logout_preserves_credential_when_device_unlink_fails() {
         with_isolated_home(|| {
-            credentials::store_server_credential("grpc.S", sample_credential())
+            credentials::store_server_credential("api.S", sample_credential())
                 .expect("store credential");
 
             let device_path = repo::identity::device_identity_path();
@@ -2254,14 +2012,14 @@ mod tests {
             );
 
             assert!(
-                credentials::get_server_credential("grpc.S")
+                credentials::get_server_credential("api.S")
                     .expect("load")
                     .is_some(),
                 "credential must be preserved when unlink fails, so logout is retryable",
             );
             assert_eq!(
                 credentials::default_server().expect("default").as_deref(),
-                Some("grpc.S"),
+                Some("api.S"),
                 "default server must be preserved so a no-arg retry re-targets the same server",
             );
         });

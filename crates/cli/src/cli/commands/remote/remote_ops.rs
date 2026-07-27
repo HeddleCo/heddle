@@ -7,7 +7,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 #[cfg(feature = "client")]
-use heddle_client::grpc_hosted::PullMaterialization;
+use heddle_client::hosted::{HostedAuthMode, PullMaterialization};
 #[cfg(feature = "client")]
 use heddle_core::{
     HostedPullResult, HostedPullResultFields, format_connected_to,
@@ -49,7 +49,7 @@ use super::super::{
     worktree_safety::ensure_worktree_clean,
 };
 #[cfg(feature = "client")]
-use crate::client::HostedGrpcClient;
+use crate::client::HostedClient;
 use crate::{
     cli::{
         Cli, RemoteCommands,
@@ -997,10 +997,11 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
     let repo_path = options
         .repo_path
         .context("network remotes must include a hosted repository path")?;
-    let mut client = HostedGrpcClient::open_session_with_insecure(
+    let mut client = HostedClient::open_session_with_insecure(
         options.addr,
         options.user_config,
         options.server_key,
+        HostedAuthMode::CredentialFallback,
         options.insecure,
     )
     .await?

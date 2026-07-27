@@ -25,12 +25,7 @@
 //! [`OnDiskCredential`] serde mirror, reachable only via
 //! [`write_credential_file`].
 
-use std::{
-    fmt,
-    fs::File,
-    io::Read,
-    path::Path,
-};
+use std::{fmt, fs::File, io::Read, path::Path};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -180,7 +175,10 @@ pub fn write_credential_file(path: &Path, credential: &VerifiedCredential) -> Re
         }
     }
 
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         objects::fs_atomic::create_private_dir_all(parent)
             .with_context(|| format!("creating credential parent {}", parent.display()))?;
     }
@@ -274,8 +272,9 @@ pub fn load_credential_file(path: &Path) -> Result<VerifiedCredential> {
     let metadata = crate::auth_cmd::headless_token_metadata(&on_disk.token)
         .with_context(|| format!("verifying token in credential file {}", path.display()))?;
 
-    let signer = Ed25519Signer::from_pem(&on_disk.proof_key_pem)
-        .map_err(|error| anyhow::anyhow!("credential proof key is not a valid Ed25519 PEM: {error}"))?;
+    let signer = Ed25519Signer::from_pem(&on_disk.proof_key_pem).map_err(|error| {
+        anyhow::anyhow!("credential proof key is not a valid Ed25519 PEM: {error}")
+    })?;
     let proof_public_key_hex = hex::encode(signer.public_key());
     if !metadata
         .proof_public_key_hex
@@ -331,8 +330,8 @@ pub fn load_credential_file(path: &Path) -> Result<VerifiedCredential> {
 /// handle's metadata so the permission verdict and the later read see the same
 /// inode.
 fn open_credential_file_checked(path: &Path) -> Result<File> {
-    let file = File::open(path)
-        .with_context(|| format!("opening credential file {}", path.display()))?;
+    let file =
+        File::open(path).with_context(|| format!("opening credential file {}", path.display()))?;
     let metadata = file
         .metadata()
         .with_context(|| format!("inspecting credential file {}", path.display()))?;
@@ -359,8 +358,9 @@ fn open_credential_file_checked(path: &Path) -> Result<File> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use biscuit_auth::KeyPair;
+
+    use super::*;
 
     /// Mint a device-bound authority token whose effective PoP key is `signer`.
     fn mint_token(subject: &str, signer: &Ed25519Signer, ttl: chrono::Duration) -> String {
@@ -390,7 +390,7 @@ mod tests {
         let proof_key_pem = signer.to_pem().expect("proof PEM");
         (
             VerifiedCredential {
-                server: "grpc.heddle.test".to_string(),
+                server: "api.heddle.test".to_string(),
                 kind: CredentialKind::Agent,
                 subject: "alice".to_string(),
                 token,
@@ -416,7 +416,7 @@ mod tests {
         write_credential_file(&path, &credential).expect("write");
 
         let loaded = load_credential_file(&path).expect("load");
-        assert_eq!(loaded.server, "grpc.heddle.test");
+        assert_eq!(loaded.server, "api.heddle.test");
         assert_eq!(loaded.subject, "alice");
         assert_eq!(loaded.kind, CredentialKind::Agent);
         assert_eq!(loaded.token, credential.token);
@@ -483,7 +483,7 @@ mod tests {
         let signer = Ed25519Signer::generate().expect("proof key");
         let token = mint_token("alice", &signer, chrono::Duration::hours(-1));
         let credential = VerifiedCredential {
-            server: "grpc.heddle.test".to_string(),
+            server: "api.heddle.test".to_string(),
             kind: CredentialKind::Agent,
             subject: "alice".to_string(),
             token,
@@ -549,7 +549,7 @@ mod tests {
         let path = dir.path().join("agent.hcred");
         let (mut credential, _signer) = sample_verified();
         // A bell control character in `server` would reach terminal output.
-        credential.server = "grpc.heddle\u{0007}.test".to_string();
+        credential.server = "api.heddle\u{0007}.test".to_string();
         write_credential_file(&path, &credential).expect("write");
         let error =
             load_credential_file(&path).expect_err("control chars in server must be rejected");

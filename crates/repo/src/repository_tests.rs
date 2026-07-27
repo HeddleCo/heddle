@@ -17,7 +17,7 @@ use tempfile::TempDir;
 
 use super::{
     repo_config::SUPPORTED_REPO_FORMAT,
-    repository_snapshot::{SnapshotFault, with_snapshot_fault},
+    repository_snapshot::{SnapshotFault, with_snapshot_fault, with_snapshot_prepare_probe},
 };
 use crate::{
     ChangedPathFilters, HeddleError, HistoryQuery, RepoConfig, Repository, RepositoryCapability,
@@ -520,6 +520,71 @@ fn snapshot_packs_blobs_and_leaves_no_loose_blob_files() {
 }
 
 #[test]
+fn supplied_tree_snapshot_batches_new_blobs_into_a_pack() {
+    let (temp_dir, repo) = create_test_repo();
+    let blob = Blob::from_slice(b"structured native authoring");
+    let hash = blob.hash();
+    let tree = Tree::from_entries(vec![TreeEntry::file("agent.txt", hash, false).unwrap()]);
+
+    let execution = repo
+        .snapshot_tree_with_blobs_with_attribution_profiled(
+            tree,
+            vec![blob],
+            Some("structured snapshot".to_string()),
+            None,
+            repo.get_attribution().unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(repo.head().unwrap(), Some(execution.state.id()));
+    assert_eq!(
+        repo.store().get_blob(&hash).unwrap().unwrap().content(),
+        b"structured native authoring"
+    );
+    let blobs_dir = temp_dir.path().join(".heddle/objects/blobs");
+    assert_eq!(
+        fs::read_dir(blobs_dir)
+            .map(|entries| entries.count())
+            .unwrap_or_default(),
+        0,
+        "structured snapshot should not fan new blobs out into loose files"
+    );
+
+    let tree_hex = execution.tree.hash().to_hex();
+    let loose_tree = temp_dir
+        .path()
+        .join(".heddle/objects/trees")
+        .join(&tree_hex[..2])
+        .join(&tree_hex[2..]);
+    assert!(
+        !loose_tree.exists(),
+        "structured snapshot tree should share the durable pack with its blobs"
+    );
+
+    let loose_state = temp_dir.path().join(format!(
+        ".heddle/objects/states/{}.state",
+        execution.state.id().to_string_full()
+    ));
+    assert!(
+        !loose_state.exists(),
+        "structured snapshot state should share the durable pack with its tree and blobs"
+    );
+
+    let state_id = execution.state.id();
+    let tree_hash = execution.tree.hash();
+    drop(repo);
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    assert_eq!(
+        reopened.store().get_state(&state_id).unwrap(),
+        Some(execution.state)
+    );
+    assert_eq!(
+        reopened.store().get_tree(&tree_hash).unwrap(),
+        Some(execution.tree)
+    );
+}
+
+#[test]
 fn snapshot_preserves_unchanged_materialized_gitlink_placeholder() {
     let (temp_dir, repo) = create_test_repo();
     let target = gitlink_target_for_tests();
@@ -697,13 +762,51 @@ fn snapshot_failure_leaves_ref_unchanged() {
 }
 
 #[test]
+fn concurrent_snapshots_prepare_outside_the_repository_write_lock() {
+    let (temp_dir, repo) = create_test_repo();
+    fs::write(temp_dir.path().join("parallel.txt"), "parallel snapshot").unwrap();
+    drop(repo);
+    let root = temp_dir.path().to_path_buf();
+    let worker_count = 6;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(worker_count + 1));
+
+    let (results, max_parallel_prepare) =
+        with_snapshot_prepare_probe(std::time::Duration::from_millis(150), || {
+            let workers = (0..worker_count)
+                .map(|worker| {
+                    let root = root.clone();
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        let repo = Repository::open(root).unwrap();
+                        barrier.wait();
+                        repo.snapshot(Some(format!("parallel-{worker}")), None)
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+    for result in results {
+        result.expect("every optimistic snapshot should retry head contention and commit");
+    }
+    assert!(
+        max_parallel_prepare >= 2,
+        "immutable snapshot preparation remained serialized by the repository write lock"
+    );
+}
+
+#[test]
 fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
     let (temp_dir, repo) = create_test_repo();
     fs::write(temp_dir.path().join("tracked.txt"), "baseline").unwrap();
     let baseline = repo.snapshot(Some("baseline".to_string()), None).unwrap();
 
     fs::write(temp_dir.path().join("tracked.txt"), "pre-commit crash").unwrap();
-    let crashed = with_snapshot_fault(SnapshotFault::AfterStageBeforeAtomicCommit, || {
+    let crashed = with_snapshot_fault(SnapshotFault::StageBeforeAtomicCommit, || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = repo.snapshot(Some("must not commit".to_string()), None);
         }))
@@ -719,12 +822,11 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
     );
 
     fs::write(temp_dir.path().join("tracked.txt"), "committed once").unwrap();
-    let committed_crash =
-        with_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish, || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = repo.snapshot(Some("committed exactly once".to_string()), None);
-            }))
-        });
+    let committed_crash = with_snapshot_fault(SnapshotFault::AtomicCommitBeforeRefPublish, || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = repo.snapshot(Some("committed exactly once".to_string()), None);
+        }))
+    });
     assert!(
         committed_crash.is_err(),
         "the post-commit checkpoint must crash after the oplog append"
@@ -763,6 +865,193 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
         transaction_count, 1,
         "capture batch must contain one transaction marker"
     );
+}
+
+#[test]
+fn packed_structured_snapshot_remains_invisible_until_oplog_commit() {
+    let (temp_dir, repo) = create_test_repo();
+    let baseline = repo.head().unwrap();
+    let blob = Blob::from_slice(b"packed structured crash recovery");
+    let tree = Tree::from_entries(vec![
+        TreeEntry::file("agent.txt", blob.hash(), false).unwrap(),
+    ]);
+    let attribution = repo.get_attribution().unwrap();
+
+    let crashed = with_snapshot_fault(SnapshotFault::StageBeforeAtomicCommit, || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = repo.snapshot_tree_with_blobs_with_attribution_profiled(
+                tree.clone(),
+                vec![blob.clone()],
+                Some("packed structured retry".to_string()),
+                None,
+                attribution.clone(),
+            );
+        }))
+    });
+    assert!(crashed.is_err());
+    assert_eq!(repo.head().unwrap(), baseline);
+
+    let committed = repo
+        .snapshot_tree_with_blobs_with_attribution_profiled(
+            tree,
+            vec![blob],
+            Some("packed structured retry".to_string()),
+            None,
+            attribution,
+        )
+        .unwrap();
+    assert_eq!(repo.head().unwrap(), Some(committed.state.id()));
+
+    drop(repo);
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    assert_eq!(reopened.head().unwrap(), Some(committed.state.id()));
+    assert_eq!(
+        reopened.store().get_state(&committed.state.id()).unwrap(),
+        Some(committed.state)
+    );
+}
+
+#[test]
+fn durable_snapshot_artifact_recovers_missing_oplog_and_ref_views_after_reopen() {
+    let (temp_dir, repo) = create_test_repo();
+    let baseline = repo.head().unwrap();
+    let before = repo
+        .store()
+        .list_states()
+        .unwrap()
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let blob = Blob::from_slice(b"authoritative snapshot artifact");
+    let tree = Tree::from_entries(vec![
+        TreeEntry::file("artifact.txt", blob.hash(), false).unwrap(),
+    ]);
+    let attribution = repo.get_attribution().unwrap();
+
+    let crashed = with_snapshot_fault(SnapshotFault::ArtifactCommitBeforeOplogView, || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = repo.snapshot_tree_with_blobs_with_attribution_profiled(
+                tree,
+                vec![blob],
+                Some("artifact committed".to_string()),
+                None,
+                attribution,
+            );
+        }))
+    });
+    assert!(crashed.is_err());
+    assert_eq!(repo.head().unwrap(), baseline);
+
+    let committed = repo
+        .store()
+        .list_states()
+        .unwrap()
+        .into_iter()
+        .find(|state| !before.contains(state))
+        .expect("durable artifact must contain the new state");
+    repo.store()
+        .pack_objects(false)
+        .expect("GC must carry authoritative artifact markers into its consolidated pack");
+    drop(repo);
+
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    assert_eq!(
+        reopened.head().unwrap(),
+        Some(committed),
+        "open must reconstruct the ref from the authoritative artifact"
+    );
+    assert!(
+        reopened.oplog().recent(16).unwrap().iter().any(|entry| {
+            matches!(entry.operation, OpRecord::Snapshot { new_state, .. } if new_state == committed)
+        }),
+        "open must reconstruct the oplog materialized view"
+    );
+}
+
+#[test]
+fn structured_snapshot_keeps_reconstructible_ref_watermark_at_durable_floor() {
+    let (temp_dir, repo) = create_test_repo();
+    let baseline = repo.head().unwrap().expect("initialized main head");
+    let watermark_path = temp_dir.path().join(".heddle/RECONCILE_WATERMARK_SHARED");
+    let durable_floor = fs::read_to_string(&watermark_path).unwrap();
+    let attribution = repo.get_attribution().unwrap();
+
+    let mut latest = baseline;
+    for index in 0..2 {
+        let blob = Blob::from_slice(format!("reconstructible ref {index}").as_bytes());
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("agent.txt", blob.hash(), false).unwrap(),
+        ]);
+        latest = repo
+            .snapshot_tree_with_blobs_with_attribution_profiled(
+                tree,
+                vec![blob],
+                Some(format!("reconstructible ref {index}")),
+                None,
+                attribution.clone(),
+            )
+            .unwrap()
+            .state
+            .id();
+        assert_eq!(repo.head().unwrap(), Some(latest));
+    }
+
+    assert_eq!(
+        fs::read_to_string(&watermark_path).unwrap(),
+        durable_floor,
+        "a reconstructible success-path ref must not durably advance its watermark"
+    );
+
+    drop(repo);
+    fs::write(
+        temp_dir.path().join(".heddle/refs/threads/main"),
+        format!("{}\n", baseline.to_string_full()),
+    )
+    .unwrap();
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    assert_eq!(
+        reopened.head().unwrap(),
+        Some(latest),
+        "fresh-process reconciliation must recover a lost reconstructible ref publish"
+    );
+}
+
+#[test]
+fn detached_snapshot_reconstructs_a_lost_nondurable_head() {
+    let (temp_dir, repo) = create_test_repo();
+    let baseline = repo.head().unwrap().expect("initialized main head");
+    repo.refs()
+        .write_head(&Head::Detached { state: baseline })
+        .unwrap();
+    assert_eq!(repo.head().unwrap(), Some(baseline));
+    let watermark_path = temp_dir.path().join(".heddle/RECONCILE_WATERMARK_LOCAL");
+    let durable_floor = fs::read_to_string(&watermark_path).unwrap();
+
+    let blob = Blob::from_slice(b"detached reconstructible head");
+    let tree = Tree::from_entries(vec![
+        TreeEntry::file("agent.txt", blob.hash(), false).unwrap(),
+    ]);
+    let latest = repo
+        .snapshot_tree_with_blobs_with_attribution_profiled(
+            tree,
+            vec![blob],
+            Some("detached reconstructible head".to_string()),
+            None,
+            repo.get_attribution().unwrap(),
+        )
+        .unwrap()
+        .state
+        .id();
+    assert_eq!(repo.head().unwrap(), Some(latest));
+    assert_eq!(fs::read_to_string(&watermark_path).unwrap(), durable_floor);
+
+    drop(repo);
+    fs::write(
+        temp_dir.path().join(".heddle/HEAD"),
+        Head::Detached { state: baseline }.to_text(),
+    )
+    .unwrap();
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    assert_eq!(reopened.head().unwrap(), Some(latest));
 }
 
 #[test]

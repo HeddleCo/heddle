@@ -4,6 +4,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    thread::JoinHandle,
 };
 
 use chrono::Utc;
@@ -28,14 +29,97 @@ use super::{
 pub struct OpLog {
     pub(crate) root: PathBuf,
     cached: Mutex<Option<PackedOpLogIndex>>,
+    pending_reconstructible_view: Mutex<Option<JoinHandle<Result<PackedOpLogIndex>>>>,
     actor: Arc<Principal>,
 }
 
+impl Drop for OpLog {
+    fn drop(&mut self) {
+        let pending = match self.pending_reconstructible_view.get_mut() {
+            Ok(pending) => pending.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        if let Some(pending) = pending {
+            let _ = pending.join();
+        }
+    }
+}
+
 impl OpLog {
+    /// Commit a batch through an independently durable artifact while holding
+    /// the same oplog lock used for exact-once and isolation validation.
+    ///
+    /// `install` is invoked only after dedup/CAS validation and receives the
+    /// current oplog head plus the canonical records (including the transaction
+    /// marker). Once it returns, the operation is committed; the oplog rewrite
+    /// is only a reconstructible materialized view.
+    #[doc(hidden)]
+    pub fn commit_reconstructible_batch_if_unchanged<T>(
+        &self,
+        mut operations: Vec<OpRecord>,
+        scope: Option<&str>,
+        transaction_id: &str,
+        precondition: &IsolationPrecondition,
+        install: impl FnOnce(u64, &[OpRecord]) -> Result<T>,
+    ) -> Result<ReconstructibleCommitOutcome<T>> {
+        let _lock = self.write_lock()?;
+        let index = self.open_index_for_write()?;
+
+        if index.transaction_commit(transaction_id)?.is_some() {
+            return Ok(ReconstructibleCommitOutcome::AlreadyCommitted(
+                index.committed_batch_records(transaction_id)?,
+            ));
+        }
+
+        if !precondition.keys.is_empty() && index.head_id() != precondition.since_head_id {
+            for entry in index.entries_after(precondition.since_head_id)? {
+                let touched = isolation_keys_for_record(&entry.operation, entry.scope.as_deref());
+                if let Some(key) = touched.intersection(&precondition.keys).next().cloned() {
+                    return Ok(ReconstructibleCommitOutcome::IsolationConflict {
+                        key,
+                        since_head_id: precondition.since_head_id,
+                        conflicting_entry_id: entry.id,
+                    });
+                }
+            }
+        }
+
+        let op_count = operations.len() as u32;
+        operations.push(OpRecord::TransactionCommit {
+            transaction_id: transaction_id.to_string(),
+            op_count,
+        });
+        let artifact = install(index.head_id(), &operations)?;
+
+        let start_id = index.head_id() + 1;
+        let timestamp = Utc::now();
+        let scope_owned = scope.map(str::to_string);
+        let entries =
+            Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
+        // The immutable pack above is the commit point. Rebuilding the packed
+        // oplog is only a reconstructible materialized view, so overlap that
+        // rewrite with the caller's ensuing network push instead of putting its
+        // full-file clone/index rewrite on snapshot latency. Keep the oplog
+        // write lock in the worker: another writer cannot validate against the
+        // old view while this committed batch is being materialized.
+        let committed_tip = entries.last().map_or(index.head_id(), |entry| entry.id);
+        let view = std::thread::spawn(move || {
+            let _lock = _lock;
+            index.append_entries_reconstructible(&entries)
+        });
+        *self.pending_reconstructible_view.lock_or_poisoned() = Some(view);
+        *self.cached.lock_or_poisoned() = None;
+        Ok(ReconstructibleCommitOutcome::Committed(
+            artifact,
+            committed_tip,
+        ))
+    }
+
     pub fn new(heddle_dir: impl AsRef<Path>, actor: Principal) -> Self {
         Self {
             root: heddle_dir.as_ref().to_path_buf(),
             cached: Mutex::new(None),
+            pending_reconstructible_view: Mutex::new(None),
             actor: Arc::new(actor),
         }
     }
@@ -69,10 +153,37 @@ impl OpLog {
     }
 
     fn write_lock(&self) -> Result<WriteLockGuard> {
+        self.finish_pending_reconstructible_view()?;
         let lock_path = self.root.join("locks/oplog.lock");
         RepoLock::at(lock_path)
             .write()
             .map_err(|err| HeddleError::Config(format!("failed to acquire oplog lock: {err}")))
+    }
+
+    fn finish_pending_reconstructible_view(&self) -> Result<()> {
+        // Keep the coordinator mutex held while joining so a second in-process
+        // reader cannot observe `None` and read the old header during the tiny
+        // interval where the worker still owns the cross-process write lock.
+        let mut pending_slot = self.pending_reconstructible_view.lock_or_poisoned();
+        let Some(pending) = pending_slot.take() else {
+            return Ok(());
+        };
+        match pending.join() {
+            Ok(Ok(index)) => {
+                *self.cached.lock_or_poisoned() = Some(index);
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                *self.cached.lock_or_poisoned() = None;
+                Err(error)
+            }
+            Err(_) => {
+                *self.cached.lock_or_poisoned() = None;
+                Err(HeddleError::Config(
+                    "reconstructible oplog materialization worker panicked".to_string(),
+                ))
+            }
+        }
     }
 
     /// Validate the fixed on-disk format header without mutating the oplog.
@@ -164,6 +275,21 @@ impl OpLog {
     fn open_index_for_write(&self) -> Result<PackedOpLogIndex> {
         let path = self.oplog_path();
         if path.exists() {
+            let disk_head = PackedOpLog::read_head_id(&path);
+            let trailer_ok = PackedOpLog::trailer_ok(&path);
+            if let (Ok(disk_head), Ok(true)) = (disk_head, trailer_ok) {
+                let cached = self.cached.lock_or_poisoned();
+                if let Some(index) = cached.as_ref()
+                    && index.head_id() == disk_head
+                    && index.matches_file_on_disk().unwrap_or(false)
+                {
+                    return Ok(index.clone());
+                }
+            }
+
+            // A different process may have advanced or rewritten the file
+            // while this handle waited for the write lock. Header/trailer
+            // damage also comes here so the existing full open can salvage it.
             PackedOpLog::ensure_current(&path)?;
         } else {
             PackedOpLog::new(path.clone()).save()?;
@@ -173,6 +299,7 @@ impl OpLog {
 
     /// Load from cache or disk (for read operations).
     fn load_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<PackedOpLogIndex>>> {
+        self.finish_pending_reconstructible_view()?;
         let guard = self.cached.lock_or_poisoned();
         if guard.is_some() {
             return Ok(guard);
@@ -198,6 +325,7 @@ impl OpLog {
     /// view that would miss a batch another process wrote (heddle#354 r6, cid
     /// 3329711888).
     fn refresh_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<PackedOpLogIndex>>> {
+        self.finish_pending_reconstructible_view()?;
         self.ensure_current_format()?;
         let mut guard = self.cached.lock_or_poisoned();
         let path = self.oplog_path();
@@ -435,6 +563,7 @@ impl OpLog {
     /// one integer compare against a cached watermark — no tail scan. Returns 0
     /// when the oplog file does not exist yet.
     pub fn head_id(&self) -> Result<u64> {
+        self.finish_pending_reconstructible_view()?;
         self.ensure_current_format()?;
         match PackedOpLog::read_head_id(&self.oplog_path()) {
             Ok(id) => Ok(id),
@@ -541,6 +670,17 @@ impl OpLog {
             .unwrap()
             .collect_batches_scoped(count, predicate, scope)
     }
+}
+
+#[doc(hidden)]
+pub enum ReconstructibleCommitOutcome<T> {
+    Committed(T, u64),
+    AlreadyCommitted(Vec<OpRecord>),
+    IsolationConflict {
+        key: super::oplog_types::IsolationKey,
+        since_head_id: u64,
+        conflicting_entry_id: u64,
+    },
 }
 
 impl OpLogBackend for OpLog {
@@ -874,5 +1014,40 @@ mod tests {
             !path.with_file_name("oplog.bin.corrupt").exists(),
             "healthy oplog must not be quarantined"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_index_for_write_reloads_same_head_file_replacement() {
+        let tmp = TempDir::new().unwrap();
+        let oplog = OpLog::new_unattributed(tmp.path());
+        oplog.init().unwrap();
+        oplog.record_batch(vec![snapshot_record()]).unwrap();
+        oplog.record_batch(vec![snapshot_record()]).unwrap();
+
+        {
+            let cached = oplog.cached.lock_or_poisoned();
+            assert!(cached.as_ref().unwrap().matches_file_on_disk().unwrap());
+        }
+
+        // Simulate a different process coalescing two batches. This replaces
+        // the file but deliberately keeps the same head_id, so a head-only
+        // cache gate would reuse stale footer offsets.
+        let path = oplog.oplog_path();
+        let mut rewritten = PackedOpLog::load(&path).unwrap();
+        rewritten.entries[1].batch_id = rewritten.entries[0].batch_id;
+        rewritten.entries[1].batch_index = 1;
+        rewritten.save().unwrap();
+        assert_eq!(PackedOpLog::read_head_id(&path).unwrap(), 2);
+        {
+            let cached = oplog.cached.lock_or_poisoned();
+            assert!(!cached.as_ref().unwrap().matches_file_on_disk().unwrap());
+        }
+
+        let _lock = oplog.write_lock().unwrap();
+        let index = oplog.open_index_for_write().unwrap();
+        let batches = index.collect_batches_scoped(10, |_| true, None).unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].entries.len(), 2);
     }
 }

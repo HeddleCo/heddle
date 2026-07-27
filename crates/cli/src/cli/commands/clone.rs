@@ -18,7 +18,7 @@ use std::{
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 #[cfg(feature = "client")]
-use heddle_client::grpc_hosted::{HostedRefEntry, PullMaterialization};
+use heddle_client::hosted::{HostedClient, HostedRefEntry, PullMaterialization};
 use heddle_core::{
     CloneMode, ClonePlanError, ClonePlanFacts, ClonePlanOptions, CloneRemoteSource,
     UnsupportedCloneFlag, plan_clone, status::next_action::canonical_git_import_ref_command,
@@ -1501,7 +1501,10 @@ async fn clone_network(
     server_key: Option<String>,
     endpoint_spec: String,
 ) -> Result<()> {
-    use crate::{client::HostedSession, config::UserConfig};
+    use crate::{
+        client::{HostedAuthMode, HostedSession},
+        config::UserConfig,
+    };
 
     let CloneOptions {
         thread,
@@ -1521,7 +1524,9 @@ async fn clone_network(
     // filesystem/repo mutation such as `create_dir_all`, `Repository::init`,
     // state writes, or ref publishes. A rejected security config must leave
     // no partial on-disk artifact.
-    let session = HostedSession::build(&user_config, server_key)?.with_allow_insecure(*insecure);
+    let session =
+        HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
+            .with_allow_insecure(*insecure);
     let repo_path = repo_path.context("network remotes must include a hosted repository path")?;
 
     let json_output = should_output_json(cli, None);
@@ -1588,6 +1593,9 @@ async fn clone_network(
         .await?;
     if result.success {
         let final_state = result.final_state;
+        if let Some(state) = final_state {
+            local_repo.set_thread_recorded(&ThreadName::new(&track_name), &state)?;
+        }
         // Lazy clone: persist the hydrator metadata so future
         // `Repository::open` calls (in any process) can reconstruct
         // the on-read hydrator. Without this, lazy clones would only
@@ -1709,7 +1717,10 @@ async fn clone_monorepo(
     server_key: Option<String>,
     endpoint_spec: String,
 ) -> Result<()> {
-    use crate::{client::HostedSession, config::UserConfig};
+    use crate::{
+        client::{HostedAuthMode, HostedSession},
+        config::UserConfig,
+    };
 
     // Monorepo clone materializes each node at a resolved state; the shallow /
     // lazy / partial knobs don't compose with the multi-spool walk in this
@@ -1723,7 +1734,8 @@ async fn clone_monorepo(
     // Security config validation must pass before any irreversible filesystem
     // mutation, exactly as `clone_network` does.
     let session =
-        HostedSession::build(&user_config, server_key)?.with_allow_insecure(options.insecure);
+        HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
+            .with_allow_insecure(options.insecure);
 
     let json_output = should_output_json(cli, None);
     let mut client = session.connect(addr).await?;
@@ -1870,7 +1882,7 @@ fn monorepo_clone_output_json(
 /// initialized empty repo (layout stays coherent).
 #[cfg(feature = "client")]
 async fn execute_monorepo_node_steps(
-    client: &mut heddle_client::grpc_hosted::HostedGrpcClient,
+    client: &mut HostedClient,
     node_exec: &MonorepoNodeExecution,
     dest: &Path,
     endpoint_spec: &str,

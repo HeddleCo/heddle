@@ -874,6 +874,48 @@ mod chokepoint {
         );
     }
 
+    #[test]
+    fn committed_snapshot_materialization_uses_known_state_without_replay() {
+        let (_t, dir) = manager();
+        let calls = Arc::new(AtomicU64::new(0));
+        let reconciler = Arc::new(FakeReconciler {
+            generation: AtomicU64::new(1),
+            republish: Vec::new(),
+            remote_updates: Vec::new(),
+            undo_recovery: None,
+            calls: Arc::clone(&calls),
+        });
+        let refs = RefManager::new(&dir).with_reconciler(reconciler.clone());
+        refs.init().unwrap();
+
+        let thread = ThreadName::new("main");
+        let attached_state = crate::refs::fresh_state_id();
+        // The known view may briefly lead the on-disk reconstructible oplog
+        // while its background rewrite retains the oplog lock.
+        refs.materialize_snapshot_thread_after_commit(&thread, attached_state, 2)
+            .unwrap();
+        assert_eq!(refs.get_thread(&thread).unwrap(), Some(attached_state));
+        let summary = refs.inspect_ref_summary_index().unwrap();
+        assert!(summary.present && summary.valid);
+        assert_eq!(summary.threads, 1);
+
+        let detached_state = crate::refs::fresh_state_id();
+        reconciler.generation.store(3, Ordering::Release);
+        refs.materialize_snapshot_head_after_commit(detached_state, 3)
+            .unwrap();
+        assert_eq!(
+            refs.read_head().unwrap(),
+            super::super::Head::Detached {
+                state: detached_state
+            }
+        );
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            0,
+            "known committed snapshot state must not replay the oplog tail"
+        );
+    }
+
     /// The lag path drives `materialize`'s authoritative-apply branches: an
     /// absent thread + marker + remote-thread + undo-recovery are all published
     /// (create), a present-but-STALE thread is overwritten with the committed
@@ -1299,9 +1341,9 @@ mod chokepoint {
 /// `refs_transactions.rs`, partition it into per-function chunks, and assert the
 /// no-bypass invariants:
 ///
-/// * every raw backend WRITER is reached only from the chokepoint body or
-///   `materialize` (so no write reaches the backend without first
-///   reconciling+materializing under the lock);
+/// * every raw backend WRITER is reached only from the chokepoint body or the
+///   shared materialization helper (so no write reaches the backend without
+///   first reconciling+materializing under the lock);
 /// * the per-request raw-loader funnel `raw_load` is reached only from the read
 ///   chokepoint (so no logical read bypasses `reconciled_load`);
 /// * every public writer/reader funnels through the respective chokepoint; and
@@ -1406,14 +1448,15 @@ mod write_read_conformance {
     }
 
     /// WRITE no-bypass: every raw backend writer is reached only from a
-    /// chokepoint body or from `materialize` (the read/write catch-up).
+    /// chokepoint body or from `materialize_with_ref_durability` (the durable
+    /// read/write catch-up and post-oplog reconstructible catch-up).
     #[test]
     fn raw_writers_are_reached_only_through_the_chokepoint() {
         let srcs = [MANAGER_SRC, TXNS_SRC];
         assert_only(
             &callers_of(&srcs, "publish_ref_plans"),
             &[
-                "materialize",
+                "materialize_with_ref_durability",
                 "update_refs_with_lock",
                 "validate_commit_publish",
             ],
@@ -1421,17 +1464,20 @@ mod write_read_conformance {
         );
         assert_only(
             &callers_of(&srcs, "set_remote_thread_locked"),
-            &["materialize", "set_remote_thread_raw"],
+            &["materialize_with_ref_durability", "set_remote_thread_raw"],
             "set_remote_thread_locked",
         );
         assert_only(
             &callers_of(&srcs, "delete_remote_thread_locked"),
-            &["materialize", "delete_remote_thread_raw"],
+            &[
+                "materialize_with_ref_durability",
+                "delete_remote_thread_raw",
+            ],
             "delete_remote_thread_locked",
         );
         assert_only(
             &callers_of(&srcs, "set_undo_recovery_locked"),
-            &["materialize", "set_undo_recovery_raw"],
+            &["materialize_with_ref_durability", "set_undo_recovery_raw"],
             "set_undo_recovery_locked",
         );
     }
@@ -1446,6 +1492,7 @@ mod write_read_conformance {
                 "reconciled_load",
                 "reconciled_value_under_lock",
                 "materialize_class",
+                "materialize_reconstructible_request",
             ],
             "raw_load",
         );

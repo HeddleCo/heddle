@@ -147,7 +147,9 @@ mod wire_compat_tests {
 
     #[test]
     fn semantic_index_attachment_is_undecodable_by_0_10_2_consumer() {
-        let attachment = sample(StateAttachmentBody::SemanticIndex(ContentHash::compute(b"root")));
+        let attachment = sample(StateAttachmentBody::SemanticIndex(ContentHash::compute(
+            b"root",
+        )));
         let bytes = rmp_serde::to_vec_named(&attachment).expect("encode");
 
         // A current (0.10.3+) consumer round-trips it cleanly.

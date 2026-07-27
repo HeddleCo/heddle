@@ -23,7 +23,6 @@ use super::*;
 /// can't drive them here.
 const SKIP: &[&str] = &[
     "daemon serve",
-    "agent serve",
     "monitor",
     "watch",
     "shell",

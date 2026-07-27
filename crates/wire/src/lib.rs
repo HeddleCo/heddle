@@ -37,22 +37,28 @@ pub use message_hosted::{
 pub use message_objects::{HaveObjects, ObjectData, ObjectRequest, SendObjects, WantObjects};
 pub use message_pushpull::{PullComplete, PushComplete};
 pub use message_refs::{HeadInfo, ListRefs, RefEntry, RefFilter, RefUpdated, RefsList, UpdateRef};
-pub use message_status::{Error, ErrorCode, Status, StatusCode};
+pub use message_status::{
+    Error, ErrorCode, RemoteCursorFailure, RemoteCursorReason, RemoteDuration, RemoteFailureCode,
+    RemoteFailureDetail, RemoteTimestamp, Status, StatusCode,
+};
 pub use native_pack::{
-    GitPackChunkState, GrowingPackChunkReader, MAX_RECEIVED_GIT_PACK_SIZE, NativePackBundle,
-    NativePackFileBundle, NativePackStreamingWriter, PackChunkSpool, PackChunkState,
-    PackFileChunkReader, build_native_pack, install_received_pack, is_native_packable_object_type,
-    native_pack_excluded_object_types, next_pack_chunk, receive_pack_chunk,
+    GitPackChunkState, GrowingPackChunkReader, MAX_RECEIVED_GIT_PACK_SIZE,
+    MAX_RECEIVED_PACK_INDEX_SIZE, MAX_RECEIVED_PACK_SIZE, NativePackBundle, NativePackFileBundle,
+    NativePackStreamingWriter, PackChunkSpool, PackChunkState, PackFileChunkReader,
+    ReusedNativePackStats, build_native_pack, install_received_pack,
+    is_native_packable_object_type, native_pack_excluded_object_types, next_pack_chunk,
+    receive_pack_chunk, reuse_native_pack_encoded_subset_in,
 };
 pub use object_availability::{ObjectAvailabilityPlan, has_object, plan_object_availability};
 pub use object_graph::{
     ObjectId, ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, StateClosureOptions,
     StateClosureTransferObjects, enumerate_state_closure, enumerate_state_closure_plan,
-    enumerate_state_closure_plan_with_options, enumerate_state_closure_transfer_with_options,
-    enumerate_state_closure_with_options, is_ancestor, missing_blobs_in_tree,
+    enumerate_state_closure_plan_with_options, enumerate_state_closure_transfer_from_boundaries,
+    enumerate_state_closure_transfer_with_options, enumerate_state_closure_with_options,
+    is_ancestor, missing_blobs_in_tree,
 };
 pub use object_transfer::{
-    MAX_PULL_DECODE_MESSAGE_SIZE, MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
+    MAX_PULL_FRAME_MESSAGE_SIZE, MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
     MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE, check_received_transfer_blob_size, chunk_bounds,
     chunk_count, chunk_offset, load_object_data, load_requested_object, store_received_object,
 };
@@ -110,9 +116,9 @@ pub enum ProtocolError {
 
     #[error("remote failure ({code:?}): {message}")]
     RemoteFailure {
-        code: ErrorCode,
+        code: RemoteFailureCode,
         message: String,
-        details: Option<String>,
+        details: Vec<RemoteFailureDetail>,
     },
 
     #[error("lock error: {0}")]
@@ -171,7 +177,26 @@ impl ProtocolError {
             ProtocolError::AlreadyExists(_) => ErrorCode::InvalidArgument,
             ProtocolError::InvalidState(_) => ErrorCode::InvalidArgument,
             ProtocolError::Remote(_) => ErrorCode::Server,
-            ProtocolError::RemoteFailure { code, .. } => *code,
+            ProtocolError::RemoteFailure { code, .. } => match code {
+                RemoteFailureCode::InvalidArgument
+                | RemoteFailureCode::AlreadyExists
+                | RemoteFailureCode::FailedPrecondition
+                | RemoteFailureCode::OutOfRange => ErrorCode::InvalidArgument,
+                RemoteFailureCode::NotFound => ErrorCode::NotFound,
+                RemoteFailureCode::PermissionDenied | RemoteFailureCode::Unauthenticated => {
+                    ErrorCode::PermissionDenied
+                }
+                RemoteFailureCode::DeadlineExceeded
+                | RemoteFailureCode::ResourceExhausted
+                | RemoteFailureCode::Aborted
+                | RemoteFailureCode::Unavailable
+                | RemoteFailureCode::Cancelled => ErrorCode::Network,
+                RemoteFailureCode::Unspecified
+                | RemoteFailureCode::Unknown
+                | RemoteFailureCode::Unimplemented
+                | RemoteFailureCode::Internal
+                | RemoteFailureCode::DataLoss => ErrorCode::Server,
+            },
             ProtocolError::LockError(_) => ErrorCode::Server,
         }
     }
@@ -191,7 +216,7 @@ pub type Result<T> = std::result::Result<T, ProtocolError>;
 mod tests {
     use std::io;
 
-    use super::{ErrorCode, ProtocolError};
+    use super::{ErrorCode, ProtocolError, RemoteFailureCode};
 
     #[test]
     fn protocol_error_public_mapping_is_stable() {
@@ -261,9 +286,9 @@ mod tests {
             ),
             (
                 ProtocolError::RemoteFailure {
-                    code: ErrorCode::InvalidArgument,
+                    code: RemoteFailureCode::InvalidArgument,
                     message: "server supplied message".to_string(),
-                    details: Some("remote details".to_string()),
+                    details: Vec::new(),
                 },
                 "server supplied message",
                 ErrorCode::InvalidArgument,

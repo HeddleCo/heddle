@@ -2,7 +2,7 @@
 //! Monorepo-clone PLANNER (Spool epic P9, weft#358).
 //!
 //! Pure, transport-free translation of a resolved `MonorepoNode` tree (the
-//! reply from `HostedGrpcClient::resolve_monorepo`) into a flat, ordered set
+//! reply from `HostedClient::resolve_monorepo`) into a flat, ordered set
 //! of per-spool clone operations plus the set of child edges that were NOT
 //! descended into (EdgeSkip).
 //!
@@ -27,7 +27,7 @@
 
 use std::path::{Path, PathBuf};
 
-use grpc::heddle::api::v1alpha1::{EdgeSkip, MonorepoNode};
+use api::heddle::api::v1alpha1::{EdgeSkip, MonorepoNode};
 use objects::object::StateId;
 
 /// A single per-spool clone operation the planner emits. The CLI reuses the
@@ -142,7 +142,7 @@ impl MonorepoClonePlan {
 
 #[cfg(test)]
 mod tests {
-    use grpc::heddle::api::v1alpha1::{ChildEdgeStatus, MonorepoEdge, StateId as ProtoStateId};
+    use api::heddle::api::v1alpha1::{ChildEdgeStatus, MonorepoEdge, StateId as ProtoStateId};
 
     use super::*;
 

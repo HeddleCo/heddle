@@ -45,7 +45,7 @@ pub const LAZY_HYDRATOR_FILE: &str = "lazy-hydrator.toml";
 /// Stable kind identifier for the git-overlay hydrator.
 pub const KIND_GIT_OVERLAY: &str = "git-overlay";
 
-/// Stable kind identifier for the hosted-gRPC hydrator.
+/// Stable kind identifier for the hosted hydrator.
 pub const KIND_HOSTED: &str = "hosted";
 
 /// Persisted hydrator metadata. Wire-format is the TOML serialization of

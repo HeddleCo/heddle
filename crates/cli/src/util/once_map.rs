@@ -11,7 +11,7 @@
 //!
 //! - [`OnceMap::get_or_init_with`] for synchronous initializers (file-stat
 //!   probes, key derivation).
-//! - [`OnceMap::get_or_init_async`] for async initializers (gRPC channel
+//! - [`OnceMap::get_or_init_async`] for async initializers (hosted session
 //!   construction, network handshakes). Concurrent inserts for *different*
 //!   keys don't serialize because the lock is released across the `await`;
 //!   concurrent inserts for the *same* key may both run the init future
@@ -19,7 +19,7 @@
 //!   that previously used this pattern.
 //!
 //! Values are cloned on read. Use a cheaply-cloneable handle (`Arc<…>`,
-//! `tonic::transport::Channel`) when the underlying object is expensive
+//! a hosted connection) when the underlying object is expensive
 //! to clone.
 
 use std::{

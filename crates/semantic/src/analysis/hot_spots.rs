@@ -19,7 +19,7 @@
 //! # Where this sits
 //!
 //! Pure function over `&impl ObjectStore`. Both the CLI (against the FS
-//! store) and the gRPC service (against any server-side store) call the
+//! store) and the hosted service (against any server-side store) call the
 //! same entry point — no host-specific glue required. The walker
 //! follows `state.first_parent()` through the imported ancestry,
 //! matching `git log --first-parent` semantics. That's the right

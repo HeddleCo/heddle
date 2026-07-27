@@ -19,7 +19,7 @@ mod pack_tests;
 pub use manager::PackManager;
 pub use pack_builder::PackBuilder;
 pub use pack_index::PackIndex;
-pub use pack_reader::PackReader;
+pub use pack_reader::{EncodedPackSubset, PackReader};
 pub use shared::{
     PACK_CHECKSUM_LEN, PackContainerSpec, PackEntryHeader, PackObjectId, PackObjectRecord,
     append_container_checksum, compress_pack_payload, decode_tagged_entry_header,
@@ -38,6 +38,7 @@ pub enum ObjectType {
     Action = 3,
     Delta = 4,
     StateAttachment = 5,
+    SnapshotCommit = 6,
 }
 
 pub(crate) fn pack_container_spec() -> PackContainerSpec {
@@ -56,6 +57,7 @@ impl ObjectType {
             3 => Some(ObjectType::Action),
             4 => Some(ObjectType::Delta),
             5 => Some(ObjectType::StateAttachment),
+            6 => Some(ObjectType::SnapshotCommit),
             _ => None,
         }
     }

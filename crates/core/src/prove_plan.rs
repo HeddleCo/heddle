@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Pure `heddle prove` planning helpers (no gRPC / FS I/O).
+//! Pure `heddle prove` planning helpers (no hosted network / FS I/O).
 //!
 //! Status labels and host/repo validation are pure so the CLI can keep
-//! prost/tonic transport, file writes, and recovery advice locally.
+//! protobuf transport, file writes, and recovery advice locally.
 
 /// Identity-proof status kinds aligned with hosted `ProofStatus` wire values
-/// (0 unspecified, 1 pending, 2 verified, 3 failed) without depending on grpc.
+/// (0 unspecified, 1 pending, 2 verified, 3 failed) without generated API types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProofStatusKind {
     Unspecified,

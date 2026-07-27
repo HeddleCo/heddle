@@ -1,17 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle agent` — agent-loop affordances.
 //!
-//! `agent serve` runs a local-only gRPC daemon
-//! over a Unix-domain socket inside the repo's `.heddle/sockets/`. The
-//! daemon hosts agent services (state-review, discussion, signal,
-//! operation-log query, timeline, hook) so a tight agent loop avoids
-//! per-command process startup latency.
-//!
-//! `heddle agent serve` is intentionally distinct from `heddle daemon`,
-//! which controls the FUSE mount daemon — different subsystem, different
-//! UX. `heddle help daemon` contrasts the two.
-
-use std::path::PathBuf;
+//! Agent commands are one-shot repository operations. The unused local daemon
+//! daemon control surface was removed during the native hosted cutover.
 
 use clap::Subcommand;
 
@@ -26,18 +17,6 @@ use super::commands_args::{
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum AgentCommands {
-    /// Run the local agent gRPC daemon in the foreground.
-    ///
-    /// The daemon binds a Unix socket inside the repo's `.heddle/sockets/`
-    /// directory and serves local same-user CLI calls.
-    Serve(AgentServeArgs),
-
-    /// Report whether the local agent daemon is running for this repo.
-    Status,
-
-    /// Ask the running daemon to drain and exit.
-    Stop,
-
     // --- Reservation API (orchestration surface) ----------------
     // The variants below are the stable JSON API that orchestrators
     // (Claude Code subagents, codex harnesses, etc.) call to
@@ -134,11 +113,4 @@ pub enum AgentFanoutCommands {
 
     /// Create task assignments and materialized child lanes.
     Start(AgentFanoutStartArgs),
-}
-
-#[derive(Clone, Debug, clap::Args)]
-pub struct AgentServeArgs {
-    /// Override the default socket path (`<heddle_dir>/sockets/grpc.sock`).
-    #[arg(long)]
-    pub socket: Option<PathBuf>,
 }

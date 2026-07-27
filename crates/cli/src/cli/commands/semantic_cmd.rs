@@ -2,7 +2,7 @@
 //! Semantic-analysis CLI commands (`heddle semantic ...`).
 //!
 //! Thin shim over [`semantic`] — the analysis lives in the core
-//! semantic crate so the same primitives are available to gRPC and the
+//! semantic crate so the same primitives are available to hosted calls and the
 //! web UI without a CLI round-trip.
 
 use std::collections::BTreeMap;

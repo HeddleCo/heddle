@@ -3,7 +3,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     thread::{self},
     time::{Duration, Instant},
@@ -196,6 +196,26 @@ impl RefManager {
 
     pub(super) fn write_string(&self, path: &Path, contents: &str) -> Result<()> {
         Ok(write_file_atomic(path, contents.as_bytes())?)
+    }
+
+    /// Atomically replace a rebuildable materialized view without forcing it
+    /// to stable storage. The authoritative oplog and its deliberately lagging
+    /// watermark provide crash recovery for these bytes.
+    pub(super) fn write_string_reconstructible(&self, path: &Path, contents: &str) -> Result<()> {
+        let temp_path = self.alloc_temp_path(path)?;
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)?;
+            file.write_all(contents.as_bytes())?;
+            fs::rename(&temp_path, path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        result
     }
 
     /// Allocate the temp path a canonical ref file will be staged into

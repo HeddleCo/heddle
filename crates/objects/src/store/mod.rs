@@ -44,7 +44,10 @@ pub use memory::InMemoryStore;
 pub use pack::{PackBuilder, PackObjectId, PackReader, PackStats, StreamingPackBuilder, SyncData};
 pub use shallow::ShallowInfo;
 #[doc(hidden)]
-pub use snapshot_commit::SnapshotPackManager;
+pub use snapshot_commit::{
+    SNAPSHOT_COMMIT_ARTIFACT_SCHEMA, SnapshotCommitArtifact, SnapshotCommitDescriptor,
+    SnapshotPackManager,
+};
 #[cfg(feature = "async-source")]
 pub use source::AsyncObjectSource;
 pub use source::ObjectSource;
@@ -214,6 +217,27 @@ impl ObjectStore for AnyStore {
     fn put_blobs_packed(&self, blobs: Vec<(ContentHash, Vec<u8>)>) -> Result<()> {
         any_store_dispatch!(self, put_blobs_packed(blobs))
     }
+    fn put_snapshot_objects_packed(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+    ) -> Result<()> {
+        any_store_dispatch!(self, put_snapshot_objects_packed(blobs, tree, state))
+    }
+    fn put_snapshot_objects_and_attachments_packed(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+        attachments: Vec<StateAttachment>,
+    ) -> Result<()> {
+        any_store_dispatch!(
+            self,
+            put_snapshot_objects_and_attachments_packed(blobs, tree, state, attachments)
+        )
+    }
+
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<pack::PackObjectId>> {
         any_store_dispatch!(self, install_pack(pack_data, index_data))
     }
@@ -270,6 +294,51 @@ impl AnyStore {
     pub fn set_external_source(&mut self, source: Arc<dyn ExternalObjectSource>) {
         match self {
             Self::Fs(store) => store.set_external_source(source),
+        }
+    }
+
+    /// Internal repository seam for the local authoritative snapshot artifact.
+    /// Kept off `ObjectStore` so third-party backends do not acquire a Heddle
+    /// filesystem recovery contract.
+    #[doc(hidden)]
+    pub fn snapshot_commit_descriptors(&self) -> Result<Vec<SnapshotCommitDescriptor>> {
+        match self {
+            Self::Fs(store) => store.snapshot_commit_descriptors_impl(),
+        }
+    }
+
+    /// O(1) lookup for the authoritative snapshot pack associated with a
+    /// pushed state. The filesystem store maintains this index as packs are
+    /// installed so hosted Push does not scan historical snapshot artifacts.
+    #[doc(hidden)]
+    pub fn snapshot_commit_descriptor_for_state(
+        &self,
+        state: &StateId,
+    ) -> Result<Option<SnapshotCommitDescriptor>> {
+        match self {
+            Self::Fs(store) => store.snapshot_commit_descriptor_for_state_impl(state),
+        }
+    }
+
+    /// Install a structured snapshot closure and its commit artifact through
+    /// the filesystem store's single durable pack barrier.
+    #[doc(hidden)]
+    pub fn put_committed_snapshot_objects_packed(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+        attachments: Vec<StateAttachment>,
+        artifact: SnapshotCommitArtifact,
+    ) -> Result<SnapshotCommitDescriptor> {
+        match self {
+            Self::Fs(store) => store.put_committed_snapshot_objects_packed_impl(
+                blobs,
+                tree,
+                state,
+                attachments,
+                artifact,
+            ),
         }
     }
 }
@@ -538,6 +607,37 @@ pub trait ObjectStore: Send + Sync {
         Ok(())
     }
 
+    /// Durably install a snapshot's newly-authored immutable object closure as
+    /// one storage batch. Pack-capable backends override this to share one pack
+    /// installation across blobs, the root tree, and the state; other backends
+    /// preserve the same ordering through their ordinary object methods.
+    fn put_snapshot_objects_packed(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+    ) -> Result<()> {
+        self.put_blobs_packed(blobs)?;
+        self.put_tree(tree)?;
+        self.put_state(state)
+    }
+
+    /// Snapshot closure variant that also durably installs immutable authored
+    /// attachments. The separate method preserves the existing backend API;
+    /// pack-capable stores override it to share the snapshot pack barrier.
+    fn put_snapshot_objects_and_attachments_packed(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+        attachments: Vec<StateAttachment>,
+    ) -> Result<()> {
+        self.put_snapshot_objects_packed(blobs, tree, state)?;
+        for attachment in attachments {
+            self.put_state_attachment(&attachment)?;
+        }
+        Ok(())
+    }
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<pack::PackObjectId>> {
         let reader = pack::PackReader::from_slice(pack_data, index_data)?;
         let ids = reader.list_ids();

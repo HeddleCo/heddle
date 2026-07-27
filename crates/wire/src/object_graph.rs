@@ -3,8 +3,9 @@ use std::collections::{HashSet, VecDeque};
 
 use objects::{
     object::{
-        ContentHash, SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode, State, StateAttachment,
-        StateAttachmentBody, StateAttachmentId, StateAttachmentKind, StateId, TreeEntryTarget,
+        ContentHash, SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode, State,
+        StateAttachment, StateAttachmentBody, StateAttachmentId, StateAttachmentKind, StateId,
+        TreeEntryTarget,
     },
     store::{ObjectStore, pack::ObjectType as PackObjectType},
 };
@@ -261,6 +262,52 @@ pub fn enumerate_state_closure_transfer_with_options(
     })
 }
 
+/// Enumerate a transfer delta while treating `boundary_states` as complete
+/// server-held roots. Unlike [`StateClosureOptions::exclude_states`], this does
+/// not expand each boundary's tree/history to build a hash exclusion set: the
+/// walk stops as soon as it reaches the boundary state. Objects reused by the
+/// new tip may still be advertised, and the receiver's have-set filters them.
+/// This keeps incremental push planning proportional to the new history.
+pub fn enumerate_state_closure_transfer_from_boundaries(
+    store: &impl ObjectStore,
+    state_id: StateId,
+    boundary_states: &[StateId],
+    full_descriptor_object_threshold: usize,
+) -> Result<StateClosureTransferObjects> {
+    let mut planned_objects = Vec::new();
+    let mut full_objects = Some(Vec::new());
+    let excluded_states = boundary_states.iter().copied().collect();
+
+    walk_state_closure_with_exclusions(
+        store,
+        state_id,
+        None,
+        excluded_states,
+        HashSet::new(),
+        |event| {
+            if let Some(object) = planned_object_from_event(store, event)? {
+                planned_objects.push(object);
+            }
+
+            if full_objects.is_some() && planned_objects.len() > full_descriptor_object_threshold {
+                full_objects = None;
+            }
+            if let Some(objects) = full_objects.as_mut()
+                && let Some(info) = object_info_from_event(store, event)?
+            {
+                objects.push(info);
+            }
+
+            Ok(())
+        },
+    )?;
+
+    Ok(StateClosureTransferObjects {
+        planned_objects,
+        full_objects,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BlobSource {
     Tree,
@@ -303,10 +350,28 @@ fn walk_state_closure(
     store: &impl ObjectStore,
     state_id: StateId,
     options: StateClosureOptions,
-    mut visit: impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
+    visit: impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
 ) -> Result<()> {
     let (excluded_states, excluded_hashes) = collect_excluded(store, &options.exclude_states)?;
 
+    walk_state_closure_with_exclusions(
+        store,
+        state_id,
+        options.depth,
+        excluded_states,
+        excluded_hashes,
+        visit,
+    )
+}
+
+fn walk_state_closure_with_exclusions(
+    store: &impl ObjectStore,
+    state_id: StateId,
+    max_depth: Option<u32>,
+    excluded_states: HashSet<StateId>,
+    excluded_hashes: HashSet<ContentHash>,
+    mut visit: impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
+) -> Result<()> {
     let mut seen_states: HashSet<StateId> = HashSet::new();
     let mut seen_hashes: HashSet<ContentHash> = HashSet::new();
     let mut queue: VecDeque<(StateId, u32)> = VecDeque::new();
@@ -364,7 +429,7 @@ fn walk_state_closure(
             }
         }
 
-        if options.depth.map(|max| depth < max).unwrap_or(true) {
+        if max_depth.map(|max| depth < max).unwrap_or(true) {
             for parent in &state.parents {
                 queue.push_back((*parent, depth + 1));
             }
@@ -912,8 +977,10 @@ mod tests {
 
     use super::{
         ObjectId, ObjectInfo, ObjectType, PlannedObject, StateClosureOptions,
-        enumerate_state_closure_plan_with_options, enumerate_state_closure_transfer_with_options,
-        enumerate_state_closure_with_options, missing_blobs_in_tree,
+        enumerate_state_closure_plan_with_options,
+        enumerate_state_closure_transfer_from_boundaries,
+        enumerate_state_closure_transfer_with_options, enumerate_state_closure_with_options,
+        missing_blobs_in_tree,
     };
 
     fn pairs_from_full(objects: &[ObjectInfo]) -> HashSet<(ObjectId, ObjectType)> {
@@ -1087,6 +1154,46 @@ mod tests {
             full_pairs
                 .iter()
                 .any(|(id, _)| matches!(id, ObjectId::StateId(_)))
+        );
+    }
+
+    #[test]
+    fn transfer_boundary_stops_at_server_head_without_walking_its_history() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let path = temp.path().join("story.txt");
+
+        std::fs::write(&path, "base\n").unwrap();
+        let base = repo.snapshot(Some("base".to_string()), None).unwrap();
+        std::fs::write(&path, "middle\n").unwrap();
+        let middle = repo.snapshot(Some("middle".to_string()), None).unwrap();
+        std::fs::write(&path, "tip\n").unwrap();
+        let tip = repo.snapshot(Some("tip".to_string()), None).unwrap();
+
+        let counting = CountingStore::new(repo.store());
+        let transfer = enumerate_state_closure_transfer_from_boundaries(
+            &counting,
+            tip.state_id,
+            &[middle.state_id],
+            512,
+        )
+        .unwrap();
+        let states = transfer
+            .planned_objects
+            .iter()
+            .filter_map(|object| match object.id {
+                ObjectId::StateId(state) if object.obj_type == ObjectType::State => Some(state),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(states, vec![tip.state_id]);
+        assert!(!states.contains(&middle.state_id));
+        assert!(!states.contains(&base.state_id));
+        assert_eq!(
+            counting.state_reads(),
+            1,
+            "the advertised server boundary must stop the walk before reading old states"
         );
     }
 
@@ -1850,9 +1957,8 @@ mod tests {
 
         // Partitioning the plan by push-packability puts the record on the
         // sidecar side and never in the pack side.
-        let (push_pack, push_sidecar): (Vec<_>, Vec<_>) = plan
-            .iter()
-            .partition(|p| p.obj_type.packable_for_push());
+        let (push_pack, push_sidecar): (Vec<_>, Vec<_>) =
+            plan.iter().partition(|p| p.obj_type.packable_for_push());
         assert!(
             push_sidecar
                 .iter()

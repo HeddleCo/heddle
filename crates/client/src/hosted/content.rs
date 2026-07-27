@@ -1,20 +1,19 @@
-use grpc::heddle::api::v1alpha1::{
+use api::heddle::api::v1alpha1::{
     AnnotationScope, CompareResponse, ContextAnnotationKind, GetBlameRequest, GetBlameResponse,
     GetCompareRequest, GetContextHistoryRequest, GetContextHistoryResponse, ListContextRequest,
     ListContextResponse, ListContextSuggestionsRequest, ListContextSuggestionsResponse,
     ReviseContextRequest, ReviseContextResponse, SetContextRequest, SetContextResponse,
     SupersedeContextRequest, SupersedeContextResponse,
 };
-use tonic::Request;
 use wire::ProtocolError;
 
-use super::{HostedGrpcClient, helpers::status_to_protocol_error, operation_id::ClientOperationId};
+use super::{HostedClient, helpers::hosted_to_protocol_error, operation_id::ClientOperationId};
 
 const SET_CONTEXT: &str = "heddle.api.v1alpha1.RepositoryService/SetContext";
 const REVISE_CONTEXT: &str = "heddle.api.v1alpha1.RepositoryService/ReviseContext";
 const SUPERSEDE_CONTEXT: &str = "heddle.api.v1alpha1.RepositoryService/SupersedeContext";
 
-impl HostedGrpcClient {
+impl HostedClient {
     pub async fn get_compare(
         &mut self,
         repo_path: &str,
@@ -22,21 +21,16 @@ impl HostedGrpcClient {
         to: &str,
         include_semantic: bool,
     ) -> Result<CompareResponse, ProtocolError> {
-        let mut request = Request::new(GetCompareRequest {
+        let request = GetCompareRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             from: from.to_string(),
             to: to.to_string(),
             include_semantic,
-        });
-        self.apply_signed_auth(
-            &mut request,
-            "/heddle.api.v1alpha1.RepositoryService/GetCompare",
-        )?;
-        self.content
-            .get_compare(request)
+        };
+        self.routes()
+            .get_compare(&request)
             .await
-            .map_err(status_to_protocol_error)
-            .map(|response| response.into_inner())
+            .map_err(hosted_to_protocol_error)
     }
 
     pub async fn get_blame(
@@ -45,20 +39,15 @@ impl HostedGrpcClient {
         r#ref: Option<&str>,
         path: &str,
     ) -> Result<GetBlameResponse, ProtocolError> {
-        let mut request = Request::new(GetBlameRequest {
+        let request = GetBlameRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             r#ref: r#ref.unwrap_or_default().to_string(),
             path: path.to_string(),
-        });
-        self.apply_signed_auth(
-            &mut request,
-            "/heddle.api.v1alpha1.RepositoryService/GetBlame",
-        )?;
-        self.content
-            .get_blame(request)
+        };
+        self.routes()
+            .get_blame(&request)
             .await
-            .map_err(status_to_protocol_error)
-            .map(|response| response.into_inner())
+            .map_err(hosted_to_protocol_error)
     }
 
     pub async fn list_context(
@@ -68,21 +57,16 @@ impl HostedGrpcClient {
         prefix: Option<&str>,
         tag_filter: Option<&str>,
     ) -> Result<ListContextResponse, ProtocolError> {
-        let mut request = Request::new(ListContextRequest {
+        let request = ListContextRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             r#ref: r#ref.unwrap_or_default().to_string(),
             prefix: prefix.map(str::to_string),
             tag_filter: tag_filter.map(str::to_string),
-        });
-        self.apply_signed_auth(
-            &mut request,
-            "/heddle.api.v1alpha1.RepositoryService/ListContext",
-        )?;
-        self.content
-            .list_context(request)
+        };
+        self.routes()
+            .list_context(&request)
             .await
-            .map_err(status_to_protocol_error)
-            .map(|response| response.into_inner())
+            .map_err(hosted_to_protocol_error)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -101,7 +85,7 @@ impl HostedGrpcClient {
     ) -> Result<SetContextResponse, ProtocolError> {
         let operation_id =
             ClientOperationId::for_required_method(SET_CONTEXT, client_operation_id)?;
-        let mut request = Request::new(SetContextRequest {
+        let request = SetContextRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             path: path.to_string(),
             scope: Some(scope),
@@ -114,16 +98,11 @@ impl HostedGrpcClient {
                 .and_then(super::helpers::proto_state_id),
             kind: kind as i32,
             client_operation_id: operation_id.to_wire(),
-        });
-        self.apply_signed_auth(
-            &mut request,
-            "/heddle.api.v1alpha1.RepositoryService/SetContext",
-        )?;
-        self.content
-            .set_context(request)
+        };
+        self.routes()
+            .set_context(&request)
             .await
-            .map_err(status_to_protocol_error)
-            .map(|response| response.into_inner())
+            .map_err(hosted_to_protocol_error)
     }
 
     pub async fn get_context_history(
@@ -132,20 +111,15 @@ impl HostedGrpcClient {
         r#ref: Option<&str>,
         annotation_id: &str,
     ) -> Result<GetContextHistoryResponse, ProtocolError> {
-        let mut request = Request::new(GetContextHistoryRequest {
+        let request = GetContextHistoryRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             r#ref: r#ref.unwrap_or_default().to_string(),
             annotation_id: annotation_id.to_string(),
-        });
-        self.apply_signed_auth(
-            &mut request,
-            "/heddle.api.v1alpha1.RepositoryService/GetContextHistory",
-        )?;
-        self.content
-            .get_context_history(request)
+        };
+        self.routes()
+            .get_context_history(&request)
             .await
-            .map_err(status_to_protocol_error)
-            .map(|response| response.into_inner())
+            .map_err(hosted_to_protocol_error)
     }
 
     pub async fn list_context_suggestions(
@@ -154,20 +128,15 @@ impl HostedGrpcClient {
         r#ref: Option<&str>,
         limit: u32,
     ) -> Result<ListContextSuggestionsResponse, ProtocolError> {
-        let mut request = Request::new(ListContextSuggestionsRequest {
+        let request = ListContextSuggestionsRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             r#ref: r#ref.unwrap_or_default().to_string(),
             limit,
-        });
-        self.apply_signed_auth(
-            &mut request,
-            "/heddle.api.v1alpha1.RepositoryService/ListContextSuggestions",
-        )?;
-        self.content
-            .list_context_suggestions(request)
+        };
+        self.routes()
+            .list_context_suggestions(&request)
             .await
-            .map_err(status_to_protocol_error)
-            .map(|response| response.into_inner())
+            .map_err(hosted_to_protocol_error)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -184,7 +153,7 @@ impl HostedGrpcClient {
     ) -> Result<ReviseContextResponse, ProtocolError> {
         let operation_id =
             ClientOperationId::for_required_method(REVISE_CONTEXT, client_operation_id)?;
-        let mut request = Request::new(revise_context_request(
+        let request = revise_context_request(
             repo_path,
             annotation_id,
             content,
@@ -193,16 +162,11 @@ impl HostedGrpcClient {
             agent_model,
             kind,
             &operation_id,
-        ));
-        self.apply_signed_auth(
-            &mut request,
-            "/heddle.api.v1alpha1.RepositoryService/ReviseContext",
-        )?;
-        self.content
-            .revise_context(request)
+        );
+        self.routes()
+            .revise_context(&request)
             .await
-            .map_err(status_to_protocol_error)
-            .map(|response| response.into_inner())
+            .map_err(hosted_to_protocol_error)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -222,7 +186,7 @@ impl HostedGrpcClient {
     ) -> Result<SupersedeContextResponse, ProtocolError> {
         let operation_id =
             ClientOperationId::for_required_method(SUPERSEDE_CONTEXT, client_operation_id)?;
-        let mut request = Request::new(supersede_context_request(
+        let request = supersede_context_request(
             repo_path,
             annotation_id,
             path,
@@ -234,16 +198,11 @@ impl HostedGrpcClient {
             agent_model,
             kind,
             &operation_id,
-        ));
-        self.apply_signed_auth(
-            &mut request,
-            "/heddle.api.v1alpha1.RepositoryService/SupersedeContext",
-        )?;
-        self.content
-            .supersede_context(request)
+        );
+        self.routes()
+            .supersede_context(&request)
             .await
-            .map_err(status_to_protocol_error)
-            .map(|response| response.into_inner())
+            .map_err(hosted_to_protocol_error)
     }
 }
 
@@ -364,7 +323,7 @@ mod tests {
     #[test]
     fn actual_context_rpc_retry_boundary_requires_reusing_the_caller_id() {
         #[allow(dead_code)]
-        async fn compile_caller_retry(client: &mut HostedGrpcClient, client_operation_id: String) {
+        async fn compile_caller_retry(client: &mut HostedClient, client_operation_id: String) {
             let _ = client
                 .revise_context(
                     "acme/widgets",

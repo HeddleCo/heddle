@@ -6,9 +6,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use api::heddle::api::v1alpha1::{
     GetReviewPayloadRequest, ListSignaturesRequest, PathSymbolRef, ReviewScope as ProtoReviewScope,
-    SignStateRequest, state_review_service_server::StateReviewService,
+    SignStateRequest,
 };
-use daemon::grpc_local_impl::{GrpcLocalService, LocalStateReviewService, get_repo_signal_health};
+use daemon::local_review::{
+    LocalReviewContext, LocalReviewError, LocalStateReviewService, get_repo_signal_health,
+};
 use repo::{HistoryQuery, operation_dedup::OperationDedupStore};
 use serde::Serialize;
 
@@ -85,22 +87,20 @@ async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
     let svc = open_state_review_service(cli)?;
     let state_id = resolve_state(cli, args.state.as_deref())?;
     let payload_resp = svc
-        .get_review_payload(tonic::Request::new(GetReviewPayloadRequest {
+        .get_review_payload(GetReviewPayloadRequest {
             repo_path: None,
             state_id: Some(api_state_id(&state_id)?),
             include_all_signals: args.all_signals,
-        }))
+        })
         .await
-        .map_err(status_to_anyhow)?
-        .into_inner();
+        .map_err(status_to_anyhow)?;
     let signatures_resp = svc
-        .list_signatures(tonic::Request::new(ListSignaturesRequest {
+        .list_signatures(ListSignaturesRequest {
             repo_path: None,
             state_id: Some(api_state_id(&state_id)?),
-        }))
+        })
         .await
-        .map_err(status_to_anyhow)?
-        .into_inner();
+        .map_err(status_to_anyhow)?;
 
     use api::heddle::api::v1alpha1::ReviewKind;
     let summary = payload_resp.summary.unwrap_or_default();
@@ -289,11 +289,7 @@ async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
         }),
         client_operation_id: crate::operation_id::wire(cli),
     };
-    let resp = svc
-        .sign_state(tonic::Request::new(req))
-        .await
-        .map_err(status_to_anyhow)?
-        .into_inner();
+    let resp = svc.sign_state(req).await.map_err(status_to_anyhow)?;
     if should_output_json(cli, None) {
         let state_str = api_state_id_string(resp.state_id.as_ref());
         let out = serde_json::json!({
@@ -342,13 +338,12 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
         let state_id_bytes = state.state_id.as_bytes().to_vec();
         let state_id_str = state.state_id.to_string_full();
         let signatures = svc
-            .list_signatures(tonic::Request::new(ListSignaturesRequest {
+            .list_signatures(ListSignaturesRequest {
                 repo_path: None,
                 state_id: Some(api_state_id(&state_id_bytes)?),
-            }))
+            })
             .await
             .map_err(status_to_anyhow)?
-            .into_inner()
             .signatures;
 
         let satisfied = signatures.iter().any(|s| {
@@ -464,19 +459,34 @@ async fn run_health(cli: &Cli, args: &ReviewHealthArgs) -> Result<()> {
 fn open_state_review_service(cli: &Cli) -> Result<LocalStateReviewService> {
     let repo = cli.open_repo()?;
     let dedup = OperationDedupStore::open(repo.heddle_dir()).context("open dedup store")?;
-    let inner = GrpcLocalService::new(Arc::new(repo), Arc::new(dedup));
+    let inner = LocalReviewContext::new(Arc::new(repo), Arc::new(dedup));
     Ok(LocalStateReviewService::new(inner))
 }
 
 fn signal_view(s: &api::heddle::api::v1alpha1::RiskSignal) -> SignalView {
+    use api::heddle::api::v1alpha1::{RiskSignalKind, SignalVisibility};
+
     let anchor = s.anchor.clone().unwrap_or_default();
     SignalView {
-        kind: s.kind.clone(),
+        kind: match s.kind() {
+            RiskSignalKind::Novelty => "novelty",
+            RiskSignalKind::TestReachability => "test_reachability",
+            RiskSignalKind::PatternDeviation => "pattern_deviation",
+            RiskSignalKind::InvariantAdjacency => "invariant_adjacency",
+            RiskSignalKind::SelfFlaggedUncertainty => "self_flagged_uncertainty",
+            RiskSignalKind::Unspecified => "unspecified",
+        }
+        .to_string(),
         file: anchor.file,
         symbol: anchor.symbol,
         reason: s.reason.clone(),
         producer: s.producer_module.clone(),
-        visibility: s.visibility.clone(),
+        visibility: match s.visibility() {
+            SignalVisibility::Visible => "visible",
+            SignalVisibility::Hidden => "hidden",
+            SignalVisibility::Unspecified => "unspecified",
+        }
+        .to_string(),
     }
 }
 
@@ -518,12 +528,7 @@ fn resolve_state(cli: &Cli, explicit: Option<&str>) -> Result<Vec<u8>> {
     Ok(head.as_bytes().to_vec())
 }
 
-fn status_to_anyhow(status: tonic::Status) -> anyhow::Error {
-    // Preserve the `tonic::Status` in the error chain (rather than flattening
-    // to a formatted string) so any typed conflict/cursor/stream detail it
-    // carries (AX H4) survives for the exit-code and JSON-envelope classifiers
-    // in `crate::hosted_typed_error`. `tonic::Status` implements `Error`, so its
-    // `Display` (`"status: <message>"`) still renders for string-only callers.
+fn status_to_anyhow(status: LocalReviewError) -> anyhow::Error {
     anyhow::Error::new(status)
 }
 

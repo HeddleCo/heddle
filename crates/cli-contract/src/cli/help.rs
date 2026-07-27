@@ -615,19 +615,11 @@ supported agent env var, harness probe, active session, user config, repo config
 `crates/cli/src/cli/commands/snapshot.rs` for the full cascade.
 "#;
 
-const DAEMON_TOPIC: &str = "Two daemons — both have legitimate uses; they are not interchangeable.\n\
+const DAEMON_TOPIC: &str = "The mount daemon owns virtualized workspace sessions.\n\
 \n\
 `heddle daemon`        — FUSE mount-daemon control plane. Owns FUSE sessions for\n\
                          `--workspace virtualized --daemon` threads. Linux only.\n\
-                         Subcommands: serve | status | stop.\n\
-\n\
-`heddle agent serve`   — Local gRPC daemon over a Unix socket inside the repo's\n\
-                         `.heddle/sockets/`. Hosts the local agent\n\
-                         services (state-review, discussion, signal, operation-log\n\
-                         query, hook) so agents avoid per-command\n\
-                         process startup latency. Mode: same-user only;\n\
-                         peer-credential checks are enforced. Runs in the\n\
-                         foreground until interrupted.\n";
+                         Subcommands: serve | status | stop.\n";
 
 const MODEL_TOPIC: &str = r#"Heddle mental model — the everyday loop in one screen.
 

@@ -44,7 +44,7 @@ pub trait CliContext: Send + Sync {
     /// directory."
     fn repo_path(&self) -> Option<&Path>;
 
-    /// `--op-id` override for idempotent gRPC calls. Empty string
+    /// `--op-id` override for idempotent hosted calls. Empty string
     /// means the caller did not supply one and the server should not
     /// dedupe.
     fn operation_id_wire(&self) -> String;
@@ -173,11 +173,7 @@ pub trait WeftExtensions: Send + Sync {
     /// `heddle whoami` — resolve and report the acting identity (principal,
     /// token kind, scopes, operation ceiling, TTL, signing + reachability).
     /// `server` is the optional `--server` override.
-    async fn whoami(
-        &self,
-        ctx: &(dyn CliContext + 'static),
-        server: Option<String>,
-    ) -> Result<()>;
+    async fn whoami(&self, ctx: &(dyn CliContext + 'static), server: Option<String>) -> Result<()>;
 }
 
 /// Noop implementation used in OSS builds. Every method returns the

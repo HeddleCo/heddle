@@ -2,14 +2,15 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::object::{Attribution, ChangeId, ContentHash, StateId, VisibilityTier};
-
 use super::CollaborationCodecError;
-use crate::object::collaboration::{
-    COLLABORATION_OPERATION_SCHEMA_VERSION, CollabOpId, CollaborationAnchor,
-    CollaborationIdempotencyKey, CollaborationOperationBodyV1, CollaborationOperationEnvelope,
-    CollaborationResolution, DiscussionRecordId, DiscussionTurnV1, LegacyDiscussionId,
-    LegacyDiscussionResolutionV1, LegacySourceLocator,
+use crate::object::{
+    Attribution, ChangeId, ContentHash, StateId, VisibilityTier,
+    collaboration::{
+        COLLABORATION_OPERATION_SCHEMA_VERSION, CollabOpId, CollaborationAnchor,
+        CollaborationIdempotencyKey, CollaborationOperationBodyV1, CollaborationOperationEnvelope,
+        CollaborationResolution, DiscussionRecordId, DiscussionTurnV1, LegacyDiscussionId,
+        LegacyDiscussionResolutionV1, LegacySourceLocator,
+    },
 };
 
 #[derive(Serialize, Deserialize)]

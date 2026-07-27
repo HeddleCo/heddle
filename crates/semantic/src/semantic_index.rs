@@ -314,8 +314,14 @@ mod tests {
         let f_b = sb.iter().find(|s| s.name == "f").unwrap();
         let g_a = sa.iter().find(|s| s.name == "g").unwrap();
         let g_b = sb.iter().find(|s| s.name == "g").unwrap();
-        assert_eq!(f_a.semantic_hash, f_b.semantic_hash, "untouched symbol stable");
-        assert_ne!(g_a.semantic_hash, g_b.semantic_hash, "edited symbol changes");
+        assert_eq!(
+            f_a.semantic_hash, f_b.semantic_hash,
+            "untouched symbol stable"
+        );
+        assert_ne!(
+            g_a.semantic_hash, g_b.semantic_hash,
+            "edited symbol changes"
+        );
     }
 
     #[test]
@@ -352,8 +358,8 @@ mod tests {
     #[test]
     fn zig_blob_extracts_real_symbols_with_hashes() {
         let src = "pub const Point = struct {\n    x: f64,\n    pub fn dist(self: Point) f64 { return self.x; }\n};\n\ntest \"works\" { _ = 1; }\n";
-        let extracted =
-            extract_semantic_file(src.as_bytes(), Language::Zig).expect("zig parses to a real node");
+        let extracted = extract_semantic_file(src.as_bytes(), Language::Zig)
+            .expect("zig parses to a real node");
         assert_eq!(language_name(extracted.language), "zig");
 
         let by_name = |n: &str| extracted.symbols.iter().find(|s| s.name == n);

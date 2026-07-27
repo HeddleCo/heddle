@@ -1,4 +1,4 @@
-use grpc::heddle::api::v1alpha1::{
+use api::heddle::api::v1alpha1::{
     ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, CheckMergeEligibilityRequest,
     CheckMergeEligibilityResponse, CreateGrantRequest, CreateInvitationRequest,
     CreateRepositoryRequest, CreateServiceAccountRequest, DeleteGrantRequest,
@@ -10,118 +10,56 @@ use grpc::heddle::api::v1alpha1::{
     ServiceAccountResponse, SpoolSummary, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
     UpdateNamespaceRequest, UpdateRepositoryRequest, grant_target_ref::Target as GrantTargetKind,
 };
-use tonic::Request;
 use wire::ProtocolError;
 
 use super::{
-    HostedGrpcClient,
+    HostedClient,
     helpers::{
-        status_to_protocol_error, to_protocol_grant, to_protocol_namespace, to_protocol_repository,
+        hosted_to_protocol_error, to_protocol_grant, to_protocol_namespace, to_protocol_repository,
     },
     operation_id::ClientOperationId,
 };
 
-/// Dispatch an authenticated unary RPC on `self.user`: wrap the message in a
-/// `tonic::Request`, stamp bearer auth AND the Tier-1 PoP request signature via
-/// `apply_signed_auth`, await the call, and — if the server rejects with
-/// `x-heddle-sig-required: human` — invoke the app-registered human-signature
-/// callback over the SAME action and retry ONCE. Maps a transport `Status` to a
-/// `ProtocolError` and unwraps the response.
-///
-/// `$rpc` is the snake_case tonic client method; `$grpc_method` is the PascalCase
-/// proto RPC name (used to build the signed `:path`). The message is bound once
-/// and cloned for the potential human retry (all hosted request protos derive
-/// `Clone`). The macro is the one chokepoint for the auth/sign/retry sequence;
-/// it must be invoked inside an `async fn` returning `Result<_, ProtocolError>`.
-fn clone_request_for_retry<T: Clone>(request: &Request<T>) -> Request<T> {
-    let mut retry = Request::new(request.get_ref().clone());
-    *retry.metadata_mut() = request.metadata().clone();
-    retry
-}
-
-/// Shared signed-call boundary for callers that already carry custom request
-/// metadata. The untouched body and metadata template is retained before PoP
-/// headers are applied, then reused for the one permitted human-tier retry.
-macro_rules! signed_request_call {
-    ($self:ident, $client:ident, $rpc:ident, $path:expr, $request:expr) => {{
-        let path = $path;
-        let mut request = $request;
-        let retry_template = clone_request_for_retry(&request);
-        let sig_ctx = $self.apply_signed_auth(&mut request, path)?;
-        match $self.$client.$rpc(request).await {
-            Ok(response) => response.into_inner(),
-            Err(status)
-                if $crate::grpc_hosted::request_signing::requires_human_signature(&status) =>
-            {
-                // The human assertion must cover the SAME action (ts + nonce +
-                // body-hash) the challenge was derived from, so we reuse the
-                // original `sig_ctx` rather than re-signing with a fresh nonce.
-                // `attach_human` re-stamps `x-heddle-sig-ts`/`-nonce-bin` from that
-                // context; we only need bearer auth (not a fresh PoP) on retry.
-                let ctx = $self.require_human_sig_context(sig_ctx)?;
-                // The server may include a deep-link (weft#338) on the rejection pointing at a
-                // surface that can complete the WebAuthn ceremony; forward it to the callback.
-                let action_url =
-                    $crate::grpc_hosted::request_signing::action_url_from_status(&status);
-                let assertion = $self.request_human_signature(path, &ctx, action_url)?;
-                let mut retry = retry_template;
-                $self.apply_auth(&mut retry, path)?;
-                $crate::grpc_hosted::request_signing::attach_human(&mut retry, &ctx, &assertion)?;
-                $self
-                    .$client
-                    .$rpc(retry)
-                    .await
-                    .map_err(status_to_protocol_error)?
-                    .into_inner()
-            }
-            Err(status) => return Err(status_to_protocol_error(status)),
-        }
+macro_rules! signed_call {
+    ($self:ident, $client:ident, $rpc:ident, $path:expr, $msg:expr) => {{
+        let request = $msg;
+        $self
+            .routes()
+            .$rpc(&request)
+            .await
+            .map_err(hosted_to_protocol_error)?
     }};
 }
 
-macro_rules! signed_call {
-    ($self:ident, $client:ident, $rpc:ident, $path:expr, $msg:expr) => {{ signed_request_call!($self, $client, $rpc, $path, Request::new($msg)) }};
-}
-
-/// Dispatch an authenticated unary RPC on `self.user`: wrap the message in a
-/// `tonic::Request`, stamp bearer auth AND the Tier-1 PoP request signature via
-/// `apply_signed_auth`, await the call, and — if the server rejects with
-/// `x-heddle-sig-required: human` — invoke the app-registered human-signature
-/// callback over the SAME action and retry ONCE. Maps a transport `Status` to a
-/// `ProtocolError` and unwraps the response.
-///
-/// `$rpc` is the snake_case tonic client method; `$grpc_method` is the PascalCase
-/// proto RPC name (used to build the signed `:path`). The message is bound once
-/// and cloned for the potential human retry (all hosted request protos derive
-/// `Clone`). Delegates to [`signed_call!`], the one chokepoint for the
-/// auth/sign/retry sequence; must be invoked inside an `async fn` returning
-/// `Result<_, ProtocolError>`.
+/// Dispatch an authenticated unary call through the native hosted chokepoint.
+/// The contract method path controls signing, human-verification retry, and
+/// transport-neutral failure mapping.
 macro_rules! authed_call {
-    ($self:ident, $rpc:ident, $grpc_method:literal, $msg:expr) => {{
+    ($self:ident, $rpc:ident, $method:literal, $msg:expr) => {{
         signed_call!(
             $self,
             user,
             $rpc,
-            concat!("/heddle.api.v1alpha1.RegistryService/", $grpc_method),
+            concat!("/heddle.api.v1alpha1.RegistryService/", $method),
             $msg
         )
     }};
 }
 
 macro_rules! workflow_call {
-    ($self:ident, $rpc:ident, $grpc_method:literal, $msg:expr) => {{
+    ($self:ident, $rpc:ident, $method:literal, $msg:expr) => {{
         signed_call!(
             $self,
             workflow,
             $rpc,
-            concat!("/heddle.api.v1alpha1.WorkflowService/", $grpc_method),
+            concat!("/heddle.api.v1alpha1.WorkflowService/", $method),
             $msg
         )
     }};
 }
 
-fn default_spool_settings_request() -> grpc::heddle::api::v1alpha1::SpoolSettings {
-    use grpc::heddle::api::v1alpha1::{
+fn default_spool_settings_request() -> api::heddle::api::v1alpha1::SpoolSettings {
+    use api::heddle::api::v1alpha1::{
         SpoolBootstrapKind, SpoolBootstrapSyncDirection, SpoolChildPolicy, SpoolHoldLifecycle,
         SpoolInitialTooling, SpoolSettings, SpoolStateVisibility, SpoolSyncBehavior,
         SpoolVisibility, SpoolWritePolicy,
@@ -143,23 +81,23 @@ fn default_spool_settings_request() -> grpc::heddle::api::v1alpha1::SpoolSetting
     }
 }
 
-impl HostedGrpcClient {
+impl HostedClient {
     /// Resolve the acting identity for the bound bearer (subject, staff/service
     /// markers, session, server-side scope, and directly-held resource roles).
     /// Read-only; drives `heddle whoami`.
-    pub(crate) async fn who_am_i(
+    pub async fn who_am_i(
         &mut self,
-    ) -> Result<grpc::heddle::api::v1alpha1::WhoAmIResponse, ProtocolError> {
+    ) -> Result<api::heddle::api::v1alpha1::WhoAmIResponse, ProtocolError> {
         Ok(signed_call!(
             self,
             auth,
             who_am_i,
             "/heddle.api.v1alpha1.IdentityService/WhoAmI",
-            grpc::heddle::api::v1alpha1::WhoAmIRequest {}
+            api::heddle::api::v1alpha1::WhoAmIRequest {}
         ))
     }
 
-    pub(crate) async fn create_service_account(
+    pub async fn create_service_account(
         &mut self,
         request: CreateServiceAccountRequest,
     ) -> Result<ServiceAccountResponse, ProtocolError> {
@@ -172,32 +110,28 @@ impl HostedGrpcClient {
         ))
     }
 
-    pub(crate) async fn issue_service_account_credential(
+    pub async fn issue_service_account_credential(
         &mut self,
-        request: Request<IssueServiceAccountCredentialRequest>,
+        request: IssueServiceAccountCredentialRequest,
     ) -> Result<IssuedCredentialResponse, ProtocolError> {
-        Ok(signed_request_call!(
-            self,
-            auth,
-            issue_service_account_credential,
-            "/heddle.api.v1alpha1.IdentityService/IssueServiceAccountCredential",
-            request
-        ))
+        self.routes()
+            .issue_service_account_credential(&request)
+            .await
+            .map_err(hosted_to_protocol_error)
     }
 
     pub async fn begin_login(
         &mut self,
         username: &str,
     ) -> Result<(String, String, u64), ProtocolError> {
-        let request = Request::new(BeginWebAuthnAuthenticationRequest {
+        let request = BeginWebAuthnAuthenticationRequest {
             username: username.to_string(),
-        });
+        };
         let response = self
-            .auth
-            .begin_web_authn_authentication(request)
+            .routes()
+            .begin_web_authn_authentication(&request)
             .await
-            .map_err(status_to_protocol_error)?
-            .into_inner();
+            .map_err(hosted_to_protocol_error)?;
         let expires_at_secs = response
             .expires_at
             .as_ref()
@@ -244,7 +178,7 @@ impl HostedGrpcClient {
             self,
             create_namespace,
             "CreateNamespace",
-            grpc::heddle::api::v1alpha1::CreateNamespaceRequest {
+            api::heddle::api::v1alpha1::CreateNamespaceRequest {
                 kind: parse_namespace_kind_arg(kind)? as i32,
                 slug: slug.to_string(),
                 parent_path: parent_path.unwrap_or_default().to_string(),
@@ -274,6 +208,29 @@ impl HostedGrpcClient {
             }
         );
         Ok(to_protocol_repository(repo))
+    }
+
+    pub async fn create_invitation(
+        &mut self,
+        email: &str,
+        namespace_path: &str,
+        role: &str,
+    ) -> Result<ProtoInvitation, ProtocolError> {
+        let operation_id =
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateInvitation");
+        Ok(authed_call!(
+            self,
+            create_invitation,
+            "CreateInvitation",
+            CreateInvitationRequest {
+                email: email.to_string(),
+                namespace_path: namespace_path.to_string(),
+                role: parse_hosted_role_arg(role)? as i32,
+                expires_at: None,
+                metadata: String::new(),
+                client_operation_id: operation_id.to_wire(),
+            }
+        ))
     }
 
     pub async fn update_namespace(
@@ -437,32 +394,6 @@ impl HostedGrpcClient {
             }
         );
         Ok(())
-    }
-
-    /// Track D — create a pending invitation. Returns the raw proto type
-    /// to keep the surface narrow until we settle on a domain shape.
-    pub async fn create_invitation(
-        &mut self,
-        email: &str,
-        namespace_path: &str,
-        role: &str,
-    ) -> Result<ProtoInvitation, ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateInvitation");
-        let invitation = authed_call!(
-            self,
-            create_invitation,
-            "CreateInvitation",
-            CreateInvitationRequest {
-                email: email.to_string(),
-                namespace_path: namespace_path.to_string(),
-                role: parse_hosted_role_arg(role)? as i32,
-                expires_at: None,
-                metadata: String::new(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        Ok(invitation)
     }
 
     /// Record an approval for `(source_thread → target_thread)` at
@@ -698,8 +629,8 @@ fn build_target_ref(
 /// proto `NamespaceKind` enum.
 fn parse_namespace_kind_arg(
     value: &str,
-) -> Result<grpc::heddle::api::v1alpha1::NamespaceKind, ProtocolError> {
-    use grpc::heddle::api::v1alpha1::NamespaceKind;
+) -> Result<api::heddle::api::v1alpha1::NamespaceKind, ProtocolError> {
+    use api::heddle::api::v1alpha1::NamespaceKind;
     match value.trim().to_ascii_lowercase().as_str() {
         "user" => Ok(NamespaceKind::User),
         "namespace" | "org" => Ok(NamespaceKind::Org),
@@ -713,8 +644,8 @@ fn parse_namespace_kind_arg(
 /// Parse a CLI-supplied role name into the proto `HostedRole` enum.
 fn parse_hosted_role_arg(
     value: &str,
-) -> Result<grpc::heddle::api::v1alpha1::HostedRole, ProtocolError> {
-    use grpc::heddle::api::v1alpha1::HostedRole;
+) -> Result<api::heddle::api::v1alpha1::HostedRole, ProtocolError> {
+    use api::heddle::api::v1alpha1::HostedRole;
     match value.trim().to_ascii_lowercase().as_str() {
         "reader" => Ok(HostedRole::Reader),
         "developer" => Ok(HostedRole::Developer),
@@ -724,198 +655,5 @@ fn parse_hosted_role_arg(
         other => Err(ProtocolError::InvalidState(format!(
             "invalid role '{other}': expected reader|developer|maintainer|admin|owner"
         ))),
-    }
-}
-
-#[cfg(test)]
-mod request_shape_tests {
-    use grpc::heddle::api::v1alpha1::{
-        ClaimHandleRequest, GetHandleStatusRequest, HandlePrincipal,
-        IssueServiceAccountCredentialRequest, RequestHeldNameRequest, ResolveHandleRequest,
-        ResolveMonorepoRequest, identity_service_client::IdentityServiceClient,
-    };
-    use prost::Message;
-    use tonic::{Request, transport::Channel};
-
-    use super::clone_request_for_retry;
-
-    #[test]
-    fn credential_issue_retry_preserves_custom_proof_and_operation_id() {
-        let mut original = Request::new(IssueServiceAccountCredentialRequest {
-            service_account_id: "sa-1".to_string(),
-            public_key: vec![7; 32],
-            scope: "repo:acme/*".to_string(),
-            ttl_secs: None,
-            client_operation_id: "stable-op-1".to_string(),
-        });
-        original
-            .metadata_mut()
-            .insert("x-heddle-issue-sa-proof-ts", "1700000000".parse().unwrap());
-        original.metadata_mut().insert_bin(
-            "x-heddle-issue-sa-proof-sig-bin",
-            tonic::metadata::MetadataValue::from_bytes(b"service-account-proof"),
-        );
-
-        let retry = clone_request_for_retry(&original);
-
-        assert_eq!(retry.get_ref(), original.get_ref());
-        assert_eq!(retry.get_ref().client_operation_id, "stable-op-1");
-        assert_eq!(
-            retry
-                .metadata()
-                .get("x-heddle-issue-sa-proof-ts")
-                .and_then(|value| value.to_str().ok()),
-            Some("1700000000")
-        );
-        assert!(
-            retry
-                .metadata()
-                .get_bin("x-heddle-issue-sa-proof-sig-bin")
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn resolve_monorepo_request_threads_optional_max_depth() {
-        let bounded = ResolveMonorepoRequest {
-            root_path: "acme/root".to_string(),
-            max_depth: Some(3),
-        };
-        assert_eq!(bounded.root_path, "acme/root");
-        assert_eq!(bounded.max_depth, Some(3));
-
-        let unbounded = ResolveMonorepoRequest {
-            root_path: "acme/root".to_string(),
-            max_depth: None,
-        };
-        assert_eq!(unbounded.max_depth, None);
-    }
-
-    #[test]
-    fn shared_handle_client_surface_is_generated_with_retry_keys() {
-        #[allow(dead_code)]
-        async fn compile_all_handle_calls(mut client: IdentityServiceClient<Channel>) {
-            let _ = client
-                .get_handle_status(GetHandleStatusRequest {
-                    name: "octocat".to_string(),
-                })
-                .await;
-            let _ = client
-                .request_held_name(RequestHeldNameRequest {
-                    name: "octocat".to_string(),
-                    client_operation_id: "request-1".to_string(),
-                })
-                .await;
-            let _ = client
-                .claim_handle(ClaimHandleRequest {
-                    name: "octocat".to_string(),
-                    client_operation_id: "claim-1".to_string(),
-                })
-                .await;
-            let _ = client
-                .resolve_handle(ResolveHandleRequest {
-                    name: "octocat".to_string(),
-                })
-                .await;
-        }
-
-        let _ = compile_all_handle_calls;
-    }
-
-    #[test]
-    fn shared_handle_principal_drops_the_legacy_subject_field() {
-        #[derive(Clone, PartialEq, Message)]
-        struct LegacyResolvedPrincipal {
-            #[prost(string, tag = "1")]
-            subject: String,
-            #[prost(string, tag = "2")]
-            display_name: String,
-            #[prost(string, tag = "3")]
-            handle: String,
-            #[prost(bool, tag = "4")]
-            resolved: bool,
-            #[prost(string, tag = "5")]
-            primary_handle: String,
-            #[prost(string, tag = "6")]
-            kind: String,
-            #[prost(bool, tag = "7")]
-            verified: bool,
-            #[prost(string, tag = "8")]
-            discriminator: String,
-        }
-
-        let legacy = LegacyResolvedPrincipal {
-            subject: "user:private".to_string(),
-            display_name: "Octo Cat".to_string(),
-            handle: "octocat".to_string(),
-            resolved: true,
-            primary_handle: "octocat".to_string(),
-            kind: "native".to_string(),
-            verified: true,
-            discriminator: String::new(),
-        };
-        let public = HandlePrincipal::decode(legacy.encode_to_vec().as_slice())
-            .expect("legacy public tags must decode");
-
-        assert_eq!(public.display_name, "Octo Cat");
-        assert_eq!(public.handle, "octocat");
-        assert_eq!(public.primary_handle, "octocat");
-        assert!(public.resolved);
-        assert!(public.verified);
-
-        let round_trip = LegacyResolvedPrincipal::decode(public.encode_to_vec().as_slice())
-            .expect("public principal must remain wire-compatible on tags 2-8");
-        assert!(
-            round_trip.subject.is_empty(),
-            "the reserved legacy subject tag must not survive public decoding"
-        );
-
-        let descriptor = prost_types::FileDescriptorSet::decode(grpc::FILE_DESCRIPTOR_SET)
-            .expect("the shared API descriptor must decode");
-        let principal = descriptor
-            .file
-            .iter()
-            .filter(|file| file.package.as_deref() == Some("heddle.api.v1alpha1"))
-            .flat_map(|file| &file.message_type)
-            .find(|message| message.name.as_deref() == Some("HandlePrincipal"))
-            .expect("the shared descriptor must define HandlePrincipal");
-        assert!(
-            principal
-                .field
-                .iter()
-                .all(|field| field.name.as_deref() != Some("subject")),
-            "HandlePrincipal must not expose subject at any tag"
-        );
-        assert!(principal.reserved_name.iter().any(|name| name == "subject"));
-        assert!(
-            principal.reserved_range.iter().any(|range| {
-                range.start.is_some_and(|start| start <= 1) && range.end.is_some_and(|end| end > 1)
-            }),
-            "HandlePrincipal must reserve legacy subject tag 1"
-        );
-    }
-
-    #[test]
-    fn workflow_mutations_and_credential_issue_use_shared_retry_chokepoints() {
-        let source = include_str!("user.rs");
-        let approve = source
-            .split("pub async fn approve_thread")
-            .nth(1)
-            .and_then(|tail| tail.split("pub async fn revoke_approval").next())
-            .expect("approve_thread source");
-        let revoke = source
-            .split("pub async fn revoke_approval")
-            .nth(1)
-            .and_then(|tail| tail.split("pub async fn list_thread_approvals").next())
-            .expect("revoke_approval source");
-        let issue = source
-            .split("pub(crate) async fn issue_service_account_credential")
-            .nth(1)
-            .and_then(|tail| tail.split("pub async fn begin_login").next())
-            .expect("credential issue source");
-
-        assert!(approve.contains("caller_or_fresh"));
-        assert!(revoke.contains("caller_or_fresh"));
-        assert!(issue.contains("signed_request_call!"));
     }
 }

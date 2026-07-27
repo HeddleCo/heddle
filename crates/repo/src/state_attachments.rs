@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+/// The kind of a state attachment, re-exported from the `objects` crate where
+/// it lives as a first-class projection of `StateAttachmentBody` (heddle#1080).
+/// Derive kind from a body with `body.kind()`.
+pub use objects::object::StateAttachmentKind;
 use objects::{
     object::{StateAttachment, StateAttachmentId, StateId},
     store::ObjectStore,
@@ -8,11 +12,6 @@ use oplog::OpLogBackend;
 use refs::RefBackend;
 
 use crate::{HeddleError, Repository, Result};
-
-/// The kind of a state attachment, re-exported from the `objects` crate where
-/// it lives as a first-class projection of `StateAttachmentBody` (heddle#1080).
-/// Derive kind from a body with `body.kind()`.
-pub use objects::object::StateAttachmentKind;
 
 impl<R, O, S> Repository<R, O, S>
 where
@@ -89,7 +88,9 @@ where
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, Utc};
-    use objects::object::{Attribution, ContentHash, Principal, StateAttachment, StateAttachmentBody};
+    use objects::object::{
+        Attribution, ContentHash, Principal, StateAttachment, StateAttachmentBody,
+    };
     use tempfile::TempDir;
 
     use super::*;

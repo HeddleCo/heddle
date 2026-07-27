@@ -309,7 +309,7 @@ Collaboration records that are causally or semantically tied to source content b
 _Avoid_: unrelated discussion sync
 
 **Live Collaboration Sync**:
-gRPC-backed synchronization that keeps already-synced collaboration records up to date while a Weft connection is active. Live sync updates the durable repository collaboration log; it is not a separate chat transport.
+Iroh-backed synchronization that keeps already-synced collaboration records up to date while a Weft connection is active. Live sync updates the durable repository collaboration log; it is not a separate chat transport.
 _Avoid_: chat stream, presence
 
 **Collaboration Watch**:
@@ -367,6 +367,14 @@ _Avoid_: developer loop, AI workflow
 **Weft**:
 The hosted collaboration and coordination product for Heddle repositories. Weft owns hosted identity, policy, multi-user coordination, and remote collaboration behavior.
 _Avoid_: Heddle server, Heddle core
+
+**Iroh Hosted Transport**:
+The shared hosted call transport used by native Heddle clients, browser WebAssembly clients, and Weft application endpoints. It carries the governed protobuf contract over operation-scoped Iroh QUIC streams while keeping framing, call context, failures, and replay policy behind one interface.
+_Avoid_: gRPC replacement contract, pack-only transport, browser WebTransport
+
+**Weft Relay**:
+The Weft-operated Iroh relay that gives browser clients secure-WebSocket access and gives native clients a fallback path when direct UDP connectivity is unavailable. It forwards encrypted Iroh traffic and is distinct from the Weft application endpoint that terminates calls and enforces hosted policy.
+_Avoid_: WebTransport endpoint, application proxy, hosted authorization service
 
 **Tapestry**:
 The hosted web product for Heddle collaboration, review, onboarding, and operational visibility.

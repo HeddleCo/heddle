@@ -26,7 +26,7 @@ use crate::{
         Tree,
     },
     store::{
-        HeddleError, ObjectStore, Result, codec,
+        HeddleError, ObjectStore, Result, SnapshotCommitDescriptor, codec,
         pack::{ObjectType, PackManager, PackObjectId},
     },
 };
@@ -128,12 +128,7 @@ impl FsStore {
         result
     }
 
-    fn rebuild_state_attachment_index(&self, state: &StateId) -> Result<Vec<StateAttachmentId>> {
-        #[cfg(test)]
-        fs::write(
-            state_attachment_index_path(&self.root, state).with_extension("rebuild-marker"),
-            b"rebuilt",
-        )?;
+    fn collect_state_attachment_ids(&self, state: &StateId) -> Result<Vec<StateAttachmentId>> {
         let mut ids = Vec::new();
         let dir = state_attachments_dir(&self.root, state);
         if let Ok(entries) = fs::read_dir(dir) {
@@ -165,9 +160,50 @@ impl FsStore {
         }
         ids.sort();
         ids.dedup();
+        Ok(ids)
+    }
+
+    fn rebuild_state_attachment_index(&self, state: &StateId) -> Result<Vec<StateAttachmentId>> {
+        #[cfg(test)]
+        fs::write(
+            state_attachment_index_path(&self.root, state).with_extension("rebuild-marker"),
+            b"rebuilt",
+        )?;
+        let ids = self.collect_state_attachment_ids(state)?;
         let path = state_attachment_index_path(&self.root, state);
         self.write_loose_object_atomic(&path, &rmp_serde::to_vec_named(&ids)?)?;
         Ok(ids)
+    }
+
+    /// Publish the attachment index for objects already made durable in a
+    /// snapshot pack. This sidecar is only a materialized view: if a crash
+    /// loses it, [`rebuild_state_attachment_index`](Self::rebuild_state_attachment_index)
+    /// reconstructs it by scanning authoritative loose objects and packs.
+    pub(super) fn materialize_packed_attachment_index(
+        &self,
+        state: &StateId,
+        packed_ids: &[StateAttachmentId],
+        state_was_present: bool,
+    ) -> Result<()> {
+        if packed_ids.is_empty() {
+            return Ok(());
+        }
+        self.with_state_attachment_index_lock(state, || {
+            let path = state_attachment_index_path(&self.root, state);
+            let mut ids = if state_was_present {
+                match read_file_bytes(&path)? {
+                    Some(bytes) => rmp_serde::from_slice(bytes.as_slice())?,
+                    None => self.collect_state_attachment_ids(state)?,
+                }
+            } else {
+                Vec::new()
+            };
+            ids.extend_from_slice(packed_ids);
+            ids.sort();
+            ids.dedup();
+            self.write_reconstructible_cache(&path, &rmp_serde::to_vec_named(&ids)?)?;
+            Ok(())
+        })
     }
 }
 
@@ -245,6 +281,16 @@ fn validate_pack_entry(id: &PackObjectId, obj_type: ObjectType, data: &[u8]) -> 
             if attachment.id().as_hash() != hash {
                 return Err(HeddleError::InvalidObject(
                     "state attachment pack id mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        (PackObjectId::Hash(hash), ObjectType::SnapshotCommit) => {
+            let artifact: crate::store::SnapshotCommitArtifact = rmp_serde::from_slice(data)?;
+            artifact.validate()?;
+            if artifact.id() != *hash {
+                return Err(HeddleError::InvalidObject(
+                    "snapshot commit artifact pack id mismatch".to_string(),
                 ));
             }
             Ok(())
@@ -520,6 +566,27 @@ impl FsStore {
         }
         let path = state_path(&self.root, id);
         self.loose_or_packed(&path, |m| m.has_object_id(&PackObjectId::StateId(*id)))
+    }
+}
+
+impl FsStore {
+    pub(crate) fn snapshot_commit_descriptors_impl(&self) -> Result<Vec<SnapshotCommitDescriptor>> {
+        let manager = self
+            .pack_manager()
+            .read()
+            .map_err(|_| HeddleError::Config("Failed to acquire pack manager lock".to_string()))?;
+        manager.snapshot_commit_descriptors()
+    }
+
+    pub(crate) fn snapshot_commit_descriptor_for_state_impl(
+        &self,
+        state: &StateId,
+    ) -> Result<Option<SnapshotCommitDescriptor>> {
+        let manager = self
+            .pack_manager()
+            .read()
+            .map_err(|_| HeddleError::Config("Failed to acquire pack manager lock".to_string()))?;
+        manager.snapshot_commit_descriptor_for_state(state)
     }
 }
 
@@ -1228,6 +1295,28 @@ impl ObjectStore for FsStore {
     #[instrument(skip(self, blobs), fields(count = blobs.len()))]
     fn put_blobs_packed(&self, blobs: Vec<(crate::object::ContentHash, Vec<u8>)>) -> Result<()> {
         self.put_blobs_packed_impl(blobs)
+    }
+
+    #[instrument(skip(self, blobs, tree, state), fields(blob_count = blobs.len()))]
+    fn put_snapshot_objects_packed(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+    ) -> Result<()> {
+        self.put_snapshot_objects_packed_impl(blobs, tree, state, Vec::new(), None)
+            .map(|_| ())
+    }
+
+    fn put_snapshot_objects_and_attachments_packed(
+        &self,
+        blobs: Vec<(ContentHash, Vec<u8>)>,
+        tree: &Tree,
+        state: &State,
+        attachments: Vec<StateAttachment>,
+    ) -> Result<()> {
+        self.put_snapshot_objects_packed_impl(blobs, tree, state, attachments, None)
+            .map(|_| ())
     }
 
     #[instrument(skip(self))]

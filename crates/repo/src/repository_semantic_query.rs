@@ -56,10 +56,7 @@ impl Repository {
     /// the nearest indexed ancestor) lives in the tree-sitter-gated
     /// [`Repository::semantic_index`](crate::Repository) and is NOT reachable
     /// from here.
-    pub fn attached_semantic_index(
-        &self,
-        state_id: &StateId,
-    ) -> Result<Option<SemanticIndexRoot>> {
+    pub fn attached_semantic_index(&self, state_id: &StateId) -> Result<Option<SemanticIndexRoot>> {
         let Some(attachment) =
             self.latest_state_attachment(state_id, StateAttachmentKind::SemanticIndex)?
         else {
@@ -183,28 +180,25 @@ impl Repository {
     /// the read paths go through [`Repository::attached_semantic_index`].
     #[cfg(feature = "tree-sitter-symbols")]
     pub(crate) fn load_index_root(&self, root_hash: &ContentHash) -> Result<SemanticIndexRoot> {
-        let blob = self
-            .store()
-            .get_blob(root_hash)?
-            .ok_or_else(|| crate::HeddleError::NotFound(format!("semantic index root {root_hash}")))?;
+        let blob = self.store().get_blob(root_hash)?.ok_or_else(|| {
+            crate::HeddleError::NotFound(format!("semantic index root {root_hash}"))
+        })?;
         SemanticIndexRoot::decode(blob.content())
             .map_err(|err| crate::HeddleError::InvalidObject(err.to_string()))
     }
 
     pub(crate) fn load_semantic_tree(&self, node_hash: &ContentHash) -> Result<SemanticTreeNode> {
-        let blob = self
-            .store()
-            .get_blob(node_hash)?
-            .ok_or_else(|| crate::HeddleError::NotFound(format!("semantic tree node {node_hash}")))?;
+        let blob = self.store().get_blob(node_hash)?.ok_or_else(|| {
+            crate::HeddleError::NotFound(format!("semantic tree node {node_hash}"))
+        })?;
         SemanticTreeNode::decode(blob.content())
             .map_err(|err| crate::HeddleError::InvalidObject(err.to_string()))
     }
 
     pub(crate) fn load_semantic_file(&self, node_hash: &ContentHash) -> Result<SemanticFileNode> {
-        let blob = self
-            .store()
-            .get_blob(node_hash)?
-            .ok_or_else(|| crate::HeddleError::NotFound(format!("semantic file node {node_hash}")))?;
+        let blob = self.store().get_blob(node_hash)?.ok_or_else(|| {
+            crate::HeddleError::NotFound(format!("semantic file node {node_hash}"))
+        })?;
         SemanticFileNode::decode(blob.content())
             .map_err(|err| crate::HeddleError::InvalidObject(err.to_string()))
     }
