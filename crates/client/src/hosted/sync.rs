@@ -2376,7 +2376,7 @@ fn push_transfer_id(
 
 #[cfg(test)]
 mod transfer_id_tests {
-    use std::time::Instant;
+    use std::{collections::HashSet, time::Instant};
 
     use api::heddle::api::v1alpha1::PushRequest;
     use objects::{
@@ -2420,6 +2420,14 @@ mod transfer_id_tests {
         }
     }
 
+    fn pack_object_id(object: &ObjectInfo) -> PackObjectId {
+        match &object.id {
+            ObjectId::Hash(hash) => PackObjectId::Hash(*hash),
+            ObjectId::StateId(state) => PackObjectId::StateId(*state),
+            ObjectId::StateAttachment { id, .. } => PackObjectId::Hash(*id.as_hash()),
+        }
+    }
+
     #[test]
     fn snapshot_pack_reuse_requires_matching_state_and_complete_unique_wanted_subset() {
         let state = StateId::from_bytes([40; 32]);
@@ -2455,7 +2463,7 @@ mod transfer_id_tests {
     }
 
     #[test]
-    fn repeated_snapshot_incremental_push_selects_reused_pack_and_profiles_copy() {
+    fn repeated_snapshot_incremental_push_reuse_gate_and_subset_copy_are_safe() {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         let attribution = repo.get_attribution().unwrap();
@@ -2501,21 +2509,52 @@ mod transfer_id_tests {
             .snapshot_commit_descriptor_for_state(&tip)
             .unwrap()
             .expect("tip snapshot has an authoritative pack descriptor");
-        assert!(
+        let wanted_ids = pack_objects
+            .iter()
+            .map(pack_object_id)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            wanted_ids.len(),
+            pack_objects.len(),
+            "the incremental closure must not contain duplicate pack wants"
+        );
+        let descriptor_ids = descriptor
+            .object_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let reusable_objects = pack_objects
+            .iter()
+            .filter(|object| descriptor_ids.contains(&pack_object_id(object)))
+            .cloned()
+            .collect::<Vec<_>>();
+        let has_objects_outside_snapshot_pack = reusable_objects.len() != pack_objects.len();
+        assert_eq!(
             select_snapshot_pack_reuse_descriptor(
                 std::slice::from_ref(&descriptor),
                 tip,
                 &pack_objects,
             )
-            .is_some(),
-            "incremental Push wants must be an exact safe subset of the tip snapshot pack"
+            .is_none(),
+            has_objects_outside_snapshot_pack,
+            "full snapshot-pack reuse must be selected exactly when every wanted object is present"
+        );
+        assert!(
+            !reusable_objects.is_empty()
+                && select_snapshot_pack_reuse_descriptor(
+                    std::slice::from_ref(&descriptor),
+                    tip,
+                    &reusable_objects,
+                )
+                .is_some(),
+            "the authoritative snapshot pack must expose a non-empty reusable subset"
         );
 
         let started = Instant::now();
         let (_, stats) = wire::reuse_native_pack_encoded_subset_in(
             repo.heddle_dir(),
             &descriptor.pack_path,
-            &pack_objects,
+            &reusable_objects,
         )
         .unwrap()
         .expect("the repeated-snapshot fixture must take the raw encoded subset path");
@@ -2524,7 +2563,7 @@ mod transfer_id_tests {
             "reused {} incremental objects / {} encoded bytes in {:?}",
             stats.object_count, stats.encoded_bytes_copied, elapsed
         );
-        assert_eq!(stats.object_count, pack_objects.len());
+        assert_eq!(stats.object_count, reusable_objects.len());
     }
 
     #[test]
