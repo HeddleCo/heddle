@@ -10,6 +10,7 @@ mod connection;
 mod content;
 mod context;
 mod credential;
+mod descriptor_trust;
 mod error;
 pub(crate) mod helpers;
 mod human;
@@ -17,15 +18,24 @@ mod hydration;
 mod methods;
 pub mod monorepo;
 pub(crate) mod operation_id;
+mod resolver;
 mod session;
 mod state_review;
 mod sync;
+#[cfg(test)]
+mod test_https;
 mod user;
+
+#[cfg(test)]
+mod descriptor_trust_acceptance;
 
 use std::sync::Arc;
 
 use api::heddle::api::v1alpha1::CallContext;
-pub use bootstrap::{DescriptorKeyring, VerifiedEndpointDescriptor, fetch_endpoint_descriptor};
+pub use bootstrap::{
+    DescriptorKeyDocument, DescriptorKeyring, VerifiedEndpointDescriptor,
+    fetch_descriptor_key_document, fetch_endpoint_descriptor, fetch_signed_endpoint_descriptor,
+};
 pub use call::{BidirectionalRequestStream, BidirectionalStream, ServerStream, ServerStreamItem};
 use cli_shared::ClientConfig;
 pub use collaboration::{HostedDiscussion, HostedDiscussionTurn};
@@ -35,6 +45,13 @@ pub use credential::{
     CredentialSource, ResolvedHostedCredential, resolve_active_bearer, resolve_hosted_credential,
 };
 use crypto::{Ed25519Signer, Signer as _};
+#[cfg(test)]
+pub(crate) use descriptor_trust::insert_verified_pin;
+pub use descriptor_trust::{
+    DescriptorTrustRecord, DescriptorTrustReport, DescriptorTrustSource,
+    canonical_server_authority, descriptor_public_key_fingerprint, descriptor_trust_path,
+    replace_descriptor_trust, trust_report,
+};
 pub use error::HostedError;
 pub use human::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion};
 pub use hydration::{LazyHostedHydrator, register_hosted_factory};

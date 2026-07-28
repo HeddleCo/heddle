@@ -142,6 +142,7 @@ schema_registry! {
     (&["agent fanout plan", "agent fanout start"], AgentFanoutSchema),
     (&["auth logout"], AuthLogoutSchema),
     (&["auth status"], AuthStatusSchema),
+    (&["auth trust show", "auth trust replace"], AuthTrustSchema),
     (&["whoami"], WhoamiSchema),
     (&["auth create-service-token"], AuthCreateServiceTokenSchema),
     (&["agent provenance begin", "agent provenance end", "agent provenance show"], AgentProvenanceEnvelopeSchema),
@@ -716,6 +717,19 @@ pub struct AuthStatusSchema {
     pub credential_id: Option<String>,
     pub expires_at: Option<String>,
     pub recommended_action: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AuthTrustSchema {
+    pub output_kind: String,
+    pub canonical_server: String,
+    /// `explicit` or `automatic`.
+    pub source: String,
+    pub key_id: String,
+    /// The 64-character lowercase-hex descriptor public key.
+    pub public_key: String,
+    /// SHA-256 fingerprint of the raw descriptor public key.
+    pub fingerprint: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
 use crate::{
-    auth_requests::AuthCommand,
+    auth_requests::{AuthCommand, AuthTrustCommand},
     credential_file::{self, CredentialKind, CredentialProvenance, VerifiedCredential},
     credentials,
     credentials::ServerCredential,
@@ -60,6 +60,16 @@ struct AuthStatusOutput {
 }
 
 #[derive(Serialize)]
+struct AuthTrustOutput {
+    output_kind: &'static str,
+    canonical_server: String,
+    source: crate::hosted::DescriptorTrustSource,
+    key_id: String,
+    public_key: String,
+    fingerprint: String,
+}
+
+#[derive(Serialize)]
 struct ServiceTokenOutput {
     output_kind: &'static str,
     name: String,
@@ -96,6 +106,7 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
         },
         AuthCommand::Logout { server } => cmd_auth_logout(ctx, server.as_deref()),
         AuthCommand::Status { server } => cmd_auth_status(ctx, server.as_deref()),
+        AuthCommand::Trust { command } => cmd_auth_trust(ctx, command),
         AuthCommand::DeriveAgent {
             server,
             agent_id,
@@ -122,6 +133,82 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             cmd_create_service_token(ctx, server.as_deref(), name, namespace, out.as_deref()).await
         }
     }
+}
+
+fn cmd_auth_trust(ctx: &dyn CliContext, command: AuthTrustCommand) -> Result<()> {
+    match command {
+        AuthTrustCommand::Show { server } => {
+            let config = UserConfig::load_default()?.heddle_client_config(None)?;
+            let explicit = config
+                .descriptor_key_id
+                .as_deref()
+                .zip(config.descriptor_public_key.as_ref());
+            let report = crate::hosted::trust_report(&server, explicit)?;
+            emit_auth_trust(
+                ctx,
+                AuthTrustOutput {
+                    output_kind: "auth_trust_show",
+                    canonical_server: report.canonical_server,
+                    source: report.source,
+                    key_id: report.key_id,
+                    public_key: report.public_key,
+                    fingerprint: report.fingerprint,
+                },
+            )
+        }
+        AuthTrustCommand::Replace {
+            server,
+            expected_current_public_key,
+            key_id,
+            public_key,
+        } => {
+            let config = UserConfig::load_default()?.heddle_client_config(None)?;
+            if config.descriptor_key_id.is_some() || config.descriptor_public_key.is_some() {
+                bail!(
+                    "descriptor trust replacement refused: explicit descriptor trust controls this \
+                     connection; update both explicit values together"
+                );
+            }
+            let canonical_server = crate::hosted::canonical_server_authority(&server)?;
+            let record = crate::hosted::replace_descriptor_trust(
+                &canonical_server,
+                &expected_current_public_key,
+                &key_id,
+                &public_key,
+            )?;
+            let fingerprint = record.fingerprint()?;
+            emit_auth_trust(
+                ctx,
+                AuthTrustOutput {
+                    output_kind: "auth_trust_replace",
+                    canonical_server,
+                    source: crate::hosted::DescriptorTrustSource::Automatic,
+                    key_id: record.key_id,
+                    public_key: record.public_key,
+                    fingerprint,
+                },
+            )
+        }
+    }
+}
+
+fn emit_auth_trust(ctx: &dyn CliContext, output: AuthTrustOutput) -> Result<()> {
+    if ctx.should_output_json(None) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        println!("Server:                {}", output.canonical_server);
+        println!(
+            "Source:                {}",
+            match output.source {
+                crate::hosted::DescriptorTrustSource::Explicit => "explicit",
+                crate::hosted::DescriptorTrustSource::Automatic => "automatic",
+            }
+        );
+        println!("Descriptor key id:     {}", output.key_id);
+        println!("Descriptor public key: {}", output.public_key);
+        println!("Fingerprint:           {}", output.fingerprint);
+    }
+    Ok(())
 }
 
 /// Derive an offline child credential with a fresh PoP key, then either install
@@ -1524,6 +1611,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn trust_replace_refuses_active_explicit_config_without_mutating_the_pin() {
+        with_isolated_home(|| {
+            let server = "https://api.example";
+            crate::hosted::insert_verified_pin(server, "old-id", &[0x11; 32])
+                .expect("initial automatic pin");
+            let before =
+                std::fs::read(crate::hosted::descriptor_trust_path()).expect("read pin store");
+            let previous_key_id = std::env::var_os("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID");
+            let previous_public_key = std::env::var_os("HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY");
+
+            unsafe {
+                std::env::set_var("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID", "explicit-id");
+                std::env::set_var(
+                    "HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
+                    hex::encode([0x33; 32]),
+                );
+            }
+            let result = cmd_auth_trust(
+                &TextCtx,
+                AuthTrustCommand::Replace {
+                    server: server.to_string(),
+                    expected_current_public_key: hex::encode([0x11; 32]),
+                    key_id: "new-id".to_string(),
+                    public_key: hex::encode([0x22; 32]),
+                },
+            );
+            unsafe {
+                match previous_key_id {
+                    Some(value) => std::env::set_var("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID", value),
+                    None => std::env::remove_var("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID"),
+                }
+                match previous_public_key {
+                    Some(value) => {
+                        std::env::set_var("HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY", value)
+                    }
+                    None => std::env::remove_var("HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY"),
+                }
+            }
+
+            let error = result.expect_err("explicit trust must control replacement");
+            assert!(
+                error
+                    .to_string()
+                    .contains("update both explicit values together")
+            );
+            assert_eq!(
+                std::fs::read(crate::hosted::descriptor_trust_path())
+                    .expect("read unchanged pin store"),
+                before
+            );
+        });
+    }
+
     /// Run `f` with `HOME` pointed at a fresh temp dir and `HEDDLE_HOME` cleared,
     /// so the credential store and device identity both resolve under
     /// `<temp>/.heddle`. Serialised with the credential store's env tests.
@@ -1923,6 +2064,10 @@ mod tests {
 
             let subject = install_credential_file(&path).expect("install device credential");
             assert_eq!(subject, "alice");
+            assert!(
+                !crate::hosted::descriptor_trust_path().exists(),
+                ".hcred installation must stay offline and must not create descriptor trust",
+            );
 
             let stored = credentials::get_server_credential(server)
                 .expect("load stored")
