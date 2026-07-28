@@ -433,6 +433,19 @@ passes:
   the `needs:` line; the parser confirms each downstream job
   individually.
 
+Every binary-signing or publishing job declares the `release` GitHub
+environment. Repository settings must keep that environment
+approval-protected and restrict deployments to protected release refs. The
+workflow deliberately refuses the deprecated `branch_dry_run` input: code
+selected from an arbitrary branch must never receive Apple signing secrets,
+release-app credentials, or a release OIDC identity. Approved RC dry-runs use
+an existing prerelease tag whose commit is reachable from `main`.
+
+All external actions in the binary and crates.io release workflows are pinned
+to exact commit SHAs. Version comments beside those pins are informational;
+updating an action means reviewing and replacing the SHA, not changing back to
+a mutable tag.
+
 The contract above is the contract it enforces. If you intentionally
 change the contract, update `scripts/check-release-pipeline.sh` in
 the same PR.
@@ -469,10 +482,12 @@ packages. The full cross-repository release gate is tracked in
      **publish** (Cargo.toml version isn't on crates.io yet),
      **skip** (already published — idempotent re-run), or **fail**
      (Cargo.toml downgrade — refuses).
-   - `publish` runs only when `has_publishes == 'true'`, checks out
+   - `publish` runs only when `has_publishes == 'true'`, enters the
+     approval-protected `release` environment, checks out
      the validated `commit_sha` (not `refs/heads/main` — see the
      TOCTOU note in `release.yml`), asserts the `CARGO_REGISTRY_TOKEN`
-     env var is non-empty (sourced from `secrets.CRATES_IO_API_KEY` —
+     env var is non-empty in the publish step only (sourced from
+     `secrets.CRATES_IO_API_KEY` —
      see [Token wiring](#token-wiring) below), and runs
      `cargo publish -p <crate>` for each entry in the publish set.
      "already exists" errors are treated as success (race / re-run);
@@ -504,7 +519,7 @@ the explicit list keeps the publication scope visible in diff.
 
 ### Token wiring
 
-The workflow's publish job exposes the credential to cargo via:
+The workflow's cargo-publish step exposes the credential to cargo via:
 
 ```yaml
 env:
@@ -521,8 +536,10 @@ The two names are deliberately distinct halves of the mapping:
   side would resolve to an empty string and break authentication on
   the first publish.
 
-The asserter (see below) checks both halves separately so a regression
-on either side surfaces with its own error line.
+The credential is step-scoped so checkout, toolchain, and cache actions never
+receive it. The asserter (see below) checks the mapping, scope, protected
+environment, and exact action pins so a regression surfaces with its own error
+line.
 
 To rotate the token: update the `CRATES_IO_API_KEY` secret in repo
 settings. No workflow change is needed.

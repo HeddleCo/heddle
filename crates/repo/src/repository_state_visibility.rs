@@ -138,7 +138,14 @@ impl Repository {
     /// `false`. This holds whether the Public put is fresh or supersedes a
     /// prior private record — no caller can leave a Public record that makes
     /// a public state read as non-public.
-    pub fn put_state_visibility(&self, record: StateVisibility) -> Result<PutVisibilityOutcome> {
+    pub fn put_state_visibility(
+        &self,
+        mut record: StateVisibility,
+    ) -> Result<PutVisibilityOutcome> {
+        if record.signature.is_none() {
+            record.signature =
+                Some(self.sign_client_metadata(&record.canonical_signing_payload())?);
+        }
         // Serialize the full read-modify-write behind the repo write lock so
         // concurrent appends on the same state can't clobber each other.
         let _lock = self
@@ -160,8 +167,12 @@ impl Repository {
     /// `declared_at` under it) and calls the locked body directly.
     pub fn put_state_visibility_if_absent(
         &self,
-        record: StateVisibility,
+        mut record: StateVisibility,
     ) -> Result<Option<PutVisibilityOutcome>> {
+        if record.signature.is_none() {
+            record.signature =
+                Some(self.sign_client_metadata(&record.canonical_signing_payload())?);
+        }
         let _lock = self
             .locker()
             .write()
@@ -189,6 +200,9 @@ impl Repository {
         &self,
         record: StateVisibility,
     ) -> Result<PutVisibilityOutcome> {
+        if record.signature.is_none() {
+            anyhow::bail!("authoritative state-visibility metadata must be client-signed");
+        }
         record
             .validate()
             .with_context(|| "validate state-visibility record before put")?;
@@ -369,6 +383,7 @@ impl Repository {
         // passes `supersedes: None`; the authoritative pointer is established
         // here so a `set` onto an existing record also extends the chain.
         record.supersedes = prior_head_id;
+        record.signature = Some(self.sign_client_metadata(&record.canonical_signing_payload())?);
 
         let state = record.state;
         let tier = record.tier.clone();
@@ -460,9 +475,10 @@ impl Repository {
 
     /// Accept a wire-transferred `StateVisibilityBlob` for a specific state.
     /// The payload must decode, every contained record must target `state`,
-    /// and each record is persisted through `put_state_visibility` so
-    /// validation and public-by-absence normalization run at the same
-    /// boundary as local writes.
+    /// every record must carry a valid signature from a configured trusted
+    /// client key. Each verified record is persisted through
+    /// `put_state_visibility` so validation and public-by-absence
+    /// normalization run at the same boundary as local writes.
     pub fn accept_wire_state_visibility(&self, state: StateId, bytes: &[u8]) -> Result<()> {
         let incoming = StateVisibilityBlob::decode(bytes).with_context(|| {
             format!(
@@ -482,6 +498,11 @@ impl Repository {
             record
                 .validate()
                 .with_context(|| "validate incoming state-visibility record")?;
+            self.verify_trusted_client_metadata_signature(
+                &record.canonical_signing_payload(),
+                record.signature.as_ref(),
+            )
+            .with_context(|| "verify incoming state-visibility signature")?;
         }
 
         for record in incoming.records {
@@ -658,7 +679,7 @@ impl Repository {
                 || "acquire repo write lock for capture-time default visibility binding",
             )?)
         };
-        let record = StateVisibility {
+        let mut record = StateVisibility {
             state: *state,
             tier: tier.clone(),
             embargo_until: None,
@@ -675,6 +696,7 @@ impl Repository {
             signature: None,
             supersedes: None,
         };
+        record.signature = Some(self.sign_client_metadata(&record.canonical_signing_payload())?);
         // Bind ONLY if the state is record-free, with the existence test and the
         // write fused into one locked critical section (heddle#317 r5). A racing
         // `visibility set` that lands between the two would otherwise be clobbered
@@ -850,6 +872,7 @@ mod tests {
     use std::{sync::Arc, thread};
 
     use chrono::{TimeZone, Utc};
+    use crypto::{Ed25519Signer, Signer};
     use objects::object::{Principal, VisibilityTier};
     use oplog::OpLogBackend;
     use tempfile::TempDir;
@@ -890,6 +913,66 @@ mod tests {
         }
     }
 
+    fn repo_trusting_metadata(signer: &dyn Signer) -> (TempDir, Repository) {
+        let dir = TempDir::new().unwrap();
+        Repository::init_default(dir.path()).unwrap();
+        let config_path = dir.path().join(".heddle/config.toml");
+        let mut config = crate::repository::repo_config::RepoConfig::load(&config_path).unwrap();
+        config.metadata.trusted_keys.push(crate::TrustedKey {
+            algorithm: signer.algorithm().to_string(),
+            public_key: hex::encode(signer.public_key()),
+            label: Some("test-client".to_string()),
+        });
+        config.save(&config_path).unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        (dir, repo)
+    }
+
+    fn sign_visibility(record: &mut StateVisibility, signer: &dyn Signer) {
+        let signature = signer
+            .sign(&record.canonical_signing_payload())
+            .expect("sign visibility");
+        record.signature = Some(objects::object::StateSignature {
+            algorithm: signer.algorithm().to_string(),
+            public_key: hex::encode(signer.public_key()),
+            signature: hex::encode(signature),
+        });
+    }
+
+    #[test]
+    fn wire_visibility_requires_trusted_signature_and_covers_tier() {
+        let signer = Ed25519Signer::generate().expect("keygen");
+        let (_dir, repo) = repo_trusting_metadata(&signer);
+        let state = StateId::from_bytes([4u8; 32]);
+        let mut record = sample_record(state, VisibilityTier::Internal);
+
+        let unsigned = StateVisibilityBlob::new(vec![record.clone()])
+            .encode()
+            .unwrap();
+        repo.accept_wire_state_visibility(state, &unsigned)
+            .expect_err("unsigned authoritative metadata must be rejected");
+
+        sign_visibility(&mut record, &signer);
+        let signed = StateVisibilityBlob::new(vec![record.clone()])
+            .encode()
+            .unwrap();
+        repo.accept_wire_state_visibility(state, &signed)
+            .expect("trusted signed visibility");
+
+        let tampered_state = StateId::from_bytes([5u8; 32]);
+        let mut tampered = sample_record(
+            tampered_state,
+            VisibilityTier::Private {
+                scope_label: "executives".to_string(),
+            },
+        );
+        sign_visibility(&mut tampered, &signer);
+        tampered.tier = VisibilityTier::Public;
+        let forged = StateVisibilityBlob::new(vec![tampered]).encode().unwrap();
+        repo.accept_wire_state_visibility(tampered_state, &forged)
+            .expect_err("relay must not widen signed visibility");
+    }
+
     #[test]
     fn put_then_read_back_and_has_visibility_true() {
         let (_dir, repo) = fresh_repo();
@@ -907,7 +990,13 @@ mod tests {
             .get_state_visibility_for_state(&state)
             .expect("read back");
         assert_eq!(stored.records.len(), 1);
-        assert_eq!(stored.records[0], record);
+        assert!(
+            stored.records[0].signature.is_some(),
+            "locally-authored visibility must be signed"
+        );
+        let mut unsigned_view = stored.records[0].clone();
+        unsigned_view.signature = None;
+        assert_eq!(unsigned_view, record);
         assert!(
             repo.has_visibility_for_state(&state)
                 .expect("has visibility"),
@@ -972,7 +1061,10 @@ mod tests {
         let stored = repo
             .get_state_visibility_for_state(&restricted_state)
             .expect("read valid record");
-        assert_eq!(stored.records, vec![valid]);
+        assert!(stored.records[0].signature.is_some());
+        let mut unsigned_view = stored.records[0].clone();
+        unsigned_view.signature = None;
+        assert_eq!(unsigned_view, valid);
     }
 
     #[test]
@@ -1310,8 +1402,11 @@ mod tests {
             1,
             "no spurious second record appended"
         );
+        assert!(stored.records[0].signature.is_some());
+        let mut unsigned_view = stored.records[0].clone();
+        unsigned_view.signature = None;
         assert_eq!(
-            stored.records[0], existing,
+            unsigned_view, existing,
             "bind must not overwrite the user's declared tier"
         );
 

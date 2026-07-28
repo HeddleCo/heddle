@@ -94,8 +94,8 @@ pub use approval_plan::{
 pub use clone_plan::{
     AdoptPlan, AdoptPlanError, AdoptPlanOptions, CloneMode, ClonePlan, ClonePlanError,
     ClonePlanFacts, ClonePlanOptions, CloneRemoteSource, CloneSecurityPreflight,
-    MonorepoCloneJsonReport, MonorepoClonePlan, MonorepoCloneResultSummary, MonorepoEdgeFacts,
-    MonorepoEdgeSkipReason, MonorepoExecutionPlan, MonorepoExecutionProgress,
+    MonorepoCloneJsonReport, MonorepoClonePlan, MonorepoClonePlanError, MonorepoCloneResultSummary,
+    MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoExecutionPlan, MonorepoExecutionProgress,
     MonorepoNodeExecution, MonorepoNodeExecutionError, MonorepoNodeExecutionStep,
     MonorepoNodeFacts, MonorepoNodePlan, MonorepoNodeStepOptions, MonorepoPlacedJsonRow,
     MonorepoPlacedNodeSummary, MonorepoSkippedChild, MonorepoSkippedJsonRow, UnsupportedCloneFlag,

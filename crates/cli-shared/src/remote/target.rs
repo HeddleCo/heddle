@@ -19,6 +19,26 @@ pub enum RemoteTarget {
 }
 
 impl RemoteTarget {
+    /// Whether a CLI argument is syntactically a location rather than an alias.
+    ///
+    /// Explicit locations must be parsed before repository configuration is
+    /// consulted so an alias with the same spelling cannot redirect them.
+    pub fn is_explicit_spec(s: &str) -> bool {
+        if s.contains("://")
+            || PathBuf::from(s).is_absolute()
+            || s.starts_with("./")
+            || s.starts_with("../")
+        {
+            return true;
+        }
+
+        let authority = s.split('/').next().unwrap_or(s);
+        authority.parse::<SocketAddr>().is_ok()
+            || authority
+                .rsplit_once(':')
+                .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
+    }
+
     /// Parse from a string.
     ///
     /// Accepts:
@@ -132,6 +152,25 @@ mod tests {
                 assert_eq!(repo_path.as_deref(), Some("acme/heddle"));
             }
             other => panic!("expected network target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_specs_are_classified_without_configuration_or_dns() {
+        for spec in [
+            "heddle://example.test:8421/acme/repo",
+            "file:///tmp/repo",
+            "/tmp/repo",
+            "./repo",
+            "../repo",
+            "example.test:8421",
+            "example.test:8421/acme/repo",
+            "[::1]:8421",
+        ] {
+            assert!(RemoteTarget::is_explicit_spec(spec), "{spec:?}");
+        }
+        for alias in ["origin", "publish", "team-prod"] {
+            assert!(!RemoteTarget::is_explicit_spec(alias), "{alias:?}");
         }
     }
 }

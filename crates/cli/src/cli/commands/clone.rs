@@ -1756,7 +1756,7 @@ async fn clone_monorepo(
     // then pure-plan placement, work order, and per-node steps (no FS yet).
     let resolved = client.resolve_monorepo(root_path, None).await?;
     let facts = monorepo_node_facts_from_resolved(&resolved);
-    let clone_plan = plan_monorepo_clone(&facts);
+    let clone_plan = plan_monorepo_clone(&facts).map_err(|err| anyhow!(err))?;
     let exec = plan_monorepo_execution(&clone_plan, &MonorepoNodeStepOptions::default());
     // Ordering invariants (Init before Fetch, paired fetch/materialize, …)
     // before any irreversible per-node I/O.
@@ -1769,7 +1769,13 @@ async fn clone_monorepo(
 
     let total_nodes = exec.node_count();
     for (node_index, node_exec) in exec.nodes.iter().enumerate() {
-        let dest = node_exec.node.dest_path(local_path);
+        let dest = validate_monorepo_destination(local_path, &node_exec.node.rel_path)
+            .with_context(|| {
+                format!(
+                    "refusing unsafe mount path for spool '{}'",
+                    node_exec.node.spool_id
+                )
+            })?;
         execute_monorepo_node_steps(
             &mut client,
             node_exec,
@@ -1828,6 +1834,59 @@ async fn clone_monorepo(
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "client")]
+fn validate_monorepo_destination(clone_root: &Path, rel_path: &Path) -> Result<PathBuf> {
+    let root_metadata = fs::symlink_metadata(clone_root)?;
+    if root_metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "monorepo clone root '{}' must not be a symlink",
+            clone_root.display()
+        );
+    }
+    let canonical_root = fs::canonicalize(clone_root)?;
+    let mut checked = canonical_root.clone();
+
+    for component in rel_path.components() {
+        let std::path::Component::Normal(name) = component else {
+            anyhow::bail!(
+                "monorepo mount path '{}' contains an unsafe component",
+                rel_path.display()
+            );
+        };
+        checked.push(name);
+        match fs::symlink_metadata(&checked) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!(
+                    "monorepo mount path '{}' traverses symlink '{}'",
+                    rel_path.display(),
+                    checked.display()
+                );
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                anyhow::bail!(
+                    "monorepo mount path '{}' traverses non-directory '{}'",
+                    rel_path.display(),
+                    checked.display()
+                );
+            }
+            Ok(_) => {
+                checked = fs::canonicalize(&checked)?;
+                if !checked.starts_with(&canonical_root) {
+                    anyhow::bail!(
+                        "monorepo mount path '{}' resolves outside clone root '{}'",
+                        rel_path.display(),
+                        clone_root.display()
+                    );
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Ok(clone_root.join(rel_path))
 }
 
 /// Map a transport `MonorepoNode` tree into pure core facts (no I/O).
@@ -2427,6 +2486,36 @@ mod tests {
             cfg.get("origin").expect("origin remote").url,
             "heddle://weft.local:8421/smoke-cli/project"
         );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn monorepo_destination_preserves_safe_nested_mounts() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let root = temp.path().join("clone");
+        std::fs::create_dir_all(root.join("libs")).expect("create clone root");
+
+        let destination = validate_monorepo_destination(&root, Path::new("libs/vendor"))
+            .expect("safe nested mount");
+
+        assert_eq!(destination, root.join("libs/vendor"));
+    }
+
+    #[cfg(all(feature = "client", unix))]
+    #[test]
+    fn monorepo_destination_rejects_symlinked_mount_ancestor() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let root = temp.path().join("clone");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&root).expect("create clone root");
+        std::fs::create_dir_all(&outside).expect("create outside");
+        std::os::unix::fs::symlink(&outside, root.join("libs")).expect("create mount symlink");
+
+        let error = validate_monorepo_destination(&root, Path::new("libs/vendor"))
+            .expect_err("symlinked mount must fail");
+
+        assert!(error.to_string().contains("traverses symlink"));
+        assert!(!outside.join("vendor").exists());
     }
 
     #[test]

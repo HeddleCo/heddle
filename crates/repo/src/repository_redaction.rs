@@ -392,9 +392,10 @@ impl Repository {
     /// `redact` before `purge`. This is the contract from the build
     /// brief: "Refuses unless a Redaction already exists on the blob."
     ///
-    /// `_purger` is recorded by the caller in the oplog `Purge` entry;
-    /// it's accepted here so the helper can be extended (e.g. to embed
-    /// the purger in a purge record) without changing the signature.
+    /// `_purger` is recorded by the caller in the oplog `Purge` entry. The
+    /// purge transition itself is re-signed by the active client identity so
+    /// receivers can independently authorize the client that made the later
+    /// destructive decision.
     pub fn purge_blob(&self, blob: &ContentHash, _purger: &Principal) -> Result<PurgeOutcome> {
         let mut redactions_blob = self.get_redactions_for_blob(blob)?;
         if redactions_blob.redactions.is_empty() {
@@ -405,6 +406,14 @@ impl Repository {
         }
         let now = Utc::now();
         let redactions_marked = redactions_blob.mark_all_purged(now);
+        if redactions_marked > 0 {
+            for redaction in &mut redactions_blob.redactions {
+                if redaction.purged_at == Some(now) {
+                    redaction.signature =
+                        Some(self.sign_client_metadata(&redaction.canonical_signing_payload())?);
+                }
+            }
+        }
         let latest_id = match redactions_blob.latest() {
             Some(latest) => Some(redaction_content_hash(latest)?),
             None => None,
@@ -533,6 +542,33 @@ impl Repository {
         }
 
         Ok(outcome)
+    }
+
+    /// Return a redaction sidecar only when every record is signed and its
+    /// lifecycle payload verifies. Push callers use this before handing bytes
+    /// to an untrusted relay, preventing unsigned or locally-tampered metadata
+    /// from entering the hosted store.
+    pub fn verified_redactions_bytes_for_wire(
+        &self,
+        blob: &ContentHash,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(bytes) = self.store().get_redactions_bytes_for_blob(blob)? else {
+            return Ok(None);
+        };
+        let redactions = RedactionsBlob::decode(&bytes)
+            .with_context(|| format!("decode outgoing redactions for blob {}", blob.short()))?;
+        for redaction in &redactions.redactions {
+            if redaction.redacted_blob != *blob {
+                anyhow::bail!(
+                    "outgoing redaction claims blob {} but is stored under {}",
+                    redaction.redacted_blob.short(),
+                    blob.short()
+                );
+            }
+            verify_redaction_signature(redaction)
+                .with_context(|| format!("verify outgoing redaction for blob {}", blob.short()))?;
+        }
+        Ok(Some(bytes))
     }
 
     /// `<heddle_dir>/redactions/` — root of the redaction store.
@@ -718,6 +754,13 @@ fn verify_wire_redaction(redaction: &Redaction, trusted_keys: &[crate::TrustedKe
             public_key: signature.public_key.clone(),
         });
     }
+    verify_redaction_signature(redaction)
+}
+
+fn verify_redaction_signature(redaction: &Redaction) -> Result<()> {
+    let Some(signature) = &redaction.signature else {
+        anyhow::bail!(WireRejection::Unsigned);
+    };
     let payload = redaction.canonical_signing_payload();
     let public_key = hex::decode(&signature.public_key)
         .with_context(|| "decode incoming redaction signature public key")?;
@@ -1242,6 +1285,29 @@ mod tests {
     }
 
     #[test]
+    fn outgoing_redactions_must_be_signed_before_hosted_transfer() {
+        let (_dir, repo) = fresh_repo();
+        repo.put_redaction(sample_redaction())
+            .expect("persist local unsigned draft");
+        let error = repo
+            .verified_redactions_bytes_for_wire(&sample_blob())
+            .expect_err("unsigned metadata must not be sent to a hosted relay");
+        assert!(error.to_string().contains("verify outgoing redaction"));
+
+        let signer = crypto::Ed25519Signer::generate().expect("keygen");
+        let (_dir, signed_repo) = fresh_repo();
+        signed_repo
+            .put_redaction(signed_sample_redaction(&signer))
+            .expect("persist signed redaction");
+        assert!(
+            signed_repo
+                .verified_redactions_bytes_for_wire(&sample_blob())
+                .expect("validate outgoing")
+                .is_some()
+        );
+    }
+
+    #[test]
     fn accept_wire_redactions_refuses_untrusted_signer_even_with_valid_signature() {
         // The codex-flagged spoof vector: an attacker mints a redaction,
         // signs it with their own key, and ships it. Signature
@@ -1313,9 +1379,8 @@ mod tests {
         let mut signed = signed_sample_redaction(&signer);
         // Sender purged before propagation: mark the record purged.
         signed.purged_at = Some(Utc.with_ymd_and_hms(2026, 5, 12, 9, 0, 0).unwrap());
-        // Re-sign over the new canonical payload (purged_at is excluded
-        // per the signing contract, so no actual change in signature
-        // bytes — but be precise about this).
+        // Re-sign over the new canonical payload: purged_at is lifecycle
+        // authority and is therefore covered by the signature.
         let payload_bytes = signed.canonical_signing_payload();
         let sig = signer.sign(&payload_bytes).unwrap();
         signed.signature = Some(objects::object::StateSignature {
@@ -1334,6 +1399,24 @@ mod tests {
         assert!(
             stored.redactions.iter().all(|r| r.is_purged()),
             "redaction must be persisted with purged_at"
+        );
+    }
+
+    #[test]
+    fn accept_wire_redactions_rejects_forged_purged_at() {
+        let signer = crypto::Ed25519Signer::generate().expect("keygen");
+        let (_dir, repo) = fresh_repo_trusting(&signer);
+        let mut signed = signed_sample_redaction(&signer);
+        signed.purged_at = Some(Utc.with_ymd_and_hms(2026, 5, 12, 9, 0, 0).unwrap());
+        let wire = RedactionsBlob::new(vec![signed]).encode().unwrap();
+
+        let err = repo
+            .accept_wire_redactions(sample_blob(), &wire)
+            .expect_err("relay-forged purge marker must be refused");
+        assert!(
+            err.chain()
+                .any(|cause| cause.to_string().contains("failed to verify")),
+            "rejection must identify signature failure: {err:#}"
         );
     }
 }

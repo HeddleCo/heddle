@@ -30,6 +30,15 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- **Security boundaries hardened across local, hosted, and release paths.**
+  Dynamic Bash completion no longer re-evaluates ref names; recursive clone
+  mounts are confined beneath the clone root; explicit remote destinations
+  cannot be shadowed by aliases; hosted Git ref updates are staged, scoped,
+  and compare-and-set after successful pull completion; authoritative
+  redaction, visibility, and signature-attachment metadata is client-signed
+  and fail-closed; and release workflows use protected environments,
+  least-privilege credentials, and commit-pinned actions.
+
 - **Explicit source authority and direct Sley Git Overlay.** Existing Git
   checkouts keep source objects, refs, index, and worktree state in their real
   `.git`; Heddle keeps provenance and coordination metadata in `.heddle`.

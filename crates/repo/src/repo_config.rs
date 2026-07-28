@@ -37,6 +37,8 @@ pub struct RepoConfig {
     pub review: ReviewConfig,
     #[serde(default)]
     pub redact: RedactConfig,
+    #[serde(default)]
+    pub metadata: MetadataConfig,
 }
 
 /// `[redact]` config section. Houses the list of operator public keys
@@ -73,6 +75,17 @@ pub struct TrustedKey {
     /// semantics. Optional; doesn't affect matching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+}
+
+/// Trust anchors for client-authored metadata received from a remote host.
+///
+/// Hosted servers relay these records but are not trusted to author them.
+/// An empty list therefore fails closed for authoritative metadata such as
+/// visibility declarations and detached signature supersession.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetadataConfig {
+    #[serde(default)]
+    pub trusted_keys: Vec<TrustedKey>,
 }
 
 /// Review-epic configuration. Houses the `[review.signals]` sub-table read by
@@ -418,6 +431,7 @@ impl Default for RepoConfig {
             hosted: HostedConfig::default(),
             review: ReviewConfig::default(),
             redact: RedactConfig::default(),
+            metadata: MetadataConfig::default(),
         }
     }
 }

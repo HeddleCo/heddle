@@ -747,6 +747,18 @@ pub struct MonorepoClonePlan {
     pub skipped: Vec<MonorepoSkippedChild>,
 }
 
+/// A remote monorepo edge supplied a mount that cannot be placed safely.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MonorepoClonePlanError {
+    #[error(
+        "invalid monorepo mount name '{mount_name}' for child '{child_spool_id}': mount names must be exactly one relative path component"
+    )]
+    InvalidMountName {
+        child_spool_id: String,
+        mount_name: String,
+    },
+}
+
 /// Reject `--depth` / `--lazy` / `--filter` for recursive monorepo clones.
 ///
 /// These knobs change single-spool pull semantics and do not compose across the
@@ -768,13 +780,19 @@ pub fn validate_monorepo_clone_options(
 ///
 /// Applies path anchoring and child selection rules. Does not perform hosted
 /// RPC or write to disk.
-pub fn plan_monorepo_clone(root: &MonorepoNodeFacts) -> MonorepoClonePlan {
+pub fn plan_monorepo_clone(
+    root: &MonorepoNodeFacts,
+) -> Result<MonorepoClonePlan, MonorepoClonePlanError> {
     let mut plan = MonorepoClonePlan::default();
-    walk_monorepo_node(&mut plan, root, PathBuf::new());
-    plan
+    walk_monorepo_node(&mut plan, root, PathBuf::new())?;
+    Ok(plan)
 }
 
-fn walk_monorepo_node(plan: &mut MonorepoClonePlan, node: &MonorepoNodeFacts, rel_path: PathBuf) {
+fn walk_monorepo_node(
+    plan: &mut MonorepoClonePlan,
+    node: &MonorepoNodeFacts,
+    rel_path: PathBuf,
+) -> Result<(), MonorepoClonePlanError> {
     // Always emit a node plan (including empty content) so the mount exists.
     plan.nodes.push(MonorepoNodePlan {
         spool_id: node.spool_id.clone(),
@@ -783,9 +801,10 @@ fn walk_monorepo_node(plan: &mut MonorepoClonePlan, node: &MonorepoNodeFacts, re
     });
 
     for edge in &node.edges {
+        validate_monorepo_mount_name(edge)?;
         let child_rel = rel_path.join(&edge.mount_name);
         match &edge.child {
-            Some(child) => walk_monorepo_node(plan, child, child_rel),
+            Some(child) => walk_monorepo_node(plan, child, child_rel)?,
             None => {
                 let reason = edge
                     .skip_reason
@@ -799,6 +818,22 @@ fn walk_monorepo_node(plan: &mut MonorepoClonePlan, node: &MonorepoNodeFacts, re
             }
         }
     }
+    Ok(())
+}
+
+fn validate_monorepo_mount_name(edge: &MonorepoEdgeFacts) -> Result<(), MonorepoClonePlanError> {
+    let mut components = Path::new(&edge.mount_name).components();
+    let is_one_normal_component =
+        matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none()
+            && !edge.mount_name.contains(['/', '\\']);
+    if is_one_normal_component {
+        return Ok(());
+    }
+    Err(MonorepoClonePlanError::InvalidMountName {
+        child_spool_id: edge.child_spool_id.clone(),
+        mount_name: edge.mount_name.clone(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1650,7 +1685,7 @@ mod tests {
 
     #[test]
     fn plan_monorepo_places_nodes_at_mount_paths_in_preorder() {
-        let plan = plan_monorepo_clone(&fixture_tree());
+        let plan = plan_monorepo_clone(&fixture_tree()).expect("plan monorepo clone");
 
         assert_eq!(plan.nodes.len(), 3, "root + child-a + grandchild");
 
@@ -1669,7 +1704,7 @@ mod tests {
 
     #[test]
     fn plan_monorepo_records_skipped_children_and_does_not_select_them() {
-        let plan = plan_monorepo_clone(&fixture_tree());
+        let plan = plan_monorepo_clone(&fixture_tree()).expect("plan monorepo clone");
 
         assert_eq!(plan.skipped.len(), 1);
         let sk = &plan.skipped[0];
@@ -1687,7 +1722,7 @@ mod tests {
 
     #[test]
     fn monorepo_node_dest_path_joins_root() {
-        let plan = plan_monorepo_clone(&fixture_tree());
+        let plan = plan_monorepo_clone(&fixture_tree()).expect("plan monorepo clone");
         let root = Path::new("/tmp/mono");
 
         assert_eq!(plan.nodes[0].dest_path(root), PathBuf::from("/tmp/mono"));
@@ -1709,7 +1744,7 @@ mod tests {
             content_state: None,
             edges: vec![selected_edge("sub", "acme/child", child)],
         };
-        let plan = plan_monorepo_clone(&root);
+        let plan = plan_monorepo_clone(&root).expect("plan monorepo clone");
 
         assert_eq!(plan.nodes.len(), 2);
         assert_eq!(plan.nodes[0].spool_id, "acme/root");
@@ -1717,6 +1752,35 @@ mod tests {
         assert_eq!(plan.nodes[1].spool_id, "acme/child");
         assert_eq!(plan.nodes[1].rel_path, PathBuf::from("sub"));
         assert_eq!(plan.nodes[1].content_state, Some(cid(5)));
+    }
+
+    #[test]
+    fn plan_monorepo_rejects_mounts_that_are_not_one_relative_component() {
+        for mount in [
+            "",
+            ".",
+            "..",
+            "../victim",
+            "/tmp/victim",
+            "libs/child",
+            r"libs\child",
+        ] {
+            let root = MonorepoNodeFacts {
+                spool_id: "acme/root".to_string(),
+                content_state: Some(cid(1)),
+                edges: vec![selected_edge(mount, "acme/child", leaf("acme/child", 2))],
+            };
+            assert!(
+                matches!(
+                    plan_monorepo_clone(&root),
+                    Err(MonorepoClonePlanError::InvalidMountName {
+                        child_spool_id,
+                        mount_name,
+                    }) if child_spool_id == "acme/child" && mount_name == mount
+                ),
+                "mount {mount:?} must fail before clone I/O"
+            );
+        }
     }
 
     #[test]
@@ -1731,7 +1795,7 @@ mod tests {
                 skip_reason: None,
             }],
         };
-        let plan = plan_monorepo_clone(&root);
+        let plan = plan_monorepo_clone(&root).expect("plan monorepo clone");
         assert_eq!(plan.skipped.len(), 1);
         assert_eq!(plan.skipped[0].reason, MonorepoEdgeSkipReason::Unspecified);
         assert_eq!(plan.skipped[0].reason_label(), "unspecified");
@@ -1761,7 +1825,7 @@ mod tests {
                 content_state: Some(cid(1)),
                 edges: vec![skipped_edge("m", "child", reason)],
             };
-            let plan = plan_monorepo_clone(&root);
+            let plan = plan_monorepo_clone(&root).expect("plan monorepo clone");
             assert_eq!(plan.skipped[0].reason_label(), label);
         }
     }
@@ -1810,7 +1874,7 @@ mod tests {
                 skip_reason: Some(MonorepoEdgeSkipReason::Unreadable),
             }],
         };
-        let plan = plan_monorepo_clone(&root);
+        let plan = plan_monorepo_clone(&root).expect("plan monorepo clone");
         assert_eq!(plan.nodes.len(), 2);
         assert!(plan.skipped.is_empty());
         assert_eq!(plan.nodes[1].spool_id, "acme/child");
@@ -1901,7 +1965,7 @@ mod tests {
 
     #[test]
     fn plan_monorepo_execution_preserves_preorder_and_skipped() {
-        let clone_plan = plan_monorepo_clone(&fixture_tree());
+        let clone_plan = plan_monorepo_clone(&fixture_tree()).expect("plan monorepo clone");
         let exec = plan_monorepo_execution(&clone_plan, &MonorepoNodeStepOptions::default());
 
         assert_eq!(exec.node_count(), 3);
@@ -1944,7 +2008,7 @@ mod tests {
             content_state: None,
             edges: vec![selected_edge("sub", "acme/child", child)],
         };
-        let clone_plan = plan_monorepo_clone(&root);
+        let clone_plan = plan_monorepo_clone(&root).expect("plan monorepo clone");
         let exec = plan_monorepo_execution(&clone_plan, &MonorepoNodeStepOptions::default());
 
         assert_eq!(exec.nodes[0].node.content_state, None);
@@ -2103,7 +2167,7 @@ mod tests {
 
     #[test]
     fn validate_monorepo_execution_accepts_full_plan() {
-        let clone_plan = plan_monorepo_clone(&fixture_tree());
+        let clone_plan = plan_monorepo_clone(&fixture_tree()).expect("plan monorepo clone");
         let exec = plan_monorepo_execution(&clone_plan, &MonorepoNodeStepOptions::default());
         assert!(validate_monorepo_execution(&exec).is_ok());
     }
@@ -2125,7 +2189,7 @@ mod tests {
 
     #[test]
     fn assemble_monorepo_clone_result_summary_counts_placed_and_skipped() {
-        let clone_plan = plan_monorepo_clone(&fixture_tree());
+        let clone_plan = plan_monorepo_clone(&fixture_tree()).expect("plan monorepo clone");
         let exec = plan_monorepo_execution(&clone_plan, &MonorepoNodeStepOptions::default());
         let summary = assemble_monorepo_clone_result_summary(&exec);
 
@@ -2168,7 +2232,7 @@ mod tests {
             edges: vec![],
         };
         let exec = plan_monorepo_execution(
-            &plan_monorepo_clone(&root),
+            &plan_monorepo_clone(&root).expect("plan monorepo clone"),
             &MonorepoNodeStepOptions::default(),
         );
         let summary = assemble_monorepo_clone_result_summary(&exec);

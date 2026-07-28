@@ -134,7 +134,7 @@ pub use repository::{
     ContextSuggestionTier, DiffKind, GitCheckpointIntent, GitCheckpointIntentPhase,
     GitCheckpointRecord, GitImportGuidance, GitRemoteTrackingStatus, HIGH_SUGGESTION_THRESHOLD,
     HistoryQuery, HostedConfig, MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD,
-    MissingBlob, OperationKind, OperationScope, OutputFormat, PackFilesInspection,
+    MetadataConfig, MissingBlob, OperationKind, OperationScope, OutputFormat, PackFilesInspection,
     PartialFetchInspection, PullPlannerCacheInspection, RedactConfig, RefCountsInspection,
     RefSummaryIndexInspection, RepoConfig, Repository, RepositoryCapability,
     RepositoryMaintenanceRunReport, RepositoryOperationStatus,

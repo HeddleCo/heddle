@@ -94,15 +94,31 @@ pub struct MonorepoClonePlan {
     pub skipped: Vec<SkippedChild>,
 }
 
+/// A remote edge supplied a mount that cannot be placed beneath the clone root.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MonorepoClonePlanError {
+    #[error(
+        "invalid monorepo mount name '{mount_name}' for child '{child_spool_id}': mount names must be exactly one relative path component"
+    )]
+    InvalidMountName {
+        child_spool_id: String,
+        mount_name: String,
+    },
+}
+
 impl MonorepoClonePlan {
     /// Build the plan from a resolved root `MonorepoNode`. Pure — no I/O.
-    pub fn from_resolved(root: &MonorepoNode) -> Self {
+    pub fn from_resolved(root: &MonorepoNode) -> Result<Self, MonorepoClonePlanError> {
         let mut plan = MonorepoClonePlan::default();
-        plan.walk(root, PathBuf::new());
-        plan
+        plan.walk(root, PathBuf::new())?;
+        Ok(plan)
     }
 
-    fn walk(&mut self, node: &MonorepoNode, rel_path: PathBuf) {
+    fn walk(
+        &mut self,
+        node: &MonorepoNode,
+        rel_path: PathBuf,
+    ) -> Result<(), MonorepoClonePlanError> {
         // Emit this node's clone op. An absent/malformed content_state maps to
         // `None` (empty checkout) rather than being dropped — the mount point
         // must still exist for the monorepo layout to be coherent.
@@ -117,10 +133,11 @@ impl MonorepoClonePlan {
         });
 
         for edge in &node.edges {
+            validate_mount_name(edge)?;
             let child_rel = rel_path.join(&edge.mount_name);
             match (&edge.subtree, edge.skipped) {
                 // Descended: recurse into the resolved subtree at its mount.
-                (Some(subtree), _) => self.walk(subtree, child_rel),
+                (Some(subtree), _) => self.walk(subtree, child_rel)?,
                 // Withheld: record the reason, do not descend. A missing
                 // subtree with no explicit reason is treated as unspecified
                 // rather than silently vanishing.
@@ -137,7 +154,25 @@ impl MonorepoClonePlan {
                 }
             }
         }
+        Ok(())
     }
+}
+
+fn validate_mount_name(
+    edge: &api::heddle::api::v1alpha1::MonorepoEdge,
+) -> Result<(), MonorepoClonePlanError> {
+    let mut components = Path::new(&edge.mount_name).components();
+    let is_one_normal_component =
+        matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none()
+            && !edge.mount_name.contains(['/', '\\']);
+    if is_one_normal_component {
+        return Ok(());
+    }
+    Err(MonorepoClonePlanError::InvalidMountName {
+        child_spool_id: edge.child_spool_id.clone(),
+        mount_name: edge.mount_name.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -225,7 +260,7 @@ mod tests {
 
     #[test]
     fn planner_places_each_spool_at_its_mount_path_and_anchored_state() {
-        let plan = MonorepoClonePlan::from_resolved(&fixture_tree());
+        let plan = MonorepoClonePlan::from_resolved(&fixture_tree()).expect("plan monorepo clone");
 
         // Three descended ops in pre-order: root, child-a, grandchild.
         assert_eq!(plan.ops.len(), 3, "root + child-a + grandchild");
@@ -249,7 +284,7 @@ mod tests {
 
     #[test]
     fn planner_reports_the_skipped_child_and_does_not_clone_it() {
-        let plan = MonorepoClonePlan::from_resolved(&fixture_tree());
+        let plan = MonorepoClonePlan::from_resolved(&fixture_tree()).expect("plan monorepo clone");
 
         assert_eq!(plan.skipped.len(), 1, "exactly one withheld edge");
         let sk = &plan.skipped[0];
@@ -268,7 +303,7 @@ mod tests {
 
     #[test]
     fn dest_path_joins_root_for_children_and_returns_root_itself_for_the_root_op() {
-        let plan = MonorepoClonePlan::from_resolved(&fixture_tree());
+        let plan = MonorepoClonePlan::from_resolved(&fixture_tree()).expect("plan monorepo clone");
         let root = Path::new("/tmp/mono");
 
         assert_eq!(plan.ops[0].dest_path(root), PathBuf::from("/tmp/mono"));
@@ -289,7 +324,7 @@ mod tests {
             content_state: None,
             edges: vec![descended_edge("sub", "acme/child", 5, child)],
         };
-        let plan = MonorepoClonePlan::from_resolved(&root);
+        let plan = MonorepoClonePlan::from_resolved(&root).expect("plan monorepo clone");
 
         assert_eq!(plan.ops.len(), 2);
         assert_eq!(plan.ops[0].spool_id, "acme/root");
@@ -297,6 +332,40 @@ mod tests {
         assert_eq!(plan.ops[1].spool_id, "acme/child");
         assert_eq!(plan.ops[1].rel_path, PathBuf::from("sub"));
         assert_eq!(plan.ops[1].content_state, Some(cid(5)));
+    }
+
+    #[test]
+    fn planner_rejects_mounts_that_are_not_one_relative_component() {
+        for mount in [
+            "",
+            ".",
+            "..",
+            "../victim",
+            "/tmp/victim",
+            "libs/child",
+            r"libs\child",
+        ] {
+            let root = MonorepoNode {
+                spool_id: "acme/root".to_string(),
+                content_state: proto_cid(1),
+                edges: vec![descended_edge(
+                    mount,
+                    "acme/child",
+                    2,
+                    leaf("acme/child", 2),
+                )],
+            };
+            assert!(
+                matches!(
+                    MonorepoClonePlan::from_resolved(&root),
+                    Err(MonorepoClonePlanError::InvalidMountName {
+                        child_spool_id,
+                        mount_name,
+                    }) if child_spool_id == "acme/child" && mount_name == mount
+                ),
+                "mount {mount:?} must fail before clone I/O"
+            );
+        }
     }
 
     #[test]
@@ -311,7 +380,7 @@ mod tests {
                 content_state: proto_cid(1),
                 edges: vec![skipped_edge("m", "child", 2, reason)],
             };
-            let plan = MonorepoClonePlan::from_resolved(&root);
+            let plan = MonorepoClonePlan::from_resolved(&root).expect("plan monorepo clone");
             assert_eq!(plan.skipped.len(), 1);
             assert_eq!(plan.skipped[0].reason, reason);
             assert_eq!(plan.skipped[0].reason_label(), label);

@@ -14,7 +14,9 @@
 #   - final-DMG app signature verification
 #   - stable-tag-only GitHub Packages publication for the generated
 #     TypeScript gRPC client
-#   - non-publishing branch dry-run path for release-only verification
+#   - explicit refusal of branch-selected release dry-runs
+#   - approval-protected release environment on credentialed jobs
+#   - exact commit pins for every external action
 #   - sha256 checksums
 #   - signing step
 #   - GitHub Release upload
@@ -92,12 +94,57 @@ else
 fi
 
 if grep -F 'branch_dry_run:' "$WF" >/dev/null \
-   && grep -F 'publish_release=false' "$WF" >/dev/null \
-   && grep -F "if: \${{ github.event_name != 'workflow_dispatch' || !inputs.branch_dry_run }}" "$WF" >/dev/null \
-   && grep -F "if: needs.validate-tag.outputs.publish_release == 'true'" "$WF" >/dev/null; then
-  ok "temporary branch dry-run path skips generic builds and GitHub Release publication"
+   && grep -F 'branch_dry_run is disabled:' "$WF" >/dev/null \
+   && ! grep -F 'tag_sha="$(git rev-parse HEAD)"' "$WF" >/dev/null; then
+  ok "branch-selected release dry-runs fail explicitly before credentialed jobs"
 else
-  err "temporary branch dry-run path must be explicit and must skip generic builds and GitHub Release publication"
+  err "branch_dry_run must fail explicitly; branch-selected workflow code cannot receive release credentials"
+fi
+
+# GitHub environments are the control-plane boundary that a tag's copy of
+# this workflow cannot self-approve. Every job that can sign or publish must
+# wait for the approval-protected release environment.
+for job in build build-macos-cask release publish-manifests; do
+  block=$(
+    awk -v wanted="$job" '
+      $0 == "  " wanted ":" { in_job=1; next }
+      in_job && /^  [A-Za-z0-9_-]+:/ { exit }
+      in_job { print }
+    ' "$WF"
+  )
+  if grep -E '^    environment:\s*release\s*$' <<<"$block" >/dev/null; then
+    ok "$job uses approval-protected release environment"
+  else
+    err "$job must declare environment: release before signing or publishing"
+  fi
+done
+
+# External actions execute inside credentialed release jobs. Mutable tags and
+# branches are therefore forbidden even when the repository is trusted.
+while IFS= read -r action; do
+  [[ -z "$action" || "$action" == ./* ]] && continue
+  ref="${action##*@}"
+  if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+    ok "external action pinned: $action"
+  else
+    err "external action must use an exact 40-character commit SHA: $action"
+  fi
+done < <(sed -nE 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*([^[:space:]#]+).*/\2/p' "$WF")
+
+# Least privilege: OIDC is available only to the two artifact-signing jobs,
+# and repository write permission only to the GitHub Release publisher.
+top_permissions=$(
+  awk '
+    /^permissions:/ { in_permissions=1; next }
+    in_permissions && /^[^[:space:]]/ { exit }
+    in_permissions { print }
+  ' "$WF"
+)
+if grep -E '^\s*contents:\s*read\s*$' <<<"$top_permissions" >/dev/null \
+   && ! grep -E '^\s*(contents:\s*write|id-token:\s*write)\s*$' <<<"$top_permissions" >/dev/null; then
+  ok "top-level permissions are read-only"
+else
+  err "top-level permissions must be contents: read; grant write/OIDC only to credentialed jobs"
 fi
 
 # All five active target triples (win-arm64 parked, see below).

@@ -262,7 +262,7 @@ fn test_state_signing_via_repository() {
 }
 
 #[test]
-fn test_signature_tampering_detected() {
+fn test_signature_tampering_cannot_supersede_valid_evidence() {
     use objects::object::{Attribution, Principal, Tree};
     use repo::Repository;
 
@@ -290,20 +290,22 @@ fn test_signature_tampering_detected() {
     let mut sig_bytes = hex::decode(&signature.signature).expect("decode");
     sig_bytes[0] ^= 0xff;
     signature.signature = hex::encode(&sig_bytes);
-    repo.put_state_attachment(&objects::object::StateAttachment {
-        state_id,
-        body: objects::object::StateAttachmentBody::Signature(signature),
-        attribution: state.attribution,
-        created_at: chrono::Utc::now(),
-        supersedes: Some(prior_id),
-    })
-    .unwrap();
+    let error = repo
+        .put_state_attachment(&objects::object::StateAttachment {
+            state_id,
+            body: objects::object::StateAttachmentBody::Signature(signature),
+            attribution: state.attribution,
+            created_at: chrono::Utc::now(),
+            supersedes: Some(prior_id),
+        })
+        .expect_err("signature evidence must be append-only");
+    assert!(error.to_string().contains("append-only"));
 
     let status = repo.verify_state_signature(&state_id).expect("verify");
     assert_eq!(
         status,
-        crypto::SignatureStatus::Invalid,
-        "tampered signature should be invalid"
+        crypto::SignatureStatus::Valid,
+        "rejected attachment must not suppress the valid signature"
     );
 }
 
