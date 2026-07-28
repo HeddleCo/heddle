@@ -19,9 +19,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::object::{ContentHash, Principal, StateId, StateSignature};
 
-/// Stable byte prefix the signing payload begins with. Bumping this versions
-/// the payload format itself; old signatures with the old prefix continue to
-/// verify exactly as they did when written.
+/// Stable byte prefix the signing payload begins with. Bumping this invalidates
+/// signatures written with an older prefix unless verification also gains
+/// explicit version dispatch. Version 2 intentionally makes a clean break from
+/// the unused version 1 format.
 pub const REDACTION_SIGNING_PAYLOAD_VERSION_TAG: &[u8] = b"hd-redact-v2\x00";
 
 /// A redaction declaration on a single blob in a single state.

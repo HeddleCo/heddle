@@ -44,25 +44,21 @@ fn test_check_states_thorough_rejects_invalid_signature() {
     let signer = Ed25519Signer::from_seed(&[7u8; 32]).expect("create signer");
 
     repo.store().put_state(&state).expect("put state");
-    repo.sign_state(&state.state_id, &signer)
-        .expect("sign state");
-    let prior = repo
-        .latest_state_attachment(&state.state_id, repo::StateAttachmentKind::Signature)
-        .expect("read signature attachment")
-        .expect("signature attachment");
-    let prior_id = prior.id();
-    let StateAttachmentBody::Signature(mut signature) = prior.body else {
-        panic!("expected signature attachment")
-    };
+    let mut signature = crypto::state_signature_from_signer(&state.compute_hash(), &signer)
+        .expect("sign state hash");
     signature.signature = "00".repeat(64);
-    repo.put_state_attachment(&StateAttachment {
-        state_id: state.state_id,
-        body: StateAttachmentBody::Signature(signature),
-        attribution: sample_attribution(),
-        created_at: chrono::Utc::now() + chrono::Duration::seconds(1),
-        supersedes: Some(prior_id),
-    })
-    .expect("put invalid signature attachment");
+    // Fsck validates objects that may have arrived in a pack below the
+    // Repository acceptance seam. Insert the corrupt evidence directly into
+    // storage; the public API correctly rejects signature supersession.
+    repo.store()
+        .put_state_attachment(&StateAttachment {
+            state_id: state.state_id,
+            body: StateAttachmentBody::Signature(signature),
+            attribution: sample_attribution(),
+            created_at: chrono::Utc::now(),
+            supersedes: None,
+        })
+        .expect("install invalid packed signature attachment");
 
     let mut errors = Vec::new();
     let mut objects_checked = 0;
