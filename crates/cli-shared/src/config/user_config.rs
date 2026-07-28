@@ -817,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn heddle_client_config_rejects_partial_descriptor_trust() {
+    fn heddle_client_config_rejects_key_only_environment_descriptor_trust() {
         let env = RemoteEnvGuard::clean();
         env.set("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID", "weft-current");
 
@@ -830,6 +830,70 @@ mod tests {
                 .to_string()
                 .contains("both non-empty descriptor trust")
         );
+        assert!(error.to_string().contains("ambiguous security posture"));
+    }
+
+    #[test]
+    fn heddle_client_config_rejects_public_key_only_environment_descriptor_trust() {
+        let env = RemoteEnvGuard::clean();
+        env.set(
+            "HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
+            hex::encode([17; 32]),
+        );
+
+        let error = UserConfig::default()
+            .heddle_client_config(None)
+            .expect_err("partial descriptor trust must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("both non-empty descriptor trust")
+        );
+        assert!(error.to_string().contains("ambiguous security posture"));
+    }
+
+    #[test]
+    fn heddle_client_config_rejects_key_only_file_descriptor_trust() {
+        let _env = RemoteEnvGuard::clean();
+        let user = UserConfig {
+            remote: UserRemoteConfig {
+                iroh_descriptor_key_id: Some("weft-current".to_string()),
+                ..UserRemoteConfig::default()
+            },
+            ..UserConfig::default()
+        };
+
+        let error = user
+            .heddle_client_config(None)
+            .expect_err("partial descriptor trust must fail closed");
+
+        assert!(error.to_string().contains("both descriptor trust fields"));
+        assert!(error.to_string().contains("ambiguous security posture"));
+    }
+
+    #[test]
+    fn heddle_client_config_rejects_public_key_only_file_descriptor_trust() {
+        let _env = RemoteEnvGuard::clean();
+        let dir = unique_temp_path("heddle-user-config-partial-descriptor");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let public_key_path = dir.join("descriptor-public-key");
+        fs::write(&public_key_path, hex::encode([17; 32])).expect("write descriptor public key");
+        let user = UserConfig {
+            remote: UserRemoteConfig {
+                iroh_descriptor_public_key_path: Some(public_key_path),
+                ..UserRemoteConfig::default()
+            },
+            ..UserConfig::default()
+        };
+
+        let error = user
+            .heddle_client_config(None)
+            .expect_err("partial descriptor trust must fail closed");
+
+        assert!(error.to_string().contains("both descriptor trust fields"));
+        assert!(error.to_string().contains("ambiguous security posture"));
+        fs::remove_dir_all(dir).expect("remove temp dir");
     }
 
     #[test]

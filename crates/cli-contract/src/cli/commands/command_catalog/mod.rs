@@ -1437,6 +1437,41 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
+        &["auth", "trust"],
+        category(feature_gated(user_scoped(GROUP), "client"), "repo"),
+    ),
+    entry(
+        &["auth", "trust", "show"],
+        feature_gated(
+            json_discriminators(
+                documented_schemas(user_scoped(READ_JSON), &["auth trust show"]),
+                &[json_discriminator(
+                    Some("auth trust show"),
+                    "output_kind",
+                    "auth_trust_show",
+                )],
+            ),
+            "client",
+        ),
+    ),
+    entry(
+        &["auth", "trust", "replace"],
+        feature_gated(
+            json_discriminators(
+                documented_schemas(
+                    user_scoped(CONFIG_MUTATION_NO_OP_ID),
+                    &["auth trust replace"],
+                ),
+                &[json_discriminator(
+                    Some("auth trust replace"),
+                    "output_kind",
+                    "auth_trust_replace",
+                )],
+            ),
+            "client",
+        ),
+    ),
+    entry(
         &["auth", "derive-agent"],
         feature_gated(user_scoped(CONFIG_MUTATION_TEXT), "client"),
     ),
@@ -4571,6 +4606,10 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             AuthCommands::Login { .. } => vec!["auth", "login"],
             AuthCommands::Logout { .. } => vec!["auth", "logout"],
             AuthCommands::Status { .. } => vec!["auth", "status"],
+            AuthCommands::Trust { command } => match command {
+                crate::cli::AuthTrustCommands::Show(_) => vec!["auth", "trust", "show"],
+                crate::cli::AuthTrustCommands::Replace(_) => vec!["auth", "trust", "replace"],
+            },
             AuthCommands::DeriveAgent { .. } => vec!["auth", "derive-agent"],
             AuthCommands::CreateServiceToken { .. } => vec!["auth", "create-service-token"],
         },

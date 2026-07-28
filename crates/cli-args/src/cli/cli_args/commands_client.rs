@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Hosted-client command arguments.
 
-use clap::{Subcommand, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 
 /// Preset operation ceilings for `heddle auth derive-agent`.
 ///
@@ -72,6 +72,12 @@ pub enum AuthCommands {
         server: Option<String>,
     },
 
+    /// Inspect or explicitly replace descriptor-signing trust
+    Trust {
+        #[command(subcommand)]
+        command: AuthTrustCommands,
+    },
+
     /// Derive a scoped, short-lived agent token offline
     DeriveAgent {
         /// Server whose stored credential is the parent.
@@ -124,6 +130,37 @@ pub enum AuthCommands {
     },
 }
 
+#[derive(Subcommand, Clone, Debug)]
+pub enum AuthTrustCommands {
+    /// Show the descriptor trust controlling a server connection
+    Show(AuthTrustShowArgs),
+    /// Atomically replace an automatic descriptor trust pin
+    Replace(AuthTrustReplaceArgs),
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct AuthTrustShowArgs {
+    /// Heddle server authority
+    #[arg(long)]
+    pub server: String,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct AuthTrustReplaceArgs {
+    /// Heddle server authority
+    #[arg(long)]
+    pub server: String,
+    /// Current descriptor public key required for compare-and-swap
+    #[arg(long, value_name = "64_HEX")]
+    pub expect_current_public_key: String,
+    /// New descriptor key id confirmed out of band
+    #[arg(long)]
+    pub key_id: String,
+    /// New descriptor public key confirmed out of band
+    #[arg(long, value_name = "64_HEX")]
+    pub public_key: String,
+}
+
 impl From<AuthCommands> for heddle_client::AuthCommand {
     fn from(command: AuthCommands) -> Self {
         match command {
@@ -138,6 +175,23 @@ impl From<AuthCommands> for heddle_client::AuthCommand {
             },
             AuthCommands::Logout { server } => heddle_client::AuthCommand::Logout { server },
             AuthCommands::Status { server } => heddle_client::AuthCommand::Status { server },
+            AuthCommands::Trust { command } => heddle_client::AuthCommand::Trust {
+                command: match command {
+                    AuthTrustCommands::Show(args) => {
+                        heddle_client::auth_requests::AuthTrustCommand::Show {
+                            server: args.server,
+                        }
+                    }
+                    AuthTrustCommands::Replace(args) => {
+                        heddle_client::auth_requests::AuthTrustCommand::Replace {
+                            server: args.server,
+                            expected_current_public_key: args.expect_current_public_key,
+                            key_id: args.key_id,
+                            public_key: args.public_key,
+                        }
+                    }
+                },
+            },
             AuthCommands::DeriveAgent {
                 server,
                 agent_id,
@@ -174,7 +228,42 @@ impl From<AuthCommands> for heddle_client::AuthCommand {
 mod tests {
     use clap::Parser;
 
-    use crate::cli::{AuthCommands, Cli, Commands};
+    use crate::cli::{AuthCommands, AuthTrustCommands, Cli, Commands};
+
+    #[test]
+    fn trust_replace_parses_compare_and_swap_inputs() {
+        let old_key = "11".repeat(32);
+        let new_key = "22".repeat(32);
+        let cli = Cli::try_parse_from([
+            "heddle",
+            "auth",
+            "trust",
+            "replace",
+            "--server",
+            "api.example",
+            "--expect-current-public-key",
+            &old_key,
+            "--key-id",
+            "next-key",
+            "--public-key",
+            &new_key,
+        ])
+        .expect("trust replacement parses");
+
+        let Commands::Auth {
+            command:
+                AuthCommands::Trust {
+                    command: AuthTrustCommands::Replace(args),
+                },
+        } = cli.command
+        else {
+            panic!("expected auth trust replace");
+        };
+        assert_eq!(args.server, "api.example");
+        assert_eq!(args.expect_current_public_key, old_key);
+        assert_eq!(args.key_id, "next-key");
+        assert_eq!(args.public_key, new_key);
+    }
 
     #[test]
     fn login_parses_credential_path() {

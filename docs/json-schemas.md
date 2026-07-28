@@ -1854,6 +1854,36 @@ the same ready envelope.
 
 ---
 
+## `heddle auth trust show --output json`
+
+```json
+{
+  "output_kind": "auth_trust_show",
+  "canonical_server": "https://api.heddle.sh",
+  "source": "automatic",
+  "key_id": "production-2026-01",
+  "public_key": "7c5eb1d4f7c09c8981789c759b1445676336afe9c88d08f57d02893df9ea23c4",
+  "fingerprint": "sha256:f31c0dbdb183e33f2366f5daa71273d3444006c0143e0f8d65e0745478c14b48"
+}
+```
+
+---
+
+## `heddle auth trust replace --output json`
+
+```json
+{
+  "output_kind": "auth_trust_replace",
+  "canonical_server": "https://api.heddle.sh",
+  "source": "automatic",
+  "key_id": "production-2026-02",
+  "public_key": "280c37c667a6334f69e878f90588d8813bb44fc88333757b3e2d6b1e79bdab01",
+  "fingerprint": "sha256:06d1aac7c406aa1cd62280ae9948af0fd2d42ac10ba5c8c0b3a7840d9deb7275"
+}
+```
+
+---
+
 ## `heddle whoami --output json`
 
 ```json
@@ -3039,26 +3069,26 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact trust remove",
       "redact purge apply"
     ],
-    "advanced_scope_json_commands_total": 106,
+    "advanced_scope_json_commands_total": 108,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
-    "advanced_scope_mutating_commands_total": 61,
+    "advanced_scope_mutating_commands_total": 62,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 22,
-    "catalog_commands_total": 183,
-    "catalog_mutating_commands_total": 89,
-    "json_commands_total": 146,
+    "catalog_commands_total": 186,
+    "catalog_mutating_commands_total": 90,
+    "json_commands_total": 148,
     "json_commands_with_accepted_opaque_schema": 39,
-    "json_commands_with_schema": 107,
+    "json_commands_with_schema": 109,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 85,
+    "json_mutating_commands_total": 86,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 85,
+    "mutating_commands_total": 86,
     "mutating_commands_with_accepted_opaque_schema": 22,
-    "mutating_commands_with_schema": 63,
+    "mutating_commands_with_schema": 64,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 39,
     "status": "available",
-    "summary": "183 command(s), 146 JSON command(s), 89 mutating command(s), 85 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+    "summary": "186 command(s), 148 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3096,7 +3126,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "183 command(s), 146 JSON command(s), 89 mutating command(s), 85 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+  "summary": "186 command(s), 148 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true

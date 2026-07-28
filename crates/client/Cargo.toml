@@ -51,6 +51,7 @@ weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim",
 
 [dev-dependencies]
 prost-reflect.workspace = true
+rcgen = "0.14.8"
 tempfile.workspace = true
 
 [lib]

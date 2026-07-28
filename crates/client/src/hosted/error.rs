@@ -3,6 +3,10 @@ use api::heddle::api::v1alpha1::{CallFailure, ErrorDetail};
 /// Failure returned by the native hosted-call module.
 #[derive(Debug, thiserror::Error)]
 pub enum HostedError {
+    #[error("server does not publish descriptor trust")]
+    DescriptorTrustUnavailable,
+    #[error("{0}")]
+    DescriptorTrust(String),
     #[error("hosted endpoint descriptor is invalid: {0}")]
     InvalidDescriptor(String),
     #[error("hosted endpoint descriptor signature is invalid")]
