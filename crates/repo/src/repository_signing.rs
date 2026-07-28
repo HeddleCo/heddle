@@ -63,8 +63,10 @@ impl Repository {
         })
     }
 
-    /// Verify that hosted metadata was signed by a client key explicitly
-    /// trusted by this repository. The hosted service itself is only a relay.
+    /// Verify hosted metadata against this repository's temporary, manually trusted client keys.
+    /// Weft authorizes destructive and state-visibility operations but holds no signing key for
+    /// this path, so it cannot forge them. HeddleCo/weft#836 tracks replacing the manual list
+    /// with that authorization model.
     pub(crate) fn verify_trusted_client_metadata_signature(
         &self,
         payload: &[u8],
