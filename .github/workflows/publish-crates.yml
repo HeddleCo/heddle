@@ -121,7 +121,7 @@ jobs:
       # job entirely on no-op merges.
       has_publishes: ${{ steps.classify.outputs.has_publishes }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Full history isn't needed (we don't walk it), but we DO
           # need the commit to be a real commit object so we can
@@ -294,17 +294,9 @@ jobs:
     if: needs.validate-publish.outputs.has_publishes == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    env:
-      # The env var name (CARGO_REGISTRY_TOKEN) is cargo's documented
-      # name and is what `cargo publish` reads at runtime — it must
-      # stay exactly this. The GitHub Actions secret name
-      # (CRATES_IO_API_KEY) is independent: it's the label under repo
-      # Settings → Secrets and variables → Actions. The strict asserter
-      # verifies both halves of this mapping — any rename on either
-      # side would silently break authentication.
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_API_KEY }}
+    environment: release
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Pin to the SHA validate-publish verified, NOT
           # refs/heads/main. main is mutable; a force-push between
@@ -313,35 +305,27 @@ jobs:
           # as release.yml.
           ref: ${{ needs.validate-publish.outputs.commit_sha }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: publish-crates
           cache-on-failure: true
 
-      - name: Assert CARGO_REGISTRY_TOKEN is present
-        shell: bash
-        run: |
-          set -euo pipefail
-          # We deliberately check at the FIRST credentialed step (not
-          # in validate-publish) so the validation pass still runs and
-          # surfaces what *would have* been published, even if the
-          # secret isn't configured yet. That gives the operator a
-          # punch list to act on. If the validation pass shipped
-          # without a publish attempt, it'd be silent.
-          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
-            echo "::error::CARGO_REGISTRY_TOKEN env var is empty — the CRATES_IO_API_KEY secret is unset or the mapping in publish-crates.yml is wrong. Add CRATES_IO_API_KEY under repo Settings → Secrets and variables → Actions, then re-run."
-            exit 1
-          fi
-          echo "ok: CARGO_REGISTRY_TOKEN is present (length=${#CARGO_REGISTRY_TOKEN})"
-
       - name: Publish each crate (idempotent, retry on 5xx)
         shell: bash
         env:
+          # Keep the crates.io credential scoped to the only step that
+          # needs it. Checkout, toolchain, and cache actions never receive it.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_API_KEY }}
           TO_PUBLISH: ${{ needs.validate-publish.outputs.to_publish }}
         run: |
           set -euo pipefail
+
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "::error::CARGO_REGISTRY_TOKEN env var is empty — the CRATES_IO_API_KEY secret is unset or the mapping in publish-crates.yml is wrong. Add CRATES_IO_API_KEY to the approval-protected release environment, then re-run."
+            exit 1
+          fi
 
           # Pretty-print the publish plan up front so the workflow log
           # has a clean record before any side effects.

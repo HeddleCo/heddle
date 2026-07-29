@@ -763,6 +763,33 @@ fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
         Some(&b_path),
     )
     .expect("B trusts A's signing key");
+    // Purging is a new authoritative metadata decision. A re-signs the
+    // lifecycle transition with its active client identity rather than
+    // pretending the original redaction operator made that later decision.
+    // Hosted rollout must provision trusted client identities through the
+    // Weft/Tapestry control plane before purge sync is enabled. That
+    // distribution is not implemented in this repository; this local-sync
+    // fixture mirrors current behavior by enrolling A's public key explicitly.
+    let identity_raw =
+        fs::read_to_string(a.path().join(".heddle/identity.toml")).expect("read A identity");
+    let identity: toml::Value = toml::from_str(&identity_raw).expect("parse A identity");
+    let client_public_key = identity
+        .get("public_key")
+        .and_then(toml::Value::as_str)
+        .expect("A identity public key");
+    heddle(
+        &[
+            "redact",
+            "trust",
+            "add",
+            "--algorithm",
+            "ed25519",
+            "--public-key",
+            client_public_key,
+        ],
+        Some(&b_path),
+    )
+    .expect("B trusts A's client metadata identity");
     heddle(
         &["remote", "add", "origin", a.path().to_str().unwrap()],
         Some(&b_path),

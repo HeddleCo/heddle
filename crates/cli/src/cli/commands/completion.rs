@@ -74,7 +74,14 @@ __heddle_dynamic_words() {
 
 __heddle_complete_from() {
     local subject="$1"
-    mapfile -t COMPREPLY < <(compgen -W "$(__heddle_dynamic_words "$subject")" -- "${COMP_WORDS[COMP_CWORD]}")
+    local current="${COMP_WORDS[COMP_CWORD]}"
+    local candidate
+    COMPREPLY=()
+    while IFS= read -r candidate; do
+        if [[ "$candidate" == "$current"* ]]; then
+            COMPREPLY+=("$candidate")
+        fi
+    done < <(__heddle_dynamic_words "$subject")
 }
 
 __heddle_thread_value_position() {

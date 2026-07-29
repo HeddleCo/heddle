@@ -168,7 +168,6 @@ pub fn resolve_remote_with_key_and_insecure(
     remote_arg: Option<&str>,
 ) -> Result<(RemoteTarget, Option<String>, bool)> {
     let cfg = RemoteConfig::open(repo)?;
-
     let spec = match remote_arg {
         Some(spec) => spec.to_string(),
         None => cfg
@@ -327,6 +326,40 @@ mod tests {
             resolve_remote_with_key(&repo, Some("origin")).expect("resolve native HTTPS remote");
         assert!(matches!(target, RemoteTarget::Network { .. }));
         assert_eq!(key.as_deref(), Some("127.0.0.1:8431"));
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn configured_host_port_remote_honors_insecure_policy() {
+        let temp = unique_temp_dir("heddle-host-port-policy-test");
+        fs::create_dir_all(&temp).expect("create temp dir");
+        let repo = Repository::init_default(&temp).expect("init repo");
+        let mut cfg = RemoteConfig::open(&repo).expect("open config");
+        cfg.add(
+            "127.0.0.1:8421",
+            Remote {
+                url: "heddle://127.0.0.1:9999/acme/repo".to_string(),
+                insecure: true,
+            },
+        )
+        .expect("add host:port-named remote");
+
+        let (target, key, insecure) =
+            resolve_remote_with_key_and_insecure(&repo, Some("127.0.0.1:8421"))
+                .expect("resolve host:port-named remote");
+        match target {
+            RemoteTarget::Network { addr, repo_path } => {
+                assert_eq!(addr.port(), 9999);
+                assert_eq!(repo_path.as_deref(), Some("acme/repo"));
+            }
+            other => panic!("expected network target, got {other:?}"),
+        }
+        assert_eq!(key.as_deref(), Some("127.0.0.1:9999"));
+        assert!(
+            insecure,
+            "configured insecure policy must survive host:port-like remote names"
+        );
 
         let _ = fs::remove_dir_all(temp);
     }

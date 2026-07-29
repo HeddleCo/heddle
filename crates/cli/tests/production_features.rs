@@ -1324,6 +1324,67 @@ mod completion {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn bash_dynamic_completion_never_evaluates_ref_names() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let completion = heddle(&["shell", "completion", "bash"], Some(temp.path())).unwrap();
+        let completion_path = temp.path().join("heddle-completion.bash");
+        fs::write(&completion_path, completion).unwrap();
+
+        let marker = temp.path().join("executed");
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir(&bin_dir).unwrap();
+        let fake_heddle = bin_dir.join("heddle");
+        fs::write(
+            &fake_heddle,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' 'safe' '$(printf pwned > {})'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_heddle, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(
+                r#"source "$1"
+COMP_WORDS=(heddle thread show "")
+COMP_CWORD=3
+__heddle_complete_from threads
+printf '%s\n' "${COMPREPLY[@]}""#,
+            )
+            .arg("bash")
+            .arg(&completion_path)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin_dir.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output()
+            .expect("run generated Bash completion");
+
+        assert!(
+            output.status.success(),
+            "generated completion failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("$(printf pwned >"),
+            "the malicious-looking but valid name should remain a literal completion candidate"
+        );
+        assert!(
+            !marker.exists(),
+            "dynamic completion must not evaluate candidate contents"
+        );
+    }
+
     #[test]
     fn test_completion_zsh() {
         let temp = TempDir::new().unwrap();

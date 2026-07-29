@@ -109,6 +109,39 @@ else
   err "$WF must expose the token as the CARGO_REGISTRY_TOKEN env var (cargo's documented name)"
 fi
 
+# The publish credential must not be inherited by checkout, toolchain, or
+# cache actions. It belongs only on the cargo-publish step, after environment
+# approval.
+publish_job_block=$(
+  awk '
+    /^  publish:/ { in_job=1; next }
+    in_job && /^  [A-Za-z0-9_-]+:/ { exit }
+    in_job { print }
+  ' "$WF"
+)
+if grep -E '^    environment:\s*release\s*$' <<<"$publish_job_block" >/dev/null; then
+  ok "publish job uses approval-protected release environment"
+else
+  err "publish job must declare environment: release"
+fi
+if grep -E '^      CARGO_REGISTRY_TOKEN:' <<<"$publish_job_block" >/dev/null; then
+  err "CARGO_REGISTRY_TOKEN must not be job-scoped"
+elif grep -E '^          CARGO_REGISTRY_TOKEN:\s*\$\{\{\s*secrets\.CRATES_IO_API_KEY\s*\}\}\s*$' <<<"$publish_job_block" >/dev/null; then
+  ok "CARGO_REGISTRY_TOKEN is scoped to the cargo publish step"
+else
+  err "cargo publish step must map secrets.CRATES_IO_API_KEY to CARGO_REGISTRY_TOKEN"
+fi
+
+while IFS= read -r action; do
+  [[ -z "$action" || "$action" == ./* ]] && continue
+  ref="${action##*@}"
+  if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+    ok "external action pinned: $action"
+  else
+    err "external action must use an exact 40-character commit SHA: $action"
+  fi
+done < <(sed -nE 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*([^[:space:]#]+).*/\2/p' "$WF")
+
 # Explicit crate list. Auto-discovery via `cargo metadata --workspace`
 # would publish whatever's currently marked publishable in Cargo.toml,
 # which is invisible at PR review time. An explicit list (env var or
@@ -259,7 +292,7 @@ else:
             "— TOCTOU on mutable main ref"
         )
 
-    if re.search(r"(?m)^      CARGO_REGISTRY_TOKEN:\s*", publish_block):
+    if re.search(r"(?m)^          CARGO_REGISTRY_TOKEN:\s*", publish_block):
         oks.append("env var key is exactly CARGO_REGISTRY_TOKEN (the name cargo reads)")
         if "secrets.CRATES_IO_API_KEY" in publish_block:
             oks.append("CARGO_REGISTRY_TOKEN wired from secrets.CRATES_IO_API_KEY")
@@ -267,8 +300,8 @@ else:
             errors.append("CARGO_REGISTRY_TOKEN env var must read from secrets.CRATES_IO_API_KEY")
     else:
         errors.append(
-            "publish job must expose CARGO_REGISTRY_TOKEN as an env var "
-            "(at job or step scope) so cargo publish can authenticate"
+            "publish job's cargo-publish step must expose CARGO_REGISTRY_TOKEN "
+            "so cargo publish can authenticate without leaking the secret to actions"
         )
 
 print("OKS:")

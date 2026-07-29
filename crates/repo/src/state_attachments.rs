@@ -25,6 +25,12 @@ where
         }
 
         if let Some(prior_id) = attachment.supersedes {
+            if attachment.body.kind() == StateAttachmentKind::Signature {
+                return Err(HeddleError::InvalidObject(
+                    "state-signature evidence is append-only and cannot supersede another signature"
+                        .to_string(),
+                ));
+            }
             let prior = self
                 .get_state_attachment(&attachment.state_id, &prior_id)?
                 .ok_or_else(|| HeddleError::NotFound(format!("state attachment {prior_id}")))?;

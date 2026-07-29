@@ -3,7 +3,10 @@
 
 use std::sync::Arc;
 
-use crypto::{Signer, load_signer, state_signature_from_signer, verify_state_signature_bytes};
+use crypto::{
+    Signer, load_signer, state_signature_from_signer, verify_payload_signature,
+    verify_state_signature_bytes,
+};
 use objects::{
     object::{
         SignatureStatus, State, StateAttachment, StateAttachmentBody, StateId, StateSignature,
@@ -38,6 +41,64 @@ impl Repository {
         let local = self.local_identity_path();
         let device = crate::identity::device_identity_path();
         crate::identity::resolve_signer(&local, &device).map(Arc::from)
+    }
+
+    /// Sign authoritative client-authored metadata with this repository's
+    /// active client identity. Unlike state auto-signing, metadata signing is
+    /// fail-closed because an unsigned sidecar must never become authoritative
+    /// after a hosted round trip.
+    pub(crate) fn sign_client_metadata(&self, payload: &[u8]) -> Result<StateSignature> {
+        let signer = self.signing_signer().ok_or_else(|| {
+            HeddleError::Conflict(
+                "client metadata requires a protected local signing identity".to_string(),
+            )
+        })?;
+        let signature = signer.sign(payload).map_err(|error| {
+            HeddleError::Conflict(format!("failed to sign client metadata: {error}"))
+        })?;
+        Ok(StateSignature {
+            algorithm: signer.algorithm().to_string(),
+            public_key: hex::encode(signer.public_key()),
+            signature: hex::encode(signature),
+        })
+    }
+
+    /// Verify hosted metadata against this repository's temporary, manually trusted client keys.
+    /// Weft authorizes destructive and state-visibility operations but holds no signing key for
+    /// this path, so it cannot forge them. HeddleCo/weft#836 tracks replacing the manual list
+    /// with that authorization model.
+    pub(crate) fn verify_trusted_client_metadata_signature(
+        &self,
+        payload: &[u8],
+        signature: Option<&StateSignature>,
+    ) -> Result<()> {
+        let signature = signature.ok_or_else(|| {
+            HeddleError::InvalidObject(
+                "hosted metadata is unsigned; a trusted client signature is required".to_string(),
+            )
+        })?;
+        let trusted = self.config().metadata.trusted_keys.iter().any(|key| {
+            key.algorithm.eq_ignore_ascii_case(&signature.algorithm)
+                && key.public_key.eq_ignore_ascii_case(&signature.public_key)
+        });
+        if !trusted {
+            return Err(HeddleError::InvalidObject(format!(
+                "hosted metadata signer is not trusted ({}:{})",
+                signature.algorithm, signature.public_key
+            )));
+        }
+        let public_key = hex::decode(&signature.public_key).map_err(|error| {
+            HeddleError::InvalidObject(format!("invalid metadata public key: {error}"))
+        })?;
+        let signature_bytes = hex::decode(&signature.signature).map_err(|error| {
+            HeddleError::InvalidObject(format!("invalid metadata signature: {error}"))
+        })?;
+        verify_payload_signature(payload, &signature.algorithm, &public_key, &signature_bytes)
+            .map_err(|error| {
+                HeddleError::InvalidObject(format!(
+                    "hosted metadata signature failed verification: {error}"
+                ))
+            })
     }
 
     /// Produce a detached signature when a signing identity is available.
@@ -107,15 +168,12 @@ impl Repository {
             .ok_or(HeddleError::StateNotFound(*state_id))?;
         let signature = state_signature_from_signer(&state.compute_hash(), signer)
             .map_err(|error| HeddleError::Conflict(format!("failed to sign state: {error}")))?;
-        let supersedes = self
-            .latest_state_attachment(state_id, crate::StateAttachmentKind::Signature)?
-            .map(|attachment| attachment.id());
         self.put_state_attachment(&StateAttachment {
             state_id: *state_id,
             body: StateAttachmentBody::Signature(signature),
             attribution: state.attribution,
             created_at: chrono::Utc::now(),
-            supersedes,
+            supersedes: None,
         })?;
 
         debug!(algorithm = signer.algorithm(), "State signed successfully");
@@ -162,31 +220,28 @@ impl Repository {
             .get_state(state_id)?
             .ok_or(HeddleError::StateNotFound(*state_id))?;
 
-        let signature = self
-            .latest_state_attachment(state_id, crate::StateAttachmentKind::Signature)?
-            .and_then(|attachment| match attachment.body {
+        let signatures: Vec<_> = self
+            .list_state_attachments(state_id)?
+            .into_iter()
+            .filter_map(|attachment| match attachment.body {
                 StateAttachmentBody::Signature(signature) => Some(signature),
                 _ => None,
-            });
-
-        match &signature {
-            Some(sig) => {
-                let hash = state.compute_hash();
-                match verify_state_signature_bytes(sig, &hash) {
-                    Ok(()) => {
-                        debug!("Signature is valid");
-                        Ok(SignatureStatus::Valid)
-                    }
-                    Err(e) => {
-                        debug!(error = %e, "Signature verification error");
-                        Ok(SignatureStatus::Invalid)
-                    }
-                }
-            }
-            None => {
-                debug!("State has no signature");
-                Ok(SignatureStatus::Unsigned)
-            }
+            })
+            .collect();
+        if signatures.is_empty() {
+            debug!("State has no signature");
+            return Ok(SignatureStatus::Unsigned);
+        }
+        let hash = state.compute_hash();
+        if signatures
+            .iter()
+            .any(|signature| verify_state_signature_bytes(signature, &hash).is_ok())
+        {
+            debug!("At least one state signature is valid");
+            Ok(SignatureStatus::Valid)
+        } else {
+            debug!("No state signature verifies");
+            Ok(SignatureStatus::Invalid)
         }
     }
 
@@ -197,12 +252,19 @@ impl Repository {
         if !self.store.has_state(state_id)? {
             return Ok(None);
         }
+        let state = self
+            .store
+            .get_state(state_id)?
+            .ok_or(HeddleError::StateNotFound(*state_id))?;
+        let hash = state.compute_hash();
         Ok(self
-            .latest_state_attachment(state_id, crate::StateAttachmentKind::Signature)?
-            .and_then(|attachment| match attachment.body {
+            .list_state_attachments(state_id)?
+            .into_iter()
+            .filter_map(|attachment| match attachment.body {
                 StateAttachmentBody::Signature(signature) => Some(signature),
                 _ => None,
-            }))
+            })
+            .find(|signature| verify_state_signature_bytes(signature, &hash).is_ok()))
     }
 }
 
@@ -277,18 +339,30 @@ mod tests {
         let mut sig_bytes = hex::decode(&signature.signature).expect("decode");
         sig_bytes[0] ^= 0xff;
         signature.signature = hex::encode(&sig_bytes);
-        repo.put_state_attachment(&StateAttachment {
+        let malicious = StateAttachment {
             state_id,
             body: StateAttachmentBody::Signature(signature),
             attribution: state.attribution,
             created_at: chrono::Utc::now() + chrono::Duration::seconds(1),
             supersedes: Some(prior_id),
-        })
-        .expect("put corrupted signature attachment");
+        };
+        let err = repo
+            .put_state_attachment(&malicious)
+            .expect_err("signature evidence cannot supersede");
+        assert!(err.to_string().contains("append-only"));
 
-        // Should now be invalid
+        // A received pack can install immutable objects below the Repository
+        // acceptance seam. Even if such a sibling is present, verification
+        // considers every signature and cannot let it eclipse valid evidence.
+        let mut packed_sibling = malicious;
+        packed_sibling.supersedes = None;
+        repo.store()
+            .put_state_attachment(&packed_sibling)
+            .expect("simulate received packed sibling");
+
+        // The original valid evidence remains authoritative.
         let status = repo.verify_state_signature(&state_id).expect("verify");
-        assert_eq!(status, SignatureStatus::Invalid);
+        assert_eq!(status, SignatureStatus::Valid);
     }
 
     #[test]

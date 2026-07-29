@@ -84,6 +84,13 @@ struct GitLanePushPlan {
     ref_updates: Vec<GitRefUpdateTransfer>,
 }
 
+struct StagedGitLanePull {
+    allow_ref_updates: bool,
+    initial_refs: HashMap<String, ReferenceTarget>,
+    ref_updates: Vec<GitRefUpdateTransfer>,
+    checkpoints: Vec<GitCheckpointTransfer>,
+}
+
 #[derive(Clone)]
 struct GitPackPushPlan {
     transfer_id: String,
@@ -1250,6 +1257,8 @@ impl HostedClient {
         };
         let mut git_lane_repo = None;
         let mut git_pack_state = GitPackPullInstallState::default();
+        let mut staged_git_lane =
+            StagedGitLanePull::snapshot(repo, options.target_state.is_none())?;
         let mut received = 0usize;
         while let Some(message) = next_pull_message(&mut response).await? {
             match message.frame {
@@ -1372,6 +1381,7 @@ impl HostedClient {
                         repo,
                         &mut git_lane_repo,
                         &mut git_pack_state,
+                        &mut staged_git_lane,
                         transfer,
                     )?;
                     let decode_elapsed = decode_start.elapsed();
@@ -1383,6 +1393,7 @@ impl HostedClient {
                     let final_state = super::helpers::parse_proto_state_id(complete.new_state)?;
 
                     if complete.success {
+                        apply_staged_git_lane_pull(repo, &mut git_lane_repo, &mut staged_git_lane)?;
                         if native_pack_required {
                             let store_start = Instant::now();
                             let installed_ids = if let Some(pack_spool) = pack_spool.as_mut() {
@@ -1780,10 +1791,12 @@ fn redaction_push_message(
     // receiver verifies the signature + trust list and then
     // persists these bytes verbatim.
     let bytes = repo
-        .store()
-        .get_redactions_bytes_for_blob(&blob)
+        .verified_redactions_bytes_for_wire(&blob)
         .map_err(|err| {
-            ProtocolError::InvalidState(format!("load redactions sidecar for {}: {err}", hex))
+            ProtocolError::InvalidState(format!(
+                "load verified redactions sidecar for {}: {err}",
+                hex
+            ))
         })?
         .ok_or_else(|| {
             ProtocolError::InvalidState(format!(
@@ -3411,6 +3424,7 @@ fn accept_git_lane_pull_transfer(
     repo: &Repository,
     git_repo: &mut Option<SleyRepository>,
     git_pack_state: &mut GitPackPullInstallState,
+    staged: &mut StagedGitLanePull,
     transfer: GitLaneTransfer,
 ) -> Result<(), ProtocolError> {
     if repo.capability() != RepositoryCapability::GitOverlay {
@@ -3424,10 +3438,11 @@ fn accept_git_lane_pull_transfer(
             accept_git_lane_pack(repo, git_repo, git_pack_state, pack)
         }
         Some(git_lane_transfer::Body::RefUpdate(update)) => {
-            accept_git_lane_ref_update(repo, git_repo, update)
+            stage_git_lane_ref_update(staged, update)
         }
         Some(git_lane_transfer::Body::Checkpoint(checkpoint)) => {
-            record_git_lane_checkpoint(repo, git_lane_sley_repository(repo, git_repo)?, checkpoint)
+            staged.checkpoints.push(checkpoint);
+            Ok(())
         }
         None => Err(ProtocolError::InvalidState(
             "GitLaneTransfer body is required".to_string(),
@@ -3446,45 +3461,120 @@ fn accept_git_lane_pack(
     Ok(())
 }
 
-/// Apply a server-originated Git ref update on the pull stream.
-///
-/// Pull-side ref application is unconditional: we commit the local Git ref with
-/// [`RefPrecondition::Any`] and do not compare against a prior target oid. That
-/// is deliberate and **not** symmetric with push-side compare-and-set, where the
-/// client transmits `expected_target_oid` / `expected_missing` from `ListRefs`.
-/// The pull stream is single-threaded and server-trusted — the client applies
-/// ref updates in the order the server sends them after installing the
-/// accompanying pack, so there is no concurrent local writer racing this path.
-fn accept_git_lane_ref_update(
-    repo: &Repository,
-    git_repo: &mut Option<SleyRepository>,
+impl StagedGitLanePull {
+    fn snapshot(repo: &Repository, allow_ref_updates: bool) -> Result<Self, ProtocolError> {
+        let initial_refs = if repo.capability() == RepositoryCapability::GitOverlay {
+            repo.git_overlay_sley_repository()
+                .map_err(|error| ProtocolError::InvalidState(error.to_string()))?
+                .ok_or_else(|| {
+                    ProtocolError::InvalidState(
+                        "git-overlay repository has no Git store".to_string(),
+                    )
+                })?
+                .references()
+                .list_refs()
+                .map_err(|error| {
+                    ProtocolError::InvalidState(format!(
+                        "snapshot Git refs before hosted pull: {error}"
+                    ))
+                })?
+                .into_iter()
+                .map(|reference| (reference.name, reference.target))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        Ok(Self {
+            allow_ref_updates,
+            initial_refs,
+            ref_updates: Vec::new(),
+            checkpoints: Vec::new(),
+        })
+    }
+}
+
+fn stage_git_lane_ref_update(
+    staged: &mut StagedGitLanePull,
     update: GitRefUpdateTransfer,
 ) -> Result<(), ProtocolError> {
+    if !staged.allow_ref_updates {
+        return Err(ProtocolError::InvalidState(
+            "targeted object fetch cannot mutate Git refs".to_string(),
+        ));
+    }
+    if !update.name.starts_with("refs/")
+        || !GitRefName::new(&update.name).is_hosted_mirror_content()
+    {
+        return Err(ProtocolError::InvalidState(format!(
+            "hosted pull attempted to update non-mirrored Git ref {}",
+            update.name
+        )));
+    }
+    if staged
+        .ref_updates
+        .iter()
+        .any(|existing| existing.name == update.name)
+    {
+        return Err(ProtocolError::InvalidState(format!(
+            "hosted pull sent duplicate Git ref update for {}",
+            update.name
+        )));
+    }
+    staged.ref_updates.push(update);
+    Ok(())
+}
+
+/// Apply every staged Git ref only after a successful `PullComplete`.
+///
+/// One transaction uses the pull-start ref snapshot as compare-and-set
+/// preconditions. A concurrent local ref mutation therefore aborts the whole
+/// batch instead of being overwritten by a stale hosted response.
+fn apply_staged_git_lane_pull(
+    repo: &Repository,
+    git_repo: &mut Option<SleyRepository>,
+    staged: &mut StagedGitLanePull,
+) -> Result<(), ProtocolError> {
+    if staged.ref_updates.is_empty() && staged.checkpoints.is_empty() {
+        return Ok(());
+    }
     let git_repo = git_lane_sley_repository(repo, git_repo)?;
-    let target = git_oid_from_proto(
-        git_repo,
-        "GitRefUpdateTransfer.target_oid",
-        update.target_oid.as_ref(),
-    )?;
-    git_repo.read_commit(&target).map_err(|err| {
-        ProtocolError::InvalidState(format!(
-            "Git ref {} target commit {} is not present after pack receive: {err}",
-            update.name,
-            target.to_hex()
-        ))
-    })?;
     let refs = git_repo.references();
     let mut tx = refs.transaction();
-    tx.update_to(
-        update.name.clone(),
-        ReferenceTarget::Direct(target),
-        RefPrecondition::Any,
-        None,
-    );
+    for update in &staged.ref_updates {
+        let target = git_oid_from_proto(
+            git_repo,
+            "GitRefUpdateTransfer.target_oid",
+            update.target_oid.as_ref(),
+        )?;
+        git_repo.read_commit(&target).map_err(|err| {
+            ProtocolError::InvalidState(format!(
+                "Git ref {} target commit {} is not present after pack receive: {err}",
+                update.name,
+                target.to_hex()
+            ))
+        })?;
+        let precondition = staged
+            .initial_refs
+            .get(&update.name)
+            .cloned()
+            .map(RefPrecondition::MustExistAndMatch)
+            .unwrap_or(RefPrecondition::MustNotExist);
+        tx.update_to(
+            update.name.clone(),
+            ReferenceTarget::Direct(target),
+            precondition,
+            None,
+        );
+    }
     tx.commit().map_err(|err| {
-        ProtocolError::InvalidState(format!("update Git ref {}: {err}", update.name))
+        ProtocolError::InvalidState(format!("commit staged hosted Git refs: {err}"))
     })?;
-    if let Some(checkpoint) = update.checkpoint {
+    for update in staged.ref_updates.drain(..) {
+        if let Some(checkpoint) = update.checkpoint {
+            record_git_lane_checkpoint(repo, git_repo, checkpoint)?;
+        }
+    }
+    for checkpoint in staged.checkpoints.drain(..) {
         record_git_lane_checkpoint(repo, git_repo, checkpoint)?;
     }
     Ok(())
@@ -3875,6 +3965,53 @@ fn preferred_transport_mode(
     let _ = transport;
     let _ = object_count;
     TransportMode::NativePack
+}
+
+#[cfg(test)]
+mod git_lane_pull_staging_tests {
+    use super::*;
+
+    fn update(name: &str) -> GitRefUpdateTransfer {
+        GitRefUpdateTransfer {
+            name: name.to_string(),
+            ..GitRefUpdateTransfer::default()
+        }
+    }
+
+    fn staging(allow_ref_updates: bool) -> StagedGitLanePull {
+        StagedGitLanePull {
+            allow_ref_updates,
+            initial_refs: HashMap::new(),
+            ref_updates: Vec::new(),
+            checkpoints: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn hosted_pull_stages_content_refs_but_rejects_local_only_refs() {
+        let mut staged = staging(true);
+        stage_git_lane_ref_update(&mut staged, update("refs/heads/main"))
+            .expect("content ref is mirrorable");
+        assert_eq!(staged.ref_updates.len(), 1);
+
+        let error = stage_git_lane_ref_update(&mut staged, update("refs/stash"))
+            .expect_err("remote must not mutate local-only ref");
+        assert!(error.to_string().contains("non-mirrored"));
+    }
+
+    #[test]
+    fn targeted_fetch_rejects_ref_mutation_and_duplicate_updates() {
+        let mut targeted = staging(false);
+        let error = stage_git_lane_ref_update(&mut targeted, update("refs/heads/main"))
+            .expect_err("object-only fetch cannot update refs");
+        assert!(error.to_string().contains("targeted object fetch"));
+
+        let mut full = staging(true);
+        stage_git_lane_ref_update(&mut full, update("refs/tags/v1")).unwrap();
+        let duplicate = stage_git_lane_ref_update(&mut full, update("refs/tags/v1"))
+            .expect_err("duplicate ref update must be rejected");
+        assert!(duplicate.to_string().contains("duplicate"));
+    }
 }
 
 #[cfg(test)]

@@ -27,9 +27,11 @@ name: Release binaries
 # the same FSKit SDK floor.
 #
 # Signing: cosign keyless via the Sigstore public-good instance. No
-# stored secrets — the GitHub OIDC token is the trust anchor. Verifying
-# parties run `cosign verify-blob --certificate-identity-regexp ...`;
-# see RELEASING.md for the exact recipe.
+# stored secrets — the GitHub OIDC token is the trust anchor. Every
+# signing or publishing job is gated by the approval-protected `release`
+# environment before GitHub issues credentials. Verifying parties run
+# `cosign verify-blob --certificate-identity-regexp ...`; see
+# RELEASING.md for the exact recipe.
 
 on:
   push:
@@ -41,17 +43,16 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to build (vX.Y.Z or vX.Y.Z-(rc|alpha|beta)[.N]); or a synthetic prerelease tag when branch_dry_run is true.'
+        description: 'Existing tag to build (vX.Y.Z or vX.Y.Z-(rc|alpha|beta)[.N]).'
         required: true
       branch_dry_run:
-        description: 'TEMP: build from the selected branch/ref without publishing a GitHub Release.'
+        description: 'Deprecated and refused: release credentials are never exposed to branch-selected workflow code.'
         type: boolean
         required: false
         default: false
 
 permissions:
-  contents: write   # create release + upload assets
-  id-token: write   # cosign keyless OIDC
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -76,7 +77,7 @@ jobs:
       kind: ${{ steps.classify.outputs.kind }}
       publish_release: ${{ steps.classify.outputs.publish_release }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Full history is needed for both the tag→commit resolution and
           # the ancestor check against origin/main.
@@ -131,49 +132,40 @@ jobs:
             exit 1
           fi
 
-          # TEMP: branch_dry_run is for PR validation of release-only
-          # signing/notarization paths. It builds artifacts from the
-          # manually selected workflow ref, skips the GitHub Release job,
-          # and still requires a prerelease-shaped synthetic tag so asset
-          # names remain realistic. Remove once the release artifact guard
-          # has been verified in CI.
+          # A branch-selected workflow definition is not an acceptable
+          # signing boundary: it can replace this validation before asking
+          # GitHub for the Apple credentials or an OIDC token. Keep the
+          # deprecated input long enough to fail existing callers explicitly,
+          # but never build or sign from it. Approved RC dry-runs remain
+          # available by dispatching an existing prerelease tag reachable from
+          # main through the normal path below.
           if [[ "$EVENT" == "workflow_dispatch" && "$BRANCH_DRY_RUN" == "true" ]]; then
-            if [[ "$PUSH_REF" != refs/heads/* ]]; then
-              echo "::error::branch_dry_run must be dispatched from a branch ref, got: $PUSH_REF"
-              exit 1
-            fi
-            if [[ "$tag" =~ $stable_re ]]; then
-              echo "::error::branch_dry_run requires a prerelease-shaped synthetic tag (vX.Y.Z-rc.N), got stable tag '${tag}'"
-              exit 1
-            fi
-            tag_sha="$(git rev-parse HEAD)"
-            kind=prerelease
-            publish_release=false
-            echo "::notice::TEMP branch_dry_run building ${tag} from ${PUSH_REF} (${tag_sha}) without publishing a GitHub Release"
-          else
-            # 3. Reject anything that is not a real tag in this repo. This
-            #    catches workflow_dispatch with 'main', a typo, or a
-            #    deleted tag — none of which should reach the release job.
-            if ! git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
-              echo "::error::'${tag}' is not a tag in this repository"
-              exit 1
-            fi
-
-            # 4. The pipeline only ships releases from main. A tag pointed
-            #    at a feature branch (deliberately or accidentally) must
-            #    not produce signed release assets with the heddle release
-            #    OIDC identity. The tag-push trigger does not enforce
-            #    branch ancestry on its own, so we do it here.
-            tag_sha="$(git rev-parse "refs/tags/${tag}^{commit}")"
-            if ! git merge-base --is-ancestor "$tag_sha" "refs/remotes/origin/main"; then
-              echo "::error::tag '${tag}' (commit ${tag_sha}) is not reachable from origin/main — refusing to release"
-              exit 1
-            fi
-
-            publish_release=true
+            echo "::error::branch_dry_run is disabled: branch-selected workflow code cannot receive release signing or publishing credentials. Push an existing prerelease tag reachable from main and dispatch that tag for an approval-protected RC dry-run."
+            exit 1
           fi
 
-          if [[ "$EVENT" == "workflow_dispatch" && "$BRANCH_DRY_RUN" != "true" ]]; then
+          # 3. Reject anything that is not a real tag in this repo. This
+          #    catches workflow_dispatch with 'main', a typo, or a
+          #    deleted tag — none of which should reach the release job.
+          if ! git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+            echo "::error::'${tag}' is not a tag in this repository"
+            exit 1
+          fi
+
+          # 4. The pipeline only ships releases from main. A tag pointed
+          #    at a feature branch (deliberately or accidentally) must
+          #    not produce signed release assets with the heddle release
+          #    OIDC identity. The tag-push trigger does not enforce
+          #    branch ancestry on its own, so we do it here.
+          tag_sha="$(git rev-parse "refs/tags/${tag}^{commit}")"
+          if ! git merge-base --is-ancestor "$tag_sha" "refs/remotes/origin/main"; then
+            echo "::error::tag '${tag}' (commit ${tag_sha}) is not reachable from origin/main — refusing to release"
+            exit 1
+          fi
+
+          publish_release=true
+
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
             # Dispatch is the RC/dry-run path. Stable tags MUST go through
             # the push trigger so they cannot be retroactively downgraded:
             # softprops/action-gh-release UPDATES an existing release when
@@ -213,9 +205,12 @@ jobs:
   build:
     name: build non-mac ${{ matrix.target }}
     needs: validate-tag
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.branch_dry_run }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -240,7 +235,7 @@ jobs:
           # absence. Re-add when cosign ships win-arm64 binaries — tracked in
           # the "re-enable aarch64-pc-windows-msvc" issue.
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Pin to the SHA validate-tag verified, not the tag ref. If the
           # tag is force-moved between validate-tag and this step, we
@@ -250,11 +245,11 @@ jobs:
           # points at.
           ref: ${{ needs.validate-tag.outputs.tag_sha }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: release-${{ matrix.target }}
           cache-on-failure: true
@@ -304,7 +299,7 @@ jobs:
           "SUM=dist/$stage.zip.sha256"   | Out-File -Encoding ascii -Append $env:GITHUB_ENV
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Sign artifact (cosign keyless)
         shell: bash
@@ -319,7 +314,7 @@ jobs:
             "${ASSET}"
 
       - name: Upload build outputs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: heddle-${{ matrix.target }}
           path: |
@@ -335,17 +330,21 @@ jobs:
     needs: validate-tag
     runs-on: macos-26
     timeout-minutes: 120
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Same SHA pin as the CLI build job — see comment there.
           ref: ${{ needs.validate-tag.outputs.tag_sha }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: release-macos-cask
           cache-on-failure: true
@@ -453,7 +452,7 @@ jobs:
           done
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Sign macOS artifacts (cosign keyless)
         shell: bash
@@ -474,7 +473,7 @@ jobs:
           done
 
       - name: Upload macOS cask outputs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: heddle-macos-artifacts
           path: |
@@ -499,8 +498,11 @@ jobs:
     if: needs.validate-tag.outputs.publish_release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Keep the publication job anchored to the same validated commit as
           # the artifact builders. The release action itself uses downloaded
@@ -509,7 +511,7 @@ jobs:
           ref: ${{ needs.validate-tag.outputs.tag_sha }}
 
       - name: Download all build outputs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: staging
 
@@ -524,7 +526,7 @@ jobs:
           ls -la dist
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.validate-tag.outputs.tag }}
           name: ${{ needs.validate-tag.outputs.tag }}
@@ -557,16 +559,17 @@ jobs:
     if: needs.validate-tag.outputs.kind == 'stable'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    environment: release
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Render manifests from the exact commit that produced the release.
           ref: ${{ needs.validate-tag.outputs.tag_sha }}
 
       - name: Download release build outputs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: staging
 
@@ -619,7 +622,7 @@ jobs:
 
       - name: Generate release publisher token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ secrets.HEDDLE_RELEASE_APP_ID }}
           private-key: ${{ secrets.HEDDLE_RELEASE_APP_PRIVATE_KEY }}

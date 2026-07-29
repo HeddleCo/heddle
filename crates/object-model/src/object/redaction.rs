@@ -19,10 +19,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::object::{ContentHash, Principal, StateId, StateSignature};
 
-/// Stable byte prefix the signing payload begins with. Bumping this versions
-/// the payload format itself; old signatures with the old prefix continue to
-/// verify exactly as they did when written.
-pub const REDACTION_SIGNING_PAYLOAD_VERSION_TAG: &[u8] = b"hd-redact-v1\x00";
+/// Stable byte prefix the signing payload begins with. Bumping this invalidates
+/// signatures written with an older prefix unless verification also gains
+/// explicit version dispatch. Version 2 intentionally makes a clean break from
+/// the unused version 1 format.
+pub const REDACTION_SIGNING_PAYLOAD_VERSION_TAG: &[u8] = b"hd-redact-v2\x00";
 
 /// A redaction declaration on a single blob in a single state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,9 +62,9 @@ pub struct Redaction {
 
 impl Redaction {
     /// Build the canonical bytes a signer covers. Anything outside this
-    /// payload (e.g. `purged_at`, `signature` itself) is intentionally
-    /// excluded — purges happen after signing, and the signature can't sign
-    /// itself.
+    /// payload (the `signature` itself) is intentionally excluded because a
+    /// signature cannot sign itself. Lifecycle state, including `purged_at`,
+    /// is covered so a relay cannot forge a destructive purge transition.
     pub fn canonical_signing_payload(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(256);
         buf.extend_from_slice(REDACTION_SIGNING_PAYLOAD_VERSION_TAG);
@@ -78,6 +79,15 @@ impl Redaction {
         buf.extend_from_slice(self.redactor.email.as_bytes());
         buf.push(0);
         buf.extend_from_slice(self.redacted_at.to_rfc3339().as_bytes());
+        buf.push(0);
+        match self.purged_at {
+            Some(purged_at) => {
+                buf.push(1);
+                buf.extend_from_slice(purged_at.to_rfc3339().as_bytes());
+            }
+            None => buf.push(0),
+        }
+        buf.push(0);
         if let Some(supersedes) = &self.supersedes {
             buf.extend_from_slice(supersedes.as_bytes());
         }
@@ -263,6 +273,7 @@ mod tests {
     #[test]
     fn mark_purged_is_idempotent_and_observable() {
         let mut r = redaction(blob_hash(), "leaked credential");
+        let before = r.canonical_signing_payload();
         let at = Utc.with_ymd_and_hms(2026, 5, 11, 0, 0, 0).unwrap();
         assert!(!r.is_purged());
         assert!(r.mark_purged(at));
@@ -271,6 +282,11 @@ mod tests {
         // without distorting the `purged_at` audit trail.
         assert!(!r.mark_purged(Utc.with_ymd_and_hms(2026, 5, 12, 0, 0, 0).unwrap()));
         assert_eq!(r.purged_at, Some(at));
+        assert_ne!(
+            before,
+            r.canonical_signing_payload(),
+            "purge lifecycle must be covered by the signed payload"
+        );
     }
 
     #[test]
