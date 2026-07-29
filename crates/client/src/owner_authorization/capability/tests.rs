@@ -95,3 +95,84 @@ fn capability_asserting_a_right_outside_parent_grant_does_not_verify() {
         Err(AuthorizationError::CapabilityDenied(_))
     ));
 }
+
+#[test]
+fn purge_cannot_be_delegated_by_attenuation() {
+    let authority = AuthorizationKey::from_seed([41; 32]).expect("authority");
+    let recovery = RecoverySetup::recommended(vec![
+        GuardianSigner::paper(AuthorizationKey::from_seed([42; 32]).expect("paper")),
+        GuardianSigner::social(AuthorizationKey::from_seed([43; 32]).expect("social")),
+    ])
+    .expect("recovery");
+    let root = create_human_owner_root([44; 16], &authority, &recovery).expect("root");
+    let state = verify_owner_root(&root).expect("state");
+    let subject_key = AuthorizationKey::from_seed([45; 32]).expect("subject");
+    let selector = SpoolSelector {
+        root_spool_uuid: vec![46; 16],
+        path_segments: vec!["acme".to_string(), "heddle".to_string()],
+        include_descendants: false,
+    };
+    let parent = create_direct_capability(
+        &state,
+        &authority,
+        CapabilityPrincipal {
+            kind: CapabilityPrincipalKind::Agent as i32,
+            principal_id: b"parent-agent".to_vec(),
+            key: Some(subject_key.verification_key()),
+        },
+        vec![SpoolCapabilityGrant {
+            spool: Some(selector.clone()),
+            actions: vec![
+                SpoolCapabilityAction::Grant as i32,
+                SpoolCapabilityAction::Purge as i32,
+            ],
+        }],
+        100,
+        300,
+        limits(),
+    )
+    .expect("direct owner purge");
+    let parent_body = parent.capability.as_ref().expect("parent body");
+    let child_body = unsigned_capability(
+        CapabilityLineage {
+            owner_id: state.owner_id(),
+            issuer_state_hash: state.state_hash(),
+            parent_capability_id: parent_body.capability_id.clone(),
+        },
+        CapabilityPrincipal {
+            kind: CapabilityPrincipalKind::Agent as i32,
+            principal_id: b"child-agent".to_vec(),
+            key: Some(
+                AuthorizationKey::from_seed([47; 32])
+                    .expect("child")
+                    .verification_key(),
+            ),
+        },
+        vec![SpoolCapabilityGrant {
+            spool: Some(selector),
+            actions: vec![SpoolCapabilityAction::Purge as i32],
+        }],
+        100,
+        300,
+        limits(),
+    )
+    .expect("well-formed delegated purge");
+    let child = SignedOwnerCapability {
+        signature: Some(
+            subject_key
+                .sign(
+                    OWNER_CAPABILITY_DOMAIN,
+                    &capability_body(&child_body).expect("canonical child"),
+                )
+                .expect("sign delegated purge"),
+        ),
+        capability: Some(child_body),
+    };
+
+    verify_capability_chain(&state, std::slice::from_ref(&parent), 200, limits())
+        .expect("direct owner purge remains valid");
+    assert!(matches!(
+        verify_capability_chain(&state, &[parent, child], 200, limits()),
+        Err(AuthorizationError::CapabilityDenied(_))
+    ));
+}
