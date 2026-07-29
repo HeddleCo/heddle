@@ -565,6 +565,7 @@ fn git_pull_fetch_options(remote_thread: &str) -> FetchOptions {
         atomic: true,
         negotiation_restrict: None,
         negotiation_include: None,
+        negotiate_only: false,
     }
 }
 
