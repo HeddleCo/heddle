@@ -19,26 +19,6 @@ pub enum RemoteTarget {
 }
 
 impl RemoteTarget {
-    /// Whether a CLI argument is syntactically a location rather than an alias.
-    ///
-    /// Explicit locations must be parsed before repository configuration is
-    /// consulted so an alias with the same spelling cannot redirect them.
-    pub fn is_explicit_spec(s: &str) -> bool {
-        if s.contains("://")
-            || PathBuf::from(s).is_absolute()
-            || s.starts_with("./")
-            || s.starts_with("../")
-        {
-            return true;
-        }
-
-        let authority = s.split('/').next().unwrap_or(s);
-        authority.parse::<SocketAddr>().is_ok()
-            || authority
-                .rsplit_once(':')
-                .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
-    }
-
     /// Parse from a string.
     ///
     /// Accepts:
@@ -65,6 +45,21 @@ impl RemoteTarget {
             "invalid remote url (expected file://path or host:port): {}",
             s
         ))
+    }
+
+    /// Parse a target under native repository source authority.
+    ///
+    /// Native repositories may use an HTTPS repository URL after the caller
+    /// has verified the server's well-known Iroh endpoint. The regular parser
+    /// deliberately keeps treating HTTPS as non-native so Git-owned callers
+    /// retain their existing transport classification.
+    pub fn parse_native(s: &str) -> Result<Self, String> {
+        if let Some(rest) = s.strip_prefix("https://") {
+            let (addr, repo_path) = parse_https_network_with_repo_path(rest)
+                .ok_or_else(|| format!("invalid native HTTPS remote url: {s}"))?;
+            return Ok(RemoteTarget::Network { addr, repo_path });
+        }
+        Self::parse(s)
     }
 
     /// Check if this is a local target.
@@ -116,6 +111,30 @@ fn parse_network_with_repo_path(s: &str) -> Option<(SocketAddr, Option<String>)>
     Some((addr, Some(repo_path.to_string())))
 }
 
+fn parse_https_network_with_repo_path(s: &str) -> Option<(SocketAddr, Option<String>)> {
+    if s.is_empty() || s.contains(['?', '#', '@']) {
+        return None;
+    }
+    let (authority, repo_path) = match s.split_once('/') {
+        Some((authority, path)) => (authority, Some(path.trim_matches('/'))),
+        None => (s, None),
+    };
+    if authority.is_empty() {
+        return None;
+    }
+    let addr = resolve_socket_addr(authority).or_else(|| {
+        let host = authority
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(authority);
+        (host, 443).to_socket_addrs().ok()?.next()
+    })?;
+    let repo_path = repo_path
+        .filter(|path| !path.is_empty())
+        .map(str::to_string);
+    Some((addr, repo_path))
+}
+
 fn resolve_socket_addr(addr: &str) -> Option<SocketAddr> {
     if let Ok(parsed) = addr.parse::<SocketAddr>() {
         return Some(parsed);
@@ -156,21 +175,27 @@ mod tests {
     }
 
     #[test]
-    fn explicit_specs_are_classified_without_configuration_or_dns() {
-        for spec in [
-            "heddle://example.test:8421/acme/repo",
-            "file:///tmp/repo",
-            "/tmp/repo",
-            "./repo",
-            "../repo",
-            "example.test:8421",
-            "example.test:8421/acme/repo",
-            "[::1]:8421",
-        ] {
-            assert!(RemoteTarget::is_explicit_spec(spec), "{spec:?}");
+    fn native_parser_accepts_https_without_changing_generic_classification() {
+        assert!(RemoteTarget::parse("https://127.0.0.1:8431/acme/heddle").is_err());
+
+        let target = RemoteTarget::parse_native("https://127.0.0.1:8431/acme/heddle")
+            .expect("parse native HTTPS URL");
+        match target {
+            RemoteTarget::Network { addr, repo_path } => {
+                assert_eq!(addr, "127.0.0.1:8431".parse().unwrap());
+                assert_eq!(repo_path.as_deref(), Some("acme/heddle"));
+            }
+            other => panic!("expected network target, got {other:?}"),
         }
-        for alias in ["origin", "publish", "team-prod"] {
-            assert!(!RemoteTarget::is_explicit_spec(alias), "{alias:?}");
+    }
+
+    #[test]
+    fn native_https_parser_defaults_to_port_443() {
+        let target =
+            RemoteTarget::parse_native("https://127.0.0.1/acme/heddle").expect("parse HTTPS URL");
+        match target {
+            RemoteTarget::Network { addr, .. } => assert_eq!(addr.port(), 443),
+            other => panic!("expected network target, got {other:?}"),
         }
     }
 }

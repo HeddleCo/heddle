@@ -425,6 +425,30 @@ export interface AuthStatusSchema {
   subject?: string | null;
 }
 
+export interface AuthTrustReplaceSchema {
+  canonical_server: string;
+  /** SHA-256 fingerprint of the raw descriptor public key. */
+  fingerprint: string;
+  key_id: string;
+  output_kind: "auth_trust_replace";
+  /** The 64-character lowercase-hex descriptor public key. */
+  public_key: string;
+  /** `explicit` or `automatic`. */
+  source: string;
+}
+
+export interface AuthTrustShowSchema {
+  canonical_server: string;
+  /** SHA-256 fingerprint of the raw descriptor public key. */
+  fingerprint: string;
+  key_id: string;
+  output_kind: "auth_trust_show";
+  /** The 64-character lowercase-hex descriptor public key. */
+  public_key: string;
+  /** `explicit` or `automatic`. */
+  source: string;
+}
+
 export interface AvailableGitRefSchema {
   git_commit: string;
   name: string;
@@ -3239,6 +3263,8 @@ export interface HeddleVerbOutputs {
   "auth create-service-token": AuthCreateServiceTokenSchema;
   "auth logout": AuthLogoutSchema;
   "auth status": AuthStatusSchema;
+  "auth trust replace": AuthTrustReplaceSchema;
+  "auth trust show": AuthTrustShowSchema;
   capture: CaptureSchema;
   clone: CloneSchema;
   collapse: CollapseSchema;
@@ -3399,6 +3425,8 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "auth create-service-token",
   "auth logout",
   "auth status",
+  "auth trust replace",
+  "auth trust show",
   "capture",
   "clone",
   "collapse",

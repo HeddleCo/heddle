@@ -16,6 +16,9 @@ pub enum AuthCommand {
     Status {
         server: Option<String>,
     },
+    Trust {
+        command: AuthTrustCommand,
+    },
     DeriveAgent {
         server: String,
         agent_id: Option<String>,
@@ -37,5 +40,18 @@ pub enum AuthCommand {
         /// Path for the `.hcred` credential file
         /// (default: `~/.heddle/service-accounts/<name>.hcred`).
         out: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum AuthTrustCommand {
+    Show {
+        server: String,
+    },
+    Replace {
+        server: String,
+        expected_current_public_key: String,
+        key_id: String,
+        public_key: String,
     },
 }

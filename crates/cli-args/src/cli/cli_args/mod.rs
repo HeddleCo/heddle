@@ -49,7 +49,7 @@ pub use commands_args::{
     TimelineTargetArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
 };
 #[cfg(feature = "client")]
-pub use commands_client::AuthCommands;
+pub use commands_client::{AuthCommands, AuthTrustCommands};
 pub use commands_context::ContextCommands;
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 pub use commands_context::ContextReasonCommands;

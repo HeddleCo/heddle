@@ -125,6 +125,28 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["auth", "status"], &["auth", "status"]),
     #[cfg(feature = "client")]
     sample(
+        &["auth", "trust", "show"],
+        &["auth", "trust", "show", "--server", "api.heddle.test"],
+    ),
+    #[cfg(feature = "client")]
+    sample(
+        &["auth", "trust", "replace"],
+        &[
+            "auth",
+            "trust",
+            "replace",
+            "--server",
+            "api.heddle.test",
+            "--expect-current-public-key",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "--key-id",
+            "next-key",
+            "--public-key",
+            "2222222222222222222222222222222222222222222222222222222222222222",
+        ],
+    ),
+    #[cfg(feature = "client")]
+    sample(
         &["auth", "derive-agent"],
         &[
             "auth",
@@ -1612,6 +1634,10 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "agent presence complete",
             "auth logout",
             "auth status",
+            // heddle#1130: descriptor-trust inspection and explicit
+            // compare-and-swap replacement emit stable trust records.
+            "auth trust show",
+            "auth trust replace",
             "auth create-service-token",
             // heddle whoami (H6, weft#642): the machine-readable
             // acting-identity verb emits `output_kind: "whoami"`, so it

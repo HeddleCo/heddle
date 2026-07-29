@@ -8,8 +8,8 @@ use crypto::{Ed25519Signer, Signer};
 use wire::{AuthToken, ProtocolError};
 
 use super::{
-    DescriptorKeyring, HostedClient, RenewableAuthorityCredential, credential::server_keys_match,
-    fetch_endpoint_descriptor, resolve_hosted_credential,
+    HostedClient, RenewableAuthorityCredential, credential::server_keys_match,
+    resolve_hosted_credential, resolver::resolve_and_verify_endpoint_descriptor,
 };
 use crate::credentials;
 
@@ -115,27 +115,22 @@ impl HostedSession {
         self
     }
 
-    pub async fn connect(&self, fallback_addr: SocketAddr) -> Result<HostedClient, ProtocolError> {
-        let key_id = self.config.descriptor_key_id.as_deref().ok_or_else(|| {
-            ProtocolError::InvalidState(
-                "native hosted transport requires a trusted descriptor key id".to_string(),
-            )
-        })?;
-        let public_key = self.config.descriptor_public_key.ok_or_else(|| {
-            ProtocolError::InvalidState(
-                "native hosted transport requires a trusted descriptor public key".to_string(),
-            )
-        })?;
-        let mut keys = DescriptorKeyring::default();
-        keys.insert(key_id, public_key, i64::MIN, i64::MAX)
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+    pub async fn discover_endpoint(
+        &self,
+        fallback_addr: SocketAddr,
+    ) -> super::Result<super::VerifiedEndpointDescriptor> {
         let server = self
             .config
             .server_key
             .as_deref()
             .map(str::to_string)
             .unwrap_or_else(|| fallback_addr.to_string());
-        let descriptor = fetch_endpoint_descriptor(&descriptor_url(&server)?, &keys, &self.config)
+        resolve_and_verify_endpoint_descriptor(&server, &self.config).await
+    }
+
+    pub async fn connect(&self, fallback_addr: SocketAddr) -> Result<HostedClient, ProtocolError> {
+        let descriptor = self
+            .discover_endpoint(fallback_addr)
             .await
             .map_err(|error| ProtocolError::Remote(error.to_string()))?;
         let mut client = HostedClient::connect_with_config(&descriptor, &self.config)
@@ -156,15 +151,7 @@ impl HostedClient {
     /// verification and Iroh address selection remain inside the hosted-call
     /// module instead of being repeated by each caller.
     pub async fn connect_server(server: &str, config: &ClientConfig) -> Result<Self> {
-        let key_id = config.descriptor_key_id.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("native hosted transport requires a trusted descriptor key id")
-        })?;
-        let public_key = config.descriptor_public_key.ok_or_else(|| {
-            anyhow::anyhow!("native hosted transport requires a trusted descriptor public key")
-        })?;
-        let mut keys = DescriptorKeyring::default();
-        keys.insert(key_id, public_key, i64::MIN, i64::MAX)?;
-        let descriptor = fetch_endpoint_descriptor(&descriptor_url(server)?, &keys, config).await?;
+        let descriptor = resolve_and_verify_endpoint_descriptor(server, config).await?;
         Ok(Self::connect_with_config(&descriptor, config).await?)
     }
 
@@ -189,22 +176,6 @@ impl HostedClient {
             .connect(addr)
             .await?)
     }
-}
-
-fn descriptor_url(server: &str) -> Result<String, ProtocolError> {
-    let authority = server
-        .strip_prefix("https://")
-        .or_else(|| server.strip_prefix("heddle://"))
-        .unwrap_or(server)
-        .trim_end_matches('/');
-    if server.starts_with("http://") || authority.is_empty() || authority.contains('/') {
-        return Err(ProtocolError::InvalidState(
-            "native hosted bootstrap requires an HTTPS server authority".to_string(),
-        ));
-    }
-    Ok(format!(
-        "https://{authority}/.well-known/heddle/iroh-endpoint"
-    ))
 }
 
 fn validated_authenticated_principal(credential: &credentials::ServerCredential) -> Result<String> {
@@ -250,29 +221,4 @@ fn shared_device_proof_key(server_key: &str, token: &str) -> Result<Option<Strin
         return Ok(None);
     }
     Ok(Some(identity.private_key_pem))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::descriptor_url;
-
-    #[test]
-    fn descriptor_bootstrap_is_https_and_well_known() {
-        assert_eq!(
-            descriptor_url("heddle://weft.example:8421").unwrap(),
-            "https://weft.example:8421/.well-known/heddle/iroh-endpoint"
-        );
-        assert!(descriptor_url("http://weft.example:8421").is_err());
-    }
-
-    #[tokio::test]
-    async fn connect_server_requires_a_descriptor_trust_root_before_network_io() {
-        let error = crate::hosted::HostedClient::connect_server(
-            "weft.example:8421",
-            &cli_shared::ClientConfig::default(),
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("trusted descriptor key id"));
-    }
 }

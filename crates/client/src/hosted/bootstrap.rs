@@ -14,13 +14,24 @@ use crypto::Ed25519Signer;
 use iroh::{EndpointAddr, EndpointId, RelayUrl};
 use prost::Message;
 use reqwest::{
-    Client,
-    header::{HOST, HeaderValue},
+    Client, StatusCode,
+    header::{CONTENT_TYPE, HOST, HeaderValue},
+    redirect::Policy,
 };
+use serde::Deserialize;
 
 use super::{HostedError, Result};
 
 const MAX_DESCRIPTOR_BYTES: usize = 64 * 1024;
+const MAX_DESCRIPTOR_KEY_DOCUMENT_BYTES: usize = 4 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DescriptorKeyDocument {
+    pub version: u32,
+    pub key_id: String,
+    pub public_key: String,
+}
 
 /// Trusted descriptor-signing keys, keyed independently from Iroh endpoint and
 /// hosted capability identities.
@@ -160,6 +171,14 @@ pub async fn fetch_endpoint_descriptor(
     keys: &DescriptorKeyring,
     config: &ClientConfig,
 ) -> Result<VerifiedEndpointDescriptor> {
+    let signed = fetch_signed_endpoint_descriptor(url, config).await?;
+    keys.verify(&signed, now_unix_millis()?)
+}
+
+pub async fn fetch_signed_endpoint_descriptor(
+    url: &str,
+    config: &ClientConfig,
+) -> Result<SignedEndpointDescriptor> {
     if !url.starts_with("https://") {
         return Err(HostedError::InvalidDescriptor(
             "endpoint descriptor URL must use HTTPS".to_string(),
@@ -170,30 +189,73 @@ pub async fn fetch_endpoint_descriptor(
     if let Some(host_header) = host_header {
         request = request.header(HOST, host_header);
     }
-    let response = request.send().await?.error_for_status()?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_DESCRIPTOR_BYTES as u64)
-    {
+    let response = request.send().await?;
+    if response.status() == StatusCode::NOT_FOUND {
+        return Err(HostedError::EndpointDescriptorUnavailable);
+    }
+    if response.status() != StatusCode::OK {
+        return Err(HostedError::InvalidDescriptor(format!(
+            "endpoint descriptor request returned HTTP {}",
+            response.status()
+        )));
+    }
+    let body = bounded_response_body(response, MAX_DESCRIPTOR_BYTES, "endpoint descriptor").await?;
+    Ok(SignedEndpointDescriptor::decode(body.as_slice())?)
+}
+
+pub async fn fetch_descriptor_key_document(
+    url: &str,
+    config: &ClientConfig,
+) -> Result<DescriptorKeyDocument> {
+    if !url.starts_with("https://") {
         return Err(HostedError::InvalidDescriptor(
-            "endpoint descriptor is oversized".to_string(),
+            "descriptor trust URL must use HTTPS".to_string(),
         ));
     }
-    let body = response.bytes().await?;
-    if body.len() > MAX_DESCRIPTOR_BYTES {
+    let (client, request_url, host_header) = bootstrap_http_client(url, config).await?;
+    let mut request = client.get(request_url);
+    if let Some(host_header) = host_header {
+        request = request.header(HOST, host_header);
+    }
+    let response = request.send().await?;
+    if response.status() == StatusCode::NOT_FOUND {
+        return Err(HostedError::DescriptorTrustUnavailable);
+    }
+    if response.status() != StatusCode::OK {
+        return Err(HostedError::InvalidDescriptor(format!(
+            "descriptor trust request returned HTTP {}",
+            response.status()
+        )));
+    }
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if !content_type.is_some_and(|value| value.eq_ignore_ascii_case("application/json")) {
         return Err(HostedError::InvalidDescriptor(
-            "endpoint descriptor is oversized".to_string(),
+            "descriptor trust response must use application/json".to_string(),
         ));
     }
-    let signed = SignedEndpointDescriptor::decode(body)?;
-    keys.verify(&signed, now_unix_millis()?)
+    let body = bounded_response_body(
+        response,
+        MAX_DESCRIPTOR_KEY_DOCUMENT_BYTES,
+        "descriptor trust response",
+    )
+    .await?;
+    serde_json::from_slice(&body).map_err(|error| {
+        HostedError::InvalidDescriptor(format!("descriptor trust response is malformed: {error}"))
+    })
 }
 
 async fn bootstrap_http_client(
     url: &str,
     config: &ClientConfig,
 ) -> Result<(Client, reqwest::Url, Option<HeaderValue>)> {
-    let mut builder = Client::builder().timeout(Duration::from_secs(config.timeout_secs.max(1)));
+    let mut builder = Client::builder()
+        .timeout(Duration::from_secs(config.timeout_secs.max(1)))
+        .redirect(Policy::none());
     if let Some(ca_pem) = config.tls_ca_certificate_pem.as_deref() {
         let certificates = reqwest::Certificate::from_pem_bundle(ca_pem.as_bytes())?;
         if certificates.is_empty() {
@@ -209,6 +271,31 @@ async fn bootstrap_http_client(
         builder = builder.resolve_to_addrs(&server_name, &addresses);
     }
     Ok((builder.build()?, target.url, target.host_header))
+}
+
+async fn bounded_response_body(
+    mut response: reqwest::Response,
+    limit: usize,
+    label: &str,
+) -> Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(HostedError::InvalidDescriptor(format!(
+            "{label} is oversized"
+        )));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(HostedError::InvalidDescriptor(format!(
+                "{label} is oversized"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 struct BootstrapTarget {

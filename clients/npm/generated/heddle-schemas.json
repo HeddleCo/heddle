@@ -11835,6 +11835,84 @@
       "title": "AuthStatusSchema",
       "type": "object"
     },
+    "auth trust replace": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "canonical_server": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "description": "SHA-256 fingerprint of the raw descriptor public key.",
+          "type": "string"
+        },
+        "key_id": {
+          "type": "string"
+        },
+        "output_kind": {
+          "enum": [
+            "auth_trust_replace"
+          ],
+          "type": "string"
+        },
+        "public_key": {
+          "description": "The 64-character lowercase-hex descriptor public key.",
+          "type": "string"
+        },
+        "source": {
+          "description": "`explicit` or `automatic`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "canonical_server",
+        "source",
+        "key_id",
+        "public_key",
+        "fingerprint"
+      ],
+      "title": "AuthTrustSchema",
+      "type": "object"
+    },
+    "auth trust show": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "canonical_server": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "description": "SHA-256 fingerprint of the raw descriptor public key.",
+          "type": "string"
+        },
+        "key_id": {
+          "type": "string"
+        },
+        "output_kind": {
+          "enum": [
+            "auth_trust_show"
+          ],
+          "type": "string"
+        },
+        "public_key": {
+          "description": "The 64-character lowercase-hex descriptor public key.",
+          "type": "string"
+        },
+        "source": {
+          "description": "`explicit` or `automatic`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "canonical_server",
+        "source",
+        "key_id",
+        "public_key",
+        "fingerprint"
+      ],
+      "title": "AuthTrustSchema",
+      "type": "object"
+    },
     "capture": {
       "$defs": {
         "ActionTemplateSchema": {

@@ -1026,7 +1026,7 @@ impl RecoveryAdvice {
             format!(
                 "Refusing to {action}: remote '{remote}' is a Git remote, not a Heddle-native remote"
             ),
-            "Use a Heddle-native remote here, or clone/adopt that Git remote in a Git-overlay checkout.",
+            "For a native server, use `heddle://<host>/<repo>` to force Heddle transport, or clone/adopt this Git remote in a Git-overlay checkout.",
             format!("remote '{remote}' resolves to Git storage"),
             format!(
                 "{action} would route a Git repository through Heddle-native sync and fail after setup work"
@@ -1037,6 +1037,23 @@ impl RecoveryAdvice {
                 "heddle clone <remote> <fresh-path>".to_string(),
                 "heddle remote add <name> <url>".to_string(),
             ],
+        )
+    }
+
+    pub fn native_https_iroh_endpoint_missing(action: &str, remote: &str) -> Self {
+        Self::safety_refusal(
+            "native_https_iroh_endpoint_missing",
+            format!(
+                "Refusing to {action}: HTTPS server for remote '{remote}' does not advertise an Iroh endpoint"
+            ),
+            "Configure the server to publish `/.well-known/heddle/iroh-endpoint`, then retry. Heddle will not silently fall back to Git transport.",
+            format!(
+                "remote '{remote}' returned no Iroh endpoint descriptor at `/.well-known/heddle/iroh-endpoint`"
+            ),
+            "falling back would silently downgrade a native repository to Git transport",
+            "remote configuration, Heddle refs, Git refs, and worktree files were left unchanged",
+            "heddle help remotes",
+            vec!["heddle help remotes".to_string()],
         )
     }
 

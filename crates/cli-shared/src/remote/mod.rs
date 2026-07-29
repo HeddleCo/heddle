@@ -12,7 +12,7 @@ use std::{
 };
 
 use objects::fs_atomic::write_file_atomic;
-use repo::Repository;
+use repo::{Repository, RepositoryCapability};
 use serde::{Deserialize, Serialize};
 pub use target::RemoteTarget;
 
@@ -167,15 +167,6 @@ pub fn resolve_remote_with_key_and_insecure(
     repo: &Repository,
     remote_arg: Option<&str>,
 ) -> Result<(RemoteTarget, Option<String>, bool)> {
-    if let Some(spec) = remote_arg
-        && RemoteTarget::is_explicit_spec(spec)
-    {
-        let target =
-            RemoteTarget::parse(spec).map_err(|_| RemoteError::InvalidUrl(spec.to_string()))?;
-        let key = credential_key_from_url(spec);
-        return Ok((target, key, false));
-    }
-
     let cfg = RemoteConfig::open(repo)?;
     let spec = match remote_arg {
         Some(spec) => spec.to_string(),
@@ -185,13 +176,38 @@ pub fn resolve_remote_with_key_and_insecure(
             .to_string(),
     };
 
+    // Named remote first so configured `insecure` applies even when the
+    // name also happens to parse as a bare host:port.
+    if let Ok(remote) = cfg.get(&spec)
+        && let Ok(target) = parse_target_for_repository(repo, &remote.url)
+    {
+        let key = credential_key_from_url(&remote.url);
+        return Ok((target, key, remote.insecure));
+    }
+
+    if let Ok(target) = parse_target_for_repository(repo, &spec) {
+        let key = credential_key_from_url(&spec);
+        return Ok((target, key, false));
+    }
+
     let remote = cfg.get(&spec)?;
-    if let Ok(target) = RemoteTarget::parse(&remote.url) {
+    if let Ok(target) = parse_target_for_repository(repo, &remote.url) {
         let key = credential_key_from_url(&remote.url);
         return Ok((target, key, remote.insecure));
     }
 
     Err(RemoteError::InvalidUrl(remote.url))
+}
+
+/// Parse a remote using the repository's source authority to interpret HTTPS.
+pub fn parse_target_for_repository(
+    repo: &Repository,
+    url: &str,
+) -> std::result::Result<RemoteTarget, String> {
+    match repo.capability() {
+        RepositoryCapability::NativeHeddle => RemoteTarget::parse_native(url),
+        RepositoryCapability::GitOverlay => RemoteTarget::parse(url),
+    }
 }
 
 /// Whether a named remote (or the default) has `insecure = true` in
@@ -288,82 +304,50 @@ mod tests {
     }
 
     #[test]
-    fn explicit_host_port_cannot_be_shadowed_by_a_named_remote() {
-        let temp = unique_temp_dir("heddle-remote-shadow-test");
+    fn native_https_remote_round_trips_without_rewriting_the_scheme() {
+        let temp = unique_temp_dir("heddle-https-remote-test");
+        fs::create_dir_all(&temp).expect("create temp dir");
+        let repo = Repository::init_default(&temp).expect("init repo");
+        let url = "https://127.0.0.1:8431/acme/heddle";
+
+        let mut cfg = RemoteConfig::open(&repo).expect("open config");
+        cfg.add(
+            "origin",
+            Remote {
+                url: url.to_string(),
+                insecure: false,
+            },
+        )
+        .expect("add HTTPS remote");
+
+        let reopened = RemoteConfig::open(&repo).expect("reopen config");
+        assert_eq!(reopened.get("origin").expect("load remote").url, url);
+        let (target, key) =
+            resolve_remote_with_key(&repo, Some("origin")).expect("resolve native HTTPS remote");
+        assert!(matches!(target, RemoteTarget::Network { .. }));
+        assert_eq!(key.as_deref(), Some("127.0.0.1:8431"));
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn configured_host_port_remote_honors_insecure_policy() {
+        let temp = unique_temp_dir("heddle-host-port-policy-test");
         fs::create_dir_all(&temp).expect("create temp dir");
         let repo = Repository::init_default(&temp).expect("init repo");
         let mut cfg = RemoteConfig::open(&repo).expect("open config");
         cfg.add(
             "127.0.0.1:8421",
             Remote {
-                url: "heddle://127.0.0.1:9999/attacker/repo".to_string(),
-                insecure: true,
-            },
-        )
-        .expect("add shadowing remote");
-
-        let (target, key, insecure) =
-            resolve_remote_with_key_and_insecure(&repo, Some("127.0.0.1:8421"))
-                .expect("resolve explicit address");
-        match target {
-            RemoteTarget::Network { addr, repo_path } => {
-                assert_eq!(addr.port(), 8421);
-                assert!(repo_path.is_none());
-            }
-            other => panic!("expected network target, got {other:?}"),
-        }
-        assert_eq!(key.as_deref(), Some("127.0.0.1:8421"));
-        assert!(
-            !insecure,
-            "an explicit address must not inherit alias policy"
-        );
-
-        let _ = fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn explicit_location_does_not_consult_remote_configuration() {
-        let temp = unique_temp_dir("heddle-explicit-remote-test");
-        fs::create_dir_all(&temp).expect("create temp dir");
-        let repo = Repository::init_default(&temp).expect("init repo");
-        fs::write(repo.heddle_dir().join("remotes.toml"), b"not = [valid")
-            .expect("write malformed remote config");
-
-        let (target, _, insecure) =
-            resolve_remote_with_key_and_insecure(&repo, Some("127.0.0.1:8421"))
-                .expect("explicit address bypasses aliases");
-        assert!(
-            matches!(
-                target,
-                RemoteTarget::Network {
-                    addr,
-                    repo_path: None,
-                } if addr.port() == 8421
-            ),
-            "explicit address must be resolved independently"
-        );
-        assert!(!insecure);
-
-        let _ = fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn bare_remote_name_still_uses_configured_target_and_policy() {
-        let temp = unique_temp_dir("heddle-named-remote-test");
-        fs::create_dir_all(&temp).expect("create temp dir");
-        let repo = Repository::init_default(&temp).expect("init repo");
-        let mut cfg = RemoteConfig::open(&repo).expect("open config");
-        cfg.add(
-            "origin",
-            Remote {
                 url: "heddle://127.0.0.1:9999/acme/repo".to_string(),
                 insecure: true,
             },
         )
-        .expect("add named remote");
+        .expect("add host:port-named remote");
 
-        let (target, key, insecure) = resolve_remote_with_key_and_insecure(&repo, Some("origin"))
-            .expect("resolve named remote");
+        let (target, key, insecure) =
+            resolve_remote_with_key_and_insecure(&repo, Some("127.0.0.1:8421"))
+                .expect("resolve host:port-named remote");
         match target {
             RemoteTarget::Network { addr, repo_path } => {
                 assert_eq!(addr.port(), 9999);
@@ -372,7 +356,10 @@ mod tests {
             other => panic!("expected network target, got {other:?}"),
         }
         assert_eq!(key.as_deref(), Some("127.0.0.1:9999"));
-        assert!(insecure, "named remotes retain their configured policy");
+        assert!(
+            insecure,
+            "configured insecure policy must survive host:port-like remote names"
+        );
 
         let _ = fs::remove_dir_all(temp);
     }
