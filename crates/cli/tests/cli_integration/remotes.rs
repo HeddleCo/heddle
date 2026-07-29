@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+use cli::remote::RemoteConfig;
 use objects::object::{MarkerName, ThreadName};
 use sley::{ConfigEdit, ConfigEditPlan};
 
@@ -321,7 +322,7 @@ fn test_cli_remote_operations() {
 fn native_remote_add_rejects_local_git_remote_before_configuring_default() {
     let temp = TempDir::new().unwrap();
     let bare = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
+    let repo = Repository::init_default(temp.path()).expect("init native Heddle repo");
     SleyRepository::init_bare(bare.path()).expect("init bare Git remote");
 
     let output = heddle_output(
@@ -358,12 +359,16 @@ fn native_remote_add_rejects_local_git_remote_before_configuring_default() {
         ]),
         "Git remote mismatch should offer clone/adopt path before native remote setup: {envelope}"
     );
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("heddle://<host>/<repo>")),
+        "Git remote mismatch should name the explicit native scheme: {envelope}"
+    );
 
-    let remotes = heddle(&["--output", "json", "remote", "list"], Some(temp.path())).unwrap();
-    let remotes: Value = serde_json::from_str(&remotes).expect("remote list JSON");
-    assert_eq!(remotes["remotes"].as_array().unwrap().len(), 0);
-    let verify = verify_json(temp.path());
-    assert_eq!(verify["default_remote"], Value::Null);
+    let remotes = RemoteConfig::open(&repo).expect("open native remotes after refusal");
+    assert!(remotes.list().is_empty());
+    assert!(remotes.default_name().is_none());
 }
 
 #[test]

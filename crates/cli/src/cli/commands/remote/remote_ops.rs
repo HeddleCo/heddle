@@ -1152,7 +1152,7 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
 }
 
 /// Execute remote command.
-pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
+pub async fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
     match &command {
@@ -1190,7 +1190,7 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             Ok(())
         }
         RemoteCommands::Add { name, url } => {
-            super::preflight_native_remote_transport(&repo, Some(&url), "remote add")?;
+            super::preflight_native_remote_transport(&repo, Some(&url), "remote add").await?;
             let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::new)?;
             cfg.add(
                 &name,

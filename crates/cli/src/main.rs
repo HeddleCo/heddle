@@ -614,7 +614,7 @@ async fn async_main() -> Result<()> {
             .await
         }
 
-        Commands::Remote { command } => cmd_remote(&cli, command.clone()),
+        Commands::Remote { command } => cmd_remote(&cli, command.clone()).await,
 
         #[cfg(feature = "client")]
         Commands::Auth { command } => {

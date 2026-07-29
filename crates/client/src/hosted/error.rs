@@ -5,6 +5,8 @@ use api::heddle::api::v1alpha1::{CallFailure, ErrorDetail};
 pub enum HostedError {
     #[error("server does not publish descriptor trust")]
     DescriptorTrustUnavailable,
+    #[error("server does not advertise an Iroh endpoint at /.well-known/heddle/iroh-endpoint")]
+    EndpointDescriptorUnavailable,
     #[error("{0}")]
     DescriptorTrust(String),
     #[error("hosted endpoint descriptor is invalid: {0}")]
