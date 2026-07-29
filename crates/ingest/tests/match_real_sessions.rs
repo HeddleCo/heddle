@@ -77,10 +77,11 @@ fn changed_files(repo: &Path, sha: &str) -> Vec<String> {
 #[ignore = "reads real $HOME transcript store; run with --ignored"]
 fn matches_real_sessions_against_recent_heddle_commits() {
     let repo_root = resolve_repo_root();
-    if !repo_root.join(".git").exists() {
-        eprintln!("skip: {} is not a git repo", repo_root.display());
-        return;
-    }
+    assert!(
+        repo_root.join(".git").exists(),
+        "{} is not a git repo",
+        repo_root.display()
+    );
 
     let roots = TranscriptRoots::default();
     let transcripts = load_transcripts(&repo_root, &roots);
@@ -89,10 +90,10 @@ fn matches_real_sessions_against_recent_heddle_commits() {
         transcripts.len(),
         repo_root.display()
     );
-    if transcripts.is_empty() {
-        eprintln!("no transcripts under $HOME — nothing to score");
-        return;
-    }
+    assert!(
+        !transcripts.is_empty(),
+        "no transcripts under $HOME; ignored smoke coverage is unavailable"
+    );
 
     let matcher =
         TranscriptMatcher::new(&transcripts, &repo_root).with_params(MatchParams::default());

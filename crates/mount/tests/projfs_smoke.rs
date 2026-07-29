@@ -69,29 +69,20 @@ use mount::{ContentAddressedMount, ProjFsSession, ProjFsShell};
 use repo::Repository;
 use tempfile::TempDir;
 
-/// Common skip-or-fail probe at the top of every test. Returns
-/// `true` when the test should run; `false` when it should silently
-/// no-op. Treats absence of `HEDDLE_PROJFS_AVAILABLE=1` as "this
-/// host opted out" (the CI matrix sets it; a generic dev box does
-/// not). Treats absence of `ProjectedFSLib.dll` as a soft skip with
-/// an eprintln so the CI log shows the reason.
-fn projfs_or_skip() -> bool {
-    if env::var("HEDDLE_PROJFS_AVAILABLE").as_deref() != Ok("1") {
-        eprintln!(
-            "skipping: set HEDDLE_PROJFS_AVAILABLE=1 to opt this host \
-             into the ProjFS smoke tests"
-        );
-        return false;
-    }
-    if !ProjFsShell::is_runtime_available() {
-        eprintln!(
-            "skipping: ProjFS runtime not available \
-             (run `Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS` \
-             from an admin PowerShell)"
-        );
-        return false;
-    }
-    true
+/// Require the opt-in marker and runtime before an ignored smoke test runs.
+///
+/// These tests are ignored by default. Once explicitly selected, an unavailable
+/// runtime is a setup failure rather than coverage that can be counted as passed.
+fn require_projfs() {
+    assert_eq!(
+        env::var("HEDDLE_PROJFS_AVAILABLE").as_deref(),
+        Ok("1"),
+        "set HEDDLE_PROJFS_AVAILABLE=1 to opt this host into the ProjFS smoke tests"
+    );
+    assert!(
+        ProjFsShell::is_runtime_available(),
+        "ProjFS runtime not available; enable Client-ProjFS or Projected-FS"
+    );
 }
 
 /// Build a tiny repo with one captured file (`hello.txt` containing
@@ -137,9 +128,7 @@ fn wait_for(target: &Path, expect_present: bool, dur: Duration) {
 #[test]
 #[ignore = "requires Windows + ProjFS; opt-in via HEDDLE_PROJFS_AVAILABLE=1"]
 fn projfs_mount_serves_blob_content() {
-    if !projfs_or_skip() {
-        return;
-    }
+    require_projfs();
     let (_repo_dir, repo) = build_fixture();
     let (session, mountpoint) = mount_fixture(repo);
 
@@ -153,9 +142,7 @@ fn projfs_mount_serves_blob_content() {
 #[test]
 #[ignore = "requires Windows + ProjFS; opt-in via HEDDLE_PROJFS_AVAILABLE=1"]
 fn projfs_mount_round_trips_writes_to_existing_file() {
-    if !projfs_or_skip() {
-        return;
-    }
+    require_projfs();
     let (_repo_dir, repo) = build_fixture();
     let (session, mountpoint) = mount_fixture(repo);
 
@@ -203,9 +190,7 @@ fn projfs_mount_round_trips_writes_to_existing_file() {
 #[test]
 #[ignore = "requires Windows + ProjFS; opt-in via HEDDLE_PROJFS_AVAILABLE=1"]
 fn projfs_mount_serves_concurrent_readers() {
-    if !projfs_or_skip() {
-        return;
-    }
+    require_projfs();
     let (_repo_dir, repo) = build_fixture();
     let (session, mountpoint) = mount_fixture(repo);
 
@@ -240,9 +225,7 @@ fn projfs_mount_serves_concurrent_readers() {
 #[test]
 #[ignore = "requires Windows + ProjFS; opt-in via HEDDLE_PROJFS_AVAILABLE=1"]
 fn projfs_mount_unmounts_cleanly_on_session_drop() {
-    if !projfs_or_skip() {
-        return;
-    }
+    require_projfs();
     let (_repo_dir, repo) = build_fixture();
     let (session, mountpoint) = mount_fixture(repo);
     let target = mountpoint.path().join("hello.txt");
@@ -312,9 +295,7 @@ fn init_default_on_windows_tempdir_does_not_permission_deny() {
 #[test]
 #[ignore = "requires Windows + ProjFS; opt-in via HEDDLE_PROJFS_AVAILABLE=1"]
 fn projfs_mount_hides_instance_id_sidecar_from_listing() {
-    if !projfs_or_skip() {
-        return;
-    }
+    require_projfs();
     let (_repo_dir, repo) = build_fixture();
     let (session, mountpoint) = mount_fixture(repo);
 

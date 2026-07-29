@@ -661,12 +661,10 @@ mod tests {
     fn unlink_fails_closed_when_matching_file_cannot_be_removed() {
         use std::os::unix::fs::PermissionsExt;
 
-        if running_as_root() {
-            // Root bypasses the read-only-dir guard; this simulation only holds
-            // for an unprivileged user. The happy-path + no-op tests still
-            // cover removal semantics under root.
-            return;
-        }
+        assert!(
+            !running_as_root(),
+            "unlink_fails_closed_when_matching_file_cannot_be_removed requires an unprivileged user"
+        );
 
         let temp = TempDir::new().expect("temp dir");
         let dir = temp.path().join("home");

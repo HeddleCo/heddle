@@ -4209,10 +4209,6 @@ mod fuse_smoke {
     use super::*;
     use crate::FuseShell;
 
-    fn fuse_available() -> bool {
-        std::path::Path::new("/dev/fuse").exists()
-    }
-
     /// Wait for `path` to come up, bounded by `deadline`.
     fn wait_until_exists(path: &std::path::Path, deadline: Duration) {
         let start = std::time::Instant::now();
@@ -4222,11 +4218,12 @@ mod fuse_smoke {
     }
 
     #[test]
+    #[ignore = "requires /dev/fuse; exercised by the FUSE mount smoke CI lane"]
     fn fuse_open_close_read_round_trip() {
-        if !fuse_available() {
-            eprintln!("skipping: /dev/fuse not present");
-            return;
-        }
+        assert!(
+            std::path::Path::new("/dev/fuse").exists(),
+            "fuse_open_close_read_round_trip requires /dev/fuse"
+        );
         let repo_dir = TempDir::new().unwrap();
         let repo = Repository::init_default(repo_dir.path()).unwrap();
         std::fs::write(repo_dir.path().join("seed.txt"), b"hello").unwrap();
@@ -4234,13 +4231,9 @@ mod fuse_smoke {
 
         let mount = ContentAddressedMount::new(repo, "main").unwrap();
         let mountpoint = TempDir::new().unwrap();
-        let session = match FuseShell::new(mount).mount_background(mountpoint.path()) {
-            Ok(s) => s,
-            Err(_) => {
-                eprintln!("skipping: FUSE mount failed (likely no kernel module)");
-                return;
-            }
-        };
+        let session = FuseShell::new(mount)
+            .mount_background(mountpoint.path())
+            .expect("mount FUSE session");
         wait_until_exists(&mountpoint.path().join("seed.txt"), Duration::from_secs(5));
         let read = std::fs::read_to_string(mountpoint.path().join("seed.txt")).unwrap();
         assert_eq!(read, "hello");

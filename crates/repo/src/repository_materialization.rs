@@ -1362,22 +1362,20 @@ mod tests {
     /// hardlinks: hardlinks share inodes (the bug we fixed),
     /// reflinks do not.
     ///
-    /// On non-CoW filesystems the test soft-skips — `fs::copy`
-    /// also gives distinct inodes, but the test is targeted at
-    /// the reflink path specifically.
+    /// Ignored by default because `fs::copy` also gives distinct
+    /// inodes on non-CoW filesystems while this test specifically
+    /// targets the reflink path.
     #[test]
     #[cfg(unix)]
+    #[ignore = "requires a reflink-capable filesystem"]
     fn materialize_uses_reflink_when_filesystem_supports_it() {
         use std::os::unix::fs::MetadataExt;
 
         let temp_dir = TempDir::new().unwrap();
-        if !filesystem_supports_reflink(temp_dir.path()) {
-            eprintln!(
-                "[skip] filesystem at {:?} does not advertise reflink support",
-                temp_dir.path()
-            );
-            return;
-        }
+        assert!(
+            filesystem_supports_reflink(temp_dir.path()),
+            "materialize_uses_reflink_when_filesystem_supports_it requires reflink support"
+        );
 
         let repo = Repository::init_default(temp_dir.path()).unwrap();
         let blob = Blob::from("reflink correctness check, kept under compression threshold");
@@ -1719,22 +1717,20 @@ mod tests {
     /// without aliasing) rather than the in-memory `fs::write` path
     /// (which costs full duplicates).
     ///
-    /// On non-CoW filesystems the test soft-skips. The materializer
-    /// will use `fs::copy` and the storage win is not recoverable
-    /// without reflink support.
+    /// Ignored by default because the materializer uses `fs::copy`
+    /// on non-CoW filesystems and the reflink storage win is not
+    /// available there.
     #[test]
     #[cfg(unix)]
+    #[ignore = "requires a reflink-capable filesystem"]
     fn packed_repo_storage_win_after_warm_and_materialize() {
         use std::{collections::HashSet, os::unix::fs::MetadataExt};
 
         let temp_dir = TempDir::new().unwrap();
-        if !filesystem_supports_reflink(temp_dir.path()) {
-            eprintln!(
-                "[skip] filesystem at {:?} does not support reflinks; storage-win test is reflink-specific",
-                temp_dir.path()
-            );
-            return;
-        }
+        assert!(
+            filesystem_supports_reflink(temp_dir.path()),
+            "packed_repo_storage_win_after_warm_and_materialize requires reflink support"
+        );
 
         let repo = Repository::init_default(temp_dir.path()).unwrap();
 

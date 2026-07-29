@@ -36,13 +36,11 @@ use tempfile::TempDir;
 #[test]
 #[ignore = "requires sudo / admin to mount NFS; opt-in via HEDDLE_NFS_AVAILABLE=1"]
 fn nfs_mount_serves_blob_content() {
-    if env::var("HEDDLE_NFS_AVAILABLE").as_deref() != Ok("1") {
-        eprintln!(
-            "skipping nfs_mount_serves_blob_content: \
-             set HEDDLE_NFS_AVAILABLE=1 (with sudo/admin) to enable"
-        );
-        return;
-    }
+    assert_eq!(
+        env::var("HEDDLE_NFS_AVAILABLE").as_deref(),
+        Ok("1"),
+        "set HEDDLE_NFS_AVAILABLE=1 (with sudo/admin) to run the ignored NFS smoke test"
+    );
 
     // Build a tiny repo with one captured file.
     let repo_dir = TempDir::new().unwrap();

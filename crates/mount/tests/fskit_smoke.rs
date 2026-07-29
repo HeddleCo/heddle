@@ -28,13 +28,11 @@ use tempfile::TempDir;
 #[test]
 #[ignore = "requires macOS 26.0 + FSKit entitlement; opt-in via HEDDLE_FSKIT_AVAILABLE=1"]
 fn fskit_session_constructs_for_extension_bootstrap() {
-    if env::var("HEDDLE_FSKIT_AVAILABLE").as_deref() != Ok("1") {
-        eprintln!(
-            "skipping fskit_session_constructs_for_extension_bootstrap: \
-             set HEDDLE_FSKIT_AVAILABLE=1 to enable"
-        );
-        return;
-    }
+    assert_eq!(
+        env::var("HEDDLE_FSKIT_AVAILABLE").as_deref(),
+        Ok("1"),
+        "set HEDDLE_FSKIT_AVAILABLE=1 to run the ignored FSKit smoke test"
+    );
     if !FSKitShell::is_runtime_available() {
         panic!(
             "FSKit not available at runtime — this test requires macOS 26.0+. \

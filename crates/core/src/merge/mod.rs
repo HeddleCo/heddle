@@ -3079,18 +3079,16 @@ mod tests {
 
         let dir = tempfile::TempDir::new().unwrap();
         // Initialize a git repo with no user.name.
-        let init_status = Command::new("git")
+        let status = Command::new("git")
             .arg("-C")
             .arg(dir.path())
             .args(["init", "--quiet"])
-            .status();
-        let Ok(status) = init_status else {
-            eprintln!("git not on PATH — skipping");
-            return;
-        };
-        if !status.success() {
-            return;
-        }
+            .status()
+            .expect("git must be on PATH for the native Git validation test");
+        assert!(
+            status.success(),
+            "git init must succeed for the test fixture"
+        );
         let blockers =
             validate_git_commit_preconditions_extended(dir.path(), &["dummy.txt".to_string()]);
         assert!(

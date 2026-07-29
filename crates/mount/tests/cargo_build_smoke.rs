@@ -83,22 +83,15 @@ const FIXTURE_MAIN_RS: &str = r#"fn main() {
 #[test]
 #[ignore = "requires FUSE + cargo on host; opt-in via --ignored"]
 fn cargo_build_succeeds_against_virtualized_mount() {
-    // Skip gracefully on hosts without FUSE so a developer who runs
-    // `cargo test -- --ignored` on a non-FUSE box gets a clear signal
-    // instead of a confusing mount error. Mirrors the early-exit
-    // pattern used elsewhere in the workspace's FUSE tests.
-    if !Path::new("/dev/fuse").exists() {
-        eprintln!("skipping: /dev/fuse not present on this host");
-        return;
-    }
-
-    // Likewise skip if `cargo` isn't on PATH. The test is about the
-    // mount holding up under a real downstream tool — if there's no
-    // tool to run, there's nothing to assert. Fail soft, don't lie.
-    if Command::new("cargo").arg("--version").output().is_err() {
-        eprintln!("skipping: `cargo` not on PATH");
-        return;
-    }
+    assert!(
+        Path::new("/dev/fuse").exists(),
+        "cargo_build_succeeds_against_virtualized_mount requires /dev/fuse"
+    );
+    let cargo = Command::new("cargo")
+        .arg("--version")
+        .output()
+        .expect("cargo must be on PATH for the ignored mount build smoke test");
+    assert!(cargo.status.success(), "cargo --version must succeed");
 
     // ----- Stage 1: build the fixture crate inside a tempdir -----
     //
@@ -211,14 +204,15 @@ fn cargo_build_succeeds_against_virtualized_mount() {
 #[test]
 #[ignore = "requires FUSE + cargo on host; opt-in via --ignored"]
 fn cargo_build_in_mount_target_dir_exercises_write_side_ops() {
-    if !Path::new("/dev/fuse").exists() {
-        eprintln!("skipping: /dev/fuse not present on this host");
-        return;
-    }
-    if Command::new("cargo").arg("--version").output().is_err() {
-        eprintln!("skipping: `cargo` not on PATH");
-        return;
-    }
+    assert!(
+        Path::new("/dev/fuse").exists(),
+        "cargo_build_in_mount_target_dir_exercises_write_side_ops requires /dev/fuse"
+    );
+    let cargo = Command::new("cargo")
+        .arg("--version")
+        .output()
+        .expect("cargo must be on PATH for the ignored mount build smoke test");
+    assert!(cargo.status.success(), "cargo --version must succeed");
 
     let repo_dir = TempDir::new().expect("repo tempdir");
     let crate_root = repo_dir.path();

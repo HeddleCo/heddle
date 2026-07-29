@@ -334,18 +334,20 @@ fn plain_git_worktree_status_preserves_staged_removal_alongside_untracked() {
         Some(output.status.success())
     };
 
-    let Some(true) = run_git(&["init", "--quiet"]) else {
-        eprintln!("git not on PATH or init failed — skipping");
-        return;
-    };
+    assert_eq!(
+        run_git(&["init", "--quiet"]),
+        Some(true),
+        "git must be on PATH and initialize the verification fixture"
+    );
     for cmd in [
         ["config", "user.email", "test@example.com"].as_slice(),
         ["config", "user.name", "Test"].as_slice(),
     ] {
-        if !matches!(run_git(cmd), Some(true)) {
-            eprintln!("git config failed — skipping");
-            return;
-        }
+        assert_eq!(
+            run_git(cmd),
+            Some(true),
+            "git config must succeed for the verification fixture"
+        );
     }
     std::fs::write(root.join("file.txt"), "hello").expect("write file");
     for cmd in [
@@ -353,10 +355,11 @@ fn plain_git_worktree_status_preserves_staged_removal_alongside_untracked() {
         ["commit", "-m", "initial", "--quiet"].as_slice(),
         ["rm", "--cached", "--quiet", "file.txt"].as_slice(),
     ] {
-        if !matches!(run_git(cmd), Some(true)) {
-            eprintln!("git command failed — skipping");
-            return;
-        }
+        assert_eq!(
+            run_git(cmd),
+            Some(true),
+            "git fixture command must succeed: {cmd:?}"
+        );
     }
 
     let status = super::build_plain_git_verification_probe(root)

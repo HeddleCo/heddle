@@ -554,14 +554,8 @@ mod tests {
         // the bytes, we just write garbage back so JSON decoding
         // fails, which is exactly what a v1 daemon's reply looks like
         // to a v2-speaking CLI in the worst case.
-        let listener = match TcpListener::bind("127.0.0.1:0") {
-            Ok(listener) => listener,
-            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-                eprintln!("skipping stale-daemon RPC test: loopback bind denied: {err}");
-                return;
-            }
-            Err(err) => panic!("bind loopback listener: {err}"),
-        };
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("bind loopback listener for daemon RPC test");
         let port = listener.local_addr().unwrap().port();
         let server_repo = repo_root.clone();
         let server = std::thread::spawn(move || {

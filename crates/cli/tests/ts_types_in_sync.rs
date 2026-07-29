@@ -79,9 +79,5 @@ mod full_feature {
     feature = "zstd"
 )))]
 #[test]
-fn drift_check_skipped_under_feature_pruned_build() {
-    eprintln!(
-        "skipping generated-TS drift check: requires the full feature set \
-         (git-overlay,native,semantic,zstd) the checked-in types were generated from"
-    );
-}
+#[ignore = "requires git-overlay,native,semantic,zstd features"]
+fn drift_check_skipped_under_feature_pruned_build() {}

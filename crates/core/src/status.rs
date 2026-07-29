@@ -3346,11 +3346,13 @@ mod tests {
             .current_dir(root)
             .output()
             .expect("git commit");
-        repo::Repository::init_default(root).expect("heddle init");
+        repo::Repository::init_git_overlay_sidecar(root).expect("heddle Git Overlay init");
         let repo = repo::Repository::open(root).expect("open");
-        if repo.capability() != repo::RepositoryCapability::GitOverlay {
-            return;
-        }
+        assert_eq!(
+            repo.capability(),
+            repo::RepositoryCapability::GitOverlay,
+            "Git fixture must open as a Git Overlay repository"
+        );
         std::fs::write(root.join("tracked.txt"), "v2\n").unwrap();
         std::fs::write(root.join("untracked.txt"), "u\n").unwrap();
         std::process::Command::new("git")

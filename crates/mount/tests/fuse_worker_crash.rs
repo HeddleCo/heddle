@@ -84,12 +84,11 @@ fn shrink_stop_grace() {
     });
 }
 
-fn skip_if_no_fuse() -> bool {
-    if !Path::new("/dev/fuse").exists() {
-        eprintln!("skipping: /dev/fuse not present on this host");
-        return true;
-    }
-    false
+fn require_fuse() {
+    assert!(
+        Path::new("/dev/fuse").exists(),
+        "ignored FUSE worker crash tests require /dev/fuse"
+    );
 }
 
 /// Wait up to `dur` for `target` to (dis)appear.
@@ -120,9 +119,7 @@ fn wait_for_path(target: &Path, expect_present: bool, dur: Duration) {
 #[test]
 #[ignore = "requires FUSE + heddle-fuse-worker binary on host; opt-in via --ignored"]
 fn panic_kills_only_worker_not_parent() {
-    if skip_if_no_fuse() {
-        return;
-    }
+    require_fuse();
     shrink_stop_grace();
 
     let (repo_dir, _repo) = build_fixture();
@@ -194,9 +191,7 @@ fn panic_kills_only_worker_not_parent() {
 #[test]
 #[ignore = "requires FUSE + heddle-fuse-worker binary on host; opt-in via --ignored"]
 fn sigkill_worker_auto_unmounts() {
-    if skip_if_no_fuse() {
-        return;
-    }
+    require_fuse();
     shrink_stop_grace();
 
     let (repo_dir, _repo) = build_fixture();

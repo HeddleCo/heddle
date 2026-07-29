@@ -142,9 +142,10 @@ mod tests {
         // unset, which is the production default. A test runner
         // that exports the var globally would change behaviour, but
         // that would be the runner's problem to surface explicitly.
-        if std::env::var("HEDDLE_FAULT_INJECT").is_ok() {
-            return;
-        }
+        assert!(
+            std::env::var("HEDDLE_FAULT_INJECT").is_err(),
+            "no_env_var_is_a_silent_noop requires HEDDLE_FAULT_INJECT to be unset"
+        );
         // Should not panic — env var unset, all checkpoints inactive.
         maybe_panic_at("anything");
     }
