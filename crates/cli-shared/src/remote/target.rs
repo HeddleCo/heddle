@@ -47,6 +47,21 @@ impl RemoteTarget {
         ))
     }
 
+    /// Parse a target under native repository source authority.
+    ///
+    /// Native repositories may use an HTTPS repository URL after the caller
+    /// has verified the server's well-known Iroh endpoint. The regular parser
+    /// deliberately keeps treating HTTPS as non-native so Git-owned callers
+    /// retain their existing transport classification.
+    pub fn parse_native(s: &str) -> Result<Self, String> {
+        if let Some(rest) = s.strip_prefix("https://") {
+            let (addr, repo_path) = parse_https_network_with_repo_path(rest)
+                .ok_or_else(|| format!("invalid native HTTPS remote url: {s}"))?;
+            return Ok(RemoteTarget::Network { addr, repo_path });
+        }
+        Self::parse(s)
+    }
+
     /// Check if this is a local target.
     pub fn is_local(&self) -> bool {
         matches!(self, RemoteTarget::Local(_))
@@ -96,6 +111,30 @@ fn parse_network_with_repo_path(s: &str) -> Option<(SocketAddr, Option<String>)>
     Some((addr, Some(repo_path.to_string())))
 }
 
+fn parse_https_network_with_repo_path(s: &str) -> Option<(SocketAddr, Option<String>)> {
+    if s.is_empty() || s.contains(['?', '#', '@']) {
+        return None;
+    }
+    let (authority, repo_path) = match s.split_once('/') {
+        Some((authority, path)) => (authority, Some(path.trim_matches('/'))),
+        None => (s, None),
+    };
+    if authority.is_empty() {
+        return None;
+    }
+    let addr = resolve_socket_addr(authority).or_else(|| {
+        let host = authority
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(authority);
+        (host, 443).to_socket_addrs().ok()?.next()
+    })?;
+    let repo_path = repo_path
+        .filter(|path| !path.is_empty())
+        .map(str::to_string);
+    Some((addr, repo_path))
+}
+
 fn resolve_socket_addr(addr: &str) -> Option<SocketAddr> {
     if let Ok(parsed) = addr.parse::<SocketAddr>() {
         return Some(parsed);
@@ -131,6 +170,31 @@ mod tests {
                 assert!(addr.ip().is_loopback());
                 assert_eq!(repo_path.as_deref(), Some("acme/heddle"));
             }
+            other => panic!("expected network target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_parser_accepts_https_without_changing_generic_classification() {
+        assert!(RemoteTarget::parse("https://127.0.0.1:8431/acme/heddle").is_err());
+
+        let target = RemoteTarget::parse_native("https://127.0.0.1:8431/acme/heddle")
+            .expect("parse native HTTPS URL");
+        match target {
+            RemoteTarget::Network { addr, repo_path } => {
+                assert_eq!(addr, "127.0.0.1:8431".parse().unwrap());
+                assert_eq!(repo_path.as_deref(), Some("acme/heddle"));
+            }
+            other => panic!("expected network target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_https_parser_defaults_to_port_443() {
+        let target =
+            RemoteTarget::parse_native("https://127.0.0.1/acme/heddle").expect("parse HTTPS URL");
+        match target {
+            RemoteTarget::Network { addr, .. } => assert_eq!(addr.port(), 443),
             other => panic!("expected network target, got {other:?}"),
         }
     }

@@ -12,7 +12,7 @@ use std::{
 };
 
 use objects::fs_atomic::write_file_atomic;
-use repo::Repository;
+use repo::{Repository, RepositoryCapability};
 use serde::{Deserialize, Serialize};
 pub use target::RemoteTarget;
 
@@ -180,24 +180,35 @@ pub fn resolve_remote_with_key_and_insecure(
     // Named remote first so configured `insecure` applies even when the
     // name also happens to parse as a bare host:port.
     if let Ok(remote) = cfg.get(&spec)
-        && let Ok(target) = RemoteTarget::parse(&remote.url)
+        && let Ok(target) = parse_target_for_repository(repo, &remote.url)
     {
         let key = credential_key_from_url(&remote.url);
         return Ok((target, key, remote.insecure));
     }
 
-    if let Ok(target) = RemoteTarget::parse(&spec) {
+    if let Ok(target) = parse_target_for_repository(repo, &spec) {
         let key = credential_key_from_url(&spec);
         return Ok((target, key, false));
     }
 
     let remote = cfg.get(&spec)?;
-    if let Ok(target) = RemoteTarget::parse(&remote.url) {
+    if let Ok(target) = parse_target_for_repository(repo, &remote.url) {
         let key = credential_key_from_url(&remote.url);
         return Ok((target, key, remote.insecure));
     }
 
     Err(RemoteError::InvalidUrl(remote.url))
+}
+
+/// Parse a remote using the repository's source authority to interpret HTTPS.
+pub fn parse_target_for_repository(
+    repo: &Repository,
+    url: &str,
+) -> std::result::Result<RemoteTarget, String> {
+    match repo.capability() {
+        RepositoryCapability::NativeHeddle => RemoteTarget::parse_native(url),
+        RepositoryCapability::GitOverlay => RemoteTarget::parse(url),
+    }
 }
 
 /// Whether a named remote (or the default) has `insecure = true` in
@@ -289,6 +300,33 @@ mod tests {
         let reopened = RemoteConfig::open(&repo).expect("reopen config");
         let remote = reopened.get("origin").expect("load remote");
         assert_eq!(remote.url, "http://heddle.example:8421/repo");
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn native_https_remote_round_trips_without_rewriting_the_scheme() {
+        let temp = unique_temp_dir("heddle-https-remote-test");
+        fs::create_dir_all(&temp).expect("create temp dir");
+        let repo = Repository::init_default(&temp).expect("init repo");
+        let url = "https://127.0.0.1:8431/acme/heddle";
+
+        let mut cfg = RemoteConfig::open(&repo).expect("open config");
+        cfg.add(
+            "origin",
+            Remote {
+                url: url.to_string(),
+                insecure: false,
+            },
+        )
+        .expect("add HTTPS remote");
+
+        let reopened = RemoteConfig::open(&repo).expect("reopen config");
+        assert_eq!(reopened.get("origin").expect("load remote").url, url);
+        let (target, key) =
+            resolve_remote_with_key(&repo, Some("origin")).expect("resolve native HTTPS remote");
+        assert!(matches!(target, RemoteTarget::Network { .. }));
+        assert_eq!(key.as_deref(), Some("127.0.0.1:8431"));
 
         let _ = fs::remove_dir_all(temp);
     }

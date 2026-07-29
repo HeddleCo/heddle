@@ -269,6 +269,36 @@ async fn explicit_pair_skips_discovery_and_old_server_failure_is_actionable() {
     .await;
 }
 
+#[tokio::test]
+async fn missing_iroh_endpoint_is_named_and_never_downgrades() {
+    with_isolated_home_async(|_| async {
+        let signer = Ed25519Signer::generate().unwrap();
+        let server = TestHttpsServer::start(HashMap::from([(
+            KEY_PATH.to_string(),
+            VecDeque::from([TestResponse::json(key_document(
+                1,
+                "missing-endpoint",
+                signer.public_key(),
+            ))]),
+        )]));
+
+        let error =
+            resolve_and_verify_endpoint_descriptor(server.authority(), &trusted_config(&server))
+                .await
+                .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("server does not advertise an Iroh endpoint"),
+            "missing endpoint must be explicit, got: {error}"
+        );
+        assert!(load_automatic_pin(server.authority()).unwrap().is_none());
+        assert_eq!(server.requests(), [KEY_PATH, DESCRIPTOR_PATH]);
+    })
+    .await;
+}
+
 fn server_with_pair(
     key_id: &str,
     signer: &Ed25519Signer,

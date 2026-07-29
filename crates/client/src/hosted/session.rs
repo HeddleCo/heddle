@@ -115,14 +115,22 @@ impl HostedSession {
         self
     }
 
-    pub async fn connect(&self, fallback_addr: SocketAddr) -> Result<HostedClient, ProtocolError> {
+    pub async fn discover_endpoint(
+        &self,
+        fallback_addr: SocketAddr,
+    ) -> super::Result<super::VerifiedEndpointDescriptor> {
         let server = self
             .config
             .server_key
             .as_deref()
             .map(str::to_string)
             .unwrap_or_else(|| fallback_addr.to_string());
-        let descriptor = resolve_and_verify_endpoint_descriptor(&server, &self.config)
+        resolve_and_verify_endpoint_descriptor(&server, &self.config).await
+    }
+
+    pub async fn connect(&self, fallback_addr: SocketAddr) -> Result<HostedClient, ProtocolError> {
+        let descriptor = self
+            .discover_endpoint(fallback_addr)
             .await
             .map_err(|error| ProtocolError::Remote(error.to_string()))?;
         let mut client = HostedClient::connect_with_config(&descriptor, &self.config)

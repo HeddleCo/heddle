@@ -880,17 +880,50 @@ pub(super) enum RemoteTransportKind {
     Unknown,
 }
 
-pub(super) fn preflight_native_remote_transport(
+pub(super) async fn preflight_native_remote_transport(
     repo: &Repository,
     remote_arg: Option<&str>,
     action: &str,
 ) -> Result<()> {
+    if repo.capability() == RepositoryCapability::NativeHeddle
+        && let Some(spec) = remote_spec_for_transport(repo, remote_arg, RemoteAccess::Push)
+        && spec.starts_with("https://")
+    {
+        discover_native_https_remote(&spec, action).await?;
+    }
     match classify_push_remote_spec(repo, remote_arg) {
         Some(RemoteTransportKind::LocalGit | RemoteTransportKind::GitUrl) => Err(anyhow!(
             RecoveryAdvice::remote_transport_mismatch(action, remote_arg.unwrap_or("<default>"))
         )),
         _ => Ok(()),
     }
+}
+
+#[cfg(feature = "client")]
+async fn discover_native_https_remote(spec: &str, action: &str) -> Result<()> {
+    let RemoteTarget::Network { addr, .. } =
+        RemoteTarget::parse_native(spec).map_err(anyhow::Error::msg)?
+    else {
+        anyhow::bail!("native HTTPS discovery requires a network remote");
+    };
+    let server_key = cli_shared::remote::credential_key_from_remote_url(spec);
+    let session = HostedSession::build(
+        &UserConfig::load_default()?,
+        server_key,
+        HostedAuthMode::Unauthenticated,
+    )?;
+    match session.discover_endpoint(addr).await {
+        Ok(_) => Ok(()),
+        Err(heddle_client::hosted::HostedError::EndpointDescriptorUnavailable) => {
+            Err(RecoveryAdvice::native_https_iroh_endpoint_missing(action, spec).into())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(not(feature = "client"))]
+async fn discover_native_https_remote(_spec: &str, action: &str) -> Result<()> {
+    Err(anyhow!(RecoveryAdvice::network_feature_unavailable(action)))
 }
 
 fn classify_push_remote_spec(
@@ -919,7 +952,7 @@ fn classify_remote_spec(
     access: RemoteAccess,
 ) -> Option<RemoteTransportKind> {
     let spec = remote_spec_for_transport(repo, remote_arg, access)?;
-    if let Ok(target) = RemoteTarget::parse(&spec) {
+    if let Ok(target) = cli_shared::remote::parse_target_for_repository(repo, &spec) {
         return Some(match target {
             RemoteTarget::Local(path) => {
                 if let Ok(target_repo) = Repository::open(&path) {
@@ -1845,6 +1878,34 @@ mod tests {
             } if path == "acme/widget"
         ));
         assert_eq!(key.as_deref(), Some("127.0.0.1:8421"));
+    }
+
+    #[test]
+    fn https_transport_follows_repository_source_authority() {
+        let native_dir = tempfile::TempDir::new().unwrap();
+        let native = Repository::init_default(native_dir.path()).unwrap();
+        let https = "https://127.0.0.1:8431/acme/widget";
+        assert_eq!(
+            classify_push_remote_spec(&native, Some(https)),
+            Some(RemoteTransportKind::NetworkHeddle)
+        );
+        let (target, key) = resolve_push_target_with_key(&native, Some(https)).unwrap();
+        assert!(matches!(
+            target,
+            RemoteTarget::Network {
+                repo_path: Some(ref path),
+                ..
+            } if path == "acme/widget"
+        ));
+        assert_eq!(key.as_deref(), Some("127.0.0.1:8431"));
+
+        let overlay_dir = tempfile::TempDir::new().unwrap();
+        SleyRepository::init(overlay_dir.path()).unwrap();
+        let overlay = Repository::init_git_overlay_sidecar(overlay_dir.path()).unwrap();
+        assert_eq!(
+            classify_push_remote_spec(&overlay, Some(https)),
+            Some(RemoteTransportKind::GitUrl)
+        );
     }
 
     // Capability / push-routing pure decisions live in heddle_core::remote.

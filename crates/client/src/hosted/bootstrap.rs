@@ -190,6 +190,9 @@ pub async fn fetch_signed_endpoint_descriptor(
         request = request.header(HOST, host_header);
     }
     let response = request.send().await?;
+    if response.status() == StatusCode::NOT_FOUND {
+        return Err(HostedError::EndpointDescriptorUnavailable);
+    }
     if response.status() != StatusCode::OK {
         return Err(HostedError::InvalidDescriptor(format!(
             "endpoint descriptor request returned HTTP {}",
