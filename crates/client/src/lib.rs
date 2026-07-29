@@ -10,6 +10,8 @@ pub mod credential_file;
 pub mod credentials;
 pub mod device_flow;
 pub mod hosted;
+// Data/crypto only until Weft's exclusive owner-authorization cutover.
+pub mod owner_authorization;
 pub mod presence;
 pub mod support;
 pub mod support_requests;
