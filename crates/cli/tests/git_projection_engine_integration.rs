@@ -510,31 +510,21 @@ struct GitHttpBackend {
     basic_auth: Option<(String, String)>,
 }
 
-fn bind_loopback_ephemeral(context: &str) -> Option<TcpListener> {
-    match TcpListener::bind("127.0.0.1:0") {
-        Ok(listener) => Some(listener),
-        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("skipping Git interop network test: {context}: {err}");
-            None
-        }
-        Err(err) => panic!("{context}: {err}"),
-    }
+fn bind_loopback_ephemeral(context: &str) -> TcpListener {
+    TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("{context}: {err}"))
 }
 
 impl GitHttpBackend {
-    fn spawn(root: &std::path::Path) -> Option<Self> {
+    fn spawn(root: &std::path::Path) -> Self {
         Self::spawn_with_auth(root, None)
     }
 
-    fn spawn_authenticated(root: &std::path::Path, username: &str, password: &str) -> Option<Self> {
+    fn spawn_authenticated(root: &std::path::Path, username: &str, password: &str) -> Self {
         Self::spawn_with_auth(root, Some((username.to_string(), password.to_string())))
     }
 
-    fn spawn_with_auth(
-        root: &std::path::Path,
-        basic_auth: Option<(String, String)>,
-    ) -> Option<Self> {
-        let listener = bind_loopback_ephemeral("bind ephemeral http port")?;
+    fn spawn_with_auth(root: &std::path::Path, basic_auth: Option<(String, String)>) -> Self {
+        let listener = bind_loopback_ephemeral("bind ephemeral http port");
         let port = listener.local_addr().expect("listener addr").port();
         listener
             .set_nonblocking(true)
@@ -562,12 +552,12 @@ impl GitHttpBackend {
         let mut delay = Duration::from_millis(10);
         for _ in 0..20 {
             if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                return Some(Self {
+                return Self {
                     join: Some(join),
                     port,
                     stop,
                     basic_auth,
-                });
+                };
             }
             thread::sleep(delay);
             delay = (delay * 2).min(Duration::from_millis(500));
@@ -736,7 +726,7 @@ fn handle_http_backend_connection(
 }
 
 impl GitDaemon {
-    fn spawn(root: &std::path::Path) -> Option<Self> {
+    fn spawn(root: &std::path::Path) -> Self {
         Self::spawn_with_push(root, false)
     }
 
@@ -745,12 +735,12 @@ impl GitDaemon {
     /// remote — the only way to cover the URL/network destination reconciliation
     /// (heddle#316 r11). `git daemon` denies anonymous push unless
     /// `--enable=receive-pack` is passed.
-    fn spawn_push(root: &std::path::Path) -> Option<Self> {
+    fn spawn_push(root: &std::path::Path) -> Self {
         Self::spawn_with_push(root, true)
     }
 
-    fn spawn_with_push(root: &std::path::Path, allow_push: bool) -> Option<Self> {
-        let listener = bind_loopback_ephemeral("bind ephemeral port")?;
+    fn spawn_with_push(root: &std::path::Path, allow_push: bool) -> Self {
+        let listener = bind_loopback_ephemeral("bind ephemeral port");
         let port = listener.local_addr().expect("listener addr").port();
         drop(listener);
 
@@ -777,7 +767,7 @@ impl GitDaemon {
         let mut delay = Duration::from_millis(10);
         for _ in 0..20 {
             if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                return Some(Self { child, port });
+                return Self { child, port };
             }
             thread::sleep(delay);
             delay = (delay * 2).min(Duration::from_millis(500));
@@ -2251,9 +2241,7 @@ fn pull_imports_remote_branches_and_tags_from_git_daemon() {
     let commit_oid = commit_with_tree(&remote_repo, Some("refs/heads/main"), tree_oid, "base", &[]);
     create_annotated_tag(&remote_repo, "v1.0", commit_oid, "release");
 
-    let Some(daemon) = GitDaemon::spawn(remote_root.path()) else {
-        return;
-    };
+    let daemon = GitDaemon::spawn(remote_root.path());
 
     let mut git_projection = GitProjection::new(&repo);
     git_projection
@@ -2285,9 +2273,7 @@ fn pull_imports_remote_branches_and_tags_from_git_http_backend() {
     let commit_oid = commit_with_tree(&remote_repo, Some("refs/heads/main"), tree_oid, "base", &[]);
     create_annotated_tag(&remote_repo, "v1.0", commit_oid, "release");
 
-    let Some(backend) = GitHttpBackend::spawn(remote_root.path()) else {
-        return;
-    };
+    let backend = GitHttpBackend::spawn(remote_root.path());
 
     let mut git_projection = GitProjection::new(&repo);
     git_projection
@@ -2319,10 +2305,7 @@ fn pull_imports_remote_branches_and_tags_from_authenticated_git_http_backend() {
     let commit_oid = commit_with_tree(&remote_repo, Some("refs/heads/main"), tree_oid, "base", &[]);
     create_annotated_tag(&remote_repo, "v1.0", commit_oid, "release");
 
-    let Some(backend) = GitHttpBackend::spawn_authenticated(remote_root.path(), "heddle", "secret")
-    else {
-        return;
-    };
+    let backend = GitHttpBackend::spawn_authenticated(remote_root.path(), "heddle", "secret");
 
     let mut git_projection = GitProjection::new(&repo);
     git_projection
@@ -6565,9 +6548,7 @@ fn retraction_delete_propagates_to_url_remote() {
         b"ref: refs/heads/__heddle_placeholder\n",
     )
     .unwrap();
-    let Some(daemon) = GitDaemon::spawn_push(remote_root.path()) else {
-        return;
-    };
+    let daemon = GitDaemon::spawn_push(remote_root.path());
     let url = daemon.url("remote.git");
 
     // Export public over the NETWORK push path — main lands on the remote.
@@ -6726,9 +6707,7 @@ fn foreign_ref_on_url_remote_survives() {
 
     let remote_root = TempDir::new().expect("remote root");
     let _remote_repo = init_named_bare_git_repo(&remote_root, "remote.git");
-    let Some(daemon) = GitDaemon::spawn_push(remote_root.path()) else {
-        return;
-    };
+    let daemon = GitDaemon::spawn_push(remote_root.path());
     let url = daemon.url("remote.git");
 
     // First public push — records main as heddle-exported to THIS url remote.
@@ -6883,9 +6862,7 @@ fn out_of_band_destination_descendant_not_force_overwritten() {
     // ---- URL/network destination ----
     let remote_root = TempDir::new().expect("remote root");
     let _remote_repo = init_named_bare_git_repo(&remote_root, "remote.git");
-    let Some(daemon) = GitDaemon::spawn_push(remote_root.path()) else {
-        return;
-    };
+    let daemon = GitDaemon::spawn_push(remote_root.path());
     let url = daemon.url("remote.git");
 
     git_projection
@@ -6984,9 +6961,7 @@ fn heddle_published_tip_embargo_rewind_still_forced() {
 
     let remote_root = TempDir::new().expect("remote root");
     let _remote_repo = init_named_bare_git_repo(&remote_root, "remote.git");
-    let Some(daemon) = GitDaemon::spawn_push(remote_root.path()) else {
-        return;
-    };
+    let daemon = GitDaemon::spawn_push(remote_root.path());
     let url = daemon.url("remote.git");
     git_projection
         .push(&url)
@@ -7129,9 +7104,7 @@ fn out_of_band_advance_after_embargo_not_deleted() {
         b"ref: refs/heads/__heddle_placeholder\n",
     )
     .unwrap();
-    let Some(daemon) = GitDaemon::spawn_push(remote_root.path()) else {
-        return;
-    };
+    let daemon = GitDaemon::spawn_push(remote_root.path());
     let url = daemon.url("remote.git");
     git_projection
         .push(&url)
@@ -7901,9 +7874,7 @@ fn out_of_band_destination_tag_not_overwritten() {
         b"ref: refs/heads/__heddle_placeholder\n",
     )
     .unwrap();
-    let Some(daemon) = GitDaemon::spawn_push(remote_root.path()) else {
-        return;
-    };
+    let daemon = GitDaemon::spawn_push(remote_root.path());
     let url = daemon.url("remote.git");
 
     git_projection

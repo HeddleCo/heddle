@@ -370,17 +370,15 @@ mod tests {
     /// reaching across worktrees.
     #[cfg(unix)]
     #[test]
+    #[ignore = "requires a reflink-capable filesystem"]
     fn successful_reflink_yields_distinct_inode() {
         use std::os::unix::fs::MetadataExt;
 
         let temp = TempDir::new().unwrap();
-        if !filesystem_supports_reflink(temp.path()) {
-            eprintln!(
-                "[skip] filesystem at {:?} does not support reflinks; cannot assert inode property",
-                temp.path()
-            );
-            return;
-        }
+        assert!(
+            filesystem_supports_reflink(temp.path()),
+            "successful_reflink_yields_distinct_inode requires reflink support"
+        );
 
         let src = temp.path().join("src.txt");
         let dst = temp.path().join("dst.txt");

@@ -287,21 +287,18 @@ fn hydration_survives_repository_reopen() {
 }
 
 /// `#[ignore]`-gated acceptance test from the issue body. Requires
-/// network access and the `git` binary; skips gracefully when either
-/// is missing so the gate doesn't flake in offline CI.
+/// network access and the `git` binary.
 #[test]
 #[ignore = "clones torvalds/linux.git; run via --include-ignored or nightly job"]
 fn hydration_fires_against_torvalds_linux() {
-    if std::process::Command::new("git")
+    let git = std::process::Command::new("git")
         .arg("--version")
         .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_none()
-    {
-        eprintln!("SKIP: git binary not on PATH");
-        return;
-    }
+        .expect("git binary must be on PATH for the ignored kernel hydration test");
+    assert!(
+        git.status.success(),
+        "git --version must succeed for the ignored kernel hydration test"
+    );
 
     let temp = TempDir::new().expect("temp for linux clone");
     let bare = temp.path().join("linux.git");
@@ -310,10 +307,8 @@ fn hydration_fires_against_torvalds_linux() {
     eprintln!("cloning torvalds/linux.git at depth=1 + filter=blob:none ...");
     let started = Instant::now();
     let mut progress = sley::remote::SilentProgress;
-    if let Err(err) = clone_url_to_bare(url, &bare, Some(1), Some("blob:none"), &mut progress) {
-        eprintln!("SKIP: kernel clone failed (network?): {err}");
-        return;
-    }
+    clone_url_to_bare(url, &bare, Some(1), Some("blob:none"), &mut progress)
+        .expect("clone torvalds/linux.git for the ignored kernel hydration test");
     eprintln!("clone completed in {:?}", started.elapsed());
 
     let git_repo = open_git(&bare).expect("open kernel bare repo");

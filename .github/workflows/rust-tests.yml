@@ -616,6 +616,9 @@ jobs:
         run: |
           cargo test --locked -p heddle-mount --features fuse --test fuse_mount \
             -- --ignored --test-threads=1 --nocapture
+          cargo test --locked -p heddle-mount --features fuse \
+            --lib fuse_smoke::fuse_open_close_read_round_trip \
+            -- --ignored --test-threads=1 --nocapture
 
       # Panic-recovery unit tests live alongside the FUSE shell; run
       # them on the same job so a regression in the `guard_call`
@@ -662,12 +665,9 @@ jobs:
   # doesn't try to mount through a missing kernel adapter. CI opts
   # in explicitly via the env var below + `-- --ignored`.
   #
-  # If the DISM step fails (newer Server SKUs sometimes rename the
-  # feature, and home-edition Windows 10 hosts may have it disabled
-  # at the SKU level), the test will report itself as skipped via
-  # the `ProjFsShell::is_runtime_available()` guard in the smoke
-  # source. The job exits 0 in that case; treat a hard `assertion
-  # failed` from the test as the real regression signal.
+  # If neither feature name produces ProjectedFSLib.dll, fail the
+  # setup step. An unavailable runtime is missing coverage, not a
+  # passing smoke test.
   projfs-smoke:
     name: ProjFS mount smoke (Windows)
     needs: changes
@@ -699,7 +699,7 @@ jobs:
             Write-Host "Client-ProjFS unavailable on this SKU; trying Projected-FS (Server variant)"
             $server = Enable-WindowsOptionalFeature -Online -FeatureName Projected-FS -NoRestart -ErrorAction SilentlyContinue
             if ($null -eq $server) {
-              Write-Host "::warning::Neither Client-ProjFS nor Projected-FS could be enabled; smoke test will self-skip"
+              throw "Neither Client-ProjFS nor Projected-FS could be enabled"
             }
           }
           # Verify the DLL the shell probes for is actually present.
@@ -707,7 +707,7 @@ jobs:
           if (Test-Path $dll) {
             Write-Host "ProjectedFSLib.dll present: $dll"
           } else {
-            Write-Host "::warning::ProjectedFSLib.dll not present; smoke test will self-skip"
+            throw "ProjectedFSLib.dll not present after enabling ProjFS"
           }
 
       # Build + run the integration test. Single-threaded to keep a

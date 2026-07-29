@@ -8815,18 +8815,16 @@ fn text_surfaces_tolerate_closed_downstream_pipes() {
 
 #[test]
 fn tty_auto_mode_renders_text_and_explicit_json_stays_json() {
-    let script_probe = std::process::Command::new("script")
+    let probe = std::process::Command::new("script")
         .arg("--version")
-        .output();
-    let Ok(probe) = script_probe else {
-        eprintln!("skipping tty transcript test: util-linux script not installed");
-        return;
-    };
+        .output()
+        .expect("util-linux script must be installed for the TTY transcript test");
     let probe_stdout = String::from_utf8_lossy(&probe.stdout);
-    if !probe.status.success() || !probe_stdout.contains("util-linux") {
-        eprintln!("skipping tty transcript test: unsupported script implementation");
-        return;
-    }
+    assert!(
+        probe.status.success() && probe_stdout.contains("util-linux"),
+        "TTY transcript test requires util-linux script; got status {:?}, stdout: {probe_stdout}",
+        probe.status
+    );
 
     let temp = TempDir::new().unwrap();
     let repo = temp.path().join("repo");

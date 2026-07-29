@@ -36,10 +36,11 @@ fn resolve_repo_root() -> PathBuf {
 #[ignore = "reads real $HOME transcript store; run with --ignored"]
 fn extracts_reasoning_points_from_recent_sessions() {
     let repo_root = resolve_repo_root();
-    if !repo_root.join(".git").exists() {
-        eprintln!("skip: {} is not a git repo", repo_root.display());
-        return;
-    }
+    assert!(
+        repo_root.join(".git").exists(),
+        "{} is not a git repo",
+        repo_root.display()
+    );
 
     let roots = TranscriptRoots::default();
     let mut transcripts = load_transcripts(&repo_root, &roots);
@@ -55,14 +56,11 @@ fn extracts_reasoning_points_from_recent_sessions() {
         "extracting from {} Claude sessions (newest first)",
         picks.len()
     );
-    if picks.is_empty() {
-        eprintln!(
-            "skip: no Claude transcripts found for cwd={}; \
-             set HEDDLE_MATCHER_SMOKE_REPO to a path with cached sessions to exercise the extractor",
-            repo_root.display()
-        );
-        return;
-    }
+    assert!(
+        !picks.is_empty(),
+        "no Claude transcripts found for cwd={}; set HEDDLE_MATCHER_SMOKE_REPO to a path with cached sessions",
+        repo_root.display()
+    );
 
     let hparams = HarvestParams::default();
     let kparams = KeepParams::default();

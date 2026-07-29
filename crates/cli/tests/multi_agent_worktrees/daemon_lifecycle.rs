@@ -10,10 +10,7 @@
 //! the `daemon stop`/`status` verbs, and the failure modes documented
 //! in `docs/design/mount-daemon.md` § "Failure modes".
 //!
-//! Gated to Linux because the FUSE shell only compiles there. Each
-//! test that needs a real kernel mount checks `/dev/fuse` first and
-//! returns gracefully (with a `eprintln!` warning) on hosts without
-//! it — same skip pattern the existing tests rely on. Marked
+//! Gated to Linux because the FUSE shell only compiles there. Marked
 //! `#[ignore]` so `cargo test` on developer laptops doesn't try to
 //! shell out to `fusermount` or bind to FUSE without opting in:
 //!
@@ -51,18 +48,12 @@ use super::{heddle, setup_repo};
 // then.
 // ---------------------------------------------------------------------------
 
-/// Skip the test (warn + return) when the host doesn't expose
-/// `/dev/fuse`. CI runners frequently lack it; a hard failure there
-/// would be useless noise.
-fn fuse_supported_or_skip(test_name: &str) -> bool {
-    if std::path::Path::new("/dev/fuse").exists() {
-        return true;
-    }
-    eprintln!(
-        "[daemon_lifecycle::{test_name}] skipping: /dev/fuse not present \
-         on this host"
+/// Require FUSE once an ignored daemon lifecycle test is explicitly selected.
+fn require_fuse(test_name: &str) {
+    assert!(
+        std::path::Path::new("/dev/fuse").exists(),
+        "[daemon_lifecycle::{test_name}] requires /dev/fuse"
     );
-    false
 }
 
 /// Conventional endpoint file path the daemon writes on bind. Kept
@@ -191,9 +182,7 @@ fn parse_mount_count(status_output: &str) -> Option<u32> {
 #[test]
 #[ignore = "requires Linux + FUSE + heddle built with --features mount"]
 fn daemon_mount_survives_cli_exit() {
-    if !fuse_supported_or_skip("daemon_mount_survives_cli_exit") {
-        return;
-    }
+    require_fuse("daemon_mount_survives_cli_exit");
     let main = setup_repo("greet.txt", "hello from daemon");
 
     let raw = heddle(
@@ -247,9 +236,7 @@ fn daemon_mount_survives_cli_exit() {
 #[test]
 #[ignore = "requires Linux + FUSE + heddle built with --features mount"]
 fn daemon_spawns_on_demand_and_status_reports_healthy() {
-    if !fuse_supported_or_skip("daemon_spawns_on_demand_and_status_reports_healthy") {
-        return;
-    }
+    require_fuse("daemon_spawns_on_demand_and_status_reports_healthy");
     let main = setup_repo("greet.txt", "alive");
 
     assert!(
@@ -305,9 +292,7 @@ fn daemon_spawns_on_demand_and_status_reports_healthy() {
 #[test]
 #[ignore = "requires Linux + FUSE + heddle built with --features mount"]
 fn idempotent_mount_does_not_double_register() {
-    if !fuse_supported_or_skip("idempotent_mount_does_not_double_register") {
-        return;
-    }
+    require_fuse("idempotent_mount_does_not_double_register");
     let main = setup_repo("greet.txt", "once");
 
     let first = heddle(
@@ -393,9 +378,7 @@ fn idempotent_mount_does_not_double_register() {
 #[test]
 #[ignore = "requires Linux + FUSE + heddle built with --features mount"]
 fn daemon_stop_drains_mounts_and_exits() {
-    if !fuse_supported_or_skip("daemon_stop_drains_mounts_and_exits") {
-        return;
-    }
+    require_fuse("daemon_stop_drains_mounts_and_exits");
     let main = setup_repo("greet.txt", "stoppable");
 
     let raw = heddle(
@@ -475,9 +458,7 @@ fn daemon_stop_drains_mounts_and_exits() {
 #[test]
 #[ignore = "requires Linux + FUSE + heddle built with --features mount"]
 fn stale_endpoint_is_swept_and_daemon_respawns() {
-    if !fuse_supported_or_skip("stale_endpoint_is_swept_and_daemon_respawns") {
-        return;
-    }
+    require_fuse("stale_endpoint_is_swept_and_daemon_respawns");
     let main = setup_repo("greet.txt", "after stale sweep");
 
     let endpoint = endpoint_path(main.path());
@@ -569,9 +550,7 @@ fn stale_endpoint_is_swept_and_daemon_respawns() {
 #[test]
 #[ignore = "requires Linux + FUSE + heddle built with --features mount"]
 fn daemon_killed_mid_mount_recovers_on_next_invocation() {
-    if !fuse_supported_or_skip("daemon_killed_mid_mount_recovers_on_next_invocation") {
-        return;
-    }
+    require_fuse("daemon_killed_mid_mount_recovers_on_next_invocation");
     let main = setup_repo("greet.txt", "before kill");
 
     let raw = heddle(
@@ -665,9 +644,7 @@ fn daemon_killed_mid_mount_recovers_on_next_invocation() {
 #[test]
 #[ignore = "requires Linux + FUSE + heddle built with --features mount"]
 fn daemon_mount_with_from_serves_resolved_state() {
-    if !fuse_supported_or_skip("daemon_mount_with_from_serves_resolved_state") {
-        return;
-    }
+    require_fuse("daemon_mount_with_from_serves_resolved_state");
     // S1: setup_repo's initial snapshot (greet.txt = "S1").
     let main = setup_repo("greet.txt", "S1");
 

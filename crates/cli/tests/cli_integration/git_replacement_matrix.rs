@@ -1357,14 +1357,8 @@ fn git_replacement_matrix_https_push_uses_native_transport_without_git_on_path()
     heddle_without_git(&["capture", "-m", "attempt https push"], &work).unwrap();
     heddle_without_git(&["commit", "-m", "attempt https push"], &work).unwrap();
 
-    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
-        Ok(listener) => listener,
-        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("skipping HTTPS native transport test: loopback bind denied: {err}");
-            return;
-        }
-        Err(err) => panic!("reserve local port: {err}"),
-    };
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("reserve local port for HTTPS test");
     let port = listener.local_addr().expect("local addr").port();
     drop(listener);
     let err = heddle_without_git(
