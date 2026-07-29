@@ -134,6 +134,13 @@ pub(crate) fn grant_covers(
     parent: &[SpoolCapabilityGrant],
     child: &[SpoolCapabilityGrant],
 ) -> bool {
+    if child.iter().any(|grant| {
+        grant
+            .actions
+            .contains(&(SpoolCapabilityAction::Purge as i32))
+    }) {
+        return false;
+    }
     child.iter().all(|child_grant| {
         let Some(child_selector) = child_grant.spool.as_ref() else {
             return false;
