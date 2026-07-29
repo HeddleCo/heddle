@@ -20,7 +20,8 @@ pub mod test_support;
 
 pub use git_core::{
     GitProjection, GitProjectionError, GitProjectionResult, SyncMapping, WriteThroughOutcome,
-    WriteThroughSkipReason,
+    WriteThroughSkipReason, configure_https_ca_certificate_pem, configured_https_client,
+    git_transport_error_message,
 };
 pub use git_residual::{
     BridgeMirrorRetirementStatus, RESIDUALS_DIR_NAME, ResidualObject, ResidualStore,

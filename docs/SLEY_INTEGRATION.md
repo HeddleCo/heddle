@@ -166,6 +166,29 @@ let changes = status.collect()?;
 Heddle would use this under status, diff, verify, and thread-list health so the
 same Sley primitive backs all Git-overlay worktree reads.
 
+### TLS Trust Source
+
+At the start of the #1132 investigation, Sley 0.5.0's default smart-HTTPS
+client was `UreqHttpClient`. Heddle enabled its `tls-rustls` feature, so ureq
+verified servers with compiled-in Mozilla `webpki-roots`. That client did not
+consult Heddle's `HEDDLE_REMOTE_TLS_CA_CERT` setting, `SSL_CERT_FILE`, or the
+platform trust store.
+
+This is a dependency default, not a deliberate Heddle policy. The hosted
+bootstrap path separately reads `HEDDLE_REMOTE_TLS_CA_CERT` into
+`ClientConfig.tls_ca_certificate_pem` and merges those certificates into
+reqwest's roots. Consequently the two transports in one Heddle binary can
+disagree about the same server certificate. Git smart-HTTPS must use the same
+operator-facing CA setting as hosted bootstrap, and certificate failures must
+name that setting.
+
+Heddle now resolves the configured CA through the same `UserConfig` method for
+both transports. When a custom CA is present, it supplies Sley's fetch, clone,
+ls-remote, and push operations with an HTTPS client whose roots combine the
+platform store and that PEM bundle. Without a configured CA, Sley's existing
+compiled-root default remains unchanged. `SSL_CERT_FILE` is not a second Heddle
+configuration mechanism.
+
 ## Heddle Hardening Gates
 
 Keep these Heddle-side checks required while Sley settles in:

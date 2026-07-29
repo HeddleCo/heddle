@@ -417,6 +417,34 @@ impl UserConfig {
         Ok(matches!(mode, UserAutoCaptureMode::Command))
     }
 
+    /// Resolve the shared custom CA bundle used by hosted and Git transports.
+    ///
+    /// `HEDDLE_REMOTE_TLS_CA_CERT` overrides the user-config path.
+    pub fn remote_tls_ca_certificate_pem(&self) -> anyhow::Result<Option<String>> {
+        let mut ca_pem = self
+            .remote
+            .tls_ca_certificate_path
+            .as_ref()
+            .map(|path| read_security_config_file("remote.tls_ca_certificate_path", path))
+            .transpose()?;
+        match env::var("HEDDLE_REMOTE_TLS_CA_CERT") {
+            Ok(path) => {
+                ca_pem = Some(read_security_config_file(
+                    "HEDDLE_REMOTE_TLS_CA_CERT",
+                    &PathBuf::from(path),
+                )?);
+            }
+            Err(env::VarError::NotPresent) => {}
+            Err(err @ env::VarError::NotUnicode(_)) => {
+                return Err(security_config_error(
+                    "HEDDLE_REMOTE_TLS_CA_CERT",
+                    format!("read environment value: {err}"),
+                ));
+            }
+        }
+        Ok(ca_pem)
+    }
+
     /// Build the validated TLS/auth client config. The bearer token is supplied
     /// by the caller (resolved through the single `HEDDLE_CREDENTIAL` → keystore
     /// precedence in the client crate); this method no longer reads any token
@@ -435,8 +463,7 @@ impl UserConfig {
         if let Some(domain) = &self.remote.tls_domain_name {
             config = config.with_tls_domain_name(domain.clone());
         }
-        if let Some(path) = &self.remote.tls_ca_certificate_path {
-            let pem = read_security_config_file("remote.tls_ca_certificate_path", path)?;
+        if let Some(pem) = self.remote_tls_ca_certificate_pem()? {
             config = config.with_tls_ca_certificate_pem(pem);
         }
         if let Some(path) = &self.remote.auth_proof_key_pem_path {
@@ -472,20 +499,6 @@ impl UserConfig {
             Err(err @ env::VarError::NotUnicode(_)) => {
                 return Err(security_config_error(
                     "HEDDLE_REMOTE_TLS_DOMAIN",
-                    format!("read environment value: {err}"),
-                ));
-            }
-        }
-        match env::var("HEDDLE_REMOTE_TLS_CA_CERT") {
-            Ok(path) => {
-                let pem =
-                    read_security_config_file("HEDDLE_REMOTE_TLS_CA_CERT", &PathBuf::from(path))?;
-                config = config.with_tls_ca_certificate_pem(pem);
-            }
-            Err(env::VarError::NotPresent) => {}
-            Err(err @ env::VarError::NotUnicode(_)) => {
-                return Err(security_config_error(
-                    "HEDDLE_REMOTE_TLS_CA_CERT",
                     format!("read environment value: {err}"),
                 ));
             }
