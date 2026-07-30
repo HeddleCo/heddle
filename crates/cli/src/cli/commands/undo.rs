@@ -547,7 +547,32 @@ fn undo_may_rewrite_worktree(repo: &Repository, batches: &[OpBatch]) -> Result<b
             OpRecord::ThreadUpdate { name, .. } => active_thread
                 .as_ref()
                 .is_some_and(|thread| thread.as_str() == name.as_str()),
-            _ => false,
+            OpRecord::Snapshot {
+                prev_head: None, ..
+            }
+            | OpRecord::Goto {
+                prev_head: None, ..
+            }
+            | OpRecord::ThreadCreate { .. }
+            | OpRecord::ThreadDelete { .. }
+            | OpRecord::Fork { .. }
+            | OpRecord::Collapse { .. }
+            | OpRecord::MarkerCreate { .. }
+            | OpRecord::MarkerDelete { .. }
+            | OpRecord::Checkpoint { .. }
+            | OpRecord::TransactionAbort { .. }
+            | OpRecord::EphemeralThreadCollapse { .. }
+            | OpRecord::ConflictResolved { .. }
+            | OpRecord::TransactionCommit { .. }
+            | OpRecord::Redact { .. }
+            | OpRecord::Purge { .. }
+            | OpRecord::GitCheckpoint { .. }
+            | OpRecord::RemoteThreadUpdate { .. }
+            | OpRecord::RemoteThreadDelete { .. }
+            | OpRecord::UndoRecoveryUpdate { .. }
+            | OpRecord::StateVisibilitySet { .. }
+            | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::HeadUpdate { .. } => false,
         })
     }))
 }
