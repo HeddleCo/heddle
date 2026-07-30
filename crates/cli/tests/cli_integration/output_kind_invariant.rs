@@ -35,7 +35,7 @@ use cli::cli::commands::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{git_hermetic, heddle, heddle_output};
+use super::{assert_undo_requires_hard, git_hermetic, heddle, heddle_output};
 
 /// Verbs whose `output_kind` invariant is enforced — both the catalog
 /// declaration and (where invocable) the runtime emission.
@@ -1572,16 +1572,23 @@ fn folded_verb_flag_variants_emit_only_advertised_output_kinds() {
     std::fs::write(temp.path().join("a.txt"), "two").unwrap();
     heddle(&["capture", "-m", "second"], Some(temp.path())).expect("capture second");
 
+    assert_undo_requires_hard(temp.path());
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("a.txt")).unwrap(),
+        "two",
+        "the rejected unqualified undo must preserve the current captured file"
+    );
+
     // Drive each JSON-emitting variant, in an order that keeps the repo
-    // consistent: undo --list (read-only) → undo (rewinds, making a redo
-    // available) → undo --redo (re-applies) → undo → undo --recover. The
-    // second undo recreates a clean recovery baseline before recovery restores
-    // it as worktree changes.
+    // consistent: undo --list (read-only) → undo --hard (explicitly rewinds,
+    // making a redo available) → undo --redo (re-applies) → undo --hard →
+    // undo --recover. The second hard undo recreates a clean recovery baseline
+    // before recovery restores it as worktree changes.
     let cases: &[(&[&str], &str, &str)] = &[
         (&["--output", "json", "undo", "--list"], "undo_list", "undo"),
-        (&["--output", "json", "undo"], "undo", "undo"),
+        (&["--output", "json", "undo", "--hard"], "undo", "undo"),
         (&["--output", "json", "undo", "--redo"], "redo", "undo"),
-        (&["--output", "json", "undo"], "undo", "undo"),
+        (&["--output", "json", "undo", "--hard"], "undo", "undo"),
         (
             &["--output", "json", "undo", "--recover"],
             "undo_recover",

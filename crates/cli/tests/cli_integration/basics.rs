@@ -2414,7 +2414,20 @@ fn test_cli_undo_changes_worktree() {
     let content = std::fs::read_to_string(temp.path().join("version.txt")).unwrap();
     assert_eq!(content, "v2");
 
-    assert!(heddle(&["undo"], Some(temp.path())).is_ok());
+    let head_before_refusal = status_json(temp.path());
+    assert_undo_requires_hard(temp.path());
+    assert_eq!(
+        status_json(temp.path())["state"]["state_id"],
+        head_before_refusal["state"]["state_id"],
+        "refused undo must leave HEAD unchanged"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("version.txt")).unwrap(),
+        "v2",
+        "refused undo must preserve the current captured file"
+    );
+
+    assert!(heddle(&["undo", "--hard"], Some(temp.path())).is_ok());
     let content = std::fs::read_to_string(temp.path().join("version.txt")).unwrap();
     assert_eq!(content, "v1", "File should be restored to v1");
 }
@@ -2441,7 +2454,19 @@ fn test_cli_undo_redo() {
         .expect("state state_id should be string")
         .to_string();
 
-    assert!(heddle(&["undo"], Some(temp.path())).is_ok());
+    assert_undo_requires_hard(temp.path());
+    assert_eq!(
+        status_json(temp.path())["state"]["state_id"],
+        second_id,
+        "refused undo must leave HEAD at the second state"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("file.txt")).unwrap(),
+        "updated",
+        "refused undo must preserve the second state's file content"
+    );
+
+    assert!(heddle(&["undo", "--hard"], Some(temp.path())).is_ok());
     let head_after_undo = status_json(temp.path());
     let undo_id = head_after_undo["state"]["state_id"]
         .as_str()

@@ -551,6 +551,11 @@ fn git_overlay_matrix_undo_reconciles_stale_mirror_after_push_pull() {
     let undo = json(&work, &["undo"]);
     assert_eq!(undo["status"], "completed", "{undo}");
     assert_eq!(git_stdout(&work, &["rev-parse", "HEAD"]), previous);
+    assert_eq!(
+        std::fs::read_to_string(work.join("second.txt")).unwrap(),
+        "second\n",
+        "undoing Git publication must preserve the captured worktree"
+    );
     let mirror = work.join(".heddle/git");
     assert_eq!(
         git_stdout(

@@ -62,6 +62,30 @@ fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Output,
     cmd.output().map_err(|e| e.to_string())
 }
 
+fn assert_undo_requires_hard(cwd: &std::path::Path) {
+    let output = heddle_output(&["--output", "json", "undo"], Some(cwd))
+        .expect("plain undo should return typed safety advice");
+    assert_eq!(output.status.code(), Some(74));
+    assert!(output.stdout.is_empty());
+    let envelope: Value =
+        serde_json::from_slice(&output.stderr).expect("undo refusal should be JSON");
+    assert_eq!(envelope["kind"], "undo_requires_hard", "{envelope}");
+    assert_eq!(
+        envelope["unsafe_condition"],
+        "the selected undo operation materializes an earlier saved tree",
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["would_change"],
+        "captured worktree files would be replaced by the selected operation's prior tree",
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["preserved"], "repository state and worktree files were left unchanged",
+        "{envelope}"
+    );
+}
+
 fn heddle_argv_json<I, S>(args: I) -> Value
 where
     I: IntoIterator<Item = S>,

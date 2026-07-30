@@ -543,8 +543,7 @@ fn undo_may_rewrite_worktree(repo: &Repository, batches: &[OpBatch]) -> Result<b
             | OpRecord::Goto {
                 prev_head: Some(_), ..
             }
-            | OpRecord::FastForward { .. }
-            | OpRecord::GitCheckpoint { .. } => true,
+            | OpRecord::FastForward { .. } => true,
             OpRecord::ThreadUpdate { name, .. } => active_thread
                 .as_ref()
                 .is_some_and(|thread| thread.as_str() == name.as_str()),

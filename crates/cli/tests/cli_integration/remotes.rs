@@ -889,7 +889,20 @@ fn test_cli_pull_local_clean_active_checkout_materializes_before_publish() {
     let status: Value = serde_json::from_str(&status_json).expect("status JSON parses");
     assert_eq!(status["thread"], "main", "{status_json}");
 
-    heddle(&["undo"], Some(&target_path)).expect("pull fast-forward should be undoable");
+    assert_undo_requires_hard(&target_path);
+    assert_eq!(
+        current_thread_state(&target_path, "main"),
+        source_main,
+        "refused pull undo must leave the published main ref unchanged"
+    );
+    assert_eq!(
+        std::fs::read_to_string(target_path.join("shared.txt")).unwrap(),
+        "remote\n",
+        "refused pull undo must preserve the pulled worktree"
+    );
+
+    heddle(&["undo", "--hard"], Some(&target_path))
+        .expect("pull fast-forward should be undoable with explicit worktree rewind");
     assert_eq!(
         current_thread_state(&target_path, "main"),
         pre_pull_ref,

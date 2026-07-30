@@ -6,7 +6,7 @@
 use std::{
     fs,
     path::Path,
-    process::Command,
+    process::{Command, Output},
     str,
     sync::{Arc, Barrier},
     thread,
@@ -36,19 +36,7 @@ mod platform_compat;
 mod resolve_comprehensive;
 
 fn heddle(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(args);
-
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-    // Heddle refuses captures without an accountable principal. Pin
-    // the identity here so the suite is deterministic regardless of
-    // the runner's git global config or shell env.
-    cmd.env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
-        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev");
-
-    let output = cmd.output().map_err(|e| e.to_string())?;
+    let output = heddle_output(args, cwd)?;
     let stdout = str::from_utf8(&output.stdout).unwrap_or("").to_string();
     let stderr = str::from_utf8(&output.stderr).unwrap_or("").to_string();
 
@@ -62,6 +50,46 @@ fn heddle(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
             stderr
         ))
     }
+}
+
+fn heddle_output(args: &[&str], cwd: Option<&Path>) -> Result<Output, String> {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
+    cmd.args(args);
+
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    // Heddle refuses captures without an accountable principal. Pin
+    // the identity here so the suite is deterministic regardless of
+    // the runner's git global config or shell env.
+    cmd.env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
+        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev");
+
+    cmd.output().map_err(|e| e.to_string())
+}
+
+fn assert_undo_requires_hard(cwd: &Path) {
+    let output = heddle_output(&["--output", "json", "undo"], Some(cwd))
+        .expect("plain undo should return typed safety advice");
+    assert_eq!(output.status.code(), Some(74));
+    assert!(output.stdout.is_empty());
+    let envelope: Value =
+        serde_json::from_slice(&output.stderr).expect("undo refusal should be JSON");
+    assert_eq!(envelope["kind"], "undo_requires_hard", "{envelope}");
+    assert_eq!(
+        envelope["unsafe_condition"],
+        "the selected undo operation materializes an earlier saved tree",
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["would_change"],
+        "captured worktree files would be replaced by the selected operation's prior tree",
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["preserved"], "repository state and worktree files were left unchanged",
+        "{envelope}"
+    );
 }
 
 fn status_json(path: &Path) -> Value {
