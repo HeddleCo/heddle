@@ -54,6 +54,41 @@ fn json(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("parse heddle JSON")
 }
 
+fn snapshot_outside_repository(
+    root: &Path,
+    repository: &Path,
+) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    fn visit(
+        root: &Path,
+        directory: &Path,
+        repository: &Path,
+        snapshot: &mut Vec<(std::path::PathBuf, Vec<u8>)>,
+    ) {
+        let mut entries = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        for path in entries {
+            if path == repository {
+                continue;
+            }
+            if path.is_dir() {
+                visit(root, &path, repository, snapshot);
+            } else if path.is_file() {
+                snapshot.push((
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    fs::read(path).unwrap(),
+                ));
+            }
+        }
+    }
+
+    let mut snapshot = Vec::new();
+    visit(root, root, repository, &mut snapshot);
+    snapshot
+}
+
 #[test]
 fn committed_git_and_unborn_git_both_enter_through_init() {
     for committed in [false, true] {
@@ -100,6 +135,96 @@ fn native_empty_directory_initializes_native_storage() {
     assert_eq!(init["git_detected"], false);
     assert!(repo.path().join(".heddle").is_dir());
     assert!(!repo.path().join(".git").exists());
+}
+
+#[test]
+fn init_in_fresh_directory_does_not_write_to_ancestor_git_repository() {
+    let fixture = TempDir::new().unwrap();
+    let outer = fixture.path().join("outer");
+    let repo = outer.join("fresh/repo");
+    let config = repo.join("user/config.toml");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&outer).unwrap();
+    init_git(&outer);
+    let outside_before = snapshot_outside_repository(&outer, &repo);
+
+    let init = json(&heddle(&repo, &config, &["init", "--output", "json"]));
+
+    assert_eq!(init["repository_mode"], "native-heddle");
+    assert_eq!(init["git_detected"], false);
+    assert_eq!(
+        snapshot_outside_repository(&outer, &repo),
+        outside_before,
+        "init must not write anywhere outside the requested repository root"
+    );
+    assert!(!outer.join(".heddle").exists());
+    assert!(repo.join(".heddle").is_dir());
+}
+
+#[test]
+fn cwd_native_repository_wins_over_readable_ancestor_git_repository() {
+    let fixture = TempDir::new().unwrap();
+    let outer = fixture.path().join("outer");
+    let repo = outer.join("native");
+    let config = repo.join("user/config.toml");
+    fs::create_dir_all(&repo).unwrap();
+    init_git(&outer);
+    repo::Repository::init_default(&repo).unwrap();
+
+    let status = json(&heddle(&repo, &config, &["status", "--output", "json"]));
+
+    assert_eq!(status["repository_capability"], "native-heddle");
+    assert_eq!(status["storage_model"], "heddle-native");
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_ancestor_git_worktree_entry_is_non_fatal_for_native_status() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = TempDir::new().unwrap();
+    let outer = fixture.path().join("outer");
+    let repo = outer.join("native");
+    let unreadable = outer.join("aaa-unreadable");
+    let config = repo.join("user/config.toml");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&unreadable).unwrap();
+    fs::write(unreadable.join("secret"), "not part of the native repo").unwrap();
+    init_git(&outer);
+    repo::Repository::init_default(&repo).unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let output = heddle(&repo, &config, &["status", "--output", "json"]);
+
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o755)).unwrap();
+    let status = json(&output);
+    assert_eq!(status["repository_capability"], "native-heddle");
+    assert_eq!(status["storage_model"], "heddle-native");
+}
+
+#[cfg(unix)]
+#[test]
+fn local_git_metadata_io_error_names_the_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = TempDir::new().unwrap();
+    let repo = fixture.path().join("repo");
+    let git_file = repo.join(".git");
+    let config = repo.join("user/config.toml");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(&git_file, "gitdir: /unreadable\n").unwrap();
+    fs::set_permissions(&git_file, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let output = heddle(&repo, &config, &["init", "--output", "json"]);
+
+    fs::set_permissions(&git_file, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&git_file.display().to_string()),
+        "I/O error must name the failing path: {stderr}"
+    );
+    assert!(!repo.join(".heddle").exists());
 }
 
 #[test]

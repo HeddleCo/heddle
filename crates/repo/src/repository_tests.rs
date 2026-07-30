@@ -16,6 +16,7 @@ use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 use tempfile::TempDir;
 
 use super::{
+    bounded_ancestor_paths_with_device,
     repo_config::SUPPORTED_REPO_FORMAT,
     repository_snapshot::{SnapshotFault, with_snapshot_fault, with_snapshot_prepare_probe},
 };
@@ -28,6 +29,36 @@ fn create_test_repo() -> (TempDir, Repository) {
     let temp_dir = TempDir::new().unwrap();
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     (temp_dir, repo)
+}
+
+#[cfg(unix)]
+#[test]
+fn ancestor_discovery_stops_at_filesystem_boundary_unless_opted_out() {
+    let start = Path::new("/same-device/repo/nested");
+    let device_of = |path: &Path| {
+        if path.starts_with("/same-device/repo") {
+            Some(2)
+        } else {
+            Some(1)
+        }
+    };
+
+    assert_eq!(
+        bounded_ancestor_paths_with_device(start, false, device_of),
+        vec![
+            PathBuf::from("/same-device/repo/nested"),
+            PathBuf::from("/same-device/repo"),
+        ]
+    );
+    assert_eq!(
+        bounded_ancestor_paths_with_device(start, true, device_of),
+        vec![
+            PathBuf::from("/same-device/repo/nested"),
+            PathBuf::from("/same-device/repo"),
+            PathBuf::from("/same-device"),
+            PathBuf::from("/"),
+        ]
+    );
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -304,8 +335,7 @@ fn open_refuses_legacy_oplog_before_mutating_repository() {
 fn open_bootstraps_plain_git_sidecar_for_mutators() {
     let temp_dir = TempDir::new().unwrap();
     let root = temp_dir.path();
-    fs::create_dir_all(root.join(".git")).unwrap();
-    fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    sley::Repository::init(root).expect("init valid Git worktree");
 
     let repo = Repository::open(root).expect("open should bootstrap plain Git for mutators");
     assert!(

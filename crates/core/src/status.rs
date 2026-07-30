@@ -25,7 +25,8 @@ use repo::{
     GitOverlayOutOfBandCommits, GitRemoteTrackingStatus, RepoConfig, Repository,
     RepositoryCapability, RepositoryOperationStatus, Thread, ThreadFreshness, ThreadImpactCategory,
     ThreadManager, ThreadMode, ThreadState, WorktreeCompareProfile,
-    describe_thread_advice_with_initial, is_synthetic_root, refresh_thread_freshness,
+    describe_thread_advice_with_initial, discover_heddle_root, is_synthetic_root,
+    refresh_thread_freshness,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -2881,7 +2882,10 @@ pub fn large_capture_requires_force(
 pub fn fast_short_status_report(start: &Path) -> Result<Option<FastShortStatusReport>> {
     let total_start = Instant::now();
     let discover_start = Instant::now();
-    let git = match SleyRepository::discover(start) {
+    if discover_heddle_root(start).is_some() {
+        return Ok(None);
+    }
+    let git = match SleyRepository::open_from_environment(start) {
         Ok(git) => git,
         Err(_) => return Ok(None),
     };

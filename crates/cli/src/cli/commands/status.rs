@@ -19,6 +19,7 @@ use heddle_core::{
 };
 use repo::{
     RepoConfig, Repository, ThreadFreshness, ThreadMode, ThreadState, WorktreeCompareProfile,
+    discover_heddle_root,
 };
 #[cfg(feature = "client")]
 use serde::Deserialize;
@@ -131,7 +132,10 @@ fn try_fast_short_status_report(cli: &Cli) -> Result<Option<FastShortStatusRepor
 
 fn pending_incomplete_land_marker_exists(start: &Path) -> bool {
     let canonical = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
-    if let Ok(git) = SleyRepository::discover(&canonical)
+    if let Some(heddle_root) = discover_heddle_root(&canonical) {
+        return heddle_root.join(".heddle/incomplete-land.json").is_file();
+    }
+    if let Ok(git) = SleyRepository::open_from_environment(&canonical)
         && let Some(workdir) = git.workdir()
     {
         // A nested plain-Git repository under a Heddle checkout is its own
@@ -144,7 +148,15 @@ fn pending_incomplete_land_marker_exists(start: &Path) -> bool {
 }
 
 fn fast_short_repo_config(start: &Path) -> Result<Option<RepoConfig>> {
-    let Ok(git) = SleyRepository::discover(start) else {
+    if let Some(heddle_root) = discover_heddle_root(start) {
+        let config_path = heddle_root.join(".heddle/config.toml");
+        return if config_path.is_file() {
+            Ok(Some(RepoConfig::load_for_repository(&config_path)?))
+        } else {
+            Ok(None)
+        };
+    }
+    let Ok(git) = SleyRepository::open_from_environment(start) else {
         return Ok(None);
     };
     let Some(workdir) = git.workdir() else {
