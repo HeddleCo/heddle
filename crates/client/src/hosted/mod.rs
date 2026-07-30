@@ -176,9 +176,10 @@ impl HostedClient {
         descriptor: &VerifiedEndpointDescriptor,
         config: &ClientConfig,
     ) -> Result<Self> {
+        let context = CallContextFactory::from_client_config(config)?;
         Ok(Self {
             connection: HostedConnection::connect_verified(descriptor).await?,
-            context: CallContextFactory::from_client_config(config)?,
+            context,
             transport: helpers::HostedTransportPolicy::from_client_config(config),
             on_human_signature: None,
             server_key: config.server_key.clone(),
@@ -201,9 +202,10 @@ impl HostedClient {
         address: EndpointAddr,
         config: &ClientConfig,
     ) -> Result<Self> {
+        let context = CallContextFactory::from_client_config(config)?;
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
-            context: CallContextFactory::from_client_config(config)?,
+            context,
             transport: helpers::HostedTransportPolicy::from_client_config(config),
             on_human_signature: None,
             server_key: config.server_key.clone(),
@@ -227,6 +229,11 @@ impl HostedClient {
     pub fn with_human_signature_callback(mut self, callback: HumanSignatureCallback) -> Self {
         self.on_human_signature = Some(callback);
         self
+    }
+
+    /// Gracefully close the native connection and its owning Iroh endpoint.
+    pub async fn close(self) {
+        self.connection.close().await;
     }
 
     pub(super) async fn auto_rotate_if_needed(

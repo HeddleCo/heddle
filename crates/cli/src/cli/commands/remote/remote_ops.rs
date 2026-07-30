@@ -1003,13 +1003,24 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
     let mut client = HostedClient::open_session_with_insecure(
         options.addr,
         options.user_config,
-        options.server_key,
+        options.server_key.clone(),
         HostedAuthMode::CredentialFallback,
         options.insecure,
     )
     .await?
     .with_human_signature_callback(crate::client::cli_human_signature_callback());
+    let result = pull_network_connected(repo, &mut client, repo_path, options).await;
+    client.close().await;
+    result
+}
 
+#[cfg(feature = "client")]
+async fn pull_network_connected(
+    repo: &Repository,
+    client: &mut HostedClient,
+    repo_path: &str,
+    options: PullNetworkOptions<'_>,
+) -> Result<()> {
     if !should_output_json(options.cli, Some(repo.config())) {
         let line = format_connected_to(&options.addr.to_string());
         if let Some(addr) = line.strip_prefix("connected to ") {
@@ -1083,9 +1094,7 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
             // new hosted CollaborationService discussions/turns for the pulled
             // head into the local op-log. Best-effort — a fetch hiccup warns
             // rather than failing the pull.
-            match crate::client::discussion_sync::pull_discussions(repo, &mut client, repo_path)
-                .await
-            {
+            match crate::client::discussion_sync::pull_discussions(repo, client, repo_path).await {
                 Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                     println!(
                         "{} synced {count} discussion(s) from {}",
@@ -1102,7 +1111,7 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
                 }
             }
             // Read path for hosted context annotations — same seam as discussions.
-            match crate::client::context_sync::pull_context(repo, &mut client, repo_path).await {
+            match crate::client::context_sync::pull_context(repo, client, repo_path).await {
                 Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                     println!(
                         "{} synced {count} annotation(s) from {}",

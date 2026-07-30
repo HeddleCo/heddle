@@ -1300,7 +1300,17 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         .connect(options.addr)
         .await?
         .with_human_signature_callback(crate::client::cli_human_signature_callback());
+    let result = push_network_connected(repo, &mut client, options).await;
+    client.close().await;
+    result
+}
 
+#[cfg(feature = "client")]
+async fn push_network_connected(
+    repo: &Repository,
+    client: &mut HostedClient,
+    options: PushNetworkOptions<'_>,
+) -> Result<()> {
     if !should_output_json(options.cli, Some(repo.config())) {
         let line = format_connected_to(&options.addr.to_string());
         if let Some(addr) = line.strip_prefix("connected to ") {
@@ -1312,7 +1322,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
 
     let repo_path = match options.repo_path {
         Some(repo_path) => repo_path.to_string(),
-        None => auto_provision_hosted_repo(repo, &mut client, &options).await?,
+        None => auto_provision_hosted_repo(repo, client, &options).await?,
     };
 
     // --all-threads (heddle#838) on the NATIVE hosted path fans out one push
@@ -1324,7 +1334,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
     // single projection push below; only the non-Git-backed path loops.
     // Plan is pure (capability + flag); network bodies stay here.
     if matches!(options.plan.hosted, HostedPushPlan::NativePerThreadFanout) {
-        return push_network_all_threads(repo, &mut client, &repo_path, &options).await;
+        return push_network_all_threads(repo, client, &repo_path, &options).await;
     }
 
     let progress = progress_for(options.cli, repo);
@@ -1341,7 +1351,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
     };
     let result = push_network_one_thread(
         repo,
-        &mut client,
+        client,
         &repo_path,
         &state_id,
         options.track_name,
@@ -1358,8 +1368,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
     // the object push already succeeded, so a discussion-sync hiccup warns
     // rather than failing the push (the next push resumes from the mirror map).
     if result.success {
-        match crate::client::discussion_sync::push_discussions(repo, &mut client, &repo_path).await
-        {
+        match crate::client::discussion_sync::push_discussions(repo, client, &repo_path).await {
             Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                 println!(
                     "{} synced {count} discussion(s) to {}",
@@ -1381,7 +1390,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         // rejects these attachments in the pack, so they only reach the server
         // over the caller-authenticated RPCs. Best-effort: the object push
         // already landed, so a sync hiccup warns rather than failing the push.
-        match crate::client::context_sync::push_context(repo, &mut client, &repo_path).await {
+        match crate::client::context_sync::push_context(repo, client, &repo_path).await {
             Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                 println!(
                     "{} synced {count} annotation(s) to {}",
@@ -1394,9 +1403,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
                 eprintln!("{} context sync skipped: {error:#}", style::warn_marker());
             }
         }
-        match crate::client::review_sync::push_review_signatures(repo, &mut client, &repo_path)
-            .await
-        {
+        match crate::client::review_sync::push_review_signatures(repo, client, &repo_path).await {
             Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                 println!(
                     "{} synced {count} review signature(s) to {}",

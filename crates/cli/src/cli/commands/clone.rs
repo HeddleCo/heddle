@@ -1506,18 +1506,6 @@ async fn clone_network(
         config::UserConfig,
     };
 
-    let CloneOptions {
-        thread,
-        depth,
-        lazy,
-        filter,
-        insecure,
-    } = options;
-    let depth = *depth;
-    // `--filter blob:none` is a synonym for `--lazy` on hosted/network
-    // remotes; both produce a clone whose blob content is hydrated on demand.
-    let lazy = *lazy || filter.is_some();
-
     let user_config = UserConfig::load_default()?;
     // On every network-connecting command, TLS/auth config validation
     // (`heddle_client_config`) must succeed before any irreversible
@@ -1526,11 +1514,46 @@ async fn clone_network(
     // no partial on-disk artifact.
     let session =
         HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
-            .with_allow_insecure(*insecure);
+            .with_allow_insecure(options.insecure);
     let repo_path = repo_path.context("network remotes must include a hosted repository path")?;
 
-    let json_output = should_output_json(cli, None);
     let mut client = session.connect(addr).await?;
+    let result = clone_network_connected(
+        cli,
+        addr,
+        repo_path,
+        local_path,
+        options,
+        endpoint_spec,
+        &mut client,
+    )
+    .await;
+    client.close().await;
+    result
+}
+
+#[cfg(feature = "client")]
+async fn clone_network_connected(
+    cli: &Cli,
+    addr: std::net::SocketAddr,
+    repo_path: &str,
+    local_path: &Path,
+    options: &CloneOptions,
+    endpoint_spec: String,
+    client: &mut HostedClient,
+) -> Result<()> {
+    let CloneOptions {
+        thread,
+        depth,
+        lazy,
+        filter,
+        insecure: _,
+    } = options;
+    let depth = *depth;
+    // `--filter blob:none` is a synonym for `--lazy` on hosted/network
+    // remotes; both produce a clone whose blob content is hydrated on demand.
+    let lazy = *lazy || filter.is_some();
+    let json_output = should_output_json(cli, None);
 
     if json_output {
         println!(
@@ -1630,8 +1653,7 @@ async fn clone_network(
         // hosted CollaborationService discussions for the cloned head into the
         // local op-log so `discuss list` / `discuss show` see them. Best-effort:
         // a fetch hiccup warns rather than failing an otherwise-good clone.
-        match crate::client::discussion_sync::pull_discussions(&local_repo, &mut client, repo_path)
-            .await
+        match crate::client::discussion_sync::pull_discussions(&local_repo, client, repo_path).await
         {
             Ok(_) => {}
             Err(error) => {
@@ -1644,7 +1666,7 @@ async fn clone_network(
         // Read path for hosted context annotations (heddle context): materialize
         // the hosted head's annotations into the local Context attachment so
         // `context list` sees them. Best-effort, mirroring discussions.
-        match crate::client::context_sync::pull_context(&local_repo, &mut client, repo_path).await {
+        match crate::client::context_sync::pull_context(&local_repo, client, repo_path).await {
             Ok(_) => {}
             Err(error) => {
                 eprintln!("{} context sync skipped: {error:#}", style::warn_marker());
@@ -1737,8 +1759,24 @@ async fn clone_monorepo(
         HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
             .with_allow_insecure(options.insecure);
 
-    let json_output = should_output_json(cli, None);
     let mut client = session.connect(addr).await?;
+    let result =
+        clone_monorepo_connected(cli, addr, root_path, local_path, endpoint_spec, &mut client)
+            .await;
+    client.close().await;
+    result
+}
+
+#[cfg(feature = "client")]
+async fn clone_monorepo_connected(
+    cli: &Cli,
+    addr: std::net::SocketAddr,
+    root_path: &str,
+    local_path: &Path,
+    endpoint_spec: String,
+    client: &mut HostedClient,
+) -> Result<()> {
+    let json_output = should_output_json(cli, None);
     if json_output {
         println!(
             "{}",
@@ -1777,7 +1815,7 @@ async fn clone_monorepo(
                 )
             })?;
         execute_monorepo_node_steps(
-            &mut client,
+            client,
             node_exec,
             &dest,
             &endpoint_spec,

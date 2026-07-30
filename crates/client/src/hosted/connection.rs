@@ -9,7 +9,7 @@ use super::{HostedError, Result, VerifiedEndpointDescriptor};
 
 #[derive(Debug)]
 pub(super) struct HostedConnection {
-    pub(super) _endpoint: Endpoint,
+    pub(super) endpoint: Endpoint,
     pub(super) connection: iroh::endpoint::Connection,
 }
 
@@ -18,6 +18,7 @@ impl HostedConnection {
         descriptor: &VerifiedEndpointDescriptor,
     ) -> Result<Arc<Self>> {
         let relays = descriptor.relay_urls()?;
+        let address = descriptor.endpoint_addr()?;
         let relay_mode = if relays.is_empty() {
             RelayMode::Disabled
         } else {
@@ -29,18 +30,26 @@ impl HostedConnection {
             .bind()
             .await
             .map_err(HostedError::transport)?;
-        Self::connect(endpoint, descriptor.endpoint_addr()?).await
+        Self::connect(endpoint, address).await
     }
 
     pub(super) async fn connect(endpoint: Endpoint, address: EndpointAddr) -> Result<Arc<Self>> {
-        let connection = endpoint
-            .connect(address, api::HOSTED_ALPN_V1)
-            .await
-            .map_err(HostedError::transport)?;
+        let connection = match endpoint.connect(address, api::HOSTED_ALPN_V1).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                endpoint.close().await;
+                return Err(HostedError::transport(error));
+            }
+        };
         Ok(Arc::new(Self {
-            _endpoint: endpoint,
+            endpoint,
             connection,
         }))
+    }
+
+    pub(super) async fn close(&self) {
+        self.connection.close(0u32.into(), b"Heddle client closed");
+        self.endpoint.close().await;
     }
 }
 
@@ -62,4 +71,53 @@ fn transport_config() -> QuicTransportConfig {
         .receive_window(CONNECTION_RECEIVE_WINDOW.into())
         .ack_frequency_config(Some(acknowledgements))
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::Ipv4Addr, time::Duration};
+
+    use iroh::{Endpoint, RelayMode, endpoint::presets};
+
+    use super::HostedConnection;
+
+    #[tokio::test]
+    async fn failed_connect_closes_the_client_endpoint() {
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![b"not-heddle".to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let server_addr = server.addr();
+        let server_task = tokio::spawn(async move {
+            let incoming = server.accept().await.expect("incoming connection");
+            assert!(
+                incoming.await.is_err(),
+                "ALPN mismatch must reject the dial"
+            );
+            server.close().await;
+        });
+
+        let client = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let client_observer = client.clone();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            HostedConnection::connect(client, server_addr),
+        )
+        .await
+        .expect("ALPN mismatch must fail promptly");
+
+        assert!(result.is_err());
+        assert!(client_observer.is_closed());
+        server_task.await.unwrap();
+    }
 }

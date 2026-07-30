@@ -184,7 +184,9 @@ async fn fetch_identity(server: &str) -> Result<WhoamiIdentity> {
     let response = client
         .who_am_i()
         .await
-        .map_err(|error| anyhow::anyhow!(error))?;
+        .map_err(|error| anyhow::anyhow!(error));
+    client.close().await;
+    let response = response?;
     Ok(WhoamiIdentity {
         subject: response.subject,
         actor_subject: response.actor_subject,
