@@ -553,6 +553,52 @@ run_text_expect_failure() {
   RUN_TEXT_ALLOW_FAILURE=1 run_text "$@"
 }
 
+run_text_expect_undo_requires_hard() {
+  local transcript="$1"
+  local repo="$2"
+  local label="$3"
+  local stdout_file="$ARTIFACT_ROOT/$label.stdout"
+  local stderr_file="$ARTIFACT_ROOT/$label.json"
+  local exit_code
+  set +e
+  (cd "$repo" && heddle_runtime undo --output json) > "$stdout_file" 2> "$stderr_file"
+  exit_code=$?
+  set -e
+  python3 - "$stdout_file" "$stderr_file" "$exit_code" <<'PYJSON'
+import json
+import sys
+
+stdout_path, stderr_path, exit_code_text = sys.argv[1:]
+with open(stdout_path, encoding="utf-8") as handle:
+    stdout = handle.read()
+with open(stderr_path, encoding="utf-8") as handle:
+    stderr = handle.read()
+if int(exit_code_text) != 74:
+    raise SystemExit(f"undo refusal should exit 74, got {exit_code_text}: {stderr!r}")
+if stdout:
+    raise SystemExit(f"undo refusal should keep JSON stdout empty, got {stdout!r}")
+stderr_lines = [line for line in stderr.splitlines() if line.strip()]
+if len(stderr_lines) != 1:
+    raise SystemExit(f"expected one undo refusal envelope, got {stderr!r}")
+artifact = json.loads(stderr)
+expected = {
+    "kind": "undo_requires_hard",
+    "unsafe_condition": "the selected undo operation materializes an earlier saved tree",
+    "would_change": "captured worktree files would be replaced by the selected operation's prior tree",
+    "preserved": "repository state and worktree files were left unchanged",
+    "primary_command": "heddle undo --hard",
+}
+for key, value in expected.items():
+    if artifact.get(key) != value:
+        raise SystemExit(f"undo refusal {key} mismatch: {artifact!r}")
+PYJSON
+  {
+    printf '\n$ (cd %s && heddle undo --output json)\n' "$repo"
+    cat "$stderr_file"
+  } >> "$transcript"
+  rm -f "$stdout_file"
+}
+
 assert_current_verify_clean() {
   local repo="$1"
   local json
@@ -637,7 +683,9 @@ run_shape() {
   assert_source_authority "$clone_path" native
   printf 'native authority proof for %s\n' "$shape" > "$clone_path/native-authority-proof.txt"
   run_text "$transcript" "$clone_path" capture -m "native authority proof $shape" --output text
-  run_text "$transcript" "$clone_path" undo --output text
+  run_text_expect_undo_requires_hard "$transcript" "$clone_path" "$shape.native-undo-refusal"
+  grep -Fx "native authority proof for $shape" "$clone_path/native-authority-proof.txt" >/dev/null
+  run_text "$transcript" "$clone_path" undo --hard --output text
   run_text "$transcript" "$clone_path" verify --output text
   assert_clean_git_status "$clone_path"
 
