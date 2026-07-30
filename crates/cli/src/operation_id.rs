@@ -389,10 +389,9 @@ fn bootstrap_op_id_scope_for_root(root: PathBuf) -> Result<BootstrapOpIdScope> {
 }
 
 fn bootstrap_op_id_store_dir(scope: &BootstrapOpIdScope) -> PathBuf {
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join(".heddle").join("bootstrap-op-id").join(&scope.id)
+    repo::identity::heddle_home_dir()
+        .join("bootstrap-op-id")
+        .join(&scope.id)
 }
 
 /// Same as [`resolve_operation_id`] but returns the wire-string form
@@ -401,7 +400,7 @@ pub fn wire(cli: &Cli) -> String {
     cli.op_id.clone().unwrap_or_default()
 }
 
-/// Per-repo session directory under `$HOME/.heddle/session/<repo-id>`.
+/// Per-repo session directory under `<heddle-home>/session/<repo-id>`.
 /// `<repo-id>` is a 16-char SHA-256 of the canonical repo root so two
 /// worktrees of the same repo don't collide.
 fn session_dir_for(repo: &Repository) -> PathBuf {
@@ -412,10 +411,9 @@ fn session_dir_for(repo: &Repository) -> PathBuf {
     hasher.update(canonical.to_string_lossy().as_bytes());
     let digest = hex::encode(hasher.finalize());
     let repo_id = &digest[..16.min(digest.len())];
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join(".heddle").join("session").join(repo_id)
+    repo::identity::heddle_home_dir()
+        .join("session")
+        .join(repo_id)
 }
 
 fn last_op_id_path(repo: &Repository) -> PathBuf {

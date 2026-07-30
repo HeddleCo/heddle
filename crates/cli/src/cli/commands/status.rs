@@ -313,9 +313,11 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
         StatusDetail::DefaultText
     };
     let status_options = worktree_status_options(Some(&repo_config));
+    let user_config = cli_shared::UserConfig::load_default()?;
     let ctx = heddle_core::ExecutionContext::builder()
         .start_path(start.clone())
         .repo(repo)
+        .config(user_config)
         .build();
     let mut output = core_status(
         &ctx,

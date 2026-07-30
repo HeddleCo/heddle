@@ -6,8 +6,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use objects::fs_atomic::{StagedAtomicWrite, stage_file_atomic_secret};
-use repo::{FsMonitorMode, FsMonitorSettings, OutputFormat, WorktreeStatusOptions};
+use objects::{
+    fs_atomic::{StagedAtomicWrite, stage_file_atomic_secret},
+    object::Principal,
+};
+use repo::{
+    FsMonitorMode, FsMonitorSettings, OutputFormat, Repository, WorktreeStatusOptions,
+    identity::heddle_home_override,
+};
 use serde::{Deserialize, Serialize};
 use wire::AuthToken;
 
@@ -40,6 +46,29 @@ pub struct UserConfig {
 pub struct StagedUserConfig {
     path: PathBuf,
     write: StagedAtomicWrite,
+}
+
+/// A principal together with the configuration surface that selected it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPrincipal {
+    pub principal: Principal,
+    pub source: Option<&'static str>,
+}
+
+impl ResolvedPrincipal {
+    fn configured(principal: Principal, source: &'static str) -> Self {
+        Self {
+            principal,
+            source: Some(source),
+        }
+    }
+
+    fn unknown(principal: Principal) -> Self {
+        Self {
+            principal,
+            source: None,
+        }
+    }
 }
 
 impl StagedUserConfig {
@@ -315,6 +344,9 @@ impl UserConfig {
         {
             return Some(PathBuf::from(path));
         }
+        if let Some(home) = heddle_home_override() {
+            return Some(home.join("config.toml"));
+        }
         if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
             && !xdg.is_empty()
         {
@@ -555,6 +587,53 @@ impl UserConfig {
             fsmonitor: FsMonitorSettings { mode },
         }
     }
+}
+
+/// Resolve capture attribution once for init, status, capture, and other
+/// identity-bearing commands.
+///
+/// Precedence is environment, repository config, Git config (including a
+/// shared parent checkout), user config, then the built-in Unknown principal.
+pub fn resolve_principal(
+    repo: &Repository,
+    user_config: &UserConfig,
+) -> repo::Result<ResolvedPrincipal> {
+    if let Some(principal) = Principal::from_env() {
+        return Ok(ResolvedPrincipal::configured(principal, "environment"));
+    }
+    if let Some(config) = &repo.config().principal {
+        return Ok(ResolvedPrincipal::configured(
+            Principal::new(&config.name, &config.email),
+            "repository",
+        ));
+    }
+    let principal = repo.get_principal()?;
+    if principal_is_accountable(&principal) {
+        return Ok(ResolvedPrincipal::configured(principal, "git_config"));
+    }
+    if let Some(config) = &user_config.principal {
+        return Ok(ResolvedPrincipal::configured(
+            Principal::new(&config.name, &config.email),
+            "user_config",
+        ));
+    }
+    Ok(ResolvedPrincipal::unknown(principal))
+}
+
+/// Human-facing source label. User config is called out as global because it
+/// is shared across repositories unless `HEDDLE_HOME` or `HEDDLE_CONFIG`
+/// isolates it.
+pub fn principal_source_display(source: &str) -> &str {
+    match source {
+        "user_config" => "user_config (shared global config)",
+        _ => source,
+    }
+}
+
+fn principal_is_accountable(principal: &Principal) -> bool {
+    let name = principal.name.trim();
+    let email = principal.email.trim();
+    !name.is_empty() && !email.is_empty() && !(name == "Unknown" && email == "unknown@example.com")
 }
 
 fn parse_auto_capture_env(setting: &str, value: &str) -> anyhow::Result<UserAutoCaptureMode> {

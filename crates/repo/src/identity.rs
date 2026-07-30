@@ -68,13 +68,20 @@ pub struct DeviceIdentity {
 /// sits beside `credentials.toml`. `HEDDLE_HOME` exists primarily as a test
 /// and power-user override; production resolves to `$HOME/.heddle`.
 pub fn heddle_home_dir() -> PathBuf {
-    if let Some(explicit) = std::env::var_os("HEDDLE_HOME") {
-        return PathBuf::from(explicit);
+    if let Some(explicit) = heddle_home_override() {
+        return explicit;
     }
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".heddle")
+}
+
+/// Explicit non-empty `HEDDLE_HOME` override, when configured.
+pub fn heddle_home_override() -> Option<PathBuf> {
+    std::env::var_os("HEDDLE_HOME")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Path to the global device identity file.
