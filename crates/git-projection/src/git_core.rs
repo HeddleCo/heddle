@@ -6,6 +6,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -33,6 +34,7 @@ use sley::{
         PushActionPlan, PushCommand, PushOptions, SilentProgress,
     },
 };
+use sley_transport::{HttpClient, UreqHttpClient};
 
 use super::{
     credential::EmbeddingSafeCredentialProvider,
@@ -141,6 +143,31 @@ pub enum GitProjectionError {
         name: String,
         reason: FailedRefExportReason,
     },
+}
+
+static GIT_HTTPS_CLIENT: OnceLock<Option<UreqHttpClient>> = OnceLock::new();
+
+/// Configure the Git transport's HTTPS trust before its first network request.
+pub fn configure_https_ca_certificate_pem(ca_pem: Option<&str>) -> GitProjectionResult<()> {
+    let client = ca_pem
+        .map(|pem| UreqHttpClient::with_extra_ca_certificate_pem(pem.as_bytes()))
+        .transpose()
+        .map_err(|error| {
+            GitProjectionError::Git(format!(
+                "invalid CA bundle configured by HEDDLE_REMOTE_TLS_CA_CERT: {error}"
+            ))
+        })?;
+    GIT_HTTPS_CLIENT.set(client).map_err(|_| {
+        GitProjectionError::Git("Git HTTPS trust has already been configured".to_string())
+    })
+}
+
+/// Return the Git smart-HTTPS client configured during CLI startup.
+pub fn configured_https_client() -> Option<&'static dyn HttpClient> {
+    GIT_HTTPS_CLIENT
+        .get()
+        .and_then(Option::as_ref)
+        .map(|client| client as &dyn HttpClient)
 }
 
 /// Type alias for Git Projection and Bridge Mirror results.
@@ -2271,7 +2298,7 @@ fn fetch_heddle_notes_into_repo(
     let mut credentials = NoCredentials;
     let mut progress = SilentProgress;
     let refspec = RefSpec::forced("refs/notes/*", "refs/notes/*")?.to_git_format();
-    repo.fetch(
+    repo.fetch_with_http_client(
         url,
         &[refspec],
         FetchOptions {
@@ -2284,6 +2311,7 @@ fn fetch_heddle_notes_into_repo(
             negotiation_include: None,
             negotiation_restrict: None,
             reject_shallow: false,
+            negotiate_only: false,
             quiet: true,
             auto_follow_tags: false,
             fetch_all_tags: false,
@@ -2313,10 +2341,13 @@ fn fetch_heddle_notes_into_repo(
         },
         &mut credentials,
         &mut progress,
+        configured_https_client(),
     )
     .map(|_| ())
     .map_err(|err| {
-        GitProjectionError::Git(format!("failed to fetch notes from {remote_name}: {err}"))
+        GitProjectionError::Git(git_transport_error_message(format!(
+            "failed to fetch notes from {remote_name}: {err}"
+        )))
     })
 }
 
@@ -2586,7 +2617,25 @@ fn common_repo_for_worktree(repo: &SleyRepository) -> GitProjectionResult<SleyRe
 }
 
 pub fn git_err(err: impl std::fmt::Display) -> GitProjectionError {
-    GitProjectionError::Git(err.to_string())
+    GitProjectionError::Git(git_transport_error_message(err))
+}
+
+/// Add operator-facing CA guidance to Git TLS trust failures.
+pub fn git_transport_error_message(error: impl std::fmt::Display) -> String {
+    let message = error.to_string();
+    let normalized = message.to_ascii_lowercase();
+    let tls_trust_failure = normalized.contains("invalid peer certificate")
+        || normalized.contains("unknownissuer")
+        || normalized.contains("unknown issuer")
+        || normalized.contains("certificateunknown");
+    if tls_trust_failure && !message.contains("HEDDLE_REMOTE_TLS_CA_CERT") {
+        format!(
+            "{message}; trust this server's CA with \
+             HEDDLE_REMOTE_TLS_CA_CERT=/path/to/ca.pem"
+        )
+    } else {
+        message
+    }
 }
 
 fn restore_file_if_unchanged(
@@ -4081,7 +4130,7 @@ fn clone_url_to_bare_via_sley(
         EmbeddingSafeCredentialProvider::new(&repo.config_snapshot().map_err(git_err)?);
     let display_url = sley::plumbing::sley_core::redact_url_for_display(url);
     let outcome = repo
-        .fetch(
+        .fetch_with_http_client(
             url,
             &heddle_mirror_fetch_refspecs()?,
             FetchOptions {
@@ -4092,6 +4141,7 @@ fn clone_url_to_bare_via_sley(
                 negotiation_include: None,
                 negotiation_restrict: None,
                 reject_shallow: false,
+                negotiate_only: false,
                 quiet: true,
                 auto_follow_tags: true,
                 fetch_all_tags: true,
@@ -4121,8 +4171,13 @@ fn clone_url_to_bare_via_sley(
             },
             &mut credentials,
             progress,
+            configured_https_client(),
         )
-        .map_err(|err| GitProjectionError::Git(format!("clone failed for {display_url}: {err}")))?;
+        .map_err(|err| {
+            GitProjectionError::Git(git_transport_error_message(format!(
+                "clone failed for {display_url}: {err}"
+            )))
+        })?;
     Ok(outcome
         .head_symref
         .and_then(|target| target.strip_prefix("refs/heads/").map(str::to_string)))
@@ -4515,7 +4570,7 @@ fn fetch_network_remote(
     let mut credentials = NoCredentials;
     let mut progress = SilentProgress;
     mirror_repo
-        .fetch(
+        .fetch_with_http_client(
             url,
             &heddle_mirror_fetch_refspecs()?,
             FetchOptions {
@@ -4526,6 +4581,7 @@ fn fetch_network_remote(
                 negotiation_include: None,
                 negotiation_restrict: None,
                 reject_shallow: false,
+                negotiate_only: false,
                 quiet: true,
                 auto_follow_tags: matches!(scope, GitFetchScope::AllRefs),
                 fetch_all_tags: matches!(scope, GitFetchScope::AllRefs),
@@ -4555,8 +4611,13 @@ fn fetch_network_remote(
             },
             &mut credentials,
             &mut progress,
+            configured_https_client(),
         )
-        .map_err(|err| GitProjectionError::Git(format!("failed to fetch from {url}: {err}")))?;
+        .map_err(|err| {
+            GitProjectionError::Git(git_transport_error_message(format!(
+                "failed to fetch from {url}: {err}"
+            )))
+        })?;
     let _ = remote_name;
     Ok(())
 }
@@ -4595,7 +4656,7 @@ fn push_network_remote(
 
     let mut credentials = NoCredentials;
     let records = mirror_repo
-        .ls_remote(
+        .ls_remote_with_http_client(
             url,
             LsRemoteFilter {
                 heads: false,
@@ -4604,8 +4665,13 @@ fn push_network_remote(
             },
             &|_| true,
             &mut credentials,
+            configured_https_client(),
         )
-        .map_err(|err| GitProjectionError::Git(format!("failed to list refs from {url}: {err}")))?;
+        .map_err(|err| {
+            GitProjectionError::Git(git_transport_error_message(format!(
+                "failed to list refs from {url}: {err}"
+            )))
+        })?;
     let remote_refs = records
         .into_iter()
         .filter(|record| GitRefName::new(&record.name).content_namespace().is_some())
@@ -4657,7 +4723,7 @@ fn push_network_remote(
     let mut credentials = NoCredentials;
     let mut progress = SilentProgress;
     mirror_repo
-        .push_actions(
+        .push_actions_with_http_client(
             url,
             PushActionPlan {
                 commands,
@@ -4673,8 +4739,13 @@ fn push_network_remote(
             },
             &mut credentials,
             &mut progress,
+            configured_https_client(),
         )
-        .map_err(|err| GitProjectionError::Git(format!("push failed for {url}: {err}")))?;
+        .map_err(|err| {
+            GitProjectionError::Git(git_transport_error_message(format!(
+                "push failed for {url}: {err}"
+            )))
+        })?;
     // Only persist the record once the remote has acknowledged every command, so
     // a failed push never leaves a ref recorded as exported that did not land.
     write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
@@ -4727,7 +4798,7 @@ pub fn push_authoritative_git_refs(
         .collect::<Vec<_>>();
 
     let records = source
-        .ls_remote(
+        .ls_remote_with_http_client(
             &remote_url,
             LsRemoteFilter {
                 heads: false,
@@ -4736,6 +4807,7 @@ pub fn push_authoritative_git_refs(
             },
             &|_| true,
             credentials,
+            configured_https_client(),
         )
         .map_err(git_err)?;
     let remote_refs = records
@@ -4795,7 +4867,7 @@ pub fn push_authoritative_git_refs(
         });
     }
     source
-        .push_actions(
+        .push_actions_with_http_client(
             remote,
             PushActionPlan {
                 commands,
@@ -4810,6 +4882,7 @@ pub fn push_authoritative_git_refs(
             },
             credentials,
             progress,
+            configured_https_client(),
         )
         .map_err(git_err)?;
     write_exported_refs_at(&manifest_path, &plan.new_manifest)?;

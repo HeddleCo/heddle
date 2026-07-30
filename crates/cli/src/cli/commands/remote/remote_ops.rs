@@ -403,12 +403,13 @@ fn pull_git_overlay(
     let mut credentials = EmbeddingSafeCredentialProvider::new(&git_config);
     let fetch_refspecs = vec![remote_ref.clone(), "+refs/notes/*:refs/notes/*".to_string()];
     let outcome = git
-        .fetch(
+        .fetch_with_http_client(
             &remote_name,
             &fetch_refspecs,
             git_pull_fetch_options(&remote_branch),
             &mut credentials,
             &mut sley_progress,
+            heddle_git_projection::configured_https_client(),
         )
         .map_err(|error| git_pull_fetch_advice(&remote_name, &remote_branch, &error))?;
     finish_line(
@@ -564,6 +565,7 @@ fn git_pull_fetch_options(remote_thread: &str) -> FetchOptions {
         atomic: true,
         negotiation_restrict: None,
         negotiation_include: None,
+        negotiate_only: false,
     }
 }
 
@@ -666,6 +668,7 @@ fn git_pull_fetch_advice(
     remote_branch: &str,
     error: &impl std::fmt::Display,
 ) -> anyhow::Error {
+    let error = heddle_git_projection::git_transport_error_message(error);
     let retry = format!("heddle pull {remote} {remote_branch}");
     RecoveryAdvice::safety_refusal(
         "git_overlay_pull_fetch_failed",

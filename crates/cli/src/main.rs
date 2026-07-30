@@ -224,6 +224,22 @@ async fn async_main() -> Result<()> {
             std::process::exit(code.into());
         }
     };
+    let git_tls_ca_pem = match user_config.remote_tls_ca_certificate_pem() {
+        Ok(ca_pem) => ca_pem,
+        Err(err) => {
+            let code = HeddleExitCode::from_error(&err);
+            print_error_with_hint(&cli, &err);
+            std::process::exit(code.into());
+        }
+    };
+    if let Err(err) =
+        heddle_git_projection::configure_https_ca_certificate_pem(git_tls_ca_pem.as_deref())
+    {
+        let err = anyhow::Error::new(err);
+        let code = HeddleExitCode::from_error(&err);
+        print_error_with_hint(&cli, &err);
+        std::process::exit(code.into());
+    }
     let config_load_ms = config_start.elapsed().as_millis();
     let logging_start = Instant::now();
     // Foreground CLI commands default to WARN-level logs so the human-facing
