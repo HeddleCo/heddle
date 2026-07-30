@@ -676,7 +676,14 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         // unchanged.
         let symlink_dir = entry.path.parent().unwrap_or(self.walk_root);
         if !validate_symlink_target(self.walk_root, symlink_dir, &target) {
-            return Err(HeddleError::InvalidSymlinkTarget(target));
+            return Err(HeddleError::InvalidSymlinkTarget {
+                path: entry
+                    .path
+                    .strip_prefix(self.walk_root)
+                    .unwrap_or(entry.path)
+                    .to_path_buf(),
+                target,
+            });
         }
 
         let blob = Blob::new(objects::util::symlink_target_bytes(&target));

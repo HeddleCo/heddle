@@ -34,9 +34,9 @@ fn test_undo_at_beginning() {
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle_must_succeed(&["capture", "-m", "Initial"], temp.path());
-    let result = heddle(&["undo"], Some(temp.path()));
+    let result = heddle(&["undo", "--hard"], Some(temp.path()));
     assert!(result.is_ok());
-    let result = heddle(&["undo"], Some(temp.path()));
+    let result = heddle(&["undo", "--hard"], Some(temp.path()));
     assert!(result.is_err());
 }
 
@@ -124,7 +124,7 @@ fn test_undo_preserves_ignored_siblings_in_tracked_dirs() {
     std::fs::create_dir_all(temp.path().join("target")).unwrap();
     std::fs::write(temp.path().join("target/foo.bin"), "build").unwrap();
 
-    heddle(&["undo", "-n", "1"], Some(temp.path())).expect("undo must succeed");
+    heddle(&["undo", "-n", "1", "--hard"], Some(temp.path())).expect("undo must succeed");
 
     // Tracked content reverted.
     assert!(!temp.path().join("main.rs").exists());
@@ -165,8 +165,11 @@ fn test_undo_refuses_when_untracked_file_present() {
     let untracked = temp.path().join("my-notes.md");
     std::fs::write(&untracked, "user-written content").unwrap();
 
-    let err = heddle(&["undo", "-n", "1", "--output", "json"], Some(temp.path()))
-        .expect_err("undo must refuse on dirty worktree");
+    let err = heddle(
+        &["undo", "-n", "1", "--hard", "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect_err("hard undo must refuse on dirty worktree");
     assert!(
         err.contains("untracked"),
         "error should mention untracked: {err}"
@@ -193,8 +196,11 @@ fn test_undo_refuses_when_tracked_file_modified() {
 
     std::fs::write(temp.path().join("a.txt"), "uncommitted edit").unwrap();
 
-    let err = heddle(&["undo", "-n", "1", "--output", "json"], Some(temp.path()))
-        .expect_err("undo must refuse with modified file");
+    let err = heddle(
+        &["undo", "-n", "1", "--hard", "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect_err("hard undo must refuse with modified file");
     assert!(
         err.contains("modified"),
         "error should mention modified: {err}"
@@ -207,7 +213,8 @@ fn test_undo_refuses_when_tracked_file_modified() {
 
     // Capturing the change unblocks undo.
     heddle_must_succeed(&["capture", "-m", "edit"], temp.path());
-    heddle(&["undo", "-n", "1"], Some(temp.path())).expect("undo succeeds once worktree is clean");
+    heddle(&["undo", "-n", "1", "--hard"], Some(temp.path()))
+        .expect("undo succeeds once worktree is clean");
 }
 
 #[test]
@@ -227,7 +234,8 @@ fn test_undo_with_dotgit_directory_present() {
     std::fs::write(temp.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::write(temp.path().join(".git/objects/01/abc"), "fake git object").unwrap();
 
-    heddle(&["undo", "-n", "1"], Some(temp.path())).expect("undo must succeed alongside .git");
+    heddle(&["undo", "-n", "1", "--hard"], Some(temp.path()))
+        .expect("undo must succeed alongside .git");
     assert!(!temp.path().join("file.txt").exists());
     assert!(
         temp.path().join(".git/HEAD").exists(),
@@ -272,7 +280,7 @@ fn test_undo_capture_restores_head_to_parent() {
         "second capture must produce a fresh state"
     );
 
-    heddle_must_succeed(&["undo"], temp.path());
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
     assert_eq!(
         head_short(temp.path()),
         parent,
@@ -282,6 +290,70 @@ fn test_undo_capture_restores_head_to_parent() {
         std::fs::read_to_string(temp.path().join("a.txt")).unwrap(),
         "v1",
         "worktree must reflect the parent state's tree after undo"
+    );
+}
+
+#[test]
+fn test_undo_capture_requires_hard_before_rewriting_worktree() {
+    let temp = TempDir::new().unwrap();
+    drop(Repository::init_default(temp.path()).unwrap());
+    std::fs::create_dir(temp.path().join(".git")).unwrap();
+
+    std::fs::write(temp.path().join("notes.md"), "base\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+    let parent = head_short(temp.path());
+
+    std::fs::write(temp.path().join("notes.md"), "captured change\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "change"], temp.path());
+    let captured = head_short(temp.path());
+
+    let refusal = heddle(&["undo", "--output", "json"], Some(temp.path()))
+        .expect_err("plain undo must refuse before a worktree rewind");
+    assert!(refusal.contains("undo_requires_hard"), "{refusal}");
+    assert!(refusal.contains("heddle undo --hard"), "{refusal}");
+    assert_eq!(head_short(temp.path()), captured);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
+        "captured change\n"
+    );
+
+    std::fs::write(temp.path().join("notes.md"), "unsaved local edit\n").unwrap();
+    let dirty_refusal = heddle(&["undo", "--hard", "--output", "json"], Some(temp.path()))
+        .expect_err("hard undo must refuse before overwriting an uncommitted edit");
+    assert!(dirty_refusal.contains("dirty_worktree"), "{dirty_refusal}");
+    assert!(
+        dirty_refusal.contains("modified: notes.md"),
+        "{dirty_refusal}"
+    );
+    assert_eq!(head_short(temp.path()), captured);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
+        "unsaved local edit\n"
+    );
+
+    std::fs::write(temp.path().join("notes.md"), "captured change\n").unwrap();
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
+    assert_eq!(head_short(temp.path()), parent);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
+        "base\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_capture_escaping_symlink_error_names_path_and_target() {
+    let temp = TempDir::new().unwrap();
+    drop(Repository::init_default(temp.path()).unwrap());
+    std::fs::create_dir(temp.path().join(".git")).unwrap();
+    std::fs::create_dir_all(temp.path().join(".venv/bin")).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/python3", temp.path().join(".venv/bin/python")).unwrap();
+
+    let error = heddle(&["capture", "-m", "venv"], Some(temp.path()))
+        .expect_err("escaping symlink must be rejected");
+    assert!(
+        error.contains(".venv/bin/python -> /usr/bin/python3"),
+        "{error}"
     );
 }
 
@@ -307,7 +379,7 @@ fn test_undo_captures_pre_undo_state_into_recovery_marker() {
     heddle_must_succeed(&["capture", "-m", "friction"], temp.path());
     let friction_state = head_short(temp.path());
 
-    heddle_must_succeed(&["undo"], temp.path());
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
 
     // The reset happened: worktree reverted to the parent state.
     assert_eq!(
@@ -352,7 +424,7 @@ fn test_undo_recover_survives_divergent_capture() {
     let friction_state = head_short(temp.path());
 
     let undo: Value = serde_json::from_str(&heddle_must_succeed(
-        &["--output", "json", "undo"],
+        &["--output", "json", "undo", "--hard"],
         temp.path(),
     ))
     .unwrap();
@@ -402,6 +474,79 @@ fn test_undo_recover_survives_divergent_capture() {
 }
 
 #[test]
+fn test_undo_recover_round_trips_with_heddleignore_present() {
+    let temp = TempDir::new().unwrap();
+    drop(Repository::init_default(temp.path()).unwrap());
+    std::fs::create_dir(temp.path().join(".git")).unwrap();
+
+    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "seed"], temp.path());
+
+    std::fs::write(temp.path().join(".heddleignore"), "ignored/\n").unwrap();
+    std::fs::write(temp.path().join("source.py"), "print('safe')\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "source and ignore"], temp.path());
+
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join(".heddleignore")).unwrap(),
+        "ignored/\n",
+        "undo must preserve the file that defines the worktree dirty set"
+    );
+
+    heddle_must_succeed(&["undo", "--recover"], temp.path());
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("source.py")).unwrap(),
+        "print('safe')\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join(".heddleignore")).unwrap(),
+        "ignored/\n"
+    );
+}
+
+#[test]
+fn test_undo_recover_ignores_unrelated_untracked_junk_exposed_by_missing_ignore_file() {
+    let temp = TempDir::new().unwrap();
+    drop(Repository::init_default(temp.path()).unwrap());
+    std::fs::create_dir(temp.path().join(".git")).unwrap();
+
+    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "seed"], temp.path());
+
+    std::fs::write(temp.path().join(".heddleignore"), ".venv/\n").unwrap();
+    std::fs::write(temp.path().join("source.py"), "print('recover me')\n").unwrap();
+    std::fs::create_dir_all(temp.path().join(".venv/lib")).unwrap();
+    std::fs::write(temp.path().join(".venv/lib/junk.pyc"), "ignored junk\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "source with ignored junk"], temp.path());
+
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
+    assert!(
+        temp.path().join(".venv/lib/junk.pyc").exists(),
+        "ignored junk must survive the worktree rewind"
+    );
+    std::fs::remove_file(temp.path().join(".heddleignore")).unwrap();
+
+    let recovered = heddle(&["undo", "--recover"], Some(temp.path()))
+        .expect("unrelated untracked junk must not block recovery");
+    assert!(
+        recovered.contains("Recovered pre-undo state"),
+        "{recovered}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("source.py")).unwrap(),
+        "print('recover me')\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join(".heddleignore")).unwrap(),
+        ".venv/\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join(".venv/lib/junk.pyc")).unwrap(),
+        "ignored junk\n"
+    );
+}
+
+#[test]
 fn test_undo_recover_ref_lives_outside_user_marker_namespace() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
@@ -412,7 +557,7 @@ fn test_undo_recover_ref_lives_outside_user_marker_namespace() {
     heddle_must_succeed(&["capture", "-m", "friction"], temp.path());
     let friction_state = head_short(temp.path());
 
-    heddle_must_succeed(&["undo"], temp.path());
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
     let markers: Value = serde_json::from_str(&heddle_must_succeed(
         &["--output", "json", "thread", "marker", "list"],
         temp.path(),
@@ -468,7 +613,7 @@ fn test_undo_recover_is_unshadowable_by_same_named_user_marker() {
     std::fs::write(temp.path().join("notes.md"), "FRICTION\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "friction"], temp.path());
     let friction_state = head_short(temp.path());
-    heddle_must_succeed(&["undo"], temp.path());
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
     assert_eq!(
         Repository::open(temp.path())
             .unwrap()
@@ -499,9 +644,10 @@ fn test_undo_recover_is_unshadowable_by_same_named_user_marker() {
 }
 
 #[test]
-fn test_undo_recover_refuses_without_recovery_state_or_clean_worktree() {
+fn test_undo_recover_refuses_without_recovery_state_or_with_overlapping_worktree_change() {
     let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
+    drop(Repository::init_default(temp.path()).unwrap());
+    std::fs::create_dir(temp.path().join(".git")).unwrap();
     std::fs::write(temp.path().join("notes.md"), "base\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "base"], temp.path());
 
@@ -514,13 +660,13 @@ fn test_undo_recover_refuses_without_recovery_state_or_clean_worktree() {
 
     std::fs::write(temp.path().join("notes.md"), "recover me\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "recoverable"], temp.path());
-    heddle_must_succeed(&["undo"], temp.path());
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
     std::fs::write(temp.path().join("notes.md"), "unsaved\n").unwrap();
     let dirty = heddle(
         &["--output", "json", "undo", "--recover"],
         Some(temp.path()),
     )
-    .expect_err("recovery must refuse a dirty worktree");
+    .expect_err("recovery must refuse an overlapping dirty worktree path");
     assert!(dirty.contains("dirty_worktree"), "{dirty}");
     assert_eq!(
         std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
@@ -537,7 +683,7 @@ fn test_undo_recover_refuses_when_preserved_state_is_missing() {
     std::fs::write(temp.path().join("notes.md"), "recover me\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "recoverable"], temp.path());
     let recovery_state = head_short(temp.path());
-    heddle_must_succeed(&["undo"], temp.path());
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
 
     let state_path = locate_state_loose_file(temp.path(), &recovery_state)
         .expect("preserved state has a loose object");
@@ -643,7 +789,6 @@ fn test_undo_refuses_when_prior_state_missing() {
 #[test]
 fn test_undo_help_lists_undoable_and_unsupported() {
     let temp = TempDir::new().unwrap();
-    heddle_must_succeed(&["init"], temp.path());
 
     let help = heddle_must_succeed(&["undo", "--help"], temp.path());
     let lower = help.to_lowercase();
@@ -662,6 +807,10 @@ fn test_undo_help_lists_undoable_and_unsupported() {
     assert!(
         lower.contains("--recover") && lower.contains("worktree changes"),
         "--help should explain recovery without moving HEAD: {help}"
+    );
+    assert!(
+        lower.contains("--hard") && lower.contains("rewind"),
+        "--help should require an explicit opt-in before rewriting the worktree: {help}"
     );
     assert!(
         lower.contains("push") || lower.contains("pull") || lower.contains("cross-worktree"),
@@ -1583,7 +1732,7 @@ fn test_undo_thread_refresh_restores_base_state() {
         );
     }
 
-    heddle_must_succeed(&["undo"], temp.path());
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
 
     let repo = Repository::open(temp.path()).unwrap();
     let feature_ref = repo
@@ -1690,7 +1839,7 @@ fn test_undo_pull_local_restores_thread_ref() {
         "second pull must advance main to a new state"
     );
 
-    heddle_must_succeed(&["undo"], target.path());
+    heddle_must_succeed(&["undo", "--hard"], target.path());
     assert_eq!(
         head_short(target.path()),
         main_after_first_pull,
@@ -1762,7 +1911,7 @@ fn test_undo_resolve_abort_keeps_thread_ref_at_ours() {
 
     // Undo the abort — `FastForward { pre = post = feature_tip_before }`
     // so the observable state is unchanged.
-    heddle_must_succeed(&["undo"], temp.path());
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
     let repo = Repository::open(temp.path()).unwrap();
     let feature_tip = repo
         .refs()
@@ -1867,7 +2016,7 @@ fn test_undo_land_manual_resolution_restores_thread_ref() {
         "land must advance main; otherwise the FF is a no-op and there's nothing to undo: {land_out}"
     );
 
-    heddle_must_succeed(&["undo"], temp.path());
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
@@ -1910,7 +2059,7 @@ fn test_redo_pull_pins_recorded_tip_when_source_advances() {
     heddle_must_succeed(&["pull", &source_path, "--thread", "main"], target.path());
     let main_after_second_pull = head_short(target.path());
 
-    heddle_must_succeed(&["undo"], target.path());
+    heddle_must_succeed(&["undo", "--hard"], target.path());
     assert_eq!(head_short(target.path()), main_after_first_pull);
 
     // Advance the source past the recorded pull target. Pre-fix
@@ -1939,7 +2088,7 @@ fn test_undo_list_hides_atomic_commit_marker_batches() {
     heddle_must_succeed(&["capture", "-m", "b"], temp.path());
 
     // Undo appends a record-less atomic commit-marker batch to the oplog.
-    heddle_must_succeed(&["undo"], temp.path());
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
 
     // The RAW oplog does contain the marker-only commit batch (the sentinel)...
     let repo = Repository::open(temp.path()).unwrap();

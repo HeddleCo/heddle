@@ -20,8 +20,8 @@ use oplog::{
 };
 use refs::Head;
 use repo::{
-    CommitGraphIndex, Repository, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
-    ThreadState, VisibilitySidecarRestore,
+    CommitGraphIndex, Repository, RepositoryCapability, Thread, ThreadFreshness,
+    ThreadIntegrationPolicy, ThreadManager, ThreadState, VisibilitySidecarRestore,
     atomic::{AtomicMutation, DeferredMutation, StagedCommit, Tx},
     refresh_thread_freshness,
 };
@@ -1888,6 +1888,105 @@ pub(super) fn undo_redo_transaction_id(
     format!("{action}:{scope}:gen{generation}:[{}]", ids.join(","))
 }
 
+#[derive(Clone)]
+struct PreservedWorktreeFile {
+    path: PathBuf,
+    bytes: Vec<u8>,
+}
+
+fn capture_preserved_worktree_files(repo: &Repository) -> HeddleResult<Vec<PreservedWorktreeFile>> {
+    let mut names = vec![".heddleignore"];
+    if repo.capability() == RepositoryCapability::GitOverlay {
+        names.push(".gitignore");
+    }
+
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let path = repo.root().join(name);
+            match fs::read(&path) {
+                Ok(bytes) => Some(Ok(PreservedWorktreeFile { path, bytes })),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => Some(Err(HeddleError::Io(error))),
+            }
+        })
+        .collect()
+}
+
+fn read_optional_worktree_file(path: &Path) -> HeddleResult<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(HeddleError::Io(error)),
+    }
+}
+
+fn restore_optional_worktree_file(path: &Path, bytes: Option<&[u8]>) -> HeddleResult<()> {
+    match bytes {
+        Some(bytes) => {
+            match fs::read(path) {
+                Ok(current) if current == bytes => return Ok(()),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(HeddleError::Io(error)),
+            }
+            objects::fs_atomic::write_file_atomic(path, bytes)?;
+            Ok(())
+        }
+        None => match fs::remove_file(path) {
+            Ok(()) => {
+                if let Some(parent) = path.parent() {
+                    objects::fs_atomic::sync_directory(parent)?;
+                }
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(HeddleError::Io(error)),
+        },
+    }
+}
+
+/// Deferred child: restore worktree-resident files whose presence controls the
+/// dirty-set calculation. Undo may move HEAD across a state that lacks one of
+/// these files, but it must not make previously ignored local paths visible and
+/// strand its own recovery command.
+struct RestorePreservedWorktreeFiles {
+    files: Vec<PreservedWorktreeFile>,
+}
+
+impl AtomicMutation for RestorePreservedWorktreeFiles {
+    type Output = ();
+
+    fn transaction_id(&self) -> String {
+        "undo:restore-preserved-worktree-files".to_string()
+    }
+
+    fn isolation_keys(&self, repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
+        let mut keys = BTreeSet::new();
+        keys.insert(IsolationKey::LocalHead {
+            scope: repo.op_scope(),
+        });
+        Ok(keys)
+    }
+
+    fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<()>> {
+        for file in &self.files {
+            let capture_path = file.path.clone();
+            let restore_path = file.path.clone();
+            let forward_path = file.path.clone();
+            let forward_bytes = file.bytes.clone();
+            tx.step_nonatomic(
+                move || read_optional_worktree_file(&capture_path),
+                move |prior| restore_optional_worktree_file(&restore_path, prior.as_deref()),
+                move || restore_optional_worktree_file(&forward_path, Some(&forward_bytes)),
+            )?;
+        }
+        Ok(StagedCommit::pure(()))
+    }
+}
+
+impl DeferredMutation for RestorePreservedWorktreeFiles {}
+
 /// Deferred child: preserve the pre-undo HEAD into the heddle-internal
 /// recovery pointer (the heddle#305 `ORIG_HEAD`-style ref), registering its
 /// restore as the inverse so an outer failure puts the prior pointer back
@@ -2120,6 +2219,7 @@ impl AtomicMutation for UndoOp {
     }
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<Vec<OpBatch>>> {
+        let preserved_worktree_files = capture_preserved_worktree_files(tx.repo())?;
         tx.enroll(StageUndoRecovery {
             head: self.recovery_head,
         })?;
@@ -2128,6 +2228,9 @@ impl AtomicMutation for UndoOp {
             let staged = tx.enroll(ApplyUndoBatch::new(batch.clone()))?;
             updated.push(staged.output);
         }
+        tx.enroll(RestorePreservedWorktreeFiles {
+            files: preserved_worktree_files,
+        })?;
         Ok(StagedCommit::pure(updated))
     }
 }

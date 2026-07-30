@@ -708,7 +708,14 @@ impl WorktreeWalkPolicy for SnapshotFingerprintPolicy<'_> {
             let target = std::fs::read_link(entry.path)?;
             let symlink_dir = entry.path.parent().unwrap_or(self.walk_root);
             if !validate_symlink_target(self.walk_root, symlink_dir, &target) {
-                return Err(HeddleError::InvalidSymlinkTarget(target));
+                return Err(HeddleError::InvalidSymlinkTarget {
+                    path: entry
+                        .path
+                        .strip_prefix(self.walk_root)
+                        .unwrap_or(entry.path)
+                        .to_path_buf(),
+                    target,
+                });
             }
             Blob::new(objects::util::symlink_target_bytes(&target)).hash()
         };

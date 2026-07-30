@@ -577,8 +577,9 @@ pub struct RevertArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
-  heddle undo                # roll back the most recent operation
-  heddle undo -n 3           # roll back the last three operations
+  heddle undo --preview      # inspect the most recent operation
+  heddle undo --hard         # roll it back and rewind the worktree
+  heddle undo -n 3 --hard    # roll back the last three operations
   heddle undo --recover      # restore the state preserved by the last undo
   heddle undo --list         # preview undoable operations on this thread
   heddle undo --dry-run      # show what would change without applying
@@ -627,6 +628,12 @@ pub struct UndoArgs {
     #[arg(long, visible_alias = "dry-run")]
     pub preview: bool,
 
+    /// Permit undo to rewind worktree files to the selected operation's prior
+    /// state. Without this explicit opt-in, an undo that would rewrite the
+    /// worktree refuses before changing repository state or files.
+    #[arg(long, conflicts_with_all = ["list", "preview", "redo", "recover"])]
+    pub hard: bool,
+
     /// Re-apply operations that a prior `undo` rewound.
     #[arg(long, conflicts_with = "list")]
     pub redo: bool,
@@ -635,7 +642,7 @@ pub struct UndoArgs {
     /// worktree changes. HEAD and the current thread remain unchanged.
     #[arg(
         long,
-        conflicts_with_all = ["steps", "list", "preview", "redo", "allow_redact_undo"]
+        conflicts_with_all = ["steps", "list", "preview", "hard", "redo", "allow_redact_undo"]
     )]
     pub recover: bool,
 
