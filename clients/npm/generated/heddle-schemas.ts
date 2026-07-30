@@ -125,6 +125,7 @@ export interface AgentCaptureSchema {
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   output_kind: "capture";
   principal: CommitPrincipalSchema;
+  principal_source: string;
   promotion_suggested: boolean;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -515,6 +516,7 @@ export interface CaptureSchema {
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   output_kind: "capture";
   principal: CommitPrincipalSchema;
+  principal_source: string;
   promotion_suggested: boolean;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
