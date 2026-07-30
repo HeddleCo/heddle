@@ -18,6 +18,8 @@ mod hydration;
 mod methods;
 pub mod monorepo;
 pub(crate) mod operation_id;
+mod provider_pull;
+mod provider_transport;
 mod resolver;
 mod session;
 mod state_review;
@@ -163,10 +165,11 @@ impl HostedClient {
     }
 
     pub async fn connect(descriptor: &VerifiedEndpointDescriptor) -> Result<Self> {
+        let config = ClientConfig::default();
         Ok(Self {
-            connection: HostedConnection::connect_verified(descriptor).await?,
+            connection: HostedConnection::connect_verified(descriptor, &config).await?,
             context: CallContextFactory::default(),
-            transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
+            transport: helpers::HostedTransportPolicy::from_client_config(&config),
             on_human_signature: None,
             server_key: None,
         })
@@ -178,7 +181,7 @@ impl HostedClient {
     ) -> Result<Self> {
         let context = CallContextFactory::from_client_config(config)?;
         Ok(Self {
-            connection: HostedConnection::connect_verified(descriptor).await?,
+            connection: HostedConnection::connect_verified(descriptor, config).await?,
             context,
             transport: helpers::HostedTransportPolicy::from_client_config(config),
             on_human_signature: None,
