@@ -161,7 +161,9 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
             args.note.as_deref(),
             cli.operation_id_wire(),
         )
-        .await?;
+        .await;
+    client.close().await;
+    let approval = approval?;
 
     if should_output_json(cli, Some(repo.config())) {
         let out = ApprovalOutput {
@@ -198,7 +200,9 @@ pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Resul
     let (mut client, repo_path) = open_heddle_client(&repo, &args.remote).await?;
     let approvals = client
         .list_thread_approvals(&repo_path, &args.source, &args.target)
-        .await?;
+        .await;
+    client.close().await;
+    let approvals = approvals?;
 
     if should_output_json(cli, Some(repo.config())) {
         let out: Vec<ApprovalOutput> = approvals
@@ -249,9 +253,11 @@ pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Resul
 pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArgs) -> Result<()> {
     let repo = cli.open_repo()?;
     let (mut client, _repo_path) = open_heddle_client(&repo, &args.remote).await?;
-    client
+    let result = client
         .revoke_approval(&args.id, cli.operation_id_wire())
-        .await?;
+        .await;
+    client.close().await;
+    result?;
     if should_output_json(cli, Some(repo.config())) {
         let output = ApprovalRevokeOutput {
             output_kind: "thread_revoke_approval",
@@ -279,7 +285,9 @@ pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Re
             args.changed_paths,
             None,
         )
-        .await?;
+        .await;
+    client.close().await;
+    let resp = resp?;
 
     let unmet: Vec<UnmetOutput> = resp
         .unmet

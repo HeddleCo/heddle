@@ -217,8 +217,8 @@ async fn run_grant(ctx: &dyn CliContext, args: SupportGrant) -> Result<()> {
         )));
     }
     let repo = Repository::open(resolve_repo_path(ctx)?)?;
-    let mut client = open_client(&repo, &args.remote).await?;
     let ttl_secs = parse_ttl(&args.ttl)?;
+    let mut client = open_client(&repo, &args.remote).await?;
     let op_id = ctx.operation_id_wire();
     let grant = client
         .grant_support_access(
@@ -229,8 +229,9 @@ async fn run_grant(ctx: &dyn CliContext, args: SupportGrant) -> Result<()> {
             &args.reason,
             op_id,
         )
-        .await?;
-    let out: SupportAccessOutput = grant.into();
+        .await;
+    client.close().await;
+    let out: SupportAccessOutput = grant?.into();
     if ctx.should_output_json(Some(repo.config())) {
         let output = SupportGrantOutput {
             output_kind: "support_grant",
@@ -269,8 +270,9 @@ async fn run_list(ctx: &dyn CliContext, args: SupportList) -> Result<()> {
             args.repo.as_deref(),
             args.include_inactive,
         )
-        .await?;
-    let entries: Vec<SupportAccessOutput> = grants.into_iter().map(Into::into).collect();
+        .await;
+    client.close().await;
+    let entries: Vec<SupportAccessOutput> = grants?.into_iter().map(Into::into).collect();
     if ctx.should_output_json(Some(repo.config())) {
         let output = SupportListOutput {
             output_kind: "support_list",
@@ -311,7 +313,9 @@ async fn run_revoke(ctx: &dyn CliContext, args: SupportRevoke) -> Result<()> {
     let repo = Repository::open(resolve_repo_path(ctx)?)?;
     let mut client = open_client(&repo, &args.remote).await?;
     let op_id = ctx.operation_id_wire();
-    client.revoke_support_access(&args.id, op_id).await?;
+    let result = client.revoke_support_access(&args.id, op_id).await;
+    client.close().await;
+    result?;
     if ctx.should_output_json(Some(repo.config())) {
         let output = SupportRevokeOutput {
             output_kind: "support_revoke",

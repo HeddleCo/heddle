@@ -162,10 +162,9 @@ impl BlobHydrator for LazyHostedHydrator {
 /// `#[tokio::main]` async context: the worker's runtime is private, so the
 /// nested `block_on` happens entirely off the caller's runtime.
 struct HydrationBridge {
-    tx: mpsc::Sender<HydrateMessage>,
-    /// Join handle for the worker. Kept so that dropping the bridge
-    /// closes the channel and lets the worker exit cleanly.
-    _worker: thread::JoinHandle<()>,
+    tx: Option<mpsc::Sender<HydrateMessage>>,
+    /// Joined after the sender is dropped so the worker can close its client.
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 enum HydrateMessage {
@@ -247,26 +246,18 @@ impl HydrationBridge {
                     // (clone, fetch, push, pull, support, approval) opens
                     // through — so a process whose cached token has slipped
                     // past expiry recovers on first lazy hydrate.
-                    let client = match tokio::time::timeout(
-                        DEFAULT_HOSTED_HYDRATION_TIMEOUT,
-                        session.connect(addr),
-                    )
-                    .await
-                    {
-                        Ok(result) => result.map_err(|err: ProtocolError| {
-                            HeddleError::Config(format!(
-                                "lazy hosted hydrator: connect to '{endpoint_for_thread}' \
+                    //
+                    // Do not cancel this future on the bridge's ready timeout:
+                    // cancellation after binding would drop Iroh's endpoint
+                    // before its async close can run. The caller still times
+                    // out below; this private worker finishes the dial and
+                    // closes the client if the caller has gone away.
+                    let client = session.connect(addr).await.map_err(|err: ProtocolError| {
+                        HeddleError::Config(format!(
+                            "lazy hosted hydrator: connect to '{endpoint_for_thread}' \
                                      (resolved to {addr}): {err}",
-                            ))
-                        })?,
-                        Err(_) => {
-                            return Err(HeddleError::Config(format!(
-                                "lazy hosted hydrator: connect to '{endpoint_for_thread}' \
-                                     (resolved to {addr}) timed out after {}",
-                                format_duration(DEFAULT_HOSTED_HYDRATION_TIMEOUT)
-                            )));
-                        }
-                    };
+                        ))
+                    })?;
                     Ok::<_, HeddleError>(client)
                 });
                 let mut client = match connect_result {
@@ -277,20 +268,20 @@ impl HydrationBridge {
                     }
                 };
 
-                // Signal the bridge constructor that connect succeeded
-                // BEFORE entering the request loop. After this point any
-                // bridge-construction errors are gone; the channel is open
-                // and `HydrationBridge::hydrate` calls will succeed.
-                if ready_tx.send(Ok(())).is_err() {
-                    return;
-                }
-
-                // Drive the request loop. `recv` returns Err when the
-                // last `Sender` is dropped (i.e. the LazyHostedHydrator
-                // owning the bridge has been dropped), which is our
-                // shutdown signal — we drop the runtime + client and
-                // exit.
                 runtime.block_on(async {
+                    // Signal the bridge constructor that connect succeeded
+                    // BEFORE entering the request loop. After this point any
+                    // bridge-construction errors are gone; the channel is open
+                    // and `HydrationBridge::hydrate` calls will succeed.
+                    if ready_tx.send(Ok(())).is_err() {
+                        client.close().await;
+                        return;
+                    }
+
+                    // Drive the request loop. `recv` returns Err when the
+                    // last `Sender` is dropped (i.e. the LazyHostedHydrator
+                    // owning the bridge has been dropped), which is our
+                    // shutdown signal.
                     while let Ok(message) = rx.recv() {
                         match message {
                             HydrateMessage::Run {
@@ -313,6 +304,7 @@ impl HydrationBridge {
                             }
                         }
                     }
+                    client.close().await;
                 });
             })
             .map_err(|err| {
@@ -324,8 +316,8 @@ impl HydrationBridge {
         // wedge the sync read path.
         match ready_rx.recv_timeout(DEFAULT_HOSTED_HYDRATION_TIMEOUT) {
             Ok(Ok(())) => Ok(Self {
-                tx,
-                _worker: worker,
+                tx: Some(tx),
+                worker: Some(worker),
             }),
             Ok(Err(err)) => Err(err),
             Err(mpsc::RecvTimeoutError::Timeout) => Err(HeddleError::Config(format!(
@@ -369,6 +361,8 @@ impl HydrationBridge {
         // the worker returns the hosted result for this request.
         let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<usize, ProtocolError>>(1);
         self.tx
+            .as_ref()
+            .expect("hydration bridge sender is present until drop")
             .send(HydrateMessage::Run {
                 repo,
                 repo_path: repo_path.to_string(),
@@ -394,6 +388,15 @@ impl HydrationBridge {
                     "lazy hosted hydrator: worker reply channel closed before hydration completed",
                 )))
             }
+        }
+    }
+}
+
+impl Drop for HydrationBridge {
+    fn drop(&mut self) {
+        self.tx.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
     }
 }
@@ -528,8 +531,8 @@ mod tests {
             })
             .expect("spawn test worker");
         HydrationBridge {
-            tx,
-            _worker: worker,
+            tx: Some(tx),
+            worker: Some(worker),
         }
     }
 
@@ -635,8 +638,8 @@ mod tests {
             })
             .expect("spawn inspect worker");
         let bridge = HydrationBridge {
-            tx,
-            _worker: worker,
+            tx: Some(tx),
+            worker: Some(worker),
         };
 
         let hydrator =
@@ -741,8 +744,8 @@ mod tests {
             })
             .expect("spawn stalling worker");
         let bridge = HydrationBridge {
-            tx,
-            _worker: worker,
+            tx: Some(tx),
+            worker: Some(worker),
         };
 
         let started = Instant::now();

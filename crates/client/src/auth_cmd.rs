@@ -653,7 +653,7 @@ async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
         .or_else(|_| std::env::var("HOST"))
         .unwrap_or_else(|_| "heddle-cli".to_string());
 
-    let response: DeviceAuthorizationResponse = auth_client
+    let response: Result<DeviceAuthorizationResponse> = auth_client
         .routes()
         .create_device_authorization(&CreateDeviceAuthorizationRequest {
             device_name: hostname,
@@ -662,7 +662,14 @@ async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
             client_operation_id: String::new(),
         })
         .await
-        .map_err(|error| anyhow::anyhow!("create_device_authorization failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("create_device_authorization failed: {error}"));
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            auth_client.close().await;
+            return Err(error);
+        }
+    };
 
     let verification_uri = &response.verification_uri;
     let user_code = &response.user_code;
@@ -706,7 +713,9 @@ async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
         &signer,
         response.expires_at,
     )
-    .await?;
+    .await;
+    auth_client.close().await;
+    let access_token = access_token?;
 
     // 7. Store credential.
     let credential = ServerCredential {
@@ -895,6 +904,29 @@ async fn cmd_create_service_token(
     let user_config = UserConfig::load_default()?;
     let session = HostedSession::build_stored_credential(&user_config, &server)?;
     let mut auth_client = session.connect(([127, 0, 0, 1], 0).into()).await?;
+    let result = create_service_token_connected(
+        ctx,
+        &mut auth_client,
+        server,
+        name,
+        namespace,
+        scope,
+        credential_path,
+    )
+    .await;
+    auth_client.close().await;
+    result
+}
+
+async fn create_service_token_connected(
+    ctx: &dyn CliContext,
+    auth_client: &mut HostedClient,
+    server: String,
+    name: String,
+    namespace: String,
+    scope: String,
+    credential_path: std::path::PathBuf,
+) -> Result<()> {
     let create_operation_id = ClientOperationId::caller_or_fresh(
         "heddle.api.v1alpha1.IdentityService/CreateServiceAccount",
         ctx.operation_id_wire(),

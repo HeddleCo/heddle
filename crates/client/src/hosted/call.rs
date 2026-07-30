@@ -457,6 +457,7 @@ mod tests {
                 .expect("dropping ServerStream must signal STOP_SENDING")
                 .expect("remote response sender observes the stop code");
             assert_eq!(stop_code, Some(1u32.into()));
+            server.close().await;
         });
 
         let client = Endpoint::builder(presets::Minimal)
@@ -466,6 +467,7 @@ mod tests {
             .bind()
             .await
             .unwrap();
+        let client_observer = client.clone();
         let connection = HostedConnection::connect(client, server_addr)
             .await
             .unwrap();
@@ -477,5 +479,7 @@ mod tests {
         drop(response);
 
         server_task.await.unwrap();
+        connection.close().await;
+        assert!(client_observer.is_closed());
     }
 }
