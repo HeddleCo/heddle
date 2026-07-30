@@ -8,7 +8,10 @@ use std::{
 };
 
 use ::objects::{HeddleError, error::Result, worktree::WorktreeStatus};
-use repo::{Repository, Thread, ThreadManager, describe_thread_advice, refresh_thread_freshness};
+use repo::{
+    Repository, Thread, ThreadManager, describe_thread_advice, discover_heddle_root,
+    refresh_thread_freshness,
+};
 use schemars::JsonSchema;
 use serde::{Serialize, Serializer};
 use sley::{Repository as SleyRepository, ShortStatusOptions, StatusUntrackedMode, StreamControl};
@@ -344,7 +347,14 @@ pub fn build_plain_git_verification_probe_with_machine_contract(
     start: &Path,
     machine_contract_input: &MachineContractInput,
 ) -> Result<Option<PlainGitVerifyProbe>> {
-    let git_repo = match SleyRepository::discover(start) {
+    // Native Heddle metadata owns the path before any ancestor Git repository
+    // is considered. In particular, do not ask Sley to scan the ancestor
+    // worktree: that can crawl unrelated siblings and fail on their
+    // permissions before Heddle opens its own repository.
+    if discover_heddle_root(start).is_some() {
+        return Ok(None);
+    }
+    let git_repo = match SleyRepository::open_from_environment(start) {
         Ok(repo) => repo,
         Err(_) => return Ok(None),
     };

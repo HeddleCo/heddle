@@ -10,9 +10,8 @@ use heddle_core::{
     select_init_principal,
 };
 use objects::object::Principal;
-use repo::{Repository, RepositoryCapability};
+use repo::{Repository, RepositoryCapability, open_git_repository_at_root};
 use serde::Serialize;
-use sley::Repository as SleyRepository;
 use tracing::{debug, info};
 
 use super::{
@@ -103,7 +102,10 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
         None
     };
 
-    let git = SleyRepository::discover(&path).ok();
+    // `init <path>` owns exactly that path. An ancestor Git worktree is not
+    // the requested repository and must never redirect initialization or
+    // receive exclude-file writes.
+    let git = open_git_repository_at_root(&path)?;
     let existing_repo = if path.join(".heddle").exists() {
         Some(Repository::open(&path)?)
     } else {

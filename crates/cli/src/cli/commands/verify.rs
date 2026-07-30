@@ -8,7 +8,7 @@ use heddle_core::{
     MachineContractInput, RepositorySetupGuidance, RepositoryVerificationState, VerificationCheck,
     VerifyOptions, VerifyReport, repository_setup_guidance, verify as core_verify,
 };
-use repo::Repository;
+use repo::{Repository, discover_heddle_root};
 
 use super::{RecoveryAdvice, action_line::print_next};
 use crate::{
@@ -142,17 +142,10 @@ fn verify_execution_context_from_cli(cli: &Cli, start: &Path) -> Result<VerifyEx
 /// True when `start` or an ancestor already has a Heddle sidecar (main repo or
 /// worktree pointer). Used to avoid auto-bootstrap on observe-only verify.
 fn heddle_sidecar_present(start: &Path) -> bool {
-    let mut current = Some(start);
-    while let Some(dir) = current {
-        let heddle = dir.join(".heddle");
-        if heddle.is_dir()
-            && (heddle.join("objects").is_dir() || heddle.join("objectstore").is_file())
-        {
-            return true;
-        }
-        current = dir.parent();
-    }
-    false
+    discover_heddle_root(start).is_some_and(|root| {
+        let heddle = root.join(".heddle");
+        heddle.join("objects").is_dir() || heddle.join("objectstore").is_file()
+    })
 }
 
 fn render_verify(output: &VerifyReport, verbose: bool, as_json: bool) -> Result<()> {

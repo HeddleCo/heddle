@@ -60,7 +60,7 @@ use objects::object::MarkerName;
 use objects::{
     Progress,
     error::{HeddleError, Result},
-    fs_atomic::write_file_atomic,
+    fs_atomic::{enrich_fs_error, write_file_atomic},
     lock::{RepoLock, RepositoryLockExt},
     object::{Attribution, ContentHash, Principal, State, StateId, ThreadName, Tree},
     store::{AnyStore, FsStore, ObjectStore, ShallowInfo},
@@ -132,6 +132,126 @@ mod status_untracked_scan;
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
 const GIT_CHECKPOINT_INTENT_FILE: &str = "git-checkpoint-intent.json";
 const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
+
+fn git_discovery_across_filesystem() -> bool {
+    std::env::var("GIT_DISCOVERY_ACROSS_FILESYSTEM")
+        .is_ok_and(|value| !matches!(value.as_str(), "" | "0" | "false" | "no" | "off"))
+}
+
+fn filesystem_device(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        fs::metadata(path).ok().map(|metadata| metadata.dev())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+fn bounded_ancestor_paths(start: &Path) -> Vec<PathBuf> {
+    bounded_ancestor_paths_with_device(start, git_discovery_across_filesystem(), filesystem_device)
+}
+
+fn bounded_ancestor_paths_with_device(
+    start: &Path,
+    across_filesystem: bool,
+    device_of: impl Fn(&Path) -> Option<u64>,
+) -> Vec<PathBuf> {
+    let start_device = if across_filesystem {
+        None
+    } else {
+        device_of(start)
+    };
+    let mut ancestors = Vec::new();
+    let mut current = Some(start);
+    while let Some(path) = current {
+        ancestors.push(path.to_path_buf());
+        let Some(parent) = path.parent() else {
+            break;
+        };
+        if let (Some(start_device), Some(parent_device)) = (start_device, device_of(parent))
+            && parent_device != start_device
+        {
+            break;
+        }
+        // A metadata failure for an unreadable parent yields no device. Keep
+        // discovery fault-tolerant: marker probes on that path will simply
+        // miss, while a later readable ancestor may still provide a boundary.
+        current = Some(parent);
+    }
+    ancestors
+}
+
+/// Find the nearest Heddle sidecar without allowing Git discovery to claim the
+/// path first. The walk follows Git's filesystem-boundary policy and honors
+/// `GIT_DISCOVERY_ACROSS_FILESYSTEM`.
+pub fn discover_heddle_root(start: &Path) -> Option<PathBuf> {
+    let absolute = if start.is_absolute() {
+        start.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(start)
+    };
+    let start = absolute.canonicalize().unwrap_or(absolute);
+    bounded_ancestor_paths(&start)
+        .into_iter()
+        .find(|path| path.join(".heddle").is_dir())
+}
+
+/// Open only the Git repository rooted at `root`; never inherit an ancestor.
+/// This accepts both a normal worktree and Heddle's embedded bare `.git`
+/// layout, while rejecting a worktree resolved to any other root.
+pub fn open_git_repository_at_root(root: &Path) -> Result<Option<SleyRepository>> {
+    let dot_git = root.join(".git");
+    let metadata = match fs::metadata(&dot_git) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(HeddleError::Io(enrich_fs_error(
+                &dot_git,
+                "inspecting Git metadata",
+                error,
+            )));
+        }
+    };
+    if !(metadata.is_dir() || metadata.is_file()) {
+        return Ok(None);
+    }
+    let repo = SleyRepository::open(&dot_git).map_err(|error| {
+        HeddleError::Config(format!(
+            "failed to open Git metadata at '{}': {error}",
+            dot_git.display()
+        ))
+    })?;
+    if let Some(workdir) = repo.workdir() {
+        let resolved_root = root.canonicalize().map_err(|error| {
+            HeddleError::Io(enrich_fs_error(root, "resolving Git worktree root", error))
+        })?;
+        let resolved_workdir = workdir.canonicalize().map_err(|error| {
+            HeddleError::Io(enrich_fs_error(
+                &workdir,
+                "resolving Git metadata worktree",
+                error,
+            ))
+        })?;
+        if resolved_workdir != resolved_root {
+            return Err(HeddleError::Config(format!(
+                "Git metadata at '{}' resolves to worktree '{}', not repository root '{}'",
+                dot_git.display(),
+                resolved_workdir.display(),
+                resolved_root.display()
+            )));
+        }
+    }
+    Ok(Some(repo))
+}
+
+fn has_git_repository_at_root(root: &Path) -> bool {
+    open_git_repository_at_root(root).ok().flatten().is_some()
+}
 
 #[derive(Debug)]
 pub struct GitOverlayShortStatus {
@@ -887,7 +1007,14 @@ impl Repository {
     ///   authority), `.heddle/HEAD` (per-checkout), `.heddle/state/`
     ///   (per-checkout cached state).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let start_path = path.as_ref().canonicalize()?;
+        let requested_path = path.as_ref();
+        let start_path = requested_path.canonicalize().map_err(|error| {
+            HeddleError::Io(enrich_fs_error(
+                requested_path,
+                "resolving repository path",
+                error,
+            ))
+        })?;
         // A virtualized thread mounts at
         // `.heddle/threads/<encoded>/<repo-name>` and writes no checkout
         // metadata of its own. Without this guard, the upward walk below would
@@ -908,8 +1035,8 @@ impl Repository {
         }
         let mut discovered_git_root = None;
 
-        let mut current = Some(start_path.as_path());
-        while let Some(dir) = current {
+        for dir in bounded_ancestor_paths(&start_path) {
+            let dir = dir.as_path();
             if discovered_git_root.is_none() && has_git_metadata(dir) {
                 discovered_git_root = Some(dir.to_path_buf());
             }
@@ -935,7 +1062,13 @@ impl Repository {
                 if pointer_path.is_file() {
                     // Worktree mode: pointer dir at <dir>/.heddle/, shared
                     // object store at the path read from .heddle/objectstore.
-                    let content = fs::read_to_string(&pointer_path)?;
+                    let content = fs::read_to_string(&pointer_path).map_err(|error| {
+                        HeddleError::Io(enrich_fs_error(
+                            &pointer_path,
+                            "reading worktree pointer",
+                            error,
+                        ))
+                    })?;
                     let pointer = parse_objectstore_pointer(&content).ok_or_else(|| {
                         HeddleError::Config(format!(
                             "invalid .heddle/objectstore pointer at {}: expected objectstore and source-authority entries",
@@ -1059,8 +1192,6 @@ impl Repository {
                     return Ok(repo);
                 }
             }
-
-            current = dir.parent();
         }
 
         // Mutating commands historically rely on open() bootstrapping a plain
@@ -1161,11 +1292,10 @@ impl Repository {
             return Ok(Some(repo));
         }
 
-        let repo = SleyRepository::discover(&self.root).map_err(|error| {
+        let repo = open_git_repository_at_root(&self.root)?.ok_or_else(|| {
             HeddleError::Config(format!(
-                "failed to inspect Git repository at '{}': {}",
-                self.root.display(),
-                error
+                "failed to inspect Git-overlay repository rooted at '{}': no valid .git metadata at that root",
+                self.root.display()
             ))
         })?;
         *cached = Some(repo.clone());
@@ -3024,18 +3154,31 @@ impl Repository {
 }
 
 fn ensure_git_overlay_exclude(root: &Path) -> Result<()> {
-    let git_dir = match SleyRepository::discover(root) {
-        Ok(repo) if repo.workdir().is_some() => repo.git_dir().to_path_buf(),
-        _ => root.join(".git"),
-    };
-    if !git_dir.is_dir() {
+    let Some(git) = open_git_repository_at_root(root)? else {
         return Ok(());
-    }
+    };
+    let git_dir = git.git_dir();
 
     let info_dir = git_dir.join("info");
-    fs::create_dir_all(&info_dir)?;
+    fs::create_dir_all(&info_dir).map_err(|error| {
+        HeddleError::Io(enrich_fs_error(
+            &info_dir,
+            "creating Git metadata directory",
+            error,
+        ))
+    })?;
     let exclude_path = info_dir.join("exclude");
-    let mut contents = fs::read_to_string(&exclude_path).unwrap_or_default();
+    let mut contents = match fs::read_to_string(&exclude_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(HeddleError::Io(enrich_fs_error(
+                &exclude_path,
+                "reading Git exclude file",
+                error,
+            )));
+        }
+    };
     let existing_lines = contents.lines().map(str::trim).collect::<BTreeSet<_>>();
     let mut missing = Vec::new();
     for pattern in GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS {
@@ -3057,7 +3200,13 @@ fn ensure_git_overlay_exclude(root: &Path) -> Result<()> {
         contents.push_str(pattern);
         contents.push('\n');
     }
-    fs::write(exclude_path, contents)?;
+    fs::write(&exclude_path, contents).map_err(|error| {
+        HeddleError::Io(enrich_fs_error(
+            &exclude_path,
+            "writing Git exclude file",
+            error,
+        ))
+    })?;
     Ok(())
 }
 
@@ -3117,12 +3266,7 @@ fn parse_objectstore_pointer(content: &str) -> Option<WorktreePointer> {
 }
 
 pub(crate) fn has_git_metadata(path: &Path) -> bool {
-    let dot_git = path.join(".git");
-    if !(dot_git.is_dir() || dot_git.is_file()) {
-        return false;
-    }
-
-    SleyRepository::discover(path).is_ok()
+    has_git_repository_at_root(path)
 }
 
 fn repository_capability_for_authority(
@@ -3148,8 +3292,8 @@ fn repository_capability_for_authority(
 /// one path component, so any direct checkout leaf below it has the
 /// unambiguous `<leaf> → <encoded> → threads → .heddle` shape (heddle#572 r2).
 fn metadataless_managed_thread_root(start_path: &Path) -> Option<PathBuf> {
-    let mut cur: Option<&Path> = Some(start_path);
-    while let Some(dir) = cur {
+    for dir in bounded_ancestor_paths(start_path) {
+        let dir = dir.as_path();
         if let Some(thread_dir) = dir.parent()
             && let Some(threads) = thread_dir.parent()
             && threads.file_name().and_then(|n| n.to_str()) == Some("threads")
@@ -3160,13 +3304,12 @@ fn metadataless_managed_thread_root(start_path: &Path) -> Option<PathBuf> {
         {
             return Some(dir.to_path_buf());
         }
-        cur = dir.parent();
     }
     None
 }
 
 fn git_config_principal(root: &Path) -> Option<Principal> {
-    let git_repo = SleyRepository::discover(root).ok()?;
+    let git_repo = open_git_repository_at_root(root).ok().flatten()?;
     let config = git_repo.config_snapshot().ok()?;
     let name = config.get("user", None, "name")?.to_string();
     let email = config.get("user", None, "email")?.to_string();
@@ -3245,9 +3388,8 @@ fn git_overlay_untracked_path_ignored(
 }
 
 fn git_remote_names(root: &Path) -> Result<Vec<String>> {
-    let repo = match SleyRepository::discover(root) {
-        Ok(repo) => repo,
-        Err(_) => return Ok(Vec::new()),
+    let Some(repo) = open_git_repository_at_root(root)? else {
+        return Ok(Vec::new());
     };
     repo.remote_names()
         .map(|names| {
@@ -3379,11 +3521,10 @@ fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Resul
 /// Read git's HEAD via sley's [`SleyRepository::head_state`], including
 /// worktree `gitdir:` indirections and detached HEAD.
 fn detect_git_head_state(path: &Path) -> Result<Option<GitHeadState>> {
-    let repo = SleyRepository::discover(path).map_err(|error| {
+    let repo = open_git_repository_at_root(path)?.ok_or_else(|| {
         HeddleError::Config(format!(
-            "failed to inspect git repository at '{}': {}",
-            path.display(),
-            error
+            "failed to inspect Git repository rooted at '{}': no valid .git metadata at that root",
+            path.display()
         ))
     })?;
     let head = match repo.head_state() {
@@ -3419,11 +3560,10 @@ fn detect_git_head(path: &Path) -> Result<Option<Head>> {
 }
 
 fn resolve_git_dir(path: &Path) -> Result<PathBuf> {
-    let repo = SleyRepository::discover(path).map_err(|error| {
+    let repo = open_git_repository_at_root(path)?.ok_or_else(|| {
         HeddleError::Config(format!(
-            "failed to resolve git dir at '{}': {}",
-            path.display(),
-            error
+            "failed to resolve Git directory for repository root '{}': no valid .git metadata at that root",
+            path.display()
         ))
     })?;
     Ok(repo.git_dir().to_path_buf())
