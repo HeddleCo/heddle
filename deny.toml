@@ -168,7 +168,7 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # when they move to the registry package.
 allow-git = [
     "https://github.com/HeddleCo/api",
-    # Native transport is pinned to an audited Iroh revision until the
-    # corresponding 1.0.2 crates.io release carries the required fixes.
-    "https://github.com/n0-computer/iroh",
+    # Provider transport is pinned to the reviewable HeddleCo fork until
+    # custom-transport backpressure is available in an upstream release.
+    "https://github.com/HeddleCo/iroh",
 ]
