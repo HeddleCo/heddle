@@ -14,7 +14,6 @@ manifests=(
   crates/semantic/Cargo.toml
   crates/refs/Cargo.toml
   crates/oplog/Cargo.toml
-  crates/client/Cargo.toml
   crates/cli-shared/Cargo.toml
   crates/ingest/Cargo.toml
   crates/format/Cargo.toml

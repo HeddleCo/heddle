@@ -74,7 +74,7 @@ auditing theater. It becomes genuine defense-in-depth in exactly one local topol
   unix-socket grpc (`crates/daemon`) with **attenuated biscuits** and receive **values, never key
   material** — scoped, time-boxed (`expires_at` verifier-injected per request, per
   `docs/SELF_SOVEREIGN_AUTH.md`), and oplog-audited.
-- **Biscuit vocabulary extension** (`crates/client/src/device_flow.rs`): today's caveats are
+- **Biscuit vocabulary extension** (`crates/cli/src/hosted_runtime/device_flow.rs`): today's caveats are
   `agent_id` / `allowed_operations` (gRPC method names) / `allowed_resources` (`kind ∈ {repo,
   namespace}`). Add a resource kind for env slots (`kind: "env-slot", path: "env/production"`) and a
   decrypt operation, on **both** the client builder and every verifier. Extending biscuit *facts* is

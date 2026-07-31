@@ -33,7 +33,7 @@ The pressure is no longer hypothetical:
   fields.
 - TypeScript SDK: `@heddleco/grpc` 0.22, generated with
   `@bufbuild/protoc-gen-es` under `clients/grpc`.
-- In-tree Rust consumers: `crates/client`, `crates/cli`, and `crates/daemon`
+- In-tree Rust consumers: `crates/cli` and `crates/daemon`
   use path dependencies with a published-version requirement.
 - Out-of-tree consumers: Weft uses the Rust packages; Tapestry uses the
   TypeScript package.

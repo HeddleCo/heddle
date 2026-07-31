@@ -58,13 +58,13 @@ Grounding both in code:
 but it appears in exactly one crate — the **client** — and only ever in the
 **attenuation** role:
 
-- `crates/client/src/device_flow.rs:72` — `UnverifiedBiscuit::from_base64(...)`
+- `crates/cli/src/hosted_runtime/device_flow.rs:383` — `UnverifiedBiscuit::from_base64(...)`
   parses a token the client *already holds*, appends an attenuation block
   (`:75 .append(block)`), and re-encodes. The module doc is explicit
   (`device_flow.rs:62-67`): *"Uses `UnverifiedBiscuit` because attenuation
   appends a new block… the new block's signature chains off the parent's keys…
   The CLI never holds the server's signing key."*
-- `crates/client/src/grpc_hosted/mod.rs:215` — the actual biscuit is obtained via
+- `crates/cli/src/hosted_runtime/hosted/mod.rs:305` — the actual biscuit is obtained via
   the `mint_biscuit` RPC; the **server** holds the root key and mints.
 
 So the biscuit *signing* key (the root `KeyPair`) is **not available locally** at
@@ -76,13 +76,13 @@ in the literal sense is infeasible — the client never possesses that key.
 What the client *does* hold locally is the **device-binding ed25519 keypair**,
 generated during `heddle auth login`:
 
-- `crates/client/src/auth_cmd.rs:67` — `Ed25519Signer::generate()` mints the
+- `crates/cli/src/hosted_runtime/auth.rs:640` — `Ed25519Signer::generate()` mints the
   keypair; `:68` exports `public_key`, `:70` exports `private_key_pem`.
 - The public key is registered with the server as the **device public key**
   (`auth_cmd.rs:84` `device_public_key: public_key_bytes`), so the server can
   map this pubkey → an authenticated identity.
 - The private key PEM is persisted to disk in the credential store:
-  `crates/client/src/credentials.rs:41` `struct ServerCredential { … private_key_pem:
+  `crates/cli-shared/src/credentials.rs:41` `struct ServerCredential { … private_key_pem:
   Option<String>, credential_id: Option<String>, … }`, written to
   `~/.heddle/credentials.toml` (`credentials.rs:55-56 credentials_path()`) with
   `write_file_atomic_secret` at mode `0600` (`credentials.rs:80`, and the

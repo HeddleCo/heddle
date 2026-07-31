@@ -220,7 +220,7 @@ Heddle records the agent model string verbatim and echoes it back in attribution
 This repository is a Cargo workspace. The OSS crates live under `crates/`:
 
 ```text
-crates/cli/                 # the `heddle` binary
+crates/cli/                 # the `heddle` binary and private hosted runtime
 crates/cli-shared/          # config types shared between cli and other surfaces
 crates/objects/             # core object and repository model
 crates/repo/                # repository helpers and higher-level repo operations
@@ -232,7 +232,6 @@ crates/review/              # review primitives
 crates/state_review/        # state-level review helpers
 crates/ingest/              # `heddle-ingest` binary and Git import path
 crates/wire/                # native Heddle wire protocol types
-crates/client/              # local-side hosted client
 crates/weft-client-shim/    # shim used by the `client` feature to talk to weft
 crates/crypto/              # crypto primitives
 crates/daemon/              # background daemon

@@ -47,7 +47,7 @@ Two findings drive the defer, and they are independent:
    algorithm with its own migration story, and a cross-platform test burden that
    needs *physical tokens in CI*. heddle's current identity story — software
    Ed25519 device keys + biscuit attenuation (`docs/SELF_SOVEREIGN_AUTH.md`,
-   `crates/client/src/device_flow.rs`) — already gives self-sovereign,
+   `crates/cli/src/hosted_runtime/device_flow.rs`) — already gives self-sovereign,
    non-exfiltratable-by-network keys at `0600` on disk
    (`crates/crypto/src/lib.rs:70-81` enforces the perm floor). The marginal threat
    closed by hardware keys (local disk theft of the device key) is real but narrow,
@@ -110,7 +110,7 @@ capability check, not a library-selection axis.
 ### How this relates to the existing software device key (biscuit `cnf` / proof key)
 
 heddle already uses a software **Ed25519** key as the self-sovereign identity, and
-biscuit attenuation (`crates/client/src/device_flow.rs`,
+biscuit attenuation (`crates/cli/src/hosted_runtime/device_flow.rs`,
 `docs/SELF_SOVEREIGN_AUTH.md`) for delegated agent auth. A hardware key would
 **augment, not replace**, that model in the near term:
 
@@ -277,7 +277,7 @@ git-dep / source gates, per the cargo-deny notes).
   `:41-60` (`load_signer`), `:102-114` (`verify_payload_signature`),
   `:70-81` (key-perm floor).
 - Software identity / biscuit attenuation: `docs/SELF_SOVEREIGN_AUTH.md`,
-  `crates/client/src/device_flow.rs`.
+  `crates/cli/src/hosted_runtime/device_flow.rs`.
 - On-disk format-stability policy this work must register against:
   `docs/spikes/heddle-451-schema-versioning-policy.md`.
 - Issue #38 (impl, blocked by this spike); weft#183 (hardware-key recovery).

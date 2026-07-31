@@ -264,7 +264,7 @@ must enforce at all three:
    for shallow/exclude negotiation, and propagates redaction records alongside
    blobs (`emit_redaction_plan`, `object_graph.rs:346`). **The authoritative
    server-side handlers live in the closed `weft` repo**, not in this OSS
-   workspace — the workspace has the client stubs (`crates/client/src/grpc_hosted/`)
+   workspace — the workspace has the private hosted runtime (`crates/cli/src/hosted_runtime/hosted/`)
    and the auth context (`Permission` at `crates/wire/src/message_auth.rs:10`,
    `TokenScope` at `crates/wire/src/auth_token.rs:16`).
 
@@ -402,7 +402,7 @@ is simply no sound *partial* embargoed-commit view to serve:
    over the *entire* `State` (`crates/wire/src/object_graph.rs:84-90`; the
    plan-only variant keys the same object by `ChangeId` at `:160-163`, and the
    wire object-id for a state is its `ChangeId`,
-   `crates/client/src/grpc_hosted/helpers.rs:109`). `State` carries `intent`,
+   `crates/cli/src/hosted_runtime/hosted/helpers.rs:109`). `State` carries `intent`,
    `attribution`, `confidence`, `created_at`, `verification`, and `signature`
    (`crates/objects/src/object/state_core.rs:202-214`) — not just
    id/parents/tree. There is **no header-only `State` form** on the wire, so
@@ -1074,7 +1074,7 @@ ref's "own line" at the initial condition; rules 1–4 govern every move thereaf
      it — as `min`-`ChangeId` over *its* antichain at first advertisement, written as a
      **persisted, signed, monotonic fact** (`<thread>`'s own-line record at `A`) and
      replicated host-to-host over the same authoritative record-sync substrate as
-     visibility/promotion records (`crates/client/src/grpc_hosted/sync.rs:268-302`,
+     visibility/promotion records (`crates/cli/src/hosted_runtime/hosted/sync.rs:268-302`,
      §5.4). Every **other** host **reads** that fact; it **never** recomputes
      `min`-`ChangeId` from its own current antichain. The hazard this forecloses is the
      §5.4 *lagging-fact-set* one, not merely a mutable-input one: the byte-order-least
@@ -1350,7 +1350,7 @@ ordering — **propagate/confirm, then gate**:
    `S`. This rides the same propagation path redactions already use: a signed
    sidecar record travels alongside the objects during sync and the receiver
    verifies signature + trust list and persists it verbatim
-   (`crates/client/src/grpc_hosted/sync.rs:268-302`); the `StateVisibility`
+   (`crates/cli/src/hosted_runtime/hosted/sync.rs:268-302`); the `StateVisibility`
    promotion record replicates by the identical mechanism, just ordered **before**
    the receiving host gates.
 3. **A host missing the authoritative records must fail toward last-known-public,
@@ -1460,7 +1460,7 @@ of them rather than restating its own rule:
      `:167-170`) supplies **uniqueness *within*** the reserved namespace; the
      reservation supplies **disjointness *from* user space**.
   3. **Client consume / store / mirror boundary** (`crates/cli/src/cli/commands/fetch.rs:296-322`;
-     `crates/client/src/grpc_hosted/mod.rs:291,327`): the synthetic root crosses the wire
+     `crates/cli/src/hosted_runtime/hosted/mod.rs:291,327`): the synthetic root crosses the wire
      as a **type-distinct `RefKind::SyntheticFrontierRoot`** (widening `RefEntry`'s boolean
      `is_thread`, `message_refs.rs:92`, into a three-way `RefKind`), and **every** consume
      site matches on `RefKind` to route it to a **dedicated synthetic-ref store path** —
@@ -2306,7 +2306,7 @@ issues are checked against:
    persisted promotion record before the first public serve. **Promotion-record
    propagation/coordination (propagate-before-gate, §5.4):** the materialized
    promotion record replicates host-to-host as an authoritative fact — over the
-   record-sync path redactions already use (`crates/client/src/grpc_hosted/sync.rs:268-302`),
+   record-sync path redactions already use (`crates/cli/src/hosted_runtime/hosted/sync.rs:268-302`),
    **not** behind the §8.4 client gate — and a secondary host **confirms it holds
    the authoritative records before it gates `S`**; a host that cannot confirm fails
    toward last-known-public (withhold serving or serve last-known-public, **never
