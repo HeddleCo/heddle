@@ -17,7 +17,8 @@ pub(super) struct HostedConnection {
     pub(super) endpoint: Endpoint,
     pub(super) connection: iroh::endpoint::Connection,
     provider_transport: Option<ProviderWebSocketTransport>,
-    provider_connections: Mutex<HashMap<EndpointId, iroh::endpoint::Connection>>,
+    provider_connections:
+        Mutex<HashMap<EndpointId, Arc<Mutex<Option<iroh::endpoint::Connection>>>>>,
 }
 
 impl HostedConnection {
@@ -82,13 +83,20 @@ impl HostedConnection {
         let endpoint_id: EndpointId = source.endpoint_id.parse().map_err(|error| {
             HostedError::InvalidDescriptor(format!("provider endpoint id: {error}"))
         })?;
-        let mut connections = self.provider_connections.lock().await;
-        if let Some(connection) = connections.get(&endpoint_id)
+        let slot = {
+            let mut connections = self.provider_connections.lock().await;
+            Arc::clone(
+                connections
+                    .entry(endpoint_id)
+                    .or_insert_with(|| Arc::new(Mutex::new(None))),
+            )
+        };
+        let mut cached = slot.lock().await;
+        if let Some(connection) = cached.as_ref()
             && connection.close_reason().is_none()
         {
             return Ok(connection.clone());
         }
-        connections.remove(&endpoint_id);
 
         let transport = self.provider_transport.as_ref().ok_or_else(|| {
             HostedError::InvalidDescriptor(
@@ -106,7 +114,7 @@ impl HostedConnection {
             .connect(address, api::PROVIDER_ALPN_V1)
             .await
             .map_err(HostedError::transport)?;
-        connections.insert(endpoint_id, connection.clone());
+        *cached = Some(connection.clone());
         Ok(connection)
     }
 
@@ -138,10 +146,11 @@ fn transport_config() -> QuicTransportConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::Ipv4Addr, time::Duration};
+    use std::{net::Ipv4Addr, sync::Arc, time::Duration};
 
     use api::heddle::api::v1alpha1::ProviderSource;
     use iroh::{Endpoint, RelayMode, endpoint::presets};
+    use tokio::sync::Mutex;
 
     use super::HostedConnection;
 
@@ -217,11 +226,10 @@ mod tests {
         let connection = HostedConnection::connect(client, server_addr)
             .await
             .unwrap();
-        connection
-            .provider_connections
-            .lock()
-            .await
-            .insert(server_id, connection.connection.clone());
+        connection.provider_connections.lock().await.insert(
+            server_id,
+            Arc::new(Mutex::new(Some(connection.connection.clone()))),
+        );
 
         let reused = connection
             .provider_connection(&ProviderSource {

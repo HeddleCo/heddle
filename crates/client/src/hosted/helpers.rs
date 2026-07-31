@@ -1,4 +1,5 @@
 use core::convert::TryFrom;
+use std::time::Duration;
 
 use api::heddle::api::v1alpha1::{
     HostedGrant, HostedNamespace, HostedObjectType, HostedRepository, ObjectAvailabilityStatus,
@@ -17,16 +18,27 @@ pub(crate) struct HostedTransportPolicy {
     pub chunk_size: usize,
     pub max_inflight_objects: usize,
     pub resume_attempts: usize,
+    pub provider_global_concurrency: usize,
+    pub provider_per_endpoint_concurrency: usize,
+    pub provider_max_inflight_bytes: usize,
+    pub provider_stall_timeout: Duration,
 }
 
 impl HostedTransportPolicy {
     pub fn from_client_config(config: &ClientConfig) -> Self {
         let chunk_size = config.chunk_size.max(1);
         let max_inflight_objects = (chunk_size / (16 * 1024)).clamp(1, 16);
+        let provider_global_concurrency = config.provider_global_concurrency.clamp(1, 64);
         Self {
             chunk_size,
             max_inflight_objects,
             resume_attempts: 2,
+            provider_global_concurrency,
+            provider_per_endpoint_concurrency: config
+                .provider_per_endpoint_concurrency
+                .clamp(1, provider_global_concurrency),
+            provider_max_inflight_bytes: config.provider_max_inflight_bytes.max(1),
+            provider_stall_timeout: Duration::from_secs(config.provider_stall_timeout_secs.max(1)),
         }
     }
 

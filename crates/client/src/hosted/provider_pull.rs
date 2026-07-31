@@ -1,11 +1,17 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
+    future::Future,
     io,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use api::{
-    framing::{MAX_CONTROL_BODY, StreamFrame, decode_stream_frame, encode_stream_message},
+    framing::{StreamFrame, decode_stream_frame, encode_stream_message},
     heddle::api::v1alpha1::{
         ProviderPlanChallenge, ProviderPlanResponse, ProviderPullCapabilityContext,
         ProviderPullManifest as ApiProviderPullManifest, ProviderPullResponse,
@@ -15,20 +21,29 @@ use api::{
     },
 };
 use bytes::Bytes;
+use futures::{StreamExt as _, stream::FuturesUnordered};
 use objects::store::PackObjectId;
 use prost::Message;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use wire::{
-    NativePackBundle, ProtocolError, ProviderPackExtent, ProviderPackIndexEntry,
-    ProviderPackManifest, assemble_provider_pack,
+    CompletedProviderPack, ProtocolError, ProviderPackExtent, ProviderPackIndexEntry,
+    ProviderPackManifest, ProviderPackSpool, ProviderPackWriter,
 };
 
-use super::{HostedClient, helpers::hosted_to_protocol_error};
+use super::{
+    HostedClient,
+    helpers::{HostedTransportPolicy, hosted_to_protocol_error},
+};
 
 const PROVIDER_VERSION: u32 = 1;
 const PLAN_NONCE_LEN: usize = 16;
 const DIGEST_LEN: usize = 32;
 const PROVIDER_READ_CHUNK: usize = 1024 * 1024;
-const MAX_PROVIDER_ATTEMPTS: usize = 3;
+const PROVIDER_CONTROL_CHUNK: usize = 16 * 1024;
+const MAX_PROVIDER_CONTROL_BODY: usize = 64 * 1024;
+// These are resumptions inside one installed opaque grant. Retrying the signed
+// provider plan itself still requires a new pull challenge and nonce.
+const MAX_PROVIDER_RESUME_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone)]
 pub(super) struct ProviderPullSession {
@@ -40,7 +55,7 @@ pub(super) struct ProviderPullSession {
 }
 
 pub(super) struct CompletedProviderPull {
-    pub(super) pack: NativePackBundle,
+    pub(super) pack: CompletedProviderPack,
     pub(super) trailer_digest: [u8; DIGEST_LEN],
 }
 
@@ -123,63 +138,39 @@ impl HostedClient {
         session: &ProviderPullSession,
         challenge: &ProviderPlanChallenge,
         manifest: &ApiProviderPullManifest,
+        spool_root: &Path,
     ) -> Result<CompletedProviderPull, ProtocolError> {
         let (wire_manifest, sources) = convert_manifest(session, challenge, manifest)?;
-        let mut bodies = Vec::with_capacity(manifest.extents.len());
-        for (extent, source) in manifest.extents.iter().zip(sources) {
-            let digest: [u8; DIGEST_LEN] = extent.digest.as_slice().try_into().map_err(|_| {
-                ProtocolError::InvalidState(
-                    "provider extent digest must be exactly 32 bytes".to_string(),
-                )
-            })?;
-            let downloaded = self
-                .download_provider_extent(source, extent.length, digest)
-                .await?;
-            bodies.push(downloaded.bytes);
-        }
-        let bundle = assemble_provider_pack(&wire_manifest, &bodies)?;
+        let extents = wire_manifest
+            .extents
+            .iter()
+            .zip(sources)
+            .enumerate()
+            .map(|(index, (extent, source))| ScheduledProviderExtent {
+                index,
+                source,
+                length: extent.length,
+                digest: extent.digest,
+            })
+            .collect();
+        let backend = HostedProviderBackend { client: self };
+        let download = download_provider_plan(
+            spool_root,
+            wire_manifest,
+            extents,
+            &backend,
+            &self.transport,
+        )
+        .await?;
+        tracing::debug!(
+            peak_inflight_bytes = download.peak_inflight_bytes,
+            configured_bytes = self.transport.provider_max_inflight_bytes,
+            "provider pull byte-budget high-water mark"
+        );
         Ok(CompletedProviderPull {
-            pack: bundle.pack,
-            trailer_digest: bundle.trailer_digest,
+            trailer_digest: download.pack.trailer_digest,
+            pack: download.pack,
         })
-    }
-
-    async fn download_provider_extent(
-        &self,
-        source: &ProviderSource,
-        expected_length: u64,
-        expected_digest: [u8; DIGEST_LEN],
-    ) -> Result<DownloadedExtent, ProtocolError> {
-        let mut retained = Vec::new();
-        let mut previous_generation = None;
-        let mut last_retryable = None;
-
-        for _ in 0..MAX_PROVIDER_ATTEMPTS {
-            let connection = match self.connection.provider_connection(source).await {
-                Ok(connection) => connection,
-                Err(error) => {
-                    last_retryable = Some(hosted_to_protocol_error(error));
-                    continue;
-                }
-            };
-            match download_attempt(
-                &connection,
-                &source.opaque_ticket,
-                expected_length,
-                expected_digest,
-                &mut retained,
-                &mut previous_generation,
-            )
-            .await
-            {
-                Ok(_) => return Ok(DownloadedExtent { bytes: retained }),
-                Err(AttemptFailure::Retryable { error }) => last_retryable = Some(error),
-                Err(AttemptFailure::Fatal(error)) => return Err(error),
-            }
-        }
-        Err(last_retryable.unwrap_or_else(|| {
-            ProtocolError::InvalidState("provider transfer attempts exhausted".to_string())
-        }))
     }
 }
 
@@ -207,10 +198,20 @@ impl ProviderPullSession {
             pack_digest: pack_digest.to_vec(),
         }
     }
-}
 
-struct DownloadedExtent {
-    bytes: Vec<u8>,
+    pub(super) fn resolve_download(
+        &self,
+        batch_digest: &[u8],
+        result: Result<CompletedProviderPull, ProtocolError>,
+    ) -> (ProviderPullResponse, Option<CompletedProviderPull>) {
+        match result {
+            Ok(completed) => (
+                self.complete_response(batch_digest, completed.trailer_digest),
+                Some(completed),
+            ),
+            Err(_) => (self.fallback_response(batch_digest), None),
+        }
+    }
 }
 
 fn validate_challenge(
@@ -247,11 +248,11 @@ fn validate_challenge(
     Ok(())
 }
 
-fn convert_manifest<'a>(
+fn convert_manifest(
     session: &ProviderPullSession,
     challenge: &ProviderPlanChallenge,
-    manifest: &'a ApiProviderPullManifest,
-) -> Result<(ProviderPackManifest, Vec<&'a ProviderSource>), ProtocolError> {
+    manifest: &ApiProviderPullManifest,
+) -> Result<(ProviderPackManifest, Vec<ProviderSource>), ProtocolError> {
     validate_challenge(session, challenge)?;
     if manifest.version != PROVIDER_VERSION
         || manifest.plan_nonce != session.plan_nonce
@@ -340,7 +341,7 @@ fn convert_manifest<'a>(
             digest,
             objects,
         });
-        sources.push(source);
+        sources.push(source.clone());
     }
     if object_count != summary.object_count || total_bytes != summary.total_bytes {
         return Err(ProtocolError::InvalidState(
@@ -357,71 +358,367 @@ fn convert_manifest<'a>(
     ))
 }
 
+#[derive(Clone, Debug)]
+struct ScheduledProviderExtent {
+    index: usize,
+    source: ProviderSource,
+    length: u64,
+    digest: [u8; DIGEST_LEN],
+}
+
+struct ProviderPlanDownload {
+    pack: CompletedProviderPack,
+    peak_inflight_bytes: usize,
+}
+
+trait ProviderBackend: Sync {
+    type Connection: Clone + Send;
+
+    fn connect<'a>(
+        &'a self,
+        sources: &'a [ProviderSource],
+    ) -> impl Future<Output = Result<Self::Connection, ProtocolError>> + Send + 'a;
+
+    fn download(
+        &self,
+        connection: Self::Connection,
+        extent: ScheduledProviderExtent,
+        writer: ProviderPackWriter,
+        byte_budget: InflightByteBudget,
+        stall_timeout: std::time::Duration,
+    ) -> impl Future<Output = Result<(), ProtocolError>> + Send;
+}
+
+struct HostedProviderBackend<'a> {
+    client: &'a HostedClient,
+}
+
+impl ProviderBackend for HostedProviderBackend<'_> {
+    type Connection = iroh::endpoint::Connection;
+
+    async fn connect(&self, sources: &[ProviderSource]) -> Result<Self::Connection, ProtocolError> {
+        let mut last_error = None;
+        for source in sources {
+            if source.expires_at_unix_millis <= now_millis()? {
+                continue;
+            }
+            match self.client.connection.provider_connection(source).await {
+                Ok(connection) => return Ok(connection),
+                Err(error) => last_error = Some(hosted_to_protocol_error(error)),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            ProtocolError::InvalidState(
+                "provider endpoint has no unexpired connection path".to_string(),
+            )
+        }))
+    }
+
+    async fn download(
+        &self,
+        connection: Self::Connection,
+        extent: ScheduledProviderExtent,
+        writer: ProviderPackWriter,
+        byte_budget: InflightByteBudget,
+        stall_timeout: std::time::Duration,
+    ) -> Result<(), ProtocolError> {
+        download_provider_extent(&connection, extent, writer, byte_budget, stall_timeout).await
+    }
+}
+
+#[derive(Clone)]
+struct InflightByteBudget {
+    inner: Arc<InflightByteBudgetInner>,
+}
+
+struct InflightByteBudgetInner {
+    semaphore: Arc<Semaphore>,
+    limit: usize,
+    current: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+struct InflightByteReservation {
+    inner: Arc<InflightByteBudgetInner>,
+    bytes: usize,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl InflightByteBudget {
+    fn new(limit: usize) -> Self {
+        let limit = limit.clamp(1, Semaphore::MAX_PERMITS);
+        Self {
+            inner: Arc::new(InflightByteBudgetInner {
+                semaphore: Arc::new(Semaphore::new(limit)),
+                limit,
+                current: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+            }),
+        }
+    }
+
+    fn chunk_limit(&self, requested: usize) -> usize {
+        requested.min(self.inner.limit).max(1)
+    }
+
+    async fn reserve(&self, requested: usize) -> Result<InflightByteReservation, ProtocolError> {
+        let bytes = self.chunk_limit(requested);
+        let permits = u32::try_from(bytes).map_err(|_| {
+            ProtocolError::InvalidState(
+                "provider in-flight byte reservation exceeds u32".to_string(),
+            )
+        })?;
+        let permit = Arc::clone(&self.inner.semaphore)
+            .acquire_many_owned(permits)
+            .await
+            .map_err(|_| ProtocolError::InvalidState("provider byte budget closed".to_string()))?;
+        let current = self.inner.current.fetch_add(bytes, Ordering::AcqRel) + bytes;
+        self.inner.peak.fetch_max(current, Ordering::AcqRel);
+        Ok(InflightByteReservation {
+            inner: Arc::clone(&self.inner),
+            bytes,
+            _permit: permit,
+        })
+    }
+
+    fn peak(&self) -> usize {
+        self.inner.peak.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for InflightByteReservation {
+    fn drop(&mut self) {
+        self.inner.current.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+async fn download_provider_plan<B: ProviderBackend>(
+    spool_root: &Path,
+    manifest: ProviderPackManifest,
+    extents: Vec<ScheduledProviderExtent>,
+    backend: &B,
+    policy: &HostedTransportPolicy,
+) -> Result<ProviderPlanDownload, ProtocolError> {
+    let spool = ProviderPackSpool::new_in(spool_root, manifest)?;
+    let writer = spool.writer();
+    let byte_budget = InflightByteBudget::new(policy.provider_max_inflight_bytes);
+    let connection_limit = Arc::new(Semaphore::new(policy.provider_global_concurrency));
+    let stream_limit = Arc::new(Semaphore::new(policy.provider_global_concurrency));
+    let mut groups = BTreeMap::<String, Vec<ScheduledProviderExtent>>::new();
+    for extent in extents {
+        groups
+            .entry(extent.source.endpoint_id.clone())
+            .or_default()
+            .push(extent);
+    }
+
+    let mut pending = FuturesUnordered::new();
+    for extents in groups.into_values() {
+        pending.push(download_provider_group(
+            backend,
+            extents,
+            writer.clone(),
+            Arc::clone(&connection_limit),
+            Arc::clone(&stream_limit),
+            byte_budget.clone(),
+            policy,
+        ));
+    }
+    while let Some(result) = pending.next().await {
+        result?;
+    }
+    drop(writer);
+
+    let peak_inflight_bytes = byte_budget.peak();
+    Ok(ProviderPlanDownload {
+        pack: spool.finish()?,
+        peak_inflight_bytes,
+    })
+}
+
+async fn download_provider_group<B: ProviderBackend>(
+    backend: &B,
+    extents: Vec<ScheduledProviderExtent>,
+    writer: ProviderPackWriter,
+    connection_limit: Arc<Semaphore>,
+    stream_limit: Arc<Semaphore>,
+    byte_budget: InflightByteBudget,
+    policy: &HostedTransportPolicy,
+) -> Result<(), ProtocolError> {
+    let _connection_permit = connection_limit.acquire_owned().await.map_err(|_| {
+        ProtocolError::InvalidState("provider connection scheduler closed".to_string())
+    })?;
+    for extent in &extents {
+        ensure_grant_unexpired(&extent.source)?;
+    }
+    let sources = extents
+        .iter()
+        .map(|extent| extent.source.clone())
+        .collect::<Vec<_>>();
+    let connection = tokio::time::timeout(policy.provider_stall_timeout, backend.connect(&sources))
+        .await
+        .map_err(|_| provider_stall_error())??;
+
+    let endpoint_limit = Arc::new(Semaphore::new(policy.provider_per_endpoint_concurrency));
+    let mut pending = FuturesUnordered::new();
+    for extent in extents {
+        let endpoint_limit = Arc::clone(&endpoint_limit);
+        let stream_limit = Arc::clone(&stream_limit);
+        let connection = connection.clone();
+        let writer = writer.clone();
+        let byte_budget = byte_budget.clone();
+        pending.push(async move {
+            let _endpoint_permit = endpoint_limit.acquire_owned().await.map_err(|_| {
+                ProtocolError::InvalidState("provider endpoint scheduler closed".to_string())
+            })?;
+            let _stream_permit = stream_limit.acquire_owned().await.map_err(|_| {
+                ProtocolError::InvalidState("provider stream scheduler closed".to_string())
+            })?;
+            ensure_grant_unexpired(&extent.source)?;
+            backend
+                .download(
+                    connection,
+                    extent,
+                    writer,
+                    byte_budget,
+                    policy.provider_stall_timeout,
+                )
+                .await
+        });
+    }
+    while let Some(result) = pending.next().await {
+        result?;
+    }
+    Ok(())
+}
+
+fn ensure_grant_unexpired(source: &ProviderSource) -> Result<(), ProtocolError> {
+    if source.expires_at_unix_millis <= now_millis()? {
+        return Err(ProtocolError::InvalidState(
+            "provider grant expired before its extent started".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn provider_stall_error() -> ProtocolError {
+    ProtocolError::InvalidState(
+        "provider extent exceeded the configured fallback threshold".to_string(),
+    )
+}
+
+async fn download_provider_extent(
+    connection: &iroh::endpoint::Connection,
+    extent: ScheduledProviderExtent,
+    writer: ProviderPackWriter,
+    byte_budget: InflightByteBudget,
+    stall_timeout: std::time::Duration,
+) -> Result<(), ProtocolError> {
+    let mut retained_length = 0_u64;
+    let mut previous_generation = None;
+    let mut last_retryable = None;
+
+    for _ in 0..MAX_PROVIDER_RESUME_ATTEMPTS {
+        let mut attempt = ExtentAttemptState {
+            expected_length: extent.length,
+            expected_digest: extent.digest,
+            writer: &writer,
+            extent_index: extent.index,
+            retained_length: &mut retained_length,
+            previous_generation: &mut previous_generation,
+        };
+        match download_attempt(
+            connection,
+            &extent.source.opaque_ticket,
+            &mut attempt,
+            &byte_budget,
+            stall_timeout,
+        )
+        .await
+        {
+            Ok(_) => {
+                writer.mark_verified(extent.index)?;
+                return Ok(());
+            }
+            Err(AttemptFailure::Retryable { error }) => last_retryable = Some(error),
+            Err(AttemptFailure::Fatal(error)) => return Err(error),
+        }
+    }
+    Err(last_retryable.unwrap_or_else(|| {
+        ProtocolError::InvalidState("provider transfer attempts exhausted".to_string())
+    }))
+}
+
 #[derive(Debug)]
 enum AttemptFailure {
     Retryable { error: ProtocolError },
     Fatal(ProtocolError),
 }
 
+struct ExtentAttemptState<'a> {
+    expected_length: u64,
+    expected_digest: [u8; DIGEST_LEN],
+    writer: &'a ProviderPackWriter,
+    extent_index: usize,
+    retained_length: &'a mut u64,
+    previous_generation: &'a mut Option<u64>,
+}
+
 async fn download_attempt(
     connection: &iroh::endpoint::Connection,
     opaque_ticket: &str,
-    expected_length: u64,
-    expected_digest: [u8; DIGEST_LEN],
-    retained: &mut Vec<u8>,
-    previous_generation: &mut Option<u64>,
+    state: &mut ExtentAttemptState<'_>,
+    byte_budget: &InflightByteBudget,
+    stall_timeout: std::time::Duration,
 ) -> Result<u64, AttemptFailure> {
-    let (mut send, recv) =
-        connection
-            .open_bi()
-            .await
-            .map_err(|error| AttemptFailure::Retryable {
-                error: transport_error(error),
-            })?;
-    send_provider_frame(
-        &mut send,
-        &ProviderReadClientFrame {
-            frame: Some(provider_read_client_frame::Frame::Request(
-                ProviderReadRequest {
-                    version: PROVIDER_VERSION,
-                    opaque_ticket: opaque_ticket.to_string(),
-                },
-            )),
-        },
+    let (mut send, recv) = await_provider_progress(
+        stall_timeout,
+        async { connection.open_bi().await.map_err(transport_error) },
+        true,
     )
-    .await
-    .map_err(|error| AttemptFailure::Retryable { error })?;
+    .await?;
+    await_provider_progress(
+        stall_timeout,
+        send_provider_frame(
+            &mut send,
+            &ProviderReadClientFrame {
+                frame: Some(provider_read_client_frame::Frame::Request(
+                    ProviderReadRequest {
+                        version: PROVIDER_VERSION,
+                        opaque_ticket: opaque_ticket.to_string(),
+                    },
+                )),
+            },
+        ),
+        true,
+    )
+    .await?;
 
     let mut reader = ProviderStreamReader::new(recv);
-    let ready = read_ready(&mut reader)
-        .await
-        .map_err(AttemptFailure::Fatal)?;
-    if ready.resume_offset > expected_length
-        || ready.resume_offset > retained.len() as u64
-        || ready.remaining_length != expected_length - ready.resume_offset
+    let ready = await_provider_progress(stall_timeout, read_ready(&mut reader), false).await?;
+    if ready.resume_offset > state.expected_length
+        || ready.resume_offset > *state.retained_length
+        || ready.remaining_length != state.expected_length - ready.resume_offset
         || ready.attempt_generation == 0
-        || previous_generation.is_some_and(|previous| previous == ready.attempt_generation)
+        || state
+            .previous_generation
+            .is_some_and(|previous| previous == ready.attempt_generation)
     {
         abort_provider_stream(&mut send, &mut reader);
         return Err(AttemptFailure::Fatal(ProtocolError::InvalidState(
             "provider returned an invalid resume offset or attempt generation".to_string(),
         )));
     }
-    *previous_generation = Some(ready.attempt_generation);
-    let resume_offset = usize::try_from(ready.resume_offset).map_err(|_| {
-        AttemptFailure::Fatal(ProtocolError::InvalidState(
-            "provider resume offset exceeds this platform".to_string(),
-        ))
-    })?;
-    retained.truncate(resume_offset);
+    *state.previous_generation = Some(ready.attempt_generation);
+    *state.retained_length = ready.resume_offset;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(retained);
+    state
+        .writer
+        .hash_extent_prefix(state.extent_index, ready.resume_offset, &mut hasher)
+        .map_err(AttemptFailure::Fatal)?;
     let prefix_rehashed = ready.resume_offset;
 
-    let raw_length = reader
-        .next_raw_body()
-        .await
-        .map_err(|error| AttemptFailure::Retryable { error })?;
+    let raw_length = await_provider_progress(stall_timeout, reader.next_raw_body(), true).await?;
     if raw_length != ready.remaining_length {
         abort_provider_stream(&mut send, &mut reader);
         return Err(AttemptFailure::Fatal(ProtocolError::InvalidState(
@@ -429,62 +726,103 @@ async fn download_attempt(
         )));
     }
 
-    while let Some(chunk) = reader
-        .read_raw_chunk(PROVIDER_READ_CHUNK)
-        .await
-        .map_err(|error| AttemptFailure::Retryable { error })?
-    {
-        hasher.update(&chunk);
-        retained.extend_from_slice(&chunk);
-        send_provider_frame(
-            &mut send,
-            &ProviderReadClientFrame {
-                frame: Some(provider_read_client_frame::Frame::Checkpoint(
-                    ProviderReadCheckpoint {
-                        attempt_generation: ready.attempt_generation,
-                        acknowledged_length: retained.len() as u64,
-                        final_digest: Vec::new(),
-                    },
-                )),
-            },
+    while reader.raw_remaining() != 0 {
+        let requested = usize::try_from(reader.raw_remaining().min(PROVIDER_READ_CHUNK as u64))
+            .unwrap_or(PROVIDER_READ_CHUNK);
+        let reservation = byte_budget
+            .reserve(requested)
+            .await
+            .map_err(AttemptFailure::Fatal)?;
+        let Some(chunk) = await_provider_progress(
+            stall_timeout,
+            reader.read_raw_chunk(reservation.bytes),
+            true,
         )
-        .await
-        .map_err(|error| AttemptFailure::Retryable { error })?;
+        .await?
+        else {
+            break;
+        };
+        hasher.update(&chunk);
+        state
+            .writer
+            .write_extent_chunk(state.extent_index, *state.retained_length, &chunk)
+            .map_err(AttemptFailure::Fatal)?;
+        *state.retained_length = state
+            .retained_length
+            .checked_add(chunk.len() as u64)
+            .ok_or_else(|| {
+                AttemptFailure::Fatal(ProtocolError::InvalidState(
+                    "provider retained length overflows".to_string(),
+                ))
+            })?;
+        await_provider_progress(
+            stall_timeout,
+            send_provider_frame(
+                &mut send,
+                &ProviderReadClientFrame {
+                    frame: Some(provider_read_client_frame::Frame::Checkpoint(
+                        ProviderReadCheckpoint {
+                            attempt_generation: ready.attempt_generation,
+                            acknowledged_length: *state.retained_length,
+                            final_digest: Vec::new(),
+                        },
+                    )),
+                },
+            ),
+            true,
+        )
+        .await?;
     }
 
-    if retained.len() as u64 != expected_length || hasher.finalize().as_bytes() != &expected_digest
+    if *state.retained_length != state.expected_length
+        || hasher.finalize().as_bytes() != &state.expected_digest
     {
         abort_provider_stream(&mut send, &mut reader);
         return Err(AttemptFailure::Fatal(ProtocolError::InvalidState(
             "provider extent digest mismatch".to_string(),
         )));
     }
-    send_provider_frame(
-        &mut send,
-        &ProviderReadClientFrame {
-            frame: Some(provider_read_client_frame::Frame::Checkpoint(
-                ProviderReadCheckpoint {
-                    attempt_generation: ready.attempt_generation,
-                    acknowledged_length: expected_length,
-                    final_digest: expected_digest.to_vec(),
-                },
-            )),
-        },
+    await_provider_progress(
+        stall_timeout,
+        send_provider_frame(
+            &mut send,
+            &ProviderReadClientFrame {
+                frame: Some(provider_read_client_frame::Frame::Checkpoint(
+                    ProviderReadCheckpoint {
+                        attempt_generation: ready.attempt_generation,
+                        acknowledged_length: state.expected_length,
+                        final_digest: state.expected_digest.to_vec(),
+                    },
+                )),
+            },
+        ),
+        true,
     )
-    .await
-    .map_err(|error| AttemptFailure::Retryable { error })?;
+    .await?;
     send.finish().map_err(|error| AttemptFailure::Retryable {
         error: transport_error(error),
     })?;
-    let complete = read_complete(&mut reader)
-        .await
-        .map_err(AttemptFailure::Fatal)?;
-    if !complete.success || complete.committed_length != expected_length {
+    let complete =
+        await_provider_progress(stall_timeout, read_complete(&mut reader), false).await?;
+    if !complete.success || complete.committed_length != state.expected_length {
         return Err(AttemptFailure::Fatal(ProtocolError::InvalidState(
             "provider did not commit the exact verified extent".to_string(),
         )));
     }
     Ok(prefix_rehashed)
+}
+
+async fn await_provider_progress<T>(
+    stall_timeout: std::time::Duration,
+    future: impl Future<Output = Result<T, ProtocolError>>,
+    retryable: bool,
+) -> Result<T, AttemptFailure> {
+    match tokio::time::timeout(stall_timeout, future).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) if retryable => Err(AttemptFailure::Retryable { error }),
+        Ok(Err(error)) => Err(AttemptFailure::Fatal(error)),
+        Err(_) => Err(AttemptFailure::Fatal(provider_stall_error())),
+    }
 }
 
 async fn send_provider_frame(
@@ -579,7 +917,7 @@ impl ProviderStreamReader {
             }
             let chunk = self
                 .recv
-                .read_chunk(MAX_CONTROL_BODY + 5)
+                .read_chunk(PROVIDER_CONTROL_CHUNK)
                 .await
                 .map_err(transport_error)?
                 .ok_or_else(|| {
@@ -589,7 +927,16 @@ impl ProviderStreamReader {
                     ))
                 })?;
             self.buffered.extend_from_slice(&chunk);
+            if self.buffered.len() > MAX_PROVIDER_CONTROL_BODY + 5 {
+                return Err(ProtocolError::InvalidState(
+                    "provider control frame exceeds its bounded buffer".to_string(),
+                ));
+            }
         }
+    }
+
+    fn raw_remaining(&self) -> u64 {
+        self.raw_remaining
     }
 
     async fn read_raw_chunk(&mut self, maximum: usize) -> Result<Option<Bytes>, ProtocolError> {
@@ -655,7 +1002,16 @@ fn now_millis() -> Result<u64, ProtocolError> {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::Ipv4Addr, time::Duration};
+    use std::{
+        collections::{HashMap, HashSet},
+        fs,
+        net::Ipv4Addr,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use api::{
         framing::{encode_stream_message, encode_stream_raw_body},
@@ -666,9 +1022,265 @@ mod tests {
     };
     use crypto::{Ed25519Signer, Signer as _};
     use iroh::{Endpoint, RelayMode, endpoint::presets};
+    use objects::{
+        object::Blob,
+        store::{
+            CompressionConfig, FsStore,
+            pack::{ObjectType, PackBuilder, PackIndex, PackObjectId},
+        },
+    };
 
     use super::*;
     use crate::hosted::CallContextFactory;
+
+    #[derive(Clone)]
+    struct FakeProviderConnection {
+        endpoint_id: String,
+    }
+
+    struct FakeProviderBackend {
+        bodies: HashMap<String, Arc<Vec<u8>>>,
+        delays: HashMap<String, Duration>,
+        stalled: HashSet<String>,
+        connections: Mutex<HashMap<String, usize>>,
+        completion_order: Mutex<Vec<String>>,
+        active_streams: Arc<AtomicUsize>,
+        cancelled_streams: Arc<AtomicUsize>,
+        chunk_size: usize,
+    }
+
+    struct FakeStreamGuard {
+        active: Arc<AtomicUsize>,
+        cancelled: Arc<AtomicUsize>,
+        completed: bool,
+    }
+
+    impl FakeProviderBackend {
+        fn new(bodies: HashMap<String, Arc<Vec<u8>>>) -> Self {
+            Self {
+                bodies,
+                delays: HashMap::new(),
+                stalled: HashSet::new(),
+                connections: Mutex::new(HashMap::new()),
+                completion_order: Mutex::new(Vec::new()),
+                active_streams: Arc::new(AtomicUsize::new(0)),
+                cancelled_streams: Arc::new(AtomicUsize::new(0)),
+                chunk_size: 64 * 1024,
+            }
+        }
+
+        fn connection_count(&self, endpoint_id: &str) -> usize {
+            self.connections
+                .lock()
+                .unwrap()
+                .get(endpoint_id)
+                .copied()
+                .unwrap_or(0)
+        }
+    }
+
+    impl ProviderBackend for FakeProviderBackend {
+        type Connection = FakeProviderConnection;
+
+        async fn connect(
+            &self,
+            sources: &[ProviderSource],
+        ) -> Result<Self::Connection, ProtocolError> {
+            let endpoint_id = sources
+                .first()
+                .ok_or_else(|| {
+                    ProtocolError::InvalidState("fake provider group is empty".to_string())
+                })?
+                .endpoint_id
+                .clone();
+            *self
+                .connections
+                .lock()
+                .unwrap()
+                .entry(endpoint_id.clone())
+                .or_default() += 1;
+            Ok(FakeProviderConnection { endpoint_id })
+        }
+
+        async fn download(
+            &self,
+            connection: Self::Connection,
+            extent: ScheduledProviderExtent,
+            writer: ProviderPackWriter,
+            byte_budget: InflightByteBudget,
+            stall_timeout: Duration,
+        ) -> Result<(), ProtocolError> {
+            if connection.endpoint_id != extent.source.endpoint_id {
+                return Err(ProtocolError::InvalidState(
+                    "fake provider connection crossed endpoint groups".to_string(),
+                ));
+            }
+            let ticket = extent.source.opaque_ticket.clone();
+            let mut guard = FakeStreamGuard {
+                active: Arc::clone(&self.active_streams),
+                cancelled: Arc::clone(&self.cancelled_streams),
+                completed: false,
+            };
+            guard.active.fetch_add(1, Ordering::AcqRel);
+            if self.stalled.contains(&ticket) {
+                tokio::time::timeout(stall_timeout, std::future::pending::<()>())
+                    .await
+                    .map_err(|_| provider_stall_error())?;
+            }
+            if let Some(delay) = self.delays.get(&ticket) {
+                tokio::time::sleep(*delay).await;
+            }
+            let body = Arc::clone(self.bodies.get(&ticket).ok_or_else(|| {
+                ProtocolError::InvalidState("fake provider body is missing".to_string())
+            })?);
+            let mut hasher = blake3::Hasher::new();
+            let mut offset = 0_usize;
+            while offset < body.len() {
+                let length = (body.len() - offset).min(self.chunk_size);
+                let reservation = byte_budget.reserve(length).await?;
+                tokio::task::yield_now().await;
+                let chunk = &body[offset..offset + length];
+                hasher.update(chunk);
+                writer.write_extent_chunk(extent.index, offset as u64, chunk)?;
+                offset += length;
+                drop(reservation);
+            }
+            if offset as u64 != extent.length || hasher.finalize().as_bytes() != &extent.digest {
+                return Err(ProtocolError::InvalidState(
+                    "fake provider extent length or digest mismatch".to_string(),
+                ));
+            }
+            writer.mark_verified(extent.index)?;
+            self.completion_order.lock().unwrap().push(ticket);
+            guard.completed = true;
+            Ok(())
+        }
+    }
+
+    impl Drop for FakeStreamGuard {
+        fn drop(&mut self) {
+            self.active.fetch_sub(1, Ordering::AcqRel);
+            if !self.completed {
+                self.cancelled.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+    }
+
+    struct ProviderFixture {
+        manifest: ProviderPackManifest,
+        extents: Vec<ScheduledProviderExtent>,
+        bodies: HashMap<String, Arc<Vec<u8>>>,
+        source_pack: Vec<u8>,
+        source_index: Vec<u8>,
+    }
+
+    fn provider_fixture(payload_sizes: &[usize], endpoints: &[&str]) -> ProviderFixture {
+        assert_eq!(payload_sizes.len(), endpoints.len());
+        let mut builder = PackBuilder::new(CompressionConfig::disabled());
+        let mut ids = Vec::new();
+        for (index, size) in payload_sizes.iter().copied().enumerate() {
+            let data = (0..size)
+                .map(|offset| ((offset.wrapping_mul(31) + index * 17) % 251) as u8)
+                .collect::<Vec<_>>();
+            let blob = Blob::new(data.clone());
+            let id = PackObjectId::Hash(blob.hash());
+            builder.add_id(id, ObjectType::Blob, data);
+            ids.push(id);
+        }
+        let (source_pack, source_index, _) = builder.build().unwrap();
+        let parsed_index = PackIndex::from_bytes(&source_index).unwrap();
+        let mut ordered = ids
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, id)| (parsed_index.find(&id).unwrap(), index, id))
+            .collect::<Vec<_>>();
+        ordered.sort_unstable_by_key(|(offset, _, _)| *offset);
+
+        let body_end = source_pack.len() - DIGEST_LEN;
+        let expires_at_unix_millis = now_millis().unwrap() + 60_000;
+        let mut extents = Vec::new();
+        let mut scheduled = Vec::new();
+        let mut bodies = HashMap::new();
+        for (position, (output_offset, source_index, id)) in ordered.iter().copied().enumerate() {
+            let end = ordered
+                .get(position + 1)
+                .map(|(offset, _, _)| *offset as usize)
+                .unwrap_or(body_end);
+            let body = Arc::new(source_pack[output_offset as usize..end].to_vec());
+            let ticket = format!("extent-{source_index}");
+            let digest = *blake3::hash(&body).as_bytes();
+            let extent = ProviderPackExtent {
+                output_offset,
+                length: body.len() as u64,
+                digest,
+                objects: vec![ProviderPackIndexEntry { id, output_offset }],
+            };
+            let source = ProviderSource {
+                provider_id: format!("provider-{}", endpoints[source_index]),
+                endpoint_id: endpoints[source_index].to_string(),
+                direct_url: format!(
+                    "wss://{}.invalid/direct?provider=provider-{}&ticket={ticket}",
+                    endpoints[source_index], endpoints[source_index]
+                ),
+                opaque_ticket: ticket.clone(),
+                expires_at_unix_millis,
+            };
+            let index = extents.len();
+            scheduled.push(ScheduledProviderExtent {
+                index,
+                source,
+                length: extent.length,
+                digest,
+            });
+            extents.push(extent);
+            bodies.insert(ticket, body);
+        }
+        ProviderFixture {
+            manifest: ProviderPackManifest {
+                header: source_pack[..16].try_into().unwrap(),
+                output_pack_length: source_pack.len() as u64,
+                extents,
+            },
+            extents: scheduled,
+            bodies,
+            source_pack,
+            source_index,
+        }
+    }
+
+    fn provider_policy() -> HostedTransportPolicy {
+        HostedTransportPolicy {
+            chunk_size: 64 * 1024,
+            max_inflight_objects: 4,
+            resume_attempts: 2,
+            provider_global_concurrency: 4,
+            provider_per_endpoint_concurrency: 2,
+            provider_max_inflight_bytes: 512 * 1024,
+            provider_stall_timeout: Duration::from_millis(100),
+        }
+    }
+
+    fn provider_session() -> ProviderPullSession {
+        ProviderPullSession {
+            stream_id: "pull:one".to_string(),
+            repository: "acme/widgets".to_string(),
+            endpoint_id: "11".repeat(32),
+            plan_nonce: [4; PLAN_NONCE_LEN],
+            provider_enabled: true,
+        }
+    }
+
+    fn assert_download_falls_back(result: Result<ProviderPlanDownload, ProtocolError>) {
+        let result = result.map(|download| CompletedProviderPull {
+            trailer_digest: download.pack.trailer_digest,
+            pack: download.pack,
+        });
+        let (response, completed) = provider_session().resolve_download(&[7; DIGEST_LEN], result);
+        assert_eq!(response.status, ProviderPullResultStatus::Fallback as i32);
+        assert!(response.pack_digest.is_empty());
+        assert!(completed.is_none());
+    }
 
     #[test]
     fn captured_exact_plan_signature_does_not_verify_for_another_plan() {
@@ -738,6 +1350,268 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn distinct_endpoints_complete_out_of_order_into_a_byte_identical_pack() {
+        let fixture = provider_fixture(&[128 * 1024, 128 * 1024], &["endpoint-a", "endpoint-b"]);
+        let mut backend = FakeProviderBackend::new(fixture.bodies);
+        backend
+            .delays
+            .insert("extent-0".to_string(), Duration::from_millis(40));
+        let root = tempfile::tempdir().unwrap();
+
+        let mut download = download_provider_plan(
+            root.path(),
+            fixture.manifest,
+            fixture.extents,
+            &backend,
+            &provider_policy(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            backend.completion_order.lock().unwrap().as_slice(),
+            ["extent-1", "extent-0"]
+        );
+        assert_eq!(
+            download.pack.trailer_digest.as_slice(),
+            &fixture.source_pack[fixture.source_pack.len() - DIGEST_LEN..]
+        );
+        let store_root = tempfile::tempdir().unwrap();
+        let store = FsStore::new(store_root.path().join(".heddle"));
+        let installed = download.pack.install_into(&store).unwrap();
+        assert_eq!(
+            installed.len(),
+            PackIndex::from_bytes(&fixture.source_index)
+                .unwrap()
+                .ids()
+                .len()
+        );
+        println!(
+            "provider_out_of_order completion=endpoint-b,endpoint-a pack_bytes={} byte_identical=true",
+            fixture.source_pack.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn one_endpoint_reuses_one_connection_for_multiple_grants() {
+        let fixture = provider_fixture(
+            &[64 * 1024, 64 * 1024, 64 * 1024],
+            &["endpoint-a", "endpoint-a", "endpoint-a"],
+        );
+        let backend = FakeProviderBackend::new(fixture.bodies);
+        let root = tempfile::tempdir().unwrap();
+
+        download_provider_plan(
+            root.path(),
+            fixture.manifest,
+            fixture.extents,
+            &backend,
+            &provider_policy(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(backend.connection_count("endpoint-a"), 1);
+        println!("provider_group grants=3 endpoint=endpoint-a connections=1 reused=true");
+    }
+
+    #[tokio::test]
+    async fn peak_provider_body_memory_is_constant_as_pack_size_grows() {
+        async fn measure(payload_size: usize) -> (usize, usize) {
+            let quarter = payload_size / 4;
+            let fixture = provider_fixture(
+                &[quarter, quarter, quarter, quarter],
+                &["endpoint-a", "endpoint-b", "endpoint-c", "endpoint-d"],
+            );
+            let pack_size = fixture.source_pack.len();
+            let mut backend = FakeProviderBackend::new(fixture.bodies);
+            backend.chunk_size = 256 * 1024;
+            let root = tempfile::tempdir().unwrap();
+            let download = download_provider_plan(
+                root.path(),
+                fixture.manifest,
+                fixture.extents,
+                &backend,
+                &provider_policy(),
+            )
+            .await
+            .unwrap();
+            (pack_size, download.peak_inflight_bytes)
+        }
+
+        let (small_pack, small_peak) = measure(1024 * 1024).await;
+        let (large_pack, large_peak) = measure(16 * 1024 * 1024).await;
+
+        assert!(large_pack >= small_pack * 10);
+        assert!(small_peak <= 512 * 1024);
+        assert!(large_peak <= 512 * 1024);
+        assert_eq!(small_peak, large_peak);
+        println!(
+            "provider_memory method=production-byte-permit-high-water small_pack={small_pack} small_peak={small_peak} large_pack={large_pack} large_peak={large_peak} bounded=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_lane_does_not_block_healthy_lane_before_fallback_threshold() {
+        let fixture = provider_fixture(&[128 * 1024, 128 * 1024], &["endpoint-a", "endpoint-b"]);
+        let mut backend = FakeProviderBackend::new(fixture.bodies);
+        backend.stalled.insert("extent-0".to_string());
+        let root = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+
+        let result = download_provider_plan(
+            root.path(),
+            fixture.manifest,
+            fixture.extents,
+            &backend,
+            &provider_policy(),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            backend.completion_order.lock().unwrap().as_slice(),
+            ["extent-1"]
+        );
+        assert!(elapsed >= Duration::from_millis(90));
+        assert!(elapsed < Duration::from_millis(500));
+        assert_download_falls_back(result);
+        println!(
+            "provider_slow_lane healthy_completed=true fallback_after_ms={} threshold_ms=100",
+            elapsed.as_millis()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_provider_extents_all_select_existing_weft_fallback() {
+        let fixture = provider_fixture(&[64 * 1024, 64 * 1024], &["a", "b"]);
+        let mut overlapping = fixture.manifest.clone();
+        overlapping.extents[1].output_offset -= 1;
+        let root = tempfile::tempdir().unwrap();
+        assert_download_falls_back(
+            download_provider_plan(
+                root.path(),
+                overlapping,
+                fixture.extents.clone(),
+                &FakeProviderBackend::new(fixture.bodies.clone()),
+                &provider_policy(),
+            )
+            .await,
+        );
+
+        let mut gapped = fixture.manifest.clone();
+        gapped.extents[1].output_offset += 1;
+        assert_download_falls_back(
+            download_provider_plan(
+                root.path(),
+                gapped,
+                fixture.extents.clone(),
+                &FakeProviderBackend::new(fixture.bodies.clone()),
+                &provider_policy(),
+            )
+            .await,
+        );
+
+        let mut oversized_pack = fixture.manifest.clone();
+        oversized_pack.output_pack_length = wire::MAX_RECEIVED_PACK_SIZE + 1;
+        assert_download_falls_back(
+            download_provider_plan(
+                root.path(),
+                oversized_pack,
+                fixture.extents.clone(),
+                &FakeProviderBackend::new(fixture.bodies.clone()),
+                &provider_policy(),
+            )
+            .await,
+        );
+
+        let mut expired_extents = fixture.extents.clone();
+        for extent in &mut expired_extents {
+            extent.source.expires_at_unix_millis = 0;
+        }
+        assert_download_falls_back(
+            download_provider_plan(
+                root.path(),
+                fixture.manifest.clone(),
+                expired_extents,
+                &FakeProviderBackend::new(fixture.bodies.clone()),
+                &provider_policy(),
+            )
+            .await,
+        );
+
+        for mutation in ["truncated", "oversized", "digest-mismatched"] {
+            let fixture = provider_fixture(&[64 * 1024], &["endpoint-a"]);
+            let mut bodies = fixture.bodies.clone();
+            let mut body = bodies["extent-0"].as_ref().clone();
+            match mutation {
+                "truncated" => {
+                    body.pop();
+                }
+                "oversized" => body.push(0),
+                "digest-mismatched" => body[0] ^= 0xff,
+                _ => unreachable!(),
+            }
+            bodies.insert("extent-0".to_string(), Arc::new(body));
+            assert_download_falls_back(
+                download_provider_plan(
+                    root.path(),
+                    fixture.manifest,
+                    fixture.extents,
+                    &FakeProviderBackend::new(bodies),
+                    &provider_policy(),
+                )
+                .await,
+            );
+        }
+        println!(
+            "provider_fail_closed cases=expired,overlap,gap,truncated,oversized,digest-mismatch fallback=existing-weft"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_drops_streams_and_partial_spool_state() {
+        let fixture = provider_fixture(
+            &[64 * 1024, 64 * 1024, 64 * 1024],
+            &["endpoint-a", "endpoint-b", "endpoint-c"],
+        );
+        let mut bodies = fixture.bodies;
+        let mut corrupt = bodies["extent-2"].as_ref().clone();
+        corrupt[0] ^= 0xff;
+        bodies.insert("extent-2".to_string(), Arc::new(corrupt));
+        let mut backend = FakeProviderBackend::new(bodies);
+        backend.stalled.insert("extent-0".to_string());
+        backend.stalled.insert("extent-1".to_string());
+        backend
+            .delays
+            .insert("extent-2".to_string(), Duration::from_millis(30));
+        let root = tempfile::tempdir().unwrap();
+        let mut policy = provider_policy();
+        policy.provider_stall_timeout = Duration::from_millis(200);
+
+        let result = download_provider_plan(
+            root.path(),
+            fixture.manifest,
+            fixture.extents,
+            &backend,
+            &policy,
+        )
+        .await;
+
+        assert_download_falls_back(result);
+        assert_eq!(backend.active_streams.load(Ordering::Acquire), 0);
+        assert!(backend.cancelled_streams.load(Ordering::Acquire) >= 2);
+        let spool_entries = fs::read_dir(root.path().join("transfer-spool"))
+            .unwrap()
+            .count();
+        assert_eq!(spool_entries, 0);
+        println!(
+            "provider_cancellation in_flight=2 streams_dropped={} spool_entries=0",
+            backend.cancelled_streams.load(Ordering::Acquire)
+        );
+    }
+
+    #[tokio::test]
     async fn interrupted_transfer_resumes_and_rehashes_the_retained_prefix() {
         let complete = b"retained verified prefix and resumed suffix".to_vec();
         let resume_offset = 24_usize;
@@ -772,19 +1646,33 @@ mod tests {
                 .unwrap();
             first_send.finish().unwrap();
         });
-        let mut retained = Vec::new();
+        let spool_root = tempfile::tempdir().unwrap();
+        let (spool, writer) = attempt_spool(
+            spool_root.path(),
+            u64::try_from(complete.len()).unwrap(),
+            expected_digest,
+        );
+        let budget = InflightByteBudget::new(PROVIDER_READ_CHUNK);
+        let mut retained_length = 0;
         let mut generation = None;
+        let mut attempt = ExtentAttemptState {
+            expected_length: complete.len() as u64,
+            expected_digest,
+            writer: &writer,
+            extent_index: 0,
+            retained_length: &mut retained_length,
+            previous_generation: &mut generation,
+        };
         let first = download_attempt(
             &first_client_connection,
             "opaque",
-            u64::try_from(complete.len()).unwrap(),
-            expected_digest,
-            &mut retained,
-            &mut generation,
+            &mut attempt,
+            &budget,
+            Duration::from_secs(1),
         )
         .await;
         assert!(matches!(first, Err(AttemptFailure::Retryable { .. })));
-        assert_eq!(retained, complete[..resume_offset]);
+        assert_eq!(retained_length, resume_offset as u64);
         drop(first_server_connection_guard);
         tokio::time::timeout(Duration::from_secs(2), first_server_task)
             .await
@@ -830,18 +1718,27 @@ mod tests {
             second_send.finish().unwrap();
         });
 
+        let mut attempt = ExtentAttemptState {
+            expected_length: complete.len() as u64,
+            expected_digest,
+            writer: &writer,
+            extent_index: 0,
+            retained_length: &mut retained_length,
+            previous_generation: &mut generation,
+        };
         let prefix_rehashed = download_attempt(
             &client_connection,
             "opaque",
-            u64::try_from(complete.len()).unwrap(),
-            expected_digest,
-            &mut retained,
-            &mut generation,
+            &mut attempt,
+            &budget,
+            Duration::from_secs(1),
         )
         .await
         .unwrap();
-        assert_eq!(retained, complete);
+        assert_eq!(retained_length, complete.len() as u64);
         assert_eq!(prefix_rehashed, u64::try_from(resume_offset).unwrap());
+        writer.mark_verified(0).unwrap();
+        spool.finish().unwrap();
         tokio::time::timeout(Duration::from_secs(2), server_task)
             .await
             .unwrap()
@@ -885,15 +1782,29 @@ mod tests {
             committed_offset
         });
 
-        let mut retained = Vec::new();
+        let spool_root = tempfile::tempdir().unwrap();
+        let (_spool, writer) = attempt_spool(
+            spool_root.path(),
+            u64::try_from(expected.len()).unwrap(),
+            expected_digest,
+        );
+        let budget = InflightByteBudget::new(PROVIDER_READ_CHUNK);
+        let mut retained_length = 0;
         let mut generation = None;
+        let mut attempt = ExtentAttemptState {
+            expected_length: expected.len() as u64,
+            expected_digest,
+            writer: &writer,
+            extent_index: 0,
+            retained_length: &mut retained_length,
+            previous_generation: &mut generation,
+        };
         let result = download_attempt(
             &client_connection,
             "opaque",
-            u64::try_from(expected.len()).unwrap(),
-            expected_digest,
-            &mut retained,
-            &mut generation,
+            &mut attempt,
+            &budget,
+            Duration::from_secs(1),
         )
         .await;
         assert!(matches!(
@@ -914,22 +1825,44 @@ mod tests {
     }
 
     #[test]
-    fn fallback_response_carries_no_success_digest() {
-        let session = ProviderPullSession {
-            stream_id: "pull:one".to_string(),
-            repository: "acme/widgets".to_string(),
-            endpoint_id: "11".repeat(32),
-            plan_nonce: [4; PLAN_NONCE_LEN],
-            provider_enabled: true,
-        };
+    fn fallback_stays_on_the_same_logical_pull_and_carries_no_success_digest() {
+        let session = provider_session();
 
         let response = session.fallback_response(&[7; DIGEST_LEN]);
 
         assert_eq!(response.status, ProviderPullResultStatus::Fallback as i32);
+        assert_eq!(response.plan_nonce, session.plan_nonce);
+        assert_eq!(response.grant_batch_digest, [7; DIGEST_LEN]);
         assert!(response.pack_digest.is_empty());
         println!(
-            "fallback provider=unavailable selected=existing-weft caller_protocol=unchanged success_digest_present=false"
+            "fallback provider=unavailable selected=existing-weft logical_pulls=1 same_nonce=true caller_protocol=unchanged success_digest_present=false"
         );
+    }
+
+    fn attempt_spool(
+        root: &Path,
+        extent_length: u64,
+        digest: [u8; DIGEST_LEN],
+    ) -> (ProviderPackSpool, ProviderPackWriter) {
+        let mut header = [0_u8; 16];
+        header[..4].copy_from_slice(b"LMPK");
+        header[4..8].copy_from_slice(&3_u32.to_be_bytes());
+        let spool = ProviderPackSpool::new_in(
+            root,
+            ProviderPackManifest {
+                header,
+                output_pack_length: 16 + extent_length + 32,
+                extents: vec![ProviderPackExtent {
+                    output_offset: 16,
+                    length: extent_length,
+                    digest,
+                    objects: Vec::new(),
+                }],
+            },
+        )
+        .unwrap();
+        let writer = spool.writer();
+        (spool, writer)
     }
 
     async fn provider_connection_pair() -> (
