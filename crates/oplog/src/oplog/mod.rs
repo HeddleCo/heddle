@@ -17,9 +17,9 @@ pub use oplog_backend::OpLogBackend;
 pub use oplog_core::{OpLog, ReconstructibleCommitOutcome};
 pub use oplog_recorder::{OpLogRecorder, VisibilitySidecarSnapshots};
 pub use oplog_types::{
-    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
-    RecordedHead, RedactionUndoClass, ThreadUpdateSnapshots, is_transaction_commit,
-    is_transaction_commit_for, isolation_keys_for_record,
+    ConditionalCommitOutcome, ConflictResolutionMode, IsolationKey, IsolationPrecondition, OpBatch,
+    OpEntry, OpRecord, RecordedHead, RedactionUndoClass, ThreadUpdateSnapshots,
+    is_transaction_commit, is_transaction_commit_for, isolation_keys_for_record,
 };
 pub use packed_oplog::OplogRecoveryReport;
 #[cfg(feature = "postgres")]

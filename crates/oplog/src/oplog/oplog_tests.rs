@@ -8,7 +8,9 @@ use std::{
     thread,
 };
 
-use objects::object::{ContentHash, MarkerName, StateId, ThreadName};
+use objects::object::{
+    Agent, Attribution, ContentHash, MarkerName, Principal, StateId, ThreadName,
+};
 use tempfile::TempDir;
 
 use super::{
@@ -702,6 +704,11 @@ fn op_record_variants_roundtrip_and_describe() {
         OpRecord::ConflictResolved {
             conflict_id: "c1".into(),
             resolution: "ours".into(),
+            resolver: Attribution::with_agent(
+                Principal::new("Resolver", "resolver@example.com"),
+                Agent::new("openai", "gpt-5-codex"),
+            ),
+            mode: super::ConflictResolutionMode::Ours,
         },
         OpRecord::TransactionCommit {
             transaction_id: "tx".into(),

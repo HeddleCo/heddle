@@ -10,11 +10,13 @@ use std::{
 
 use objects::{
     error::{HeddleError, Result},
-    object::{ContentHash, MarkerName, StateId, ThreadName, VisibilityTier},
+    object::{
+        Attribution, ContentHash, MarkerName, Principal, StateId, ThreadName, VisibilityTier,
+    },
 };
 use oplog::{
-    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpLogBackend, OpLogRecorder,
-    OpRecord, ThreadUpdateSnapshots, isolation_keys_for_record,
+    ConditionalCommitOutcome, ConflictResolutionMode, IsolationKey, IsolationPrecondition,
+    OpLogBackend, OpLogRecorder, OpRecord, ThreadUpdateSnapshots, isolation_keys_for_record,
 };
 use refs::{Head, RefExpectation, RefManager, RefUpdate};
 use tempfile::TempDir;
@@ -1334,6 +1336,8 @@ fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<Isolatio
             OpRecord::ConflictResolved {
                 conflict_id: "conflict-1".to_string(),
                 resolution: "ours".to_string(),
+                resolver: Attribution::human(Principal::new("Resolver", "resolver@example.com")),
+                mode: ConflictResolutionMode::Ours,
             },
             BTreeSet::new(),
         ),

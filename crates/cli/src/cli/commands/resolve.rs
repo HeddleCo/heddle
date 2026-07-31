@@ -7,12 +7,16 @@ use anyhow::{Context, Result, anyhow};
 use heddle_core::{
     contains_line_start_conflict_markers, path_is_active_conflict, unresolved_conflict_paths,
 };
-use objects::store::ObjectStore;
+use objects::{object::Attribution, store::ObjectStore};
+use oplog::{ConflictResolutionMode, OpLogBackend, OpRecord};
 use repo::{MergeState, Repository};
 use serde::Serialize;
 
-use super::{action_line::print_next_step, advice::RecoveryAdvice};
-use crate::cli::{Cli, should_output_json};
+use super::{action_line::print_next_step, advice::RecoveryAdvice, snapshot::resolve_attribution};
+use crate::{
+    cli::{Cli, should_output_json},
+    config::UserConfig,
+};
 
 #[derive(Serialize)]
 struct ResolveOutput {
@@ -163,11 +167,14 @@ fn cmd_resolve_all(
     if unresolved.is_empty() {
         return Err(anyhow!(no_conflicts_to_resolve_advice()));
     }
+    let resolver = resolve_attribution(repo, &UserConfig::load_default()?)?;
+    let mode = manual_resolution_mode(ours, theirs);
 
     for path in &unresolved {
         resolve_file_with_version(repo, &merge_state, path, ours, theirs)?;
         ensure_resolved_file_has_no_conflict_markers(repo, path, ours || theirs, force)?;
         merge_manager.resolve(path)?;
+        record_conflict_resolved(repo, path, &resolver, mode)?;
     }
 
     let remaining = merge_manager.unresolved()?;
@@ -208,9 +215,12 @@ fn cmd_resolve_file(
     if !path_is_active_conflict(&merge_state.conflicts, path) {
         return Err(anyhow!(path_not_in_active_merge_advice(path)));
     }
+    let resolver = resolve_attribution(repo, &UserConfig::load_default()?)?;
+    let mode = manual_resolution_mode(ours, theirs);
     resolve_file_with_version(repo, &merge_state, path, ours, theirs)?;
     ensure_resolved_file_has_no_conflict_markers(repo, path, ours || theirs, force)?;
     merge_manager.resolve(path)?;
+    record_conflict_resolved(repo, path, &resolver, mode)?;
 
     let remaining = merge_manager.unresolved()?;
     let continuation = continue_if_resolution_complete(repo, remaining.is_empty())?;
@@ -243,6 +253,33 @@ fn continue_if_resolution_complete(
     } else {
         Ok(None)
     }
+}
+
+fn manual_resolution_mode(ours: bool, theirs: bool) -> ConflictResolutionMode {
+    if ours {
+        ConflictResolutionMode::Ours
+    } else if theirs {
+        ConflictResolutionMode::Theirs
+    } else {
+        ConflictResolutionMode::Edit
+    }
+}
+
+fn record_conflict_resolved(
+    repo: &Repository,
+    conflict_id: &str,
+    resolver: &Attribution,
+    mode: ConflictResolutionMode,
+) -> Result<()> {
+    repo.oplog().record_batch_scoped(
+        vec![OpRecord::conflict_resolved(
+            conflict_id,
+            resolver.clone(),
+            mode,
+        )],
+        Some(&repo.op_scope()),
+    )?;
+    Ok(())
 }
 
 fn resolve_output(
