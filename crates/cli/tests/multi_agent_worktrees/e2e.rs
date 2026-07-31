@@ -1120,7 +1120,17 @@ fn undo_is_scoped_to_the_current_thread() {
     )
     .unwrap();
 
-    heddle(&["undo"], Some(&auth_path)).unwrap();
+    assert_undo_requires_hard(&auth_path);
+    assert!(
+        auth_path.join("auth.rs").exists(),
+        "refused undo must preserve the auth thread worktree"
+    );
+    assert!(
+        search_path.join("search.rs").exists(),
+        "refused auth undo must preserve the sibling thread worktree"
+    );
+
+    heddle(&["undo", "--hard"], Some(&auth_path)).unwrap();
 
     assert!(
         !auth_path.join("auth.rs").exists(),

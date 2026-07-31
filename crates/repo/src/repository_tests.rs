@@ -1412,7 +1412,10 @@ fn test_build_tree_rejects_escaping_symlinks() {
     std::os::unix::fs::symlink(outside_dir.path(), &symlink_path).unwrap();
 
     let result = repo.build_tree(temp_dir.path());
-    assert!(matches!(result, Err(HeddleError::InvalidSymlinkTarget(_))));
+    assert!(matches!(
+        result,
+        Err(HeddleError::InvalidSymlinkTarget { .. })
+    ));
 }
 
 #[test]
@@ -1516,7 +1519,10 @@ fn test_materialize_tree_rejects_relative_symlink_escape() {
 
     let result = repo.materialize_tree(&tree, &materialize_root);
 
-    assert!(matches!(result, Err(HeddleError::InvalidSymlinkTarget(_))));
+    assert!(matches!(
+        result,
+        Err(HeddleError::InvalidSymlinkTarget { .. })
+    ));
     assert!(
         fs::symlink_metadata(materialize_root.join("link")).is_err(),
         "escaping symlink must fail before the link is created"
@@ -1532,7 +1538,10 @@ fn test_materialize_tree_rejects_normalized_relative_symlink_escape() {
 
     let result = repo.materialize_tree(&tree, &materialize_root);
 
-    assert!(matches!(result, Err(HeddleError::InvalidSymlinkTarget(_))));
+    assert!(matches!(
+        result,
+        Err(HeddleError::InvalidSymlinkTarget { .. })
+    ));
     assert!(
         fs::symlink_metadata(materialize_root.join("link")).is_err(),
         "normalized escaping symlink must fail before the link is created"
@@ -1549,7 +1558,10 @@ fn test_materialize_tree_rejects_absolute_symlink_escape() {
 
     let result = repo.materialize_tree(&tree, &materialize_root);
 
-    assert!(matches!(result, Err(HeddleError::InvalidSymlinkTarget(_))));
+    assert!(matches!(
+        result,
+        Err(HeddleError::InvalidSymlinkTarget { .. })
+    ));
     assert!(
         fs::symlink_metadata(materialize_root.join("link")).is_err(),
         "absolute escaping symlink must fail before the link is created"
@@ -1584,7 +1596,7 @@ fn test_capture_and_materialize_reject_same_escaping_symlink_target() {
     let capture_result = repo.build_tree(temp_dir.path());
     assert!(matches!(
         capture_result,
-        Err(HeddleError::InvalidSymlinkTarget(_))
+        Err(HeddleError::InvalidSymlinkTarget { .. })
     ));
 
     let materialize_root = temp_dir.path().join("materialized");
@@ -1592,7 +1604,7 @@ fn test_capture_and_materialize_reject_same_escaping_symlink_target() {
     let materialize_result = repo.materialize_tree(&tree, &materialize_root);
     assert!(matches!(
         materialize_result,
-        Err(HeddleError::InvalidSymlinkTarget(_))
+        Err(HeddleError::InvalidSymlinkTarget { .. })
     ));
     assert!(
         fs::symlink_metadata(materialize_root.join("link")).is_err(),
@@ -1680,7 +1692,7 @@ fn test_build_tree_rejects_dangling_symlink_escaping_repo() {
 
     let result = repo.build_tree(temp_dir.path());
     assert!(
-        matches!(result, Err(HeddleError::InvalidSymlinkTarget(_))),
+        matches!(result, Err(HeddleError::InvalidSymlinkTarget { .. })),
         "Should reject dangling symlink that escapes repo via .. traversal"
     );
 }

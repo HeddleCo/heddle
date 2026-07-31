@@ -532,6 +532,7 @@ async fn async_main() -> Result<()> {
             list,
             depth,
             preview,
+            hard,
             redo,
             recover,
             allow_redact_undo,
@@ -541,7 +542,15 @@ async fn async_main() -> Result<()> {
             } else if *redo {
                 cmd_redo(&cli, *steps, *preview)
             } else {
-                cmd_undo(&cli, *steps, *list, *depth, *preview, *allow_redact_undo)
+                cmd_undo(
+                    &cli,
+                    *steps,
+                    *list,
+                    *depth,
+                    *preview,
+                    *hard,
+                    *allow_redact_undo,
+                )
             }
         }
 

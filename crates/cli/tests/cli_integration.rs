@@ -400,6 +400,42 @@ pub(crate) fn assert_json_recovery_advice_fields(envelope: &Value, context: &str
     );
 }
 
+fn assert_undo_requires_hard(cwd: &Path) -> Value {
+    let output = heddle_output(&["--output", "json", "undo"], Some(cwd))
+        .expect("plain undo should return typed safety advice");
+    assert_eq!(
+        output.status.code(),
+        Some(74),
+        "destructive plain undo should use the safety-refusal exit code: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON safety refusal should keep stdout empty: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let envelope: Value =
+        serde_json::from_slice(&output.stderr).expect("undo refusal should be JSON");
+    assert_eq!(envelope["kind"], "undo_requires_hard", "{envelope}");
+    assert_eq!(
+        envelope["unsafe_condition"],
+        "the selected undo operation materializes an earlier saved tree",
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["would_change"],
+        "captured worktree files would be replaced by the selected operation's prior tree",
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["preserved"], "repository state and worktree files were left unchanged",
+        "{envelope}"
+    );
+    assert_json_recovery_advice_fields(&envelope, "undo --hard refusal");
+    envelope
+}
+
 fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
     let output = heddle_output(args, cwd)?;
     let stdout = str::from_utf8(&output.stdout).unwrap_or("").to_string();

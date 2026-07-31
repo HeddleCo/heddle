@@ -556,7 +556,13 @@ impl Repository {
                     let target_path = Path::new(target);
                     let symlink_dir = path.parent().unwrap_or(validation_root);
                     if !validate_symlink_target(validation_root, symlink_dir, target_path) {
-                        return Err(HeddleError::InvalidSymlinkTarget(target_path.to_path_buf()));
+                        return Err(HeddleError::InvalidSymlinkTarget {
+                            path: path
+                                .strip_prefix(validation_root)
+                                .unwrap_or(path)
+                                .to_path_buf(),
+                            target: target_path.to_path_buf(),
+                        });
                     }
                     remove_materialized_leaf(path)?;
                     std::os::unix::fs::symlink(target, path)?;

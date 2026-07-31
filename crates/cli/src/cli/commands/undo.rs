@@ -16,7 +16,7 @@ use heddle_core::{
     plan_undo_batches, summarize_batch, validate_undo_list_preview_modes,
 };
 use objects::store::ObjectStore;
-use oplog::OpBatch;
+use oplog::{OpBatch, OpRecord};
 use refs::UNDO_RECOVERY_HANDLE;
 use repo::{Repository, ThreadManager};
 use serde::Serialize;
@@ -93,6 +93,7 @@ pub(crate) fn undo_batches_quiet(repo: &Repository, batches: Vec<OpBatch>) -> Re
     ensure_redaction_undo_safe(repo, &batches, false)?;
     ensure_thread_worktree_undo_safe(repo, &batches)?;
     preflight_undo_execution(repo, &batches)?;
+    ensure_worktree_clean(repo, "undo")?;
     let recovery_state = repo.head()?;
     let scope = repo.op_scope();
     let generation = repo.oplog().head_id()?;
@@ -108,6 +109,7 @@ pub fn cmd_undo(
     list: bool,
     depth: usize,
     preview: bool,
+    hard: bool,
     allow_redact_undo: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
@@ -184,6 +186,24 @@ pub fn cmd_undo(
 
         return Ok(());
     }
+
+    if !hard && undo_may_rewrite_worktree(&repo, &apply_plan.batches)? {
+        return Err(anyhow!(RecoveryAdvice::safety_refusal(
+            "undo_requires_hard",
+            "Undo would rewind repository state and worktree files",
+            "Inspect the selected operation with `heddle undo --preview`, then rerun with `heddle undo --hard` to permit the worktree rewind.",
+            "the selected undo operation materializes an earlier saved tree",
+            "captured worktree files would be replaced by the selected operation's prior tree",
+            "repository state and worktree files were left unchanged",
+            "heddle undo --hard",
+            vec![
+                "heddle undo --preview".to_string(),
+                "heddle undo --hard".to_string(),
+            ],
+        )));
+    }
+
+    ensure_worktree_clean(&repo, "undo")?;
 
     // heddle#305: capture the pre-undo state into thread history BEFORE the
     // reset, so the worktree content the undone batch(es) absorbed is never
@@ -297,7 +317,6 @@ pub fn cmd_undo_recover(cli: &Cli) -> Result<()> {
         )));
     }
 
-    ensure_worktree_clean(&repo, "recover the pre-undo state")?;
     repo.restore_state_tree_to_worktree(&recovery_state)?;
 
     let recovered_repo = Repository::open(repo.root())?;
@@ -502,7 +521,6 @@ fn human_post_undo_trust_status(trust: &RepositoryVerificationState) -> String {
 
 fn preflight_undo_execution(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
     ensure_no_active_operation(repo, "undo")?;
-    ensure_worktree_clean(repo, "undo")?;
     // Refuse before mutating anything when a state the batch needs to
     // restore is missing from the object store — typically because `gc
     // --prune` or a truncated oplog has reached past the live window.
@@ -510,6 +528,53 @@ fn preflight_undo_execution(repo: &Repository, batches: &[OpBatch]) -> Result<()
     // repo half-undone (worktree partially rewritten, batch not marked).
     ensure_undo_states_reachable(repo, batches)?;
     preflight_undo_batches(repo, batches)
+}
+
+fn undo_may_rewrite_worktree(repo: &Repository, batches: &[OpBatch]) -> Result<bool> {
+    let active_thread = match repo.head_ref()? {
+        refs::Head::Attached { thread } => Some(thread),
+        refs::Head::Detached { .. } => None,
+    };
+    Ok(batches.iter().any(|batch| {
+        batch.entries.iter().any(|entry| match &entry.operation {
+            OpRecord::Snapshot {
+                prev_head: Some(_), ..
+            }
+            | OpRecord::Goto {
+                prev_head: Some(_), ..
+            }
+            | OpRecord::FastForward { .. } => true,
+            OpRecord::ThreadUpdate { name, .. } => active_thread
+                .as_ref()
+                .is_some_and(|thread| thread.as_str() == name.as_str()),
+            OpRecord::Snapshot {
+                prev_head: None, ..
+            }
+            | OpRecord::Goto {
+                prev_head: None, ..
+            }
+            | OpRecord::ThreadCreate { .. }
+            | OpRecord::ThreadDelete { .. }
+            | OpRecord::Fork { .. }
+            | OpRecord::Collapse { .. }
+            | OpRecord::MarkerCreate { .. }
+            | OpRecord::MarkerDelete { .. }
+            | OpRecord::Checkpoint { .. }
+            | OpRecord::TransactionAbort { .. }
+            | OpRecord::EphemeralThreadCollapse { .. }
+            | OpRecord::ConflictResolved { .. }
+            | OpRecord::TransactionCommit { .. }
+            | OpRecord::Redact { .. }
+            | OpRecord::Purge { .. }
+            | OpRecord::GitCheckpoint { .. }
+            | OpRecord::RemoteThreadUpdate { .. }
+            | OpRecord::RemoteThreadDelete { .. }
+            | OpRecord::UndoRecoveryUpdate { .. }
+            | OpRecord::StateVisibilitySet { .. }
+            | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::HeadUpdate { .. } => false,
+        })
+    }))
 }
 
 fn ensure_no_active_operation(repo: &Repository, action: &str) -> Result<()> {

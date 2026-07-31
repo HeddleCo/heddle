@@ -71,7 +71,20 @@ fn test_undo_redo_workflow() {
     fs::write(temp.path().join("file.txt"), "v3").unwrap();
     heddle(&["capture", "-m", "V3"], Some(temp.path())).unwrap();
 
-    heddle(&["undo"], Some(temp.path())).unwrap();
+    let state_before_refusal = status_json(temp.path())["state"]["state_id"].clone();
+    assert_undo_requires_hard(temp.path());
+    assert_eq!(
+        status_json(temp.path())["state"]["state_id"],
+        state_before_refusal,
+        "refused undo must leave HEAD at V3"
+    );
+    assert_eq!(
+        fs::read_to_string(temp.path().join("file.txt")).unwrap(),
+        "v3",
+        "refused undo must preserve the V3 file"
+    );
+
+    heddle(&["undo", "--hard"], Some(temp.path())).unwrap();
     let content = fs::read_to_string(temp.path().join("file.txt")).unwrap();
     assert_eq!(content, "v2", "undo should restore v2");
 

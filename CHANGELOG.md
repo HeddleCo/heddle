@@ -30,6 +30,11 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- **Undo recovery no longer deadlocks on ignored local files.** Destructive
+  worktree rewinds now require `undo --hard`, preserve ignore-control files,
+  and leave unrelated local files available to `undo --recover`. Checkpoint-only
+  Git publication undo remains non-destructive and does not require `--hard`.
+
 - **Security boundaries hardened across local, hosted, and release paths.**
   Dynamic Bash completion no longer re-evaluates ref names; recursive clone
   mounts are confined beneath the clone root; hosted Git ref updates are

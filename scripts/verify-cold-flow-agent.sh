@@ -612,6 +612,39 @@ if verification.get("verified") is not False:
 PYJSON
 }
 
+run_json_expect_undo_requires_hard() {
+  local transcript="$1"
+  local repo="$2"
+  local label="$3"
+  shift 3
+  run_json_expect_failure "$transcript" "$repo" "$label" "$@"
+  python3 - "$ARTIFACT_ROOT/$label.json" "$transcript" <<'PYJSON'
+import json
+import sys
+
+artifact_path, transcript_path = sys.argv[1:]
+with open(artifact_path, encoding="utf-8") as handle:
+    artifact = json.load(handle)
+expected = {
+    "kind": "undo_requires_hard",
+    "unsafe_condition": "the selected undo operation materializes an earlier saved tree",
+    "would_change": "captured worktree files would be replaced by the selected operation's prior tree",
+    "preserved": "repository state and worktree files were left unchanged",
+    "primary_command": "heddle undo --hard",
+}
+for key, value in expected.items():
+    if artifact.get(key) != value:
+        raise SystemExit(f"undo refusal {key} mismatch: {artifact!r}")
+with open(transcript_path, encoding="utf-8") as handle:
+    records = [json.loads(line) for line in handle if line.strip()]
+record = records[-1]
+if record.get("exit_code") != 74:
+    raise SystemExit(f"undo refusal should exit 74, got {record!r}")
+if record.get("stdout"):
+    raise SystemExit(f"undo refusal should keep JSON stdout empty, got {record!r}")
+PYJSON
+}
+
 assert_current_verify_clean_json() {
   local repo="$1"
   local json
@@ -821,7 +854,9 @@ PYJSON
   assert_source_authority "$clone_path" native
   printf 'native authority proof for %s\n' "$shape" > "$clone_path/native-authority-proof.txt"
   run_json "$transcript" "$clone_path" "$shape.00.native-capture" capture -m "native authority proof $shape" --confidence 0.9
-  run_json "$transcript" "$clone_path" "$shape.00.native-undo" undo
+  run_json_expect_undo_requires_hard "$transcript" "$clone_path" "$shape.00.native-undo-refusal" undo
+  grep -Fx "native authority proof for $shape" "$clone_path/native-authority-proof.txt" >/dev/null
+  run_json "$transcript" "$clone_path" "$shape.00.native-undo" undo --hard
   run_json "$transcript" "$clone_path" "$shape.00.native-verify" verify
   assert_clean_git_status "$clone_path"
 

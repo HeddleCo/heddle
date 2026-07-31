@@ -16,7 +16,7 @@ use std::{fs, path::Path};
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::heddle;
+use super::{assert_undo_requires_hard, heddle};
 
 /// Pin `[review.discussion] default_visibility` while preserving the current
 /// repository-format and source-authority fields written by `heddle init`.
@@ -178,7 +178,24 @@ fn undo_after_capture_with_nonpublic_default_reverts_snapshot_and_visibility_in_
 
     // ONE undo must revert BOTH the snapshot (HEAD back to `first`) AND the
     // auto-applied visibility (the captured state reads public-by-absence again).
-    heddle(&["undo"], Some(temp.path())).expect("undo capture");
+    assert_undo_requires_hard(temp.path());
+    assert_eq!(
+        latest_state(temp.path()),
+        second,
+        "refused undo must leave the second captured state current"
+    );
+    assert_eq!(
+        fs::read(temp.path().join("note.txt")).unwrap(),
+        b"secret",
+        "refused undo must preserve the current captured file"
+    );
+    assert_eq!(
+        show_json(temp.path(), &second)["tier"],
+        "internal",
+        "refused undo must preserve the folded visibility sidecar"
+    );
+
+    heddle(&["undo", "--hard"], Some(temp.path())).expect("hard undo capture");
 
     assert_eq!(
         latest_state(temp.path()),

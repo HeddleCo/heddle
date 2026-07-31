@@ -6,8 +6,14 @@ Every completed undo preserves its pre-undo state in a checkout-local internal
 ref. Run `heddle undo --recover` to materialize that state later, even after a
 divergent capture has made redo unavailable. Recovery preserves the current
 `HEAD` and attached thread, restores the saved tree as dirty worktree changes,
-and recommends `heddle capture`. It refuses without changing files when the
-recovery state is absent or the worktree is dirty.
+and recommends `heddle capture`. Unrelated local changes do not block recovery;
+it refuses without changing files only when the recovery state is absent or
+when recovery would overwrite a differing local change at the same path.
+
+Undo operations that materialize an earlier tree are explicitly destructive.
+Run `heddle undo --preview` to inspect them and `heddle undo --hard` to permit
+the worktree rewind. Plain `heddle undo` refuses before changing repository
+state or files when the selected inverse would rewrite the worktree.
 
 This document describes the user-facing surface shipped under
 [HeddleCo/heddle#23](https://github.com/HeddleCo/heddle/issues/23). The
@@ -76,12 +82,20 @@ contracts below are enforced by integration tests in
   destroyed the underlying bytes (the redaction's audit-trail role is then
   load-bearing).
 
-- **Dirty worktree refusal.** If you have uncommitted changes (modified
-  tracked files, untracked files), `heddle undo` refuses and surfaces the
-  dirty paths. Capture the changes with `heddle capture -m "..."` (or remove
-  them) and retry. `heddle undo --recover` enforces the same refusal before
-  materializing the preserved state. The check is shared with `revert` and
-  `sync`.
+- **Explicit destructive opt-in.** If the selected inverse would materialize
+  an earlier tree, plain `heddle undo` refuses before mutation and points to
+  `--preview` and `--hard`. `heddle undo --hard` still refuses if the worktree
+  is dirty and surfaces the exact paths that would otherwise be lost. Capture
+  the changes with `heddle capture -m "..."` (or move them) and retry.
+- **Recovery overlays unrelated changes.** `heddle undo --recover` restores
+  the preserved tree as worktree changes without moving `HEAD`. Unrelated
+  modified or untracked paths are left in place. Recovery refuses only when
+  it would overwrite differing local content at a path it needs to write or
+  remove.
+- **Ignore controls survive undo.** A worktree rewind preserves the existing
+  `.heddleignore`. Git-overlay repositories also preserve their existing
+  `.gitignore`. Undo therefore cannot expose previously ignored local junk and
+  strand its own recovery command.
 - **Destructive-boundary refusal.** If the state the inverse would restore
   has been removed from the object store — typically by `heddle maintenance gc --prune`
   reaching past the live oplog window — `heddle undo` refuses with a single
@@ -119,6 +133,7 @@ contracts below are enforced by integration tests in
 | `--list`                   | Print the recent batches without undoing.                   |
 | `--depth <N>`              | How many batches `--list` shows (default 20).               |
 | `--preview` / `--dry-run`  | Print what would change without applying.                   |
+| `--hard`                   | Permit an undo that rewinds worktree files.                  |
 | `--redo`                   | Re-apply operations that a prior `undo` rewound.            |
 | `--recover`                | Restore the last undo's saved state as worktree changes without moving HEAD. |
 | `--allow-redact-undo`      | Explicit opt-in to undo a `heddle redact apply` (see "Safety contracts"). |
