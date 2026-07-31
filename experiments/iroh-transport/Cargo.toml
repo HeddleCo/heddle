@@ -8,7 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-api = { package = "heddle-api", git = "https://github.com/HeddleCo/api", rev = "3acac53f3527ba4a9ea510c331cfffa556f92e1b" }
+api = { package = "heddle-api", version = "0.2.1" }
 bytes.workspace = true
 iroh.workspace = true
 objects = { path = "../../crates/objects", package = "heddle-objects" }
