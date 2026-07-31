@@ -440,7 +440,8 @@ struct InflightByteBudgetInner {
 
 struct InflightByteReservation {
     inner: Arc<InflightByteBudgetInner>,
-    bytes: usize,
+    reserved_bytes: usize,
+    buffered_bytes: usize,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -472,11 +473,10 @@ impl InflightByteBudget {
             .acquire_many_owned(permits)
             .await
             .map_err(|_| ProtocolError::InvalidState("provider byte budget closed".to_string()))?;
-        let current = self.inner.current.fetch_add(bytes, Ordering::AcqRel) + bytes;
-        self.inner.peak.fetch_max(current, Ordering::AcqRel);
         Ok(InflightByteReservation {
             inner: Arc::clone(&self.inner),
-            bytes,
+            reserved_bytes: bytes,
+            buffered_bytes: 0,
             _permit: permit,
         })
     }
@@ -486,9 +486,25 @@ impl InflightByteBudget {
     }
 }
 
+impl InflightByteReservation {
+    fn record_buffered(&mut self, bytes: usize) -> Result<(), ProtocolError> {
+        if self.buffered_bytes != 0 || bytes > self.reserved_bytes {
+            return Err(ProtocolError::InvalidState(
+                "provider body buffer exceeds its in-flight reservation".to_string(),
+            ));
+        }
+        self.buffered_bytes = bytes;
+        let current = self.inner.current.fetch_add(bytes, Ordering::AcqRel) + bytes;
+        self.inner.peak.fetch_max(current, Ordering::AcqRel);
+        Ok(())
+    }
+}
+
 impl Drop for InflightByteReservation {
     fn drop(&mut self) {
-        self.inner.current.fetch_sub(self.bytes, Ordering::AcqRel);
+        self.inner
+            .current
+            .fetch_sub(self.buffered_bytes, Ordering::AcqRel);
     }
 }
 
@@ -729,19 +745,22 @@ async fn download_attempt(
     while reader.raw_remaining() != 0 {
         let requested = usize::try_from(reader.raw_remaining().min(PROVIDER_READ_CHUNK as u64))
             .unwrap_or(PROVIDER_READ_CHUNK);
-        let reservation = byte_budget
+        let mut reservation = byte_budget
             .reserve(requested)
             .await
             .map_err(AttemptFailure::Fatal)?;
         let Some(chunk) = await_provider_progress(
             stall_timeout,
-            reader.read_raw_chunk(reservation.bytes),
+            reader.read_raw_chunk(reservation.reserved_bytes),
             true,
         )
         .await?
         else {
             break;
         };
+        reservation
+            .record_buffered(chunk.len())
+            .map_err(AttemptFailure::Fatal)?;
         hasher.update(&chunk);
         state
             .writer
@@ -1137,11 +1156,12 @@ mod tests {
             let mut offset = 0_usize;
             while offset < body.len() {
                 let length = (body.len() - offset).min(self.chunk_size);
-                let reservation = byte_budget.reserve(length).await?;
+                let mut reservation = byte_budget.reserve(length).await?;
+                let chunk = Bytes::copy_from_slice(&body[offset..offset + length]);
+                reservation.record_buffered(chunk.len())?;
                 tokio::task::yield_now().await;
-                let chunk = &body[offset..offset + length];
-                hasher.update(chunk);
-                writer.write_extent_chunk(extent.index, offset as u64, chunk)?;
+                hasher.update(&chunk);
+                writer.write_extent_chunk(extent.index, offset as u64, &chunk)?;
                 offset += length;
                 drop(reservation);
             }
@@ -1447,7 +1467,7 @@ mod tests {
         assert!(large_peak <= 512 * 1024);
         assert_eq!(small_peak, large_peak);
         println!(
-            "provider_memory method=production-byte-permit-high-water small_pack={small_pack} small_peak={small_peak} large_pack={large_pack} large_peak={large_peak} bounded=true"
+            "provider_memory method=production-live-body-buffer-high-water small_pack={small_pack} small_peak={small_peak} large_pack={large_pack} large_peak={large_peak} bounded=true"
         );
     }
 
