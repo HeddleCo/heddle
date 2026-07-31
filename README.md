@@ -54,7 +54,7 @@ Heddle's CLI follows five operating principles — verification, disposability, 
 
 ### Foundation in place
 
-- Hosted client (`heddle-cli`'s optional `client` feature enables `dep:heddle-client` for talking to a hosted backend; `weft-client-shim` is always present as a non-optional dep)
+- Hosted runtime (`heddle-cli`'s optional `client` feature enables its internal native Iroh/session/provider implementation; `weft-client-shim` remains a non-optional, patchable extension contract)
 - Verification and verification metadata across the wire protocol
 - Commit-level visibility tiers: per-state `StateVisibility` records and `heddle visibility set/promote` verbs (with oplog tier records) are shipped client-side; Git projection visibility gating for exports and checkouts is landing; hosted serve-side enforcement is in progress
 

@@ -11,26 +11,26 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-crypto = { path = "../crypto", package = "heddle-crypto", version = "0.10" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.11" }
 futures.workspace = true
 api = { package = "heddle-api", version = "0.2.1" }
 hex.workspace = true
 libc.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.10" }
-oplog = { path = "../oplog", package = "heddle-oplog", version = "0.10", default-features = false }
+objects = { path = "../objects", package = "heddle-objects", version = "0.11" }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.11", default-features = false }
 prost.workspace = true
 prost-types.workspace = true
-refs = { path = "../refs", package = "heddle-refs", version = "0.10", default-features = false }
-repo = { path = "../repo", package = "heddle-repo", version = "0.10", default-features = false, features = ["git-overlay", "native"] }
+refs = { path = "../refs", package = "heddle-refs", version = "0.11", default-features = false }
+repo = { path = "../repo", package = "heddle-repo", version = "0.11", default-features = false, features = ["git-overlay", "native"] }
 serde.workspace = true
 serde_json.workspace = true
-state_review = { path = "../state_review", package = "heddle-state-review", version = "0.10" }
+state_review = { path = "../state_review", package = "heddle-state-review", version = "0.11" }
 tokio.workspace = true
 tokio-stream.workspace = true
 toml.workspace = true
 tracing.workspace = true
 
-semantic = { path = "../semantic", package = "heddle-semantic", version = "0.10", optional = true }
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.11", optional = true }
 
 [dev-dependencies]
 objects = { path = "../objects", package = "heddle-objects", features = ["memory-backend"] }

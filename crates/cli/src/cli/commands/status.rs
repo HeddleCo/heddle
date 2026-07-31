@@ -1536,7 +1536,7 @@ impl HostedPresenceWatch {
             .headers_mut()
             .insert(AUTHORIZATION, auth.parse().ok()?);
         let user_config = cli_shared::UserConfig::load_default().ok()?;
-        let client_config = user_config.heddle_client_config(None).ok()?;
+        let client_config = user_config.hosted_runtime_config(None).ok()?;
         let (mut stream, _) = crate::client::connect_websocket(request, &client_config)
             .await
             .ok()?;

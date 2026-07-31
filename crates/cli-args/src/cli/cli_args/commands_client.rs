@@ -29,16 +29,6 @@ pub enum AgentTemplateArg {
     CiLanding,
 }
 
-impl From<AgentTemplateArg> for heddle_client::device_flow::AgentTemplate {
-    fn from(arg: AgentTemplateArg) -> Self {
-        match arg {
-            AgentTemplateArg::Reviewer => Self::Reviewer,
-            AgentTemplateArg::Contributor => Self::Contributor,
-            AgentTemplateArg::CiLanding => Self::CiLanding,
-        }
-    }
-}
-
 #[derive(Subcommand, Clone, Debug)]
 pub enum AuthCommands {
     /// Authenticate with a Heddle server
@@ -159,69 +149,6 @@ pub struct AuthTrustReplaceArgs {
     /// New descriptor public key confirmed out of band
     #[arg(long, value_name = "64_HEX")]
     pub public_key: String,
-}
-
-impl From<AuthCommands> for heddle_client::AuthCommand {
-    fn from(command: AuthCommands) -> Self {
-        match command {
-            AuthCommands::Login {
-                server,
-                open_browser,
-                credential,
-            } => heddle_client::AuthCommand::Login {
-                server,
-                open_browser,
-                credential,
-            },
-            AuthCommands::Logout { server } => heddle_client::AuthCommand::Logout { server },
-            AuthCommands::Status { server } => heddle_client::AuthCommand::Status { server },
-            AuthCommands::Trust { command } => heddle_client::AuthCommand::Trust {
-                command: match command {
-                    AuthTrustCommands::Show(args) => {
-                        heddle_client::auth_requests::AuthTrustCommand::Show {
-                            server: args.server,
-                        }
-                    }
-                    AuthTrustCommands::Replace(args) => {
-                        heddle_client::auth_requests::AuthTrustCommand::Replace {
-                            server: args.server,
-                            expected_current_public_key: args.expect_current_public_key,
-                            key_id: args.key_id,
-                            public_key: args.public_key,
-                        }
-                    }
-                },
-            },
-            AuthCommands::DeriveAgent {
-                server,
-                agent_id,
-                ttl_secs,
-                scopes,
-                allowed_operations,
-                template,
-                out,
-            } => heddle_client::AuthCommand::DeriveAgent {
-                server,
-                agent_id,
-                ttl_secs,
-                scopes,
-                allowed_operations,
-                template: template.map(Into::into),
-                out,
-            },
-            AuthCommands::CreateServiceToken {
-                name,
-                namespace,
-                server,
-                out,
-            } => heddle_client::AuthCommand::CreateServiceToken {
-                name,
-                namespace,
-                server,
-                out,
-            },
-        }
-    }
 }
 
 #[cfg(test)]

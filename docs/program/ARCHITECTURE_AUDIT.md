@@ -7,8 +7,8 @@ Recorded against commit in `artifacts/baseline/commit.txt`.
 ```text
 heddle-cli (apex binary)
   ├─ heddle-core          # embeddable facade (partial extraction)
-  ├─ heddle-cli-shared    # UserConfig, remotes, logging/output shared types
-  ├─ heddle-client        # optional hosted client
+  ├─ heddle-cli-shared    # UserConfig, credentials, remotes, logging/output
+  ├─ hosted_runtime       # private native Iroh/session/provider runtime
   ├─ heddle-daemon        # local gRPC/UDS services
   ├─ heddle-git-projection
   ├─ heddle-ingest

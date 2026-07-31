@@ -460,17 +460,12 @@ The public protobuf contract and its `heddle-api` Rust package must be released
 independently from `HeddleCo/api`; they are not part of this workspace's
 publication pipeline.
 
-Heddle currently relies on a temporary git pin to API revision `e3b3e6d0`.
-The TypeScript package
-`@heddleco/api@0.1.1` is published, but the Rust `heddle-api@0.1.1` crate is not:
-HeddleCo/api#10 is blocked on configuring that repository's
-`CARGO_REGISTRY_TOKEN`. While that blocker remains, `heddle-client`,
-`heddle-daemon`, and `heddle-cli` are marked `publish = false`, excluded from
-`PUBLISHABLE_CRATES`, and disabled in `release-plz.toml`; independently
-publishable workspace crates continue through the normal pipeline. Publish the
-Rust crate and replace the temporary git pin before re-enabling those three
-packages. The full cross-repository release gate is tracked in
-[ADR 0048](docs/adr/0048-net-new-public-api-contract.md#coordinated-cutover-checklist).
+The Rust `heddle-api@0.2.1` crate is published on crates.io. Heddle consumes it
+as a registry dependency, so every workspace crate in the explicit publish set
+is eligible for the normal release-plz pipeline. `heddle-cli-shared` owns the
+published CLI configuration and credential-store contract used by external
+operator tooling; the native hosted transport remains internal to
+`heddle-cli`.
 
 1. `release-plz` (configured in `release-plz.toml`) opens a PR that
    bumps Cargo.toml versions and updates `CHANGELOG.md`.
@@ -564,9 +559,8 @@ two-pass shape as `check-release-pipeline.sh`:
   `refs/heads/main` — TOCTOU); the env-var key is exactly
   `CARGO_REGISTRY_TOKEN` (cargo's documented name); that env var is
   wired from `secrets.CRATES_IO_API_KEY` (the repo-settings secret
-  name). Direct git-pinned `heddle-api` consumers must also be marked
-  `publish = false`, absent from `PUBLISHABLE_CRATES`, and explicitly
-  `release = false` in `release-plz.toml`.
+  name). Registry dependencies and every versioned workspace path dependency
+  are also checked by package dry-runs before a release PR is approved.
 
 ### Verifying a publish
 

@@ -137,12 +137,12 @@ public SDK exports.
 
 ### Phase 2 — cut consumers over
 
-- Weft updates the direct `heddle-grpc` dependency and audits whether `weftctl`
-  needs `heddle-client` or only the generated contract.
+- Weft updates the direct protocol dependency and audits whether `weftctl`
+  needs only `heddle-api` plus the shared credential-file contract.
 - Weft makes descriptor-to-registered-handler coverage fatal and resolves every
   uncertain producer entry in the consumer inventory.
-- Heddle changes `client`, `cli`, and `daemon` from path dependencies to the
-  published crate and publishes any new `heddle-client` version Weft requires.
+- Heddle changes its CLI and daemon protocol dependencies to the published API
+  crate and publishes the coherent Heddle workspace release Weft requires.
 - Tapestry updates `@heddleco/grpc` after the Weft producer is deployed.
 - Run old-client/new-server and new-client/old-server tests for unary,
   server-streaming, and bidirectional sync paths.

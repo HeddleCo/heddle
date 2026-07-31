@@ -99,7 +99,7 @@ struct ApprovalRevokeOutput {
 
 /// Resolve the named remote and its repo_path. Errors if the remote
 /// is local (approvals are a hosted-server concept) or has no path.
-async fn open_heddle_client(
+async fn open_hosted_session(
     repo: &Repository,
     remote_name: &str,
 ) -> Result<(HostedClient, String)> {
@@ -151,7 +151,7 @@ fn thread_head_state(repo: &Repository, thread: &str) -> Result<String> {
 pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()> {
     let repo = cli.open_repo()?;
     let source_state = thread_head_state(&repo, &args.source)?;
-    let (mut client, repo_path) = open_heddle_client(&repo, &args.remote).await?;
+    let (mut client, repo_path) = open_hosted_session(&repo, &args.remote).await?;
     let approval = client
         .approve_thread(
             &repo_path,
@@ -197,7 +197,7 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
 
 pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Result<()> {
     let repo = cli.open_repo()?;
-    let (mut client, repo_path) = open_heddle_client(&repo, &args.remote).await?;
+    let (mut client, repo_path) = open_hosted_session(&repo, &args.remote).await?;
     let approvals = client
         .list_thread_approvals(&repo_path, &args.source, &args.target)
         .await;
@@ -252,7 +252,7 @@ pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Resul
 
 pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArgs) -> Result<()> {
     let repo = cli.open_repo()?;
-    let (mut client, _repo_path) = open_heddle_client(&repo, &args.remote).await?;
+    let (mut client, _repo_path) = open_hosted_session(&repo, &args.remote).await?;
     let result = client
         .revoke_approval(&args.id, cli.operation_id_wire())
         .await;
@@ -274,7 +274,7 @@ pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArg
 pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Result<()> {
     let repo = cli.open_repo()?;
     let source_state = thread_head_state(&repo, &args.source)?;
-    let (mut client, repo_path) = open_heddle_client(&repo, &args.remote).await?;
+    let (mut client, repo_path) = open_hosted_session(&repo, &args.remote).await?;
     let resp = client
         .check_merge_eligibility(
             &repo_path,

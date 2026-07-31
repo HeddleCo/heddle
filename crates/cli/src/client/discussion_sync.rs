@@ -70,7 +70,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use heddle_client::hosted::{HostedDiscussion, HostedDiscussionTurn};
 use objects::{
     fs_atomic::write_file_atomic,
     object::{
@@ -83,7 +82,10 @@ use objects::{
 use repo::{CollaborationStore, Repository, mark_legacy_discussions_migrated};
 use serde::{Deserialize, Serialize};
 
-use crate::client::HostedClient;
+use crate::{
+    client::HostedClient,
+    hosted_runtime::hosted::{HostedDiscussion, HostedDiscussionTurn},
+};
 
 /// Deterministic namespace for the derived client-operation-ids so a retried
 /// push replays (server-side idempotent) rather than duplicating a turn.

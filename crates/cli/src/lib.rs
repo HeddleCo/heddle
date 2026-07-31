@@ -18,6 +18,8 @@ pub mod exit;
 pub mod extensions;
 pub mod harness;
 mod hosted_failure;
+#[cfg(feature = "client")]
+mod hosted_runtime;
 pub mod operation_id;
 pub mod perf;
 #[cfg(feature = "semantic")]
@@ -25,9 +27,7 @@ pub mod semantic;
 pub mod ts_codegen;
 pub mod util;
 
-// Shared types now live in cli-shared (so heddle-client can depend on
-// them without a cli ↔ heddle-client cycle). Re-export under the
-// historical paths so internal code keeps working.
+// Shared CLI configuration and credential contracts live in cli-shared.
 pub use cli_shared::{
     LogFormat, LoggingConfig, LoggingGuard, OutputMode, config, init_logging, init_logging_default,
     is_enabled, log_operation, log_repo_event, logging, remote,
@@ -38,6 +38,12 @@ pub use objects::{
 };
 pub use repo::Repository;
 pub type StoreResult<T> = objects::error::Result<T>;
+
+/// Register factories needed to reopen CLI-owned lazy hosted repositories.
+#[cfg(feature = "client")]
+pub fn register_hosted_factory() {
+    hosted_runtime::hosted::register_hosted_factory();
+}
 
 #[cfg(test)]
 mod object_graph_tests;

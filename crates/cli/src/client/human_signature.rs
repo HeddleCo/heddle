@@ -2,9 +2,9 @@
 //! CLI default human-signature (WebAuthn) callback for destructive hosted RPCs.
 //!
 //! When the server marks an RPC `human`-tier and rejects it with
-//! `x-weft-sig-required: human`, `heddle-client`'s request-signing interceptor
+//! `x-weft-sig-required: human`, `CLI-owned hosted runtime`'s request-signing interceptor
 //! invokes an app-registered callback to produce a WebAuthn assertion over the
-//! action, then retries once (see `heddle_client::HumanSignatureCallback`).
+//! action, then retries once (see `crate::hosted_runtime::hosted::HumanSignatureCallback`).
 //!
 //! # What the CLI supports vs defers
 //!
@@ -29,8 +29,11 @@
 
 use std::sync::Arc;
 
-use heddle_client::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion};
 use wire::ProtocolError;
+
+use crate::hosted_runtime::hosted::{
+    HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion,
+};
 
 /// The default human-signature callback for CLI-opened hosted sessions.
 ///

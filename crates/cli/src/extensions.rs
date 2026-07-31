@@ -7,12 +7,8 @@
 //! `client` enabled, this module provides
 //! [`EnabledWeftExtensions`], which downcasts the trait's opaque
 //! arguments back to `cli::cli::AuthCommands` and delegates to the
-//! hosted client implementation.
-//!
-//! Step 5 of the OSS extraction plan moves the underlying command
-//! implementations out of `cli` into a separate `client`
-//! crate that ships the closed build. At that point this adapter goes
-//! away and the closed crate implements `WeftExtensions` directly.
+//! CLI-owned hosted runtime. Closed builds can continue replacing the shim
+//! package through `[patch.crates-io]` without owning Heddle's transport.
 
 #![cfg(feature = "client")]
 
@@ -22,7 +18,13 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use weft_client_shim::{CliContext, WeftExtensions};
 
-use crate::cli::{AuthCommands, commands::cmd_auth};
+use crate::{
+    cli::{AgentTemplateArg, AuthCommands, AuthTrustCommands, commands::cmd_auth},
+    hosted_runtime::{
+        auth_requests::{AuthCommand, AuthTrustCommand},
+        device_flow::AgentTemplate,
+    },
+};
 
 pub struct EnabledWeftExtensions;
 
@@ -34,11 +36,76 @@ impl WeftExtensions for EnabledWeftExtensions {
         command: &(dyn Any + Send + Sync),
     ) -> Result<()> {
         let command = downcast::<AuthCommands>(command, "AuthCommands")?;
-        cmd_auth(ctx, command.clone().into()).await
+        cmd_auth(ctx, auth_command(command.clone())).await
     }
 
     async fn whoami(&self, ctx: &(dyn CliContext + 'static), server: Option<String>) -> Result<()> {
-        heddle_client::cmd_whoami(ctx, server).await
+        crate::hosted_runtime::whoami::cmd_whoami(ctx, server).await
+    }
+}
+
+fn auth_command(command: AuthCommands) -> AuthCommand {
+    match command {
+        AuthCommands::Login {
+            server,
+            open_browser,
+            credential,
+        } => AuthCommand::Login {
+            server,
+            open_browser,
+            credential,
+        },
+        AuthCommands::Logout { server } => AuthCommand::Logout { server },
+        AuthCommands::Status { server } => AuthCommand::Status { server },
+        AuthCommands::Trust { command } => AuthCommand::Trust {
+            command: match command {
+                AuthTrustCommands::Show(args) => AuthTrustCommand::Show {
+                    server: args.server,
+                },
+                AuthTrustCommands::Replace(args) => AuthTrustCommand::Replace {
+                    server: args.server,
+                    expected_current_public_key: args.expect_current_public_key,
+                    key_id: args.key_id,
+                    public_key: args.public_key,
+                },
+            },
+        },
+        AuthCommands::DeriveAgent {
+            server,
+            agent_id,
+            ttl_secs,
+            scopes,
+            allowed_operations,
+            template,
+            out,
+        } => AuthCommand::DeriveAgent {
+            server,
+            agent_id,
+            ttl_secs,
+            scopes,
+            allowed_operations,
+            template: template.map(agent_template),
+            out,
+        },
+        AuthCommands::CreateServiceToken {
+            name,
+            namespace,
+            server,
+            out,
+        } => AuthCommand::CreateServiceToken {
+            name,
+            namespace,
+            server,
+            out,
+        },
+    }
+}
+
+fn agent_template(template: AgentTemplateArg) -> AgentTemplate {
+    match template {
+        AgentTemplateArg::Reviewer => AgentTemplate::Reviewer,
+        AgentTemplateArg::Contributor => AgentTemplate::Contributor,
+        AgentTemplateArg::CiLanding => AgentTemplate::CiLanding,
     }
 }
 

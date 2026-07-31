@@ -101,13 +101,13 @@ they tune the 1.0 targets the next sections propose against it.
     `DiscussionsBlob`, `RiskSignalBlob`, `RedactionsBlob`,
     `ReviewSignaturesBlob`, `FileProvenance`, `StructuredConflict`
     (`crates/objects/src/object/*.rs`).
-- **Hosted API candidate.** The `heddle.api.v1alpha1` protobuf source,
+- **Hosted API contract.** The `heddle.api.v1alpha1` protobuf source,
   descriptors, policy, and generated SDK sources are owned by
-  [`HeddleCo/api`](https://github.com/HeddleCo/api). The Heddle cutover branch
-  consumes an exact git-pinned `heddle-api` candidate and removes its schema
-  copy. The contract correction, Weft/Tapestry cutovers, and package publication
-  remain blocked by [ADR 0048](adr/0048-net-new-public-api-contract.md); service
-  maturity labels in the candidate descriptor do not prove a live deployment.
+  [`HeddleCo/api`](https://github.com/HeddleCo/api). Heddle consumes the
+  published `heddle-api@0.2.1` registry package and does not own a schema copy.
+  The remaining Weft/Tapestry cutovers are tracked by
+  [ADR 0048](adr/0048-net-new-public-api-contract.md); service maturity labels
+  in the descriptor do not prove a live deployment.
 - **Content-addressing primitives.** `ContentHash` is a 32-byte
   BLAKE3 digest
   ([`crates/objects/src/object/hash.rs:13`](../crates/objects/src/object/hash.rs));
@@ -298,7 +298,7 @@ implementer cannot route around. Hosted consumers rely on the separately owned
   that's covered by `heddle doctor docs` /
   `heddle doctor schemas` plus the conventions in
   [`CONTRIBUTING.md`](../CONTRIBUTING.md).
-- `heddle-cli-shared`, `heddle-client`, `heddle-daemon`,
+- `heddle-cli-shared`, `heddle-daemon`,
   `heddle-devtools`, `heddle-ingest`, `heddle-mount`,
   `heddle-oplog`, `heddle-refs`, `heddle-repo`, `heddle-review`,
   `heddle-semantic`, `heddle-state-review`, `heddle-crypto`,

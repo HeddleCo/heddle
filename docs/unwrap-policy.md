@@ -21,7 +21,6 @@ Counts below are unique primary clippy diagnostics from `cargo clippy --workspac
 | heddle-cli | 1099 | 336 | 58 |
 | heddle-cli-macro-poc | 0 | 2 | 0 |
 | heddle-cli-shared | 0 | 21 | 2 |
-| heddle-client | 23 | 123 | 6 |
 | heddle-crypto | 0 | 78 | 5 |
 | heddle-daemon | 183 | 95 | 8 |
 | heddle-devtools | 32 | 12 | 0 |

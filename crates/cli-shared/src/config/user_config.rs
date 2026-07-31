@@ -457,7 +457,7 @@ impl UserConfig {
     /// by the caller (resolved through the single `HEDDLE_CREDENTIAL` → keystore
     /// precedence in the client crate); this method no longer reads any token
     /// from env or user config.
-    pub fn heddle_client_config(&self, token: Option<AuthToken>) -> anyhow::Result<ClientConfig> {
+    pub fn hosted_runtime_config(&self, token: Option<AuthToken>) -> anyhow::Result<ClientConfig> {
         let mut config = token
             .map(|token| ClientConfig::default().with_token(token))
             .unwrap_or_default();
@@ -864,10 +864,10 @@ mod tests {
     }
 
     #[test]
-    fn heddle_client_config_absent_security_settings_uses_defaults() {
+    fn hosted_runtime_config_absent_security_settings_uses_defaults() {
         let _env = RemoteEnvGuard::clean();
         let config = UserConfig::default()
-            .heddle_client_config(None)
+            .hosted_runtime_config(None)
             .expect("absent optional settings should not error");
 
         assert!(!config.tls_enabled);
@@ -884,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn heddle_client_config_loads_provider_knobs_from_user_config_and_env() {
+    fn hosted_runtime_config_loads_provider_knobs_from_user_config_and_env() {
         let env = RemoteEnvGuard::clean();
         env.set("HEDDLE_REMOTE_PROVIDER_GLOBAL_CONCURRENCY", "16");
         env.set("HEDDLE_REMOTE_PROVIDER_MAX_INFLIGHT_BYTES", "33554432");
@@ -899,7 +899,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = user.heddle_client_config(None).unwrap();
+        let config = user.hosted_runtime_config(None).unwrap();
 
         assert_eq!(config.provider_global_concurrency, 16);
         assert_eq!(config.provider_per_endpoint_concurrency, 4);
@@ -908,12 +908,12 @@ mod tests {
     }
 
     #[test]
-    fn heddle_client_config_rejects_invalid_provider_env_knob() {
+    fn hosted_runtime_config_rejects_invalid_provider_env_knob() {
         let env = RemoteEnvGuard::clean();
         env.set("HEDDLE_REMOTE_PROVIDER_STALL_TIMEOUT_SECS", "0");
 
         let error = UserConfig::default()
-            .heddle_client_config(None)
+            .hosted_runtime_config(None)
             .expect_err("zero provider timeout must be rejected");
 
         assert!(
@@ -924,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn heddle_client_config_loads_descriptor_trust_from_environment() {
+    fn hosted_runtime_config_loads_descriptor_trust_from_environment() {
         let env = RemoteEnvGuard::clean();
         env.set("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID", "weft-current");
         env.set(
@@ -932,19 +932,19 @@ mod tests {
             hex::encode([17; 32]),
         );
 
-        let config = UserConfig::default().heddle_client_config(None).unwrap();
+        let config = UserConfig::default().hosted_runtime_config(None).unwrap();
 
         assert_eq!(config.descriptor_key_id.as_deref(), Some("weft-current"));
         assert_eq!(config.descriptor_public_key, Some([17; 32]));
     }
 
     #[test]
-    fn heddle_client_config_rejects_key_only_environment_descriptor_trust() {
+    fn hosted_runtime_config_rejects_key_only_environment_descriptor_trust() {
         let env = RemoteEnvGuard::clean();
         env.set("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID", "weft-current");
 
         let error = UserConfig::default()
-            .heddle_client_config(None)
+            .hosted_runtime_config(None)
             .expect_err("partial descriptor trust must fail closed");
 
         assert!(
@@ -956,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn heddle_client_config_rejects_public_key_only_environment_descriptor_trust() {
+    fn hosted_runtime_config_rejects_public_key_only_environment_descriptor_trust() {
         let env = RemoteEnvGuard::clean();
         env.set(
             "HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
@@ -964,7 +964,7 @@ mod tests {
         );
 
         let error = UserConfig::default()
-            .heddle_client_config(None)
+            .hosted_runtime_config(None)
             .expect_err("partial descriptor trust must fail closed");
 
         assert!(
@@ -976,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn heddle_client_config_rejects_key_only_file_descriptor_trust() {
+    fn hosted_runtime_config_rejects_key_only_file_descriptor_trust() {
         let _env = RemoteEnvGuard::clean();
         let user = UserConfig {
             remote: UserRemoteConfig {
@@ -987,7 +987,7 @@ mod tests {
         };
 
         let error = user
-            .heddle_client_config(None)
+            .hosted_runtime_config(None)
             .expect_err("partial descriptor trust must fail closed");
 
         assert!(error.to_string().contains("both descriptor trust fields"));
@@ -995,7 +995,7 @@ mod tests {
     }
 
     #[test]
-    fn heddle_client_config_rejects_public_key_only_file_descriptor_trust() {
+    fn hosted_runtime_config_rejects_public_key_only_file_descriptor_trust() {
         let _env = RemoteEnvGuard::clean();
         let dir = unique_temp_path("heddle-user-config-partial-descriptor");
         fs::create_dir_all(&dir).expect("create temp dir");
@@ -1010,7 +1010,7 @@ mod tests {
         };
 
         let error = user
-            .heddle_client_config(None)
+            .hosted_runtime_config(None)
             .expect_err("partial descriptor trust must fail closed");
 
         assert!(error.to_string().contains("both descriptor trust fields"));
@@ -1019,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn heddle_client_config_valid_security_files_are_applied() {
+    fn hosted_runtime_config_valid_security_files_are_applied() {
         let _env = RemoteEnvGuard::clean();
         let dir = unique_temp_path("heddle-user-config-valid-security");
         fs::create_dir_all(&dir).expect("create temp dir");
@@ -1034,7 +1034,7 @@ mod tests {
         };
 
         let config = user
-            .heddle_client_config(None)
+            .hosted_runtime_config(None)
             .expect("valid TLS/auth files should load");
 
         assert!(config.tls_enabled);
@@ -1047,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn heddle_client_config_missing_tls_ca_path_fails_closed() {
+    fn hosted_runtime_config_missing_tls_ca_path_fails_closed() {
         let _env = RemoteEnvGuard::clean();
         let missing = unique_temp_path("heddle-user-config-missing-ca").join("ca.pem");
         let user = UserConfig {
@@ -1059,7 +1059,7 @@ mod tests {
         };
 
         let err = user
-            .heddle_client_config(None)
+            .hosted_runtime_config(None)
             .expect_err("missing configured CA path must fail closed");
         let message = err.to_string();
 
@@ -1068,13 +1068,13 @@ mod tests {
     }
 
     #[test]
-    fn heddle_client_config_missing_env_tls_ca_path_fails_closed() {
+    fn hosted_runtime_config_missing_env_tls_ca_path_fails_closed() {
         let env = RemoteEnvGuard::clean();
         let missing = unique_temp_path("heddle-user-config-missing-env-ca").join("ca.pem");
         env.set("HEDDLE_REMOTE_TLS_CA_CERT", missing);
 
         let err = UserConfig::default()
-            .heddle_client_config(None)
+            .hosted_runtime_config(None)
             .expect_err("missing env CA path must fail closed");
         let message = err.to_string();
 
@@ -1083,12 +1083,12 @@ mod tests {
     }
 
     #[test]
-    fn heddle_client_config_invalid_env_tls_value_fails_closed() {
+    fn hosted_runtime_config_invalid_env_tls_value_fails_closed() {
         let env = RemoteEnvGuard::clean();
         env.set("HEDDLE_REMOTE_TLS", "enabled");
 
         let err = UserConfig::default()
-            .heddle_client_config(None)
+            .hosted_runtime_config(None)
             .expect_err("invalid TLS env value must fail closed");
         let message = err.to_string();
 

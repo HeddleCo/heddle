@@ -2069,12 +2069,14 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "biscuit-auth",
  "blake3",
+ "bytes",
  "chrono",
  "clap",
  "clap_complete",
@@ -2085,7 +2087,6 @@ dependencies = [
  "heddle-cli-contract",
  "heddle-cli-render",
  "heddle-cli-shared",
- "heddle-client",
  "heddle-core",
  "heddle-crypto",
  "heddle-daemon",
@@ -2100,10 +2101,14 @@ dependencies = [
  "heddle-repo",
  "heddle-semantic",
  "heddle-wire",
+ "heddleco-iroh",
  "hex",
  "hyper-util",
  "ignore",
+ "iroh-base",
  "libc",
+ "n0-watcher",
+ "noq-udp",
  "notify",
  "ntest",
  "opentelemetry",
@@ -2111,8 +2116,11 @@ dependencies = [
  "opentelemetry_sdk",
  "proptest",
  "prost 0.14.1",
+ "prost-reflect",
  "prost-types 0.14.1",
+ "rand 0.10.2",
  "rcgen",
+ "reqwest",
  "rmp-serde",
  "rustls",
  "schemars",
@@ -2124,6 +2132,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-tungstenite",
  "toml 1.1.3+spec-1.1.0",
  "tracing",
@@ -2131,18 +2140,18 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "walkdir",
+ "webpki-roots 1.0.9",
  "weft-client-shim",
 ]
 
 [[package]]
 name = "heddle-cli-args"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "clap",
  "heddle-api",
  "heddle-cli-shared",
- "heddle-client",
  "heddle-objects",
  "heddle-repo",
  "weft-client-shim",
@@ -2150,7 +2159,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli-contract"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2171,7 +2180,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli-render"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -2192,9 +2201,10 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli-shared"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "heddle-objects",
  "heddle-repo",
  "heddle-wire",
@@ -2211,54 +2221,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "heddle-client"
-version = "0.10.4"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "biscuit-auth",
- "blake3",
- "bytes",
- "chrono",
- "futures",
- "heddle-api",
- "heddle-cli-shared",
- "heddle-crypto",
- "heddle-objects",
- "heddle-refs",
- "heddle-repo",
- "heddle-wire",
- "hex",
- "iroh",
- "iroh-base",
- "n0-watcher",
- "noq-udp",
- "prost 0.14.1",
- "prost-reflect",
- "prost-types 0.14.1",
- "rand 0.10.2",
- "rcgen",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sley",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite",
- "toml 1.1.3+spec-1.1.0",
- "tracing",
- "uuid",
- "webpki-roots 1.0.9",
- "weft-client-shim",
-]
-
-[[package]]
 name = "heddle-core"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2284,7 +2248,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-crypto"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 3.0.0",
@@ -2300,7 +2264,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-daemon"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "chrono",
  "futures",
@@ -2329,7 +2293,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-devtools"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2342,7 +2306,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-format"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "thiserror 2.0.18",
  "zstd",
@@ -2350,7 +2314,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-fs-prims"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "fs2",
  "heddle-object-model",
@@ -2361,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-git-projection"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "heddle-ingest",
  "heddle-objects",
@@ -2379,7 +2343,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-ingest"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2403,13 +2367,13 @@ dependencies = [
 
 [[package]]
 name = "heddle-iroh-transport-experiment"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "heddle-api",
  "heddle-objects",
  "heddle-wire",
- "iroh",
+ "heddleco-iroh",
  "prost 0.14.1",
  "tempfile",
  "thiserror 2.0.18",
@@ -2418,7 +2382,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-merge"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "heddle-format",
@@ -2430,7 +2394,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-mount"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2461,7 +2425,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-object-model"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "base32",
@@ -2483,7 +2447,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-objects"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "base32",
@@ -2517,7 +2481,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-oplog"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -2537,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-pack"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -2552,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-refs"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -2574,7 +2538,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-repo"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2604,14 +2568,14 @@ dependencies = [
 
 [[package]]
 name = "heddle-runtime-bridge"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "heddle-schema"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "chrono",
  "heddle-objects",
@@ -2622,7 +2586,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-semantic"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -2644,7 +2608,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-state-review"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "heddle-objects",
  "heddle-semantic",
@@ -2653,7 +2617,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-wire"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -2664,6 +2628,56 @@ dependencies = [
  "sley",
  "tempfile",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "heddleco-iroh"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0aa16ec8e81c0370f0d2a98b52cc71dbcdd68fb10f932ab0b76fc8d93bc121f"
+dependencies = [
+ "backon",
+ "blake3",
+ "bytes",
+ "cfg_aliases",
+ "ctutils",
+ "data-encoding",
+ "derive_more",
+ "ed25519-dalek 3.0.0",
+ "futures-util",
+ "getrandom 0.4.3",
+ "hickory-resolver",
+ "http",
+ "ipnet",
+ "iroh-base",
+ "iroh-dns",
+ "iroh-metrics",
+ "iroh-relay",
+ "n0-error",
+ "n0-future",
+ "n0-watcher",
+ "netwatch",
+ "noq",
+ "noq-proto",
+ "noq-udp",
+ "papaya",
+ "pin-project",
+ "portable-atomic",
+ "rand 0.10.2",
+ "reqwest",
+ "rustc-hash",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "smallvec",
+ "strum",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "url",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
@@ -3137,58 +3151,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "iroh"
-version = "1.0.3"
-source = "git+https://github.com/HeddleCo/iroh.git?rev=6d50cebc0a18a8b2d2cc9303d938bd5fa39fffd6#6d50cebc0a18a8b2d2cc9303d938bd5fa39fffd6"
-dependencies = [
- "backon",
- "blake3",
- "bytes",
- "cfg_aliases",
- "ctutils",
- "data-encoding",
- "derive_more",
- "ed25519-dalek 3.0.0",
- "futures-util",
- "getrandom 0.4.3",
- "hickory-resolver",
- "http",
- "ipnet",
- "iroh-base",
- "iroh-dns",
- "iroh-metrics",
- "iroh-relay",
- "n0-error",
- "n0-future",
- "n0-watcher",
- "netwatch",
- "noq",
- "noq-proto",
- "noq-udp",
- "papaya",
- "pin-project",
- "portable-atomic",
- "rand 0.10.2",
- "reqwest",
- "rustc-hash",
- "rustls",
- "rustls-pki-types",
- "serde",
- "smallvec",
- "strum",
- "time",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "url",
- "wasm-bindgen-futures",
-]
-
-[[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "git+https://github.com/HeddleCo/iroh.git?rev=6d50cebc0a18a8b2d2cc9303d938bd5fa39fffd6#6d50cebc0a18a8b2d2cc9303d938bd5fa39fffd6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6be73e16ee21c923aca9b3121aaa0db936f7c7ecc156ff47b8dac944c68d59a8"
 dependencies = [
  "curve25519-dalek 5.0.0",
  "data-encoding",
@@ -3206,7 +3172,8 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
-source = "git+https://github.com/HeddleCo/iroh.git?rev=6d50cebc0a18a8b2d2cc9303d938bd5fa39fffd6#6d50cebc0a18a8b2d2cc9303d938bd5fa39fffd6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46f6a9b39d18e6345f5c151afd299f2488e2cb5c520fe41b107b6bd3dc4c3349"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -3256,7 +3223,8 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "git+https://github.com/HeddleCo/iroh.git?rev=6d50cebc0a18a8b2d2cc9303d938bd5fa39fffd6#6d50cebc0a18a8b2d2cc9303d938bd5fa39fffd6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24bd586cf927f7b700f56ec3639b53cb5fa901ce284784051ff71092bfbf8193"
 dependencies = [
  "blake3",
  "bytes",
@@ -3864,9 +3832,9 @@ dependencies = [
 
 [[package]]
 name = "noq"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e11803df44ac03a30988d61585ea50885d5428e42da944fe1e498799da7886a2"
+checksum = "09e4bb6601fa543c110d8957813267d5a8d775a0f8fbaccf1f615d06ba9b10da"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -3886,9 +3854,9 @@ dependencies = [
 
 [[package]]
 name = "noq-proto"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "334c3c9833f7b2c573cceb9896ddc7aaeb58c8807cbb63211b24d1fe88bf866e"
+checksum = "baa7b5ccd819a9c68a0d955e67a881032d09b1a17219b1f90b0997a0888e1a15"
 dependencies = [
  "aes-gcm 0.10.3",
  "bytes",
@@ -3913,9 +3881,9 @@ dependencies = [
 
 [[package]]
 name = "noq-udp"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bde7a5d5102f1cff03d482240f0ed20551661f63663620f4b26112ed751165e9"
+checksum = "02bba20e097a5a16cd0ad14ec882fae1e80a092a124e9422fc4dddd92e96a647"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -5908,9 +5876,9 @@ dependencies = [
 
 [[package]]
 name = "simple-dns"
-version = "0.12.0"
+version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b6f884fa9a8d48101774bfbd3aeb81e968dd22cffd19a372da69f183db22c1a"
+checksum = "7a75cbde1bf934313596a004973e462f9a82caa814dcf1a5f507bdf51597eeb4"
 dependencies = [
  "bitflags 2.13.1",
 ]
@@ -7618,7 +7586,7 @@ dependencies = [
 
 [[package]]
 name = "weft-client-shim"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",

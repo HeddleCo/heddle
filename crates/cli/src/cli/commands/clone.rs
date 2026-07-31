@@ -17,8 +17,6 @@ use std::{
 #[cfg(feature = "client")]
 use anyhow::Context;
 use anyhow::{Result, anyhow};
-#[cfg(feature = "client")]
-use heddle_client::hosted::{HostedClient, HostedRefEntry, PullMaterialization};
 use heddle_core::{
     CloneMode, ClonePlanError, ClonePlanFacts, ClonePlanOptions, CloneRemoteSource,
     UnsupportedCloneFlag, plan_clone, status::next_action::canonical_git_import_ref_command,
@@ -59,6 +57,8 @@ use super::{
     import_progress::ImportProgress,
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
+#[cfg(feature = "client")]
+use crate::hosted_runtime::hosted::{HostedClient, HostedRefEntry, PullMaterialization};
 #[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;
 use crate::{
@@ -1508,7 +1508,7 @@ async fn clone_network(
 
     let user_config = UserConfig::load_default()?;
     // On every network-connecting command, TLS/auth config validation
-    // (`heddle_client_config`) must succeed before any irreversible
+    // (`hosted_runtime_config`) must succeed before any irreversible
     // filesystem/repo mutation such as `create_dir_all`, `Repository::init`,
     // state writes, or ref publishes. A rejected security config must leave
     // no partial on-disk artifact.
