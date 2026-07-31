@@ -1396,11 +1396,16 @@ impl HostedClient {
                                 challenge,
                                 &manifest,
                                 repo.heddle_dir(),
+                                repo.store().clone(),
                             )
                             .await
                         }
-                        _ => Err(ProtocolError::InvalidState(
-                            "provider manifest arrived without one matching consent".to_string(),
+                        _ => Err(super::provider_pull::rejected_provider_manifest(
+                            &manifest,
+                            ProtocolError::InvalidState(
+                                "provider manifest arrived without one matching consent"
+                                    .to_string(),
+                            ),
                         )),
                     };
                     let (provider_result, completed) =
@@ -1525,8 +1530,7 @@ impl HostedClient {
                             let store_start = Instant::now();
                             let mut installed_ids = Vec::new();
                             if let Some(provider_pack) = provider_pack.as_mut() {
-                                installed_ids
-                                    .extend(provider_pack.pack.install_into(repo.store())?);
+                                installed_ids.append(&mut provider_pack.installed_ids);
                             }
                             if ordinary_pack_received {
                                 if let Some(pack_spool) = pack_spool.as_mut() {
