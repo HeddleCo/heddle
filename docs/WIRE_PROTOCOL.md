@@ -27,6 +27,7 @@ Environment-based local testing:
 - `heddle` client commands use user config plus `HEDDLE_REMOTE_*` overrides for TLS profiles.
 - Client authentication follows a single precedence: `HEDDLE_CREDENTIAL=<path-to-.hcred>` (authoritative — a bad/expired/mismatched file is a hard error) → the per-server keystore entry (`heddle auth login`) → unauthenticated. There is no `HEDDLE_REMOTE_TOKEN` or `remote.token`; an agent authenticates by pointing `HEDDLE_CREDENTIAL` at a `.hcred` (see `heddle auth derive-agent --out` / `heddle auth create-service-token --out`).
 - `HEDDLE_REMOTE_TLS=1` enables TLS; `HEDDLE_REMOTE_INSECURE=1` allows cleartext to non-loopback hosts.
+- Provider pulls can be tuned in the user config under `[remote]` with `provider_global_concurrency`, `provider_per_endpoint_concurrency`, `provider_max_inflight_bytes`, and `provider_stall_timeout_secs`. The corresponding environment overrides are `HEDDLE_REMOTE_PROVIDER_GLOBAL_CONCURRENCY`, `HEDDLE_REMOTE_PROVIDER_PER_ENDPOINT_CONCURRENCY`, `HEDDLE_REMOTE_PROVIDER_MAX_INFLIGHT_BYTES`, and `HEDDLE_REMOTE_PROVIDER_STALL_TIMEOUT_SECS`.
 
 ## Hosted Admin Operations
 

@@ -64,8 +64,8 @@ pub use object_transfer::{
     chunk_count, chunk_offset, load_object_data, load_requested_object, store_received_object,
 };
 pub use provider_pack::{
-    ProviderPackBundle, ProviderPackExtent, ProviderPackIndexEntry, ProviderPackManifest,
-    assemble_provider_pack,
+    CompletedProviderPack, ProviderPackBundle, ProviderPackExtent, ProviderPackIndexEntry,
+    ProviderPackManifest, ProviderPackSpool, ProviderPackWriter, assemble_provider_pack,
 };
 pub use transfer_plan::{
     GitLaneTransferIntent, RepositoryTransferPlan, TransferPartitions, TransferPlanStats,

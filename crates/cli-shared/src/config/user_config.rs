@@ -165,6 +165,14 @@ pub struct UserRemoteConfig {
     pub iroh_descriptor_key_id: Option<String>,
     #[serde(default)]
     pub iroh_descriptor_public_key_path: Option<PathBuf>,
+    #[serde(default)]
+    pub provider_global_concurrency: Option<usize>,
+    #[serde(default)]
+    pub provider_per_endpoint_concurrency: Option<usize>,
+    #[serde(default)]
+    pub provider_max_inflight_bytes: Option<usize>,
+    #[serde(default)]
+    pub provider_stall_timeout_secs: Option<u64>,
     /// Allow cleartext connections to non-loopback hosts without TLS.
     /// Prefer enabling TLS; this is an explicit opt-in for lab/VPN testing.
     #[serde(default)]
@@ -486,6 +494,18 @@ impl UserConfig {
                 "both descriptor trust fields are required".to_string(),
             ));
         }
+        if let Some(value) = self.remote.provider_global_concurrency {
+            config = config.with_provider_global_concurrency(value);
+        }
+        if let Some(value) = self.remote.provider_per_endpoint_concurrency {
+            config = config.with_provider_per_endpoint_concurrency(value);
+        }
+        if let Some(value) = self.remote.provider_max_inflight_bytes {
+            config = config.with_provider_max_inflight_bytes(value);
+        }
+        if let Some(value) = self.remote.provider_stall_timeout_secs {
+            config = config.with_provider_stall_timeout(value);
+        }
 
         if env_bool("HEDDLE_REMOTE_TLS")? {
             config = config.with_tls(false);
@@ -531,6 +551,20 @@ impl UserConfig {
                     format!("read environment value: {error}"),
                 ));
             }
+        }
+        if let Some(value) = env_positive::<usize>("HEDDLE_REMOTE_PROVIDER_GLOBAL_CONCURRENCY")? {
+            config = config.with_provider_global_concurrency(value);
+        }
+        if let Some(value) =
+            env_positive::<usize>("HEDDLE_REMOTE_PROVIDER_PER_ENDPOINT_CONCURRENCY")?
+        {
+            config = config.with_provider_per_endpoint_concurrency(value);
+        }
+        if let Some(value) = env_positive::<usize>("HEDDLE_REMOTE_PROVIDER_MAX_INFLIGHT_BYTES")? {
+            config = config.with_provider_max_inflight_bytes(value);
+        }
+        if let Some(value) = env_positive::<u64>("HEDDLE_REMOTE_PROVIDER_STALL_TIMEOUT_SECS")? {
+            config = config.with_provider_stall_timeout(value);
         }
         Ok(config)
     }
@@ -628,6 +662,33 @@ fn env_bool(name: &str) -> anyhow::Result<bool> {
     }
 }
 
+fn env_positive<T>(name: &str) -> anyhow::Result<Option<T>>
+where
+    T: std::str::FromStr + PartialEq + Default,
+    T::Err: std::fmt::Display,
+{
+    let value = match env::var(name) {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => return Ok(None),
+        Err(err @ env::VarError::NotUnicode(_)) => {
+            return Err(config_value_error(
+                name,
+                format!("read environment value: {err}"),
+            ));
+        }
+    };
+    let parsed = value.trim().parse::<T>().map_err(|error| {
+        config_value_error(name, format!("parse positive integer value: {error}"))
+    })?;
+    if parsed == T::default() {
+        return Err(config_value_error(
+            name,
+            "value must be greater than zero".to_string(),
+        ));
+    }
+    Ok(Some(parsed))
+}
+
 fn config_value_error(setting: &str, reason: String) -> anyhow::Error {
     anyhow::anyhow!("fatal configuration error for `{setting}`: {reason}")
 }
@@ -668,6 +729,10 @@ mod tests {
         "HEDDLE_REMOTE_INSECURE",
         "HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID",
         "HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
+        "HEDDLE_REMOTE_PROVIDER_GLOBAL_CONCURRENCY",
+        "HEDDLE_REMOTE_PROVIDER_PER_ENDPOINT_CONCURRENCY",
+        "HEDDLE_REMOTE_PROVIDER_MAX_INFLIGHT_BYTES",
+        "HEDDLE_REMOTE_PROVIDER_STALL_TIMEOUT_SECS",
         "HEDDLE_AUTO_CAPTURE",
     ];
 
@@ -812,6 +877,50 @@ mod tests {
         assert!(config.token.is_none());
         assert!(config.descriptor_key_id.is_none());
         assert!(config.descriptor_public_key.is_none());
+        assert_eq!(config.provider_global_concurrency, 4);
+        assert_eq!(config.provider_per_endpoint_concurrency, 2);
+        assert_eq!(config.provider_max_inflight_bytes, 8 * 1024 * 1024);
+        assert_eq!(config.provider_stall_timeout_secs, 15);
+    }
+
+    #[test]
+    fn heddle_client_config_loads_provider_knobs_from_user_config_and_env() {
+        let env = RemoteEnvGuard::clean();
+        env.set("HEDDLE_REMOTE_PROVIDER_GLOBAL_CONCURRENCY", "16");
+        env.set("HEDDLE_REMOTE_PROVIDER_MAX_INFLIGHT_BYTES", "33554432");
+        let user: UserConfig = toml::from_str(
+            r#"
+                [remote]
+                provider_global_concurrency = 8
+                provider_per_endpoint_concurrency = 4
+                provider_max_inflight_bytes = 16777216
+                provider_stall_timeout_secs = 30
+            "#,
+        )
+        .unwrap();
+
+        let config = user.heddle_client_config(None).unwrap();
+
+        assert_eq!(config.provider_global_concurrency, 16);
+        assert_eq!(config.provider_per_endpoint_concurrency, 4);
+        assert_eq!(config.provider_max_inflight_bytes, 32 * 1024 * 1024);
+        assert_eq!(config.provider_stall_timeout_secs, 30);
+    }
+
+    #[test]
+    fn heddle_client_config_rejects_invalid_provider_env_knob() {
+        let env = RemoteEnvGuard::clean();
+        env.set("HEDDLE_REMOTE_PROVIDER_STALL_TIMEOUT_SECS", "0");
+
+        let error = UserConfig::default()
+            .heddle_client_config(None)
+            .expect_err("zero provider timeout must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("HEDDLE_REMOTE_PROVIDER_STALL_TIMEOUT_SECS")
+        );
     }
 
     #[test]

@@ -1391,28 +1391,27 @@ impl HostedClient {
                 Some(pull_server_frame::Frame::ProviderManifest(manifest)) => {
                     let result = match consented_provider_plan.as_ref() {
                         Some(challenge) if !provider_fallback && provider_pack.is_none() => {
-                            self.download_provider_pull(&provider_session, challenge, &manifest)
-                                .await
+                            self.download_provider_pull(
+                                &provider_session,
+                                challenge,
+                                &manifest,
+                                repo.heddle_dir(),
+                                repo.store().clone(),
+                            )
+                            .await
                         }
-                        _ => Err(ProtocolError::InvalidState(
-                            "provider manifest arrived without one matching consent".to_string(),
+                        _ => Err(super::provider_pull::rejected_provider_manifest(
+                            &manifest,
+                            ProtocolError::InvalidState(
+                                "provider manifest arrived without one matching consent"
+                                    .to_string(),
+                            ),
                         )),
                     };
-                    let provider_result = match result {
-                        Ok(completed) => {
-                            let response = provider_session.complete_response(
-                                &manifest.grant_batch_digest,
-                                completed.trailer_digest,
-                            );
-                            provider_pack = Some(completed);
-                            response
-                        }
-                        Err(_) => {
-                            provider_fallback = true;
-                            provider_pack = None;
-                            provider_session.fallback_response(&manifest.grant_batch_digest)
-                        }
-                    };
+                    let (provider_result, completed) =
+                        provider_session.resolve_download(&manifest.grant_batch_digest, result);
+                    provider_pack = completed;
+                    provider_fallback = provider_pack.is_none();
                     tx.as_ref()
                         .ok_or_else(|| {
                             ProtocolError::InvalidState(
@@ -1530,12 +1529,8 @@ impl HostedClient {
                         {
                             let store_start = Instant::now();
                             let mut installed_ids = Vec::new();
-                            if let Some(provider_pack) = provider_pack.as_ref() {
-                                installed_ids.extend(wire::install_received_pack(
-                                    repo.store(),
-                                    &provider_pack.pack.pack_data,
-                                    &provider_pack.pack.index_data,
-                                )?);
+                            if let Some(provider_pack) = provider_pack.as_mut() {
+                                installed_ids.append(&mut provider_pack.installed_ids);
                             }
                             if ordinary_pack_received {
                                 if let Some(pack_spool) = pack_spool.as_mut() {

@@ -53,6 +53,14 @@ pub struct ClientConfig {
     pub pack_transfer: bool,
     /// Enable partial fetch negotiation.
     pub partial_fetch: bool,
+    /// Maximum provider extent streams active across all provider endpoints.
+    pub provider_global_concurrency: usize,
+    /// Maximum provider extent streams multiplexed over one endpoint connection.
+    pub provider_per_endpoint_concurrency: usize,
+    /// Maximum provider body bytes retained between transport reads and spool writes.
+    pub provider_max_inflight_bytes: usize,
+    /// Maximum seconds without provider transport progress before falling back.
+    pub provider_stall_timeout_secs: u64,
 }
 
 impl ClientConfig {
@@ -78,6 +86,10 @@ impl ClientConfig {
             resumable_transfer: true,
             pack_transfer: true,
             partial_fetch: true,
+            provider_global_concurrency: 4,
+            provider_per_endpoint_concurrency: 2,
+            provider_max_inflight_bytes: 8 * 1024 * 1024,
+            provider_stall_timeout_secs: 15,
         }
     }
 
@@ -175,6 +187,30 @@ impl ClientConfig {
         self
     }
 
+    /// Set the maximum number of provider extent streams active globally.
+    pub fn with_provider_global_concurrency(mut self, concurrency: usize) -> Self {
+        self.provider_global_concurrency = concurrency.max(1);
+        self
+    }
+
+    /// Set the maximum provider extent streams multiplexed over one endpoint.
+    pub fn with_provider_per_endpoint_concurrency(mut self, concurrency: usize) -> Self {
+        self.provider_per_endpoint_concurrency = concurrency.max(1);
+        self
+    }
+
+    /// Set the provider body-byte budget shared by all active extent streams.
+    pub fn with_provider_max_inflight_bytes(mut self, bytes: usize) -> Self {
+        self.provider_max_inflight_bytes = bytes.max(1);
+        self
+    }
+
+    /// Set the provider transport progress threshold before ordinary Weft fallback.
+    pub fn with_provider_stall_timeout(mut self, secs: u64) -> Self {
+        self.provider_stall_timeout_secs = secs.max(1);
+        self
+    }
+
     /// Explicitly allow cleartext to non-loopback addresses.
     pub fn with_allow_insecure(mut self, allow: bool) -> Self {
         self.allow_insecure = allow;
@@ -243,5 +279,24 @@ mod tests {
         assert!(is_loopback_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
         assert!(is_loopback_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
         assert!(!is_loopback_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+    }
+
+    #[test]
+    fn provider_scheduler_defaults_and_builders_are_explicit() {
+        let defaults = ClientConfig::default();
+        assert_eq!(defaults.provider_global_concurrency, 4);
+        assert_eq!(defaults.provider_per_endpoint_concurrency, 2);
+        assert_eq!(defaults.provider_max_inflight_bytes, 8 * 1024 * 1024);
+        assert_eq!(defaults.provider_stall_timeout_secs, 15);
+
+        let configured = ClientConfig::default()
+            .with_provider_global_concurrency(8)
+            .with_provider_per_endpoint_concurrency(3)
+            .with_provider_max_inflight_bytes(4 * 1024 * 1024)
+            .with_provider_stall_timeout(20);
+        assert_eq!(configured.provider_global_concurrency, 8);
+        assert_eq!(configured.provider_per_endpoint_concurrency, 3);
+        assert_eq!(configured.provider_max_inflight_bytes, 4 * 1024 * 1024);
+        assert_eq!(configured.provider_stall_timeout_secs, 20);
     }
 }

@@ -797,7 +797,7 @@ fn validate_pack_chunk(
     Ok((next_offset, next_chunk))
 }
 
-fn unique_spool_dir(base: &Path) -> Result<PathBuf> {
+pub(crate) fn unique_spool_dir(base: &Path) -> Result<PathBuf> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|err| {
