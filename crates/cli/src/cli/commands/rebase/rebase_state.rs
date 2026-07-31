@@ -18,12 +18,11 @@ pub(crate) struct RebaseState {
     pub(crate) original_head: StateId,
     pub(crate) pending_manual_resolution: Option<StateId>,
     pub(crate) pre_conflict_head: Option<StateId>,
-    /// FastForward (or, on detached HEAD, Goto) records buffered from
-    /// the per-commit replay loop. Flushed as a single oplog batch
-    /// when the rebase completes so `heddle undo` rewinds the whole
-    /// transaction atomically (heddle#198). Persisted across
-    /// `--continue` invocations so a conflict pause doesn't drop the
-    /// in-flight records.
+    /// Oplog records buffered from the per-commit replay loop. Each replayed
+    /// commit contributes a FastForward (or, on detached HEAD, Goto); an
+    /// automatic merge may precede it with ConflictResolved events. Flushed as
+    /// one oplog batch when the rebase completes and persisted across
+    /// `--continue` invocations.
     pub(crate) pending_advances: Vec<OpRecord>,
     /// Stable id for the rebase batch's `TransactionCommit` envelope.
     /// Persisted at rebase start so that a crash between
@@ -211,18 +210,17 @@ fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result
                     Err(_) if for_abort => continue,
                     Err(e) => return Err(e),
                     Ok(advance) => match advance {
-                        // heddle#198 r4 (Codex PR #218 P2): only the
-                        // FF-advance variants plus `Goto` can legitimately
-                        // appear in a rebase batch.
+                        // Rebase batches contain their FF/Goto advances plus
+                        // attributed automatic conflict-resolution events.
                         // Anything else — MarkerCreate, ThreadX,
                         // Snapshot — would land in the committed batch
                         // verbatim and pollute undo/redo with records
                         // the rebase never produced. Strict loader
                         // rejects; abort silently drops them since the
                         // buffered FF history is discarded on rewind.
-                        OpRecord::FastForward { .. } | OpRecord::Goto { .. } => {
-                            pending_advances.push(advance)
-                        }
+                        OpRecord::FastForward { .. }
+                        | OpRecord::Goto { .. }
+                        | OpRecord::ConflictResolved { .. } => pending_advances.push(advance),
                         // Anything else would land in the committed batch
                         // verbatim and pollute undo/redo with records the
                         // rebase never produced. Abort silently drops them (the
@@ -241,7 +239,6 @@ fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result
                         | OpRecord::Checkpoint { .. }
                         | OpRecord::TransactionAbort { .. }
                         | OpRecord::EphemeralThreadCollapse { .. }
-                        | OpRecord::ConflictResolved { .. }
                         | OpRecord::TransactionCommit { .. }
                         | OpRecord::Redact { .. }
                         | OpRecord::Purge { .. }
@@ -258,7 +255,7 @@ fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result
                             return Err(anyhow!(RecoveryAdvice::rebase_state_corrupted(
                                 "Unexpected pending_advance variant in rebase state",
                                 format!(
-                                    "{} — only FastForward/Goto are accepted",
+                                    "{} — only FastForward/Goto/ConflictResolved are accepted",
                                     advance.description()
                                 ),
                             )));
@@ -311,21 +308,18 @@ fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result
         }
     };
 
-    // heddle#198 r4 (Codex PR #218 P1): the persisted invariant is
-    // `pending_advances.len() == current_index` — `replay_commits_internal`
-    // and `resume_manual_resolution_if_present` always bump both in
-    // lockstep before the save. A crash-truncated REBASE_STATE that keeps
-    // `current_index=` but drops trailing `pending_advance=` lines breaks
-    // it; strict `--continue` must hard-fail rather than silently flush
-    // an incomplete batch. Abort tolerates because it discards the
-    // buffered FF history when rewinding to `original_head`.
-    if !for_abort && pending_advances.len() != current_index {
+    // Each successfully replayed commit contributes exactly one FF/Goto.
+    // ConflictResolved events may add more buffered records, so validate the
+    // advance count rather than the total record count.
+    let advance_count = pending_advances
+        .iter()
+        .filter(|record| matches!(record, OpRecord::FastForward { .. } | OpRecord::Goto { .. }))
+        .count();
+    if !for_abort && advance_count != current_index {
         return Err(anyhow!(RecoveryAdvice::rebase_state_corrupted(
             "Inconsistent rebase state",
             format!(
-                "pending_advance lines ({}) do not match current_index ({})",
-                pending_advances.len(),
-                current_index,
+                "pending_advance FF/Goto records ({advance_count}) do not match current_index ({current_index})",
             ),
         )));
     }
@@ -344,18 +338,17 @@ fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result
 
 #[cfg(test)]
 mod tests {
-    use objects::object::StateId;
-    use oplog::OpRecord;
+    use objects::object::{Attribution, Principal, StateId};
+    use oplog::{ConflictResolutionMode, OpRecord};
     use tempfile::TempDir;
 
     use super::*;
 
     fn sample_state(pending: Vec<OpRecord>) -> RebaseState {
-        // The persisted invariant (heddle#198 r4 / Codex PR #218 P1) is
-        // `pending_advances.len() == current_index`; derive `current_index`
-        // from the supplied vec so every fixture round-trips cleanly
-        // through the strict loader.
-        let current_index = pending.len();
+        let current_index = pending
+            .iter()
+            .filter(|record| matches!(record, OpRecord::FastForward { .. } | OpRecord::Goto { .. }))
+            .count();
         let commits_to_replay = (0..(current_index + 1))
             .map(|_| StateId::from_bytes([16; 32]))
             .collect();
@@ -378,6 +371,14 @@ mod tests {
             pre_target_id: StateId::from_bytes([21; 32]),
             post_target_id: StateId::from_bytes([22; 32]),
         }
+    }
+
+    fn auto_resolution_record() -> OpRecord {
+        OpRecord::conflict_resolved(
+            "src/lib.rs",
+            Attribution::human(Principal::new("Resolver", "resolver@example.com")),
+            ConflictResolutionMode::Auto,
+        )
     }
 
     /// Round-trip cover: the `pending_advances` vec must survive a
@@ -413,6 +414,26 @@ mod tests {
             let want_bytes = rmp_serde::to_vec(want).unwrap();
             assert_eq!(got_bytes, want_bytes);
         }
+    }
+
+    #[test]
+    fn save_then_load_round_trips_auto_resolution_before_advance() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let original = sample_state(vec![auto_resolution_record(), ff_record()]);
+
+        save_rebase_state(&path, &original).unwrap();
+        let loaded = load_rebase_state(&path).unwrap();
+
+        assert_eq!(loaded.current_index, 1);
+        assert!(matches!(
+            &loaded.pending_advances[0],
+            OpRecord::ConflictResolved {
+                conflict_id,
+                mode: ConflictResolutionMode::Auto,
+                ..
+            } if conflict_id == "src/lib.rs"
+        ));
     }
 
     /// Even with no buffered FFs (the conflict-on-first-commit case),
@@ -669,7 +690,7 @@ mod tests {
     /// decodes can inject non-rebase operations (e.g. `MarkerCreate`,
     /// `ThreadDelete`) into the rebase's undo/redo history — undo would
     /// replay records the rebase never produced. The strict loader
-    /// must whitelist only the FF-advance records (`FastForward` / `Goto`) and
+    /// must whitelist the FF-advance records plus ConflictResolved events and
     /// reject anything else.
     #[test]
     fn load_strict_rejects_non_advance_pending_record() {
@@ -858,8 +879,8 @@ mod tests {
     }
 
     /// heddle#198 r4 (Codex PR #218 P1): the persisted invariant in
-    /// REBASE_STATE is `pending_advances.len() == current_index` — each
-    /// successful per-commit replay bumps both in lockstep (see
+    /// REBASE_STATE has one FF/Goto per `current_index` — each successful
+    /// per-commit replay bumps both in lockstep (see
     /// `replay_commits_internal` Success arm and
     /// `resume_manual_resolution_if_present`). A crash mid-write to
     /// REBASE_STATE that preserves the `current_index=` line but

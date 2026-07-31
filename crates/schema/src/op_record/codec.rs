@@ -9,11 +9,11 @@
 
 use objects::{
     error::{HeddleError, Result},
-    object::{ContentHash, StateId, VisibilityTier},
+    object::{Attribution, ContentHash, StateId, VisibilityTier},
 };
 use serde::Deserialize;
 
-use super::{OpRecord, RecordedHead, ThreadUpdateSnapshots};
+use super::{ConflictResolutionMode, OpRecord, RecordedHead, ThreadUpdateSnapshots};
 
 pub const CURRENT_OP_RECORD_SCHEMA_VERSION: u32 = 4;
 const CURRENT_OP_RECORD_SCHEMA_NAME: &str = "state-id-v4";
@@ -126,6 +126,8 @@ enum StrictCurrentOpRecord {
     ConflictResolved {
         conflict_id: String,
         resolution: String,
+        resolver: Attribution,
+        mode: ConflictResolutionMode,
     },
     TransactionCommit {
         transaction_id: String,
@@ -285,9 +287,13 @@ impl StrictCurrentOpRecord {
             Self::ConflictResolved {
                 conflict_id,
                 resolution,
+                resolver,
+                mode,
             } => OpRecord::ConflictResolved {
                 conflict_id,
                 resolution,
+                resolver,
+                mode,
             },
             Self::TransactionCommit {
                 transaction_id,
@@ -384,6 +390,8 @@ impl StrictCurrentOpRecord {
 
 #[cfg(test)]
 mod tests {
+    use objects::object::{Agent, Principal};
+
     use super::*;
 
     fn state(byte: u8) -> StateId {
@@ -470,6 +478,11 @@ mod tests {
             OpRecord::ConflictResolved {
                 conflict_id: "conflict".into(),
                 resolution: "ours".into(),
+                resolver: Attribution::with_agent(
+                    Principal::new("Resolver", "resolver@example.com"),
+                    Agent::new("openai", "gpt-5-codex"),
+                ),
+                mode: ConflictResolutionMode::Ours,
             },
             OpRecord::TransactionCommit {
                 transaction_id: "tx".into(),

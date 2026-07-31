@@ -6,6 +6,8 @@
 use std::{fs, process::Command, str};
 
 use ntest::timeout;
+use oplog::{ConflictResolutionMode, OpLogBackend, OpRecord};
+use repo::Repository;
 use serde_json::Value;
 use serial_test::serial;
 use tempfile::TempDir;
@@ -139,6 +141,14 @@ mod resolve {
         refresh_thread_expect_conflict(temp.path(), "feature");
     }
 
+    fn recent_oplog_entries(temp: &TempDir) -> Vec<oplog::OpEntry> {
+        Repository::open(temp.path())
+            .unwrap()
+            .oplog()
+            .recent(200)
+            .unwrap()
+    }
+
     #[test]
     #[timeout(15000)]
     #[serial]
@@ -150,6 +160,109 @@ mod resolve {
 
         let result = heddle(&["resolve", "file.txt"], Some(temp.path()));
         assert!(result.is_ok(), "resolve failed: {:?}", result.err());
+    }
+
+    #[test]
+    #[timeout(15000)]
+    #[serial]
+    fn manual_resolve_appends_attributed_conflict_resolved_op_record() {
+        let temp = TempDir::new().unwrap();
+        create_conflict(&temp);
+        fs::write(temp.path().join("file.txt"), "resolved content").unwrap();
+
+        heddle_with_env(
+            &["resolve", "file.txt"],
+            Some(temp.path()),
+            &[
+                ("HEDDLE_PRINCIPAL_NAME", "Resolution Owner"),
+                ("HEDDLE_PRINCIPAL_EMAIL", "owner@example.com"),
+                ("HEDDLE_AGENT_PROVIDER", "openai"),
+                ("HEDDLE_AGENT_MODEL", "gpt-resolver"),
+            ],
+        )
+        .unwrap();
+
+        let entries = recent_oplog_entries(&temp);
+        let event = entries
+            .iter()
+            .find_map(|entry| match &entry.operation {
+                OpRecord::ConflictResolved {
+                    conflict_id,
+                    resolution,
+                    resolver,
+                    mode,
+                } => Some((conflict_id, resolution, resolver, mode)),
+                _ => None,
+            })
+            .expect("production resolve must append ConflictResolved");
+        assert_eq!(event.0, "file.txt");
+        assert_eq!(event.1, "edit");
+        assert_eq!(*event.3, ConflictResolutionMode::Edit);
+        assert_eq!(event.2.principal.name, "Resolution Owner");
+        assert_eq!(event.2.principal.email, "owner@example.com");
+        let agent = event.2.agent.as_ref().expect("resolver agent attribution");
+        assert_eq!(agent.provider, "openai");
+        assert_eq!(agent.model, "gpt-resolver");
+    }
+
+    #[test]
+    #[timeout(15000)]
+    #[serial]
+    fn rebase_auto_resolution_appends_attributed_conflict_resolved_op_record() {
+        let temp = TempDir::new().unwrap();
+        heddle(&["init"], Some(temp.path())).unwrap();
+        fs::write(temp.path().join("file.txt"), "one\ntwo\nthree\n").unwrap();
+        heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+        heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
+        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+        fs::write(temp.path().join("file.txt"), "feature-one\ntwo\nthree\n").unwrap();
+        heddle(&["capture", "-m", "Feature"], Some(temp.path())).unwrap();
+
+        heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+        fs::write(temp.path().join("file.txt"), "one\ntwo\nmain-three\n").unwrap();
+        heddle(&["capture", "-m", "Main"], Some(temp.path())).unwrap();
+        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+        heddle_with_env(
+            &["thread", "refresh", "feature"],
+            Some(temp.path()),
+            &[
+                ("HEDDLE_PRINCIPAL_NAME", "Automation Owner"),
+                ("HEDDLE_PRINCIPAL_EMAIL", "automation@example.com"),
+                ("HEDDLE_AGENT_PROVIDER", "openai"),
+                ("HEDDLE_AGENT_MODEL", "gpt-auto-resolver"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(temp.path().join("file.txt")).unwrap(),
+            "feature-one\ntwo\nmain-three\n"
+        );
+        let entries = recent_oplog_entries(&temp);
+        let event = entries
+            .iter()
+            .find_map(|entry| match &entry.operation {
+                OpRecord::ConflictResolved {
+                    conflict_id,
+                    resolution,
+                    resolver,
+                    mode: ConflictResolutionMode::Auto,
+                } => Some((conflict_id, resolution, resolver)),
+                _ => None,
+            })
+            .expect("rebase auto-merge must append ConflictResolved");
+        assert_eq!(event.0, "file.txt");
+        assert_eq!(event.1, "auto");
+        assert_eq!(event.2.principal.name, "Automation Owner");
+        assert_eq!(event.2.principal.email, "automation@example.com");
+        let agent = event
+            .2
+            .agent
+            .as_ref()
+            .expect("auto resolver agent attribution");
+        assert_eq!(agent.provider, "openai");
+        assert_eq!(agent.model, "gpt-auto-resolver");
     }
 
     #[test]
@@ -228,6 +341,15 @@ mod resolve {
 
         let content = fs::read_to_string(temp.path().join("file.txt")).unwrap();
         assert_eq!(content, "feature version", "should use our version");
+        assert!(recent_oplog_entries(&temp).iter().any(|entry| matches!(
+            &entry.operation,
+            OpRecord::ConflictResolved {
+                conflict_id,
+                resolution,
+                mode: ConflictResolutionMode::Ours,
+                ..
+            } if conflict_id == "file.txt" && resolution == "ours"
+        )));
     }
 
     #[test]
@@ -246,6 +368,15 @@ mod resolve {
 
         let content = fs::read_to_string(temp.path().join("file.txt")).unwrap();
         assert_eq!(content, "main version", "should use their version");
+        assert!(recent_oplog_entries(&temp).iter().any(|entry| matches!(
+            &entry.operation,
+            OpRecord::ConflictResolved {
+                conflict_id,
+                resolution,
+                mode: ConflictResolutionMode::Theirs,
+                ..
+            } if conflict_id == "file.txt" && resolution == "theirs"
+        )));
     }
 
     #[test]

@@ -11,16 +11,18 @@ use objects::{
     },
     store::ObjectStore,
 };
-use oplog::OpRecord;
+use oplog::{ConflictResolutionMode, OpRecord};
 use refs::Head;
 use repo::{Repository, StateAttachmentKind};
 
 use super::{
-    super::{advice::RecoveryAdvice, ff_record::ff_advance_deferred},
+    super::{
+        advice::RecoveryAdvice, ff_record::ff_advance_deferred, snapshot::resolve_attribution,
+    },
     emit_rebase_progress,
     rebase_state::{load_rebase_state, save_rebase_state},
 };
-use crate::cli::Cli;
+use crate::{cli::Cli, config::UserConfig};
 
 /// Synthetic `source_thread` for `OpRecord::FastForward` entries
 /// emitted during a rebase replay. Each replayed commit becomes its
@@ -61,6 +63,7 @@ fn replay_commits_internal(
 ) -> Result<()> {
     let mut state = load_rebase_state(rebase_state_path)?;
     resume_manual_resolution_if_present(repo, &mut state, rebase_state_path, cli)?;
+    let resolver = resolve_attribution(repo, &UserConfig::load_default()?)?;
 
     let mut current_head = if state.current_index == 0 {
         state.onto
@@ -99,11 +102,24 @@ fn replay_commits_internal(
         let result = apply_commit(repo, &commit_state, &current_head, discard_local_changes)?;
 
         match result {
-            ApplyResult::Success { new_head, advance } => {
+            ApplyResult::Success {
+                new_head,
+                advance,
+                auto_resolved_conflicts,
+            } => {
                 current_head = new_head;
                 state.current_index += 1;
                 state.pending_manual_resolution = None;
                 state.pre_conflict_head = None;
+                state
+                    .pending_advances
+                    .extend(auto_resolved_conflicts.into_iter().map(|conflict_id| {
+                        OpRecord::conflict_resolved(
+                            conflict_id,
+                            resolver.clone(),
+                            ConflictResolutionMode::Auto,
+                        )
+                    }));
                 state.pending_advances.push(*advance);
                 save_rebase_state(rebase_state_path, &state)?;
             }
@@ -312,6 +328,7 @@ enum ApplyResult {
         /// — the worktree/ref mutation has already happened by the
         /// time this is returned.
         advance: Box<OpRecord>,
+        auto_resolved_conflicts: Vec<String>,
     },
     Conflict,
 }
@@ -361,6 +378,7 @@ fn apply_commit(
     let changes = compute_tree_diff(&parent_tree, &commit_tree);
 
     let mut has_conflicts = false;
+    let mut auto_resolved_conflicts = Vec::new();
     let mut updated_entries: Vec<TreeEntry> = Vec::new();
     let mut deleted_paths: Vec<String> = Vec::new();
 
@@ -427,6 +445,7 @@ fn apply_commit(
                             mode == FileMode::Executable,
                         )?;
                         updated_entries.push(merged);
+                        auto_resolved_conflicts.push(path.clone());
                         continue;
                     }
                     if blob_contains_both(repo, &new_hash, &existing_hash, &parent_hash)?
@@ -434,6 +453,7 @@ fn apply_commit(
                     {
                         let merged = new.with_mode(mode)?;
                         updated_entries.push(merged);
+                        auto_resolved_conflicts.push(path.clone());
                         continue;
                     }
                 }
@@ -493,6 +513,7 @@ fn apply_commit(
     Ok(ApplyResult::Success {
         new_head: new_state_id,
         advance: Box::new(advance),
+        auto_resolved_conflicts,
     })
 }
 
@@ -650,6 +671,7 @@ fn apply_tree_to_worktree(
     Ok(ApplyResult::Success {
         new_head: new_state_id,
         advance: Box::new(advance),
+        auto_resolved_conflicts: Vec::new(),
     })
 }
 

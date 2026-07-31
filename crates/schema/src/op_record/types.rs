@@ -4,8 +4,35 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use chrono::{DateTime, Utc};
-use objects::object::{ContentHash, OperationId, Principal, StateId, VisibilityTier};
+use objects::object::{Attribution, ContentHash, OperationId, Principal, StateId, VisibilityTier};
 use serde::{Deserialize, Serialize};
+
+/// How a conflict was resolved.
+///
+/// The three manual variants preserve the explicit operator choice. `Auto`
+/// means the rebase merge driver resolved overlapping changes mechanically,
+/// without a human or agent editing or selecting a side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictResolutionMode {
+    Ours,
+    Theirs,
+    Edit,
+    Auto,
+}
+
+impl ConflictResolutionMode {
+    /// Stable lower-case spelling used in persisted resolution summaries and
+    /// human-facing oplog descriptions.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ours => "ours",
+            Self::Theirs => "theirs",
+            Self::Edit => "edit",
+            Self::Auto => "auto",
+        }
+    }
+}
 
 /// Logical key used by conditional transaction commits to detect intervening
 /// same-thread changes.
@@ -177,6 +204,10 @@ pub enum OpRecord {
     ConflictResolved {
         conflict_id: String,
         resolution: String,
+        /// Principal and optional agent that performed or initiated the
+        /// resolution, using the same shape as state authorship.
+        resolver: Attribution,
+        mode: ConflictResolutionMode,
     },
     /// Recorded when a transaction is successfully committed. The number
     /// of buffered ops at commit time is captured so the audit trail
@@ -529,6 +560,20 @@ pub fn isolation_keys_for_record(record: &OpRecord, scope: Option<&str>) -> BTre
 }
 
 impl OpRecord {
+    /// Construct an attributed conflict-resolution event.
+    pub fn conflict_resolved(
+        conflict_id: impl Into<String>,
+        resolver: Attribution,
+        mode: ConflictResolutionMode,
+    ) -> Self {
+        Self::ConflictResolved {
+            conflict_id: conflict_id.into(),
+            resolution: mode.as_str().to_string(),
+            resolver,
+            mode,
+        }
+    }
+
     /// Get a short description of the operation.
     pub fn description(&self) -> String {
         match self {
@@ -574,8 +619,18 @@ impl OpRecord {
             OpRecord::EphemeralThreadCollapse { thread, .. } => {
                 format!("collapse ephemeral thread {}", thread)
             }
-            OpRecord::ConflictResolved { conflict_id, .. } => {
-                format!("resolve conflict {}", conflict_id)
+            OpRecord::ConflictResolved {
+                conflict_id,
+                resolver,
+                mode,
+                ..
+            } => {
+                format!(
+                    "resolve conflict {} ({} by {})",
+                    conflict_id,
+                    mode.as_str(),
+                    resolver
+                )
             }
             OpRecord::TransactionCommit {
                 transaction_id,
@@ -1149,6 +1204,8 @@ mod verb_catalog_tests {
             OpRecord::ConflictResolved {
                 conflict_id: "c".into(),
                 resolution: "r".into(),
+                resolver: Attribution::human(Principal::new("Resolver", "resolver@example.com")),
+                mode: ConflictResolutionMode::Edit,
             },
             OpRecord::TransactionCommit {
                 transaction_id: "tx".into(),
