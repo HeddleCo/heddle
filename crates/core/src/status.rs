@@ -2830,30 +2830,18 @@ fn first_capture_identity_notice(
     if !current_state.map(is_synthetic_root).unwrap_or(true) {
         return Ok(None);
     }
-    let principal = resolve_principal(repo, ctx.config())?;
-    if principal_is_default_unknown(&principal) {
+    let resolved = cli_shared::resolve_principal(repo, ctx.config())?;
+    if principal_is_default_unknown(&resolved.principal) {
         return Ok(Some(
             "no principal configured; the first capture would use Unknown <unknown@example.com>. Set HEDDLE_PRINCIPAL_NAME and HEDDLE_PRINCIPAL_EMAIL or run `heddle init --principal-name <name> --principal-email <email>`.".to_string(),
         ));
     }
-    Ok(None)
-}
-
-fn resolve_principal(repo: &Repository, user_config: &cli_shared::UserConfig) -> Result<Principal> {
-    if let Some(principal) = Principal::from_env() {
-        return Ok(principal);
-    }
-    if let Some(config) = &repo.config().principal {
-        return Ok(Principal::new(&config.name, &config.email));
-    }
-    let principal = repo.get_principal()?;
-    if !principal_is_default_unknown(&principal) {
-        return Ok(principal);
-    }
-    if let Some(config) = &user_config.principal {
-        return Ok(Principal::new(&config.name, &config.email));
-    }
-    Ok(principal)
+    let source = resolved
+        .source
+        .map(cli_shared::principal_source_display)
+        .map(|source| format!(" from {source}"))
+        .unwrap_or_default();
+    Ok(Some(format!("{}{}", resolved.principal, source)))
 }
 
 /// Whether principal is the built-in unknown placeholder (exact match).

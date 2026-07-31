@@ -7,8 +7,8 @@
 //! - **stderr only**: piping `heddle <verb>` to other tools never includes
 //!   tips.
 //! - **never in `--output json`**: scripted consumers don't get advisory output.
-//! - **once per session per repo**: a session marker file at
-//!   `~/.heddle/session/<repo-id>/tips-shown.toml` records which tips
+//! - **once per session per repo**: a session marker file under
+//!   `<heddle-home>/session/<repo-id>/tips-shown.toml` records which tips
 //!   have been shown so we don't nag.
 //! - **per-repo permanently suppressible** via `[ui.tips] enabled = false`
 //!   in `.heddle/config.toml` (or `[ui.tips.suppress] keys = [...]` to
@@ -57,12 +57,7 @@ pub fn session_marker_dir(repo_root: &std::path::Path) -> PathBuf {
     let canonical = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
     let hash = blake3::hash(canonical.to_string_lossy().as_bytes());
     let id = hex::encode(&hash.as_bytes()[..8]);
-    let home = dirs_home().unwrap_or_else(|| PathBuf::from("/tmp"));
-    home.join(".heddle").join("session").join(id)
-}
-
-fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    repo::identity::heddle_home_dir().join("session").join(id)
 }
 
 fn marker_file(repo_root: &std::path::Path) -> PathBuf {

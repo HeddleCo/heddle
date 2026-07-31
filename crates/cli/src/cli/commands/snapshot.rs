@@ -59,6 +59,7 @@ pub(crate) struct SnapshotOutput {
     pub confidence: Option<f32>,
     pub task_assignment_id: Option<String>,
     pub principal: SnapshotPrincipalOutput,
+    pub principal_source: String,
     pub agent: Option<SnapshotAgentOutput>,
     pub promotion_suggested: bool,
     pub heavy_impact_paths: Vec<String>,
@@ -293,8 +294,9 @@ pub async fn cmd_snapshot(
             style::dim(&output.content_hash),
         );
         println!(
-            "Saved by: {}",
-            style::principal(&output.principal.name, &output.principal.email)
+            "Saved by: {} from {}",
+            style::principal(&output.principal.name, &output.principal.email),
+            cli_shared::principal_source_display(&output.principal_source)
         );
         if let Some(agent) = &output.agent {
             println!(
@@ -804,7 +806,7 @@ fn create_snapshot_profiled_inner(
         plan.precomputed_worktree_status = Some(clone_worktree_status_result(status));
     }
     let report = execute_save(repo, plan)?;
-    snapshot_output_from_save_report(repo, report)
+    snapshot_output_from_save_report(repo, user_config, report)
 }
 
 #[allow(dead_code)]
@@ -848,7 +850,7 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         precomputed_worktree_status: None,
     };
     let report = execute_save(repo, plan)?;
-    snapshot_output_from_save_report(repo, report)
+    snapshot_output_from_save_report(repo, user_config, report)
 }
 
 fn clone_worktree_status_result(
@@ -867,6 +869,7 @@ fn clone_worktree_status_result(
 
 fn snapshot_output_from_save_report(
     repo: &Repository,
+    user_config: &UserConfig,
     report: heddle_core::SaveReport,
 ) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
     // Public capture JSON still uses the CLI verification adapter so
@@ -880,6 +883,10 @@ fn snapshot_output_from_save_report(
         .and_then(action_template)
         .or_else(|| trust.recommended_action_template.clone());
     let task_assignment_id = active_task_assignment_id(repo)?;
+    let principal_source = cli_shared::resolve_principal(repo, user_config)?
+        .source
+        .unwrap_or("unknown")
+        .to_string();
     let output = SnapshotOutput {
         output_kind: "capture",
         status: "captured",
@@ -890,6 +897,7 @@ fn snapshot_output_from_save_report(
         confidence: report.confidence,
         task_assignment_id,
         principal: (&report.principal).into(),
+        principal_source,
         agent: report.agent.as_ref().map(SnapshotAgentOutput::from),
         promotion_suggested: report.promotion_suggested,
         heavy_impact_paths: report.heavy_impact_paths.clone(),
@@ -1196,33 +1204,7 @@ pub(crate) fn resolve_attribution(
 }
 
 pub(crate) fn resolve_principal(repo: &Repository, user_config: &UserConfig) -> Result<Principal> {
-    // Precedence: env > repo .heddle/config.toml > Git-overlay Git config
-    // (including the shared parent checkout for isolated work) > user
-    // ~/.config/heddle/config.toml > Unknown.
-    //
-    // Repo-level config must win over user-level: a repo carrying an
-    // explicit `[principal]` is recording "captures in this project use
-    // this identity," and the user-level config is the default for
-    // repos that DON'T pin one. Inverting that order (the previous
-    // implementation) meant every capture in every repo silently
-    // adopted the user-level identity, even when the repo had its own
-    // `[principal]` declared — regression seen in
-    // `e2e::log_never_surfaces_unknown_principal_after_init` where a
-    // repo-level "Adam" was overridden by a stray user-level "test".
-    if let Some(principal) = Principal::from_env() {
-        return Ok(principal);
-    }
-    if let Some(config) = &repo.config().principal {
-        return Ok(Principal::new(&config.name, &config.email));
-    }
-    let principal = repo.get_principal()?;
-    if !is_default_unknown_principal(&principal) {
-        return Ok(principal);
-    }
-    if let Some(config) = &user_config.principal {
-        return Ok(Principal::new(&config.name, &config.email));
-    }
-    Ok(principal)
+    Ok(cli_shared::resolve_principal(repo, user_config)?.principal)
 }
 
 pub(crate) fn is_placeholder_principal(principal: &Principal) -> bool {

@@ -977,6 +977,9 @@
         "principal": {
           "$ref": "#/$defs/CommitPrincipalSchema"
         },
+        "principal_source": {
+          "type": "string"
+        },
         "promotion_suggested": {
           "type": "boolean"
         },
@@ -1024,6 +1027,7 @@
         "state_id",
         "content_hash",
         "principal",
+        "principal_source",
         "promotion_suggested",
         "heavy_impact_paths",
         "signed",
@@ -12101,6 +12105,9 @@
         "principal": {
           "$ref": "#/$defs/CommitPrincipalSchema"
         },
+        "principal_source": {
+          "type": "string"
+        },
         "promotion_suggested": {
           "type": "boolean"
         },
@@ -12148,6 +12155,7 @@
         "state_id",
         "content_hash",
         "principal",
+        "principal_source",
         "promotion_suggested",
         "heavy_impact_paths",
         "signed",

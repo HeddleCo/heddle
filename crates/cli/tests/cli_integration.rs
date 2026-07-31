@@ -304,6 +304,8 @@ mod harness_error_surface;
 mod hooks;
 #[path = "cli_integration/hydrate.rs"]
 mod hydrate;
+#[path = "cli_integration/identity_resolution.rs"]
+mod identity_resolution;
 #[path = "cli_integration/misc.rs"]
 mod misc;
 #[path = "cli_integration/next_action_contract.rs"]

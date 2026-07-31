@@ -520,7 +520,17 @@ docs.\n\
 \n\
 This is intentional. The everyday surface stays minimal so first-time users aren't\n\
 overwhelmed; agents and power users reach for the advanced affordances when they\n\
-need them.\n";
+need them.\n\
+\n\
+Configuration environment:\n\
+  HEDDLE_HOME    Relocates global Heddle state (credentials, device identity,\n\
+                 session state, and the default user config).\n\
+  HEDDLE_CONFIG  Overrides the user config file. Takes precedence over\n\
+                 HEDDLE_HOME; otherwise HEDDLE_HOME uses <path>/config.toml.\n\
+\n\
+Principal resolution (highest first): HEDDLE_PRINCIPAL_NAME and\n\
+HEDDLE_PRINCIPAL_EMAIL, repository config, Git config, user config, then\n\
+Unknown <unknown@example.com>. Init, status, and capture use this same order.\n";
 
 // The single full statement of the --output machine contract (plus the
 // one-paragraph version on the top-level `heddle help`). The global
@@ -1362,6 +1372,17 @@ mod tests {
             !advanced.contains("Advanced commands:"),
             "the flat list header is replaced by area groups: {advanced}"
         );
+    }
+
+    #[test]
+    fn advanced_help_documents_home_and_config_overrides() {
+        use clap::CommandFactory;
+        let cmd = crate::cli::cli_args::Cli::command();
+        let advanced = render_help(&cmd, &["advanced".to_string()]);
+        assert!(advanced.contains("HEDDLE_HOME"));
+        assert!(advanced.contains("HEDDLE_CONFIG"));
+        assert!(advanced.contains("<path>/config.toml"));
+        assert!(advanced.contains("Principal resolution (highest first)"));
     }
 
     /// heddle#652. The grouped advanced surface is exhaustive and

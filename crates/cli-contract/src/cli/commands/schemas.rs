@@ -1223,6 +1223,7 @@ pub struct CaptureSchema {
     pub confidence: Option<f32>,
     pub task_assignment_id: Option<String>,
     pub principal: CommitPrincipalSchema,
+    pub principal_source: String,
     pub agent: Option<CommitAgentSchema>,
     pub promotion_suggested: bool,
     pub heavy_impact_paths: Vec<String>,

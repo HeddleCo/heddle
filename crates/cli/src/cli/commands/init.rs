@@ -78,6 +78,15 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     };
     let path = path.canonicalize().unwrap_or(path.clone());
 
+    if let Some(home) = repo::identity::heddle_home_override() {
+        fs::create_dir_all(&home).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to create HEDDLE_HOME at {}: {error}",
+                home.display()
+            )
+        })?;
+    }
+
     info!(path = %path.display(), "Initializing repository");
 
     let mut user_config = UserConfig::load_default()?;
@@ -258,6 +267,7 @@ fn render_init(output: &InitOutput, json: bool) -> Result<()> {
                 let source = output
                     .principal_source
                     .as_deref()
+                    .map(cli_shared::principal_source_display)
                     .map(|source| format!(" from {source}"))
                     .unwrap_or_default();
                 println!(
@@ -299,19 +309,11 @@ fn init_principal_status(
     repo: &Repository,
     user_config: &UserConfig,
 ) -> Result<InitPrincipalStatus> {
-    let mut candidates: Vec<(&'static str, Principal)> = Vec::new();
-    if let Some(principal) = Principal::from_env() {
-        candidates.push(("environment", principal));
-    }
-    if let Some(config) = &repo.config().principal {
-        candidates.push(("repository", Principal::new(&config.name, &config.email)));
-    }
-    if repo.capability() == RepositoryCapability::GitOverlay {
-        candidates.push(("git_config", repo.get_principal()?));
-    }
-    if let Some(config) = &user_config.principal {
-        candidates.push(("user_config", Principal::new(&config.name, &config.email)));
-    }
+    let resolved = cli_shared::resolve_principal(repo, user_config)?;
+    let candidates = resolved
+        .source
+        .map(|source| vec![(source, resolved.principal)])
+        .unwrap_or_default();
     Ok(init_principal_status_from_plan(select_init_principal(
         &candidates,
     )))

@@ -1990,6 +1990,7 @@ fn capture_json_reports_recorded_confidence_principal_and_agent() {
     assert_eq!(capture["confidence"], serde_json::json!(0.9));
     assert_eq!(capture["principal"]["name"], "Ada Agent");
     assert_eq!(capture["principal"]["email"], "ada-agent@example.com");
+    assert_eq!(capture["principal_source"], "environment");
     assert_eq!(capture["agent"]["provider"], "codex");
     assert_eq!(capture["agent"]["model"], "gpt-5-codex");
     assert!(capture["agent"].get("session_id").is_none());
