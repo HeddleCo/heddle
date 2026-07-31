@@ -92,7 +92,6 @@ env:
     heddle-repo
     heddle-cli-shared
     weft-client-shim
-    heddle-client
     heddle-ingest
     heddle-git-projection
     heddle-core

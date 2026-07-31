@@ -1,24 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-//! Trait surface separating the OSS Heddle CLI from the closed
-//! heddle-client implementation.
+//! Patchable extension trait surface for the Heddle CLI.
 //!
 //! OSS builds use [`NoopWeftExtensions`], which returns a friendly
-//! "hosted features not enabled" error on every method. Closed builds
-//! ship a real implementation in the `heddle-client` crate and inject
-//! it via Cargo features (today) or `[patch.crates-io]` (post-split).
+//! "hosted features not enabled" error on every method. Closed builds may
+//! replace this package through `[patch.crates-io]` while the Heddle CLI keeps
+//! ownership of its native transport and download runtime.
 //!
 //! Why a separate crate (and not just a trait in `cli`)? When the
 //! repos physically split, the OSS `heddle-cli` crate ships on
-//! crates.io. The closed `heddle-client` crate published in the
-//! private workspace depends on this shim to satisfy `cli`'s trait
-//! bound without `cli` ever knowing about closed-source code. Same
-//! trait surface, two impls, no circular deps.
+//! crates.io. A closed replacement can preserve the trait identity without
+//! making `cli` depend on closed-source code. Same trait surface, two impls,
+//! no circular deps.
 //!
-//! Trait methods are intentionally minimal — only the truly
-//! hosted-only commands (`auth`, `support`, `presence`) flow through
-//! here. Hybrid commands like `push`/`pull`/`fetch`/`clone` stay in
+//! Trait methods are intentionally minimal — only the patchable hosted command
+//! hooks (`auth` and `whoami`) flow through here. Hybrid commands like
+//! `push`/`pull`/`fetch`/`clone` stay in
 //! `cli` because their git-overlay-without-hosted code paths must
 //! work in OSS-only builds too.
 
@@ -29,10 +27,8 @@ use async_trait::async_trait;
 
 /// Small projection of `cli::Cli` that hosted commands rely on.
 /// Defining the surface here rather than passing `&Cli` lets the
-/// closed `heddle-client` crate compile without depending on `cli` —
-/// breaking what would otherwise be a circular dep (cli optionally
-/// pulls in heddle-client, heddle-client would otherwise need cli for
-/// the `Cli` type).
+/// a patched extension implementation compile without depending on `cli` and
+/// therefore without creating a cycle around the `Cli` type.
 ///
 /// Keep this trait deliberately small. Every new method is a
 /// permanent contract between the OSS and closed sides; before adding
@@ -153,13 +149,13 @@ impl Error for HostedRecoveryAdvice {}
 
 /// Hosted-side command implementations. The CLI dispatches through a
 /// `&dyn WeftExtensions` reference; the active impl is selected at
-/// build time by the `heddle-client` Cargo feature.
+/// build time.
 ///
 /// Implementations take CLI args opaquely (`&dyn Any`) so this shim
 /// crate doesn't need to depend on `cli` for type definitions —
 /// downstream concrete impls downcast to the real types. This avoids
 /// a circular dependency between `cli` (which defines `Cli`,
-/// `AuthCommands`, etc.) and the heddle-client crate.
+/// `AuthCommands`, etc.) and a patched extension implementation.
 #[async_trait]
 pub trait WeftExtensions: Send + Sync {
     /// `heddle auth <subcommand>` — login, logout, device

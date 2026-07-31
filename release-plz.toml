@@ -52,6 +52,14 @@ name = "heddle-crypto"
 release = true
 
 [[package]]
+name = "heddle-runtime-bridge"
+release = true
+
+[[package]]
+name = "heddle-merge"
+release = true
+
+[[package]]
 name = "heddle-semantic"
 release = true
 
@@ -80,7 +88,15 @@ name = "heddle-cli"
 release = true
 
 [[package]]
-name = "heddle-client"
+name = "heddle-cli-args"
+release = true
+
+[[package]]
+name = "heddle-cli-render"
+release = true
+
+[[package]]
+name = "heddle-cli-contract"
 release = true
 
 [[package]]

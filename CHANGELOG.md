@@ -11,9 +11,16 @@ recorded here. Hosted-product work (Postgres, Biscuit, the web app,
 GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 `HeddleCo/tapestry` repos.
 
-## Unreleased
+## 0.11.0 - 2026-07-31
 
 ### Breaking
+
+- **Hosted runtime ownership is now explicit.** The former public
+  hosted-backend implementation crate is retired. `heddle-api` remains the
+  sole shared protocol contract, `heddle-cli-shared` now owns the compatible
+  global credential-store schema and resolution helpers, and native
+  Iroh/provider download behavior is private to `heddle-cli`. See the
+  [0.11 migration note](docs/migrations/0.11-hosted-runtime.md).
 
 - **Derived agent credentials no longer support `--stdout`.** A derived token
   is bound to its freshly generated child proof key, so `heddle auth
@@ -571,7 +578,7 @@ addition.
 ## 0.2.2 - 2026-05-14
 
 ### Added
-- New `heddle-client` crate — the hosted-backend command implementations
+- New hosted-backend implementation crate — the hosted command implementations
   (`auth`, `support`, `presence`), the gRPC client wrappers, and the
   global credential store. Moved out of the closed `weft` workspace and
   into OSS heddle so the workspace builds standalone with
@@ -579,10 +586,10 @@ addition.
   public gRPC protocol surface rather than a closed crate.
 
 ### Changed
-- `heddle-cli`: optional dep `weft-client = "0.0"` → `heddle-client`.
+- `heddle-cli`: replaced its optional placeholder dependency with the hosted implementation.
   The feature gating that dep renamed `weft-client` → `client`.
 - `heddle-cli-shared`: `UserConfig::weft_client_config` →
-  `UserConfig::heddle_client_config`.
+  the hosted runtime configuration builder.
 
 ### Note
 - The `weft-client` placeholder crate on crates.io (v0.0.0) is now

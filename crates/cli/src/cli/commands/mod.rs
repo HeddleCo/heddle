@@ -128,8 +128,6 @@ pub use git_projection_io::{cmd_export_git, cmd_import_git, cmd_sync_git};
 pub use heddle_cli_contract::cli::commands::{
     advice, command_catalog, doctor_docs, doctor_schemas, schemas, verification_health,
 };
-#[cfg(feature = "client")]
-pub use heddle_client::cmd_auth;
 pub use hook::cmd_hook;
 pub use init::cmd_init;
 pub use integration::{
@@ -170,3 +168,6 @@ pub use verify::cmd_verify;
 pub use visibility::cmd_visibility;
 pub use watch::cmd_watch;
 pub use workflow::{cmd_land, cmd_sync, recover_incomplete_land_if_present};
+
+#[cfg(feature = "client")]
+pub(crate) use crate::hosted_runtime::cmd_auth;

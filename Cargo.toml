@@ -5,7 +5,6 @@ members = [
     "crates/cli-contract",
     "crates/cli-render",
     "crates/cli-shared",
-    "crates/client",
     "crates/core",
     "crates/crypto",
     "crates/daemon",
@@ -34,7 +33,7 @@ default-members = ["crates/cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.10.4"
+version = "0.11.0"
 edition = "2024"
 authors = ["Luke"]
 description = "An AI-native version control system"
@@ -63,8 +62,8 @@ sley-transport = "0.5.2"
 hex = "0.4"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 ignore = "0.4"
-iroh = { version = "=1.0.3", git = "https://github.com/HeddleCo/iroh.git", rev = "6d50cebc0a18a8b2d2cc9303d938bd5fa39fffd6", default-features = false, features = ["tls-ring", "unstable-custom-transports", "unstable-custom-transport-backpressure"] }
-iroh-base = { version = "=1.0.3", git = "https://github.com/HeddleCo/iroh.git", rev = "6d50cebc0a18a8b2d2cc9303d938bd5fa39fffd6" }
+iroh = { package = "heddleco-iroh", version = "0.1.0", default-features = false, features = ["tls-ring", "unstable-custom-transports", "unstable-custom-transport-backpressure"] }
+iroh-base = "=1.0.3"
 libc = "0.2"
 lru = "0.18"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
@@ -72,7 +71,7 @@ memmap2 = "0.9"
 n0-watcher = "=1.0.0"
 notify = "8"
 ntest = "0.9"
-noq-udp = { version = "=1.1.0", default-features = false }
+noq-udp = { version = "=1.1.1", default-features = false }
 proptest = "1"
 p256 = { version = "0.14", features = ["ecdsa", "pem", "getrandom"] }
 pkcs8 = { version = "0.11", features = ["pem", "encryption"] }

@@ -54,7 +54,7 @@ Heddle's CLI follows five operating principles — verification, disposability, 
 
 ### Foundation in place
 
-- Hosted client (`heddle-cli`'s optional `client` feature enables `dep:heddle-client` for talking to a hosted backend; `weft-client-shim` is always present as a non-optional dep)
+- Hosted runtime (`heddle-cli`'s optional `client` feature enables its internal native Iroh/session/provider implementation; `weft-client-shim` remains a non-optional, patchable extension contract)
 - Verification and verification metadata across the wire protocol
 - Commit-level visibility tiers: per-state `StateVisibility` records and `heddle visibility set/promote` verbs (with oplog tier records) are shipped client-side; Git projection visibility gating for exports and checkouts is landing; hosted serve-side enforcement is in progress
 
@@ -220,7 +220,7 @@ Heddle records the agent model string verbatim and echoes it back in attribution
 This repository is a Cargo workspace. The OSS crates live under `crates/`:
 
 ```text
-crates/cli/                 # the `heddle` binary
+crates/cli/                 # the `heddle` binary and private hosted runtime
 crates/cli-shared/          # config types shared between cli and other surfaces
 crates/objects/             # core object and repository model
 crates/repo/                # repository helpers and higher-level repo operations
@@ -232,7 +232,6 @@ crates/review/              # review primitives
 crates/state_review/        # state-level review helpers
 crates/ingest/              # `heddle-ingest` binary and Git import path
 crates/wire/                # native Heddle wire protocol types
-crates/client/              # local-side hosted client
 crates/weft-client-shim/    # shim used by the `client` feature to talk to weft
 crates/crypto/              # crypto primitives
 crates/daemon/              # background daemon

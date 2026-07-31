@@ -7,8 +7,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 #[cfg(feature = "client")]
-use heddle_client::hosted::{HostedAuthMode, PullMaterialization};
-#[cfg(feature = "client")]
 use heddle_core::{
     HostedPullResult, HostedPullResultFields, format_connected_to,
     heddle_pull_execution_facts_from_hosted, parse_hosted_pull_result, pull_tip_changed,
@@ -50,6 +48,8 @@ use super::super::{
 };
 #[cfg(feature = "client")]
 use crate::client::HostedClient;
+#[cfg(feature = "client")]
+use crate::hosted_runtime::hosted::{HostedAuthMode, PullMaterialization};
 use crate::{
     cli::{
         Cli, RemoteCommands,

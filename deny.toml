@@ -43,8 +43,8 @@ ignore = [
     { id = "RUSTSEC-2023-0071", reason = "rsa 0.9 Marvin timing sidechannel; precondition (attacker-chosen ciphertext decryption) not present in Heddle's signature-verification use; tracked upstream" },
 
     # proc-macro-error2 2.0.1: unmaintained (RUSTSEC-2026-0173). Pulled
-    # transitively via biscuit-quote → biscuit-auth 6.0 (heddle-client's auth
-    # lib). It is a BUILD-TIME proc-macro helper, not a runtime dependency, and
+    # transitively via biscuit-quote → biscuit-auth 6.0 (the CLI auth runtime).
+    # It is a BUILD-TIME proc-macro helper, not a runtime dependency, and
     # "unmaintained" is a maintenance-status warning, not a vulnerability — no
     # CVE, no runtime attack surface. Remove this ignore when biscuit-auth drops
     # proc-macro-error2 upstream.
@@ -163,8 +163,4 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = [
-    # Provider transport is pinned to the reviewable HeddleCo fork until
-    # custom-transport backpressure is available in an upstream release.
-    "https://github.com/HeddleCo/iroh",
-]
+allow-git = []

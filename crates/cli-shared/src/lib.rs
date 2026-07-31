@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-//! CLI-side utilities shared between the OSS `cli` crate and the
-//! closed `heddle-client` crate.
+//! Shared Heddle CLI configuration and credential-file contracts.
 //!
-//! These items would create a circular dependency if they stayed in
-//! `cli` (which depends on `heddle-client` when the `heddle-client`
-//! feature is on, and `heddle-client` needs `UserConfig` /
-//! `RemoteTarget` / `ClientConfig`). Pulling them out lets both sides
-//! resolve cleanly.
+//! This crate contains transport configuration inputs and the durable global
+//! credential-store schema used by both the Heddle CLI and operator tooling.
+//! Transport implementations and application policy remain in their callers.
 
 pub mod client_config;
 pub mod config;
+pub mod credentials;
 pub mod logging;
 pub mod output;
 pub mod remote;

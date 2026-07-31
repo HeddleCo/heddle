@@ -52,12 +52,12 @@ hosted server. The attenuation machinery is identical either way.
 
 ## Where the code lives
 
-Two surfaces are involved:
-
-| Surface | Crate | What it does |
-|---|---|---|
-| Mint | [`biscuit-auth`](https://docs.rs/biscuit-auth) (workspace dep, pinned to `"6"` in [`Cargo.toml`](../Cargo.toml)) | `KeyPair::new()` to generate a root key; `Biscuit::builder()` to build the authority block. |
-| Attenuate | [`heddle_client::device_flow`](../crates/client/src/device_flow.rs) (re-exported as `heddle_client::auth`) | `attenuate_for_agent`, `time_bounded`, `read_only_repo_agent`. |
+Self-sovereign minting uses
+[`biscuit-auth`](https://docs.rs/biscuit-auth) directly. Heddle does not expose a
+general-purpose capability-token library. Its hosted attenuation policy belongs
+to the application and lives in the CLI's private
+[`hosted_runtime/device_flow.rs`](../crates/cli/src/hosted_runtime/device_flow.rs)
+module. Use `heddle auth derive-agent` for that policy-controlled flow.
 
 [`heddle-crypto`](../crates/crypto/) is a *different* crypto surface:
 it covers the signers (`Ed25519Signer`, `P256Signer`) that Heddle uses
@@ -65,13 +65,12 @@ to sign repository **states**, not Biscuit authority blocks. The two
 crates are intentionally separate — state signing and capability tokens
 are independent concerns.
 
-## End-to-end example
+## Minting a local authority token
 
-The example below mints a self-sovereign root token, attenuates it
-for a sub-agent, and shows the result parses back as a multi-block
-Biscuit. It's grounded in the same APIs the unit tests in
-[`crates/client/src/device_flow.rs`](../crates/client/src/device_flow.rs)
-exercise.
+The example below creates a self-sovereign root token with the upstream
+`biscuit-auth` API. Any service accepting the result must define and test its
+own attenuation policy and request facts; Heddle's hosted policy is not a
+public integration surface.
 
 `Cargo.toml`:
 
@@ -80,7 +79,6 @@ exercise.
 anyhow = "1"
 biscuit-auth = "6"
 chrono = "0.4"
-heddle-client = "0.2"
 ```
 
 `src/main.rs`:
@@ -89,7 +87,6 @@ heddle-client = "0.2"
 use anyhow::Result;
 use biscuit_auth::{Biscuit, KeyPair};
 use chrono::{Duration, Utc};
-use heddle_client::auth::{AgentAttenuation, attenuate_for_agent, read_only_repo_agent};
 
 fn main() -> Result<()> {
     // 1. Mint: generate the client's own root keypair and build an
@@ -105,36 +102,8 @@ fn main() -> Result<()> {
         .build(&root)?
         .to_base64()?;
 
-    // 2. Attenuate (simple): hand a sub-agent a read-only token
-    //    restricted to one repo for 2 hours.
-    let agent_b64 = read_only_repo_agent(
-        &parent_b64,
-        "agent-doc-review",
-        "org/acme/heddle",
-        /* duration_hours = */ 2,
-    )?;
-
-    // 3. Attenuate (custom): build the restriction set field-by-field
-    //    for a sub-agent that can call two specific RPCs on two repos.
-    let custom_b64 = attenuate_for_agent(
-        &parent_b64,
-        AgentAttenuation {
-            agent_id: "agent-cross-repo".to_string(),
-            expires_at: Utc::now() + Duration::hours(1),
-            allowed_operations: Some(vec![
-                "GetState".to_string(),
-                "GetCompare".to_string(),
-            ]),
-            allowed_resources: Some(vec![
-                ("repo".to_string(), "org/acme/heddle".to_string()),
-                ("repo".to_string(), "org/acme/docs".to_string()),
-            ]),
-        },
-    )?;
-
     println!("parent  {} bytes", parent_b64.len());
-    println!("agent   {} bytes ({} blocks)", agent_b64.len(), block_count(&agent_b64)?);
-    println!("custom  {} bytes ({} blocks)", custom_b64.len(), block_count(&custom_b64)?);
+    println!("{} authority block", block_count(&parent_b64)?);
     Ok(())
 }
 
@@ -148,14 +117,19 @@ Running this prints something like:
 
 ```
 parent  N bytes
-agent   M bytes (2 blocks)
-custom  K bytes (2 blocks)
+1 authority block
 ```
 
-The attenuated tokens have one more block than the parent: the
-authority block (minted at step 1) plus the attenuation block
-(appended at step 2 or 3). Further attenuation by the sub-agent
-appends additional blocks.
+Use the CLI flow below when the token is intended for hosted Heddle:
+
+```bash
+heddle auth derive-agent \
+  --server grpc.heddle.sh \
+  --agent-id agent-doc-review \
+  --ttl 7200 \
+  --scope repo:org/acme/heddle \
+  --allow GetState
+```
 
 ## What gets emitted in the attenuation block
 
@@ -163,9 +137,9 @@ Each restriction translates to a Biscuit Datalog clause that the
 verifier evaluates with the per-request facts (`time`, `operation`,
 `resource`) injected by the server. The shape is documented in
 [`.agents/agent-attenuation.md`](../.agents/agent-attenuation.md)
-and the construction lives in
-[`build_attenuation_block`](../crates/client/src/device_flow.rs)
-in `device_flow.rs`. In short:
+and the CLI-owned construction lives in
+[`hosted_runtime/device_flow.rs`](../crates/cli/src/hosted_runtime/device_flow.rs).
+In short:
 
 | Field | Datalog | Default when fact missing |
 |---|---|---|
@@ -215,8 +189,8 @@ chain is still under 2 KB.
 - [`.agents/agent-attenuation.md`](../.agents/agent-attenuation.md)
   — hosted-flow cookbook (read-only inspector, time-bounded agent,
   multi-repo writer, sub-sub-agent chain).
-- [`crates/client/src/device_flow.rs`](../crates/client/src/device_flow.rs)
-  — the attenuation API surface and its unit tests.
+- [`crates/cli/src/hosted_runtime/device_flow.rs`](../crates/cli/src/hosted_runtime/device_flow.rs)
+  — the CLI-owned attenuation policy and its unit tests.
 - [biscuit-auth documentation](https://docs.rs/biscuit-auth) —
   upstream details on the Biscuit format, Datalog semantics, and
   `KeyPair`/`Biscuit::builder` APIs used at mint time.

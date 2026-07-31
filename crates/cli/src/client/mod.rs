@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Heddle protocol client.
+//! CLI sync orchestration.
 //!
-//! Connects to Heddle servers for push, pull, and other operations.
+//! Local-copy helpers and command-specific hosted sync glue live here. The
+//! transport/session implementation remains private in `hosted_runtime`.
 
 #[cfg(feature = "client")]
 pub mod context_sync;
@@ -15,10 +16,11 @@ pub mod review_sync;
 
 pub use cli_shared::ClientConfig;
 #[cfg(feature = "client")]
-pub use heddle_client::{
-    CredentialSource, HostedAuthMode, HostedClient, HostedSession, ResolvedHostedCredential,
-    connect_websocket, resolve_active_bearer, resolve_hosted_credential,
-};
-#[cfg(feature = "client")]
 pub use human_signature::cli_human_signature_callback;
 pub use local_sync::LocalSync;
+
+#[cfg(feature = "client")]
+pub(crate) use crate::hosted_runtime::{
+    HostedAuthMode, HostedClient, HostedSession, connect_websocket, resolve_active_bearer,
+    resolve_hosted_credential,
+};

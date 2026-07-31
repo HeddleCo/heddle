@@ -220,7 +220,7 @@ impl ClientConfig {
 
 impl Default for ClientConfig {
     fn default() -> Self {
-        Self::new("heddle-client")
+        Self::new("heddle-cli")
     }
 }
 

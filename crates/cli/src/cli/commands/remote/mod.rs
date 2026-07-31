@@ -378,7 +378,7 @@ pub async fn cmd_push(
     // local state — matching the prevalidation the `client` build runs above.
     #[cfg(not(feature = "client"))]
     if matches!(target, RemoteTarget::Network { .. }) {
-        user_config.heddle_client_config(None)?;
+        user_config.hosted_runtime_config(None)?;
     }
 
     // `--all-threads` fans out over every pushable thread (heddle#838);
@@ -914,7 +914,7 @@ async fn discover_native_https_remote(spec: &str, action: &str) -> Result<()> {
     )?;
     match session.discover_endpoint(addr).await {
         Ok(_) => Ok(()),
-        Err(heddle_client::hosted::HostedError::EndpointDescriptorUnavailable) => {
+        Err(crate::hosted_runtime::hosted::HostedError::EndpointDescriptorUnavailable) => {
             Err(RecoveryAdvice::native_https_iroh_endpoint_missing(action, spec).into())
         }
         Err(error) => Err(error.into()),
