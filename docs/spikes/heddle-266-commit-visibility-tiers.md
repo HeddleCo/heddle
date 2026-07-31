@@ -946,7 +946,7 @@ requires widening the single-`ChangeId` request shape:
    function of the served `ChangeId` (`RefEntry.change_id`, `:91`) so it is stable,
    identity-bound, and never reused for a different state. The name carries the
    **full** `ChangeId` — `ChangeId::to_string_full()` (`crates/objects/src/object/hash.rs:129`,
-   the `hd-`+base32 form that round-trips via `parse()`, `:143`) — **never** the
+   the `hc-`+base32 form that round-trips via `parse()`, `:143`) — **never** the
    truncatable `short()`/`Display` form (`:137`, `:167-170`): two distinct sibling
    `ChangeId`s must map to two distinct names or one frontier root would
    overwrite the other. But uniqueness alone is **not** collision-proof: the name lives
@@ -1012,7 +1012,7 @@ requires widening the single-`ChangeId` request shape:
    (`git_sync.rs:129`) writes (Invariant C, §5.4). The reservation is what makes the
    synthetic ref collision-proof: `refs/heddle/*` is **disjoint from** `refs/heads/*`,
    so no user thread — published only ever to `refs/heads/{track_name}` — and no
-   raw-Git / imported `refs/heads/main@hd-…` branch can target the synthetic ref's
+   raw-Git / imported `refs/heads/main@hc-…` branch can target the synthetic ref's
    location. *(Tradeoff: a **vanilla** `git clone` with the default
    `refs/heads/*`+`refs/tags/*` refspec will not auto-fetch `refs/heddle/frontier/*`,
    so the sibling-line roots are fetched by a **Heddle-aware** clone whose refspec
@@ -1428,7 +1428,7 @@ of them rather than restating its own rule:
   validation** (`identifiers.rs:23-25,99-102`) and `validate_ref_name`
   (`name.rs:11-31`) rejects only controls / `..` / `//` / backslash / slash-edges /
   leading-`.` / `.lock`, **allowing** `@` (legitimately used by scoped names like
-  `main@review`, §3 Design C). So a user could create a thread `main@hd-<changeid>`
+  `main@review`, §3 Design C). So a user could create a thread `main@hc-<changeid>`
   whose name *equals* the encoded synthetic form, and the bridge publishes every user
   thread to `refs/heads/{track_name}` (`sync_track_to_branch`, `git_sync.rs:129`) —
   the user thread and the synthetic sibling root would target the **same Git ref**,
@@ -1500,7 +1500,7 @@ of them rather than restating its own rule:
   different surfaces.** *Name reservation without publish separation* still collides
   on the **Git-ref** surface: `refs/heads/*` is writable by *raw Git*
   (`git branch` / `git update-ref`) and by *imported foreign branches* — neither passes
-  through Heddle's validator — so a branch `refs/heads/main@hd-…` can exist that Heddle
+  through Heddle's validator — so a branch `refs/heads/main@hc-…` can exist that Heddle
   never named; only moving synthetic refs **out of** `refs/heads/` forecloses that.
   *Publish separation without name reservation* still collides on the **wire /
   CLI-resolution** surface: `ListRefs` names a synthetic root with a `ThreadName`-shaped
@@ -2378,7 +2378,7 @@ issues are checked against:
      `git clone` gets only the own-line `refs/heads/<thread>`, the deliberate cost of
      collision-proofness, §5.3). A conformance test must assert (a) prefix-sharing
      siblings get distinct, individually-fetchable refs, and (b) a user thread named
-     `<thread>@hd-…` (or a raw-Git branch at that `refs/heads/` location) does **not**
+     `<thread>@hc-…` (or a raw-Git branch at that `refs/heads/` location) does **not**
      collide with or overwrite any synthetic frontier root. `<thread>` itself only ever
      advances FF **along its own line** to the maximal served descendant of its prior
      tip, else retains its prior tip — **never moves sideways to a sibling member and

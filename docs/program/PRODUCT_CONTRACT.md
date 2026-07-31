@@ -59,7 +59,7 @@ delivery (CLI / future daemon / tests)
 | Git object bytes (public, lossless path) | Byte-identical SHAs on round-trip |
 | Raw Git Object Residuals | Preserve non-reconstructable object bytes |
 | ContentHash (BLAKE3) | Content-addressed equality |
-| ChangeId (`hd-…` physical) | Stable handle for a specific state, not rewrite lineage |
+| ChangeId (`hc-…` physical) | Stable handle for a specific state, not rewrite lineage |
 | Public JSON schemas | Field-stable; alpha may break names when model improves (documented) |
 | Hosted protobuf `heddle.api.v1alpha1` | Net-new public-contract candidate owned by `HeddleCo/api`; the blocked coordinated cutover is tracked in ADR 0048 |
 | Text CLI | User-facing; not byte-stable |

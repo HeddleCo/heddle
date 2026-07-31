@@ -52,7 +52,7 @@ The differences are entirely in the on-disk encoding:
 |---|---|---|
 | Bytes | Line-oriented UTF-8 text | Header + offset index + variable-length records + footer, little-endian |
 | Record | `<base32 ChangeId> refs/<kind>/<name>\n` | `[name_len u16][name][id 16 bytes]` |
-| ID encoding | base32 with `hd-` prefix (≈ 29 chars / ID) | Raw 16 bytes |
+| ID encoding | base32 with `hc-` prefix (≈ 29 chars / ID) | Raw 16 bytes |
 | Lookup cost (cold) | Full parse, then `HashMap` get | `O(log N)` binary search via offset index |
 | Lookup cost (warm) | `HashMap` get — `O(1)` | Binary search over sorted `Vec` — `O(log N)` |
 | File header | `# packed-refs with: peeled fully-peeled sorted` | 8-byte magic + thread/marker counts |
@@ -127,7 +127,7 @@ that motivate reftable, not the full spec.
 
 Reftable is **34 % smaller**. The win comes entirely from encoding the
 16-byte `ChangeId` raw rather than as a 26-character base32 string with
-`hd-` prefix.
+`hc-` prefix.
 
 ### Cold load (open file, parse to in-memory model)
 
