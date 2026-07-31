@@ -152,7 +152,7 @@ current tip (`repo.head()`), else refuse with a precise error. On success it is
 the existing checkpoint flow, just with an explicit assertion that you're
 checkpointing the state you named.
 
-- **Pros:** explicit, auditable ("I am checkpointing exactly hd-…"), reuses the
+- **Pros:** explicit, auditable ("I am checkpointing exactly hc-…"), reuses the
   canonical resolver, replaces the hidden `--from-index-snapshot` recovery
   string with a self-documenting one, zero new commit machinery.
 - **Cons:** the flag is *only ever* a no-op-or-assertion when X==tip. A user who

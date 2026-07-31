@@ -16,10 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::object::{hash::StateId, state_attribution::Principal};
 
-/// Stable byte prefix the signing payload begins with. Bumping this versions
-/// the payload format itself; old signatures with the old prefix continue to
-/// verify exactly as they did when written.
-pub const SIGNING_PAYLOAD_VERSION_TAG: &[u8] = b"hd-rev-sig-v1\x00";
+/// Stable byte prefix the signing payload begins with. This pre-launch domain
+/// deliberately has no compatibility path for the superseded `hd-` draft tag.
+pub const SIGNING_PAYLOAD_VERSION_TAG: &[u8] = b"hc-rev-sig-v1\x00";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewSignaturesBlob {
@@ -280,6 +279,7 @@ mod tests {
     fn signing_payload_starts_with_version_tag() {
         let id = StateId::from_bytes([1; 32]);
         let payload = signing_payload(id, ReviewKind::Read, &ReviewScope::WholeChange, 0, None);
+        assert_eq!(SIGNING_PAYLOAD_VERSION_TAG, b"hc-rev-sig-v1\x00");
         assert!(payload.starts_with(SIGNING_PAYLOAD_VERSION_TAG));
     }
 

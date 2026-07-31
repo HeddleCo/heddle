@@ -1261,10 +1261,22 @@ mod tests {
     }
 
     fn sign_request(state_id: &StateId, op_id: &str) -> SignStateRequest {
+        signed_request(state_id, op_id, false)
+    }
+
+    fn legacy_tag_sign_request(state_id: &StateId, op_id: &str) -> SignStateRequest {
+        signed_request(state_id, op_id, true)
+    }
+
+    fn signed_request(state_id: &StateId, op_id: &str, use_legacy_tag: bool) -> SignStateRequest {
         let signer = crypto::Ed25519Signer::generate().expect("generate ed25519 key");
         let scope = ReviewScope::WholeChange;
         let signed_at = chrono::Utc::now().timestamp();
-        let payload = signing_payload(*state_id, ReviewKind::Read, &scope, signed_at, None);
+        let mut payload = signing_payload(*state_id, ReviewKind::Read, &scope, signed_at, None);
+        if use_legacy_tag {
+            const LEGACY_TAG: &[u8] = b"hd-rev-sig-v1\x00";
+            payload[..LEGACY_TAG.len()].copy_from_slice(LEGACY_TAG);
+        }
         let signature = signer.sign(&payload).expect("sign payload");
         use api::heddle::api::v1alpha1::review_scope::{Scope, WholeChange};
         SignStateRequest {
@@ -1352,6 +1364,33 @@ mod tests {
             scope_case,
             Some(api::heddle::api::v1alpha1::review_scope::Scope::WholeChange(_))
         ));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_global)]
+    async fn sign_state_rejects_legacy_hd_domain_signature() {
+        let (svc, repo, _tmp) = fresh_service();
+        let state_id = capture_state(&repo);
+
+        let error = svc
+            .sign_state(local_request(legacy_tag_sign_request(&state_id, "")))
+            .await
+            .expect_err("signature made with the hd-rev-sig-v1 tag must fail");
+
+        assert_eq!(
+            error.code(),
+            crate::local_review::LocalReviewCode::InvalidArgument
+        );
+        assert!(error.message().contains("failed verification"));
+
+        let listing = svc
+            .list_signatures(local_request(ListSignaturesRequest {
+                repo_path: None,
+                state_id: Some(api_state_id(&state_id)),
+            }))
+            .await
+            .expect("list_signatures");
+        assert!(listing.signatures.is_empty());
     }
 
     #[tokio::test]

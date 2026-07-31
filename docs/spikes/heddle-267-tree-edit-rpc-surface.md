@@ -211,7 +211,7 @@ message TreeEditRepo {
 message TreeBase {
   oneof base {
     string ref = 1;          // thread, marker, or state spec
-    string state_id = 2;     // full hd-* string
+    string state_id = 2;     // full hc-* string
     bytes tree_hash = 3;     // raw ContentHash bytes
     bool empty = 4;
   }

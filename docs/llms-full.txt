@@ -2045,6 +2045,29 @@ let changes = status.collect()?;
 Heddle would use this under status, diff, verify, and thread-list health so the
 same Sley primitive backs all Git-overlay worktree reads.
 
+### TLS Trust Source
+
+At the start of the #1132 investigation, Sley 0.5.0's default smart-HTTPS
+client was `UreqHttpClient`. Heddle enabled its `tls-rustls` feature, so ureq
+verified servers with compiled-in Mozilla `webpki-roots`. That client did not
+consult Heddle's `HEDDLE_REMOTE_TLS_CA_CERT` setting, `SSL_CERT_FILE`, or the
+platform trust store.
+
+This is a dependency default, not a deliberate Heddle policy. The hosted
+bootstrap path separately reads `HEDDLE_REMOTE_TLS_CA_CERT` into
+`ClientConfig.tls_ca_certificate_pem` and merges those certificates into
+reqwest's roots. Consequently the two transports in one Heddle binary can
+disagree about the same server certificate. Git smart-HTTPS must use the same
+operator-facing CA setting as hosted bootstrap, and certificate failures must
+name that setting.
+
+Heddle now resolves the configured CA through the same `UserConfig` method for
+both transports. When a custom CA is present, it supplies Sley's fetch, clone,
+ls-remote, and push operations with an HTTPS client whose roots combine the
+platform store and that PEM bundle. Without a configured CA, Sley's existing
+compiled-root default remains unchanged. `SSL_CERT_FILE` is not a second Heddle
+configuration mechanism.
+
 ## Heddle Hardening Gates
 
 Keep these Heddle-side checks required while Sley settles in:
@@ -3249,6 +3272,7 @@ Environment-based local testing:
 - `heddle` client commands use user config plus `HEDDLE_REMOTE_*` overrides for TLS profiles.
 - Client authentication follows a single precedence: `HEDDLE_CREDENTIAL=<path-to-.hcred>` (authoritative — a bad/expired/mismatched file is a hard error) → the per-server keystore entry (`heddle auth login`) → unauthenticated. There is no `HEDDLE_REMOTE_TOKEN` or `remote.token`; an agent authenticates by pointing `HEDDLE_CREDENTIAL` at a `.hcred` (see `heddle auth derive-agent --out` / `heddle auth create-service-token --out`).
 - `HEDDLE_REMOTE_TLS=1` enables TLS; `HEDDLE_REMOTE_INSECURE=1` allows cleartext to non-loopback hosts.
+- Provider pulls can be tuned in the user config under `[remote]` with `provider_global_concurrency`, `provider_per_endpoint_concurrency`, `provider_max_inflight_bytes`, and `provider_stall_timeout_secs`. The corresponding environment overrides are `HEDDLE_REMOTE_PROVIDER_GLOBAL_CONCURRENCY`, `HEDDLE_REMOTE_PROVIDER_PER_ENDPOINT_CONCURRENCY`, `HEDDLE_REMOTE_PROVIDER_MAX_INFLIGHT_BYTES`, and `HEDDLE_REMOTE_PROVIDER_STALL_TIMEOUT_SECS`.
 
 ## Hosted Admin Operations
 
@@ -4055,9 +4079,9 @@ Every CLI verb that takes a state argument accepts the same set of
 specifiers. Pass any of them — they all resolve to the same change ID:
 
 * **Full change ID** — the 32-character form printed by `show --output json`'s
-  `change_id_full`, e.g. `hd-sqr398dvx9ayt9bf8bf5gz0jg8`.
+  `change_id_full`, e.g. `hc-sqr398dvx9ayt9bf8bf5gz0jg8`.
 * **Short change ID** — the 12-character prefix printed by every other
-  `--output json` verb's `change_id` field, e.g. `hd-sqr398dvx9ay`. Any
+  `--output json` verb's `change_id` field, e.g. `hc-sqr398dvx9ay`. Any
   unambiguous prefix of length 4 or more works; ambiguous prefixes
   yield an `ambiguous state ID prefix '<X>' matches: <list>` error.
 * **`HEAD`, `@`, `HEAD~N`, `@~N`** — relative walks from the active
@@ -4069,6 +4093,19 @@ Verbs covered: `show`, `diff`, `revert`, `query --attribution --state`,
 `review sign`, `discuss open|list|resolve --state`, `retro --since`.
 The `heddle log --output json` `change_id` field is the canonical short form
 that downstream verbs consume.
+
+### Pre-launch compatibility policy
+
+`hc-` is the only accepted tagged ChangeId form. Heddle has no deployed data
+using the former prefix, so there is no legacy alias: no parser, API, or
+downstream client should accept or normalize `hd-`. Unprefixed base32 prefixes
+remain valid as described above.
+
+Review signatures use the `hc-rev-sig-v1\0` payload domain. The pre-launch
+`hd-rev-sig-v1\0` draft domain is intentionally not accepted: a signature over
+that old payload must fail verification. Renaming the domain now keeps the
+HeddleCo `hc-` namespace consistent without creating a permanent dual-domain
+compatibility requirement after launch.
 
 ---
 
@@ -4158,9 +4195,9 @@ in-progress operation.
     "checks": []
   },
   "thread": "feature/parser-fast",
-  "base_state": "hd-abc123",
-  "base_root": "hd-abc123",
-  "current_state": "hd-def456",
+  "base_state": "hc-abc123",
+  "base_root": "hc-abc123",
+  "current_state": "hc-def456",
   "path": "/repo",
   "execution_path": "/repo",
   "actor": {"provider": "anthropic", "model": "claude-opus-4-7"},
@@ -4180,7 +4217,7 @@ in-progress operation.
   "coordination_status": "clean",
   "is_isolated": false,
   "parallel_threads": [],
-  "state": {"change_id": "hd-def456", "content_hash": "deadbeef", "intent": null},
+  "state": {"change_id": "hc-def456", "content_hash": "deadbeef", "intent": null},
   "git_checkpoint": null,
   "changes": {"modified": [], "added": [], "deleted": []}
 }
@@ -4361,7 +4398,7 @@ through Sley; it does not require a Git executable.
   "output_kind": "capture",
   "status": "captured",
   "action": "capture",
-  "state_id": "hd-capture123",
+  "state_id": "hc-capture123",
   "content_hash": "deadbeef",
   "intent": "tighten parser validation",
   "confidence": 0.86,
@@ -4373,7 +4410,7 @@ through Sley; it does not require a Git executable.
   },
   "promotion_suggested": false,
   "heavy_impact_paths": [],
-  "message": "captured state hd-capture123"
+  "message": "captured state hc-capture123"
 }
 ```
 
@@ -4387,7 +4424,7 @@ hooks.
 {
   "output_kind": "commit",
   "status": "committed",
-  "state_id": "hd-head456",
+  "state_id": "hc-head456",
   "git_commit": "e97f61a",
   "summary": "committed",
   "recommended_action": null,
@@ -4408,7 +4445,7 @@ hooks.
   "next_action_template": {"program": "heddle", "args": ["undo", "--recover"], "placeholders": []},
   "recommended_action": null,
   "recommended_action_template": null,
-  "recovery_state": "hd-before123",
+  "recovery_state": "hc-before123",
   "recovery_marker": ".undo-recovery"
 }
 ```
@@ -4429,7 +4466,7 @@ the recovered work can be captured as new history:
   "next_action_template": {"program": "heddle", "args": ["capture", "-m", "<message>"], "placeholders": ["message"]},
   "recommended_action": "heddle capture -m \"...\"",
   "recommended_action_template": {"program": "heddle", "args": ["capture", "-m", "<message>"], "placeholders": ["message"]},
-  "recovery_state": "hd-before123",
+  "recovery_state": "hc-before123",
   "recovery_marker": ".undo-recovery"
 }
 ```
@@ -4477,12 +4514,12 @@ saves a Heddle state without recommending a Git checkpoint.
   "next_action": "heddle land --thread feature/parser",
   "recommended_action": "heddle land --thread feature/parser",
   "captured": true,
-  "captured_state": "hd-sqr398dvx9ay",
+  "captured_state": "hc-sqr398dvx9ay",
   "thread_state": "ready",
   "readiness": {
     "status": "ready",
     "captured": true,
-    "captured_state": "hd-sqr398dvx9ay",
+    "captured_state": "hc-sqr398dvx9ay",
     "checks": {
       "status": "completed",
       "reason": "readiness preview ran"
@@ -4519,7 +4556,7 @@ saves a Heddle state without recommending a Git checkpoint.
   "integrated": true,
   "performed_steps": ["merge", "checkpoint"],
   "skipped_steps": ["capture(no changes)", "sync(current)"],
-  "merge_state": "hd-land123",
+  "merge_state": "hc-land123",
   "chosen_path": "capture_sync_merge_checkpoint",
   "siblings_restacked": ["feature/peer-b"],
   "siblings_restack_failed": []
@@ -4602,7 +4639,7 @@ add/modify/delete badges from `diff` alone:
 ```json
 {
   "output_kind": "diff",
-  "from_state": "hd-base123",
+  "from_state": "hc-base123",
   "to_state": null,
   "changes": {
     "modified": [{"path": "src/lib.rs", "kind": "modified"}],
@@ -4618,8 +4655,8 @@ flat `array<object>`:
 ```json
 {
   "output_kind": "diff",
-  "from_state": "hd-base123",
-  "to_state": "hd-head456",
+  "from_state": "hc-base123",
+  "to_state": "hc-head456",
   "changes": []
 }
 ```
@@ -4678,7 +4715,7 @@ available, checkout paths, and post-command verification.
 {
   "output_kind": "thread_create",
   "name": "feature/parser",
-  "message": "Created thread 'feature/parser' at hd-sqr398dvx9ay",
+  "message": "Created thread 'feature/parser' at hc-sqr398dvx9ay",
   "thread": null,
   "path": null,
   "execution_path": null
@@ -4706,7 +4743,7 @@ List recent saved states on a thread.
 ```json
 [
   {
-    "change_id": "hd-sqr398dvx9ay",
+    "change_id": "hc-sqr398dvx9ay",
     "created_at": "2026-05-23T23:57:09Z",
     "intent": "capture parser fix",
     "confidence": 0.86,
@@ -4756,8 +4793,8 @@ Move captured paths between isolated threads.
   "from_thread": "feature/parser",
   "to_thread": "feature/tests",
   "moved_paths": ["src/parser.rs"],
-  "source_state_id": "hd-src123",
-  "target_state_id": "hd-tgt456",
+  "source_state_id": "hc-src123",
+  "target_state_id": "hc-tgt456",
   "message": "Moved selected paths between threads"
 }
 ```
@@ -4813,7 +4850,7 @@ emits an array of the same object.
   "repo_path": "acme/project",
   "source_thread": "feature/parser",
   "target_thread": "main",
-  "source_state": "hd-src123",
+  "source_state": "hc-src123",
   "approver_user_id": "user_42",
   "note": "looks good",
   "approved_at": 1779580000,
@@ -4832,7 +4869,7 @@ emits an array of the same object.
     "repo_path": "acme/project",
     "source_thread": "feature/parser",
     "target_thread": "main",
-    "source_state": "hd-src123",
+    "source_state": "hc-src123",
     "approver_user_id": "user_42",
     "note": "looks good",
     "approved_at": 1779580000,
@@ -4922,9 +4959,9 @@ verification.
   "name": "parser-fast",
   "operation": {},
   "remote_tracking": {},
-  "base_state": "hd-base123",
-  "base_root": "hd-base123",
-  "current_state": "hd-head456",
+  "base_state": "hc-base123",
+  "base_root": "hc-base123",
+  "current_state": "hc-head456",
   "path": "../parser-fast",
   "execution_path": "../parser-fast",
   "actor": {"provider": "codex-cli", "model": "oss-cold-flow"},
@@ -5032,7 +5069,7 @@ verification.
   "markers": [
     {
       "name": "verified-parser",
-      "state_id": "hd-def456"
+      "state_id": "hc-def456"
     }
   ]
 }
@@ -5044,8 +5081,8 @@ verification.
 {
   "output_kind": "thread_marker_create",
   "name": "verified-parser",
-  "state_id": "hd-def456",
-  "message": "Created marker 'verified-parser' at hd-def456"
+  "state_id": "hc-def456",
+  "message": "Created marker 'verified-parser' at hc-def456"
 }
 ```
 
@@ -5066,8 +5103,8 @@ verification.
 {
   "output_kind": "thread_marker_show",
   "name": "verified-parser",
-  "state_id": "hd-def456",
-  "message": "Marker 'verified-parser' -> hd-def456"
+  "state_id": "hc-def456",
+  "message": "Marker 'verified-parser' -> hc-def456"
 }
 ```
 
@@ -5149,7 +5186,7 @@ also enveloped so agents never have to special-case a raw array.
   "presence": {
     "session_id": "agent-4dvta2dd6as3uzjrszmq",
     "thread": "actor/agent-4dvta2dd6as3uzjrszmq",
-    "base_state": "hd-sqr398dvx9ay",
+    "base_state": "hc-sqr398dvx9ay",
     "provider": "openai",
     "model": "gpt-5",
     "usage_summary": {},
@@ -5335,7 +5372,7 @@ and release emit the same reservation shape without `token`:
     "lease_id": "lease-kvd9yn2z5kk3ehm0x8be",
     "actor_session_id": "agent-k3f2w58q7f8rmm3qj0v8",
     "thread": "main",
-    "anchor_state": "hd-sqr398dvx9ay",
+    "anchor_state": "hc-sqr398dvx9ay",
     "anchor_root": "32fc0aff",
     "task_assignment_id": null,
     "status": "active",
@@ -5354,13 +5391,13 @@ and release emit the same reservation shape without `token`:
 ## `heddle agent heartbeat --output json`
 
 ```json
-{"reservation":{"lease_id":"lease-kvd9yn2z5kk3ehm0x8be","actor_session_id":"agent-k3f2w58q7f8rmm3qj0v8","thread":"main","anchor_state":"hd-sqr398dvx9ay","anchor_root":"32fc0aff","task_assignment_id":null,"status":"active","path":null,"heartbeat_at":"2026-07-12T23:16:00Z","lease_expires_at":"2026-07-12T23:21:00Z","liveness":"alive"},"token":null,"verification":{"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":null,"clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}}
+{"reservation":{"lease_id":"lease-kvd9yn2z5kk3ehm0x8be","actor_session_id":"agent-k3f2w58q7f8rmm3qj0v8","thread":"main","anchor_state":"hc-sqr398dvx9ay","anchor_root":"32fc0aff","task_assignment_id":null,"status":"active","path":null,"heartbeat_at":"2026-07-12T23:16:00Z","lease_expires_at":"2026-07-12T23:21:00Z","liveness":"alive"},"token":null,"verification":{"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":null,"clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}}
 ```
 
 ## `heddle agent release --output json`
 
 ```json
-{"reservation":{"lease_id":"lease-kvd9yn2z5kk3ehm0x8be","actor_session_id":"agent-k3f2w58q7f8rmm3qj0v8","thread":"main","anchor_state":"hd-sqr398dvx9ay","anchor_root":"32fc0aff","task_assignment_id":null,"status":"released","path":null,"heartbeat_at":"2026-07-12T23:16:00Z","lease_expires_at":"2026-07-12T23:16:00Z","liveness":"released"},"token":null,"verification":{"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":null,"clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}}
+{"reservation":{"lease_id":"lease-kvd9yn2z5kk3ehm0x8be","actor_session_id":"agent-k3f2w58q7f8rmm3qj0v8","thread":"main","anchor_state":"hc-sqr398dvx9ay","anchor_root":"32fc0aff","task_assignment_id":null,"status":"released","path":null,"heartbeat_at":"2026-07-12T23:16:00Z","lease_expires_at":"2026-07-12T23:16:00Z","liveness":"released"},"token":null,"verification":{"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":null,"clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}}
 ```
 
 ---
@@ -5375,13 +5412,13 @@ shape is the same capture envelope.
   "output_kind": "capture",
   "status": "captured",
   "action": "capture",
-  "state_id": "hd-sqr398dvx9ay",
+  "state_id": "hc-sqr398dvx9ay",
   "content_hash": "sha256:...",
   "intent": "agent capture",
   "confidence": 0.8,
   "promotion_suggested": false,
   "heavy_impact_paths": [],
-  "message": "Captured hd-sqr398dvx9ay"
+  "message": "Captured hc-sqr398dvx9ay"
 }
 ```
 
@@ -5642,7 +5679,7 @@ the same ready envelope.
   "output_kind": "agent_fanout_plan",
   "title": "Coordinate Wave 4 lanes",
   "parent_thread": "main",
-  "base_state": "hd-base123",
+  "base_state": "hc-base123",
   "base_root": "tr-root123",
   "coordination_discussion_id": "discussion-123",
   "parent_task": null,
@@ -5703,7 +5740,7 @@ the same ready envelope.
   "output_kind": "agent_fanout_start",
   "title": "Coordinate Wave 4 lanes",
   "parent_thread": "main",
-  "base_state": "hd-base123",
+  "base_state": "hc-base123",
   "base_root": "tr-root123",
   "coordination_discussion_id": "discussion-123",
   "parent_task": {
@@ -5713,7 +5750,7 @@ the same ready envelope.
     "body": "- feature/lane-d4 -> ../lane-d4: Implement native fan-out UX",
     "status": "in_progress",
     "target_thread": "main",
-    "base_state": "hd-base123",
+    "base_state": "hc-base123",
     "base_root": "tr-root123",
     "parent_task_id": null,
     "coordination_discussion_id": "discussion-123",
@@ -5735,7 +5772,7 @@ the same ready envelope.
         "body": "Fan-out child lane for parent task task-parent",
         "status": "in_progress",
         "target_thread": "feature/lane-d4",
-        "base_state": "hd-base123",
+        "base_state": "hc-base123",
         "base_root": "tr-root123",
         "parent_task_id": "task-parent",
         "coordination_discussion_id": "discussion-123",
@@ -5814,6 +5851,36 @@ the same ready envelope.
   "credential_id": "cred-123",
   "expires_at": "2026-06-27T00:00:00Z",
   "recommended_action": null
+}
+```
+
+---
+
+## `heddle auth trust show --output json`
+
+```json
+{
+  "output_kind": "auth_trust_show",
+  "canonical_server": "https://api.heddle.sh",
+  "source": "automatic",
+  "key_id": "production-2026-01",
+  "public_key": "7c5eb1d4f7c09c8981789c759b1445676336afe9c88d08f57d02893df9ea23c4",
+  "fingerprint": "sha256:f31c0dbdb183e33f2366f5daa71273d3444006c0143e0f8d65e0745478c14b48"
+}
+```
+
+---
+
+## `heddle auth trust replace --output json`
+
+```json
+{
+  "output_kind": "auth_trust_replace",
+  "canonical_server": "https://api.heddle.sh",
+  "source": "automatic",
+  "key_id": "production-2026-02",
+  "public_key": "280c37c667a6334f69e878f90588d8813bb44fc88333757b3e2d6b1e79bdab01",
+  "fingerprint": "sha256:06d1aac7c406aa1cd62280ae9948af0fd2d42ac10ba5c8c0b3a7840d9deb7275"
 }
 ```
 
@@ -6115,14 +6182,14 @@ State history walking from a given starting state.
   "storage_model": "git+heddle-sidecar",
   "states": [
     {
-      "change_id": "hd-def456",
+      "change_id": "hc-def456",
       "content_hash": "deadbeef",
       "intent": "Capture audit pipeline",
       "principal": "Ada <ada@example.com>",
       "agent": "anthropic/claude-opus-4-7",
       "confidence": 0.95,
       "created_at": "2026-05-09 12:00:00",
-      "parents": ["hd-abc123"],
+      "parents": ["hc-abc123"],
       "git_checkpoint": "abc123def456"
     }
   ]
@@ -6172,8 +6239,8 @@ tool-call navigation state:
   "cursor": {
     "branch_id": "tlb-main",
     "step_id": "tls-2",
-    "state": "hd-def456",
-    "state_full": "hd-def4561234567890abcdef"
+    "state": "hc-def456",
+    "state_full": "hc-def4561234567890abcdef"
   },
   "branches": [
     {
@@ -6204,11 +6271,11 @@ tool-call navigation state:
       "changed": true,
       "touched_paths": ["src/lib.rs"],
       "labels": ["repo-reversible"],
-      "before_state": "hd-abc123",
-      "after_state": "hd-def456",
-      "capture_state": "hd-def456",
-      "cursor_state": "hd-def456",
-      "cursor_state_full": "hd-def4561234567890abcdef",
+      "before_state": "hc-abc123",
+      "after_state": "hc-def456",
+      "capture_state": "hc-def456",
+      "cursor_state": "hc-def456",
+      "cursor_state_full": "hc-def4561234567890abcdef",
       "payload_summary": "edit src/lib.rs",
       "payload_hash": "hpb-abc123",
       "capture_oplog_batch_id": 42,
@@ -6245,7 +6312,7 @@ values, argv, or filename lists.
   "thread": "main",
   "cursor_branch_id": "tlb-main",
   "cursor_step_id": "tls-1",
-  "cursor_state": "hd-0123456789abcdefghijklmnop",
+  "cursor_state": "hc-0123456789abcdefghijklmnop",
   "current_step": {
     "step_id": "tls-1",
     "branch_id": "tlb-main",
@@ -6286,7 +6353,7 @@ result after appending a versioned tool-call-start operation body:
   "branch_id": "tlb-main",
   "parent_step_id": null,
   "operation_id": "tl-0123456789abcdefghijklmnopqrstuv",
-  "before_state": "hd-0123456789abcdefghijklmnop",
+  "before_state": "hc-0123456789abcdefghijklmnop",
   "after_state": null,
   "changed": null,
   "tool_status": null,
@@ -6310,8 +6377,8 @@ result after appending a versioned tool-call-finish operation body:
   "branch_id": "tlb-main",
   "parent_step_id": null,
   "operation_id": "tl-1123456789abcdefghijklmnopqrstuv",
-  "before_state": "hd-0123456789abcdefghijklmnop",
-  "after_state": "hd-1123456789abcdefghijklmnop",
+  "before_state": "hc-0123456789abcdefghijklmnop",
+  "after_state": "hc-1123456789abcdefghijklmnop",
   "changed": true,
   "tool_status": "succeeded",
   "payload_summary": "Read project metadata",
@@ -6359,11 +6426,11 @@ State detail view, pretty-printed.
   "output_kind": "show",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
-  "state_id": "hd-def456",
-  "state_id_full": "hd-def4561234567890abcdef",
+  "state_id": "hc-def456",
+  "state_id_full": "hc-def4561234567890abcdef",
   "content_hash": "deadbeef…",
   "tree": "…",
-  "parents": ["hd-abc123"],
+  "parents": ["hc-abc123"],
   "intent": "Capture audit pipeline",
   "confidence": 0.95,
   "principal": {"name": "Ada", "email": "ada@example.com"},
@@ -6406,7 +6473,7 @@ State detail view, pretty-printed.
   "threads": [
     {
       "name": "feature/parser-fast",
-      "current_state": "hd-def456",
+      "current_state": "hc-def456",
       "is_current": true,
       "thread_state": "active",
       "freshness": "current",
@@ -6691,7 +6758,7 @@ Hosted-review payload for a single state.
 ```json
 {
   "output_kind": "review_show",
-  "state_id": "hd-def456",
+  "state_id": "hc-def456",
   "headline": "Tighten parser recovery",
   "agent_narrative": null,
   "files_changed": 3,
@@ -6718,7 +6785,7 @@ payload carries only `output_kind` and `next: null` — never a
 top-level `null`.
 
 ```json
-{"output_kind": "review_next", "state_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": 0, "next": {"state_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": 0}}
+{"output_kind": "review_next", "state_id": "hc-def456", "headline": "Tighten parser recovery", "existing_signatures": 0, "next": {"state_id": "hc-def456", "headline": "Tighten parser recovery", "existing_signatures": 0}}
 ```
 
 `heddle review health --output json` emits:
@@ -7004,40 +7071,40 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact trust remove",
       "redact purge apply"
     ],
-    "advanced_scope_json_commands_total": 106,
+    "advanced_scope_json_commands_total": 108,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
-    "advanced_scope_mutating_commands_total": 61,
+    "advanced_scope_mutating_commands_total": 62,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 22,
-    "catalog_commands_total": 185,
+    "catalog_commands_total": 186,
     "catalog_mutating_commands_total": 90,
-    "json_commands_total": 149,
+    "json_commands_total": 148,
     "json_commands_with_accepted_opaque_schema": 39,
-    "json_commands_with_schema": 110,
+    "json_commands_with_schema": 109,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 87,
+    "json_mutating_commands_total": 86,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 87,
+    "mutating_commands_total": 86,
     "mutating_commands_with_accepted_opaque_schema": 22,
-    "mutating_commands_with_schema": 65,
+    "mutating_commands_with_schema": 64,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 39,
     "status": "available",
-    "summary": "185 command(s), 149 JSON command(s), 90 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+    "summary": "186 command(s), 148 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
     "undocumented_schema_verbs_total": 0,
     "verified_scope": "everyday_and_agent",
     "verified_scope_accepted_opaque_schema_examples": [],
-    "verified_scope_json_commands_total": 43,
+    "verified_scope_json_commands_total": 40,
     "verified_scope_json_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_json_commands_with_schema": 43,
+    "verified_scope_json_commands_with_schema": 40,
     "verified_scope_json_commands_without_schema": 0,
     "verified_scope_missing_schema_examples": [],
-    "verified_scope_mutating_commands_total": 26,
+    "verified_scope_mutating_commands_total": 24,
     "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_mutating_commands_with_schema": 26,
+    "verified_scope_mutating_commands_with_schema": 24,
     "verified_scope_mutating_commands_without_schema": 0
   },
   "doc_path": "/repo/docs/json-schemas.md",
@@ -7061,7 +7128,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "185 command(s), 149 JSON command(s), 90 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+  "summary": "186 command(s), 148 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -7079,7 +7146,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
   "ts": "2026-05-23T00:00:00Z",
   "thread": "main",
   "kind": "snapshot",
-  "state_id": "hd-sqr398dvx9ay",
+  "state_id": "hc-sqr398dvx9ay",
   "intent": "capture parser fix",
   "confidence": 0.91,
   "actor": {"provider": "openai", "model": "gpt-5"},
@@ -7100,12 +7167,12 @@ lives in `recovery_commands`.
 {
   "status": "completed",
   "action": "try",
-  "message": "`cargo test` succeeded; thread 'try-1234abcd' ready (state hd-sqr398dvx9ay). Run `heddle ready --thread try-1234abcd` to land.",
+  "message": "`cargo test` succeeded; thread 'try-1234abcd' ready (state hc-sqr398dvx9ay). Run `heddle ready --thread try-1234abcd` to land.",
   "thread": "try-1234abcd",
   "thread_dropped": false,
   "exit_code": 0,
   "duration_ms": 1420,
-  "captured_state": "hd-sqr398dvx9ay",
+  "captured_state": "hc-sqr398dvx9ay",
   "merge_state": null,
   "next_action": "heddle ready --thread try-1234abcd",
   "recommended_action": "heddle ready --thread try-1234abcd",
@@ -7149,7 +7216,7 @@ Refresh the active or named thread, or report the verification/action blocker.
   "next_action": "heddle land",
   "recommended_action": "heddle land",
   "thread": "feature/parser",
-  "current_state": "hd-sqr398dvx9ay",
+  "current_state": "hc-sqr398dvx9ay",
   "chosen_path": "refresh"
 }
 ```
@@ -7190,7 +7257,7 @@ Apply the inverse of a state. With `--no-commit`, `state_id` is
 {
   "output_kind": "revert",
   "state_id": null,
-  "reverted_state": "hd-sqr398dvx9ay",
+  "reverted_state": "hc-sqr398dvx9ay",
   "files_affected": ["M src/parser.rs"],
   "message": "Changes applied to worktree (not committed)"
 }
@@ -7212,7 +7279,7 @@ a structured object (`provider`, `model`, optional `session_id` /
 required:
 
 ```json
-{"output_kind": "query_attribution", "status": "completed", "file": "src/lib.rs", "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z", "origins": [{"change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z"}]}]}
+{"output_kind": "query_attribution", "status": "completed", "file": "src/lib.rs", "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hc-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z", "origins": [{"change_id": "hc-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z"}]}]}
 ```
 
 `heddle context reason git --output json` emits:
@@ -7224,25 +7291,25 @@ required:
 `heddle collapse --output json` emits:
 
 ```json
-{"change_id": "hd-collapsed123", "collapsed": 3, "message": "collapse feature checkpoints", "parents": ["hd-base123"]}
+{"change_id": "hc-collapsed123", "collapsed": 3, "message": "collapse feature checkpoints", "parents": ["hc-base123"]}
 ```
 
 `heddle expand --output json` emits the ordered captures recorded by a squashed land collapse:
 
 ```json
-{"output_kind": "expand", "status": "completed", "requested": "HEAD", "collapsed": {"change_id": "hd-collapsed123", "change_id_full": "hd-collapsed123000000000000000000", "git_commit": "abc123def456abc123def456abc123def456abcd", "thread": "feature/parser", "source_count": 2}, "captures": [{"change_id": "hd-source111", "change_id_full": "hd-source1110000000000000000000", "content_hash": "h1-source", "intent": "first parser checkpoint", "principal": "A. Engineer <a@example.com>", "agent": null, "confidence": null, "created_at": "2026-01-01 00:00:00", "parents": ["hd-base123"]}, {"change_id": "hd-source222", "change_id_full": "hd-source2220000000000000000000", "content_hash": "h1-source2", "intent": "second parser checkpoint", "principal": "A. Engineer <a@example.com>", "agent": "codex/gpt-5", "confidence": 0.91, "created_at": "2026-01-01 00:05:00", "parents": ["hd-source111"]}]}
+{"output_kind": "expand", "status": "completed", "requested": "HEAD", "collapsed": {"change_id": "hc-collapsed123", "change_id_full": "hc-collapsed123000000000000000000", "git_commit": "abc123def456abc123def456abc123def456abcd", "thread": "feature/parser", "source_count": 2}, "captures": [{"change_id": "hc-source111", "change_id_full": "hc-source1110000000000000000000", "content_hash": "h1-source", "intent": "first parser checkpoint", "principal": "A. Engineer <a@example.com>", "agent": null, "confidence": null, "created_at": "2026-01-01 00:00:00", "parents": ["hc-base123"]}, {"change_id": "hc-source222", "change_id_full": "hc-source2220000000000000000000", "content_hash": "h1-source2", "intent": "second parser checkpoint", "principal": "A. Engineer <a@example.com>", "agent": "codex/gpt-5", "confidence": 0.91, "created_at": "2026-01-01 00:05:00", "parents": ["hc-source111"]}]}
 ```
 
 `heddle context set|get|list|history|edit|supersede|rm|check|suggest|audit --output json` emit per-subcommand shapes (each carries `output_kind` set to the snake-cased subcommand, e.g. `context_set`, `context_get`) — there is no single shared shape. For example, `context set` (and `edit`/`supersede`/`rm`) reports the mutated target and the new state:
 
 ```json
-{"output_kind": "context_set", "target": "src/lib.rs", "annotations": 1, "state": "hd-k6a0wfrbgcg7"}
+{"output_kind": "context_set", "target": "src/lib.rs", "annotations": 1, "state": "hc-k6a0wfrbgcg7"}
 ```
 
 `heddle context list --output json` wraps its rows in an `items` envelope; the rows themselves carry no per-row discriminator (the envelope owns it). Each row is `{"target_kind": ..., "target": ..., "annotations": [...]}` — it emits:
 
 ```json
-{"output_kind": "context_list", "items": [{"target_kind": "file", "target": "src/lib.rs", "annotations": [{"annotation_id": "hd-hy06md66hab4qb5ctkwphyc22r", "attribution": "A. Engineer <a@example.com>", "content": "returns false on timing mismatch", "created_at": 1767225600, "kind": "rationale", "revision_count": 1, "scope": "file", "status": "active", "supersedes_annotation_id": null, "supersedes_rewrite_pct": null, "tags": []}]}]}
+{"output_kind": "context_list", "items": [{"target_kind": "file", "target": "src/lib.rs", "annotations": [{"annotation_id": "hc-hy06md66hab4qb5ctkwphyc22r", "attribution": "A. Engineer <a@example.com>", "content": "returns false on timing mismatch", "created_at": 1767225600, "kind": "rationale", "revision_count": 1, "scope": "file", "status": "active", "supersedes_annotation_id": null, "supersedes_rewrite_pct": null, "tags": []}]}]}
 ```
 
 `heddle daemon serve|status --output json` emit:
@@ -7348,20 +7415,20 @@ set to the snake-cased subcommand, e.g. `purge_apply`, `purge_list`).
 `.heddleignore` / `.gitignore` glob:
 
 ```json
-{"output_kind": "purge_apply", "redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hd-sqr398dvx9ay", "path": "secrets.env", "redactions_marked": 1, "blob_bytes_removed": false, "blob_remains_in_pack": false, "purger": "A. Engineer <a@example.com>", "message": "purged blob sha256:abc123 at secrets.env in hd-sqr398dvx9ay (1 redaction(s) marked)", "ignore_hint": {"ignore_file": ".heddleignore", "already_exists": false, "suggested_pattern": "secrets.env", "message": "hint: create .heddleignore with `secrets.env` so the next `heddle capture` doesn't re-import the leaked bytes"}}
+{"output_kind": "purge_apply", "redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hc-sqr398dvx9ay", "path": "secrets.env", "redactions_marked": 1, "blob_bytes_removed": false, "blob_remains_in_pack": false, "purger": "A. Engineer <a@example.com>", "message": "purged blob sha256:abc123 at secrets.env in hc-sqr398dvx9ay (1 redaction(s) marked)", "ignore_hint": {"ignore_file": ".heddleignore", "already_exists": false, "suggested_pattern": "secrets.env", "message": "hint: create .heddleignore with `secrets.env` so the next `heddle capture` doesn't re-import the leaked bytes"}}
 ```
 
 `heddle query --output json` emits:
 
 ```json
-{"output_kind": "query", "hits": [{"seq": 1, "timestamp_secs": 1767225600, "verb": "capture", "actor_email": "a@example.com", "operation_id": "op-123", "thread": "main", "symbols": ["verify"], "signal_kinds": ["test_passed"], "change_id": "hd-sqr398dvx9ay"}]}
+{"output_kind": "query", "hits": [{"seq": 1, "timestamp_secs": 1767225600, "verb": "capture", "actor_email": "a@example.com", "operation_id": "op-123", "thread": "main", "symbols": ["verify"], "signal_kinds": ["test_passed"], "change_id": "hc-sqr398dvx9ay"}]}
 ```
 
 `heddle query --attribution --output json` emits structured attribution
 for a tracked file:
 
 ```json
-{"output_kind": "query_attribution", "status": "completed", "file": "src/lib.rs", "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": null, "timestamp": "2026-01-01T00:00:00Z", "origins": null}]}
+{"output_kind": "query_attribution", "status": "completed", "file": "src/lib.rs", "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hc-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": null, "timestamp": "2026-01-01T00:00:00Z", "origins": null}]}
 ```
 
 `heddle redact apply|list|show --output json` emit (each carries
@@ -7371,7 +7438,7 @@ is signed (`--sign-with`); `ignore_hint` only when the path is not yet
 covered by a `.heddleignore` / `.gitignore` glob:
 
 ```json
-{"output_kind": "redact_apply", "redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hd-sqr398dvx9ay", "path": "secrets.env", "reason": "credential", "redactor": "A. Engineer <a@example.com>", "redacted_at": "2026-01-01T00:00:00Z", "all_states": false, "states_redacted": 1, "signed": false, "ignore_hint": {"ignore_file": ".heddleignore", "already_exists": false, "suggested_pattern": "secrets.env", "message": "hint: create .heddleignore with `secrets.env` so the next `heddle capture` doesn't re-import the leaked bytes"}}
+{"output_kind": "redact_apply", "redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hc-sqr398dvx9ay", "path": "secrets.env", "reason": "credential", "redactor": "A. Engineer <a@example.com>", "redacted_at": "2026-01-01T00:00:00Z", "all_states": false, "states_redacted": 1, "signed": false, "ignore_hint": {"ignore_file": ".heddleignore", "already_exists": false, "suggested_pattern": "secrets.env", "message": "hint: create .heddleignore with `secrets.env` so the next `heddle capture` doesn't re-import the leaked bytes"}}
 ```
 
 `heddle redact trust add|list|remove --output json` emit (each carries
@@ -7391,14 +7458,14 @@ set to the snake-cased subcommand). `label` is present only for the
 declaration:
 
 ```json
-{"output_kind": "visibility_set", "state": "hd-sqr398dvx9ay", "tier": "internal", "record_id": "hd-vis123", "declarer": "A. Engineer <a@example.com>", "declared_at": "2026-01-01T00:00:00Z"}
+{"output_kind": "visibility_set", "state": "hc-sqr398dvx9ay", "tier": "internal", "record_id": "hc-vis123", "declarer": "A. Engineer <a@example.com>", "declared_at": "2026-01-01T00:00:00Z"}
 ```
 
 `heddle visibility promote --output json` emits the same shape as `set`,
 with `supersedes` carrying the prior record it replaces:
 
 ```json
-{"output_kind": "visibility_promote", "state": "hd-sqr398dvx9ay", "tier": "internal", "record_id": "hd-vis456", "declarer": "A. Engineer <a@example.com>", "declared_at": "2026-01-01T00:00:00Z", "supersedes": "hd-vis123"}
+{"output_kind": "visibility_promote", "state": "hc-sqr398dvx9ay", "tier": "internal", "record_id": "hc-vis456", "declarer": "A. Engineer <a@example.com>", "declared_at": "2026-01-01T00:00:00Z", "supersedes": "hc-vis123"}
 ```
 
 `heddle visibility show --output json` emits the effective tier for one
@@ -7406,13 +7473,13 @@ state (`effective_public` is true and the declarer fields are omitted when
 no record exists — public-by-absence):
 
 ```json
-{"output_kind": "visibility_show", "state": "hd-sqr398dvx9ay", "tier": "internal", "effective_public": false, "declarer": "A. Engineer <a@example.com>", "declared_at": "2026-01-01T00:00:00Z", "record_count": 1}
+{"output_kind": "visibility_show", "state": "hc-sqr398dvx9ay", "tier": "internal", "effective_public": false, "declarer": "A. Engineer <a@example.com>", "declared_at": "2026-01-01T00:00:00Z", "record_count": 1}
 ```
 
 `heddle visibility list --output json` emits every non-public state:
 
 ```json
-{"output_kind": "visibility_list", "states": [{"state": "hd-sqr398dvx9ay", "tier": "internal", "declarer": "A. Engineer <a@example.com>", "declared_at": "2026-01-01T00:00:00Z"}], "count": 1}
+{"output_kind": "visibility_list", "states": [{"state": "hc-sqr398dvx9ay", "tier": "internal", "declarer": "A. Engineer <a@example.com>", "declared_at": "2026-01-01T00:00:00Z"}], "count": 1}
 ```
 
 `heddle resolve --output json` emits:
@@ -7426,7 +7493,7 @@ no record exists — public-by-absence):
 --full --output json` emits expanded timeline summaries:
 
 ```json
-{"since": "hd-base123", "until": "hd-head456", "duration_secs": 3600, "states_captured": [{"change_id": "hd-head456", "intent": "capture parser fix", "confidence": 0.91, "agent": "codex/gpt-5", "principal": "A. Engineer <a@example.com>", "timestamp": "2026-01-01T00:00:00Z"}], "agents_active": [{"session_id": "session-123", "provider": "codex", "model": "gpt-5", "status": "active", "started_at": "2026-01-01T00:00:00Z", "completed_at": null, "tokens": {"input": 1200, "output": 800, "reasoning": 300, "tool_calls": 12}}], "agent_tasks": [{"task_id": "task-parser-fast", "title": "Tighten parser validation", "status": "in_progress", "target_thread": "feature/parser-fast", "updated_at": "2026-01-01T00:00:00Z", "completed_at": null, "coordination_discussion_id": null}], "timeline_steps": [{"thread": "feature/parser-fast", "step_id": "tls-1", "branch_id": "tlb-main", "parent_step_id": null, "tool_name": "edit", "tool_status": "succeeded", "changed": true, "payload_summary": "Edit parser validation", "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "before_state": "hd-base123", "after_state": "hd-head456", "capture_state": "hd-head456", "started_at_ms": 1770000000000, "finished_at_ms": 1770000001000}], "markers_created": [{"name": "verified-parser", "state": "hd-head456", "timestamp": "2026-01-01T00:00:00Z"}], "context_annotations": [{"path": "src/lib.rs", "scope": "file", "kind": "rationale", "content_excerpt": "Parser accepts the new token form.", "attribution": "A. Engineer <a@example.com>", "created_at": "2026-01-01T00:00:00Z"}], "verify_signals": [{"kind": "test_passed", "label": "verified: cargo test", "timestamp": "2026-01-01T00:00:00Z"}], "merges": [{"description": "Collapsed feature/parser", "timestamp": "2026-01-01T00:00:00Z"}], "undos": [{"description": "Undo capture", "timestamp": "2026-01-01T00:00:00Z"}]}
+{"since": "hc-base123", "until": "hc-head456", "duration_secs": 3600, "states_captured": [{"change_id": "hc-head456", "intent": "capture parser fix", "confidence": 0.91, "agent": "codex/gpt-5", "principal": "A. Engineer <a@example.com>", "timestamp": "2026-01-01T00:00:00Z"}], "agents_active": [{"session_id": "session-123", "provider": "codex", "model": "gpt-5", "status": "active", "started_at": "2026-01-01T00:00:00Z", "completed_at": null, "tokens": {"input": 1200, "output": 800, "reasoning": 300, "tool_calls": 12}}], "agent_tasks": [{"task_id": "task-parser-fast", "title": "Tighten parser validation", "status": "in_progress", "target_thread": "feature/parser-fast", "updated_at": "2026-01-01T00:00:00Z", "completed_at": null, "coordination_discussion_id": null}], "timeline_steps": [{"thread": "feature/parser-fast", "step_id": "tls-1", "branch_id": "tlb-main", "parent_step_id": null, "tool_name": "edit", "tool_status": "succeeded", "changed": true, "payload_summary": "Edit parser validation", "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "before_state": "hc-base123", "after_state": "hc-head456", "capture_state": "hc-head456", "started_at_ms": 1770000000000, "finished_at_ms": 1770000001000}], "markers_created": [{"name": "verified-parser", "state": "hc-head456", "timestamp": "2026-01-01T00:00:00Z"}], "context_annotations": [{"path": "src/lib.rs", "scope": "file", "kind": "rationale", "content_excerpt": "Parser accepts the new token form.", "attribution": "A. Engineer <a@example.com>", "created_at": "2026-01-01T00:00:00Z"}], "verify_signals": [{"kind": "test_passed", "label": "verified: cargo test", "timestamp": "2026-01-01T00:00:00Z"}], "merges": [{"description": "Collapsed feature/parser", "timestamp": "2026-01-01T00:00:00Z"}], "undos": [{"description": "Undo capture", "timestamp": "2026-01-01T00:00:00Z"}]}
 ```
 
 `heddle semantic hot --output json` emits:

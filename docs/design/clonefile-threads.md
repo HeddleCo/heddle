@@ -257,7 +257,7 @@ Otherwise falls back to `virtualized`. Users can override explicitly.
 
 ```toml
 schema_version = 1
-state_id = "hd-xxxxxxxx..."
+state_id = "hc-xxxxxxxx..."
 tree_hash = "blake3..."
 materialized_at = 1778800000
 

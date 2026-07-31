@@ -302,6 +302,14 @@ mod tests {
     }
 
     #[test]
+    fn test_change_id_rejects_legacy_hd_prefix() {
+        let legacy = ChangeId::generate()
+            .to_string_full()
+            .replacen("hc-", "hd-", 1);
+        assert!(ChangeId::parse(&legacy).is_err());
+    }
+
+    #[test]
     fn test_change_id_short() {
         let id = ChangeId::generate();
         let short = id.short();
