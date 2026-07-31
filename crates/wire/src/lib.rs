@@ -16,6 +16,7 @@ mod native_pack;
 mod object_availability;
 mod object_graph;
 mod object_transfer;
+mod provider_pack;
 mod transfer_plan;
 
 pub use auth_token::AuthToken;
@@ -61,6 +62,10 @@ pub use object_transfer::{
     MAX_PULL_FRAME_MESSAGE_SIZE, MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
     MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE, check_received_transfer_blob_size, chunk_bounds,
     chunk_count, chunk_offset, load_object_data, load_requested_object, store_received_object,
+};
+pub use provider_pack::{
+    ProviderPackBundle, ProviderPackExtent, ProviderPackIndexEntry, ProviderPackManifest,
+    assemble_provider_pack,
 };
 pub use transfer_plan::{
     GitLaneTransferIntent, RepositoryTransferPlan, TransferPartitions, TransferPlanStats,

@@ -1,21 +1,29 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
+use api::heddle::api::v1alpha1::ProviderSource;
+use cli_shared::ClientConfig;
 use iroh::{
-    Endpoint, EndpointAddr, RelayMode,
+    Endpoint, EndpointAddr, EndpointId, RelayMode,
     endpoint::{AckFrequencyConfig, QuicTransportConfig, presets},
 };
+use tokio::sync::Mutex;
 
-use super::{HostedError, Result, VerifiedEndpointDescriptor};
+use super::{
+    HostedError, Result, VerifiedEndpointDescriptor, provider_transport::ProviderWebSocketTransport,
+};
 
 #[derive(Debug)]
 pub(super) struct HostedConnection {
     pub(super) endpoint: Endpoint,
     pub(super) connection: iroh::endpoint::Connection,
+    provider_transport: Option<ProviderWebSocketTransport>,
+    provider_connections: Mutex<HashMap<EndpointId, iroh::endpoint::Connection>>,
 }
 
 impl HostedConnection {
     pub(super) async fn connect_verified(
         descriptor: &VerifiedEndpointDescriptor,
+        config: &ClientConfig,
     ) -> Result<Arc<Self>> {
         let relays = descriptor.relay_urls()?;
         let address = descriptor.endpoint_addr()?;
@@ -24,16 +32,26 @@ impl HostedConnection {
         } else {
             RelayMode::custom(relays)
         };
+        let provider_transport = ProviderWebSocketTransport::new(config.clone());
         let endpoint = Endpoint::builder(presets::Minimal)
             .transport_config(transport_config())
             .relay_mode(relay_mode)
+            .add_custom_transport(Arc::new(provider_transport.clone()))
             .bind()
             .await
             .map_err(HostedError::transport)?;
-        Self::connect(endpoint, address).await
+        Self::connect_inner(endpoint, address, Some(provider_transport)).await
     }
 
     pub(super) async fn connect(endpoint: Endpoint, address: EndpointAddr) -> Result<Arc<Self>> {
+        Self::connect_inner(endpoint, address, None).await
+    }
+
+    async fn connect_inner(
+        endpoint: Endpoint,
+        address: EndpointAddr,
+        provider_transport: Option<ProviderWebSocketTransport>,
+    ) -> Result<Arc<Self>> {
         let connection = match endpoint.connect(address, api::HOSTED_ALPN_V1).await {
             Ok(connection) => connection,
             Err(error) => {
@@ -44,7 +62,52 @@ impl HostedConnection {
         Ok(Arc::new(Self {
             endpoint,
             connection,
+            provider_transport,
+            provider_connections: Mutex::new(HashMap::new()),
         }))
+    }
+
+    pub(super) fn endpoint_id(&self) -> EndpointId {
+        self.endpoint.id()
+    }
+
+    pub(super) fn supports_provider_transport(&self) -> bool {
+        self.provider_transport.is_some()
+    }
+
+    pub(super) async fn provider_connection(
+        &self,
+        source: &ProviderSource,
+    ) -> Result<iroh::endpoint::Connection> {
+        let endpoint_id: EndpointId = source.endpoint_id.parse().map_err(|error| {
+            HostedError::InvalidDescriptor(format!("provider endpoint id: {error}"))
+        })?;
+        let mut connections = self.provider_connections.lock().await;
+        if let Some(connection) = connections.get(&endpoint_id)
+            && connection.close_reason().is_none()
+        {
+            return Ok(connection.clone());
+        }
+        connections.remove(&endpoint_id);
+
+        let transport = self.provider_transport.as_ref().ok_or_else(|| {
+            HostedError::InvalidDescriptor(
+                "the active Iroh endpoint has no provider transport".to_string(),
+            )
+        })?;
+        let address = transport.register_source(
+            &source.provider_id,
+            &source.endpoint_id,
+            &source.direct_url,
+            &source.opaque_ticket,
+        )?;
+        let connection = self
+            .endpoint
+            .connect(address, api::PROVIDER_ALPN_V1)
+            .await
+            .map_err(HostedError::transport)?;
+        connections.insert(endpoint_id, connection.clone());
+        Ok(connection)
     }
 
     pub(super) async fn close(&self) {
@@ -77,6 +140,7 @@ fn transport_config() -> QuicTransportConfig {
 mod tests {
     use std::{net::Ipv4Addr, time::Duration};
 
+    use api::heddle::api::v1alpha1::ProviderSource;
     use iroh::{Endpoint, RelayMode, endpoint::presets};
 
     use super::HostedConnection;
@@ -118,6 +182,63 @@ mod tests {
 
         assert!(result.is_err());
         assert!(client_observer.is_closed());
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn provider_connection_is_reused_by_cryptographic_endpoint_id() {
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let server_id = server.id();
+        let server_addr = server.addr();
+        let server_task = tokio::spawn(async move {
+            let connection = server
+                .accept()
+                .await
+                .expect("incoming connection")
+                .await
+                .unwrap();
+            connection.closed().await;
+            server.close().await;
+        });
+        let client = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let connection = HostedConnection::connect(client, server_addr)
+            .await
+            .unwrap();
+        connection
+            .provider_connections
+            .lock()
+            .await
+            .insert(server_id, connection.connection.clone());
+
+        let reused = connection
+            .provider_connection(&ProviderSource {
+                provider_id: "provider-a".to_string(),
+                endpoint_id: server_id.to_string(),
+                direct_url: "wss://unused.invalid/direct?provider=provider-a&ticket=unused"
+                    .to_string(),
+                opaque_ticket: "unused".to_string(),
+                expires_at_unix_millis: u64::MAX,
+            })
+            .await
+            .unwrap();
+
+        assert!(reused.close_reason().is_none());
+        assert_eq!(connection.provider_connections.lock().await.len(), 1);
+        println!("provider_connection_reuse endpoint={server_id} connection_count=1 reused=true");
+        connection.close().await;
         server_task.await.unwrap();
     }
 }

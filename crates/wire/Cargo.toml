@@ -10,6 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+blake3.workspace = true
 # `objects/zstd` is forwarded via this crate's own `zstd` feature
 # instead of being hardcoded on. Hardcoding here meant every consumer
 # (repo → ingest → cli) got zstd unconditionally even

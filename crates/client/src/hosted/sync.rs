@@ -14,12 +14,13 @@ use api::heddle::api::v1alpha1::{
     GitRefKind as ProtoGitRefKind, GitRefUpdateTransfer,
     IntegrationPolicyStatus as ProtoIntegrationPolicyStatus, ListRefsRequest,
     ObjectAvailabilityStatus, ObjectDescriptor, PackChunk, PackStreamKind, PartialFetchStatus,
-    PullClientFrame, PullRequest, PullServerFrame, PushClientFrame, PushRequest, PushServerFrame,
-    RedactionTransfer, StateAttachmentTransfer, StateVisibilityTransfer, StreamOpeningProof,
-    ThreadConfidenceSummary, ThreadFreshness as ProtoThreadFreshness, ThreadIntegrationPolicy,
-    ThreadMetadata, ThreadMode as ProtoThreadMode, ThreadVerificationSummary, TransportMode,
-    UpdateRefRequest, WantObjects, git_lane_transfer, pull_client_frame, pull_server_frame,
-    push_client_frame, push_server_frame, thread_state::Kind as ProtoThreadState,
+    ProviderPlanChallenge, PullClientFrame, PullRequest, PullServerFrame, PushClientFrame,
+    PushRequest, PushServerFrame, RedactionTransfer, StateAttachmentTransfer,
+    StateVisibilityTransfer, StreamOpeningProof, ThreadConfidenceSummary,
+    ThreadFreshness as ProtoThreadFreshness, ThreadIntegrationPolicy, ThreadMetadata,
+    ThreadMode as ProtoThreadMode, ThreadVerificationSummary, TransportMode, UpdateRefRequest,
+    WantObjects, git_lane_transfer, pull_client_frame, pull_server_frame, push_client_frame,
+    push_server_frame, thread_state::Kind as ProtoThreadState,
 };
 use objects::{
     Progress,
@@ -242,6 +243,7 @@ impl HostedClient {
         route: &str,
         repository: &str,
         resume_cursor: &str,
+        capability_context: Vec<u8>,
     ) -> Result<StreamOpeningProof, ProtocolError> {
         self.stream_opening_proof(
             route,
@@ -250,7 +252,7 @@ impl HostedClient {
                 ProtocolError::InvalidState("invalid repository path".to_string())
             })?,
             resume_cursor,
-            Vec::new(),
+            capability_context,
         )
         .map_err(hosted_to_protocol_error)
     }
@@ -672,6 +674,7 @@ impl HostedClient {
                     "/heddle.api.v1alpha1.RepoSyncService/Push",
                     repo_path,
                     "",
+                    Vec::new(),
                 )?,
             )),
             client_operation_id: operation_id.to_wire(),
@@ -1134,6 +1137,8 @@ impl HostedClient {
             options.target_state,
             uuid::Uuid::new_v4(),
         );
+        let (provider_session, provider_capability_context) =
+            self.begin_provider_pull(&transfer_id, repo_path)?;
         let request_message = PullClientFrame {
             frame: Some(pull_client_frame::Frame::Request(PullRequest {
                 repo_path: super::helpers::repository_ref(repo_path),
@@ -1173,6 +1178,7 @@ impl HostedClient {
                     "/heddle.api.v1alpha1.RepoSyncService/Pull",
                     repo_path,
                     "",
+                    provider_capability_context,
                 )?,
             )),
         })
@@ -1241,11 +1247,10 @@ impl HostedClient {
         })
         .await
         .map_err(|_| ProtocolError::InvalidState("pull stream closed unexpectedly".to_string()))?;
-        drop(tx);
-        request_pump
-            .await
-            .map_err(|err| ProtocolError::InvalidState(format!("pull request task failed: {err}")))?
-            .map_err(hosted_to_protocol_error)?;
+        let mut tx = Some(tx);
+        if !native_pack_required {
+            tx.take();
+        }
 
         let receive_start = Instant::now();
         let use_pack_spool = advertised_object_count > PULL_PACK_SPOOL_OBJECT_THRESHOLD;
@@ -1259,10 +1264,40 @@ impl HostedClient {
         let mut git_pack_state = GitPackPullInstallState::default();
         let mut staged_git_lane =
             StagedGitLanePull::snapshot(repo, options.target_state.is_none())?;
+        let mut consented_provider_plan: Option<ProviderPlanChallenge> = None;
+        let mut provider_pack = None;
+        let mut provider_fallback = false;
+        let mut ordinary_pack_received = false;
         let mut received = 0usize;
         while let Some(message) = next_pull_message(&mut response).await? {
             match message.frame {
                 Some(pull_server_frame::Frame::Pack(chunk)) => {
+                    if let Some(challenge) = consented_provider_plan.as_ref()
+                        && !provider_fallback
+                        && provider_pack.is_none()
+                    {
+                        provider_fallback = true;
+                        let sender = tx.as_ref().ok_or_else(|| {
+                            ProtocolError::InvalidState(
+                                "provider negotiation closed before fallback".to_string(),
+                            )
+                        })?;
+                        sender
+                            .send(PullClientFrame {
+                                frame: Some(pull_client_frame::Frame::ProviderResult(
+                                    provider_session
+                                        .fallback_response(&challenge.grant_batch_digest),
+                                )),
+                            })
+                            .await
+                            .map_err(|_| {
+                                ProtocolError::InvalidState(
+                                    "pull stream closed during provider fallback".to_string(),
+                                )
+                            })?;
+                    }
+                    tx.take();
+                    ordinary_pack_received = true;
                     profile.bytes_received =
                         profile.bytes_received.saturating_add(chunk.data.len());
                     profile.pack_bytes_received =
@@ -1304,6 +1339,96 @@ impl HostedClient {
                     profile.pack_decode += decode_elapsed;
                     profile.pack_decode_apply += decode_elapsed;
                     profile.decode += decode_elapsed;
+                }
+                Some(pull_server_frame::Frame::ProviderChallenge(challenge)) => {
+                    let (plan, consented_challenge) = if consented_provider_plan.is_some()
+                        || provider_fallback
+                    {
+                        provider_fallback = true;
+                        consented_provider_plan = None;
+                        (
+                            self.decline_provider_challenge(&provider_session, Some(&challenge)),
+                            None,
+                        )
+                    } else {
+                        match self.answer_provider_challenge(&provider_session, &challenge) {
+                            Ok(plan) => (plan, Some(challenge.clone())),
+                            Err(_) => {
+                                provider_fallback = true;
+                                (
+                                    self.decline_provider_challenge(
+                                        &provider_session,
+                                        Some(&challenge),
+                                    ),
+                                    None,
+                                )
+                            }
+                        }
+                    };
+                    let accepted = plan.accepted;
+                    tx.as_ref()
+                        .ok_or_else(|| {
+                            ProtocolError::InvalidState(
+                                "provider challenge arrived after request completion".to_string(),
+                            )
+                        })?
+                        .send(PullClientFrame {
+                            frame: Some(pull_client_frame::Frame::ProviderPlan(plan)),
+                        })
+                        .await
+                        .map_err(|_| {
+                            ProtocolError::InvalidState(
+                                "pull stream closed during provider plan consent".to_string(),
+                            )
+                        })?;
+                    if let Some(challenge) = consented_challenge {
+                        consented_provider_plan = Some(challenge);
+                    }
+                    if !accepted {
+                        tx.take();
+                    }
+                }
+                Some(pull_server_frame::Frame::ProviderManifest(manifest)) => {
+                    let result = match consented_provider_plan.as_ref() {
+                        Some(challenge) if !provider_fallback && provider_pack.is_none() => {
+                            self.download_provider_pull(&provider_session, challenge, &manifest)
+                                .await
+                        }
+                        _ => Err(ProtocolError::InvalidState(
+                            "provider manifest arrived without one matching consent".to_string(),
+                        )),
+                    };
+                    let provider_result = match result {
+                        Ok(completed) => {
+                            let response = provider_session.complete_response(
+                                &manifest.grant_batch_digest,
+                                completed.trailer_digest,
+                            );
+                            provider_pack = Some(completed);
+                            response
+                        }
+                        Err(_) => {
+                            provider_fallback = true;
+                            provider_pack = None;
+                            provider_session.fallback_response(&manifest.grant_batch_digest)
+                        }
+                    };
+                    tx.as_ref()
+                        .ok_or_else(|| {
+                            ProtocolError::InvalidState(
+                                "provider manifest arrived after request completion".to_string(),
+                            )
+                        })?
+                        .send(PullClientFrame {
+                            frame: Some(pull_client_frame::Frame::ProviderResult(provider_result)),
+                        })
+                        .await
+                        .map_err(|_| {
+                            ProtocolError::InvalidState(
+                                "pull stream closed during provider result".to_string(),
+                            )
+                        })?;
+                    tx.take();
                 }
                 Some(pull_server_frame::Frame::Redaction(transfer)) => {
                     // Out-of-pack channel: receive a redaction sidecar
@@ -1388,35 +1513,58 @@ impl HostedClient {
                     profile.store_receive_object += decode_elapsed;
                 }
                 Some(pull_server_frame::Frame::Complete(complete)) => {
+                    tx.take();
+                    request_pump
+                        .await
+                        .map_err(|err| {
+                            ProtocolError::InvalidState(format!("pull request task failed: {err}"))
+                        })?
+                        .map_err(hosted_to_protocol_error)?;
                     profile.receive_and_apply = receive_start.elapsed();
                     git_pack_state.ensure_idle()?;
                     let final_state = super::helpers::parse_proto_state_id(complete.new_state)?;
 
                     if complete.success {
                         apply_staged_git_lane_pull(repo, &mut git_lane_repo, &mut staged_git_lane)?;
-                        if native_pack_required {
+                        if native_pack_required || provider_pack.is_some() || ordinary_pack_received
+                        {
                             let store_start = Instant::now();
-                            let installed_ids = if let Some(pack_spool) = pack_spool.as_mut() {
-                                if !pack_spool.is_complete() {
-                                    return Err(ProtocolError::InvalidState(
-                                        "pull completed before native pack stream finished"
-                                            .to_string(),
-                                    ));
-                                }
-                                pack_spool.install_into(repo.store())?
-                            } else {
-                                if !pack_state.is_complete() {
-                                    return Err(ProtocolError::InvalidState(
-                                        "pull completed before native pack stream finished"
-                                            .to_string(),
-                                    ));
-                                }
-                                wire::install_received_pack(
+                            let mut installed_ids = Vec::new();
+                            if let Some(provider_pack) = provider_pack.as_ref() {
+                                installed_ids.extend(wire::install_received_pack(
                                     repo.store(),
-                                    &pack_state.pack_data,
-                                    &pack_state.index_data,
-                                )?
-                            };
+                                    &provider_pack.pack.pack_data,
+                                    &provider_pack.pack.index_data,
+                                )?);
+                            }
+                            if ordinary_pack_received {
+                                if let Some(pack_spool) = pack_spool.as_mut() {
+                                    if !pack_spool.is_complete() {
+                                        return Err(ProtocolError::InvalidState(
+                                            "pull completed before native pack stream finished"
+                                                .to_string(),
+                                        ));
+                                    }
+                                    installed_ids.extend(pack_spool.install_into(repo.store())?);
+                                } else {
+                                    if !pack_state.is_complete() {
+                                        return Err(ProtocolError::InvalidState(
+                                            "pull completed before native pack stream finished"
+                                                .to_string(),
+                                        ));
+                                    }
+                                    installed_ids.extend(wire::install_received_pack(
+                                        repo.store(),
+                                        &pack_state.pack_data,
+                                        &pack_state.index_data,
+                                    )?);
+                                }
+                            }
+                            if installed_ids.is_empty() {
+                                return Err(ProtocolError::InvalidState(
+                                    "pull completed without its required native pack".to_string(),
+                                ));
+                            }
                             profile.store_receive_object += store_start.elapsed();
                             received = installed_ids.len();
                             for id in installed_ids {

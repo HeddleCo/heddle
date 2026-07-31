@@ -222,6 +222,33 @@ impl CallContextFactory {
         })
     }
 
+    pub(crate) fn provider_plan_signature(
+        &self,
+        stream_id: &str,
+        repository: &str,
+        client_endpoint_id: &str,
+        plan_nonce: &[u8],
+        grant_batch_digest: &[u8],
+    ) -> Result<Vec<u8>> {
+        let signer = self
+            .signer
+            .as_ref()
+            .ok_or(HostedError::SigningIdentityRequired)?;
+        let identity = self
+            .signing_identity
+            .as_deref()
+            .ok_or(HostedError::SigningIdentityRequired)?;
+        let canonical = signing::provider_plan_bytes(
+            identity,
+            stream_id,
+            repository,
+            client_endpoint_id,
+            plan_nonce,
+            grant_batch_digest,
+        );
+        Ok(signer.sign(&canonical)?)
+    }
+
     fn base(&self, method: &str, client_operation_id: String) -> Result<CallContext> {
         Ok(CallContext {
             deadline: Some(deadline(self.timeout)?),

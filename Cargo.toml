@@ -63,13 +63,16 @@ sley-transport = "0.5.2"
 hex = "0.4"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 ignore = "0.4"
-iroh = { version = "=1.0.2", git = "https://github.com/n0-computer/iroh.git", rev = "cc876c75e53171dfcaf2e5fa0b81a417904694ba", default-features = false, features = ["tls-ring"] }
+iroh = { version = "=1.0.3", git = "https://github.com/HeddleCo/iroh.git", rev = "6d50cebc0a18a8b2d2cc9303d938bd5fa39fffd6", default-features = false, features = ["tls-ring", "unstable-custom-transports", "unstable-custom-transport-backpressure"] }
+iroh-base = { version = "=1.0.3", git = "https://github.com/HeddleCo/iroh.git", rev = "6d50cebc0a18a8b2d2cc9303d938bd5fa39fffd6" }
 libc = "0.2"
 lru = "0.18"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 memmap2 = "0.9"
+n0-watcher = "=1.0.0"
 notify = "8"
 ntest = "0.9"
+noq-udp = { version = "=1.1.0", default-features = false }
 proptest = "1"
 p256 = { version = "0.14", features = ["ecdsa", "pem", "getrandom"] }
 pkcs8 = { version = "0.11", features = ["pem", "encryption"] }
