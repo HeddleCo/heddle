@@ -11,6 +11,15 @@ recorded here. Hosted-product work (Postgres, Biscuit, the web app,
 GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 `HeddleCo/tapestry` repos.
 
+## Unreleased
+
+### Fixed
+
+- **Native pull preserves managed threads.** Pulling a pushed managed thread
+  into a clone now restores its thread metadata, so `thread list` exposes its
+  integration target and `land` reaches the real merge verdict instead of
+  diagnosing the pulled ref as Git damage.
+
 ## 0.11.0 - 2026-07-31
 
 ### Breaking

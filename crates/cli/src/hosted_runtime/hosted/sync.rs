@@ -9,8 +9,8 @@ use std::{
 };
 
 use api::heddle::api::v1alpha1::{
-    ConfidenceBand as ProtoConfidenceBand, GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer,
-    GitObjectAlgorithm, GitObjectId as ProtoGitObjectId, GitPackTransfer,
+    ConfidenceBand as ProtoConfidenceBand, GetBlobRequest, GetThreadRequest, GitCheckpointTransfer,
+    GitLaneTransfer, GitObjectAlgorithm, GitObjectId as ProtoGitObjectId, GitPackTransfer,
     GitRefKind as ProtoGitRefKind, GitRefUpdateTransfer,
     IntegrationPolicyStatus as ProtoIntegrationPolicyStatus, ListRefsRequest,
     ObjectAvailabilityStatus, ObjectDescriptor, PackChunk, PackStreamKind, PartialFetchStatus,
@@ -296,6 +296,40 @@ impl HostedClient {
                 })
             })
             .collect()
+    }
+
+    /// Fetch and validate the managed record for a pulled hosted thread.
+    pub async fn get_thread_metadata(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        remote_thread: &str,
+        pulled_state: StateId,
+    ) -> Result<SyncedThreadMetadata, ProtocolError> {
+        let request = GetThreadRequest {
+            repo_path: super::helpers::repository_ref(repo_path),
+            name: remote_thread.to_string(),
+        };
+        let summary = match self.routes().get_thread(&request).await {
+            Ok(summary) => summary,
+            Err(error) => {
+                let error = hosted_to_protocol_error(error);
+                if matches!(
+                    error,
+                    ProtocolError::ObjectNotFound(_)
+                        | ProtocolError::RemoteFailure {
+                            code: wire::RemoteFailureCode::NotFound,
+                            ..
+                        }
+                ) {
+                    return Err(ProtocolError::InvalidState(format!(
+                        "hosted thread '{remote_thread}' has no managed metadata; no local thread was created"
+                    )));
+                }
+                return Err(error);
+            }
+        };
+        super::thread_metadata::from_summary(repo, remote_thread, pulled_state, summary)
     }
 
     #[allow(clippy::too_many_arguments)]

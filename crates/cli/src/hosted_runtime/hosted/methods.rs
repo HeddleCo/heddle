@@ -292,6 +292,13 @@ impl HostedRoutes<'_> {
         CheckMergeEligibilityResponse
     );
     unary_method!(
+        get_thread,
+        "WorkflowService",
+        "GetThread",
+        GetThreadRequest,
+        ThreadSummary
+    );
+    unary_method!(
         list_thread_approvals,
         "WorkflowService",
         "ListThreadApprovals",
