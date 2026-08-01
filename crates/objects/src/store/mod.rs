@@ -658,6 +658,11 @@ pub trait ObjectStore: Send + Sync {
                 (pack::PackObjectId::StateId(change_id), pack::ObjectType::State) => {
                     self.put_state_serialized(&data, *change_id)?;
                 }
+                (_, pack::ObjectType::TimelineOperation) => {
+                    return Err(HeddleError::InvalidObject(
+                        "timeline operations belong in the timeline pack store".to_string(),
+                    ));
+                }
                 _ => {
                     return Err(HeddleError::InvalidObject(format!(
                         "unsupported native pack object: {:?} {:?}",

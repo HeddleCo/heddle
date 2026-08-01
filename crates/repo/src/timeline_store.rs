@@ -5,6 +5,7 @@ use std::{
     fs,
     fs::OpenOptions,
     path::{Path, PathBuf},
+    sync::RwLock,
 };
 
 use objects::{
@@ -15,15 +16,17 @@ use objects::{
         StateId, TimelineBranchId, TimelineCodecError, TimelineCursorMoveReason,
         TimelineOperationEnvelope, TimelineOperationId, TimelineStepId,
     },
+    store::recover_pack_install_intents,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::thread_manifest::encode_thread_segment;
+use crate::{thread_manifest::encode_thread_segment, timeline_pack::TimelinePackSet};
 
 pub const TIMELINE_MATERIALIZATION_RECOVERY_SCHEMA_VERSION: u16 = 1;
 pub const TIMELINE_OPERATION_INDEX_SCHEMA_VERSION: u16 = 1;
 const TIMELINE_DIR: &str = "timeline";
 const OPS_DIR: &str = "ops";
+const PACKS_DIR: &str = "packs";
 const INDEXES_DIR: &str = "indexes";
 const VIEWS_DIR: &str = "views";
 const SYNC_DIR: &str = "sync";
@@ -85,14 +88,18 @@ impl TimelineMaterializationRecoveryRecord {
 pub struct TimelineStore {
     root: PathBuf,
     lock: RepoLock,
+    packs: RwLock<TimelinePackSet>,
 }
 
 impl TimelineStore {
     /// Open or create the timeline store under `<heddle_dir>/timeline`.
     pub fn open(heddle_dir: impl AsRef<Path>) -> Result<Self> {
         let root = heddle_dir.as_ref().join(TIMELINE_DIR);
+        fs::create_dir_all(root.join(PACKS_DIR))?;
+        recover_pack_install_intents(&root.join(PACKS_DIR))?;
         let store = Self {
             lock: RepoLock::at(root.join(LOCK_FILE)),
+            packs: RwLock::new(TimelinePackSet::open(root.join(PACKS_DIR))?),
             root,
         };
         store.init()?;
@@ -107,6 +114,7 @@ impl TimelineStore {
     /// Ensure the timeline layout exists.
     pub fn init(&self) -> Result<()> {
         fs::create_dir_all(self.ops_dir())?;
+        fs::create_dir_all(self.packs_dir())?;
         fs::create_dir_all(self.root.join(INDEXES_DIR))?;
         fs::create_dir_all(self.root.join(VIEWS_DIR))?;
         fs::create_dir_all(self.root.join(SYNC_DIR))?;
@@ -158,7 +166,11 @@ impl TimelineStore {
         let _guard = self.lock.read().map_err(timeline_lock_error)?;
         match fs::read(path) {
             Ok(bytes) => Ok(Some(bytes)),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let mut packs = self.packs.write().map_err(timeline_pack_lock_error)?;
+                packs.reload_if_disk_changed()?;
+                packs.read_operation(id)
+            }
             Err(err) => Err(err.into()),
         }
     }
@@ -187,6 +199,106 @@ impl TimelineStore {
         let path = self.operation_index_path();
         let _guard = self.lock.read().map_err(timeline_lock_error)?;
         read_operation_index_unlocked(&path)
+    }
+
+    pub(crate) fn canonical_operation_ids(&self) -> Result<Vec<TimelineOperationId>> {
+        let _guard = self.lock.read().map_err(timeline_lock_error)?;
+        let mut operation_ids = self
+            .loose_operation_paths()?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        let mut packs = self.packs.write().map_err(timeline_pack_lock_error)?;
+        packs.reload_if_disk_changed()?;
+        operation_ids.extend(packs.operation_ids());
+        operation_ids.sort();
+        operation_ids.dedup();
+        Ok(operation_ids)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn loose_operation_ids(&self) -> Result<Vec<TimelineOperationId>> {
+        let _guard = self.lock.read().map_err(timeline_lock_error)?;
+        Ok(self
+            .loose_operation_paths()?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect())
+    }
+
+    /// Number of loose canonical timeline-operation files.
+    pub fn loose_operation_count(&self) -> Result<u64> {
+        let _guard = self.lock.read().map_err(timeline_lock_error)?;
+        u64::try_from(self.loose_operation_paths()?.len()).map_err(|_| {
+            HeddleError::InvalidObject("timeline operation count exceeds u64".to_string())
+        })
+    }
+
+    /// Consolidate every canonical timeline operation into one pack.
+    pub fn pack_operations(&self, aggressive: bool) -> Result<(u64, u64)> {
+        let _guard = self.lock.write().map_err(timeline_lock_error)?;
+        let loose_operations = self.read_loose_operations()?;
+        let mut packs = self.packs.write().map_err(timeline_pack_lock_error)?;
+        packs.consolidate(loose_operations, aggressive)
+    }
+
+    /// Remove loose operations only when an identical packed copy resolves.
+    pub fn prune_loose_operations(&self) -> Result<(u64, u64)> {
+        let _guard = self.lock.write().map_err(timeline_lock_error)?;
+        let loose_paths = self.loose_operation_paths()?;
+        let mut packs = self.packs.write().map_err(timeline_pack_lock_error)?;
+        packs.reload()?;
+        let mut removed = 0u64;
+        let mut bytes_freed = 0u64;
+        for (id, path) in loose_paths {
+            let loose_bytes = match fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err.into()),
+            };
+            if packs.read_operation(&id)?.as_deref() != Some(loose_bytes.as_slice()) {
+                continue;
+            }
+            let len = fs::metadata(&path)?.len();
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    removed += 1;
+                    bytes_freed += len;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+        remove_empty_operation_shards(&self.ops_dir())?;
+        Ok((removed, bytes_freed))
+    }
+
+    /// Remove timeline `.pack` files that have no matching index.
+    pub fn prune_unpaired_packs(&self) -> Result<(u64, u64)> {
+        let _guard = self.lock.write().map_err(timeline_lock_error)?;
+        let mut removed = 0u64;
+        let mut bytes_freed = 0u64;
+        for entry in fs::read_dir(self.packs_dir())? {
+            let path = entry?.path();
+            if !path.is_file()
+                || !path
+                    .extension()
+                    .is_some_and(|extension| extension == "pack")
+                || path.with_extension("idx").is_file()
+            {
+                continue;
+            }
+            let len = fs::metadata(&path)?.len();
+            match fs::remove_file(path) {
+                Ok(()) => {
+                    removed += 1;
+                    bytes_freed += len;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+        Ok((removed, bytes_freed))
     }
 
     pub(crate) fn write_operation_index(
@@ -307,6 +419,36 @@ impl TimelineStore {
         self.root.join(OPS_DIR)
     }
 
+    fn loose_operation_paths(&self) -> Result<Vec<(TimelineOperationId, PathBuf)>> {
+        let mut paths = Vec::new();
+        collect_loose_operation_paths(&self.ops_dir(), &mut paths)?;
+        paths.sort_by_key(|(id, _)| *id);
+        Ok(paths)
+    }
+
+    fn read_loose_operations(&self) -> Result<Vec<(TimelineOperationId, Vec<u8>)>> {
+        self.loose_operation_paths()?
+            .into_iter()
+            .map(|(id, path)| {
+                let bytes = fs::read(path)?;
+                let computed_id = TimelineOperationId::for_bytes(&bytes);
+                if computed_id != id {
+                    return Err(HeddleError::InvalidObject(format!(
+                        "loose timeline operation id mismatch: expected {}, decoded {}",
+                        id.short(),
+                        computed_id.short()
+                    )));
+                }
+                TimelineOperationEnvelope::decode(&bytes).map_err(timeline_codec_error)?;
+                Ok((id, bytes))
+            })
+            .collect()
+    }
+
+    fn packs_dir(&self) -> PathBuf {
+        self.root.join(PACKS_DIR)
+    }
+
     fn operation_index_path(&self) -> PathBuf {
         self.root.join(INDEXES_DIR).join(OPERATION_INDEX_FILE)
     }
@@ -354,6 +496,84 @@ fn write_operation_index_unlocked(
     Ok(())
 }
 
+fn collect_loose_operation_paths(
+    dir: &Path,
+    paths: &mut Vec<(TimelineOperationId, PathBuf)>,
+) -> Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_loose_operation_paths(&path, paths)?;
+        } else if file_type.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "msgpack")
+        {
+            paths.push((operation_id_from_path(&path)?, path));
+        }
+    }
+    Ok(())
+}
+
+fn operation_id_from_path(path: &Path) -> Result<TimelineOperationId> {
+    let prefix = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            HeddleError::InvalidObject(format!(
+                "timeline operation path has no shard prefix: {}",
+                path.display()
+            ))
+        })?;
+    let rest = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            HeddleError::InvalidObject(format!(
+                "timeline operation path has no file stem: {}",
+                path.display()
+            ))
+        })?;
+    let raw = hex::decode(format!("{prefix}{rest}")).map_err(|err| {
+        HeddleError::InvalidObject(format!(
+            "timeline operation path has invalid id '{}': {err}",
+            path.display()
+        ))
+    })?;
+    TimelineOperationId::try_from_slice(&raw).map_err(|err| {
+        HeddleError::InvalidObject(format!(
+            "timeline operation path has invalid id length '{}': {err}",
+            path.display()
+        ))
+    })
+}
+
+fn remove_empty_operation_shards(ops_dir: &Path) -> Result<()> {
+    for entry in fs::read_dir(ops_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if fs::read_dir(&path)?.next().is_none() {
+            match fs::remove_dir(path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn timeline_codec_error(err: TimelineCodecError) -> HeddleError {
     HeddleError::InvalidObject(err.to_string())
 }
@@ -362,8 +582,16 @@ fn timeline_lock_error(err: objects::lock::LockError) -> HeddleError {
     HeddleError::InvalidObject(format!("acquire timeline store lock: {err}"))
 }
 
+fn timeline_pack_lock_error<T>(_: std::sync::PoisonError<T>) -> HeddleError {
+    HeddleError::InvalidObject("acquire timeline pack index lock".to_string())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+
     use objects::object::{
         BranchCreatedV1, StateId, TimelineBranchId, TimelineBranchReason, TimelineOperationBodyV1,
         TimelineOperationEnvelope, TimelineStepId,
@@ -385,6 +613,23 @@ mod tests {
             }),
             Vec::new(),
         )
+    }
+
+    fn directory_sizes(path: &Path) -> (u64, u64) {
+        let metadata = std::fs::metadata(path).unwrap();
+        let mut apparent = metadata.len();
+        #[cfg(unix)]
+        let mut allocated = metadata.blocks() * 512;
+        #[cfg(not(unix))]
+        let mut allocated = apparent;
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path).unwrap() {
+                let (entry_apparent, entry_allocated) = directory_sizes(&entry.unwrap().path());
+                apparent += entry_apparent;
+                allocated += entry_allocated;
+            }
+        }
+        (apparent, allocated)
     }
 
     #[test]
@@ -424,6 +669,131 @@ mod tests {
 
         assert_eq!(store.write_operation(&sample_envelope()).unwrap(), id);
         assert_eq!(store.read_operation_index().unwrap(), Some(vec![id]));
+    }
+
+    #[test]
+    fn timeline_store_fails_open_on_corrupt_paired_pack() {
+        let temp = TempDir::new().unwrap();
+        let heddle_dir = temp.path().join(".heddle");
+        let store = TimelineStore::open(&heddle_dir).unwrap();
+        std::fs::write(store.packs_dir().join("corrupt.pack"), b"not a pack").unwrap();
+        std::fs::write(store.packs_dir().join("corrupt.idx"), b"not an index").unwrap();
+        drop(store);
+
+        assert!(TimelineStore::open(&heddle_dir).is_err());
+    }
+
+    #[test]
+    fn timeline_store_prunes_only_unpaired_pack_files() {
+        let temp = TempDir::new().unwrap();
+        let store = TimelineStore::open(temp.path().join(".heddle")).unwrap();
+        std::fs::write(store.packs_dir().join("orphan.pack"), b"orphan").unwrap();
+        std::fs::write(store.packs_dir().join("index-only.idx"), b"index").unwrap();
+
+        assert_eq!(store.prune_unpaired_packs().unwrap(), (1, 6));
+        assert!(!store.packs_dir().join("orphan.pack").exists());
+        assert!(store.packs_dir().join("index-only.idx").exists());
+    }
+
+    #[test]
+    fn timeline_repack_carries_forward_existing_packed_operations() {
+        let temp = TempDir::new().unwrap();
+        let store = TimelineStore::open(temp.path().join(".heddle")).unwrap();
+        let first = sample_envelope();
+        let first_id = store.write_operation(&first).unwrap();
+        let first_bytes = first.encode().unwrap();
+        store.pack_operations(false).unwrap();
+        store.prune_loose_operations().unwrap();
+
+        let second = TimelineOperationEnvelope::new(
+            TimelineOperationBodyV1::BranchCreated(BranchCreatedV1 {
+                thread: "main".to_string(),
+                branch_id: TimelineBranchId::new("tlb-second"),
+                parent_branch_id: Some(TimelineBranchId::new("tlb-child")),
+                from_step_id: Some(TimelineStepId::new("tls-root")),
+                from_state: StateId::from_bytes([1; 32]),
+                reason: TimelineBranchReason::FanOut,
+                created_at_ms: 1_700_000_000_001,
+            }),
+            Vec::new(),
+        );
+        let second_id = store.write_operation(&second).unwrap();
+        let second_bytes = second.encode().unwrap();
+
+        assert_eq!(store.pack_operations(true).unwrap().0, 2);
+        assert_eq!(store.prune_loose_operations().unwrap().0, 1);
+        assert_eq!(
+            store.read_operation_bytes(&first_id).unwrap(),
+            Some(first_bytes)
+        );
+        assert_eq!(
+            store.read_operation_bytes(&second_id).unwrap(),
+            Some(second_bytes)
+        );
+    }
+
+    #[test]
+    fn packing_1000_branches_preserves_ids_bytes_and_removes_block_slack() {
+        let temp = TempDir::new().unwrap();
+        let heddle_dir = temp.path().join(".heddle");
+        let store = TimelineStore::open(&heddle_dir).unwrap();
+        let mut expected = BTreeMap::new();
+        for ordinal in 0..1_000 {
+            let envelope = TimelineOperationEnvelope::new(
+                TimelineOperationBodyV1::BranchCreated(BranchCreatedV1 {
+                    thread: "main".to_string(),
+                    branch_id: TimelineBranchId::new(format!("tlb-{ordinal:04}")),
+                    parent_branch_id: None,
+                    from_step_id: None,
+                    from_state: StateId::from_bytes([1; 32]),
+                    reason: TimelineBranchReason::FanOut,
+                    created_at_ms: ordinal,
+                }),
+                Vec::new(),
+            );
+            let bytes = envelope.encode().unwrap();
+            let id = TimelineOperationId::for_bytes(&bytes);
+            let path = store.operation_path(&id);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, &bytes).unwrap();
+            expected.insert(id, bytes);
+        }
+        store
+            .write_operation_index(&expected.keys().copied().collect::<Vec<_>>())
+            .unwrap();
+        let (before_apparent, before_allocated) = directory_sizes(store.root());
+
+        let (packed, _) = store.pack_operations(false).unwrap();
+        assert_eq!(packed, 1_000);
+        let (pruned, _) = store.prune_loose_operations().unwrap();
+        assert_eq!(pruned, 1_000);
+        let (after_apparent, after_allocated) = directory_sizes(store.root());
+        drop(store);
+        let store = TimelineStore::open(&heddle_dir).unwrap();
+        assert_eq!(
+            store.canonical_operation_ids().unwrap(),
+            expected.keys().copied().collect::<Vec<_>>()
+        );
+
+        for (id, expected_bytes) in &expected {
+            assert!(!store.operation_path(id).exists());
+            let packed_bytes = store.read_operation_bytes(id).unwrap().unwrap();
+            assert_eq!(&packed_bytes, expected_bytes);
+            assert_eq!(TimelineOperationId::for_bytes(&packed_bytes), *id);
+        }
+        assert_eq!(
+            crate::TimelineView::rebuild(&store)
+                .unwrap()
+                .branch_count("main"),
+            1_000
+        );
+        assert_eq!(store.pack_operations(false).unwrap(), (0, 0));
+        assert_eq!(store.prune_loose_operations().unwrap(), (0, 0));
+        println!(
+            "1000-branch canonical store: apparent {before_apparent} -> {after_apparent} bytes; allocated {before_allocated} -> {after_allocated} bytes"
+        );
+        #[cfg(unix)]
+        assert!(after_allocated < before_allocated / 2);
     }
 
     #[test]

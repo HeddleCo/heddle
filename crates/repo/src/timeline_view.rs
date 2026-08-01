@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Rebuildable derived views over canonical agent timeline operations.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-    path::Path,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use objects::{
     error::{HeddleError, Result},
@@ -679,10 +675,7 @@ fn read_timeline_operation_records_by_id(
 }
 
 fn read_timeline_operation_ids(store: &TimelineStore) -> Result<Vec<TimelineOperationId>> {
-    let mut canonical_ids = Vec::new();
-    collect_operation_ids(&store.root().join("ops"), &mut canonical_ids)?;
-    canonical_ids.sort();
-    canonical_ids.dedup();
+    let canonical_ids = store.canonical_operation_ids()?;
 
     let canonical_set = canonical_ids.iter().copied().collect::<BTreeSet<_>>();
     let indexed_operation_ids = store
@@ -703,62 +696,6 @@ fn read_timeline_operation_ids(store: &TimelineStore) -> Result<Vec<TimelineOper
         store.write_operation_index(&operation_ids)?;
     }
     Ok(operation_ids)
-}
-
-fn collect_operation_ids(dir: &Path, ids: &mut Vec<TimelineOperationId>) -> Result<()> {
-    match fs::read_dir(dir) {
-        Ok(entries) => {
-            for entry in entries {
-                let entry = entry?;
-                let path = entry.path();
-                let file_type = entry.file_type()?;
-                if file_type.is_dir() {
-                    collect_operation_ids(&path, ids)?;
-                } else if file_type.is_file()
-                    && path.extension().is_some_and(|ext| ext == "msgpack")
-                {
-                    ids.push(operation_id_from_path(&path)?);
-                }
-            }
-            Ok(())
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
-
-fn operation_id_from_path(path: &Path) -> Result<TimelineOperationId> {
-    let prefix = path
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            HeddleError::InvalidObject(format!(
-                "timeline operation path has no shard prefix: {}",
-                path.display()
-            ))
-        })?;
-    let rest = path
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            HeddleError::InvalidObject(format!(
-                "timeline operation path has no file stem: {}",
-                path.display()
-            ))
-        })?;
-    let raw = hex::decode(format!("{prefix}{rest}")).map_err(|err| {
-        HeddleError::InvalidObject(format!(
-            "timeline operation path has invalid id '{}': {err}",
-            path.display()
-        ))
-    })?;
-    TimelineOperationId::try_from_slice(&raw).map_err(|err| {
-        HeddleError::InvalidObject(format!(
-            "timeline operation path has invalid id length '{}': {err}",
-            path.display()
-        ))
-    })
 }
 
 fn rebuild_timeline_view_from_ids(
@@ -907,9 +844,12 @@ fn push_unique_operation(target: &mut Vec<TimelineOperationId>, id: TimelineOper
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{
-        BranchCreatedV1, NativeToolCallRefV1, TimelineToolPayloadMetadata, ToolCallFinishedV1,
-        ToolCallStartedV1,
+    use objects::{
+        object::{
+            BranchCreatedV1, NativeToolCallRefV1, TimelineToolPayloadMetadata, ToolCallFinishedV1,
+            ToolCallStartedV1,
+        },
+        store::{CompressionConfig, PackBuilder, pack::ObjectType},
     };
     use tempfile::TempDir;
 
@@ -944,6 +884,38 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let store = TimelineStore::open(temp.path().join(".heddle")).unwrap();
         (temp, store)
+    }
+
+    fn install_operation_pack(store: &TimelineStore, id: TimelineOperationId, bytes: Vec<u8>) {
+        let mut builder = PackBuilder::new(CompressionConfig::disabled());
+        builder.add_id(
+            crate::timeline_pack::timeline_pack_id(&id),
+            ObjectType::TimelineOperation,
+            bytes,
+        );
+        let (pack_data, index_data, _) = builder.build().unwrap();
+        std::fs::write(store.root().join("packs/fixture.pack"), pack_data).unwrap();
+        std::fs::write(store.root().join("packs/fixture.idx"), index_data).unwrap();
+    }
+
+    fn read_timeline_operation_ids_loose_only(
+        store: &TimelineStore,
+    ) -> Result<Vec<TimelineOperationId>> {
+        let mut canonical_ids = store.loose_operation_ids()?;
+        canonical_ids.sort();
+        canonical_ids.dedup();
+
+        let canonical_set = canonical_ids.iter().copied().collect::<BTreeSet<_>>();
+        let indexed_operation_ids = store
+            .read_operation_index()
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let mut operation_ids = indexed_operation_ids.clone();
+        operation_ids.retain(|id| canonical_set.contains(id));
+        if indexed_operation_ids != operation_ids {
+            store.write_operation_index(&operation_ids)?;
+        }
+        Ok(operation_ids)
     }
 
     fn write_main_two_steps(store: &TimelineStore) {
@@ -1084,6 +1056,52 @@ mod tests {
         assert_eq!(first.payload_summary.as_deref(), Some("created src/lib.rs"));
         assert_eq!(first.operation_ids.len(), 2);
         assert_eq!(first.labels, vec![TimelineLabel::RepoReversible]);
+    }
+
+    #[test]
+    fn pack_aware_rebuild_closes_loose_only_silent_omission() {
+        let (_temp, store) = temp_store();
+        let envelope = TimelineOperationEnvelope::new(
+            TimelineOperationBodyV1::BranchCreated(BranchCreatedV1 {
+                thread: "main".to_string(),
+                branch_id: branch("tlb-packed"),
+                parent_branch_id: None,
+                from_step_id: None,
+                from_state: state(0),
+                reason: TimelineBranchReason::ExplicitFork,
+                created_at_ms: 1,
+            }),
+            Vec::new(),
+        );
+        let id = store.write_operation(&envelope).unwrap();
+        let canonical_bytes = store.read_operation_bytes(&id).unwrap().unwrap();
+        install_operation_pack(&store, id, canonical_bytes.clone());
+        std::fs::remove_file(store.operation_path(&id)).unwrap();
+
+        let loose_only_ids = read_timeline_operation_ids_loose_only(&store).unwrap();
+        let loose_only_view = rebuild_timeline_view_from_ids(&store, &loose_only_ids).unwrap();
+        println!(
+            "non-pack-aware rebuild: indexed=1 resolved={} branches={} (silently omitted {})",
+            loose_only_view.operation_ids().len(),
+            loose_only_view.branch_count("main"),
+            id.short()
+        );
+        assert!(loose_only_view.operation_ids().is_empty());
+        assert_eq!(store.read_operation_index().unwrap(), Some(Vec::new()));
+
+        let pack_aware_view = TimelineView::rebuild(&store).unwrap();
+        let packed_bytes = store.read_operation_bytes(&id).unwrap().unwrap();
+        println!(
+            "pack-aware rebuild: resolved={} branches={} id={} canonical_bytes_identical={}",
+            pack_aware_view.operation_ids().len(),
+            pack_aware_view.branch_count("main"),
+            id.short(),
+            packed_bytes == canonical_bytes
+        );
+        assert_eq!(pack_aware_view.operation_ids(), &[id]);
+        assert_eq!(pack_aware_view.branch_count("main"), 1);
+        assert_eq!(packed_bytes, canonical_bytes);
+        assert_eq!(TimelineOperationId::for_bytes(&packed_bytes), id);
     }
 
     #[test]

@@ -295,6 +295,9 @@ fn validate_pack_entry(id: &PackObjectId, obj_type: ObjectType, data: &[u8]) -> 
             }
             Ok(())
         }
+        (_, ObjectType::TimelineOperation) => Err(HeddleError::InvalidObject(
+            "timeline operations belong in the timeline pack store".to_string(),
+        )),
         _ => Err(HeddleError::InvalidObject(format!(
             "unsupported native pack object: {:?} {:?}",
             id, obj_type

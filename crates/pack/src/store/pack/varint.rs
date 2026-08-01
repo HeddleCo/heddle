@@ -172,6 +172,7 @@ mod tests {
             (4, ObjectType::Delta),
             (5, ObjectType::StateAttachment),
             (6, ObjectType::SnapshotCommit),
+            (7, ObjectType::TimelineOperation),
         ] {
             let mut buf = Vec::new();
             encode_type_and_size(obj_type, 42, &mut buf);
@@ -239,12 +240,5 @@ mod tests {
     fn test_decode_empty() {
         assert!(decode_type_and_size(&[]).is_none());
         assert!(decode_varint(&[]).is_none());
-    }
-
-    #[test]
-    fn test_invalid_type_rejected() {
-        // Type 7 is unassigned.
-        let buf = [0x70]; // type = 7, size = 0
-        assert!(decode_type_and_size(&buf).is_none());
     }
 }

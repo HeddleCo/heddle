@@ -81,6 +81,7 @@ mod thread_worktree_target;
 mod timeline_actions;
 mod timeline_materialize;
 mod timeline_navigation;
+mod timeline_pack;
 mod timeline_store;
 mod timeline_view;
 pub mod visibility;

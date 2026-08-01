@@ -26,6 +26,7 @@ use objects::store::{
     AnyStore, ObjectStore, PackInstallMetricsSnapshot, pack_install_metrics_snapshot,
     recover_pack_install_intents,
 };
+use repo::TimelineStore;
 use serde::Serialize;
 
 use crate::cli::{Cli, render::write_json_stdout, should_output_json};
@@ -41,6 +42,11 @@ struct GcOutput {
     bytes_saved: u64,
     pruned_loose: u64,
     bytes_freed: u64,
+    timeline_packed_count: u64,
+    timeline_bytes_saved: u64,
+    timeline_pruned_loose: u64,
+    timeline_bytes_freed: u64,
+    timeline_unpaired_packs_pruned: u64,
     /// L8 Option D: unpaired `.pack` files removed (no matching `.idx`).
     unpaired_packs_pruned: u64,
     /// L8 install-intent recover: intents completed during this GC.
@@ -75,6 +81,7 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
     // these files, but the audit step costs O(redactions) and gives
     // operators a hard guarantee in writing.
     let redactions_before = repo.list_all_redactions().unwrap_or_default();
+    let timeline = TimelineStore::open(repo.heddle_dir())?;
     let pinned_redactions: usize = redactions_before
         .iter()
         .map(|(_, blob)| blob.redactions.len())
@@ -86,6 +93,7 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
         let trees = repo.store().list_trees()?;
         let plan = plan_gc_dry_run(blobs.len(), trees.len());
         summary.packed_count = plan.packed_count;
+        summary.timeline_packed_count = timeline.loose_operation_count()?;
         summary.status = plan.status;
 
         if !json {
@@ -93,6 +101,10 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
             for line in gc_dry_run_messages(blobs.len(), trees.len(), pinned_redactions) {
                 println!("{line}");
             }
+            println!(
+                "Would pack {} loose timeline operations and prune their redundant copies",
+                summary.timeline_packed_count
+            );
         }
     } else {
         let (packed_count, bytes_saved) = repo.store().pack_objects(aggressive)?;
@@ -101,6 +113,32 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
 
         if !json {
             println!("{}", gc_pack_message(packed_count, bytes_saved));
+        }
+
+        let (timeline_packed_count, timeline_bytes_saved) = timeline.pack_operations(aggressive)?;
+        summary.timeline_packed_count = timeline_packed_count;
+        summary.timeline_bytes_saved = timeline_bytes_saved;
+        if !json {
+            println!(
+                "Packed {timeline_packed_count} timeline operations ({timeline_bytes_saved} bytes saved)"
+            );
+        }
+
+        let (timeline_pruned_loose, timeline_bytes_freed) = timeline.prune_loose_operations()?;
+        summary.timeline_pruned_loose = timeline_pruned_loose;
+        summary.timeline_bytes_freed = timeline_bytes_freed;
+        if !json {
+            println!(
+                "Pruned {timeline_pruned_loose} loose timeline operations ({timeline_bytes_freed} bytes freed)"
+            );
+        }
+        let (timeline_unpaired_removed, timeline_unpaired_bytes) =
+            timeline.prune_unpaired_packs()?;
+        summary.timeline_unpaired_packs_pruned = timeline_unpaired_removed;
+        if !json && timeline_unpaired_removed > 0 {
+            println!(
+                "Pruned {timeline_unpaired_removed} unpaired timeline packs ({timeline_unpaired_bytes} bytes freed)"
+            );
         }
 
         repo.refs().pack_refs()?;
