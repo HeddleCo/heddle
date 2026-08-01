@@ -157,7 +157,7 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
                  or `heddle help <topic>` for a topic page (e.g. `git-concepts`, \
                  `git-overlay`, \
                  `threads`, `daemon`, `signals`, `git-projection`, `operation-ids`, \
-                 `remotes`, `output-formats`, `git-dependencies`)."
+                 `remotes`, `output-formats`, `heddleignore`, `git-dependencies`)."
             );
         }
         [name] if name == "advanced" => {
@@ -501,6 +501,7 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
         "operation-ids" | "idempotency" => OPERATION_IDS_TOPIC,
         "remotes" => REMOTES_TOPIC,
         "git-dependencies" | "git-deps" | "git-dependency" => GIT_DEPENDENCIES_TOPIC,
+        "heddleignore" | "ignore" => HEDDLEIGNORE_TOPIC,
         "review" => REVIEW_TOPIC,
         "discuss" | "discussions" => DISCUSS_TOPIC,
         "git-projection" | "git-projections" | "footer" | "notes" => GIT_PROJECTION_TOPIC,
@@ -508,6 +509,8 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
         _ => return None,
     })
 }
+
+const HEDDLEIGNORE_TOPIC: &str = include_str!("../../../../docs/heddleignore.md");
 
 const ADVANCED_HELP: &str = "Advanced commands for power users, agents, automation, Git interop, and recovery.\n\
 \n\
@@ -1033,6 +1036,8 @@ mod tests {
             "idempotency",
             "remotes",
             "git-dependencies",
+            "heddleignore",
+            "ignore",
             "review",
             "discuss",
             "discussions",

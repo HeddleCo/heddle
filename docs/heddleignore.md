@@ -30,22 +30,37 @@ The matcher is `gitignore`-compatible: glob patterns (`*.log`,
 `config/*.toml`), `**` for recursive directory globs, leading `/`
 for root-anchored, trailing `/` for directory-only, and `!` for
 negation. Order is significant — a later rule can re-include a path
-a previous rule ignored. The same rules apply as in `.gitignore`.
+a previous rule ignored. Heddle reads only the two files at the worktree
+root; nested per-directory `.gitignore` and `.heddleignore` files are captured
+as ordinary files but their patterns are not evaluated.
 
 ## Relationship to `.gitignore`
 
-In Git-overlay repositories, Heddle reads `.gitignore` first and
-treats it as the preferred shared ignore policy so raw `git status`
-and Heddle agree. Use `.heddleignore` only for Heddle-specific
-excludes that should not affect Git.
+In both native and Git-overlay repositories, Heddle reads the root
+`.gitignore` and root `.heddleignore` into one ordered rule stream. It reads
+`.gitignore` first and `.heddleignore` last. A positive ignore in either file
+therefore ignores a path when no later rule contradicts it. For negations,
+last match wins across the combined stream: a `.heddleignore` `!pattern` can
+re-include a path ignored by `.gitignore`, while a `.gitignore` negation cannot
+override a later `.heddleignore` ignore. Repeated patterns are preserved so a
+later rule after a negation is not accidentally discarded.
 
-In native Heddle repositories, `.heddleignore` is the ignore policy.
-Heddle does not auto-ignore project artifacts such as build outputs,
-dependency folders, caches, or generated files unless they are named
-in `.heddleignore`.
+Native mode reads `.gitignore` directly from the worktree even when no `.git`
+directory exists. Reading it does not discover, initialize, or otherwise
+require a Git repository.
 
 Heddle always protects its own `.heddle/` metadata. Other paths must
 be explicit in `.gitignore` or `.heddleignore`.
+
+Ignore changes affect future captures only. Existing states are immutable, so
+previously captured artifacts remain in history. To clean the current line of
+work, add the root ignore rule and make one cleanup capture; the new state drops
+the now-ignored paths while older states retain them.
+
+A single capture that changes 500 or more paths emits a warning naming both
+root ignore files. The threshold is deliberately above ordinary edits and
+repo-wide refactors while still catching the reported 700-plus-path artifact
+sweep. The warning does not block an intentional large capture.
 
 ## Common-noise hints
 
@@ -115,9 +130,9 @@ linked in O(1) rather than duplicated per thread.
 
 What it links, and what it doesn't:
 
-- **Linked:** top-level directories at the origin root that match an
-  ignore rule (in Git-overlay repos that includes `.gitignore`; in
-  native repos, `.heddleignore`).
+- **Linked:** top-level directories at the origin root that match a
+  root ignore rule (in both modes that includes `.gitignore` and
+  `.heddleignore`).
 - **Not linked:** the admin directories `.git` and `.heddle` (even
   though they're ignored), plain files, and per-package dependency dirs
   nested below the root (e.g. a monorepo's `packages/*/node_modules`).

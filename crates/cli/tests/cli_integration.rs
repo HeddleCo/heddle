@@ -306,6 +306,8 @@ mod hooks;
 mod hydrate;
 #[path = "cli_integration/identity_resolution.rs"]
 mod identity_resolution;
+#[path = "cli_integration/ignore_mechanics.rs"]
+mod ignore_mechanics;
 #[path = "cli_integration/misc.rs"]
 mod misc;
 #[path = "cli_integration/next_action_contract.rs"]

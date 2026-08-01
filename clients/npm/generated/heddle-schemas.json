@@ -885,6 +885,11 @@
             }
           ]
         },
+        "captured_path_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "confidence": {
           "format": "float",
           "type": [
@@ -1019,6 +1024,12 @@
             "string",
             "null"
           ]
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -1030,6 +1041,8 @@
         "principal_source",
         "promotion_suggested",
         "heavy_impact_paths",
+        "captured_path_count",
+        "warnings",
         "signed",
         "message",
         "output_kind"
@@ -12013,6 +12026,11 @@
             }
           ]
         },
+        "captured_path_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "confidence": {
           "format": "float",
           "type": [
@@ -12147,6 +12165,12 @@
             "string",
             "null"
           ]
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -12158,6 +12182,8 @@
         "principal_source",
         "promotion_suggested",
         "heavy_impact_paths",
+        "captured_path_count",
+        "warnings",
         "signed",
         "message",
         "output_kind"

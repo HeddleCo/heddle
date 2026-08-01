@@ -421,6 +421,8 @@ through Sley; it does not require a Git executable.
   },
   "promotion_suggested": false,
   "heavy_impact_paths": [],
+  "captured_path_count": 3,
+  "warnings": [],
   "message": "captured state hc-capture123"
 }
 ```
@@ -617,6 +619,7 @@ blocked peer in `stopped_at`.
 | `confidence` | number \| null | required for `capture` | Agent or human confidence score, when supplied. |
 | `principal`, `agent` | object / object \| null | required for `capture` | Accountable principal and optional agent/model provenance recorded on the captured state. |
 | `promotion_suggested`, `heavy_impact_paths` | bool / array<string> | required for `capture` | Thread-promotion signal. Empty array if none. |
+| `captured_path_count`, `warnings` | number / array<string> | required for `capture` | Number of paths changed by this capture and non-blocking warnings. Captures changing 500 or more paths include a bulk-capture warning. |
 | `output_kind`, `status` | string \| null | required when present | Stable output discriminator and machine status; `undo`, `undo --redo`, and `undo --recover` report `completed`; undo/redo previews report `preview`. |
 | `message`, `summary` | string \| null | required when present | Human-readable result. |
 | `next_action`, `recommended_action` | string \| null | required | Primary next command, if one is known. |
@@ -1429,6 +1432,8 @@ shape is the same capture envelope.
   "confidence": 0.8,
   "promotion_suggested": false,
   "heavy_impact_paths": [],
+  "captured_path_count": 2,
+  "warnings": [],
   "message": "Captured hc-sqr398dvx9ay"
 }
 ```

@@ -960,23 +960,15 @@ fn redact_apply_emits_no_hint_when_heddleignore_glob_matches() {
 }
 
 #[test]
-fn redact_apply_emits_hint_when_only_gitignore_covers_the_path() {
-    // In a native Heddle repo, `.gitignore` is not the capture policy.
-    // The hint must surface, pointing at `.heddleignore`.
+fn redact_apply_emits_no_hint_when_gitignore_covers_the_path_in_native_mode() {
+    // Native capture reads the root `.gitignore`, so an already-covered
+    // secret must not produce redundant `.heddleignore` guidance.
     let (temp, state) = setup_repo_with_secret();
     fs::write(temp.path().join(".gitignore"), "config/*.toml\n").unwrap();
     let apply = redact_apply_json(&temp, &state);
-    let hint = apply
-        .get("ignore_hint")
-        .expect(".gitignore coverage must NOT suppress the heddle-ignore hint");
-    assert_eq!(
-        hint["ignore_file"].as_str().unwrap(),
-        ".heddleignore",
-        ".gitignore is not consulted by native Heddle capture; hint must target .heddleignore"
-    );
     assert!(
-        !hint["already_exists"].as_bool().unwrap(),
-        "init should not install a default .heddleignore"
+        apply.get("ignore_hint").is_none() || apply["ignore_hint"].is_null(),
+        "root .gitignore coverage in native mode must suppress the hint: {apply:?}"
     );
 }
 

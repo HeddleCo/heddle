@@ -14,6 +14,7 @@ use objects::{
     HeddleError, RecoveryDetails,
     lock::RepositoryLockExt,
     object::{Agent, Attribution, ContentHash, Principal, State, StateId, Tree},
+    store::ObjectStore,
 };
 use oplog::{OpLogBackend, OpRecord};
 use refs::Head;
@@ -191,6 +192,9 @@ pub struct SaveReport {
     pub agent: Option<Agent>,
     pub promotion_suggested: bool,
     pub heavy_impact_paths: Vec<String>,
+    /// Number of paths changed by this save relative to the state that was
+    /// current when the operation began.
+    pub captured_path_count: usize,
     pub verification: RepositoryVerificationState,
     pub created_new_state: bool,
     pub git_checkpoint: Option<GitCheckpointRecord>,
@@ -411,13 +415,15 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
         )));
     }
 
-    let has_current = repo.current_state()?.is_some();
+    let previous_state = repo.current_state()?;
+    let has_current = previous_state.is_some();
     let mut created_new_state = false;
     let mut snapshot_profile = SnapshotProfile::default();
     let mut thread_metadata_ms = 0u128;
     let mut promotion_suggested = false;
     let mut heavy_impact_paths = Vec::new();
     let mut snapshot_state_id: Option<StateId> = None;
+    let mut captured_path_count = 0usize;
 
     let mut state = if plan_creates_new_state(&plan, has_current) {
         created_new_state = true;
@@ -427,6 +433,13 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
         promotion_suggested = execution.promotion_suggested;
         heavy_impact_paths = execution.heavy_impact_paths;
         snapshot_state_id = Some(execution.state.state_id);
+        let previous_tree = match previous_state.as_ref() {
+            Some(state) => state.tree,
+            None => repo.store().put_tree(&Tree::new())?,
+        };
+        captured_path_count = repo
+            .diff_trees(&previous_tree, &execution.state.tree)?
+            .len();
         execution.state
     } else {
         repo.current_state()?
@@ -526,6 +539,7 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
         agent: state.attribution.agent.clone(),
         promotion_suggested,
         heavy_impact_paths,
+        captured_path_count,
         verification,
         created_new_state,
         git_checkpoint,

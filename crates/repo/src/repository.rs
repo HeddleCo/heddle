@@ -2795,9 +2795,12 @@ impl Repository {
         ));
         // Root Git metadata is repository-engine state, never source content.
         patterns.push("/.git/".to_string());
-        if self.capability() == RepositoryCapability::GitOverlay {
-            append_ignore_file_patterns(&mut patterns, &self.root.join(".gitignore"))?;
-        }
+        // Native and Git-overlay repositories share the root `.gitignore`
+        // convention. This is intentionally a plain worktree-file read: a
+        // native repository does not need `.git` metadata for these rules to
+        // apply. `.heddleignore` is appended below, so the two files form one
+        // ordered matcher rather than one shadowing the other.
+        append_ignore_file_patterns(&mut patterns, &self.root.join(".gitignore"))?;
         // Worktree-local, never-captured excludes (heddle's analogue of
         // `.git/info/exclude`). Lives under THIS worktree's own `.heddle/`
         // (`root/.heddle`, which is local even for a shared-store checkout), so
@@ -3526,9 +3529,10 @@ fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Resul
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        if !patterns.iter().any(|pattern| pattern == trimmed) {
-            patterns.push(trimmed.to_string());
-        }
+        // Preserve repetitions. Gitignore matching is last-match-wins, so a
+        // repeated rule after a negation can change the outcome even when the
+        // same text appeared in an earlier file.
+        patterns.push(trimmed.to_string());
     }
     Ok(())
 }
