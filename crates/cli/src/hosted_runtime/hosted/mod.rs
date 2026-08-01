@@ -25,6 +25,7 @@ mod state_review;
 mod sync;
 #[cfg(test)]
 mod test_https;
+mod thread_metadata;
 mod user;
 
 #[cfg(test)]

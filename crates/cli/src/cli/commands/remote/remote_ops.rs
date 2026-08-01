@@ -26,7 +26,7 @@ use objects::{
     store::ObjectStore,
 };
 use refs::Head;
-use repo::{Repository, RepositoryCapability};
+use repo::{Repository, RepositoryCapability, SyncedThreadMetadata, ThreadManager};
 use serde::Serialize;
 use sley::{
     ConfigEdit, ConfigEditPlan, ConfigEditScope, HeadUpdateOptions, RefChange, ReferenceTarget,
@@ -908,6 +908,8 @@ async fn pull_local(
         .context(format!("Thread {} not found in source", remote_thread))?;
 
     let objects_copied = source.fetch_state(repo, &state_id)? + source.fetch_markers(repo)?;
+    let pulled_thread_metadata =
+        ThreadManager::new(source.source().heddle_dir()).find_record_by_thread(remote_thread)?;
 
     let track_to_update = local_thread.unwrap_or(remote_thread);
     let track_tn = ThreadName::new(track_to_update);
@@ -945,6 +947,7 @@ async fn pull_local(
     } else {
         repo.set_thread_recorded(&track_tn, &state_id)?;
     }
+    save_pulled_thread_metadata(repo, track_to_update, &state_id, pulled_thread_metadata)?;
     if let Some(remote_name) = configured_remote_name {
         repo.set_remote_thread_recorded(remote_name, &ThreadName::new(remote_thread), &state_id)?;
     }
@@ -1057,6 +1060,20 @@ async fn pull_network_connected(
             let track_to_update = options.local_thread.unwrap_or(options.remote_thread);
             let mut changed = false;
             if let Some(final_state_id) = final_state_id {
+                let pulled_thread_metadata = if options.local_thread.is_some() {
+                    Some(
+                        client
+                            .get_thread_metadata(
+                                repo,
+                                repo_path,
+                                options.remote_thread,
+                                final_state_id,
+                            )
+                            .await?,
+                    )
+                } else {
+                    None
+                };
                 let track_tn = ThreadName::new(track_to_update);
                 let pre_target = repo.refs().get_thread(&track_tn)?;
                 let pre_target_str = pre_target.as_ref().map(|s| s.to_string());
@@ -1089,6 +1106,12 @@ async fn pull_network_connected(
                         repo.set_thread_recorded(&track_tn, &final_state_id)?;
                     }
                 }
+                save_pulled_thread_metadata(
+                    repo,
+                    track_to_update,
+                    &final_state_id,
+                    pulled_thread_metadata,
+                )?;
             }
             // Read path for hosted discussions (heddle discuss): materialize any
             // new hosted CollaborationService discussions/turns for the pulled
@@ -1160,6 +1183,23 @@ async fn pull_network_connected(
         }
     }
 
+    Ok(())
+}
+
+fn save_pulled_thread_metadata(
+    repo: &Repository,
+    local_thread: &str,
+    pulled_state: &StateId,
+    metadata: Option<SyncedThreadMetadata>,
+) -> Result<()> {
+    let Some(mut metadata) = metadata else {
+        return Ok(());
+    };
+    metadata.id = local_thread.to_string();
+    metadata.thread = local_thread.to_string();
+    metadata.current_state = Some(pulled_state.short());
+    metadata.shared_target_dir = None;
+    ThreadManager::new(repo.heddle_dir()).save_record(&metadata)?;
     Ok(())
 }
 

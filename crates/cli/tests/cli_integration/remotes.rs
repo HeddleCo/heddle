@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use cli::remote::RemoteConfig;
 use objects::object::{MarkerName, ThreadName};
+use repo::ThreadManager;
 use sley::{ConfigEdit, ConfigEditPlan};
 
 use super::{git_overlay_fixtures::GitOverlayFixture, *};
@@ -846,6 +847,134 @@ fn test_cli_pull_local_side_thread_updates_ref_without_materializing_checkout() 
     assert_eq!(
         std::fs::read_to_string(target.path().join("source.txt")).unwrap(),
         "from source\n"
+    );
+}
+
+fn managed_thread_pull_fixture() -> (TempDir, std::path::PathBuf, TempDir, std::path::PathBuf) {
+    let source_root = TempDir::new().unwrap();
+    let source = source_root.path().join("source");
+    let runner = source_root.path().join("runner");
+    std::fs::create_dir(&source).unwrap();
+    heddle(&["init"], Some(&source)).unwrap();
+    std::fs::write(source.join("base.txt"), "base\n").unwrap();
+    heddle(&["capture", "-m", "Base state"], Some(&source)).unwrap();
+    heddle(
+        &[
+            "start",
+            "shuttle/runner",
+            "--path",
+            runner.to_str().unwrap(),
+            "--task",
+            "fixture runner",
+        ],
+        Some(&source),
+    )
+    .unwrap();
+    std::fs::write(runner.join("runner.txt"), "runner change\n").unwrap();
+    heddle(&["capture", "-m", "Runner change"], Some(&runner)).unwrap();
+
+    let target_root = TempDir::new().unwrap();
+    let clone = target_root.path().join("clone");
+    heddle(
+        &["clone", source.to_str().unwrap(), clone.to_str().unwrap()],
+        None,
+    )
+    .unwrap();
+    (source_root, source, target_root, clone)
+}
+
+fn pull_managed_runner(source: &std::path::Path, clone: &std::path::Path) -> Value {
+    let output = heddle(
+        &[
+            "--output",
+            "json",
+            "pull",
+            source.to_str().unwrap(),
+            "--thread",
+            "shuttle/runner",
+            "--local-thread",
+            "shuttle/runner",
+        ],
+        Some(clone),
+    )
+    .expect("managed side-thread pull succeeds");
+    serde_json::from_str(&output).expect("pull JSON parses")
+}
+
+#[test]
+fn pulling_managed_thread_into_clone_registers_it_for_thread_list_and_land() {
+    let (_source_root, source, _target_root, clone) = managed_thread_pull_fixture();
+    let pull = pull_managed_runner(&source, &clone);
+    assert_eq!(pull["thread"], "shuttle/runner", "{pull}");
+
+    let repo = Repository::open(&clone).unwrap();
+    let managed = ThreadManager::new(repo.heddle_dir())
+        .find_by_thread("shuttle/runner")
+        .unwrap()
+        .expect("pull must persist managed thread metadata");
+    assert_eq!(managed.target_thread.as_deref(), Some("main"));
+    assert_eq!(
+        managed.current_state,
+        repo.refs()
+            .get_thread(&ThreadName::new("shuttle/runner"))
+            .unwrap()
+            .map(|state| state.short())
+    );
+
+    let listed = heddle(&["thread", "list", "--output", "json"], Some(&clone)).unwrap();
+    let listed: Value = serde_json::from_str(&listed).unwrap();
+    let runner = listed["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|thread| thread["name"] == "shuttle/runner")
+        .expect("thread list must show the pulled managed thread");
+    assert_eq!(runner["target_thread"], "main", "{listed}");
+
+    let landed = heddle(
+        &[
+            "land",
+            "--thread",
+            "shuttle/runner",
+            "-m",
+            "integrate runner",
+            "--output",
+            "json",
+        ],
+        Some(&clone),
+    )
+    .expect("land must reach a real merge verdict");
+    let landed: Value = serde_json::from_str(&landed).unwrap();
+    assert_eq!(landed["output_kind"], "land", "{landed}");
+    assert_eq!(landed["status"], "landed", "{landed}");
+}
+
+#[test]
+fn pull_created_ref_never_routes_cli_verbs_to_fsck_repair() {
+    let (_source_root, source, _target_root, clone) = managed_thread_pull_fixture();
+    pull_managed_runner(&source, &clone);
+
+    let verdict = heddle_output(
+        &[
+            "land",
+            "--thread",
+            "shuttle/runner",
+            "-m",
+            "integrate runner",
+            "--output",
+            "json",
+        ],
+        Some(&clone),
+    )
+    .expect("invoke land after pull");
+    let output = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&verdict.stdout),
+        String::from_utf8_lossy(&verdict.stderr)
+    );
+    assert!(
+        !output.contains("fsck repair") && !output.contains("imported_git_ref_not_managed_thread"),
+        "a CLI-created pull result must not be diagnosed as repository damage: {output}"
     );
 }
 
