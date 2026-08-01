@@ -1227,6 +1227,8 @@ pub struct CaptureSchema {
     pub agent: Option<CommitAgentSchema>,
     pub promotion_suggested: bool,
     pub heavy_impact_paths: Vec<String>,
+    pub captured_path_count: usize,
+    pub warnings: Vec<String>,
     pub signed: bool,
     pub message: String,
     pub next_action: Option<String>,

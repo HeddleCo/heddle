@@ -206,10 +206,9 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
 /// capture/walker actually consults.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct IgnoreHint {
-    /// Path to the ignore file we'd append to, relative to the repo
-    /// root. Always `.heddleignore` — heddle's capture path doesn't
-    /// read `.gitignore`, so suggesting `.gitignore` would be a
-    /// false-negative on the leak-prevention guidance.
+    /// Path to the preferred ignore file we'd append to, relative to the repo
+    /// root: `.gitignore` for Git Overlay and `.heddleignore` for native mode.
+    /// Both modes honor either root file when it already covers the path.
     pub ignore_file: String,
     /// Whether `.heddleignore` is already present on disk. `false`
     /// means the operator would also create the file in the same
@@ -226,7 +225,8 @@ pub(crate) struct IgnoreHint {
 
 /// If `path` is not yet covered by Heddle's effective ignore set,
 /// return a hint pointing at the preferred ignore file for this repo:
-/// `.gitignore` in Git-overlay mode, `.heddleignore` in native mode.
+/// `.gitignore` in Git-overlay mode, `.heddleignore` in native mode. Existing
+/// coverage in either root file suppresses the hint in both modes.
 pub(crate) fn ignore_hint_for_path(repo: &Repository, path: &str) -> Result<Option<IgnoreHint>> {
     let patterns = repo
         .ignore_patterns()

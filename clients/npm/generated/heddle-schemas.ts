@@ -113,6 +113,7 @@ export interface AdoptSchema {
 export interface AgentCaptureSchema {
   action: string;
   agent?: CommitAgentSchema | null;
+  captured_path_count: number;
   confidence?: number | null;
   content_hash: string;
   heavy_impact_paths: string[];
@@ -134,6 +135,7 @@ export interface AgentCaptureSchema {
   state_id: string;
   status: string;
   task_assignment_id?: string | null;
+  warnings: string[];
 }
 
 export interface AgentFanoutCommandSchema {
@@ -506,6 +508,7 @@ export interface BlameSchema {
 export interface CaptureSchema {
   action: string;
   agent?: CommitAgentSchema | null;
+  captured_path_count: number;
   confidence?: number | null;
   content_hash: string;
   heavy_impact_paths: string[];
@@ -527,6 +530,7 @@ export interface CaptureSchema {
   state_id: string;
   status: string;
   task_assignment_id?: string | null;
+  warnings: string[];
 }
 
 export interface ChangeMonitorInspectionSchema {

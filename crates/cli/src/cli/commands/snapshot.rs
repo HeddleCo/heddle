@@ -63,6 +63,8 @@ pub(crate) struct SnapshotOutput {
     pub agent: Option<SnapshotAgentOutput>,
     pub promotion_suggested: bool,
     pub heavy_impact_paths: Vec<String>,
+    pub captured_path_count: usize,
+    pub warnings: Vec<String>,
     /// Whether this state carries an ed25519 author signature (heddle#482).
     /// `false` means signing degraded (no key, or an unreadable key); the
     /// state is still captured, just unsigned — surfaced here so a degraded
@@ -313,6 +315,9 @@ pub async fn cmd_snapshot(
                     "Unsigned: no signing identity available — captured without an ed25519 signature"
                 )
             );
+        }
+        for warning in &output.warnings {
+            println!("{}", style::warn(&format!("Warning: {warning}")));
         }
         if output.confidence.is_some() {
             let confidence_text = format_confidence(output.confidence);
@@ -887,6 +892,9 @@ fn snapshot_output_from_save_report(
         .source
         .unwrap_or("unknown")
         .to_string();
+    let warnings = bulk_capture_warning(report.captured_path_count)
+        .into_iter()
+        .collect();
     let output = SnapshotOutput {
         output_kind: "capture",
         status: "captured",
@@ -901,6 +909,8 @@ fn snapshot_output_from_save_report(
         agent: report.agent.as_ref().map(SnapshotAgentOutput::from),
         promotion_suggested: report.promotion_suggested,
         heavy_impact_paths: report.heavy_impact_paths.clone(),
+        captured_path_count: report.captured_path_count,
+        warnings,
         signed: report.signed,
         message: report.summary,
         next_action: recommended_action.clone(),
@@ -913,6 +923,16 @@ fn snapshot_output_from_save_report(
         output,
         snapshot_command_profile(report.snapshot_profile, report.thread_metadata_ms),
     ))
+}
+
+const BULK_CAPTURE_WARNING_THRESHOLD: usize = 500;
+
+fn bulk_capture_warning(captured_path_count: usize) -> Option<String> {
+    (captured_path_count >= BULK_CAPTURE_WARNING_THRESHOLD).then(|| {
+        format!(
+            "captured {captured_path_count} paths in one operation; check root .gitignore and .heddleignore rules if build artifacts or tool state were included"
+        )
+    })
 }
 
 fn active_task_assignment_id(repo: &Repository) -> Result<Option<String>> {
@@ -1544,6 +1564,16 @@ mod tests {
             vec!["heddle capture -m \"...\"".to_string()]
         );
         assert!(advice.preserved.contains("working tree was not modified"));
+    }
+
+    #[test]
+    fn bulk_capture_warning_starts_at_five_hundred_paths() {
+        assert!(bulk_capture_warning(BULK_CAPTURE_WARNING_THRESHOLD - 1).is_none());
+        let warning = bulk_capture_warning(BULK_CAPTURE_WARNING_THRESHOLD)
+            .expect("the threshold should emit a warning");
+        assert!(warning.contains("captured 500 paths"));
+        assert!(warning.contains(".gitignore"));
+        assert!(warning.contains(".heddleignore"));
     }
 
     #[test]
