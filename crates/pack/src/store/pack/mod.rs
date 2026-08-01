@@ -39,6 +39,7 @@ pub enum ObjectType {
     Delta = 4,
     StateAttachment = 5,
     SnapshotCommit = 6,
+    TimelineOperation = 7,
 }
 
 pub(crate) fn pack_container_spec() -> PackContainerSpec {
@@ -58,6 +59,7 @@ impl ObjectType {
             4 => Some(ObjectType::Delta),
             5 => Some(ObjectType::StateAttachment),
             6 => Some(ObjectType::SnapshotCommit),
+            7 => Some(ObjectType::TimelineOperation),
             _ => None,
         }
     }

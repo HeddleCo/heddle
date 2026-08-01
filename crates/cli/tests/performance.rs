@@ -674,6 +674,9 @@ fn decode_native_pack(pack_data: &[u8], index_data: &[u8]) -> Vec<ObjectData> {
                 PackObjectType::SnapshotCommit => {
                     panic!("decoded native pack should not surface local snapshot commit artifacts")
                 }
+                PackObjectType::TimelineOperation => {
+                    panic!("decoded native pack should not contain timeline operations")
+                }
             };
             ObjectData {
                 id: object_id,
