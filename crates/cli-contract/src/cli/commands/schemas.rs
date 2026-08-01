@@ -1323,6 +1323,8 @@ pub struct ReadySchema {
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub captured: bool,
     pub captured_state: Option<String>,
+    pub capture_status: String,
+    pub capture_reason: String,
     pub thread_state: Option<String>,
     pub readiness: ReadyReadinessSchema,
     pub report: Value,
@@ -1335,6 +1337,8 @@ pub struct ReadyReadinessSchema {
     pub status: String,
     pub captured: bool,
     pub captured_state: Option<String>,
+    pub capture_status: String,
+    pub capture_reason: String,
     pub checks: ReadyChecksSchema,
     pub integration: String,
     pub freshness: String,
@@ -1384,9 +1388,56 @@ pub struct LandSchema {
     pub performed_steps: Vec<String>,
     pub skipped_steps: Vec<String>,
     pub merge_state: Option<String>,
+    pub blocker_details: Vec<LandBlockerDetailSchema>,
     pub chosen_path: String,
     pub siblings_restacked: Vec<String>,
     pub siblings_restack_failed: Vec<SiblingRestackFailureSchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LandBlockerDetailSchema {
+    /// Stable condition code for machine branching.
+    pub code: LandBlockerCodeSchema,
+    /// Eligibility check that produced the blocker.
+    pub check: LandBlockerCheckSchema,
+    /// Human explanation of the observed condition.
+    pub message: String,
+    /// Concrete affected paths; empty for non-path conditions.
+    pub paths: Vec<String>,
+    pub state_context: Option<LandBlockerStateContextSchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LandBlockerCodeSchema {
+    ThreadStateBlocked,
+    MergeConflicts,
+    AutoLandConfidenceBelowThreshold,
+    VerificationTestsFailed,
+    ThreadStale,
+    IntegrationPreviewBlocked,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LandBlockerCheckSchema {
+    ThreadState,
+    MergePreview,
+    AutoLandConfidence,
+    VerificationSummary,
+    Freshness,
+    IntegrationPreview,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LandBlockerStateContextSchema {
+    pub recorded_thread_state: String,
+    pub recorded_state_id: Option<String>,
+    pub thread_tip_state_id: Option<String>,
+    pub integration_policy_status: Option<String>,
+    pub integration_policy_reason: Option<String>,
+    pub merge_relation: String,
+    pub conflict_count: usize,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1408,6 +1459,7 @@ pub struct LandBatchPeerSchema {
     pub siblings_restacked: Vec<String>,
     pub siblings_restack_failed: Vec<SiblingRestackFailureSchema>,
     pub blockers: Vec<String>,
+    pub blocker_details: Vec<LandBlockerDetailSchema>,
     pub warnings: Vec<String>,
     pub primary_command: Option<String>,
     pub recovery_commands: Vec<String>,
@@ -3658,7 +3710,14 @@ mod tests {
         );
 
         let required = required_fields(&schema);
-        for stable_field in ["blockers", "warnings", "readiness", "verification"] {
+        for stable_field in [
+            "blockers",
+            "warnings",
+            "capture_status",
+            "capture_reason",
+            "readiness",
+            "verification",
+        ] {
             assert!(
                 required.contains(&stable_field),
                 "ready schema must require `{stable_field}` because ready JSON always emits the stable field set: {schema}"
@@ -3667,6 +3726,20 @@ mod tests {
         assert!(
             properties.contains_key("captured_state"),
             "ready schema should document captured_state even though schemars models nullable Option fields as optional"
+        );
+    }
+
+    #[test]
+    fn land_schema_requires_structured_blocker_details() {
+        let schema = schema_for_verb("land").expect("land schema");
+        let properties = schema
+            .get("properties")
+            .and_then(|properties| properties.as_object())
+            .expect("land schema has properties");
+        assert!(properties.contains_key("blocker_details"), "{schema}");
+        assert!(
+            required_fields(&schema).contains(&"blocker_details"),
+            "land always emits the machine-readable blocker detail array: {schema}"
         );
     }
 

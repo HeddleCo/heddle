@@ -169,8 +169,8 @@ pub use stack_snapshot::{
 pub use stash::{StashEntry, StashId, StashManager};
 pub use state_attachments::StateAttachmentKind;
 pub use thread_advice::{
-    RecommendedAction, ThreadAdvice, describe_thread_advice, describe_thread_advice_with_initial,
-    shell_quote, thread_flag,
+    RecommendedAction, THREAD_STATE_BLOCKER_PREFIX, ThreadAdvice, describe_thread_advice,
+    describe_thread_advice_with_initial, shell_quote, thread_flag,
 };
 pub use thread_model::{
     ConfidenceBand, EphemeralMarker, ThreadConfidenceSummary, ThreadFreshness, ThreadId,

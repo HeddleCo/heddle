@@ -8,7 +8,6 @@ use heddle_core::{
     integrated_land_next_action as core_integrated_land_next_action,
     integration_blocker_recommended_action as core_integration_blocker_recommended_action,
     integration_blockers as core_integration_blockers,
-    land_blockers_for_preview as core_land_blockers_for_preview,
     land_checkpoint_message as core_land_checkpoint_message,
     land_performed_steps as core_land_performed_steps,
     land_skipped_steps as core_land_skipped_steps, land_text_step as core_land_text_step,
@@ -25,7 +24,10 @@ use objects::{
     store::ObjectStore,
 };
 use oplog::{OpBatch, OpLogBackend, OpRecord};
-use repo::{Repository, Thread, ThreadIntegrationPolicy, thread_flag};
+use repo::{
+    Repository, THREAD_STATE_BLOCKER_PREFIX, Thread, ThreadIntegrationPolicy, ThreadState,
+    thread_flag,
+};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -104,6 +106,7 @@ struct LandOutput {
     performed_steps: Vec<String>,
     skipped_steps: Vec<String>,
     merge_state: Option<String>,
+    blocker_details: Vec<LandBlockerDetail>,
     #[serde(default)]
     siblings_restacked: Vec<String>,
     #[serde(default)]
@@ -112,6 +115,49 @@ struct LandOutput {
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
     chosen_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LandBlockerDetail {
+    code: LandBlockerCode,
+    check: LandBlockerCheck,
+    message: String,
+    paths: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state_context: Option<LandBlockerStateContext>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LandBlockerCode {
+    ThreadStateBlocked,
+    MergeConflicts,
+    AutoLandConfidenceBelowThreshold,
+    VerificationTestsFailed,
+    ThreadStale,
+    IntegrationPreviewBlocked,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LandBlockerCheck {
+    ThreadState,
+    MergePreview,
+    AutoLandConfidence,
+    VerificationSummary,
+    Freshness,
+    IntegrationPreview,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LandBlockerStateContext {
+    recorded_thread_state: String,
+    recorded_state_id: Option<String>,
+    thread_tip_state_id: Option<String>,
+    integration_policy_status: Option<String>,
+    integration_policy_reason: Option<String>,
+    merge_relation: String,
+    conflict_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,6 +176,7 @@ struct MultiLandPeerResult {
     siblings_restack_failed: Vec<SiblingRestackFailure>,
     #[serde(default)]
     blockers: Vec<String>,
+    blocker_details: Vec<LandBlockerDetail>,
     #[serde(default)]
     warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -460,6 +507,9 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         let preview = build_thread_preview_report(&repo, &mut refreshed_thread, true)?;
         let stale_blockers = non_staleness_blockers(&preview.blockers);
         if preview.conflict_count == 0 && !stale_blockers.is_empty() {
+            let blocker_details =
+                land_blocker_details(&repo, &refreshed_thread, &preview, &stale_blockers)?;
+            let rendered_blockers = blocker_messages(&blocker_details);
             update_integration_policy(
                 &repo,
                 &refreshed_thread.id,
@@ -480,7 +530,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                             "Thread '{}' must be synced manually",
                             refreshed_thread.id
                         ),
-                        blockers: land_blockers_for_preview(&preview, &stale_blockers),
+                        blockers: rendered_blockers,
                         warnings: Vec::new(),
                         next_action: Some(format!(
                             "heddle sync {}",
@@ -498,6 +548,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                     synced: false,
                     integrated: false,
                     merge_state: None,
+                    blocker_details,
                     siblings_restacked: Vec::new(),
                     siblings_restack_failed: Vec::new(),
                     trust: build_repository_verification_state(&repo),
@@ -530,6 +581,9 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                     "land sync produced conflicts requiring manual resolution",
                 )?;
                 let recommended_action = scoped_resolve_list_command(&refreshed_thread);
+                let blocker_details =
+                    land_blocker_details(&repo, &refreshed_thread, &preview, &stale_blockers)?;
+                let rendered_blockers = blocker_messages(&blocker_details);
                 return write_land_output(
                     cli,
                     &repo,
@@ -541,7 +595,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                                 "Thread '{}' has merge conflicts to resolve",
                                 refreshed_thread.id
                             ),
-                            blockers: land_blockers_for_preview(&preview, &stale_blockers),
+                            blockers: rendered_blockers,
                             warnings: Vec::new(),
                             next_action: Some(recommended_action.clone()),
                             recommended_action: Some(recommended_action),
@@ -553,6 +607,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                         synced: false,
                         integrated: false,
                         merge_state: None,
+                        blocker_details,
                         siblings_restacked: Vec::new(),
                         siblings_restack_failed: Vec::new(),
                         trust: build_repository_verification_state(&repo),
@@ -727,6 +782,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 synced,
                 integrated: true,
                 merge_state: Some(merge_state),
+                blocker_details: Vec::new(),
                 siblings_restacked: sibling_restack.restacked,
                 siblings_restack_failed: sibling_restack.failed,
                 trust,
@@ -741,7 +797,10 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         );
     }
     if preview.conflict_count > 0 || !integration_blockers.is_empty() {
-        let reason = integration_blockers
+        let blocker_details =
+            land_blocker_details(&repo, &merge_thread, &preview, &integration_blockers)?;
+        let rendered_blockers = blocker_messages(&blocker_details);
+        let policy_reason = integration_blockers
             .first()
             .cloned()
             .unwrap_or_else(|| "integration requires manual review".to_string());
@@ -754,7 +813,15 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             && policy_recovery_action.is_none()
             && materialize_land_conflict_for_thread(&repo, &merge_thread)?
         {
-            update_integration_policy(&repo, &merge_thread.id, "blocked", &reason)?;
+            update_integration_policy(
+                &repo,
+                &merge_thread.id,
+                "blocked",
+                format!(
+                    "{} path conflict(s) need manual resolution",
+                    preview.conflict_count
+                ),
+            )?;
             let recommended_action = scoped_resolve_list_command(&merge_thread);
             return write_land_output(
                 cli,
@@ -767,7 +834,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                             "Thread '{}' has merge conflicts to resolve",
                             merge_thread.id
                         ),
-                        blockers: land_blockers_for_preview(&preview, &integration_blockers),
+                        blockers: rendered_blockers.clone(),
                         warnings: preview_warnings.clone(),
                         next_action: Some(recommended_action.clone()),
                         recommended_action: Some(recommended_action),
@@ -779,6 +846,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                     synced: false,
                     integrated: false,
                     merge_state: None,
+                    blocker_details: blocker_details.clone(),
                     siblings_restacked: Vec::new(),
                     siblings_restack_failed: Vec::new(),
                     trust: build_repository_verification_state(&repo),
@@ -788,14 +856,14 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 },
             );
         }
-        // Never fall back to `preview.recommended_action` here: this is the
-        // pre-merge bail, so a preview-originated `resolve` breadcrumb could
-        // die with `no_merge_in_progress`, and the preview's own land
-        // recommendation would self-loop this very command. When materializing
-        // was not possible, drive the operator through the explicit sync path.
-        let recommended_action = policy_recovery_action
-            .unwrap_or_else(|| format!("heddle sync {}", thread_flag(&merge_thread.id)));
-        update_integration_policy(&repo, &merge_thread.id, "blocked", &reason)?;
+        // A current thread's persisted lifecycle/policy blocker cannot be
+        // changed by sync: sync's selected path is necessarily `no_op`. Only
+        // emit a command when the blocker classifier knows it can change the
+        // condition (currently confidence / failing-test policy recapture).
+        let recommended_action = policy_recovery_action;
+        if merge_thread.state != ThreadState::Blocked {
+            update_integration_policy(&repo, &merge_thread.id, "blocked", policy_reason)?;
+        }
         return write_land_output(
             cli,
             &repo,
@@ -804,10 +872,10 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                     status: "blocked".to_string(),
                     action: OperatorAction::Land,
                     message: format!("Thread '{}' is not eligible for auto-land", merge_thread.id),
-                    blockers: land_blockers_for_preview(&preview, &integration_blockers),
+                    blockers: rendered_blockers,
                     warnings: preview_warnings.clone(),
-                    next_action: Some(recommended_action.clone()),
-                    recommended_action: Some(recommended_action),
+                    next_action: recommended_action.clone(),
+                    recommended_action,
                 },
                 thread: merge_thread.id.clone(),
                 captured,
@@ -816,6 +884,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 synced,
                 integrated: false,
                 merge_state: None,
+                blocker_details,
                 siblings_restacked: Vec::new(),
                 siblings_restack_failed: Vec::new(),
                 trust: build_repository_verification_state(&repo),
@@ -992,6 +1061,16 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     );
     let sibling_restack =
         apply_sibling_restack_after_land(&repo, &merge_thread, cli, integrated, &mut operator);
+    let blocker_details = if integrated {
+        Vec::new()
+    } else {
+        land_blocker_details(
+            &repo,
+            &merge_thread,
+            &preview,
+            &merge_output.operator.blockers,
+        )?
+    };
 
     write_land_output(
         cli,
@@ -1005,6 +1084,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             synced,
             integrated,
             merge_state: merge_output.merge_state.clone(),
+            blocker_details,
             siblings_restacked: sibling_restack.restacked,
             siblings_restack_failed: sibling_restack.failed,
             trust,
@@ -1765,11 +1845,153 @@ pub(crate) fn recovery_scope_checkout(
     core_recovery_scope_checkout(&thread.execution_path, current_checkout)
 }
 
-fn land_blockers_for_preview(
+fn land_blocker_details(
+    repo: &Repository,
+    thread: &Thread,
     preview: &super::merge::ThreadPreviewReport,
     blockers: &[String],
-) -> Vec<String> {
-    core_land_blockers_for_preview(preview, blockers)
+) -> Result<Vec<LandBlockerDetail>> {
+    let mut details = Vec::new();
+    if let Some(detail) = thread_state_blocker_detail(repo, thread, preview)? {
+        details.push(detail);
+    }
+    if preview.conflict_count > 0 {
+        details.push(LandBlockerDetail {
+            code: LandBlockerCode::MergeConflicts,
+            check: LandBlockerCheck::MergePreview,
+            message: format!(
+                "merge preview check failed: {} conflicting path(s): {}",
+                preview.conflict_count,
+                preview.conflicts.join(", ")
+            ),
+            paths: preview.conflicts.clone(),
+            state_context: None,
+        });
+    }
+    details.extend(auto_land_blocker_details(repo, thread));
+    for blocker in blockers {
+        let known = blocker.starts_with(THREAD_STATE_BLOCKER_PREFIX)
+            || blocker.starts_with("confidence ")
+            || blocker == "verification summary reports failing tests"
+            || (preview.conflict_count > 0
+                && (blocker.contains("path conflict(s) need manual resolution")
+                    || blocker.starts_with("conflict: ")));
+        if known {
+            continue;
+        }
+        let (code, check) = if blocker.contains(" is stale against ") {
+            (LandBlockerCode::ThreadStale, LandBlockerCheck::Freshness)
+        } else {
+            (
+                LandBlockerCode::IntegrationPreviewBlocked,
+                LandBlockerCheck::IntegrationPreview,
+            )
+        };
+        details.push(LandBlockerDetail {
+            code,
+            check,
+            message: blocker.clone(),
+            paths: Vec::new(),
+            state_context: None,
+        });
+    }
+
+    Ok(details)
+}
+
+fn thread_state_blocker_detail(
+    repo: &Repository,
+    thread: &Thread,
+    preview: &super::merge::ThreadPreviewReport,
+) -> Result<Option<LandBlockerDetail>> {
+    if thread.state != ThreadState::Blocked {
+        return Ok(None);
+    }
+    let thread_tip_state_id = repo
+        .refs()
+        .get_thread(&ThreadName::new(&thread.thread))?
+        .map(|state| state.short());
+    let id_context = match (
+        thread.current_state.as_deref(),
+        thread_tip_state_id.as_deref(),
+    ) {
+        (Some(recorded), Some(tip)) if recorded != tip => {
+            format!("recorded state {recorded} differs from thread tip {tip}")
+        }
+        (Some(recorded), Some(_)) => {
+            format!("recorded state and thread tip both resolve to {recorded}")
+        }
+        (None, Some(tip)) => format!("no state is recorded while the thread tip is {tip}"),
+        (Some(recorded), None) => {
+            format!("recorded state is {recorded} but the thread has no readable tip")
+        }
+        (None, None) => "neither a recorded state nor a thread tip is available".to_string(),
+    };
+    let policy_status = thread
+        .integration_policy_result
+        .status
+        .as_deref()
+        .unwrap_or("not recorded");
+    let policy_reason = thread
+        .integration_policy_result
+        .reason
+        .as_deref()
+        .unwrap_or("no reason recorded");
+    Ok(Some(LandBlockerDetail {
+        code: LandBlockerCode::ThreadStateBlocked,
+        check: LandBlockerCheck::ThreadState,
+        message: format!(
+            "thread state check failed: recorded lifecycle state is 'blocked' (integration policy status '{policy_status}', reason '{policy_reason}'); {id_context}; current merge preview is {} with {} conflict(s)",
+            preview.merge_relation, preview.conflict_count
+        ),
+        paths: Vec::new(),
+        state_context: Some(LandBlockerStateContext {
+            recorded_thread_state: thread.state.to_string(),
+            recorded_state_id: thread.current_state.clone(),
+            thread_tip_state_id,
+            integration_policy_status: thread.integration_policy_result.status.clone(),
+            integration_policy_reason: thread.integration_policy_result.reason.clone(),
+            merge_relation: preview.merge_relation.clone(),
+            conflict_count: preview.conflict_count,
+        }),
+    }))
+}
+
+fn auto_land_blocker_details(repo: &Repository, thread: &Thread) -> Vec<LandBlockerDetail> {
+    let policy = auto_land_policy_input(repo, thread);
+    let mut details = Vec::new();
+    if policy.agent_authored
+        && let Some(confidence) = policy.confidence
+        && confidence < heddle_core::AUTO_LAND_CONFIDENCE_THRESHOLD
+    {
+        details.push(LandBlockerDetail {
+            code: LandBlockerCode::AutoLandConfidenceBelowThreshold,
+            check: LandBlockerCheck::AutoLandConfidence,
+            message: format!(
+                "auto-land confidence check failed: {confidence:.2} is below the {:.2} threshold",
+                heddle_core::AUTO_LAND_CONFIDENCE_THRESHOLD
+            ),
+            paths: Vec::new(),
+            state_context: None,
+        });
+    }
+    if matches!(policy.tests_passed, Some(false)) {
+        details.push(LandBlockerDetail {
+            code: LandBlockerCode::VerificationTestsFailed,
+            check: LandBlockerCheck::VerificationSummary,
+            message: "verification summary check failed: tests_passed is false".to_string(),
+            paths: Vec::new(),
+            state_context: None,
+        });
+    }
+    details
+}
+
+fn blocker_messages(details: &[LandBlockerDetail]) -> Vec<String> {
+    details
+        .iter()
+        .map(|detail| detail.message.clone())
+        .collect()
 }
 
 fn land_warnings_for_preview(preview: &super::merge::ThreadPreviewReport) -> Vec<String> {
@@ -1896,6 +2118,7 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
                     siblings_restacked: output.siblings_restacked.clone(),
                     siblings_restack_failed: output.siblings_restack_failed.clone(),
                     blockers: output.operator.blockers.clone(),
+                    blocker_details: output.blocker_details.clone(),
                     warnings: output.operator.warnings.clone(),
                     recovery_commands: primary_command.iter().cloned().collect(),
                     primary_command,
@@ -1939,7 +2162,7 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
                 println!(
                     "  {}",
                     style::field(
-                        "up to date",
+                        "not performed",
                         &output
                             .skipped_steps
                             .iter()
@@ -1986,6 +2209,21 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
             .or(output.operator.next_action.as_ref())
         {
             print_next(next);
+        } else if output.operator.status == "blocked" {
+            println!();
+            if output
+                .blocker_details
+                .iter()
+                .any(|detail| detail.code == LandBlockerCode::ThreadStateBlocked)
+            {
+                println!(
+                    "No automatic recovery command is available: sync is already current and cannot change the recorded blocked thread state."
+                );
+            } else {
+                println!(
+                    "No automatic recovery command is available for the blocking condition above."
+                );
+            }
         }
     }
     fail_if_blocked_operator_status(&output.operator.status)
@@ -2899,6 +3137,7 @@ fn multi_land_error_peer(thread: &str, error: &anyhow::Error) -> MultiLandPeerRe
         siblings_restacked: Vec::new(),
         siblings_restack_failed: Vec::new(),
         blockers,
+        blocker_details: Vec::new(),
         warnings,
         primary_command,
         recovery_commands,

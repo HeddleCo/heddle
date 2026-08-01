@@ -5,6 +5,12 @@ use serde::Serialize;
 
 use crate::{Thread, ThreadFreshness, ThreadState};
 
+/// Stable prefix for the human rendering of the persisted thread-state gate.
+/// Machine consumers must use the structured blocker code emitted by `land`;
+/// this prefix only lets internal renderers recognize and enrich the matching
+/// human message without comparing the old opaque sentence.
+pub const THREAD_STATE_BLOCKER_PREFIX: &str = "thread state check failed:";
+
 /// Shell-quote an argument for inclusion in a recommended-command string so a
 /// value containing whitespace or shell metacharacters yields a runnable
 /// command (and tokenizes correctly through the CLI's next_action validator).
@@ -188,15 +194,11 @@ pub fn describe_thread_advice_with_initial(
             preview_paths(&thread.heavy_impact_paths)
         ));
         RecommendedAction::Review
-    } else if conflicts > 0 || thread.state == ThreadState::Blocked {
-        if conflicts > 0 {
-            blockers.push(format!(
-                "{} path conflict(s) need manual resolution",
-                conflicts
-            ));
-        } else if blockers.is_empty() {
-            blockers.push("Thread needs attention before integration".to_string());
-        }
+    } else if conflicts > 0 {
+        blockers.push(format!(
+            "{} path conflict(s) need manual resolution",
+            conflicts
+        ));
         // `land` — not `resolve --list`. This is a metadata-only function; it
         // is always called from non-materialized contexts (status passes
         // conflicts=0, the only conflicts>0 caller is the merge dry-run
@@ -206,6 +208,25 @@ pub fn describe_thread_advice_with_initial(
         // `continue`) or re-reports the specific blocker with its own
         // recommendation. (heddle#464 close-the-class.)
         RecommendedAction::Land
+    } else if thread.state == ThreadState::Blocked {
+        let policy_status = thread
+            .integration_policy_result
+            .status
+            .as_deref()
+            .unwrap_or("not recorded");
+        let policy_reason = thread
+            .integration_policy_result
+            .reason
+            .as_deref()
+            .unwrap_or("no reason recorded");
+        blockers.push(format!(
+            "{THREAD_STATE_BLOCKER_PREFIX} recorded lifecycle state is 'blocked' (integration policy status '{policy_status}', reason '{policy_reason}')"
+        ));
+        // No generic command is known to change a persisted Blocked state.
+        // `land` reports the state/ref/preview mismatch in structured form;
+        // `sync` is deliberately not suggested because a current thread makes
+        // that command a no-op (heddle#1185).
+        RecommendedAction::Review
     } else if thread.state == ThreadState::Ready
         && thread.integration_policy_result.status.as_deref() == Some("previewed")
     {
@@ -279,17 +300,17 @@ mod tests {
         .expect("thread fixture should deserialize")
     }
 
-    // heddle#464 close-the-class: `describe_thread_advice` is metadata-only —
-    // it is never called from a context that has materialized a merge (status
-    // passes conflicts=0; the lone conflicts>0 caller is the dry-run merge
-    // preview). So it must never emit `heddle resolve --list`, which would die
-    // with `no_merge_in_progress`. A blocked thread re-drives through `land`.
+    // A persisted Blocked lifecycle state is itself the failed check. There is
+    // no generic command that can safely clear it, so advice must name the
+    // recorded condition and stop instead of entering a land/sync loop.
     #[test]
-    fn blocked_thread_recommends_land_not_dead_resolve_breadcrumb() {
+    fn blocked_thread_names_recorded_state_without_guessing_recovery() {
         let advice = describe_thread_advice(&thread_json("blocked"), false, 0, false);
         assert_eq!(advice.thread_health, "blocked");
-        assert_ne!(advice.recommended_action, "heddle resolve --list");
-        assert_eq!(advice.recommended_action, "heddle land --thread feature/x");
+        assert_eq!(advice.recommended_action, "");
+        assert_eq!(advice.blockers.len(), 1);
+        assert!(advice.blockers[0].starts_with(THREAD_STATE_BLOCKER_PREFIX));
+        assert!(advice.blockers[0].contains("recorded lifecycle state is 'blocked'"));
     }
 
     // Even when a preview reports conflicts, the merge is a dry run with no

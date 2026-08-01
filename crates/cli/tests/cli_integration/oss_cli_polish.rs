@@ -5493,7 +5493,7 @@ fn ready_text_names_ready_and_already_ready_noop_states() {
     for field in [
         "thread:",
         "status:",
-        "captured:",
+        "capture:",
         "checks:",
         "integration:",
         "freshness:",
@@ -5509,7 +5509,9 @@ fn ready_text_names_ready_and_already_ready_noop_states() {
     }
     assert!(
         first_stdout.contains("checks: completed (readiness preview ran)")
-            && first_stdout.contains("captured: no")
+            && first_stdout.contains(
+                "capture: not needed (the worktree already matches the current Heddle state)"
+            )
             && first_stdout.contains("freshness: n/a (no integration target configured)")
             && first_stdout.contains("merge type: n/a (no integration target configured)")
             && first_stdout.contains("conflicts: 0")
@@ -5570,7 +5572,7 @@ fn ready_capture_is_visible_and_carries_confidence() {
     assert!(text.status.success(), "ready should succeed");
     let stdout = String::from_utf8_lossy(&text.stdout);
     assert!(
-        stdout.contains("captured: yes (state hs-"),
+        stdout.contains("capture: captured (state hs-"),
         "ready text should explicitly name the captured state when it saves work: {stdout}"
     );
 
@@ -5590,6 +5592,8 @@ fn ready_capture_is_visible_and_carries_confidence() {
     assert_schema_declares_runtime_top_level(&["ready"], &json);
     assert_eq!(json["output_kind"], "ready");
     assert_eq!(json["captured"], true);
+    assert_eq!(json["capture_status"], "captured");
+    assert_eq!(json["readiness"]["capture_status"], "captured");
     assert!(
         json["captured_state"]
             .as_str()
@@ -5617,9 +5621,11 @@ fn ready_refuses_dirty_capture_without_intent() {
     assert_eq!(ready["status"], "blocked");
     assert_eq!(ready["captured"], false);
     assert_eq!(ready["captured_state"], serde_json::Value::Null);
+    assert_eq!(ready["capture_status"], "required");
     assert_eq!(ready["blockers"].as_array().unwrap().len(), 1);
     assert_eq!(ready["warnings"], serde_json::json!([]));
     assert_eq!(ready["readiness"]["captured"], false);
+    assert_eq!(ready["readiness"]["capture_status"], "required");
     assert_eq!(
         ready["readiness"]["captured_state"],
         serde_json::Value::Null
@@ -5683,6 +5689,7 @@ fn ready_plain_git_refuses_before_initializing_heddle() {
     assert_eq!(ready["output_kind"], "ready");
     assert_eq!(ready["verification"]["status"], "needs_init");
     assert_eq!(ready["captured"], false);
+    assert_eq!(ready["capture_status"], "not_checked");
     assert!(
         ready["recommended_action"]
             .as_str()

@@ -7606,6 +7606,12 @@
               },
               "type": "array"
             },
+            "capture_reason": {
+              "type": "string"
+            },
+            "capture_status": {
+              "type": "string"
+            },
             "captured": {
               "type": "boolean"
             },
@@ -7665,6 +7671,8 @@
           "required": [
             "status",
             "captured",
+            "capture_status",
+            "capture_reason",
             "checks",
             "integration",
             "freshness",
@@ -7879,6 +7887,12 @@
           },
           "type": "array"
         },
+        "capture_reason": {
+          "type": "string"
+        },
+        "capture_status": {
+          "type": "string"
+        },
         "captured": {
           "type": "boolean"
         },
@@ -8007,6 +8021,8 @@
         "blockers",
         "warnings",
         "captured",
+        "capture_status",
+        "capture_reason",
         "readiness",
         "report",
         "verification",
@@ -18306,6 +18322,113 @@
           ],
           "type": "object"
         },
+        "LandBlockerCheckSchema": {
+          "enum": [
+            "thread_state",
+            "merge_preview",
+            "auto_land_confidence",
+            "verification_summary",
+            "freshness",
+            "integration_preview"
+          ],
+          "type": "string"
+        },
+        "LandBlockerCodeSchema": {
+          "enum": [
+            "thread_state_blocked",
+            "merge_conflicts",
+            "auto_land_confidence_below_threshold",
+            "verification_tests_failed",
+            "thread_stale",
+            "integration_preview_blocked"
+          ],
+          "type": "string"
+        },
+        "LandBlockerDetailSchema": {
+          "properties": {
+            "check": {
+              "$ref": "#/$defs/LandBlockerCheckSchema",
+              "description": "Eligibility check that produced the blocker."
+            },
+            "code": {
+              "$ref": "#/$defs/LandBlockerCodeSchema",
+              "description": "Stable condition code for machine branching."
+            },
+            "message": {
+              "description": "Human explanation of the observed condition.",
+              "type": "string"
+            },
+            "paths": {
+              "description": "Concrete affected paths; empty for non-path conditions.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "state_context": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LandBlockerStateContextSchema"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "code",
+            "check",
+            "message",
+            "paths"
+          ],
+          "type": "object"
+        },
+        "LandBlockerStateContextSchema": {
+          "properties": {
+            "conflict_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "integration_policy_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "integration_policy_status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "merge_relation": {
+              "type": "string"
+            },
+            "recorded_state_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "recorded_thread_state": {
+              "type": "string"
+            },
+            "thread_tip_state_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "recorded_thread_state",
+            "merge_relation",
+            "conflict_count"
+          ],
+          "type": "object"
+        },
         "SiblingRestackFailureSchema": {
           "properties": {
             "message": {
@@ -18326,6 +18449,12 @@
       "properties": {
         "action": {
           "type": "string"
+        },
+        "blocker_details": {
+          "items": {
+            "$ref": "#/$defs/LandBlockerDetailSchema"
+          },
+          "type": "array"
         },
         "blockers": {
           "items": {
@@ -18503,6 +18632,7 @@
         "integrated",
         "performed_steps",
         "skipped_steps",
+        "blocker_details",
         "chosen_path",
         "siblings_restacked",
         "siblings_restack_failed",
@@ -18545,6 +18675,12 @@
         },
         "LandBatchPeerSchema": {
           "properties": {
+            "blocker_details": {
+              "items": {
+                "$ref": "#/$defs/LandBlockerDetailSchema"
+              },
+              "type": "array"
+            },
             "blockers": {
               "items": {
                 "type": "string"
@@ -18620,8 +18756,116 @@
             "siblings_restacked",
             "siblings_restack_failed",
             "blockers",
+            "blocker_details",
             "warnings",
             "recovery_commands"
+          ],
+          "type": "object"
+        },
+        "LandBlockerCheckSchema": {
+          "enum": [
+            "thread_state",
+            "merge_preview",
+            "auto_land_confidence",
+            "verification_summary",
+            "freshness",
+            "integration_preview"
+          ],
+          "type": "string"
+        },
+        "LandBlockerCodeSchema": {
+          "enum": [
+            "thread_state_blocked",
+            "merge_conflicts",
+            "auto_land_confidence_below_threshold",
+            "verification_tests_failed",
+            "thread_stale",
+            "integration_preview_blocked"
+          ],
+          "type": "string"
+        },
+        "LandBlockerDetailSchema": {
+          "properties": {
+            "check": {
+              "$ref": "#/$defs/LandBlockerCheckSchema",
+              "description": "Eligibility check that produced the blocker."
+            },
+            "code": {
+              "$ref": "#/$defs/LandBlockerCodeSchema",
+              "description": "Stable condition code for machine branching."
+            },
+            "message": {
+              "description": "Human explanation of the observed condition.",
+              "type": "string"
+            },
+            "paths": {
+              "description": "Concrete affected paths; empty for non-path conditions.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "state_context": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LandBlockerStateContextSchema"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "code",
+            "check",
+            "message",
+            "paths"
+          ],
+          "type": "object"
+        },
+        "LandBlockerStateContextSchema": {
+          "properties": {
+            "conflict_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "integration_policy_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "integration_policy_status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "merge_relation": {
+              "type": "string"
+            },
+            "recorded_state_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "recorded_thread_state": {
+              "type": "string"
+            },
+            "thread_tip_state_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "recorded_thread_state",
+            "merge_relation",
+            "conflict_count"
           ],
           "type": "object"
         },
@@ -23022,6 +23266,12 @@
               },
               "type": "array"
             },
+            "capture_reason": {
+              "type": "string"
+            },
+            "capture_status": {
+              "type": "string"
+            },
             "captured": {
               "type": "boolean"
             },
@@ -23081,6 +23331,8 @@
           "required": [
             "status",
             "captured",
+            "capture_status",
+            "capture_reason",
             "checks",
             "integration",
             "freshness",
@@ -23295,6 +23547,12 @@
           },
           "type": "array"
         },
+        "capture_reason": {
+          "type": "string"
+        },
+        "capture_status": {
+          "type": "string"
+        },
         "captured": {
           "type": "boolean"
         },
@@ -23423,6 +23681,8 @@
         "blockers",
         "warnings",
         "captured",
+        "capture_status",
+        "capture_reason",
         "readiness",
         "report",
         "verification",
