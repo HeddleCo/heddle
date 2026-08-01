@@ -132,6 +132,7 @@ mod status_untracked_scan;
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
 const GIT_CHECKPOINT_INTENT_FILE: &str = "git-checkpoint-intent.json";
 const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
+const HEDDLE_REPOSITORY_MEMBERS: &[&str] = &["HEAD", "objects", "objectstore", "oplog", "refs"];
 
 fn git_discovery_across_filesystem() -> bool {
     std::env::var("GIT_DISCOVERY_ACROSS_FILESYSTEM")
@@ -186,9 +187,23 @@ fn bounded_ancestor_paths_with_device(
     ancestors
 }
 
-/// Find the nearest Heddle sidecar without allowing Git discovery to claim the
-/// path first. The walk follows Git's filesystem-boundary policy and honors
-/// `GIT_DISCOVERY_ACROSS_FILESYSTEM`.
+/// Return whether `root/.heddle` contains repository-specific metadata.
+///
+/// The user configuration directory is also named `.heddle`, so the directory
+/// name alone is not a repository marker. This is only a discovery probe, not
+/// full validation: once a candidate is found, [`Repository::open`] still
+/// validates it and reports malformed repository metadata loudly.
+pub fn is_heddle_repository_root(root: &Path) -> bool {
+    let heddle_dir = root.join(".heddle");
+    heddle_dir.is_dir()
+        && HEDDLE_REPOSITORY_MEMBERS
+            .iter()
+            .any(|member| fs::symlink_metadata(heddle_dir.join(member)).is_ok())
+}
+
+/// Find the nearest Heddle repository sidecar without allowing Git discovery
+/// to claim the path first. The walk follows Git's filesystem-boundary policy
+/// and honors `GIT_DISCOVERY_ACROSS_FILESYSTEM`.
 pub fn discover_heddle_root(start: &Path) -> Option<PathBuf> {
     let absolute = if start.is_absolute() {
         start.to_path_buf()
@@ -198,7 +213,7 @@ pub fn discover_heddle_root(start: &Path) -> Option<PathBuf> {
     let start = absolute.canonicalize().unwrap_or(absolute);
     bounded_ancestor_paths(&start)
         .into_iter()
-        .find(|path| path.join(".heddle").is_dir())
+        .find(|path| is_heddle_repository_root(path))
 }
 
 /// Open only the Git repository rooted at `root`; never inherit an ancestor.
@@ -1042,7 +1057,7 @@ impl Repository {
             }
             let heddle_path = dir.join(".heddle");
 
-            if heddle_path.is_dir() {
+            if is_heddle_repository_root(dir) {
                 let pointer_path = heddle_path.join("objectstore");
                 let objects_dir = heddle_path.join("objects");
                 if !pointer_path.is_file() && !objects_dir.is_dir() {

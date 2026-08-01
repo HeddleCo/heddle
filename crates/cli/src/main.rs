@@ -860,11 +860,9 @@ async fn async_main() -> Result<()> {
 /// `Repository::open` create a sidecar before adopt preflight completes.
 fn recovery_target_has_existing_metadata(command: &Commands, start: &Path) -> bool {
     if matches!(command, Commands::Adopt(_)) {
-        return start.join(".heddle").is_dir();
+        return repo::is_heddle_repository_root(start);
     }
-    start
-        .ancestors()
-        .any(|ancestor| ancestor.join(".heddle").is_dir())
+    repo::discover_heddle_root(start).is_some()
 }
 
 fn is_harness_relay_invocation(command: &Commands) -> bool {
