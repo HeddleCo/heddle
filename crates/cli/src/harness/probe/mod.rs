@@ -12,7 +12,7 @@ mod codex;
 mod opencode;
 
 pub(crate) use claude_code::ClaudeCodeProbe;
-pub(crate) use codex::CodexProbe;
+pub(crate) use codex::{CodexProbe, codex_session_probe_metadata};
 pub(crate) use opencode::OpenCodeProbe;
 
 #[derive(Debug, Clone, Default)]

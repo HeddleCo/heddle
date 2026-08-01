@@ -44,7 +44,9 @@ use wire::{
 mod claude_hook;
 mod probe;
 
-use self::probe::{HarnessProbeInput, HarnessProbeResult, probe_harness_actor};
+use self::probe::{
+    HarnessProbeInput, HarnessProbeResult, codex_session_probe_metadata, probe_harness_actor,
+};
 use crate::{
     cli::{
         Cli,
@@ -69,15 +71,17 @@ pub(crate) fn probe_current_process_harness(
     current_model: Option<String>,
     current_policy: Option<String>,
 ) -> Result<HarnessProbeResult> {
+    let env_hints = harness_env_hints();
+    let probe_metadata = codex_session_probe_metadata(&env_hints);
     probe_harness_actor(&HarnessProbeInput {
         argv: detected_harness_argv().or_else(|| Some(std::env::args().collect())),
-        env_hints: harness_env_hints(),
+        env_hints,
         explicit_harness: None,
         explicit_provider: None,
         explicit_model: None,
         explicit_thinking_level: None,
         explicit_policy: None,
-        probe_metadata: BTreeMap::new(),
+        probe_metadata,
         current_provider,
         current_model,
         current_policy,

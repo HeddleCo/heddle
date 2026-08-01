@@ -2008,6 +2008,86 @@ fn capture_json_reports_recorded_confidence_principal_and_agent() {
 }
 
 #[test]
+fn capture_auto_detects_codex_model_without_fabricating_plain_shell_agent() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let agent_env = [
+        "CODEX_THREAD_ID",
+        "CODEX_CI",
+        "CODEX_SANDBOX",
+        "CODEX_HOME",
+        "HEDDLE_AGENT_PROVIDER",
+        "HEDDLE_AGENT_MODEL",
+        "CLAUDECODE",
+        "CLAUDE_MODEL",
+        "ANTHROPIC_MODEL",
+    ];
+    let capture = |message: &str, envs: &[(&str, &str)]| {
+        let output = heddle_output_with_env_removed(
+            &["capture", "-m", message, "--output", "json"],
+            Some(temp.path()),
+            envs,
+            &agent_env,
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "capture failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let latest_agent = || {
+        let output = heddle_output_with_env_removed(
+            &["log", "--output", "json"],
+            Some(temp.path()),
+            &[],
+            &agent_env,
+        )
+        .unwrap();
+        assert!(output.status.success());
+        let log: Value = serde_json::from_slice(&output.stdout).unwrap();
+        log["states"][0]["agent"].clone()
+    };
+
+    let codex_home = temp.path().join("codex-home");
+    let session_dir = codex_home.join("sessions/2026/08/01");
+    let thread_id = "019fbc09-7051-79e1-b13c-3a55b72fa811";
+    std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::write(
+        session_dir.join(format!("rollout-2026-08-01T08-36-03-{thread_id}.jsonl")),
+        format!(
+            concat!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"model_provider\":\"openai\"}}}}\n",
+                "{{\"type\":\"turn_context\",\"payload\":{{\"model\":\"gpt-5.6-sol\",\"effort\":\"high\"}}}}\n"
+            ),
+            thread_id
+        ),
+    )
+    .unwrap();
+
+    std::fs::write(temp.path().join("codex.txt"), "codex work\n").unwrap();
+    capture(
+        "codex save",
+        &[
+            ("CODEX_THREAD_ID", thread_id),
+            ("CODEX_HOME", codex_home.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(latest_agent(), "openai/gpt-5.6-sol");
+
+    std::fs::write(temp.path().join("plain.txt"), "plain shell work\n").unwrap();
+    capture("plain shell save", &[]);
+    assert_eq!(latest_agent(), Value::Null);
+
+    std::fs::write(temp.path().join("claude.txt"), "claude work\n").unwrap();
+    capture(
+        "claude save",
+        &[("CLAUDECODE", "1"), ("CLAUDE_MODEL", "claude-fable-5")],
+    );
+    assert_eq!(latest_agent(), "anthropic/claude-fable-5");
+}
+
+#[test]
 fn git_overlay_commit_without_capture_uses_typed_recovery() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");

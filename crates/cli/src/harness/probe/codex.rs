@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
+};
+
 use anyhow::Result;
 use heddle_core::HarnessKind;
+use serde_json::Value;
 
 use super::{
     HarnessActorProbe, HarnessAttachHints, HarnessProbeInput, HarnessProbeResult, ProbeSource,
@@ -8,6 +16,102 @@ use super::{
 };
 
 pub(crate) struct CodexProbe;
+
+/// Resolve the effective model from the durable rollout for the Codex thread
+/// that launched this command. Missing or mismatched session evidence stays
+/// empty so attribution never turns a provider-only detection into a guess.
+pub(crate) fn codex_session_probe_metadata(
+    env_hints: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let Some(thread_id) = env_hints.get("CODEX_THREAD_ID") else {
+        return BTreeMap::new();
+    };
+    let Some(codex_home) = codex_home(env_hints) else {
+        return BTreeMap::new();
+    };
+    let Some(path) = codex_rollout_path(&codex_home, thread_id) else {
+        return BTreeMap::new();
+    };
+    read_codex_session_metadata(&path, thread_id).unwrap_or_default()
+}
+
+fn codex_home(env_hints: &BTreeMap<String, String>) -> Option<PathBuf> {
+    env_hints
+        .get("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".codex")))
+        .or_else(|| std::env::var_os("USERPROFILE").map(|home| Path::new(&home).join(".codex")))
+}
+
+fn codex_rollout_path(codex_home: &Path, thread_id: &str) -> Option<PathBuf> {
+    ingest::transcript::locator::codex_sessions(codex_home, None)
+        .ok()?
+        .into_iter()
+        .rev()
+        .find(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem.ends_with(thread_id))
+        })
+}
+
+fn read_codex_session_metadata(
+    path: &Path,
+    thread_id: &str,
+) -> std::io::Result<BTreeMap<String, String>> {
+    let reader = BufReader::new(File::open(path)?);
+    let mut matched_session = false;
+    let mut metadata = BTreeMap::new();
+
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            continue;
+        };
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let payload = event.get("payload").and_then(Value::as_object);
+        match event.get("type").and_then(Value::as_str) {
+            Some("session_meta") => {
+                matched_session = payload
+                    .and_then(|payload| payload.get("id"))
+                    .and_then(Value::as_str)
+                    == Some(thread_id);
+                if let Some(provider) = payload
+                    .and_then(|payload| payload.get("model_provider"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    metadata.insert("model_provider".to_string(), provider.to_string());
+                }
+            }
+            Some("turn_context") => {
+                if let Some(model) = payload
+                    .and_then(|payload| payload.get("model"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    metadata.insert("model".to_string(), model.to_string());
+                }
+                if let Some(effort) = payload
+                    .and_then(|payload| payload.get("effort"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    metadata.insert("model_reasoning_effort".to_string(), effort.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if matched_session {
+        Ok(metadata)
+    } else {
+        Ok(BTreeMap::new())
+    }
+}
 
 impl HarnessActorProbe for CodexProbe {
     fn harness_name(&self) -> &'static str {
@@ -105,5 +209,54 @@ impl HarnessActorProbe for CodexProbe {
             probe_source: Some(probe_source.as_str().to_string()),
             ..HarnessProbeResult::default()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_thread_resolves_latest_model_from_its_rollout() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let thread_id = "019fbc09-7051-79e1-b13c-3a55b72fa811";
+        let session_dir = temp.path().join("sessions/2026/08/01");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join(format!("rollout-2026-08-01T08-36-03-{thread_id}.jsonl")),
+            format!(
+                concat!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"model_provider\":\"openai\"}}}}\n",
+                    "{{\"type\":\"turn_context\",\"payload\":{{\"model\":\"gpt-5.6-terra\",\"effort\":\"medium\"}}}}\n",
+                    "{{\"type\":\"turn_context\",\"payload\":{{\"model\":\"gpt-5.6-sol\",\"effort\":\"high\"}}}}\n"
+                ),
+                thread_id
+            ),
+        )
+        .unwrap();
+
+        let env_hints = BTreeMap::from([
+            ("CODEX_THREAD_ID".to_string(), thread_id.to_string()),
+            ("CODEX_HOME".to_string(), temp.path().display().to_string()),
+        ]);
+
+        let metadata = codex_session_probe_metadata(&env_hints);
+        assert_eq!(
+            metadata.get("model_provider").map(String::as_str),
+            Some("openai")
+        );
+        assert_eq!(
+            metadata.get("model").map(String::as_str),
+            Some("gpt-5.6-sol")
+        );
+        assert_eq!(
+            metadata.get("model_reasoning_effort").map(String::as_str),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn codex_session_metadata_requires_a_thread_marker() {
+        assert!(codex_session_probe_metadata(&BTreeMap::new()).is_empty());
     }
 }
