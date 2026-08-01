@@ -23,7 +23,8 @@ use super::{
         effective_pop_public_key_hex,
     },
     hosted::{
-        HostedAuthMode, HostedClient, HostedError, HostedSession, operation_id::ClientOperationId,
+        HostedAuthMode, HostedClient, HostedError, HostedSession, ResolvedHostedCredential,
+        operation_id::ClientOperationId, resolve_hosted_credential,
     },
 };
 
@@ -226,21 +227,24 @@ fn cmd_auth_derive_agent(
         bail!("--ttl must be greater than zero seconds");
     }
     let ttl_secs = i64::try_from(ttl_secs).context("--ttl is too large")?;
-    let parent = credentials::get_server_credential(server)?
+    let parent = resolve_hosted_credential(Some(server))?;
+    let parent_token = parent
+        .token
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!(HostedRecoveryAdvice::auth_required(server)))?;
-    let private_key_pem = parent.private_key_pem.as_deref().ok_or_else(|| {
+    let private_key_pem = parent.proof_key_pem.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
-            "stored credential for {server} has no device proof key; run `heddle auth login --server {server}` first"
+            "active credential for {server} has no device proof key; run `heddle auth login --server {server}` first"
         )
     })?;
     let signer = Ed25519Signer::from_pem(private_key_pem)
-        .map_err(|error| anyhow::anyhow!("stored device proof key is invalid: {error}"))?;
-    let metadata = headless_token_metadata(&parent.token)?;
+        .map_err(|error| anyhow::anyhow!("active device proof key is invalid: {error}"))?;
+    let metadata = headless_token_metadata(&parent_token.id)?;
     if !metadata
         .proof_public_key_hex
         .eq_ignore_ascii_case(&hex::encode(signer.public_key()))
     {
-        bail!("stored device proof key does not match the parent Biscuit");
+        bail!("active device proof key does not match the parent Biscuit");
     }
 
     let now = chrono::Utc::now();
@@ -263,11 +267,11 @@ fn cmd_auth_derive_agent(
     let agent_id = agent_id.unwrap_or_else(|| format!("agent-{}", uuid::Uuid::new_v4()));
     let allowed_operations = resolve_agent_operations(template, requested_operations)?;
     let declared_scopes = parse_agent_scopes(scopes)?;
-    validate_scope_narrowing(&parent.token, &declared_scopes)?;
+    validate_scope_narrowing(&parent_token.id, &declared_scopes)?;
     let child_signer = Ed25519Signer::generate()
         .map_err(|error| anyhow::anyhow!("failed to generate child proof key: {error}"))?;
     let child_token = attenuate_for_agent(
-        &parent.token,
+        &parent_token.id,
         AgentAttenuation {
             agent_id: agent_id.clone(),
             expires_at,
@@ -313,6 +317,7 @@ fn cmd_auth_derive_agent(
         };
         credential_file::write_credential_file(out, &verified)?;
         println!("Agent credential {agent_id} written to {}.", out.display());
+        println!("Parent source: {}", parent.source.label());
         if let Some(template) = template {
             println!("Template: {} ceiling", template.as_str());
         }
@@ -329,7 +334,7 @@ fn cmd_auth_derive_agent(
         server,
         ServerCredential {
             token: child_token,
-            subject: parent.subject,
+            subject: parent.subject.unwrap_or(metadata.subject),
             device_id: None,
             credential_id: None,
             private_key_pem: Some(child_private_key_pem),
@@ -338,6 +343,7 @@ fn cmd_auth_derive_agent(
     )?;
 
     println!("Derived and installed agent token {agent_id} for {server}.");
+    println!("Parent source: {}", parent.source.label());
     println!("Expires: {expires_at}");
     if let Some(template) = template {
         println!("Template: {} ceiling", template.as_str());
@@ -795,7 +801,7 @@ fn cmd_auth_status(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
     // Report through the SAME precedence the runtime authenticates with, so
     // `auth status` reflects what a hosted op would actually use — including a
     // `HEDDLE_CREDENTIAL` that overrides the keystore.
-    let resolved = crate::hosted_runtime::hosted::resolve_hosted_credential(Some(&server))?;
+    let resolved = resolve_hosted_credential(Some(&server))?;
     let output = auth_status_output(&server, &resolved);
     if ctx.should_output_json(None) {
         println!("{}", serde_json::to_string(&output)?);
@@ -831,10 +837,7 @@ fn cmd_auth_status(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn auth_status_output(
-    server: &str,
-    resolved: &crate::hosted_runtime::hosted::ResolvedHostedCredential,
-) -> AuthStatusOutput {
+fn auth_status_output(server: &str, resolved: &ResolvedHostedCredential) -> AuthStatusOutput {
     let source = resolved.source.label();
     if resolved.token.is_some() {
         let proof_key_available = resolved
@@ -898,10 +901,14 @@ async fn cmd_create_service_token(
         );
     }
 
-    // Select and validate the exact stored bearer + matching device proof key
+    // Select and validate the exact active bearer + matching device proof key
     // before generating the new service-account key.
     let user_config = UserConfig::load_default()?;
-    let session = HostedSession::build_stored_credential(&user_config, &server)?;
+    let session = HostedSession::build(
+        &user_config,
+        Some(server.clone()),
+        HostedAuthMode::CredentialFallback,
+    )?;
     let mut auth_client = session.connect(([127, 0, 0, 1], 0).into()).await?;
     let result = create_service_token_connected(
         ctx,

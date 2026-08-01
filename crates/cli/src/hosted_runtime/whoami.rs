@@ -1,7 +1,7 @@
 //! `heddle whoami` — machine-readable acting-identity introspection.
 //!
-//! Where `auth status` reports only the locally-stored credential state,
-//! `whoami` resolves the *acting* identity: it calls `IdentityService.WhoAmI`
+//! Like `auth status`, `whoami` resolves the credential the hosted runtime
+//! would actually use. It then calls `IdentityService.WhoAmI`
 //! on the server for the authoritative principal/staff/service-account markers
 //! and directly-held resource roles, and reads the local Biscuit for the token
 //! kind, resource scopes, operation ceiling, and TTL that the delegation chain
@@ -10,22 +10,26 @@
 //! unreachable.
 
 use anyhow::{Context, Result};
-use cli_shared::{UserConfig, credentials};
+use cli_shared::UserConfig;
 use crypto::Ed25519Signer;
 use serde::Serialize;
 use weft_client_shim::CliContext;
 
 use super::{
     auth::{headless_token_metadata, resolve_server},
-    hosted::HostedSession,
+    hosted::{HostedAuthMode, HostedSession, ResolvedHostedCredential, resolve_hosted_credential},
 };
 
 #[derive(Debug, Serialize)]
 struct WhoamiOutput {
     output_kind: &'static str,
     server: String,
-    /// A usable credential is stored locally for this server.
+    /// A usable credential resolves for this server.
     authenticated: bool,
+    /// Credential origin: `env:<path>`, `keystore`, or `none`.
+    source: String,
+    /// Locally verified subject, present even when the server is unreachable.
+    subject: Option<String>,
     /// The server answered `WhoAmI` — the acting identity below is authoritative.
     reachable: bool,
     /// `root` (full-authority device/human token), `agent` (an offline-derived,
@@ -90,11 +94,44 @@ pub async fn cmd_whoami(ctx: &dyn CliContext, server: Option<String>) -> Result<
 }
 
 async fn resolve_whoami(server: &str) -> Result<WhoamiOutput> {
-    let Some(credential) = credentials::get_server_credential(server)? else {
+    let resolved = resolve_hosted_credential(Some(server))?;
+    let mut output = resolve_local_whoami(server, &resolved)?;
+    if !output.authenticated {
+        return Ok(output);
+    }
+
+    // Server round trip for the authoritative identity. Failure (unreachable,
+    // rejected, or missing proof key) degrades to a local-only answer rather
+    // than erroring — `reachable` records which case this is.
+    output.identity = fetch_identity(server).await.ok();
+    output.reachable = output.identity.is_some();
+    if output
+        .identity
+        .as_ref()
+        .is_some_and(|identity| identity.is_service_account)
+    {
+        output.token_kind = Some("service-account".to_string());
+    }
+    output.recommended_action = if !output.proof_key_available {
+        Some(format!("heddle auth login --server {server}"))
+    } else if !output.reachable {
+        Some(format!(
+            "server did not answer WhoAmI; check connectivity to {server} or re-run `heddle auth login --server {server}`"
+        ))
+    } else {
+        None
+    };
+    Ok(output)
+}
+
+fn resolve_local_whoami(server: &str, resolved: &ResolvedHostedCredential) -> Result<WhoamiOutput> {
+    let Some(token) = resolved.token.as_ref() else {
         return Ok(WhoamiOutput {
             output_kind: "whoami",
             server: server.to_string(),
             authenticated: false,
+            source: resolved.source.label(),
+            subject: None,
             reachable: false,
             token_kind: None,
             scopes: Vec::new(),
@@ -107,21 +144,21 @@ async fn resolve_whoami(server: &str) -> Result<WhoamiOutput> {
         });
     };
 
-    let proof_key_available = credential
-        .private_key_pem
+    let proof_key_available = resolved
+        .proof_key_pem
         .as_deref()
         .is_some_and(|pem| Ed25519Signer::from_pem(pem).is_ok());
 
     // Local Biscuit introspection — works with no server round trip.
-    let metadata = headless_token_metadata(&credential.token)
-        .context("reading the stored credential's Biscuit")?;
-    let scopes = token_resource_scopes(&credential.token)
+    let metadata =
+        headless_token_metadata(&token.id).context("reading the active credential's Biscuit")?;
+    let scopes = token_resource_scopes(&token.id)
         .context("reading the token's resource scopes")?
         .into_iter()
         .map(|(kind, path)| format!("{kind}:{path}"))
         .collect::<Vec<_>>();
-    let operation_ceiling = token_operation_ceiling(&credential.token)
-        .context("reading the token's operation ceiling")?;
+    let operation_ceiling =
+        token_operation_ceiling(&token.id).context("reading the token's operation ceiling")?;
     let expires_at = metadata.expires_at.clone();
     let ttl_seconds_remaining = expires_at.as_deref().and_then(|value| {
         chrono::DateTime::parse_from_rfc3339(value)
@@ -129,53 +166,42 @@ async fn resolve_whoami(server: &str) -> Result<WhoamiOutput> {
             .map(|expiry| (expiry.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds())
     });
 
-    // Server round trip for the authoritative identity. Failure (unreachable,
-    // rejected, or missing proof key) degrades to a local-only answer rather
-    // than erroring — `reachable` records which case this is.
-    let identity = fetch_identity(server).await.ok();
-    let reachable = identity.is_some();
-
-    let token_kind = Some(
-        if identity.as_ref().is_some_and(|id| id.is_service_account) {
-            "service-account"
-        } else if metadata.is_derived {
-            "agent"
-        } else {
-            "root"
-        }
-        .to_string(),
-    );
+    let token_kind = Some(if metadata.is_derived { "agent" } else { "root" }.to_string());
 
     let recommended_action = if !proof_key_available {
         Some(format!("heddle auth login --server {server}"))
-    } else if !reachable {
+    } else {
         Some(format!(
             "server did not answer WhoAmI; check connectivity to {server} or re-run `heddle auth login --server {server}`"
         ))
-    } else {
-        None
     };
 
     Ok(WhoamiOutput {
         output_kind: "whoami",
         server: server.to_string(),
         authenticated: true,
-        reachable,
+        source: resolved.source.label(),
+        subject: resolved.subject.clone(),
+        reachable: false,
         token_kind,
         scopes,
         operation_ceiling,
         expires_at,
         ttl_seconds_remaining,
         proof_key_available,
-        identity,
+        identity: None,
         recommended_action,
     })
 }
 
 async fn fetch_identity(server: &str) -> Result<WhoamiIdentity> {
     let user_config = UserConfig::load_default()?;
-    let session = HostedSession::build_stored_credential(&user_config, server)
-        .map_err(|error| anyhow::anyhow!(error))?;
+    let session = HostedSession::build(
+        &user_config,
+        Some(server.to_string()),
+        HostedAuthMode::CredentialFallback,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
     let mut client = session
         .connect(([127, 0, 0, 1], 0).into())
         .await
@@ -322,8 +348,11 @@ fn print_human(output: &WhoamiOutput) {
         }
         return;
     }
+    println!("Source:        {}", output.source);
+    if let Some(subject) = &output.subject {
+        println!("Subject:       {subject}");
+    }
     if let Some(identity) = &output.identity {
-        println!("Subject:       {}", identity.subject);
         if identity.actor_subject != identity.subject && !identity.actor_subject.is_empty() {
             println!("Acting as:     {}", identity.actor_subject);
         }
