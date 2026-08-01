@@ -4,6 +4,7 @@
 use std::{
     fs,
     fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
     sync::RwLock,
 };
@@ -35,8 +36,12 @@ const LOCKS_DIR: &str = "locks";
 const TMP_DIR: &str = "tmp";
 const LOCK_FILE: &str = "timeline.lock";
 const OPERATION_INDEX_FILE: &str = "operations.msgpack";
+const OPERATION_INDEX_JOURNAL_FILE: &str = "operations.journal";
 const VIEW_CHECKPOINT_FILE: &str = "timeline-view.msgpack";
 const MATERIALIZATION_RECOVERY_EXT: &str = "materialization.msgpack";
+const OPERATION_INDEX_JOURNAL_RECORD_SIZE: u64 = 33;
+const OPERATION_INDEX_JOURNAL_PENDING: u8 = 0;
+const OPERATION_INDEX_JOURNAL_COMMITTED: u8 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct TimelineOperationIndex {
@@ -103,6 +108,7 @@ impl TimelineStore {
             root,
         };
         store.init()?;
+        store.recover_operation_index_journal()?;
         Ok(store)
     }
 
@@ -143,20 +149,38 @@ impl TimelineStore {
         let id = TimelineOperationId::for_bytes(bytes);
         let path = self.operation_path(&id);
         let _guard = self.lock.write().map_err(timeline_lock_error)?;
+        self.recover_operation_index_journal_unlocked()?;
+        let journal_path = self.operation_index_journal_path();
+        if !journal_path.exists() {
+            write_file_atomic(&journal_path, &[])?;
+        }
+        repair_operation_index_journal_tail_unlocked(&journal_path)?;
+        let journal_len = fs::metadata(&journal_path)?.len();
+        append_operation_index_journal_record_unlocked(
+            &journal_path,
+            OPERATION_INDEX_JOURNAL_PENDING,
+            &id,
+            true,
+        )?;
         if !path.exists() {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            write_file_atomic(&path, bytes)?;
+            if let Err(err) = write_file_atomic(&path, bytes) {
+                truncate_operation_index_journal_unlocked(&journal_path, journal_len)?;
+                return Err(err.into());
+            }
         }
-        let index_path = self.operation_index_path();
-        let mut operation_ids = read_operation_index_unlocked(&index_path)
-            .unwrap_or(None)
-            .unwrap_or_default();
-        if !operation_ids.contains(&id) {
-            operation_ids.push(id);
-            write_operation_index_unlocked(&index_path, &operation_ids)?;
+        #[cfg(test)]
+        if std::env::var_os("HEDDLE_TEST_KILL_TIMELINE_INDEX_BATCH").is_some() {
+            std::process::abort();
         }
+        append_operation_index_journal_record_unlocked(
+            &journal_path,
+            OPERATION_INDEX_JOURNAL_COMMITTED,
+            &id,
+            false,
+        )?;
         Ok(id)
     }
 
@@ -196,9 +220,11 @@ impl TimelineStore {
     }
 
     pub(crate) fn read_operation_index(&self) -> Result<Option<Vec<TimelineOperationId>>> {
-        let path = self.operation_index_path();
         let _guard = self.lock.read().map_err(timeline_lock_error)?;
-        read_operation_index_unlocked(&path)
+        read_operation_index_unlocked(
+            &self.operation_index_path(),
+            &self.operation_index_journal_path(),
+        )
     }
 
     pub(crate) fn canonical_operation_ids(&self) -> Result<Vec<TimelineOperationId>> {
@@ -307,7 +333,21 @@ impl TimelineStore {
     ) -> Result<()> {
         let path = self.operation_index_path();
         let _guard = self.lock.write().map_err(timeline_lock_error)?;
-        write_operation_index_unlocked(&path, operation_ids)
+        let journal_path = self.operation_index_journal_path();
+        repair_operation_index_journal_tail_unlocked(&journal_path)?;
+        let current_ids = match read_operation_index_unlocked(&path, &journal_path) {
+            Ok(Some(ids)) => ids,
+            Ok(None) => Vec::new(),
+            Err(_) => read_operation_index_journal_unlocked(&journal_path)?,
+        };
+        let mut checkpoint_ids = operation_ids.to_vec();
+        let mut seen = checkpoint_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        checkpoint_ids.extend(current_ids.into_iter().filter(|id| seen.insert(*id)));
+        write_operation_index_unlocked(&path, &checkpoint_ids)?;
+        clear_operation_index_journal_unlocked(&journal_path)
     }
 
     pub(crate) fn read_view_checkpoint_bytes(&self) -> Result<Option<Vec<u8>>> {
@@ -453,6 +493,12 @@ impl TimelineStore {
         self.root.join(INDEXES_DIR).join(OPERATION_INDEX_FILE)
     }
 
+    fn operation_index_journal_path(&self) -> PathBuf {
+        self.root
+            .join(INDEXES_DIR)
+            .join(OPERATION_INDEX_JOURNAL_FILE)
+    }
+
     fn view_checkpoint_path(&self) -> PathBuf {
         self.root.join(VIEWS_DIR).join(VIEW_CHECKPOINT_FILE)
     }
@@ -462,21 +508,188 @@ impl TimelineStore {
     }
 }
 
-fn read_operation_index_unlocked(path: &Path) -> Result<Option<Vec<TimelineOperationId>>> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+impl TimelineStore {
+    fn recover_operation_index_journal(&self) -> Result<()> {
+        let _guard = self.lock.write().map_err(timeline_lock_error)?;
+        self.recover_operation_index_journal_unlocked()
+    }
+
+    fn recover_operation_index_journal_unlocked(&self) -> Result<()> {
+        let journal_path = self.operation_index_journal_path();
+        if !journal_path.exists() {
+            return Ok(());
+        }
+        repair_operation_index_journal_tail_unlocked(&journal_path)?;
+        let records = read_operation_index_journal_records_unlocked(&journal_path)?;
+        let (mut committed, pending) = resolve_operation_index_journal_records(records)?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        for id in pending {
+            if self.canonical_operation_bytes_unlocked(&id)?.is_some() {
+                committed.push(id);
+            }
+        }
+        write_operation_index_journal_unlocked(&journal_path, &committed)
+    }
+
+    fn canonical_operation_bytes_unlocked(
+        &self,
+        id: &TimelineOperationId,
+    ) -> Result<Option<Vec<u8>>> {
+        match fs::read(self.operation_path(id)) {
+            Ok(bytes) => {
+                let computed_id = TimelineOperationId::for_bytes(&bytes);
+                if computed_id != *id {
+                    return Err(HeddleError::InvalidObject(format!(
+                        "timeline operation id mismatch: expected {}, decoded {}",
+                        id.short(),
+                        computed_id.short()
+                    )));
+                }
+                Ok(Some(bytes))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let mut packs = self.packs.write().map_err(timeline_pack_lock_error)?;
+                packs.reload_if_disk_changed()?;
+                packs.read_operation(id)
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+}
+
+fn read_operation_index_unlocked(
+    path: &Path,
+    journal_path: &Path,
+) -> Result<Option<Vec<TimelineOperationId>>> {
+    let mut ids = match fs::read(path) {
+        Ok(bytes) => {
+            let index: TimelineOperationIndex = rmp_serde::from_slice(&bytes)
+                .map_err(|err| HeddleError::InvalidObject(err.to_string()))?;
+            if index.schema_version != TIMELINE_OPERATION_INDEX_SCHEMA_VERSION {
+                return Err(HeddleError::InvalidObject(format!(
+                    "unsupported timeline operation index schema version {}",
+                    index.schema_version
+                )));
+            }
+            index.operation_ids
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(err) => return Err(err.into()),
     };
-    let index: TimelineOperationIndex =
-        rmp_serde::from_slice(&bytes).map_err(|err| HeddleError::InvalidObject(err.to_string()))?;
-    if index.schema_version != TIMELINE_OPERATION_INDEX_SCHEMA_VERSION {
-        return Err(HeddleError::InvalidObject(format!(
-            "unsupported timeline operation index schema version {}",
-            index.schema_version
-        )));
+    ids.extend(read_operation_index_journal_unlocked(journal_path)?);
+    let mut seen = std::collections::BTreeSet::new();
+    ids.retain(|id| seen.insert(*id));
+    if ids.is_empty() && !path.exists() && !journal_path.exists() {
+        Ok(None)
+    } else {
+        Ok(Some(ids))
     }
-    Ok(Some(index.operation_ids))
+}
+
+fn read_operation_index_journal_unlocked(path: &Path) -> Result<Vec<TimelineOperationId>> {
+    let records = read_operation_index_journal_records_unlocked(path)?;
+    resolve_operation_index_journal_records(records).map(|(committed, _)| committed)
+}
+
+fn read_operation_index_journal_records_unlocked(
+    path: &Path,
+) -> Result<Vec<(u8, TimelineOperationId)>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err.into()),
+    };
+    if !(bytes.len() as u64).is_multiple_of(OPERATION_INDEX_JOURNAL_RECORD_SIZE) {
+        return Err(HeddleError::InvalidObject(
+            "timeline operation index journal has a partial record".to_string(),
+        ));
+    }
+    bytes
+        .chunks_exact(OPERATION_INDEX_JOURNAL_RECORD_SIZE as usize)
+        .map(|record| {
+            let id = TimelineOperationId::try_from_slice(&record[1..])
+                .map_err(|err| HeddleError::InvalidObject(err.to_string()))?;
+            Ok((record[0], id))
+        })
+        .collect()
+}
+
+fn resolve_operation_index_journal_records(
+    records: Vec<(u8, TimelineOperationId)>,
+) -> Result<(Vec<TimelineOperationId>, Vec<TimelineOperationId>)> {
+    let mut committed = Vec::new();
+    let mut pending = Vec::new();
+    for (kind, id) in records {
+        match kind {
+            OPERATION_INDEX_JOURNAL_PENDING => pending.push(id),
+            OPERATION_INDEX_JOURNAL_COMMITTED => {
+                let position = pending.iter().rposition(|pending_id| *pending_id == id);
+                if let Some(position) = position {
+                    pending.remove(position);
+                }
+                committed.push(id);
+            }
+            _ => {
+                return Err(HeddleError::InvalidObject(format!(
+                    "timeline operation index journal has unknown record kind {kind}"
+                )));
+            }
+        }
+    }
+    Ok((committed, pending))
+}
+
+fn append_operation_index_journal_record_unlocked(
+    path: &Path,
+    kind: u8,
+    id: &TimelineOperationId,
+    durable: bool,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(&[kind])?;
+    file.write_all(id.as_bytes())?;
+    if durable {
+        file.sync_all()?;
+    }
+    Ok(())
+}
+
+fn write_operation_index_journal_unlocked(path: &Path, ids: &[TimelineOperationId]) -> Result<()> {
+    let mut bytes = Vec::with_capacity(ids.len() * OPERATION_INDEX_JOURNAL_RECORD_SIZE as usize);
+    for id in ids {
+        bytes.push(OPERATION_INDEX_JOURNAL_COMMITTED);
+        bytes.extend_from_slice(id.as_bytes());
+    }
+    write_file_atomic(path, &bytes).map_err(Into::into)
+}
+
+fn truncate_operation_index_journal_unlocked(path: &Path, len: u64) -> Result<()> {
+    let file = OpenOptions::new().write(true).open(path)?;
+    file.set_len(len)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn repair_operation_index_journal_tail_unlocked(path: &Path) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    let file = options.open(path)?;
+    let len = file.metadata()?.len();
+    let complete_len = len - (len % OPERATION_INDEX_JOURNAL_RECORD_SIZE);
+    if complete_len != len {
+        file.set_len(complete_len)?;
+        file.sync_all()?;
+    }
+    Ok(())
+}
+
+fn clear_operation_index_journal_unlocked(path: &Path) -> Result<()> {
+    write_file_atomic(path, &[]).map_err(Into::into)
 }
 
 fn write_operation_index_unlocked(
@@ -588,9 +801,9 @@ fn timeline_pack_lock_error<T>(_: std::sync::PoisonError<T>) -> HeddleError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
+    use std::{collections::BTreeMap, process::Command};
 
     use objects::object::{
         BranchCreatedV1, StateId, TimelineBranchId, TimelineBranchReason, TimelineOperationBodyV1,
@@ -601,15 +814,19 @@ mod tests {
     use super::*;
 
     fn sample_envelope() -> TimelineOperationEnvelope {
+        branch_envelope("tlb-child", 1_700_000_000_000)
+    }
+
+    fn branch_envelope(branch_id: &str, created_at_ms: i64) -> TimelineOperationEnvelope {
         TimelineOperationEnvelope::new(
             TimelineOperationBodyV1::BranchCreated(BranchCreatedV1 {
                 thread: "main".to_string(),
-                branch_id: TimelineBranchId::new("tlb-child"),
+                branch_id: TimelineBranchId::new(branch_id),
                 parent_branch_id: Some(TimelineBranchId::new("tlb-main")),
                 from_step_id: Some(TimelineStepId::new("tls-root")),
                 from_state: StateId::from_bytes([1; 32]),
                 reason: TimelineBranchReason::ExplicitFork,
-                created_at_ms: 1_700_000_000_000,
+                created_at_ms,
             }),
             Vec::new(),
         )
@@ -660,15 +877,181 @@ mod tests {
     }
 
     #[test]
-    fn timeline_store_repairs_corrupt_operation_index_on_write() {
+    fn timeline_view_rebuild_repairs_corrupt_operation_index() {
         let temp = TempDir::new().unwrap();
         let heddle_dir = temp.path().join(".heddle");
         let store = TimelineStore::open(&heddle_dir).unwrap();
         let id = store.write_operation(&sample_envelope()).unwrap();
         std::fs::write(store.operation_index_path(), b"not msgpack").unwrap();
 
-        assert_eq!(store.write_operation(&sample_envelope()).unwrap(), id);
+        let view = crate::TimelineView::rebuild(&store).unwrap();
+        assert_eq!(view.operation_ids(), &[id]);
         assert_eq!(store.read_operation_index().unwrap(), Some(vec![id]));
+    }
+
+    #[test]
+    fn stale_checkpoint_compaction_preserves_concurrent_journal_appends() {
+        let temp = TempDir::new().unwrap();
+        let store = TimelineStore::open(temp.path().join(".heddle")).unwrap();
+        let first = store.write_operation(&sample_envelope()).unwrap();
+        store.write_operation_index(&[first]).unwrap();
+        let second = store
+            .write_operation(&branch_envelope("tlb-concurrent", 1_700_000_000_001))
+            .unwrap();
+
+        store.write_operation_index(&[first]).unwrap();
+
+        assert_eq!(
+            store.read_operation_index().unwrap(),
+            Some(vec![first, second])
+        );
+        assert_eq!(
+            std::fs::metadata(store.operation_index_journal_path())
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn timeline_derived_checkpoints_batch_64_appends_without_changing_canonical_bytes() {
+        let temp = TempDir::new().unwrap();
+        let heddle_dir = temp.path().join(".heddle");
+        let store = TimelineStore::open(&heddle_dir).unwrap();
+        store.write_operation(&sample_envelope()).unwrap();
+        crate::TimelineView::rebuild(&store).unwrap();
+        let index_before = std::fs::read(store.operation_index_path()).unwrap();
+        let view_before = std::fs::read(store.view_checkpoint_path()).unwrap();
+        let mut expected = BTreeMap::new();
+
+        for ordinal in 1..crate::timeline_view::TIMELINE_DERIVED_CHECKPOINT_BATCH_SIZE {
+            let envelope = branch_envelope(
+                &format!("tlb-batched-{ordinal:02}"),
+                1_700_000_000_000 + ordinal as i64,
+            );
+            let bytes = envelope.encode().unwrap();
+            let id = store.write_operation(&envelope).unwrap();
+            expected.insert(id, bytes);
+            crate::TimelineView::rebuild(&store).unwrap();
+            assert_eq!(
+                std::fs::read(store.operation_index_path()).unwrap(),
+                index_before
+            );
+            assert_eq!(
+                std::fs::read(store.view_checkpoint_path()).unwrap(),
+                view_before
+            );
+            assert_eq!(
+                std::fs::metadata(store.operation_index_journal_path())
+                    .unwrap()
+                    .len(),
+                ordinal as u64 * OPERATION_INDEX_JOURNAL_RECORD_SIZE * 2
+            );
+        }
+
+        let envelope = branch_envelope("tlb-batched-64", 1_700_000_000_064);
+        let bytes = envelope.encode().unwrap();
+        let id = store.write_operation(&envelope).unwrap();
+        expected.insert(id, bytes);
+        let view = crate::TimelineView::rebuild(&store).unwrap();
+
+        assert_ne!(
+            std::fs::read(store.operation_index_path()).unwrap(),
+            index_before
+        );
+        assert_ne!(
+            std::fs::read(store.view_checkpoint_path()).unwrap(),
+            view_before
+        );
+        assert_eq!(
+            std::fs::metadata(store.operation_index_journal_path())
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(view.branch_count("main"), 65);
+        for (id, bytes) in expected {
+            assert_eq!(
+                store.read_operation_bytes(&id).unwrap(),
+                Some(bytes.clone())
+            );
+            assert_eq!(TimelineOperationId::for_bytes(&bytes), id);
+        }
+        println!(
+            "64 appends compacted one index and view checkpoint; canonical ids and bytes match"
+        );
+    }
+
+    #[test]
+    fn timeline_mid_batch_kill_recovers_index_and_view_from_canonical_operations() {
+        const CHILD_ENV: &str = "HEDDLE_TEST_TIMELINE_INDEX_BATCH_CHILD";
+        const KILL_ENV: &str = "HEDDLE_TEST_KILL_TIMELINE_INDEX_BATCH";
+        if let Some(heddle_dir) = std::env::var_os(CHILD_ENV) {
+            let store = TimelineStore::open(heddle_dir).unwrap();
+            store
+                .write_operation(&branch_envelope("tlb-killed-mid-batch", 1_700_000_000_001))
+                .unwrap();
+            panic!("mid-batch kill failpoint did not terminate the child process");
+        }
+
+        let temp = TempDir::new().unwrap();
+        let heddle_dir = temp.path().join(".heddle");
+        let store = TimelineStore::open(&heddle_dir).unwrap();
+        let baseline_id = store.write_operation(&sample_envelope()).unwrap();
+        crate::TimelineView::rebuild(&store).unwrap();
+        let killed_envelope = branch_envelope("tlb-killed-mid-batch", 1_700_000_000_001);
+        let killed_bytes = killed_envelope.encode().unwrap();
+        let killed_id = TimelineOperationId::for_bytes(&killed_bytes);
+
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(
+                "timeline_store::tests::timeline_mid_batch_kill_recovers_index_and_view_from_canonical_operations",
+            )
+            .arg("--nocapture")
+            .env(CHILD_ENV, &heddle_dir)
+            .env(KILL_ENV, "1")
+            .env("TMPDIR", "/home/scratch")
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "child should be killed mid-batch: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(
+            std::fs::read(store.operation_path(&killed_id)).unwrap(),
+            killed_bytes
+        );
+        assert_eq!(
+            store.read_operation_index().unwrap(),
+            Some(vec![baseline_id])
+        );
+        assert_eq!(
+            std::fs::metadata(store.operation_index_journal_path())
+                .unwrap()
+                .len(),
+            OPERATION_INDEX_JOURNAL_RECORD_SIZE
+        );
+        drop(store);
+
+        let recovered = TimelineStore::open(&heddle_dir).unwrap();
+        let indexed = recovered.read_operation_index().unwrap().unwrap();
+        let view = crate::TimelineView::rebuild(&recovered).unwrap();
+        assert_eq!(indexed, vec![baseline_id, killed_id]);
+        assert_eq!(view.branch_count("main"), 2);
+        assert!(view.operation_ids().contains(&killed_id));
+        assert_eq!(
+            std::fs::read(recovered.operation_index_journal_path()).unwrap()[0],
+            OPERATION_INDEX_JOURNAL_COMMITTED
+        );
+        println!(
+            "mid-batch kill {:?}: canonical=2 indexed_before_recovery=1 indexed_after_recovery={} view_operations={} branches={}",
+            output.status,
+            indexed.len(),
+            view.operation_ids().len(),
+            view.branch_count("main")
+        );
     }
 
     #[test]

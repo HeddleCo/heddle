@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Rebuildable derived views over canonical agent timeline operations.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use objects::{
     error::{HeddleError, Result},
@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::TimelineStore;
 
 const TIMELINE_VIEW_CHECKPOINT_SCHEMA_VERSION: u16 = 1;
+pub(crate) const TIMELINE_DERIVED_CHECKPOINT_BATCH_SIZE: usize = 64;
 
 /// Native harness identity for a tool call.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -244,13 +245,15 @@ impl TimelineView {
                     view.operation_ids.push(record.id);
                     view.apply_operation(record.id, record.envelope);
                 }
-                write_timeline_view_checkpoint(store, &operation_ids, &view)?;
+                if new_operation_ids.len() >= TIMELINE_DERIVED_CHECKPOINT_BATCH_SIZE {
+                    write_timeline_derived_checkpoint(store, &operation_ids, &view)?;
+                }
                 return Ok(view);
             }
         }
 
         let view = rebuild_timeline_view_from_ids(store, &operation_ids)?;
-        write_timeline_view_checkpoint(store, &operation_ids, &view)?;
+        write_timeline_derived_checkpoint(store, &operation_ids, &view)?;
         Ok(view)
     }
 
@@ -652,9 +655,12 @@ fn read_timeline_operation_records_by_id(
 ) -> Result<Vec<TimelineOperationRecord>> {
     let mut records = Vec::with_capacity(operation_ids.len());
     for id in operation_ids {
-        let Some(bytes) = store.read_operation_bytes(id)? else {
-            continue;
-        };
+        let bytes = store.read_operation_bytes(id)?.ok_or_else(|| {
+            HeddleError::InvalidObject(format!(
+                "indexed timeline operation '{}' is absent from loose and packed canonical storage",
+                id.short()
+            ))
+        })?;
         let computed_id = TimelineOperationId::for_bytes(&bytes);
         if computed_id != *id {
             return Err(HeddleError::InvalidObject(format!(
@@ -675,26 +681,11 @@ fn read_timeline_operation_records_by_id(
 }
 
 fn read_timeline_operation_ids(store: &TimelineStore) -> Result<Vec<TimelineOperationId>> {
-    let canonical_ids = store.canonical_operation_ids()?;
-
-    let canonical_set = canonical_ids.iter().copied().collect::<BTreeSet<_>>();
-    let indexed_operation_ids = store
-        .read_operation_index()
-        .unwrap_or(None)
-        .unwrap_or_default();
-    let mut operation_ids = indexed_operation_ids.clone();
-    operation_ids.retain(|id| canonical_set.contains(id));
-
-    let indexed_set = operation_ids.iter().copied().collect::<BTreeSet<_>>();
-    operation_ids.extend(
-        canonical_ids
-            .into_iter()
-            .filter(|id| !indexed_set.contains(id)),
-    );
-
-    if indexed_operation_ids != operation_ids {
-        store.write_operation_index(&operation_ids)?;
+    if let Ok(Some(operation_ids)) = store.read_operation_index() {
+        return Ok(operation_ids);
     }
+    let operation_ids = store.canonical_operation_ids()?;
+    store.write_operation_index(&operation_ids)?;
     Ok(operation_ids)
 }
 
@@ -787,6 +778,15 @@ fn write_timeline_view_checkpoint(
     store.write_view_checkpoint_bytes(&bytes)
 }
 
+fn write_timeline_derived_checkpoint(
+    store: &TimelineStore,
+    processed_operation_ids: &[TimelineOperationId],
+    view: &TimelineView,
+) -> Result<()> {
+    store.write_operation_index(processed_operation_ids)?;
+    write_timeline_view_checkpoint(store, processed_operation_ids, view)
+}
+
 fn operation_timestamp(envelope: &TimelineOperationEnvelope) -> i64 {
     match &envelope.body {
         TimelineOperationBodyV1::ToolCallStarted(body) => body.started_at_ms,
@@ -844,6 +844,8 @@ fn push_unique_operation(target: &mut Vec<TimelineOperationId>, id: TimelineOper
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use objects::{
         object::{
             BranchCreatedV1, NativeToolCallRefV1, TimelineToolPayloadMetadata, ToolCallFinishedV1,
@@ -912,9 +914,6 @@ mod tests {
             .unwrap_or_default();
         let mut operation_ids = indexed_operation_ids.clone();
         operation_ids.retain(|id| canonical_set.contains(id));
-        if indexed_operation_ids != operation_ids {
-            store.write_operation_index(&operation_ids)?;
-        }
         Ok(operation_ids)
     }
 
@@ -1087,7 +1086,7 @@ mod tests {
             id.short()
         );
         assert!(loose_only_view.operation_ids().is_empty());
-        assert_eq!(store.read_operation_index().unwrap(), Some(Vec::new()));
+        assert_eq!(store.read_operation_index().unwrap(), Some(vec![id]));
 
         let pack_aware_view = TimelineView::rebuild(&store).unwrap();
         let packed_bytes = store.read_operation_bytes(&id).unwrap().unwrap();
