@@ -12,6 +12,8 @@ pub mod discussion_sync;
 pub mod human_signature;
 pub mod local_sync;
 #[cfg(feature = "client")]
+pub mod repo_events;
+#[cfg(feature = "client")]
 pub mod review_sync;
 
 pub use cli_shared::ClientConfig;
