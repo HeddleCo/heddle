@@ -3,9 +3,8 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use cli_shared::{ClientConfig, UserConfig, credentials};
-use crypto::{Ed25519Signer, Signer};
-use wire::{AuthToken, ProtocolError};
+use cli_shared::{ClientConfig, UserConfig};
+use wire::ProtocolError;
 
 use super::{
     HostedClient, RenewableAuthorityCredential, credential::server_keys_match,
@@ -23,27 +22,6 @@ pub struct HostedSession {
 }
 
 impl HostedSession {
-    pub fn build_stored_credential(user_config: &UserConfig, server_key: &str) -> Result<Self> {
-        let credential = credentials::get_server_credential(server_key)?.ok_or_else(|| {
-            anyhow::anyhow!(weft_client_shim::HostedRecoveryAdvice::auth_required(
-                server_key
-            ))
-        })?;
-        let proof_key = validated_stored_proof_key(&credential, server_key)?;
-        let authenticated_principal = validated_authenticated_principal(&credential)?;
-        let renewable_authority_credential = RenewableAuthorityCredential::from_stored(&credential);
-        let token = AuthToken::new(credential.token, "credential-store");
-        let config = user_config
-            .hosted_runtime_config(Some(token))?
-            .with_server_key(server_key.to_string())
-            .with_auth_proof_key_pem(proof_key)
-            .with_authenticated_principal(authenticated_principal);
-        Ok(Self {
-            config,
-            renewable_authority_credential,
-        })
-    }
-
     pub fn build(
         user_config: &UserConfig,
         server_key: Option<String>,
@@ -53,7 +31,7 @@ impl HostedSession {
             token,
             mut credential_proof_key,
             renewable_authority_credential,
-            stored_credential_subject,
+            resolved_credential_subject,
         ) = match mode {
             HostedAuthMode::Unauthenticated => (None, None, None, None),
             HostedAuthMode::CredentialFallback => {
@@ -91,12 +69,12 @@ impl HostedSession {
             })?;
             let subject = crate::hosted_runtime::device_flow::authenticated_subject(&token.id)
                 .context("reading the hosted bearer token's authenticated principal")?;
-            if stored_credential_subject
+            if resolved_credential_subject
                 .as_deref()
                 .is_some_and(|stored| stored != subject.as_str())
             {
                 anyhow::bail!(
-                    "stored credential subject does not match the bearer token's authenticated principal"
+                    "resolved credential subject does not match the bearer token's authenticated principal"
                 );
             }
             config = config.with_authenticated_principal(format!("principal:{subject}"));
@@ -175,37 +153,6 @@ impl HostedClient {
             .connect(addr)
             .await?)
     }
-}
-
-fn validated_authenticated_principal(credential: &credentials::ServerCredential) -> Result<String> {
-    let subject = crate::hosted_runtime::device_flow::authenticated_subject(&credential.token)
-        .context("reading the stored credential's authenticated principal")?;
-    if subject != credential.subject {
-        anyhow::bail!(
-            "stored credential subject does not match the bearer token's authenticated principal"
-        );
-    }
-    Ok(format!("principal:{subject}"))
-}
-
-fn validated_stored_proof_key(
-    credential: &credentials::ServerCredential,
-    server_key: &str,
-) -> Result<String> {
-    let pem = credential.private_key_pem.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "stored credential for {server_key} has no device proof key; run `heddle auth login --server {server_key}` first"
-        )
-    })?;
-    let signer = Ed25519Signer::from_pem(pem)
-        .map_err(|error| anyhow::anyhow!("stored device proof key is invalid: {error}"))?;
-    let token_key =
-        crate::hosted_runtime::device_flow::effective_pop_public_key_hex(&credential.token)
-            .context("reading the stored credential's effective proof key")?;
-    if !token_key.eq_ignore_ascii_case(&hex::encode(signer.public_key())) {
-        anyhow::bail!("stored device proof key does not match the credential Biscuit");
-    }
-    Ok(pem.to_string())
 }
 
 fn shared_device_proof_key(server_key: &str, token: &str) -> Result<Option<String>> {
