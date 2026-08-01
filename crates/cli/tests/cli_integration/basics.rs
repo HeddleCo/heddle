@@ -387,6 +387,98 @@ fn test_cli_init_creates_repository() {
 }
 
 #[test]
+fn test_cli_init_under_home_ignores_user_config_directory() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let user_config_dir = home.join(".heddle");
+    std::fs::create_dir_all(user_config_dir.join("session")).unwrap();
+    std::fs::create_dir_all(user_config_dir.join("locks")).unwrap();
+    std::fs::write(user_config_dir.join("credentials.toml"), "").unwrap();
+    std::fs::write(user_config_dir.join("device-identity.toml"), "").unwrap();
+    std::fs::write(user_config_dir.join("config.toml"), "").unwrap();
+
+    let repo = home.join("anywhere/new-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let home_env = home.to_str().expect("home path is utf8");
+
+    let init = heddle_output_with_env(&["init"], Some(&repo), &[("HOME", home_env)])
+        .expect("invoke init under HOME");
+    assert!(
+        init.status.success(),
+        "init under HOME with ~/.heddle user config must succeed: {}",
+        std::str::from_utf8(&init.stderr).unwrap()
+    );
+    assert!(repo.join(".heddle/objects").is_dir());
+
+    let status = heddle_output_with_env(
+        &["status", "--output", "json"],
+        Some(&repo),
+        &[("HOME", home_env)],
+    )
+    .expect("invoke status in initialized repo");
+    assert!(
+        status.status.success(),
+        "status under HOME after init must succeed: {}",
+        std::str::from_utf8(&status.stderr).unwrap()
+    );
+
+    std::fs::write(repo.join("tracked.txt"), "captured under HOME\n").unwrap();
+    let capture = heddle_output_with_env(
+        &["capture", "-m", "capture under HOME"],
+        Some(&repo),
+        &[("HOME", home_env)],
+    )
+    .expect("invoke capture in initialized repo");
+    assert!(
+        capture.status.success(),
+        "capture under HOME after init must succeed: {}",
+        std::str::from_utf8(&capture.stderr).unwrap()
+    );
+}
+
+#[test]
+fn test_cli_discovery_does_not_skip_a_genuinely_malformed_repository() {
+    let temp = TempDir::new().unwrap();
+    let outer = temp.path().join("outer");
+    Repository::init_default(&outer).unwrap();
+    let broken = outer.join("broken");
+    Repository::init_default(&broken).unwrap();
+    let broken_config = broken.join(".heddle/config.toml");
+    std::fs::write(&broken_config, "[repository\n").unwrap();
+    let nested = broken.join("src/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    let output = heddle_output(&["status"], Some(&nested)).expect("invoke status in broken repo");
+    assert!(
+        !output.status.success(),
+        "discovery must not skip the broken inner repository and open the valid outer repository"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    assert!(
+        stderr.contains(&broken_config.display().to_string()),
+        "error must identify the malformed repository config: {stderr}"
+    );
+}
+
+#[test]
+fn test_discovery_under_home_finds_nearest_real_repository() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let user_config_dir = home.join(".heddle");
+    std::fs::create_dir_all(user_config_dir.join("session")).unwrap();
+    std::fs::write(user_config_dir.join("credentials.toml"), "").unwrap();
+    std::fs::write(user_config_dir.join("config.toml"), "").unwrap();
+
+    let real_root = home.join("projects/real-repo");
+    Repository::init_default(&real_root).unwrap();
+    let nested = real_root.join("src/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    let discovered = Repository::open(&nested).expect("discover real repository under HOME");
+    assert_eq!(discovered.root(), real_root);
+}
+
+#[test]
 fn test_cli_init_honors_global_repo_path() {
     let temp = TempDir::new().unwrap();
     let cwd = temp.path().join("cwd");

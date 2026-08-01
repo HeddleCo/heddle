@@ -427,24 +427,28 @@ fn test_open_finds_repo() {
 }
 
 #[test]
-fn test_open_rejects_bogus_ancestor_metadata_and_reports_matched_root() {
+fn test_open_ignores_config_only_ancestor_metadata() {
     let temp_dir = TempDir::new().unwrap();
-    let bogus_root = temp_dir.path().canonicalize().unwrap();
-    fs::create_dir_all(bogus_root.join(".heddle/bootstrap-op-id")).unwrap();
-    let nested = bogus_root.join("projects/demo");
+    let home = temp_dir.path().canonicalize().unwrap();
+    fs::create_dir_all(home.join(".heddle/session")).unwrap();
+    fs::create_dir_all(home.join(".heddle/locks")).unwrap();
+    fs::write(home.join(".heddle/credentials.toml"), "").unwrap();
+    fs::write(home.join(".heddle/device-identity.toml"), "").unwrap();
+    fs::write(home.join(".heddle/config.toml"), "").unwrap();
+    let nested = home.join("projects/demo");
     fs::create_dir_all(&nested).unwrap();
 
     let error = match Repository::open(&nested) {
-        Ok(_) => panic!("bogus .heddle metadata must not be accepted as a repository"),
+        Ok(_) => panic!("a path without repository metadata must not open"),
         Err(error) => error,
     };
 
     match error {
         HeddleError::RepositoryNotFound(path) => assert_eq!(
-            path, bogus_root,
-            "the error must identify the ancestor containing bogus .heddle metadata",
+            path, nested,
+            "the config-only ancestor must not be accepted as a repository marker",
         ),
-        other => panic!("expected repository-not-found for bogus metadata, got {other}"),
+        other => panic!("expected repository-not-found for requested path, got {other}"),
     }
 }
 

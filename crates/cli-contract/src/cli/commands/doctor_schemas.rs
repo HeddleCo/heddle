@@ -659,13 +659,13 @@ pub fn documented_samples_with_bound_verbs(doc: &str, verbs: &[&str]) -> Vec<(Va
     core_documented_samples_with_bound_verbs(doc, verbs)
 }
 
-/// Walk parents of `start` until we find a directory containing a
-/// `.heddle/` or `.git/` folder. Same heuristic as
+/// Walk parents of `start` until we find a directory containing repository
+/// metadata in `.heddle/` or `.git/`. Same heuristic as
 /// [`super::doctor_docs::find_repo_root`] but kept private to this
 /// module to avoid a doc-only intermodule coupling.
 fn find_repo_root(start: &Path) -> Option<PathBuf> {
     for ancestor in start.ancestors() {
-        if ancestor.join(".heddle").exists() || ancestor.join(".git").exists() {
+        if repo::is_heddle_repository_root(ancestor) || ancestor.join(".git").exists() {
             return Some(ancestor.to_path_buf());
         }
     }

@@ -352,7 +352,7 @@ fn walk_markdown(repo_root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result
 fn find_repo_root(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     loop {
-        if current.join(".git").exists() || current.join(".heddle").exists() {
+        if current.join(".git").exists() || repo::is_heddle_repository_root(&current) {
             return Some(current);
         }
         if !current.pop() {
