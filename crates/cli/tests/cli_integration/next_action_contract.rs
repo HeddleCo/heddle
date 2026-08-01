@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use repo::{Repository, ThreadIntegrationPolicy, ThreadManager, ThreadState};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -48,6 +49,30 @@ fn setup_managed_thread(name: &str) -> (TempDir, TempDir, String) {
         .expect("start should report execution_path")
         .to_string();
     (main, checkout, execution_path)
+}
+
+fn setup_current_blocked_thread(name: &str) -> (TempDir, TempDir, String) {
+    let (main, checkout_owner, execution_path) = setup_managed_thread(name);
+    let checkout = std::path::Path::new(&execution_path);
+    std::fs::write(checkout.join("feature.txt"), "feature\n").unwrap();
+    heddle(&["capture", "-m", "feature"], Some(checkout)).unwrap();
+
+    let repo = Repository::open(main.path()).unwrap();
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let mut thread = manager
+        .load(name)
+        .unwrap()
+        .expect("managed thread should have a record");
+    thread.state = ThreadState::Blocked;
+    thread.current_state = Some(thread.base_state.clone());
+    thread.integration_policy_result = ThreadIntegrationPolicy {
+        status: Some("blocked".to_string()),
+        reason: Some("Thread needs attention before integration".to_string()),
+        ..ThreadIntegrationPolicy::default()
+    };
+    manager.save(&thread).unwrap();
+
+    (main, checkout_owner, execution_path)
 }
 
 fn assert_no_banned_next_actions(value: &Value) {
@@ -204,6 +229,96 @@ fn ready_clean_stale_managed_thread_refreshes_and_surfaces_land() {
     );
     assert_eq!(shown["freshness"], "current", "{shown}");
     assert_no_banned_next_actions(&shown);
+
+    drop(checkout_owner);
+}
+
+#[test]
+fn land_blocker_payload_names_thread_state_condition() {
+    let (main, checkout_owner, _execution_path) =
+        setup_current_blocked_thread("feature/blocked-state-payload");
+
+    let land = json(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/blocked-state-payload",
+        ],
+        main.path(),
+    );
+
+    assert_eq!(
+        land["status"], "blocked",
+        "land must preserve the gate: {land}"
+    );
+    assert!(
+        land["blockers"].as_array().is_some_and(|blockers| {
+            blockers.iter().any(|blocker| {
+                blocker
+                    .as_str()
+                    .is_some_and(|message| message.contains("thread state check"))
+            })
+        }),
+        "human blockers must name the failed check: {land}"
+    );
+    let detail = &land["blocker_details"][0];
+    assert_eq!(detail["code"], "thread_state_blocked", "{land}");
+    assert_eq!(detail["check"], "thread_state", "{land}");
+    assert_eq!(detail["paths"], serde_json::json!([]), "{land}");
+    assert_eq!(
+        detail["state_context"]["recorded_thread_state"], "blocked",
+        "{land}"
+    );
+    assert_ne!(
+        detail["state_context"]["recorded_state_id"],
+        detail["state_context"]["thread_tip_state_id"],
+        "the fixture must preserve the state-id mismatch from #1185: {land}"
+    );
+    assert_eq!(
+        detail["state_context"]["merge_relation"], "fast_forward",
+        "{land}"
+    );
+    assert_eq!(detail["state_context"]["conflict_count"], 0, "{land}");
+
+    drop(checkout_owner);
+}
+
+#[test]
+fn land_never_recommends_no_op_sync_for_current_thread_state_blocker() {
+    let (main, checkout_owner, _execution_path) =
+        setup_current_blocked_thread("feature/blocked-state-no-sync");
+
+    let sync = json(
+        &[
+            "--output",
+            "json",
+            "sync",
+            "--thread",
+            "feature/blocked-state-no-sync",
+        ],
+        main.path(),
+    );
+    assert_eq!(
+        sync["chosen_path"], "no_op",
+        "fixture must hit the no-op path: {sync}"
+    );
+
+    let land = json(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/blocked-state-no-sync",
+        ],
+        main.path(),
+    );
+    assert_eq!(land["status"], "blocked", "{land}");
+    assert_eq!(land["next_action"], Value::Null, "{land}");
+    assert_eq!(land["recommended_action"], Value::Null, "{land}");
+    assert_eq!(land["blocker_details"][0]["code"], "thread_state_blocked");
 
     drop(checkout_owner);
 }

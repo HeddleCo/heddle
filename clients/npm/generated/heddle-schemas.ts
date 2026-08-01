@@ -281,6 +281,8 @@ export interface AgentProvenanceShowSchema {
 export interface AgentReadySchema {
   action: string;
   blockers: string[];
+  capture_reason: string;
+  capture_status: string;
   captured: boolean;
   captured_state?: string | null;
   idempotency_status?: string | null;
@@ -1240,6 +1242,7 @@ export interface IntegrationUpgradeSchema {
 }
 
 export interface LandBatchPeerSchema {
+  blocker_details: LandBlockerDetailSchema[];
   blockers: string[];
   captured: boolean;
   checkpointed: boolean;
@@ -1274,8 +1277,35 @@ export interface LandBatchSchema {
   verification: RepositoryVerificationStateSchema | null;
 }
 
+export type LandBlockerCheckSchema = "thread_state" | "merge_preview" | "auto_land_confidence" | "verification_summary" | "freshness" | "integration_preview";
+
+export type LandBlockerCodeSchema = "thread_state_blocked" | "merge_conflicts" | "auto_land_confidence_below_threshold" | "verification_tests_failed" | "thread_stale" | "integration_preview_blocked";
+
+export interface LandBlockerDetailSchema {
+  /** Eligibility check that produced the blocker. */
+  check: LandBlockerCheckSchema;
+  /** Stable condition code for machine branching. */
+  code: LandBlockerCodeSchema;
+  /** Human explanation of the observed condition. */
+  message: string;
+  /** Concrete affected paths; empty for non-path conditions. */
+  paths: string[];
+  state_context?: LandBlockerStateContextSchema | null;
+}
+
+export interface LandBlockerStateContextSchema {
+  conflict_count: number;
+  integration_policy_reason?: string | null;
+  integration_policy_status?: string | null;
+  merge_relation: string;
+  recorded_state_id?: string | null;
+  recorded_thread_state: string;
+  thread_tip_state_id?: string | null;
+}
+
 export interface LandSchema {
   action: string;
+  blocker_details: LandBlockerDetailSchema[];
   blockers?: string[] | null;
   captured: boolean;
   checkpointed: boolean;
@@ -1645,6 +1675,8 @@ export interface ReadyChecksSchema {
 
 export interface ReadyReadinessSchema {
   blockers: string[];
+  capture_reason: string;
+  capture_status: string;
   captured: boolean;
   captured_state?: string | null;
   changed_path_count: number;
@@ -1663,6 +1695,8 @@ export interface ReadyReadinessSchema {
 export interface ReadySchema {
   action: string;
   blockers: string[];
+  capture_reason: string;
+  capture_status: string;
   captured: boolean;
   captured_state?: string | null;
   idempotency_status?: string | null;

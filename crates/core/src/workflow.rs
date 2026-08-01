@@ -296,7 +296,7 @@ pub fn land_text_step(step: &str) -> String {
         "sync(current)" => "already refreshed".to_string(),
         "merge(blocked)" => "merge blocked".to_string(),
         "checkpoint(not needed)" => "no Git commit needed".to_string(),
-        "checkpoint(not reached)" => "Git commit not reached".to_string(),
+        "checkpoint(not reached)" => "Git commit skipped because merge did not run".to_string(),
         other => other.to_string(),
     }
 }
@@ -839,6 +839,10 @@ mod tests {
     fn land_text_scope_and_manual_review() {
         assert_eq!(land_text_step("capture"), "saved");
         assert_eq!(land_text_step("merge(blocked)"), "merge blocked");
+        assert_eq!(
+            land_text_step("checkpoint(not reached)"),
+            "Git commit skipped because merge did not run"
+        );
         assert!(is_manual_review_blocker("Heavy-impact change: Cargo.lock"));
         assert!(!is_manual_review_blocker("stale"));
         assert_eq!(

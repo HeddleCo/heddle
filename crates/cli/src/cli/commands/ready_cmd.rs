@@ -62,6 +62,8 @@ struct ReadyReadinessSummary {
     status: String,
     captured: bool,
     captured_state: Option<String>,
+    capture_status: String,
+    capture_reason: String,
     checks: ReadyChecksSummary,
     integration: String,
     freshness: String,
@@ -82,7 +84,32 @@ struct ReadyChecksSummary {
 }
 
 impl ReadyOutput {
+    fn capture_status(&self) -> (&'static str, &'static str) {
+        if self.captured {
+            (
+                "captured",
+                "worktree changes were captured during this ready invocation",
+            )
+        } else if ready_blocked_by_missing_intent(self) {
+            (
+                "required",
+                "the worktree has uncaptured changes and capture intent is missing",
+            )
+        } else if !self.trust.verified && self.report.merge_relation == "blocked" {
+            (
+                "not_checked",
+                "repository verification blocked capture evaluation",
+            )
+        } else {
+            (
+                "not_needed",
+                "the worktree already matches the current Heddle state",
+            )
+        }
+    }
+
     fn readiness_summary(&self) -> ReadyReadinessSummary {
+        let (capture_status, capture_reason) = self.capture_status();
         let checks = ready_checks_summary(self);
         let integration = ready_integration_summary(&self.report);
         let freshness = ready_freshness_summary(&self.report);
@@ -96,6 +123,8 @@ impl ReadyOutput {
             status: ready_status_summary(&self.report),
             captured: self.captured,
             captured_state: self.captured_state.clone(),
+            capture_status: capture_status.to_string(),
+            capture_reason: capture_reason.to_string(),
             checks,
             integration,
             freshness,
@@ -128,7 +157,8 @@ impl Serialize for ReadyOutput {
         let verification = serde_json::to_value(&self.trust).map_err(S::Error::custom)?;
         let readiness = self.readiness_summary();
 
-        let mut state = serializer.serialize_struct("ReadyOutput", 18)?;
+        let (capture_status, capture_reason) = self.capture_status();
+        let mut state = serializer.serialize_struct("ReadyOutput", 20)?;
         state.serialize_field("output_kind", "ready")?;
         state.serialize_field("status", &self.operator.status)?;
         state.serialize_field("action", &self.operator.action)?;
@@ -141,6 +171,8 @@ impl Serialize for ReadyOutput {
         state.serialize_field("recommended_action_template", &recommended_action_template)?;
         state.serialize_field("captured", &self.captured)?;
         state.serialize_field("captured_state", &self.captured_state)?;
+        state.serialize_field("capture_status", capture_status)?;
+        state.serialize_field("capture_reason", capture_reason)?;
         state.serialize_field("thread_state", &self.thread_state)?;
         state.serialize_field("readiness", &readiness)?;
         state.serialize_field("report", &self.report)?;
@@ -830,7 +862,7 @@ fn write_preview_report(output: &ReadyOutput, recommended_action: Option<&str>) 
     );
     println!(
         "  {}",
-        style::field("captured", &ready_captured_label(&summary))
+        style::field("capture", &ready_capture_label(&summary))
     );
     println!(
         "  {}",
@@ -911,11 +943,14 @@ fn ready_merge_type_summary(report: &ThreadPreviewReport) -> String {
     core_ready_merge_type_summary(&report.merge_relation)
 }
 
-fn ready_captured_label(summary: &ReadyReadinessSummary) -> String {
-    match summary.captured_state.as_deref() {
-        Some(state) => format!("yes (state {})", style::state_id(state)),
-        None if summary.captured => "yes".to_string(),
-        None => "no".to_string(),
+fn ready_capture_label(summary: &ReadyReadinessSummary) -> String {
+    match (
+        summary.capture_status.as_str(),
+        summary.captured_state.as_deref(),
+    ) {
+        ("captured", Some(state)) => format!("captured (state {})", style::state_id(state)),
+        ("captured", None) => "captured".to_string(),
+        (status, _) => format!("{} ({})", status.replace('_', " "), summary.capture_reason),
     }
 }
 
