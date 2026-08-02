@@ -107,7 +107,8 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
             );
         }
     } else {
-        let (packed_count, bytes_saved) = repo.store().pack_objects(aggressive)?;
+        let delta_search = aggressive || repo.config().storage.delta_search.gc;
+        let (packed_count, bytes_saved) = repo.store().pack_objects(delta_search)?;
         summary.packed_count = packed_count;
         summary.bytes_saved = bytes_saved;
 

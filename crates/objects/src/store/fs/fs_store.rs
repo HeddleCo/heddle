@@ -236,6 +236,7 @@ where
 pub struct FsStore {
     pub(super) root: PathBuf,
     pub(super) compression: CompressionConfig,
+    pub(super) snapshot_delta_search: bool,
     pack_manager: RwLock<SnapshotPackManager>,
     pub(super) recent_blobs: RwLock<RecentObjectCache<ContentHash, Blob>>,
     pub(super) recent_trees: RwLock<RecentObjectCache<ContentHash, Tree>>,
@@ -269,6 +270,7 @@ pub struct FsStore {
 impl Clone for FsStore {
     fn clone(&self) -> Self {
         let mut cloned = Self::with_compression(&self.root, self.compression);
+        cloned.snapshot_delta_search = self.snapshot_delta_search;
         cloned.loose_object_write_mode = self.loose_object_write_mode;
         cloned.external_source = self.external_source.clone();
         cloned
@@ -285,6 +287,7 @@ impl FsStore {
         Self {
             root,
             compression: CompressionConfig::default(),
+            snapshot_delta_search: false,
             pack_manager: RwLock::new(pack_manager),
             recent_blobs: RwLock::new(RecentObjectCache::with_byte_budget(
                 RECENT_BLOB_CACHE_CAPACITY,
@@ -311,6 +314,7 @@ impl FsStore {
         Self {
             root,
             compression,
+            snapshot_delta_search: false,
             pack_manager: RwLock::new(pack_manager),
             recent_blobs: RwLock::new(RecentObjectCache::with_byte_budget(
                 RECENT_BLOB_CACHE_CAPACITY,
@@ -355,6 +359,11 @@ impl FsStore {
     /// Set the compression configuration.
     pub fn set_compression(&mut self, compression: CompressionConfig) {
         self.compression = compression;
+    }
+
+    /// Enable or disable sliding-window delta search for snapshot packs.
+    pub fn set_snapshot_delta_search(&mut self, enabled: bool) {
+        self.snapshot_delta_search = enabled;
     }
 
     pub fn loose_object_write_mode(&self) -> LooseObjectWriteMode {

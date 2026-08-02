@@ -581,7 +581,10 @@ fn finish_git_overlay_clone(
     let (stats, _map) = ingest::import_git_into_scoped_with_options_and_progress(
         local_path,
         local_path,
-        ImportOptions::default(),
+        ImportOptions {
+            delta_search: repo.config().storage.delta_search.import,
+            ..ImportOptions::default()
+        },
         scope,
         Some(&mut on_commit),
     )

@@ -473,7 +473,10 @@ fn run_git_import(
     };
     let mut progress = ImportProgress::start(cli, repo, &scope, &source_label);
     progress.begin_commit_import();
-    let import_options = ImportOptions { lossy };
+    let import_options = ImportOptions {
+        lossy,
+        delta_search: repo.config().storage.delta_search.import,
+    };
     let mut on_commit = |event| progress.commit_tick(event);
     let source_path = resolved
         .as_ref()

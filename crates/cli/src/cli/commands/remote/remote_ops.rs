@@ -454,7 +454,10 @@ fn pull_git_overlay(
     let (stats, mapping) = ingest::import_git_into_scoped_with_options_and_progress(
         repo.root(),
         repo.root(),
-        ingest::ImportOptions::default(),
+        ingest::ImportOptions {
+            delta_search: repo.config().storage.delta_search.import,
+            ..ingest::ImportOptions::default()
+        },
         ingest::ImportScope::refs(vec![staging_ref.clone()]),
         Some(&mut on_import),
     )

@@ -114,7 +114,9 @@ impl FsStore {
             <Self as ObjectStore>::has_state(self, &state.id())?
         };
         let mut compression = self.compression;
-        compression.max_delta_size = 0;
+        if !self.snapshot_delta_search {
+            compression.max_delta_size = 0;
+        }
         let mut builder = PackBuilder::new(compression);
         let mut staged_blobs = Vec::with_capacity(blobs.len());
 
@@ -241,7 +243,9 @@ impl FsStore {
         // `pack_objects_impl` keeps the full delta search; this
         // path only optimizes durability + write throughput.
         let mut compression = self.compression;
-        compression.max_delta_size = 0;
+        if !self.snapshot_delta_search {
+            compression.max_delta_size = 0;
+        }
         let mut builder = PackBuilder::new(compression);
         let mut staged: Vec<(ContentHash, Vec<u8>)> = Vec::with_capacity(blobs.len());
         for (hash, data) in blobs {
@@ -297,7 +301,7 @@ impl FsStore {
     /// started with. Running GC again over an already-consolidated store
     /// is a no-op (nothing loose, one pack already covers everything).
     ///
-    pub(super) fn pack_objects_impl(&self, aggressive: bool) -> Result<(u64, u64)> {
+    pub(super) fn pack_objects_impl(&self, delta_search: bool) -> Result<(u64, u64)> {
         let loose_blobs = list_hashes_from_dir(&blobs_dir(&self.root))?;
         let loose_trees = list_hashes_from_dir(&trees_dir(&self.root))?;
 
@@ -328,17 +332,14 @@ impl FsStore {
         }
 
         // Consolidation packs every object that's already packed plus the
-        // loose ones. The default path SKIPS the sliding-window delta
-        // search: it runs across the full payloads of every object and on
-        // a large native store (tens of MB across thousands of objects)
-        // costs minutes for a near-zero size win, because the carried-
-        // forward objects are already zstd-compressed. `--aggressive`
-        // opts back into the full delta search for the rare "shrink the
-        // pack at all costs" case. This mirrors the snapshot hot path
-        // (`put_blobs_packed_impl`), which disables delta for the same
-        // reason.
+        // loose ones. The default path skips the sliding-window delta search
+        // to keep foreground GC latency bounded: it searches the full payloads
+        // of every object and can turn a seconds-long consolidation into
+        // minutes. The caller resolves the repository's GC policy and the
+        // `--aggressive` override into the `delta_search` argument. This
+        // mirrors the snapshot hot path, whose policy is held by the store.
         let mut compression = self.compression;
-        if !aggressive {
+        if !delta_search {
             compression.max_delta_size = 0;
         }
         let mut builder = PackBuilder::new(compression);

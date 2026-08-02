@@ -25,7 +25,7 @@ use objects::{
     object::{Blob, ContentHash, Tree, TreeEntry},
     store::{
         CompressionConfig, ObjectStore,
-        pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder, SyncData},
+        pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId, StreamingPackBuilder},
     },
     util::{GitTreeNameClassification, GitTreeNameLossyAction, classify_git_tree_name},
 };
@@ -336,9 +336,9 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             });
         }
 
-        // Translate each commit into a streaming native pack: tree first,
-        // then state. Importing a git repo creates thousands of objects;
-        // writing them as loose files means thousands of durable renames.
+        // Translate each commit into one native pack: tree first, then state.
+        // Importing a git repo creates thousands of objects; writing them as
+        // loose files means thousands of durable renames.
         //
         // We use [`StreamingPackBuilder`] so the pack data streams to a
         // single staging file on disk while the index entries are
@@ -347,11 +347,9 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
         // repo size, modulo the largest single object's compressed
         // payload (limited by the non-streaming zstd API).
         //
-        // Delta search is disabled (`max_delta_size = 0`): the
-        // previous delta-enabled experiment was slower than loose
-        // writes on real Heddle history, and `StreamingPackBuilder`
-        // can't do delta encoding anyway (it'd need random access to
-        // recently-written objects).
+        // The default remains the bounded-memory streaming builder. The
+        // repository's import delta-search policy opts into `PackBuilder`,
+        // which retains the full object set so it can search recent bases.
         let staging_dir = self.pack_staging_dir.clone().unwrap_or_else(|| {
             std::env::temp_dir().join(format!("heddle-ingest-{}", std::process::id()))
         });
@@ -393,29 +391,12 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             for (git_sha, _) in &descriptor_commits {
                 self.map.remove_commit(git_sha)?;
             }
-            let pack_file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&pack_path)
-                .map_err(|e| {
-                    IngestError::Other(format!(
-                        "opening pack staging file {}: {e}",
-                        pack_path.display()
-                    ))
-                })?;
-            let compression = CompressionConfig {
-                max_delta_size: 0,
-                ..CompressionConfig::default()
-            };
-            let builder = StreamingPackBuilder::new(
-                pack_file,
-                index_path.clone(),
-                compression,
-                bucket_dir.clone(),
-            )
-            .map_err(IngestError::from)?;
+            let builder = ImportPackBuilder::new(
+                &pack_path,
+                &index_path,
+                &bucket_dir,
+                self.options.delta_search,
+            )?;
             let mut packed = PackedImport::new(self.git, self.map, builder, self.options.clone())
                 .repair_mapped_objects(repair_mapped_objects);
             let mut last_log = 0usize;
@@ -452,8 +433,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             }
             let stats = packed.stats;
             if stats.object_count > 0 {
-                let (_file, _) = packed.builder.finalize()?;
-                self.store.install_pack_streaming(&pack_path, &index_path)?;
+                packed.builder.finish(self.store, &pack_path, &index_path)?;
             } else {
                 // No objects to install — drop the empty staging file.
                 let _ = std::fs::remove_file(&pack_path);
@@ -544,10 +524,160 @@ struct PackedImportStats {
     lossy_entries: Vec<LossyImportEntry>,
 }
 
-struct PackedImport<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> {
+trait ImportPackSink {
+    fn add(
+        &mut self,
+        hash: ContentHash,
+        obj_type: PackObjectType,
+        data: Vec<u8>,
+    ) -> crate::Result<()>;
+
+    fn add_id(
+        &mut self,
+        id: PackObjectId,
+        obj_type: PackObjectType,
+        data: Vec<u8>,
+    ) -> crate::Result<()>;
+}
+
+impl<W> ImportPackSink for StreamingPackBuilder<W>
+where
+    W: std::io::Write + std::io::Read + std::io::Seek + objects::store::SyncData,
+{
+    fn add(
+        &mut self,
+        hash: ContentHash,
+        obj_type: PackObjectType,
+        data: Vec<u8>,
+    ) -> crate::Result<()> {
+        StreamingPackBuilder::add(self, hash, obj_type, data).map_err(IngestError::from)
+    }
+
+    fn add_id(
+        &mut self,
+        id: PackObjectId,
+        obj_type: PackObjectType,
+        data: Vec<u8>,
+    ) -> crate::Result<()> {
+        StreamingPackBuilder::add_id(self, id, obj_type, data).map_err(IngestError::from)
+    }
+}
+
+impl ImportPackSink for PackBuilder {
+    fn add(
+        &mut self,
+        hash: ContentHash,
+        obj_type: PackObjectType,
+        data: Vec<u8>,
+    ) -> crate::Result<()> {
+        PackBuilder::add(self, hash, obj_type, data);
+        Ok(())
+    }
+
+    fn add_id(
+        &mut self,
+        id: PackObjectId,
+        obj_type: PackObjectType,
+        data: Vec<u8>,
+    ) -> crate::Result<()> {
+        PackBuilder::add_id(self, id, obj_type, data);
+        Ok(())
+    }
+}
+
+enum ImportPackBuilder {
+    Streaming(StreamingPackBuilder<std::fs::File>),
+    DeltaSearch(PackBuilder),
+}
+
+impl ImportPackBuilder {
+    fn new(
+        pack_path: &Path,
+        index_path: &Path,
+        bucket_dir: &Path,
+        delta_search: bool,
+    ) -> crate::Result<Self> {
+        if delta_search {
+            return Ok(Self::DeltaSearch(PackBuilder::new(
+                CompressionConfig::default(),
+            )));
+        }
+
+        let pack_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(pack_path)
+            .map_err(|error| {
+                IngestError::Other(format!(
+                    "opening pack staging file {}: {error}",
+                    pack_path.display()
+                ))
+            })?;
+        let compression = CompressionConfig {
+            max_delta_size: 0,
+            ..CompressionConfig::default()
+        };
+        let builder = StreamingPackBuilder::new(
+            pack_file,
+            index_path.to_path_buf(),
+            compression,
+            bucket_dir.to_path_buf(),
+        )?;
+        Ok(Self::Streaming(builder))
+    }
+
+    fn finish<S: ObjectStore>(
+        self,
+        store: &S,
+        pack_path: &Path,
+        index_path: &Path,
+    ) -> crate::Result<()> {
+        match self {
+            Self::Streaming(builder) => {
+                let (_file, _) = builder.finalize()?;
+                store.install_pack_streaming(pack_path, index_path)?;
+            }
+            Self::DeltaSearch(builder) => {
+                let (pack, index, _) = builder.build()?;
+                store.install_pack(&pack, &index)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ImportPackSink for ImportPackBuilder {
+    fn add(
+        &mut self,
+        hash: ContentHash,
+        obj_type: PackObjectType,
+        data: Vec<u8>,
+    ) -> crate::Result<()> {
+        match self {
+            Self::Streaming(builder) => ImportPackSink::add(builder, hash, obj_type, data),
+            Self::DeltaSearch(builder) => ImportPackSink::add(builder, hash, obj_type, data),
+        }
+    }
+
+    fn add_id(
+        &mut self,
+        id: PackObjectId,
+        obj_type: PackObjectType,
+        data: Vec<u8>,
+    ) -> crate::Result<()> {
+        match self {
+            Self::Streaming(builder) => ImportPackSink::add_id(builder, id, obj_type, data),
+            Self::DeltaSearch(builder) => ImportPackSink::add_id(builder, id, obj_type, data),
+        }
+    }
+}
+
+struct PackedImport<'a, B: ImportPackSink> {
     git: &'a GitSource,
     map: &'a mut ShaMap,
-    builder: StreamingPackBuilder<W>,
+    builder: B,
     stats: PackedImportStats,
     options: ImportOptions,
     emit_objects: bool,
@@ -556,13 +686,8 @@ struct PackedImport<'a, W: std::io::Write + std::io::Read + std::io::Seek + Sync
     materialized_blobs: HashSet<String>,
 }
 
-impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImport<'a, W> {
-    fn new(
-        git: &'a GitSource,
-        map: &'a mut ShaMap,
-        builder: StreamingPackBuilder<W>,
-        options: ImportOptions,
-    ) -> Self {
+impl<'a, B: ImportPackSink> PackedImport<'a, B> {
+    fn new(git: &'a GitSource, map: &'a mut ShaMap, builder: B, options: ImportOptions) -> Self {
         Self {
             git,
             map,
@@ -898,9 +1023,9 @@ pub fn import_git_into_scoped_with_options_and_progress(
     let map_path = repo.heddle_dir().join("ingest").join("sha_map.sqlite");
     let mut map = ShaMap::open(&map_path)?;
 
-    // Stage the streaming pack file inside `.heddle/ingest/staging/` so
-    // the final `rename(2)` into `.heddle/objects/packs/` lands on the
-    // same filesystem (atomic move, no copy).
+    // Stage streaming packs inside `.heddle/ingest/staging/` so the final
+    // `rename(2)` into `.heddle/packs/` lands on the same filesystem.
+    // Delta-search imports use the buffered builder and install from memory.
     let staging_dir = repo.heddle_dir().join("ingest").join("staging");
 
     // `run` is `async`, but the local `RefManager`/`OpLog` futures are
@@ -1146,7 +1271,10 @@ mod tests {
 
     use objects::{
         object::{EntryType, FileMode, ThreadName},
-        store::InMemoryStore,
+        store::{
+            FsStore, InMemoryStore,
+            pack::{ObjectType, PackIndex, decode_tagged_entry_header},
+        },
     };
     use refs::refs::RefManager;
     use tempfile::TempDir;
@@ -1216,6 +1344,52 @@ mod tests {
             "160000,0808080808080808080808080808080808080808,vendor",
         ]);
         run(&["commit", "-q", "-m", "add gitlink"]);
+    }
+
+    fn seed_delta_repo(path: &Path) {
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .status()
+                .expect("git cmd");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-q", "--initial-branch=main"]);
+        for version in 0..12 {
+            let mut payload = vec![b'a'; 8 * 1024];
+            payload[version * 31] = b'A' + version as u8;
+            std::fs::write(path.join("history.txt"), payload).unwrap();
+            run(&["add", "history.txt"]);
+            run(&["commit", "-q", "-m", &format!("version {version}")]);
+        }
+    }
+
+    fn count_pack_deltas(store: &FsStore) -> usize {
+        let manager = store.pack_manager().read().unwrap();
+        manager
+            .pack_file_paths()
+            .into_iter()
+            .map(|(pack_path, index_path)| {
+                let pack = std::fs::read(pack_path).unwrap();
+                let index = PackIndex::from_bytes(&std::fs::read(index_path).unwrap()).unwrap();
+                index
+                    .ids()
+                    .into_iter()
+                    .filter(|id| {
+                        let offset = index.find(id).unwrap() as usize;
+                        decode_tagged_entry_header(&pack[offset..])
+                            .is_ok_and(|header| header.obj_type == ObjectType::Delta)
+                    })
+                    .count()
+            })
+            .sum()
     }
 
     fn git_output(path: &Path, args: &[&str], stdin: Option<&[u8]>) -> String {
@@ -1302,6 +1476,59 @@ mod tests {
             refs.get_thread(&ThreadName::new("feature/x"))
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn delta_search_enabled_import_reconstructs_byte_exact_with_zero_blake3_failures() {
+        let gitdir = TempDir::new().unwrap();
+        let streaming_dir = TempDir::new().unwrap();
+        let delta_dir = TempDir::new().unwrap();
+        seed_delta_repo(gitdir.path());
+
+        import_git_into_with_options(
+            gitdir.path(),
+            streaming_dir.path(),
+            ImportOptions::default(),
+        )
+        .expect("streaming import");
+        import_git_into_with_options(
+            gitdir.path(),
+            delta_dir.path(),
+            ImportOptions {
+                delta_search: true,
+                ..ImportOptions::default()
+            },
+        )
+        .expect("delta import");
+
+        let streaming_store = FsStore::new(streaming_dir.path().join(".heddle"));
+        let delta_store = FsStore::new(delta_dir.path().join(".heddle"));
+        assert_eq!(
+            count_pack_deltas(&streaming_store),
+            0,
+            "off must preserve the zero-delta streaming pack"
+        );
+        assert!(
+            count_pack_deltas(&delta_store) > 0,
+            "on must emit delta entries"
+        );
+
+        let hashes = delta_store.list_blobs().unwrap();
+        assert!(!hashes.is_empty());
+        let mut blake3_failures = 0;
+        for hash in hashes {
+            let blob = delta_store
+                .get_blob(&hash)
+                .unwrap()
+                .expect("imported blob must reconstruct");
+            if ContentHash::compute_typed("blob", blob.content()) != hash {
+                blake3_failures += 1;
+            }
+        }
+        assert_eq!(
+            blake3_failures, 0,
+            "delta-enabled import must have 0 BLAKE3 reconstruction failures"
         );
     }
 
@@ -1458,7 +1685,10 @@ mod tests {
         let (stats, _map) = import_git_into_with_options(
             gitdir.path(),
             heddledir.path(),
-            ImportOptions { lossy: true },
+            ImportOptions {
+                lossy: true,
+                ..ImportOptions::default()
+            },
         )
         .expect("lossy import converts invalid UTF-8 name");
         let converted_name = "bad\u{fffd}name";
@@ -1478,7 +1708,10 @@ mod tests {
         let (first, map) = import_git_into_with_options(
             gitdir.path(),
             heddledir.path(),
-            ImportOptions { lossy: true },
+            ImportOptions {
+                lossy: true,
+                ..ImportOptions::default()
+            },
         )
         .expect("initial lossy import succeeds");
         drop(map);
@@ -1508,7 +1741,10 @@ mod tests {
         let (_first, map) = import_git_into_with_options(
             gitdir.path(),
             heddledir.path(),
-            ImportOptions { lossy: true },
+            ImportOptions {
+                lossy: true,
+                ..ImportOptions::default()
+            },
         )
         .expect("initial lossy import succeeds");
         drop(map);
@@ -1516,7 +1752,10 @@ mod tests {
         let (second, _map) = import_git_into_with_options(
             gitdir.path(),
             heddledir.path(),
-            ImportOptions { lossy: true },
+            ImportOptions {
+                lossy: true,
+                ..ImportOptions::default()
+            },
         )
         .expect("lossy rerun reports persisted lossy entries");
 
@@ -1534,7 +1773,10 @@ mod tests {
         let (stats, _map) = import_git_into_with_options(
             gitdir.path(),
             heddledir.path(),
-            ImportOptions { lossy: true },
+            ImportOptions {
+                lossy: true,
+                ..ImportOptions::default()
+            },
         )
         .expect("clean lossy import succeeds");
 

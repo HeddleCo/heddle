@@ -220,7 +220,10 @@ fn run_import(
     let (stats, _map) = import_git_into_scoped_with_options(
         git_path,
         heddle_path,
-        ImportOptions { lossy },
+        ImportOptions {
+            lossy,
+            ..ImportOptions::default()
+        },
         ImportScope::refs(refs.to_vec()),
     )?;
     let r = &stats.refs_seen;

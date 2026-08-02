@@ -49,7 +49,7 @@ fn ingest_into_git_projection(
     source: &Path,
 ) -> Result<(), String> {
     let target = test_support::heddle_repo(git_projection).root();
-    ingest::import_git_into_with_options(source, target, ingest::ImportOptions { lossy: false })
+    ingest::import_git_into_with_options(source, target, ingest::ImportOptions::default())
         .map_err(|error| error.to_string())?;
     test_support::stage_ingest_source_in_mirror(git_projection, source, &[])
         .map_err(|error| error.to_string())?;

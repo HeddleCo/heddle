@@ -248,8 +248,8 @@ impl ObjectStore for AnyStore {
     ) -> Result<Vec<pack::PackObjectId>> {
         any_store_dispatch!(self, install_pack_streaming(pack_path, index_path))
     }
-    fn pack_objects(&self, aggressive: bool) -> Result<(u64, u64)> {
-        any_store_dispatch!(self, pack_objects(aggressive))
+    fn pack_objects(&self, delta_search: bool) -> Result<(u64, u64)> {
+        any_store_dispatch!(self, pack_objects(delta_search))
     }
     fn prune_loose_objects(&self) -> Result<(u64, u64)> {
         any_store_dispatch!(self, prune_loose_objects())
@@ -706,8 +706,8 @@ pub trait ObjectStore: Send + Sync {
         Ok(ids)
     }
 
-    fn pack_objects(&self, aggressive: bool) -> Result<(u64, u64)> {
-        let _ = aggressive;
+    fn pack_objects(&self, delta_search: bool) -> Result<(u64, u64)> {
+        let _ = delta_search;
         Ok((0, 0))
     }
 
