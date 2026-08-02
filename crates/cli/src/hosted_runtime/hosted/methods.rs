@@ -347,10 +347,9 @@ impl HostedRoutes<'_> {
         request: &WaitForDeviceAuthorizationRequest,
     ) -> Result<ServerStream<DeviceAuthorizationEvent>> {
         self.client
-            .call_server_stream(
+            .call_long_lived_server_stream(
                 "/heddle.api.v1alpha1.IdentityService/WaitForDeviceAuthorization",
                 request,
-                "",
             )
             .await
     }

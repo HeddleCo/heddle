@@ -5,9 +5,9 @@ use std::{collections::BTreeSet, path::Path};
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha1::{
     CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, DeviceAuthProof,
-    DeviceAuthorizationResponse, DeviceAuthorizationStatus, ExchangeDeviceAuthorizationRequest,
-    IssueServiceAccountCredentialRequest, MintBiscuitRequest, WaitForDeviceAuthorizationRequest,
-    mint_biscuit_request::Proof,
+    DeviceAuthorizationEvent, DeviceAuthorizationResponse, DeviceAuthorizationStatus,
+    ExchangeDeviceAuthorizationRequest, IssueServiceAccountCredentialRequest, MintBiscuitRequest,
+    WaitForDeviceAuthorizationRequest, mint_biscuit_request::Proof,
 };
 use cli_shared::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
@@ -1173,17 +1173,17 @@ async fn poll_for_approval(
         .as_ref()
         .map(|t| t.seconds.max(0) as u64)
         .unwrap_or(0);
-    let deadline = std::time::Instant::now()
-        + std::time::Duration::from_secs(
-            expires_at_secs
-                .saturating_sub(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                )
-                .max(30),
-        );
+    let wait_budget = std::time::Duration::from_secs(
+        expires_at_secs
+            .saturating_sub(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            )
+            .max(30),
+    );
+    let deadline = std::time::Instant::now() + wait_budget;
 
     let mut events = client
         .routes()
@@ -1196,13 +1196,11 @@ async fn poll_for_approval(
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            bail!("Authorization timed out. Please try again.");
+            return Err(device_authorization_wait_timeout(wait_budget));
         }
 
-        let event = tokio::time::timeout(remaining, events.next())
-            .await
-            .map_err(|_| anyhow::anyhow!("Authorization timed out. Please try again."))?
-            .map_err(|error| anyhow::anyhow!("device authorization wait failed: {error}"))?;
+        let event =
+            wait_for_device_authorization_event(events.next(), remaining, wait_budget).await?;
 
         match event.map(|status| status.status()) {
             Some(DeviceAuthorizationStatus::Pending) => continue,
@@ -1227,6 +1225,45 @@ async fn poll_for_approval(
         }
         Err(error) => Err(anyhow::anyhow!("device authorization failed: {error}")),
     }
+}
+
+async fn wait_for_device_authorization_event(
+    event: impl std::future::Future<
+        Output = std::result::Result<Option<DeviceAuthorizationEvent>, HostedError>,
+    >,
+    remaining: std::time::Duration,
+    wait_budget: std::time::Duration,
+) -> Result<Option<DeviceAuthorizationEvent>> {
+    tokio::time::timeout(remaining, event)
+        .await
+        .map_err(|_| device_authorization_wait_timeout(wait_budget))?
+        .map_err(|error| device_authorization_wait_stream_error(error, wait_budget))
+}
+
+fn device_authorization_wait_timeout(wait_budget: std::time::Duration) -> anyhow::Error {
+    anyhow::anyhow!(
+        "device authorization approval wait exceeded its {}s authorization-expiry budget; please run `heddle auth login` again",
+        wait_budget.as_secs()
+    )
+}
+
+fn device_authorization_wait_stream_error(
+    error: HostedError,
+    wait_budget: std::time::Duration,
+) -> anyhow::Error {
+    if matches!(
+        error,
+        HostedError::Call {
+            code: api::heddle::api::v1alpha1::CallFailureCode::DeadlineExceeded,
+            ..
+        }
+    ) {
+        return anyhow::anyhow!(
+            "device authorization approval stream returned DeadlineExceeded before its {}s authorization-expiry budget elapsed: {error}",
+            wait_budget.as_secs()
+        );
+    }
+    anyhow::anyhow!("device authorization approval stream failed: {error}")
 }
 
 async fn mint_biscuit_with_device_auth(
@@ -1538,6 +1575,41 @@ mod tests {
             .is_err(),
             "signature must commit to the device code",
         );
+    }
+
+    #[tokio::test]
+    async fn device_authorization_timeout_names_stage_and_budget() {
+        let wait_budget = std::time::Duration::from_secs(42);
+        let error = wait_for_device_authorization_event(
+            std::future::pending::<
+                std::result::Result<Option<DeviceAuthorizationEvent>, HostedError>,
+            >(),
+            std::time::Duration::from_millis(1),
+            wait_budget,
+        )
+        .await
+        .expect_err("the deliberately stalled authorization wait must time out");
+
+        assert_eq!(
+            error.to_string(),
+            "device authorization approval wait exceeded its 42s authorization-expiry budget; please run `heddle auth login` again"
+        );
+    }
+
+    #[test]
+    fn early_remote_deadline_names_stage_and_budget() {
+        let error = device_authorization_wait_stream_error(
+            HostedError::Call {
+                code: api::heddle::api::v1alpha1::CallFailureCode::DeadlineExceeded,
+                message: "call deadline has elapsed".to_string(),
+                error: None,
+            },
+            std::time::Duration::from_secs(600),
+        );
+
+        assert!(error.to_string().contains(
+            "device authorization approval stream returned DeadlineExceeded before its 600s authorization-expiry budget elapsed"
+        ));
     }
 
     #[test]
