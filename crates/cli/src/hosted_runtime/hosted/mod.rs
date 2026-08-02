@@ -414,6 +414,19 @@ impl HostedClient {
         call::server_stream(self.connection.clone(), method, &context, request).await
     }
 
+    pub(super) async fn call_long_lived_server_stream<Request, Response>(
+        &self,
+        method: &str,
+        request: &Request,
+    ) -> Result<ServerStream<Response>>
+    where
+        Request: Message,
+        Response: Message + Default,
+    {
+        let context = self.context.long_lived_streaming(method, "")?;
+        call::server_stream(self.connection.clone(), method, &context, request).await
+    }
+
     pub async fn call_bidirectional<Request, Response>(
         &self,
         method: &str,

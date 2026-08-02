@@ -355,6 +355,18 @@ impl HostedRoutes<'_> {
             .await
     }
 
+    pub async fn subscribe_repo_events(
+        &self,
+        request: &SubscribeRepoEventsRequest,
+    ) -> Result<ServerStream<RepoEvent>> {
+        self.client
+            .call_long_lived_server_stream(
+                "/heddle.api.v1alpha1.RepositoryService/SubscribeRepoEvents",
+                request,
+            )
+            .await
+    }
+
     pub async fn push(
         &self,
         client_operation_id: impl Into<String>,
@@ -401,7 +413,7 @@ mod tests {
     };
 
     #[test]
-    fn shipped_native_inventory_is_43_unary_one_server_stream_and_two_bidi() {
+    fn shipped_native_inventory_is_43_unary_two_server_streams_and_two_bidi() {
         const ROUTES: &[MethodRoute] = &[
             MethodRoute::CollaborationServiceAppendTurn,
             MethodRoute::CollaborationServiceListByState,
@@ -443,6 +455,7 @@ mod tests {
             MethodRoute::RepositoryServiceListContextSuggestions,
             MethodRoute::RepositoryServiceReviseContext,
             MethodRoute::RepositoryServiceSetContext,
+            MethodRoute::RepositoryServiceSubscribeRepoEvents,
             MethodRoute::RepositoryServiceSupersedeContext,
             MethodRoute::StateReviewServiceSignState,
             MethodRoute::WorkflowServiceApproveThread,
@@ -459,7 +472,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(shipped.len(), 46);
+        assert_eq!(shipped.len(), 47);
         assert_eq!(
             shipped
                 .iter()
@@ -472,7 +485,7 @@ mod tests {
                 .iter()
                 .filter(|method| method.streaming == StreamingShape::ServerStreaming)
                 .count(),
-            1
+            2
         );
         assert_eq!(
             shipped

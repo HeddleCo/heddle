@@ -176,6 +176,16 @@ impl CallContextFactory {
         self.base(method, client_operation_id.into())
     }
 
+    pub(super) fn long_lived_streaming(
+        &self,
+        method: &str,
+        client_operation_id: impl Into<String>,
+    ) -> Result<CallContext> {
+        let mut context = self.streaming(method, client_operation_id)?;
+        context.deadline = None;
+        Ok(context)
+    }
+
     pub fn stream_opening_proof(
         &self,
         method: &str,
@@ -457,5 +467,16 @@ mod tests {
         );
         Ed25519Signer::verify_with_public_key(&canonical, signer.public_key(), &proof.signature)
             .unwrap();
+    }
+
+    #[test]
+    fn long_lived_streaming_context_has_no_rpc_deadline() {
+        let context = CallContextFactory::default()
+            .long_lived_streaming(
+                "/heddle.api.v1alpha1.RepositoryService/SubscribeRepoEvents",
+                "",
+            )
+            .unwrap();
+        assert!(context.deadline.is_none());
     }
 }

@@ -16,6 +16,7 @@ pub(crate) mod whoami;
 
 pub(crate) use auth::cmd_auth;
 pub(crate) use hosted::{
-    HostedAuthMode, HostedClient, HostedSession, resolve_active_bearer, resolve_hosted_credential,
+    HostedAuthMode, HostedClient, HostedSession, ServerStream, resolve_active_bearer,
+    resolve_hosted_credential,
 };
 pub(crate) use websocket::connect_websocket;

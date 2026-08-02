@@ -13,6 +13,13 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+### Added
+
+- **Public hosted repo-event subscription client.** Rust consumers can connect
+  through Heddle's standard credential and verified native transport, subscribe
+  with the API-owned request/event types, and resume from the last delivered
+  event ID after an explicit disconnect error.
+
 ### Fixed
 
 - **Native pull preserves managed threads.** Pulling a pushed managed thread

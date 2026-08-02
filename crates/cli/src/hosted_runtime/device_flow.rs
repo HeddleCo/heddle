@@ -175,6 +175,7 @@ pub const SAFE_AGENT_OPERATIONS: &[&str] = &[
     "GetDiff",
     "GetSemanticHotSpots",
     "ListActions",
+    "SubscribeRepoEvents",
     // Context reads and writes.
     "ListContext",
     "GetContextHistory",
@@ -209,6 +210,7 @@ const TEMPLATE_READ_OPERATIONS: &[&str] = &[
     "GetDiff",
     "GetSemanticHotSpots",
     "ListActions",
+    "SubscribeRepoEvents",
     "ListContext",
     "GetContextHistory",
     "ListContextSuggestions",
