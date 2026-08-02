@@ -16,7 +16,10 @@ use crate::{
     },
     store::{
         HeddleError, ObjectStore,
-        pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
+        pack::{
+            ObjectType as PackObjectType, PackBuilder, PackIndex, PackObjectId,
+            decode_tagged_entry_header,
+        },
     },
     sync::RwLockExt,
 };
@@ -479,6 +482,78 @@ fn count_packs(store: &FsStore) -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+fn count_pack_deltas(store: &FsStore) -> usize {
+    let manager = store.pack_manager().read().unwrap();
+    manager
+        .pack_file_paths()
+        .into_iter()
+        .map(|(pack_path, index_path)| {
+            let pack = std::fs::read(pack_path).unwrap();
+            let index = PackIndex::from_bytes(&std::fs::read(index_path).unwrap()).unwrap();
+            index
+                .ids()
+                .into_iter()
+                .filter(|id| {
+                    let offset = index.find(id).unwrap() as usize;
+                    decode_tagged_entry_header(&pack[offset..])
+                        .is_ok_and(|header| header.obj_type == PackObjectType::Delta)
+                })
+                .count()
+        })
+        .sum()
+}
+
+fn similar_blobs(count: usize) -> Vec<(ContentHash, Vec<u8>)> {
+    (0..count)
+        .map(|version| {
+            let mut data = vec![b'x'; 8 * 1024];
+            data[version * 31] = b'A' + version as u8;
+            let blob = Blob::from(data.clone());
+            (blob.hash(), data)
+        })
+        .collect()
+}
+
+#[test]
+fn snapshot_delta_search_policy_controls_pack_emission() {
+    let (_off_temp, off_store) = create_test_store();
+    let (_on_temp, mut on_store) = create_test_store();
+    let blobs = similar_blobs(12);
+
+    off_store.put_blobs_packed(blobs.clone()).unwrap();
+    on_store.set_snapshot_delta_search(true);
+    on_store.put_blobs_packed(blobs.clone()).unwrap();
+
+    assert_eq!(count_pack_deltas(&off_store), 0);
+    assert!(count_pack_deltas(&on_store) > 0);
+    for (hash, expected) in blobs {
+        let actual = on_store.get_blob(&hash).unwrap().unwrap();
+        assert_eq!(actual.content(), expected);
+    }
+}
+
+#[test]
+fn gc_delta_search_policy_controls_pack_emission() {
+    let (_off_temp, off_store) = create_test_store();
+    let (_on_temp, on_store) = create_test_store();
+    let blobs = similar_blobs(12);
+    for (_, data) in &blobs {
+        let blob = Blob::from(data.clone());
+        off_store.put_blob(&blob).unwrap();
+        on_store.put_blob(&blob).unwrap();
+    }
+
+    off_store.pack_objects(false).unwrap();
+    on_store.pack_objects(true).unwrap();
+
+    assert_eq!(count_pack_deltas(&off_store), 0);
+    assert!(count_pack_deltas(&on_store) > 0);
+    for (hash, expected) in blobs {
+        let actual = on_store.get_blob(&hash).unwrap().unwrap();
+        assert_eq!(actual.content(), expected);
+    }
 }
 
 fn count_loose_objects(store: &FsStore) -> usize {

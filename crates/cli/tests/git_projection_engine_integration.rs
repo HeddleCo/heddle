@@ -1085,7 +1085,10 @@ fn import_all_default_fails_on_cached_lossy_commit_from_prior_run() {
     let first = import_all_with_options(
         &mut first_git_projection,
         Some(git_path),
-        ingest::ImportOptions { lossy: true },
+        ingest::ImportOptions {
+            lossy: true,
+            ..ingest::ImportOptions::default()
+        },
     )
     .expect("initial lossy Git import succeeds");
     assert_eq!(first.lossy_entries.len(), 1);
@@ -1112,7 +1115,10 @@ fn import_all_lossy_reports_cached_lossy_commit_from_prior_run() {
     import_all_with_options(
         &mut first_git_projection,
         Some(git_path),
-        ingest::ImportOptions { lossy: true },
+        ingest::ImportOptions {
+            lossy: true,
+            ..ingest::ImportOptions::default()
+        },
     )
     .expect("initial lossy Git import succeeds");
 
@@ -1120,7 +1126,10 @@ fn import_all_lossy_reports_cached_lossy_commit_from_prior_run() {
     let second = import_all_with_options(
         &mut rerun_git_projection,
         Some(git_path),
-        ingest::ImportOptions { lossy: true },
+        ingest::ImportOptions {
+            lossy: true,
+            ..ingest::ImportOptions::default()
+        },
     )
     .expect("lossy git_projection rerun reports ingest-cached lossy entries");
 
@@ -1174,7 +1183,10 @@ fn run_lossy_then_default_rerun(engine: ImportEngine) {
             let (first, map) = import_git_into_with_options(
                 git_path,
                 heddle_temp.path(),
-                ImportOptions { lossy: true },
+                ImportOptions {
+                    lossy: true,
+                    ..ImportOptions::default()
+                },
             )
             .expect("initial lossy ingest import succeeds");
             drop(map);
@@ -1191,7 +1203,10 @@ fn run_lossy_then_default_rerun(engine: ImportEngine) {
             let first = import_all_with_options(
                 &mut first_git_projection,
                 Some(git_path),
-                ingest::ImportOptions { lossy: true },
+                ingest::ImportOptions {
+                    lossy: true,
+                    ..ingest::ImportOptions::default()
+                },
             )
             .expect("initial lossy Git import succeeds");
             assert_eq!(first.lossy_entries.len(), 1);
@@ -1456,7 +1471,10 @@ fn import_all_lossy_clean_repo_reports_no_lossy_entries() {
     let stats = import_all_with_options(
         &mut git_projection,
         Some(git_repo.workdir().expect("workdir").as_path()),
-        ingest::ImportOptions { lossy: true },
+        ingest::ImportOptions {
+            lossy: true,
+            ..ingest::ImportOptions::default()
+        },
     )
     .expect("clean repo imports with lossy flag too");
 
@@ -1502,7 +1520,10 @@ fn git_import_lossy_state_carries_canonical_git_lossy_marker() {
     let stats = import_all_with_options(
         &mut git_projection,
         Some(git_temp.path()),
-        ingest::ImportOptions { lossy: true },
+        ingest::ImportOptions {
+            lossy: true,
+            ..ingest::ImportOptions::default()
+        },
     )
     .expect("lossy Git import succeeds");
     assert_eq!(stats.lossy_entries.len(), 1);
@@ -1525,9 +1546,15 @@ fn ingest_lossy_state_carries_canonical_git_lossy_marker() {
     let git_path = git_temp.path();
 
     let heddle_temp = TempDir::new().expect("heddle temp");
-    let (stats, map) =
-        import_git_into_with_options(git_path, heddle_temp.path(), ImportOptions { lossy: true })
-            .expect("lossy ingest succeeds");
+    let (stats, map) = import_git_into_with_options(
+        git_path,
+        heddle_temp.path(),
+        ImportOptions {
+            lossy: true,
+            ..ImportOptions::default()
+        },
+    )
+    .expect("lossy ingest succeeds");
     drop(map);
     assert_eq!(stats.lossy_entries.len(), 1);
 
@@ -1553,9 +1580,15 @@ fn export_mints_lossy_ingest_state_from_raw_metadata() {
     let git_path = git_temp.path();
 
     let heddle_temp = TempDir::new().expect("heddle temp");
-    let (stats, map) =
-        import_git_into_with_options(git_path, heddle_temp.path(), ImportOptions { lossy: true })
-            .expect("lossy ingest succeeds");
+    let (stats, map) = import_git_into_with_options(
+        git_path,
+        heddle_temp.path(),
+        ImportOptions {
+            lossy: true,
+            ..ImportOptions::default()
+        },
+    )
+    .expect("lossy ingest succeeds");
     drop(map);
     assert_eq!(stats.lossy_entries.len(), 1);
 

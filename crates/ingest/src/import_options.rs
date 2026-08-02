@@ -10,6 +10,9 @@ pub struct ImportOptions {
     /// When true, the importer restores the historical drop/convert behavior
     /// and records every affected entry in the import summary.
     pub lossy: bool,
+    /// Use the classic buffered pack builder and its sliding-window delta
+    /// search instead of the bounded-memory streaming builder.
+    pub delta_search: bool,
 }
 
 use serde::{Deserialize, Serialize};

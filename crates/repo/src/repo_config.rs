@@ -388,12 +388,29 @@ pub struct DisplayConfig {
 pub struct StorageConfig {
     #[serde(default)]
     pub filesystem: Option<FilesystemStorageConfig>,
+    #[serde(default)]
+    pub delta_search: DeltaSearchConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilesystemStorageConfig {
     /// Path to the storage directory (relative to .heddle or absolute)
     pub path: Option<String>,
+}
+
+/// `[storage.delta_search]` policy for pack-producing paths.
+///
+/// Every path defaults off to preserve the bounded-memory import path and the
+/// latency-oriented snapshot and maintenance behavior. Operators can opt a
+/// path into the classic sliding-window search independently.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, Eq, PartialEq)]
+pub struct DeltaSearchConfig {
+    #[serde(default)]
+    pub import: bool,
+    #[serde(default)]
+    pub snapshot: bool,
+    #[serde(default)]
+    pub gc: bool,
 }
 
 fn default_hash_length() -> usize {
@@ -553,6 +570,7 @@ mod tests {
         );
         assert_eq!(config.output.format, None);
         assert!(config.policies.default_policy.is_none());
+        assert_eq!(config.storage.delta_search, DeltaSearchConfig::default());
     }
 
     #[test]
@@ -569,6 +587,30 @@ source_authority = "native"
         assert!(config.policies.default_policy.is_none());
         assert!(config.agent.provider.is_none());
         assert!(config.agent.model.is_none());
+        assert_eq!(config.storage.delta_search, DeltaSearchConfig::default());
+    }
+
+    #[test]
+    fn delta_search_paths_deserialize_independently() {
+        let toml = r#"
+[repository]
+version = 3
+source_authority = "native"
+[storage.delta_search]
+import = true
+snapshot = false
+gc = true
+"#;
+        let config: RepoConfig = toml::from_str(toml).expect("config should deserialize");
+
+        assert_eq!(
+            config.storage.delta_search,
+            DeltaSearchConfig {
+                import: true,
+                snapshot: false,
+                gc: true,
+            }
+        );
     }
 
     #[test]

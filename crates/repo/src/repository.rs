@@ -841,7 +841,9 @@ impl Repository {
         heddle_dir: &Path,
         shared_overlay_source_root: Option<&Path>,
     ) -> Result<AnyStore> {
-        let store = AnyStore::Fs(FsStore::new(heddle_dir));
+        let mut fs_store = FsStore::new(heddle_dir);
+        fs_store.set_snapshot_delta_search(config.storage.delta_search.snapshot);
+        let store = AnyStore::Fs(fs_store);
         #[cfg(feature = "git-overlay")]
         let mut store = store;
         #[cfg(not(feature = "git-overlay"))]

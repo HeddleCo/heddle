@@ -1237,8 +1237,8 @@ impl ObjectStore for FsStore {
     }
 
     #[instrument(skip(self))]
-    fn pack_objects(&self, aggressive: bool) -> Result<(u64, u64)> {
-        self.pack_objects_impl(aggressive)
+    fn pack_objects(&self, delta_search: bool) -> Result<(u64, u64)> {
+        self.pack_objects_impl(delta_search)
     }
 
     #[instrument(skip(self), fields(id = ?id))]

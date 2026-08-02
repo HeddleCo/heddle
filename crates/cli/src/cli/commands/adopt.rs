@@ -207,7 +207,10 @@ fn import_ingest_for_adopt(
     let (stats, _map) = import_git_into_scoped_with_options_and_progress(
         repo.root(),
         repo.root(),
-        ImportOptions::default(),
+        ImportOptions {
+            delta_search: repo.config().storage.delta_search.import,
+            ..ImportOptions::default()
+        },
         scope,
         Some(&mut on_commit),
     )
