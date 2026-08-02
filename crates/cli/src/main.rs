@@ -67,7 +67,6 @@ fn main() -> Result<()> {
     }));
     match result {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) if is_broken_pipe_error(&error) => Ok(()),
         Ok(Err(error)) => Err(error),
         Err(payload) if is_broken_pipe_panic(payload.as_ref()) => Ok(()),
         Err(payload) => std::panic::resume_unwind(payload),
@@ -822,7 +821,7 @@ async fn async_main() -> Result<()> {
     if profile {
         let exit_status = match &result {
             Ok(()) => 0,
-            Err(err) if is_broken_pipe_error(err) => 0,
+            Err(err) if !explicit_json_requested(&cli) && is_broken_pipe_error(err) => 0,
             Err(err) => HeddleExitCode::from_error(err).into(),
         };
         emit_command_profile(
@@ -840,7 +839,10 @@ async fn async_main() -> Result<()> {
     telemetry.shutdown();
     match result {
         Ok(()) => Ok(()),
-        Err(err) if is_broken_pipe_error(&err) => Ok(()),
+        // Machine output must end in a terminal record or a structured error.
+        // Never confuse a transport's BrokenPipe with a consumer closing
+        // stdout; JSON writers already handle the latter at the write site.
+        Err(err) if !explicit_json_requested(&cli) && is_broken_pipe_error(&err) => Ok(()),
         Err(err) => {
             let code = HeddleExitCode::from_error(&err);
             // OutcomeExit means the command already rendered its report
@@ -1028,7 +1030,6 @@ fn is_broken_pipe_error(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<std::io::Error>()
         .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
-        || error.to_string().contains("Broken pipe")
 }
 
 fn is_broken_pipe_panic(payload: &(dyn Any + Send)) -> bool {
