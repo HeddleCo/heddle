@@ -52,6 +52,10 @@ fn verified_descriptor(
 #[tokio::test]
 #[ignore = "manual five-sample loopback transport measurement"]
 async fn measure_loopback_transport_setup_and_close() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
         .relay_mode(RelayMode::Disabled)
