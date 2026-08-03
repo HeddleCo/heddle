@@ -14,7 +14,7 @@ use super::{RecoveryAdvice, action_line::print_next};
 use crate::{
     cli::{Cli, should_output_json, style},
     config::UserConfig,
-    perf::{ProfileField, ProfileMode, emit_profile, profile_enabled, profile_mode},
+    perf::{ProfileField, ProfileMode, emit_profile, instrumentation_enabled, profile_mode},
 };
 
 pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
@@ -33,7 +33,7 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
     // Open cost is paid either in the CLI shell (injected) or inside core
     // (facade open). Exactly one side owns it; sum keeps profile truthful.
     let repo_open_ms = prepared.repo_open_ms + output.profile.repo_open_ms;
-    if profile_enabled() {
+    if instrumentation_enabled() {
         let fields = [
             ProfileField::millis("plain_git_probe_ms", output.profile.plain_git_probe_ms),
             ProfileField::millis("repo_open_ms", repo_open_ms),
@@ -41,9 +41,7 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
             ProfileField::duration("command_body_ms", body_start.elapsed()),
         ];
         match profile_mode() {
-            ProfileMode::Off => {}
-            ProfileMode::Human => emit_profile("verify phases", &fields),
-            ProfileMode::Jsonl => {
+            ProfileMode::Off | ProfileMode::Jsonl => {
                 emit_profile(
                     "verify plain git probe",
                     &[ProfileField::millis(
@@ -70,6 +68,7 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
                     )],
                 );
             }
+            ProfileMode::Human => emit_profile("verify phases", &fields),
         }
     }
     // Config comes from the single open above — never re-open for JSON mode.

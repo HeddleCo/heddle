@@ -26,6 +26,9 @@ tracing.workspace = true
 tracing-opentelemetry = { workspace = true, optional = true }
 tracing-subscriber.workspace = true
 
+[dev-dependencies]
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+
 [features]
 observability = [
     "dep:opentelemetry",

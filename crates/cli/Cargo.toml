@@ -142,7 +142,19 @@ mount = { path = "../mount", package = "heddle-mount", version = "0.11", optiona
 # fallback (`nfsserve` + `tokio` async-trait). The OSS feature
 # subsets that explicitly want a slim build (`--no-default-features
 # --features git-overlay,...`) opt out the same way they do today.
-default = ["git-overlay", "native", "local", "mount", "semantic", "zstd", "client"]
+# `observability` compiles OTLP support into shipped binaries, but runtime
+# initialization remains endpoint-gated: without an OTLP endpoint there is no
+# provider, exporter, background worker, or telemetry network client.
+default = [
+    "git-overlay",
+    "native",
+    "local",
+    "mount",
+    "semantic",
+    "zstd",
+    "client",
+    "observability",
+]
 local = []
 # Repository mode features. At least one must be enabled. The default
 # build enables both modes plus the hosted `client`. Slimmer builds opt

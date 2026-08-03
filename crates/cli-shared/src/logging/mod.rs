@@ -24,16 +24,22 @@
 //! ```
 
 use std::io::{self, IsTerminal};
+#[cfg(feature = "observability")]
+use std::time::Duration;
 
+mod trace;
 #[cfg(feature = "observability")]
 use opentelemetry::{KeyValue, global, trace::TracerProvider as _};
 #[cfg(feature = "observability")]
 use opentelemetry_otlp::WithExportConfig;
 #[cfg(feature = "observability")]
 use opentelemetry_sdk::{Resource, metrics::SdkMeterProvider, trace::SdkTracerProvider};
+pub use trace::{CommandTrace, record_phase_span, trace_export_enabled};
 use tracing::Level;
+#[cfg(feature = "observability")]
+use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::{
-    EnvFilter, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
+    EnvFilter, Layer as _, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
 };
 
 use crate::config::UserConfig;
@@ -76,16 +82,27 @@ pub struct LoggingGuard {
 }
 
 impl LoggingGuard {
-    pub fn shutdown(self) {
+    pub fn shutdown(mut self) {
+        self.shutdown_inner();
+    }
+
+    fn shutdown_inner(&mut self) {
         #[cfg(feature = "observability")]
         {
-            if let Some(meter_provider) = self.meter_provider {
-                let _ = meter_provider.shutdown();
+            if let Some(meter_provider) = self.meter_provider.take() {
+                let _ = meter_provider.shutdown_with_timeout(Duration::from_millis(250));
             }
-            if let Some(tracer_provider) = self.tracer_provider {
-                let _ = tracer_provider.shutdown();
+            if let Some(tracer_provider) = self.tracer_provider.take() {
+                let _ = tracer_provider.shutdown_with_timeout(Duration::from_millis(250));
             }
+            trace::set_trace_export_enabled(false);
         }
+    }
+}
+
+impl Drop for LoggingGuard {
+    fn drop(&mut self) {
+        self.shutdown_inner();
     }
 }
 
@@ -225,7 +242,6 @@ impl LoggingConfig {
 #[cfg(feature = "observability")]
 impl OtelConfig {
     fn from_logging_config(config: &LoggingConfig) -> Self {
-        let shared_endpoint = config.otel_endpoint.clone();
         Self {
             service_name: config
                 .otel_service_name
@@ -234,8 +250,11 @@ impl OtelConfig {
             trace_endpoint: config
                 .otel_traces_endpoint
                 .clone()
-                .or_else(|| shared_endpoint.clone()),
-            metrics_endpoint: config.otel_metrics_endpoint.clone().or(shared_endpoint),
+                .or_else(|| signal_endpoint(config.otel_endpoint.as_deref(), "v1/traces")),
+            metrics_endpoint: config
+                .otel_metrics_endpoint
+                .clone()
+                .or_else(|| signal_endpoint(config.otel_endpoint.as_deref(), "v1/metrics")),
         }
     }
 
@@ -249,6 +268,11 @@ impl OtelConfig {
             .with_attributes([KeyValue::new("service.name", self.service_name.clone())])
             .build()
     }
+}
+
+#[cfg(feature = "observability")]
+fn signal_endpoint(base: Option<&str>, signal_path: &str) -> Option<String> {
+    base.map(|endpoint| format!("{}/{signal_path}", endpoint.trim_end_matches('/')))
 }
 
 /// Initialize the global tracing subscriber.
@@ -273,14 +297,17 @@ pub fn init_logging(config: LoggingConfig) -> LoggingGuard {
         FmtSpan::NONE
     };
     let telemetry = init_otel(&config);
-    let registry = tracing_subscriber::registry().with(env_filter);
+    let registry = tracing_subscriber::registry();
 
     #[cfg(feature = "observability")]
     let init_result = match (config.format, telemetry.tracer_provider.as_ref()) {
         (LogFormat::Text, Some(provider)) => registry
             .with(
                 tracing_opentelemetry::layer()
-                    .with_tracer(provider.tracer(telemetry.service_name.clone())),
+                    .with_tracer(provider.tracer(telemetry.service_name.clone()))
+                    .with_filter(filter_fn(|metadata| {
+                        metadata.target() == trace::TELEMETRY_TARGET
+                    })),
             )
             .with(
                 tracing_subscriber::fmt::layer()
@@ -291,7 +318,8 @@ pub fn init_logging(config: LoggingConfig) -> LoggingGuard {
                     .with_file(config.include_location)
                     .with_line_number(config.include_location)
                     .with_span_events(span_events)
-                    .with_ansi(io::stderr().is_terminal()),
+                    .with_ansi(io::stderr().is_terminal())
+                    .with_filter(env_filter),
             )
             .try_init(),
         (LogFormat::Text, None) => registry
@@ -304,13 +332,17 @@ pub fn init_logging(config: LoggingConfig) -> LoggingGuard {
                     .with_file(config.include_location)
                     .with_line_number(config.include_location)
                     .with_span_events(span_events)
-                    .with_ansi(io::stderr().is_terminal()),
+                    .with_ansi(io::stderr().is_terminal())
+                    .with_filter(env_filter),
             )
             .try_init(),
         (LogFormat::Json, Some(provider)) => registry
             .with(
                 tracing_opentelemetry::layer()
-                    .with_tracer(provider.tracer(telemetry.service_name.clone())),
+                    .with_tracer(provider.tracer(telemetry.service_name.clone()))
+                    .with_filter(filter_fn(|metadata| {
+                        metadata.target() == trace::TELEMETRY_TARGET
+                    })),
             )
             .with(
                 tracing_subscriber::fmt::layer()
@@ -321,7 +353,8 @@ pub fn init_logging(config: LoggingConfig) -> LoggingGuard {
                     .with_thread_ids(config.include_thread_ids)
                     .with_file(config.include_location)
                     .with_line_number(config.include_location)
-                    .with_span_events(span_events),
+                    .with_span_events(span_events)
+                    .with_filter(env_filter),
             )
             .try_init(),
         (LogFormat::Json, None) => registry
@@ -334,7 +367,8 @@ pub fn init_logging(config: LoggingConfig) -> LoggingGuard {
                     .with_thread_ids(config.include_thread_ids)
                     .with_file(config.include_location)
                     .with_line_number(config.include_location)
-                    .with_span_events(span_events),
+                    .with_span_events(span_events)
+                    .with_filter(env_filter),
             )
             .try_init(),
     };
@@ -351,7 +385,8 @@ pub fn init_logging(config: LoggingConfig) -> LoggingGuard {
                     .with_file(config.include_location)
                     .with_line_number(config.include_location)
                     .with_span_events(span_events)
-                    .with_ansi(io::stderr().is_terminal()),
+                    .with_ansi(io::stderr().is_terminal())
+                    .with_filter(env_filter),
             )
             .try_init(),
         LogFormat::Json => registry
@@ -364,7 +399,8 @@ pub fn init_logging(config: LoggingConfig) -> LoggingGuard {
                     .with_thread_ids(config.include_thread_ids)
                     .with_file(config.include_location)
                     .with_line_number(config.include_location)
-                    .with_span_events(span_events),
+                    .with_span_events(span_events)
+                    .with_filter(env_filter),
             )
             .try_init(),
     };
@@ -426,6 +462,8 @@ struct TelemetryInit {
     tracer_provider: Option<SdkTracerProvider>,
     #[cfg(feature = "observability")]
     service_name: String,
+    #[cfg(all(test, feature = "observability"))]
+    network_client_initialized: bool,
 }
 
 #[cfg(feature = "observability")]
@@ -436,6 +474,8 @@ fn init_otel(logging: &LoggingConfig) -> TelemetryInit {
             guard: LoggingGuard::default(),
             tracer_provider: None,
             service_name: config.service_name,
+            #[cfg(all(test, feature = "observability"))]
+            network_client_initialized: false,
         };
     }
 
@@ -457,6 +497,7 @@ fn init_otel(logging: &LoggingConfig) -> TelemetryInit {
         global::set_tracer_provider(provider.clone());
         Some(provider)
     });
+    trace::set_trace_export_enabled(tracer_provider.is_some());
 
     let meter_provider = config.metrics_endpoint.as_ref().and_then(|endpoint| {
         let exporter = opentelemetry_otlp::MetricExporter::builder()
@@ -483,6 +524,9 @@ fn init_otel(logging: &LoggingConfig) -> TelemetryInit {
         },
         tracer_provider,
         service_name: config.service_name,
+        #[cfg(all(test, feature = "observability"))]
+        network_client_initialized: config.trace_endpoint.is_some()
+            || config.metrics_endpoint.is_some(),
     }
 }
 
@@ -495,6 +539,13 @@ fn init_otel(_logging: &LoggingConfig) -> TelemetryInit {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "observability")]
+    use opentelemetry::trace::TracerProvider as _;
+    #[cfg(feature = "observability")]
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SimpleSpanProcessor};
+    #[cfg(feature = "observability")]
+    use tracing_subscriber::layer::SubscriberExt as _;
+
     use super::*;
 
     #[test]
@@ -538,5 +589,61 @@ mod tests {
         assert!(!is_truthy("off"));
         assert!(!is_truthy(""));
         assert!(!is_truthy("random"));
+    }
+
+    #[cfg(feature = "observability")]
+    #[test]
+    fn endpoint_gate_is_network_dormant_and_command_spans_export_when_enabled() {
+        let shared = LoggingConfig {
+            otel_endpoint: Some("http://collector:4318/".to_string()),
+            ..LoggingConfig::default()
+        };
+        let resolved = OtelConfig::from_logging_config(&shared);
+        assert_eq!(
+            resolved.trace_endpoint.as_deref(),
+            Some("http://collector:4318/v1/traces")
+        );
+
+        let telemetry = init_otel(&LoggingConfig::default());
+        assert!(telemetry.tracer_provider.is_none());
+        assert!(!telemetry.network_client_initialized);
+        drop(telemetry);
+
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_span_processor(SimpleSpanProcessor::new(exporter.clone()))
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("heddle-test")));
+        trace::set_trace_export_enabled(true);
+        tracing::subscriber::with_default(subscriber, || {
+            let mut command = CommandTrace::start("status", std::time::Instant::now())
+                .expect("test trace export is enabled");
+            command
+                .span()
+                .in_scope(|| record_phase_span("status repo open", 7));
+            command.finish(0);
+            drop(command);
+        });
+        trace::set_trace_export_enabled(false);
+
+        let spans = exporter.get_finished_spans().expect("read exported spans");
+        assert_eq!(spans.len(), 2);
+        let command = spans
+            .iter()
+            .find(|span| span.name == "heddle.command")
+            .expect("command span exported");
+        let phase = spans
+            .iter()
+            .find(|span| span.name == "heddle.phase")
+            .expect("phase span exported");
+        assert_eq!(phase.parent_span_id, command.span_context.span_id());
+        assert!(command.attributes.iter().any(|attribute| {
+            attribute.key.as_str() == "command.status" && attribute.value.to_string() == "ok"
+        }));
+        assert!(phase.attributes.iter().any(|attribute| {
+            attribute.key.as_str() == "phase.name"
+                && attribute.value.to_string() == "status repo open"
+        }));
     }
 }

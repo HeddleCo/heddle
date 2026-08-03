@@ -40,7 +40,7 @@ use super::{
 };
 use crate::{
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
-    perf::{ProfileField, ProfileMode, emit_profile, profile_enabled, profile_mode},
+    perf::{ProfileField, ProfileMode, emit_profile, instrumentation_enabled, profile_mode},
 };
 
 fn emit_status_worktree_profile(profile: Option<&WorktreeCompareProfile>) {
@@ -81,9 +81,8 @@ fn emit_status_worktree_profile(profile: Option<&WorktreeCompareProfile>) {
         ),
     ];
     match profile_mode() {
-        ProfileMode::Off => {}
+        ProfileMode::Off | ProfileMode::Jsonl => emit_profile("status worktree detail", &fields),
         ProfileMode::Human => emit_profile("status worktree", &fields),
-        ProfileMode::Jsonl => emit_profile("status worktree detail", &fields),
     }
 }
 
@@ -182,7 +181,7 @@ fn render_fast_short_status(output: &FastShortStatusReport) {
 }
 
 fn emit_fast_short_status_profile(output: &FastShortStatusReport) {
-    if profile_enabled() {
+    if instrumentation_enabled() {
         emit_profile(
             "status fast short",
             &[
@@ -374,7 +373,7 @@ fn cli_coordination_status(status: CoordinationStatus) -> super::thread::Coordin
 }
 
 fn emit_status_profile(output: &StatusOutput) {
-    if !profile_enabled() {
+    if !instrumentation_enabled() {
         return;
     }
     emit_status_worktree_profile(output.profile.worktree_profile.as_ref());
@@ -402,9 +401,8 @@ fn emit_status_profile(output: &StatusOutput) {
         ProfileField::millis("build_total_ms", output.profile.build_total_ms),
     ];
     match profile_mode() {
-        ProfileMode::Off => {}
+        ProfileMode::Off | ProfileMode::Jsonl => emit_profile_status_jsonl_phases(output),
         ProfileMode::Human => emit_profile("status phases", &fields),
-        ProfileMode::Jsonl => emit_profile_status_jsonl_phases(output),
     }
 }
 
@@ -577,7 +575,7 @@ pub(crate) fn render_status(
     } else {
         render_long_status(output, cli.verbose > 0);
     }
-    if profile_enabled() {
+    if instrumentation_enabled() {
         emit_profile(
             "status render",
             &[ProfileField::duration("render_ms", render_start.elapsed())],

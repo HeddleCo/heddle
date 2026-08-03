@@ -10,6 +10,8 @@ use std::{cell::RefCell, collections::BTreeMap, time::Duration};
 
 use serde::Serialize;
 
+use crate::logging::{record_phase_span, trace_export_enabled};
+
 const PROFILE_SCHEMA: &str = "heddle-cli-profile/v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,7 +103,18 @@ pub fn profile_enabled() -> bool {
     profile_mode() != ProfileMode::Off
 }
 
-pub fn emit_profile(command: &str, fields: &[ProfileField]) {
+pub fn instrumentation_enabled() -> bool {
+    profile_enabled() || trace_export_enabled()
+}
+
+pub fn emit_profile(command: &'static str, fields: &[ProfileField]) {
+    let duration_ms = fields
+        .iter()
+        .filter(|field| matches!(field.unit, ProfileMetricUnit::Milliseconds))
+        .map(|field| u64::try_from(field.value).unwrap_or(u64::MAX))
+        .max()
+        .unwrap_or(0);
+    record_phase_span(command, duration_ms);
     match profile_mode() {
         ProfileMode::Off => {}
         ProfileMode::Human => emit_human_profile(command, fields),

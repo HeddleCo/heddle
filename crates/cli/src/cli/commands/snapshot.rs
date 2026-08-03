@@ -45,7 +45,7 @@ use crate::{
     attribution::clean_attribution_value,
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
-    perf::{ProfileField, emit_profile, profile_enabled},
+    perf::{ProfileField, emit_profile, instrumentation_enabled},
 };
 
 #[derive(Serialize)]
@@ -365,7 +365,7 @@ pub async fn cmd_snapshot(
         );
     }
 
-    if profile_enabled() {
+    if instrumentation_enabled() {
         emit_profile(
             "capture phases",
             &[

@@ -12,7 +12,13 @@ use api::{
 };
 use cli_shared::ClientConfig;
 use crypto::{Ed25519Signer, Signer as _};
+#[cfg(feature = "observability")]
+use opentelemetry::propagation::{Injector, TextMapPropagator};
+#[cfg(feature = "observability")]
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use prost_types::Timestamp;
+#[cfg(feature = "observability")]
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use super::{HostedError, Result};
 
@@ -267,7 +273,7 @@ impl CallContextFactory {
             request_proof: None,
             human_verification: None,
             client_operation_id,
-            trace: self.trace.clone(),
+            trace: self.trace.clone().or_else(active_trace_context),
             bearer_grant_envelope: self.bearer_grant_envelope.clone(),
         })
     }
@@ -297,6 +303,41 @@ impl CallContextFactory {
             signature,
         }))
     }
+}
+
+#[cfg(feature = "observability")]
+#[derive(Default)]
+struct TraceHeaders {
+    traceparent: Option<String>,
+    tracestate: Option<String>,
+}
+
+#[cfg(feature = "observability")]
+impl Injector for TraceHeaders {
+    fn set(&mut self, key: &str, value: String) {
+        match key {
+            "traceparent" => self.traceparent = Some(value),
+            "tracestate" => self.tracestate = Some(value),
+            _ => {}
+        }
+    }
+}
+
+#[cfg(feature = "observability")]
+fn active_trace_context() -> Option<TraceContext> {
+    let context = tracing::Span::current().context();
+    let mut headers = TraceHeaders::default();
+    TraceContextPropagator::new().inject_context(&context, &mut headers);
+    Some(TraceContext {
+        traceparent: headers.traceparent?,
+        tracestate: headers.tracestate.unwrap_or_default(),
+        baggage: String::new(),
+    })
+}
+
+#[cfg(not(feature = "observability"))]
+fn active_trace_context() -> Option<TraceContext> {
+    None
 }
 
 /// A context plus the stable action data required for one human-verification retry.
@@ -373,7 +414,15 @@ fn deadline(timeout: Duration) -> Result<Timestamp> {
 mod tests {
     use api::UNARY_SIGNING_V1_FIXTURE_JSON;
     use crypto::Signer as _;
+    #[cfg(feature = "observability")]
+    use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
+    #[cfg(feature = "observability")]
+    use opentelemetry_sdk::trace::SdkTracerProvider;
     use serde::Deserialize;
+    #[cfg(feature = "observability")]
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    #[cfg(feature = "observability")]
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
 
@@ -385,6 +434,55 @@ mod tests {
         nonce_hex: String,
         request_hex: String,
         canonical_hex: String,
+    }
+
+    #[test]
+    fn tracing_off_omits_hosted_trace_context() {
+        let context = CallContextFactory::default()
+            .streaming("/heddle.api.v1alpha1.RepoSyncService/Pull", "off")
+            .unwrap();
+        assert!(context.trace.is_none());
+    }
+
+    #[cfg(feature = "observability")]
+    #[test]
+    fn active_span_traceparent_is_carried_in_the_iroh_request_prelude() {
+        let provider = SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("propagation-test")));
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!(
+                target: "heddle_telemetry",
+                "heddle.command",
+                command.name = "pull"
+            );
+            span.in_scope(|| {
+                let span_context = span.context();
+                let expected = span_context.span().span_context().clone();
+                let context = CallContextFactory::default()
+                    .streaming("/heddle.api.v1alpha1.RepoSyncService/Pull", "propagation")
+                    .unwrap();
+                let trace = context.trace.as_ref().expect("active trace is propagated");
+                let parts = trace.traceparent.split('-').collect::<Vec<_>>();
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], "00");
+                assert_eq!(parts[1], expected.trace_id().to_string());
+                assert_eq!(parts[2], expected.span_id().to_string());
+                assert!(trace.baggage.is_empty());
+
+                let frame = api::framing::encode_request_prelude(
+                    "/heddle.api.v1alpha1.RepoSyncService/Pull",
+                    &context,
+                )
+                .unwrap();
+                let (decoded, consumed) = api::framing::decode_request_prelude(&frame)
+                    .unwrap()
+                    .expect("complete request prelude");
+                assert_eq!(consumed, frame.len());
+                assert_eq!(decoded.context.trace, context.trace);
+            });
+        });
+        provider.shutdown().unwrap();
     }
 
     #[test]
