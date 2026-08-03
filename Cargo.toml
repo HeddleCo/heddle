@@ -20,6 +20,7 @@ members = [
     "crates/objects",
     "crates/oplog",
     "crates/pack",
+    "crates/perf-contract",
     "crates/wire",
     "crates/refs",
     "crates/repo",

@@ -53,6 +53,7 @@ impl HostedConnection {
         address: EndpointAddr,
         provider_transport: Option<ProviderWebSocketTransport>,
     ) -> Result<Arc<Self>> {
+        heddle_perf_contract::record_network_client_initialization();
         let connection = match endpoint.connect(address, api::HOSTED_ALPN_V1).await {
             Ok(connection) => connection,
             Err(error) => {

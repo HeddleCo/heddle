@@ -19,6 +19,7 @@ type ConnectResult = Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, Respons
 
 /// Connect a WebSocket with the same TLS trust and server-name policy as hosted RPCs.
 pub async fn connect_websocket(mut request: Request, config: &ClientConfig) -> ConnectResult {
+    heddle_perf_contract::record_network_client_initialization();
     if config.tls_skip_verify {
         return Err(invalid_input(
             "TLS skip-verify is not supported for hosted WebSocket connections",

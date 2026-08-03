@@ -75,6 +75,7 @@ rmp-serde.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+heddle-perf-contract = { path = "../perf-contract", version = "0.11" }
 sha2.workspace = true
 sley.workspace = true
 tempfile.workspace = true

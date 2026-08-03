@@ -341,6 +341,7 @@ impl FsStore {
             // blobs the verify was the dominant tail of the cold
             // read (~3GB/s × 10MB ≈ 3.3ms per call).
             let blob = Blob::new(data);
+            heddle_perf_contract::record_object_decode();
             self.cache_recent_blob(*hash, &blob);
             return Ok(Some(blob));
         }
@@ -351,6 +352,7 @@ impl FsStore {
                 trace!(size = data.as_slice().len(), "Blob data read");
                 let content = codec::decode_blob_content(data.as_slice())?;
                 let blob = Blob::new(content);
+                heddle_perf_contract::record_object_decode();
                 // Loose blobs are bare bytes on disk: a half-written
                 // file or bit-rot inside the payload would slip past
                 // the path-is-the-hash invariant. Keep the verify on
@@ -461,6 +463,7 @@ impl FsStore {
         {
             trace!(size = data.as_slice().len(), "Tree data read");
             let tree = validate_loaded_tree(codec::decode_tree(data.as_slice())?)?;
+            heddle_perf_contract::record_object_decode();
             if tree.hash() != *hash {
                 return Err(HeddleError::Corruption {
                     expected: *hash,
@@ -479,6 +482,7 @@ impl FsStore {
         {
             trace!("Found tree in packfile");
             let tree = validate_loaded_tree(codec::decode_tree_serialized(&data)?)?;
+            heddle_perf_contract::record_object_decode();
             if tree.hash() != *hash {
                 return Err(HeddleError::Corruption {
                     expected: *hash,
@@ -538,6 +542,7 @@ impl FsStore {
         if let Some(data) = read_file_bytes(&path)? {
             trace!(size = data.as_slice().len(), "State read from loose object");
             let state = validate_loaded_state(id, codec::decode_state(data.as_slice())?)?;
+            heddle_perf_contract::record_object_decode();
             if let Ok(mut cache) = self.recent_states.write() {
                 cache.insert(*id, state.clone());
             }
@@ -550,6 +555,7 @@ impl FsStore {
         {
             trace!("Found state in packfile");
             let state = validate_loaded_state(id, rmp_serde::from_slice(&data)?)?;
+            heddle_perf_contract::record_object_decode();
             if let Ok(mut cache) = self.recent_states.write() {
                 cache.insert(*id, state.clone());
             }
