@@ -1595,6 +1595,12 @@ fn collect_status_submodules(
         && !is_synthetic_root(state)
     {
         let tree = repo.require_tree(&state.tree)?;
+        if let Some(cached) = repo.cached_gitlinks_for_tree(&tree) {
+            return Ok(cached
+                .into_iter()
+                .map(|(path, commit)| SubmoduleInfo { path, commit })
+                .collect());
+        }
         collect_tree_submodules(repo, &tree, "", &mut submodules)?;
     } else if let Some(git) = repo.git_overlay_sley_repository()? {
         let head = git.head_state().map_err(|error| {

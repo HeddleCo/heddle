@@ -5,15 +5,22 @@
 //! offering faster load/save compared to TOML while maintaining
 //! debuggability via the `dump()` function.
 //!
-//! ## Binary Format (Version 5)
+//! ## Binary Format (Version 6)
 //!
 //! ```text
-//! Header (24 bytes):
+//! Header (40 bytes):
 //!   - magic: "HDLEIDX\0" (8 bytes)
 //!   - version: u32 (4 bytes)
 //!   - file_entry_count: u32 (4 bytes)
 //!   - directory_entry_count: u32 (4 bytes) [new in v2]
 //!   - untracked_directory_entry_count: u32 (4 bytes) [new in v5]
+//!   - gitlink_summary_count: u32 (4 bytes) [new in v6]
+//!   - hot_section_len: u64 (8 bytes) [new in v6]
+//!   - hot_section_checksum: u32 (4 bytes) [new in v6]
+//!
+//! Directory and untracked-directory entries come first as the independently
+//! checksummed hot section. File entries follow and are loaded only by callers
+//! that need a full index.
 //!
 //! File Entries (variable):
 //!   - type: u8 (1 byte: 0x01 = file)
@@ -55,7 +62,11 @@
 //!   - checksum: u32 (CRC32 of all entries)
 //! ```
 
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 use objects::object::ContentHash;
 use thiserror::Error;
@@ -74,13 +85,14 @@ pub(crate) const MAX_JOURNAL_BYTES_BEFORE_COMPACT: u64 = 256 * 1024;
 pub(crate) const MAX_JOURNAL_REPLAY_MS_BEFORE_COMPACT: u128 = 16;
 
 /// Current format version.
-pub(crate) const INDEX_VERSION: u32 = 5;
+pub(crate) const INDEX_VERSION: u32 = 6;
 
 /// Size of the v4 fixed header (magic + version + file_count + dir_count).
 pub(crate) const HEADER_SIZE_V4: usize = 8 + 4 + 4 + 4;
 
 /// Size of the v5 fixed header (magic + version + file_count + dir_count + untracked_count).
 pub(crate) const HEADER_SIZE_V5: usize = HEADER_SIZE_V4 + 4;
+pub(crate) const HEADER_SIZE_V6: usize = HEADER_SIZE_V5 + 4 + 8 + 4;
 
 /// Index errors.
 #[derive(Debug, Error)]
@@ -287,11 +299,14 @@ pub struct WorktreeIndex {
     entries: BTreeMap<String, IndexEntry>,
     directories: BTreeMap<String, DirectoryCacheEntry>,
     untracked_directories: BTreeMap<String, UntrackedDirectoryCacheEntry>,
+    gitlinks: BTreeMap<String, String>,
+    gitlinks_tree: Option<ContentHash>,
     dirty: bool,
     pending_ops: Vec<JournalOp>,
     last_journal_bytes: u64,
     last_journal_ops: usize,
     last_journal_replay_ms: u128,
+    hot_loaded: bool,
 }
 
 impl WorktreeIndex {
@@ -301,11 +316,14 @@ impl WorktreeIndex {
             entries: BTreeMap::new(),
             directories: BTreeMap::new(),
             untracked_directories: BTreeMap::new(),
+            gitlinks: BTreeMap::new(),
+            gitlinks_tree: None,
             dirty: false,
             pending_ops: Vec::new(),
             last_journal_bytes: 0,
             last_journal_ops: 0,
             last_journal_replay_ms: 0,
+            hot_loaded: false,
         }
     }
 
@@ -316,6 +334,13 @@ impl WorktreeIndex {
 
     pub fn load_profiled(path: &Path) -> Result<(Self, WorktreeIndexLoadStats), IndexError> {
         storage::load_profiled(path)
+    }
+
+    pub(crate) fn load_hot_profiled_for_directories(
+        path: &Path,
+        directories: &BTreeSet<String>,
+    ) -> Result<(Self, WorktreeIndexLoadStats), IndexError> {
+        storage::load_hot_profiled_for_directories(path, directories)
     }
 
     /// Save the index to a binary file.
@@ -507,6 +532,55 @@ impl WorktreeIndex {
         removed_any
     }
 
+    pub(crate) fn gitlinks(&self) -> &BTreeMap<String, String> {
+        &self.gitlinks
+    }
+
+    pub(crate) fn gitlinks_tree(&self) -> Option<ContentHash> {
+        self.gitlinks_tree
+    }
+
+    pub(crate) fn set_gitlinks_tree(&mut self, tree: ContentHash) {
+        self.gitlinks_tree = Some(tree);
+    }
+
+    pub(crate) fn insert_gitlink(&mut self, path: String, target: String) {
+        if self.gitlinks.get(&path) != Some(&target) {
+            self.gitlinks.insert(path.clone(), target.clone());
+            self.pending_ops
+                .push(JournalOp::UpsertGitlink { path, target });
+            self.dirty = true;
+        }
+    }
+
+    pub(crate) fn remove_gitlinks_at_or_below(&mut self, path: &str) -> bool {
+        let mut keys = Vec::new();
+        if self.gitlinks.remove(path).is_some() {
+            keys.push(path.to_string());
+        }
+        keys.extend(remove_prefixed_range(
+            &mut self.gitlinks,
+            &descendant_range_start(path),
+        ));
+        for key in &keys {
+            self.pending_ops
+                .push(JournalOp::RemoveGitlink { path: key.clone() });
+        }
+        if !keys.is_empty() {
+            self.dirty = true;
+        }
+        !keys.is_empty()
+    }
+
+    pub(crate) fn clear_gitlinks(&mut self) {
+        let keys = self.gitlinks.keys().cloned().collect::<Vec<_>>();
+        for path in keys {
+            self.gitlinks.remove(&path);
+            self.pending_ops.push(JournalOp::RemoveGitlink { path });
+            self.dirty = true;
+        }
+    }
+
     /// Returns true if index contents changed since load/new.
     pub fn is_dirty(&self) -> bool {
         self.dirty
@@ -534,6 +608,10 @@ impl WorktreeIndex {
 
     pub(crate) fn last_journal_replay_ms(&self) -> u128 {
         self.last_journal_replay_ms
+    }
+
+    pub(crate) fn is_hot_loaded(&self) -> bool {
+        self.hot_loaded
     }
 
     fn remove_matching_paths(&mut self, path: &str, remove_file_at_path: bool) -> bool {

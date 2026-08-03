@@ -127,6 +127,15 @@ fn scan_directory(
             continue;
         }
 
+        let child_rel_path = join_relative_path(rel_path, &entry.name);
+        if ctx
+            .monitor
+            .can_filter_directory_children(rel_path, ctx.index)
+            && !ctx.monitor.path_may_have_changed(&child_rel_path)
+        {
+            continue;
+        }
+
         while next_tree_entry < tree_entries.len()
             && tree_entries[next_tree_entry].name() < entry.name.as_str()
         {
@@ -140,7 +149,6 @@ fn scan_directory(
             next_tree_entry += 1;
         }
 
-        let child_rel_path = join_relative_path(rel_path, &entry.name);
         let child_key = cache_key(&child_rel_path);
 
         match entry.kind {

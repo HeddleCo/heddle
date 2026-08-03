@@ -78,7 +78,6 @@ struct MonitorHelperResponse {
 
 trait ChangeMonitorBackend {
     fn prepare(repo_root: &Path, state_path: PathBuf) -> ChangeMonitorSession;
-    fn persist_current_cursor(repo_root: &Path, state_path: PathBuf) -> Result<(), HeddleError>;
 }
 
 struct LocalMonitor;
@@ -90,9 +89,6 @@ struct WatchmanMonitor;
 /// The mount daemon ships with its own protocol version (v2) on a
 /// separate endpoint file — see `crates/repo/src/daemon/mount.rs`.
 const HELPER_PROTOCOL_VERSION: u32 = 1;
-const HELPER_SPAWN_RETRIES: usize = 10;
-const HELPER_SPAWN_RETRY_DELAY_MS: u64 = 50;
-
 /// Query result and persisted state for one compare run.
 #[derive(Debug, Default)]
 pub(crate) struct ChangeMonitorSession {
@@ -100,6 +96,8 @@ pub(crate) struct ChangeMonitorSession {
     next_cursor: Option<String>,
     state_path: PathBuf,
     pending_snapshot: Option<MonitorSnapshotState>,
+    repo_root: PathBuf,
+    establish_baseline: bool,
     pub(crate) backend: Option<&'static str>,
     pub(crate) reason: Option<String>,
     pub(crate) status: MonitorStatus,
@@ -112,6 +110,7 @@ impl ChangeMonitorSession {
         match settings.mode {
             FsMonitorMode::Off => Self {
                 state_path,
+                repo_root: repo_root.to_path_buf(),
                 reason: Some("disabled".to_string()),
                 status: MonitorStatus::Disabled,
                 ..Self::default()
@@ -119,16 +118,19 @@ impl ChangeMonitorSession {
             FsMonitorMode::Native => try_local_helper_query(repo_root, &state_path)
                 .unwrap_or(None)
                 .unwrap_or_else(|| LocalMonitor::prepare(repo_root, state_path)),
-            FsMonitorMode::Auto => {
-                let session = try_local_helper_query(repo_root, &state_path)
+            FsMonitorMode::Auto if native_backend_supported() => {
+                try_local_helper_query(repo_root, &state_path)
                     .unwrap_or(None)
-                    .unwrap_or_else(|| LocalMonitor::prepare(repo_root, state_path.clone()));
-                if session.status != MonitorStatus::Disabled {
-                    session
-                } else {
-                    WatchmanMonitor::prepare(repo_root, state_path)
-                }
+                    .unwrap_or_else(|| LocalMonitor::prepare(repo_root, state_path))
             }
+            FsMonitorMode::Auto => Self {
+                state_path,
+                repo_root: repo_root.to_path_buf(),
+                backend: Some("off"),
+                reason: Some("native_unsupported_platform".to_string()),
+                status: MonitorStatus::Disabled,
+                ..Self::default()
+            },
             FsMonitorMode::Watchman => WatchmanMonitor::prepare(repo_root, state_path),
         }
     }
@@ -139,12 +141,64 @@ impl ChangeMonitorSession {
             .map_or(0, |paths| paths.len() as u64)
     }
 
+    pub(crate) fn changed_directory_keys(&self) -> BTreeSet<String> {
+        let mut directories = BTreeSet::from([String::new()]);
+        let Some(changed_paths) = &self.changed_paths else {
+            return directories;
+        };
+        for changed in changed_paths {
+            let mut current = Path::new(changed).parent();
+            while let Some(path) = current {
+                directories.insert(cache_key(path));
+                current = path.parent();
+            }
+            directories.insert(changed.clone());
+        }
+        directories
+    }
+
+    pub(crate) fn path_may_have_changed(&self, rel_path: &Path) -> bool {
+        if self.status != MonitorStatus::Usable {
+            return true;
+        }
+        let Some(changed_paths) = &self.changed_paths else {
+            return true;
+        };
+        if changed_paths.contains(".heddleignore") {
+            return true;
+        }
+        let key = cache_key(rel_path);
+        changed_paths.iter().any(|changed| {
+            changed == &key
+                || changed
+                    .strip_prefix(&key)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                || key
+                    .strip_prefix(changed)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+    }
+
+    pub(crate) fn can_filter_directory_children(
+        &self,
+        rel_path: &Path,
+        index: &WorktreeIndex,
+    ) -> bool {
+        !subtree_skip_disabled()
+            && self.status == MonitorStatus::Usable
+            && self.changed_paths.is_some()
+            && index.get_directory(&cache_key(rel_path)).is_some()
+    }
+
     pub(crate) fn can_skip_directory(
         &self,
         rel_path: &Path,
         tree: Option<&Tree>,
         index: &WorktreeIndex,
     ) -> bool {
+        if subtree_skip_disabled() {
+            return false;
+        }
         if self.status != MonitorStatus::Usable {
             return false;
         }
@@ -152,6 +206,9 @@ impl ChangeMonitorSession {
             Some(paths) => paths,
             None => return false,
         };
+        if changed_paths.contains(".heddleignore") {
+            return false;
+        }
         let tree = match tree {
             Some(tree) => tree,
             None => return false,
@@ -170,9 +227,19 @@ impl ChangeMonitorSession {
         !subtree_has_changes(changed_paths, &dir_key)
     }
 
-    pub(crate) fn persist(&self) -> Result<(), HeddleError> {
+    pub(crate) fn persist(&self, worktree_clean: bool) -> Result<(), HeddleError> {
+        if !worktree_clean {
+            return Ok(());
+        }
         if let Some(snapshot) = &self.pending_snapshot {
             persist_snapshot(&snapshot_path(&self.state_path), snapshot)?;
+        }
+        if self.establish_baseline {
+            return try_establish_local_helper_baseline(
+                &self.repo_root,
+                &self.state_path,
+                self.next_cursor.as_deref(),
+            );
         }
         let Some(cursor) = &self.next_cursor else {
             return Ok(());
@@ -197,6 +264,27 @@ impl ChangeMonitorSession {
                 .unwrap_or_default(),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_usable(repo_root: &Path, changed_paths: BTreeSet<String>) -> Self {
+        Self {
+            changed_paths: Some(changed_paths),
+            state_path: repo_root.join(".heddle/state/fsmonitor.toml"),
+            repo_root: repo_root.to_path_buf(),
+            backend: Some("test"),
+            status: MonitorStatus::Usable,
+            ..Self::default()
+        }
+    }
+}
+
+fn subtree_skip_disabled() -> bool {
+    std::env::var("HEDDLE_PERF_DISABLE_SUBTREE_SKIP")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+}
+
+const fn native_backend_supported() -> bool {
+    cfg!(target_os = "linux")
 }
 
 /// Rebuild the native change-monitor snapshot + cursor sidecars from a full
@@ -233,35 +321,6 @@ pub(crate) fn rebuild_local_monitor_snapshot(
             };
             persist_snapshot(&snapshot_path(&state_path), &snapshot)?;
             persist_cursor(&state_path, &next_generation.to_string())
-        }
-    }
-}
-
-pub(crate) fn persist_current_monitor_cursor(
-    repo_root: &Path,
-    settings: FsMonitorSettings,
-) -> Result<(), HeddleError> {
-    match settings.mode {
-        FsMonitorMode::Off => Ok(()),
-        FsMonitorMode::Native => {
-            let state_path = repo_root.join(".heddle/state").join("fsmonitor.toml");
-            if try_local_helper_refresh(repo_root, &state_path)? {
-                Ok(())
-            } else {
-                LocalMonitor::persist_current_cursor(repo_root, state_path)
-            }
-        }
-        FsMonitorMode::Auto => {
-            let state_path = repo_root.join(".heddle/state").join("fsmonitor.toml");
-            if try_local_helper_refresh(repo_root, &state_path)? {
-                Ok(())
-            } else {
-                LocalMonitor::persist_current_cursor(repo_root, state_path)
-            }
-        }
-        FsMonitorMode::Watchman => {
-            let state_path = repo_root.join(".heddle/state").join("fsmonitor.toml");
-            WatchmanMonitor::persist_current_cursor(repo_root, state_path)
         }
     }
 }
@@ -330,25 +389,20 @@ impl ChangeMonitorBackend for LocalMonitor {
         // the status hot path: without a live watcher we cannot produce a
         // reliable changed-paths set, so return a session that simply never
         // skips directories (`can_skip_directory` requires `Usable`).
-        // `Disabled` also lets `FsMonitorMode::Auto` fall through to
-        // Watchman. See docs/perf/cli-core-loop-todo.md.
-        let _ = repo_root;
+        // Once that correct fallback scan completes, attempt a non-blocking
+        // baseline handshake with the watcher that was spawned by `prepare`.
+        // If the endpoint is not ready yet, or the watcher observed a change
+        // during the scan, no cursor is advanced and the next command safely
+        // falls back again.
         ChangeMonitorSession {
             state_path,
+            repo_root: repo_root.to_path_buf(),
+            establish_baseline: true,
             backend: Some("native"),
             reason: Some("helper_unavailable_no_full_scan".to_string()),
             status: MonitorStatus::Disabled,
             ..ChangeMonitorSession::default()
         }
-    }
-
-    fn persist_current_cursor(repo_root: &Path, state_path: PathBuf) -> Result<(), HeddleError> {
-        // Same policy as `prepare`: do not full-tree scan just to advance a
-        // cursor when the helper is down. A no-op keeps status cheap; the
-        // helper's own `refresh` path still rebuilds snapshots under the
-        // long-lived watcher.
-        let _ = (repo_root, state_path);
-        Ok(())
     }
 }
 
@@ -381,8 +435,12 @@ impl LocalMonitorServer {
         watcher
             .watch(&repo_root, RecursiveMode::Recursive)
             .map_err(|error| HeddleError::Config(format!("watch repo root: {error}")))?;
-        let current_cursor = snapshot.generation.saturating_add(1);
-        persist_cursor(&state_path, &current_cursor.to_string())?;
+        let persisted_cursor = load_cursor_state(&state_path)
+            .clock
+            .and_then(|clock| clock.parse::<u64>().ok())
+            .unwrap_or_default();
+        let helper_restarted = persisted_cursor > 0;
+        let current_cursor = snapshot.generation.max(persisted_cursor).saturating_add(1);
         Ok(Self {
             repo_root,
             state_path,
@@ -391,7 +449,7 @@ impl LocalMonitorServer {
             current_cursor,
             startup_cursor: current_cursor,
             recent_changes: BTreeMap::new(),
-            desync_reason: None,
+            desync_reason: helper_restarted.then(|| "helper_restart".to_string()),
             last_activity: Instant::now(),
             event_rx,
             _watcher: watcher,
@@ -462,6 +520,43 @@ impl LocalMonitorServer {
         })
     }
 
+    fn establish_baseline(
+        &mut self,
+        expected_cursor: Option<&str>,
+    ) -> Result<MonitorHelperResponse, HeddleError> {
+        self.drain_events()?;
+        let expected = expected_cursor.and_then(|cursor| cursor.parse::<u64>().ok());
+        let stable = expected.map_or_else(
+            || self.recent_changes.is_empty(),
+            |cursor| cursor == self.current_cursor,
+        );
+        if !stable {
+            return Ok(MonitorHelperResponse {
+                version: HELPER_PROTOCOL_VERSION,
+                ok: true,
+                status: "fresh_instance".to_string(),
+                reason: Some("changes_during_baseline".to_string()),
+                clock: Some(self.current_cursor.to_string()),
+                changed_paths: Vec::new(),
+                error: None,
+            });
+        }
+
+        self.startup_cursor = self.current_cursor;
+        self.recent_changes.clear();
+        self.desync_reason = None;
+        persist_cursor(&self.state_path, &self.current_cursor.to_string())?;
+        Ok(MonitorHelperResponse {
+            version: HELPER_PROTOCOL_VERSION,
+            ok: true,
+            status: "usable".to_string(),
+            reason: None,
+            clock: Some(self.current_cursor.to_string()),
+            changed_paths: Vec::new(),
+            error: None,
+        })
+    }
+
     fn drain_events(&mut self) -> Result<(), HeddleError> {
         while let Ok(result) = self.event_rx.try_recv() {
             match result {
@@ -477,6 +572,11 @@ impl LocalMonitorServer {
 
     fn apply_event(&mut self, event: Event) {
         if should_ignore_event_kind(&event.kind) {
+            return;
+        }
+        if matches!(event.kind, EventKind::Any | EventKind::Other) || event.paths.is_empty() {
+            self.desync_reason = Some("overflow_or_dropped_event".to_string());
+            self.recent_changes.clear();
             return;
         }
         for changed_path in normalized_event_paths(&self.repo_root, &event) {
@@ -497,6 +597,8 @@ impl ChangeMonitorBackend for WatchmanMonitor {
                 next_cursor: result.clock,
                 state_path,
                 pending_snapshot: None,
+                repo_root: repo_root.to_path_buf(),
+                establish_baseline: false,
                 backend: Some("watchman"),
                 reason: result.reason,
                 status: result.status,
@@ -512,20 +614,6 @@ impl ChangeMonitorBackend for WatchmanMonitor {
                 }
             }
         }
-    }
-
-    fn persist_current_cursor(repo_root: &Path, state_path: PathBuf) -> Result<(), HeddleError> {
-        let watch_project = run_watchman_json(&[
-            Value::String("watch-project".to_string()),
-            Value::String(repo_root.display().to_string()),
-        ])?;
-        let watch = required_string(&watch_project, "watch")?;
-        let clock_response =
-            run_watchman_json(&[Value::String("clock".to_string()), Value::String(watch)])?;
-        let Some(clock) = optional_string(&clock_response, "clock") else {
-            return Ok(());
-        };
-        persist_cursor(&state_path, &clock)
     }
 }
 
@@ -595,17 +683,13 @@ fn try_local_helper_query(
     let endpoint = match crate::daemon::load_endpoint(&endpoint_path) {
         Ok(endpoint) => endpoint,
         Err(HeddleError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            if !try_spawn_local_helper(repo_root, state_path)? {
-                return Ok(None);
-            }
-            crate::daemon::load_endpoint(&endpoint_path)?
+            let _ = try_spawn_local_helper(repo_root, state_path)?;
+            return Ok(None);
         }
         Err(error) => {
             warn!(%error, path = %endpoint_path.display(), "Ignoring unreadable monitor helper endpoint");
-            if !try_spawn_local_helper(repo_root, state_path)? {
-                return Ok(None);
-            }
-            crate::daemon::load_endpoint(&endpoint_path)?
+            let _ = try_spawn_local_helper(repo_root, state_path)?;
+            return Ok(None);
         }
     };
     let response: MonitorHelperResponse = match send_json_request(
@@ -626,6 +710,7 @@ fn try_local_helper_query(
     };
 
     Ok(Some(change_monitor_session_from_helper_response(
+        repo_root.to_path_buf(),
         state_path.to_path_buf(),
         &endpoint,
         response,
@@ -709,15 +794,38 @@ fn try_spawn_local_helper_with(
         spawn()?;
     }
 
-    for _ in 0..HELPER_SPAWN_RETRIES {
-        if endpoint_is_current_and_live(&endpoint_path) {
-            return Ok(true);
+    Ok(endpoint_is_current_and_live(&endpoint_path))
+}
+
+fn try_establish_local_helper_baseline(
+    repo_root: &Path,
+    state_path: &Path,
+    expected_cursor: Option<&str>,
+) -> Result<(), HeddleError> {
+    let endpoint_path = helper_endpoint_path(state_path);
+    let endpoint = match crate::daemon::load_endpoint(&endpoint_path) {
+        Ok(endpoint) => endpoint,
+        Err(_) => {
+            let _ = try_spawn_local_helper(repo_root, state_path)?;
+            return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(
-            HELPER_SPAWN_RETRY_DELAY_MS,
+    };
+    let response: MonitorHelperResponse = send_json_request(
+        &endpoint,
+        &MonitorHelperRequest {
+            version: HELPER_PROTOCOL_VERSION,
+            command: "baseline".to_string(),
+            since: expected_cursor.map(str::to_string),
+        },
+    )?;
+    if !response.ok {
+        return Err(HeddleError::Config(
+            response
+                .error
+                .unwrap_or_else(|| "native monitor baseline failed".to_string()),
         ));
     }
-    Ok(endpoint_is_current_and_live(&endpoint_path))
+    Ok(())
 }
 
 fn endpoint_is_current_and_live(path: &Path) -> bool {
@@ -782,6 +890,7 @@ fn handle_local_helper_request(
     let result = match request.command.as_str() {
         "query" => server.query(request.since.as_deref()),
         "refresh" => server.refresh(),
+        "baseline" => server.establish_baseline(request.since.as_deref()),
         command => Err(HeddleError::Config(format!(
             "unknown helper command: {command}"
         ))),
@@ -802,6 +911,7 @@ fn handle_local_helper_request(
 }
 
 fn change_monitor_session_from_helper_response(
+    repo_root: PathBuf,
     state_path: PathBuf,
     endpoint: &EndpointState,
     response: MonitorHelperResponse,
@@ -827,6 +937,8 @@ fn change_monitor_session_from_helper_response(
         next_cursor: response.clock,
         state_path,
         pending_snapshot: None,
+        repo_root,
+        establish_baseline: status != MonitorStatus::Usable,
         backend: Some("native-helper"),
         reason: response.reason,
         status,
@@ -1164,6 +1276,59 @@ mod tests {
 
         assert!(threads.into_iter().all(|thread| thread.join().unwrap()));
         assert_eq!(spawns.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cold_start_never_polls_for_worker_readiness() {
+        let temp = TempDir::new().unwrap();
+        let state_path = temp.path().join(".heddle/state/fsmonitor.toml");
+        let started = std::time::Instant::now();
+        let ready = try_spawn_local_helper_with(&state_path, || Ok(())).unwrap();
+        assert!(!ready);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "cold spawn should return immediately instead of polling"
+        );
+    }
+
+    #[test]
+    fn overflow_and_missing_cursor_force_fresh_instance() {
+        let temp = TempDir::new().unwrap();
+        let state_path = temp.path().join(".heddle/state/fsmonitor.toml");
+        let mut server =
+            super::LocalMonitorServer::new(temp.path().to_path_buf(), state_path).unwrap();
+
+        let missing = server.query(None).unwrap();
+        assert_eq!(missing.status, "fresh_instance");
+
+        let cursor = server.current_cursor.to_string();
+        server.apply_event(notify::Event::new(notify::EventKind::Other));
+        let overflow = server.query(Some(&cursor)).unwrap();
+        assert_eq!(overflow.status, "fresh_instance");
+        assert_eq!(
+            overflow.reason.as_deref(),
+            Some("overflow_or_dropped_event")
+        );
+        assert!(overflow.changed_paths.is_empty());
+    }
+
+    #[test]
+    fn helper_restart_invalidates_a_durable_cursor() {
+        let temp = TempDir::new().unwrap();
+        let state_path = temp.path().join(".heddle/state/fsmonitor.toml");
+        super::persist_cursor(&state_path, "7").unwrap();
+
+        let mut restarted =
+            super::LocalMonitorServer::new(temp.path().to_path_buf(), state_path).unwrap();
+        let response = restarted.query(Some("7")).unwrap();
+
+        assert_eq!(response.status, "fresh_instance");
+        assert_eq!(response.reason.as_deref(), Some("helper_restart"));
+    }
+
+    #[test]
+    fn auto_native_backend_is_explicitly_platform_gated() {
+        assert_eq!(super::native_backend_supported(), cfg!(target_os = "linux"));
     }
 
     #[cfg(unix)]

@@ -36,6 +36,10 @@ pub(crate) fn refresh_tracked_paths(
     status: &mut WorktreeStatusDetailed,
     stats: &mut WorktreeCompareStats,
 ) -> Result<BTreeSet<String>> {
+    index.set_gitlinks_tree(tree.hash());
+    if !monitor.can_filter_directory_children(Path::new(""), index) {
+        index.clear_gitlinks();
+    }
     let mut dirty_directories = BTreeSet::new();
     let mut ctx = TrackedRefreshContext {
         repo,
@@ -88,7 +92,15 @@ fn refresh_tracked_directory(
     let mut subtree_clean = true;
     for entry in tree.entries() {
         let child_rel_path = join_relative_path(rel_path, entry.name());
+        if ctx
+            .monitor
+            .can_filter_directory_children(rel_path, ctx.index)
+            && !ctx.monitor.path_may_have_changed(&child_rel_path)
+        {
+            continue;
+        }
         let child_key = child_key(dir_key, entry.name());
+        ctx.index.remove_gitlinks_at_or_below(&child_key);
         let child_clean = match entry.entry_type() {
             EntryType::Blob => refresh_tracked_file(ctx, &child_rel_path, &child_key, entry)?,
             EntryType::Symlink => refresh_tracked_symlink(ctx, &child_rel_path, &child_key, entry)?,
@@ -99,7 +111,13 @@ fn refresh_tracked_directory(
                 })?;
                 refresh_tracked_directory(ctx, &child_rel_path, &child_key, &subtree)?
             }
-            EntryType::Gitlink => false,
+            EntryType::Gitlink => {
+                if let Some(target) = entry.gitlink_target() {
+                    ctx.index
+                        .insert_gitlink(child_key.clone(), target.to_string());
+                }
+                false
+            }
             // Native child-spool edge: not materialized to the worktree in
             // this phase, so it never makes the tracked tree dirty.
             EntryType::Spoollink => true,
@@ -115,6 +133,11 @@ fn refresh_tracked_file(
     key: &str,
     tree_entry: &TreeEntry,
 ) -> Result<bool> {
+    if index_has_parent_baseline(ctx.index, rel_path)
+        && !ctx.monitor.path_may_have_changed(rel_path)
+    {
+        return Ok(true);
+    }
     let path = ctx.repo.root().join(rel_path);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -164,6 +187,11 @@ fn refresh_tracked_symlink(
     key: &str,
     tree_entry: &TreeEntry,
 ) -> Result<bool> {
+    if index_has_parent_baseline(ctx.index, rel_path)
+        && !ctx.monitor.path_may_have_changed(rel_path)
+    {
+        return Ok(true);
+    }
     let path = ctx.repo.root().join(rel_path);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -214,6 +242,13 @@ fn compute_and_cache_file(
         index.insert(key.to_string(), cached);
     }
     Ok(hash)
+}
+
+fn index_has_parent_baseline(index: &WorktreeIndex, rel_path: &Path) -> bool {
+    let parent = rel_path.parent().unwrap_or_else(|| Path::new(""));
+    index
+        .get_directory(&parent.to_string_lossy().replace('\\', "/"))
+        .is_some()
 }
 
 fn compute_and_cache_symlink(
