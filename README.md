@@ -215,6 +215,9 @@ export RUST_BACKTRACE=1
 
 Heddle records the agent model string verbatim and echoes it back in attribution output (for example the `Agent:` line of `heddle log --verbose`). If the coding agent reports a model id with a bracketed suffix — such as `claude-opus-4-8[1m]` — heddle preserves the suffix as-is; it does not add or interpret it. The suffix is supplied by the agent harness to distinguish a model variant (for Claude models the bracketed tag denotes the context-window variant), so set `HEDDLE_AGENT_MODEL` to whatever identifier you want recorded.
 
+Optional OpenTelemetry command tracing, its privacy boundary, and pilot
+collector wiring are documented in [CLI trace export](docs/telemetry.md).
+
 ## Repository layout
 
 This repository is a Cargo workspace. The OSS crates live under `crates/`:

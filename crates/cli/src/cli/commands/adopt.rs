@@ -22,7 +22,7 @@ use super::{
 };
 use crate::{
     cli::{AdoptArgs, Cli, should_output_json, style},
-    perf::{ProfileField, emit_profile, profile_enabled},
+    perf::{ProfileField, emit_profile, instrumentation_enabled},
 };
 
 #[derive(Debug, Serialize)]
@@ -114,7 +114,7 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
     drop(repo);
     let repo = Repository::open(&git_root)?;
     let verification_start = std::time::Instant::now();
-    let (trust, verification_profile) = if profile_enabled() {
+    let (trust, verification_profile) = if instrumentation_enabled() {
         let (trust, profile) = build_repository_verification_state_profiled(&repo);
         (trust, Some(profile))
     } else {

@@ -64,7 +64,7 @@ use super::{
 use crate::{
     cli::{Cli, ThreadListArgs, ThreadStartArgs, WorkspaceModeArg, should_output_json, style},
     config::{UserConfig, UserThreadWorkspaceMode},
-    perf::{ProfileField, ProfileMode, emit_profile, profile_enabled, profile_mode},
+    perf::{ProfileField, ProfileMode, emit_profile, instrumentation_enabled, profile_mode},
 };
 
 pub(crate) const DEFAULT_AVAILABLE_GIT_REF_LIMIT: usize = 5;
@@ -586,16 +586,14 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
         render_available_git_refs(&output.available_git_refs, cli.verbose > 0);
     }
 
-    if profile_enabled() {
+    if instrumentation_enabled() {
         let fields = [
             ProfileField::millis("collect_summaries_ms", collect_summaries_ms),
             ProfileField::millis("verification_ms", verification_ms),
             ProfileField::duration("command_body_ms", body_start.elapsed()),
         ];
         match profile_mode() {
-            ProfileMode::Off => {}
-            ProfileMode::Human => emit_profile("thread list phases", &fields),
-            ProfileMode::Jsonl => {
+            ProfileMode::Off | ProfileMode::Jsonl => {
                 emit_profile(
                     "thread list collect summaries",
                     &[ProfileField::millis(
@@ -615,6 +613,7 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
                     )],
                 );
             }
+            ProfileMode::Human => emit_profile("thread list phases", &fields),
         }
     }
 

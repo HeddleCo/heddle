@@ -81,11 +81,11 @@ prost-reflect = "0.16"
 prost-types = "0.14"
 protoc-bin-vendored = "3"
 opentelemetry = "0.32"
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-client", "reqwest-rustls", "trace", "metrics"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics"] }
 opentelemetry_sdk = "0.32"
 rand = "0.10"
 regex-lite = "0.1"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls-no-provider"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
 rmp-serde = "1"
 rusqlite = { version = "0.39", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }

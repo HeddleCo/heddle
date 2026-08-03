@@ -45,7 +45,7 @@ use cli::{
     },
     config::UserConfig,
     exit::HeddleExitCode,
-    logging::{LoggingConfig, init_logging},
+    logging::{CommandTrace, LoggingConfig, LoggingGuard, init_logging},
     operation_id::{resolve_operation_id, run_local_idempotency_if_requested},
     perf::{ProfileField, emit_command_profile, profile_enabled},
 };
@@ -252,6 +252,12 @@ async fn async_main() -> Result<()> {
     };
     let telemetry = init_logging(logging);
     let logging_init_ms = logging_start.elapsed().as_millis();
+    let command_trace = CommandTrace::start(&command_name, total_start);
+    // The foreground runtime is deliberately single-threaded, so keeping this
+    // span entered across awaits cannot associate it with another task/thread.
+    let command_span_guard = command_trace
+        .as_ref()
+        .map(|trace| trace.span().clone().entered());
 
     debug!(
         command = command_name.as_str(),
@@ -268,34 +274,34 @@ async fn async_main() -> Result<()> {
     // Agents treat 64 as "fix your argv" and retry-with-mutation; 65 tells
     // them to fall back to a supported output mode (HeddleCo/heddle#648).
     if explicit_json_requested(&cli) && !command_contract.supports_json {
-        telemetry.shutdown();
         let err = anyhow::anyhow!(cli::cli::commands::RecoveryAdvice::json_unsupported(
             &command_name
         ));
         let code = HeddleExitCode::from_error(&err);
         print_error_with_hint(&cli, &err);
+        shutdown_command_telemetry(command_trace, command_span_guard, telemetry, code.into());
         std::process::exit(code.into());
     }
     if cli::cli::output_is_compact(&cli) && !command_contract.supports_json_compact {
-        telemetry.shutdown();
         let err = anyhow::anyhow!(
             cli::cli::commands::RecoveryAdvice::json_compact_unsupported(&command_name)
         );
         let code = HeddleExitCode::from_error(&err);
         print_error_with_hint(&cli, &err);
+        shutdown_command_telemetry(command_trace, command_span_guard, telemetry, code.into());
         std::process::exit(code.into());
     }
 
     match run_local_idempotency_if_requested(&cli, &command_name, command_supports_op_id) {
         Ok(true) => {
-            telemetry.shutdown();
+            shutdown_command_telemetry(command_trace, command_span_guard, telemetry, 0);
             return Ok(());
         }
         Ok(false) => {}
         Err(err) => {
-            telemetry.shutdown();
             let code = HeddleExitCode::from_error(&err);
             print_error_with_hint(&cli, &err);
+            shutdown_command_telemetry(command_trace, command_span_guard, telemetry, code.into());
             std::process::exit(code.into());
         }
     }
@@ -818,12 +824,12 @@ async fn async_main() -> Result<()> {
         "CLI command complete"
     );
 
+    let exit_status = match &result {
+        Ok(()) => 0,
+        Err(err) if !explicit_json_requested(&cli) && is_broken_pipe_error(err) => 0,
+        Err(err) => HeddleExitCode::from_error(err).into(),
+    };
     if profile {
-        let exit_status = match &result {
-            Ok(()) => 0,
-            Err(err) if !explicit_json_requested(&cli) && is_broken_pipe_error(err) => 0,
-            Err(err) => HeddleExitCode::from_error(err).into(),
-        };
         emit_command_profile(
             &command_name,
             exit_status,
@@ -836,7 +842,7 @@ async fn async_main() -> Result<()> {
         );
     }
 
-    telemetry.shutdown();
+    shutdown_command_telemetry(command_trace, command_span_guard, telemetry, exit_status);
     match result {
         Ok(()) => Ok(()),
         // Machine output must end in a terminal record or a structured error.
@@ -854,6 +860,20 @@ async fn async_main() -> Result<()> {
             std::process::exit(code.into());
         }
     }
+}
+
+fn shutdown_command_telemetry(
+    mut command_trace: Option<CommandTrace>,
+    command_span_guard: Option<tracing::span::EnteredSpan>,
+    telemetry: LoggingGuard,
+    exit_code: i32,
+) {
+    if let Some(trace) = command_trace.as_mut() {
+        trace.finish(exit_code);
+    }
+    drop(command_span_guard);
+    drop(command_trace);
+    telemetry.shutdown();
 }
 
 /// Check for an existing recovery target without opening or bootstrapping it.
