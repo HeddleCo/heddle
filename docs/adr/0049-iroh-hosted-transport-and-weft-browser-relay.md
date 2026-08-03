@@ -84,3 +84,14 @@ and Weft implementation concerns. Using browser WebTransport would create a
 second transport implementation instead of exercising Iroh's relay path. One
 Iroh call interface preserves locality while keeping the public protobuf contract
 independent of its transport.
+
+## Revisit trigger
+
+The browser leg uses a secure WebSocket to a Weft relay rather than
+WebTransport because, as of mid-2026, Cloudflare Workers and Durable Objects
+terminate inbound WebSockets and inbound HTTP/3 request/response traffic, but
+not WebTransport. This is a Cloudflare capability constraint, not a transport
+preference. Re-evaluate WebTransport—which maps more directly to Iroh's QUIC
+bidirectional streams—if Cloudflare adds WebTransport termination to Workers
+and Durable Objects. See Cloudflare Workers' [Protocols](https://developers.cloudflare.com/workers/reference/protocols/)
+documentation.
