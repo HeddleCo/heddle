@@ -31,6 +31,7 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "false"
   TMPDIR: /home/scratch
+  HEDDLE_PERF_BASELINE: ci-blacksmith-4vcpu-ubuntu-2404
 
 jobs:
   release-contract:
@@ -79,7 +80,7 @@ jobs:
             echo 'Compilation and fixture construction are reported separately from command samples.'
             echo
             echo '```text'
-            grep -E '^(RUNNER|SETUP|RESULT|COUNTERS|BAND|SCALE|GATES|PERF GATE)' \
+            grep -E '^(RUNNER|SETUP|RESULT|COUNTERS|BASELINE|BAND|SCALE|GATES|PERF GATE)' \
               core-loop-contract.txt 2>/dev/null || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

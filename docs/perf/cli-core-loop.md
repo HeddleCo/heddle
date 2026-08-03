@@ -62,8 +62,10 @@ rendering, and network work. Structural counters use the same percentiles.
 Wave 0 covers `--version`, `help`, clean status, one-dirty-path status, and a
 one-path capture. Repository fixtures contain 10k and 100k paths. Version and
 help enforce the cold-process band; repository commands run after two explicit
-native-monitor warmups. The versioned baseline and target gaps live in
-`docs/perf/cli-core-loop-baseline.json`.
+native-monitor warmups. The versioned, runner-scoped baselines and target gaps
+live in `docs/perf/cli-core-loop-baseline.json`. CI selects the controlled
+Blacksmith profile with `HEDDLE_PERF_BASELINE`; local runs use the recorded
+local calibration profile.
 
 The ignored marker keeps the harness out of debug and ordinary unit-test runs;
 the dedicated release workflow runs it on a controlled runner. Absolute bands

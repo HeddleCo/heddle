@@ -8,6 +8,12 @@ use super::measurement::{CaseKind, CaseResult, NegativeControl};
 
 #[derive(Deserialize)]
 struct BaselineFile {
+    profiles: Vec<BaselineProfile>,
+}
+
+#[derive(Deserialize)]
+struct BaselineProfile {
+    name: String,
     cases: Vec<BaselineCase>,
     scale_cases: Vec<ScaleBaseline>,
 }
@@ -59,6 +65,7 @@ pub(super) fn print_runner_fingerprint(binary: &Path, samples: usize, negative: 
 
 pub(super) fn enforce_contract(results: &[CaseResult]) {
     let baseline = load_baseline();
+    println!("BASELINE profile={}", baseline.name);
     let mut failures = Vec::new();
 
     for result in results {
@@ -138,7 +145,7 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
 fn enforce_scale(
     results: &[CaseResult],
     kind: CaseKind,
-    baseline: &BaselineFile,
+    baseline: &BaselineProfile,
     failures: &mut Vec<String>,
 ) {
     let (Some(small), Some(large)) = (find(results, kind, 10_000), find(results, kind, 100_000))
@@ -182,13 +189,20 @@ fn find(results: &[CaseResult], kind: CaseKind, path_count: usize) -> Option<&Ca
         .find(|result| result.kind == kind && result.path_count == path_count)
 }
 
-fn load_baseline() -> BaselineFile {
+fn load_baseline() -> BaselineProfile {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/perf/cli-core-loop-baseline.json");
     let contents = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read baseline {}: {error}", path.display()));
-    serde_json::from_str(&contents)
-        .unwrap_or_else(|error| panic!("parse baseline {}: {error}", path.display()))
+    let baseline: BaselineFile = serde_json::from_str(&contents)
+        .unwrap_or_else(|error| panic!("parse baseline {}: {error}", path.display()));
+    let profile_name =
+        env::var("HEDDLE_PERF_BASELINE").unwrap_or_else(|_| "local-calibration".to_string());
+    baseline
+        .profiles
+        .into_iter()
+        .find(|profile| profile.name == profile_name)
+        .unwrap_or_else(|| panic!("missing performance baseline profile {profile_name:?}"))
 }
 
 fn command_output(program: &str, args: &[&str]) -> String {
