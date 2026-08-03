@@ -161,8 +161,11 @@ fn init_in_fresh_directory_does_not_write_to_ancestor_git_repository() {
     assert!(repo.join(".heddle").is_dir());
 }
 
+#[cfg(unix)]
 #[test]
-fn cwd_native_repository_wins_over_readable_ancestor_git_repository() {
+fn poisoned_ancestor_git_cannot_override_local_heddle_boundary_or_receive_writes() {
+    use std::os::unix::fs::PermissionsExt;
+
     let fixture = TempDir::new().unwrap();
     let outer = fixture.path().join("outer");
     let repo = outer.join("native");
@@ -170,11 +173,26 @@ fn cwd_native_repository_wins_over_readable_ancestor_git_repository() {
     fs::create_dir_all(&repo).unwrap();
     init_git(&outer);
     repo::Repository::init_default(&repo).unwrap();
+    let git_info = outer.join(".git/info");
+    let git_exclude = git_info.join("exclude");
+    fs::set_permissions(&git_exclude, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(&git_info, fs::Permissions::from_mode(0o555)).unwrap();
+    let outside_before = snapshot_outside_repository(&outer, &repo);
 
-    let status = json(&heddle(&repo, &config, &["status", "--output", "json"]));
+    let output = heddle(&repo, &config, &["status", "--output", "json"]);
 
+    fs::set_permissions(&git_info, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&git_exclude, fs::Permissions::from_mode(0o644)).unwrap();
+    let status = json(&output);
     assert_eq!(status["repository_capability"], "native-heddle");
     assert_eq!(status["storage_model"], "heddle-native");
+    assert_eq!(
+        snapshot_outside_repository(&outer, &repo),
+        outside_before,
+        "poisoned ancestor Git metadata must remain untouched"
+    );
+    assert!(!outer.join(".heddle").exists());
+    assert!(repo.join(".heddle").is_dir());
 }
 
 #[cfg(unix)]
