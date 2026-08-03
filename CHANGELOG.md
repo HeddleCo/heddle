@@ -15,6 +15,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Added
 
+- **Opt-in CLI OpenTelemetry traces.** Default `heddle` builds can export
+  privacy-bounded command and profile-phase spans to a configured OTLP
+  collector, and hosted Iroh request preludes carry W3C trace context for
+  coordinated end-to-end traces with Weft. Export remains dormant when no
+  endpoint is configured.
+
 - **Public hosted repo-event subscription client.** Rust consumers can connect
   through Heddle's standard credential and verified native transport, subscribe
   with the API-owned request/event types, and resume from the last delivered
