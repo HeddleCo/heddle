@@ -146,6 +146,40 @@ async fn reachable_direct_address_never_initializes_advertised_relays() {
 }
 
 #[tokio::test]
+async fn direct_only_descriptor_uses_the_normal_connection_path() {
+    let server = Endpoint::builder(presets::Minimal)
+        .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let descriptor = verified_descriptor(
+        server.id(),
+        Vec::new(),
+        server.addr().ip_addrs().map(ToString::to_string).collect(),
+    );
+    let server_task = tokio::spawn(async move {
+        let connection = server
+            .accept()
+            .await
+            .expect("incoming direct-only connection")
+            .await
+            .unwrap();
+        connection.closed().await;
+        server.close().await;
+    });
+
+    let connection =
+        HostedConnection::connect_verified(&descriptor, &cli_shared::ClientConfig::default())
+            .await
+            .unwrap();
+    connection.close().await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
 async fn unreachable_direct_address_falls_back_to_signed_relay() {
     use iroh_relay::server::{RelayConfig as RelayServerConfig, Server, ServerConfig};
 

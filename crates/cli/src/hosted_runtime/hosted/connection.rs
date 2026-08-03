@@ -37,6 +37,10 @@ impl HostedConnection {
             let provider_transport = ProviderWebSocketTransport::new(config.clone());
             let endpoint =
                 bind_endpoint(RelayMode::Disabled, Some(provider_transport.clone())).await?;
+            if relays.is_empty() {
+                return Self::connect_inner(endpoint, direct_address, Some(provider_transport))
+                    .await;
+            }
             let direct = tokio::time::timeout(
                 DIRECT_CONNECT_TIMEOUT,
                 Self::connect_inner(endpoint, direct_address, Some(provider_transport)),
@@ -44,8 +48,6 @@ impl HostedConnection {
             .await;
             match direct {
                 Ok(Ok(connection)) => return Ok(connection),
-                Ok(Err(error)) if relays.is_empty() => return Err(error),
-                Err(error) if relays.is_empty() => return Err(HostedError::transport(error)),
                 Ok(Err(error)) => {
                     tracing::debug!(%error, "signed direct addresses unavailable; enabling relays")
                 }
