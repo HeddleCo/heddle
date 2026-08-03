@@ -248,6 +248,7 @@ mount = [
 criterion = "0.8"
 heddle-cli-render = { path = "../cli-render", version = "0.11", features = ["test-utils"] }
 hyper-util.workspace = true
+iroh-relay = { version = "=1.0.3", default-features = false, features = ["server"] }
 ntest.workspace = true
 prost-reflect.workspace = true
 proptest.workspace = true

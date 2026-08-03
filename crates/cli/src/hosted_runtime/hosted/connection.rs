@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use api::heddle::api::v1alpha1::ProviderSource;
 use cli_shared::ClientConfig;
@@ -11,6 +11,8 @@ use tokio::sync::Mutex;
 use super::{
     HostedError, Result, VerifiedEndpointDescriptor, provider_transport::ProviderWebSocketTransport,
 };
+
+const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug)]
 pub(super) struct HostedConnection {
@@ -29,19 +31,38 @@ impl HostedConnection {
         heddle_perf_contract::record_network_client_initialization();
         let relays = descriptor.relay_urls()?;
         let address = descriptor.endpoint_addr()?;
+        let direct_address = descriptor.direct_endpoint_addr()?;
+
+        if direct_address.ip_addrs().next().is_some() {
+            let provider_transport = ProviderWebSocketTransport::new(config.clone());
+            let endpoint =
+                bind_endpoint(RelayMode::Disabled, Some(provider_transport.clone())).await?;
+            let direct = tokio::time::timeout(
+                DIRECT_CONNECT_TIMEOUT,
+                Self::connect_inner(endpoint, direct_address, Some(provider_transport)),
+            )
+            .await;
+            match direct {
+                Ok(Ok(connection)) => return Ok(connection),
+                Ok(Err(error)) if relays.is_empty() => return Err(error),
+                Err(error) if relays.is_empty() => return Err(HostedError::transport(error)),
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "signed direct addresses unavailable; enabling relays")
+                }
+                Err(_) => tracing::debug!(
+                    timeout_ms = DIRECT_CONNECT_TIMEOUT.as_millis(),
+                    "signed direct-address attempt timed out; enabling relays"
+                ),
+            }
+        }
+
         let relay_mode = if relays.is_empty() {
             RelayMode::Disabled
         } else {
             RelayMode::custom(relays)
         };
         let provider_transport = ProviderWebSocketTransport::new(config.clone());
-        let endpoint = Endpoint::builder(presets::Minimal)
-            .transport_config(transport_config())
-            .relay_mode(relay_mode)
-            .add_custom_transport(Arc::new(provider_transport.clone()))
-            .bind()
-            .await
-            .map_err(HostedError::transport)?;
+        let endpoint = bind_endpoint(relay_mode, Some(provider_transport.clone())).await?;
         Self::connect_inner(endpoint, address, Some(provider_transport)).await
     }
 
@@ -124,6 +145,19 @@ impl HostedConnection {
         self.connection.close(0u32.into(), b"Heddle client closed");
         self.endpoint.close().await;
     }
+}
+
+async fn bind_endpoint(
+    relay_mode: RelayMode,
+    provider_transport: Option<ProviderWebSocketTransport>,
+) -> Result<Endpoint> {
+    let mut builder = Endpoint::builder(presets::Minimal)
+        .transport_config(transport_config())
+        .relay_mode(relay_mode);
+    if let Some(provider_transport) = provider_transport {
+        builder = builder.add_custom_transport(Arc::new(provider_transport));
+    }
+    builder.bind().await.map_err(HostedError::transport)
 }
 
 impl Drop for HostedConnection {
