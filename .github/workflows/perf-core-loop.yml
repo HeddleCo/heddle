@@ -1,0 +1,98 @@
+name: Core Loop Performance
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - crates/cli/**
+      - crates/objects/**
+      - crates/oplog/**
+      - crates/perf-contract/**
+      - crates/refs/**
+      - crates/repo/**
+      - docs/perf/**
+      - .github/workflows/perf-core-loop.yml
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: perf-core-loop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "false"
+  TMPDIR: /home/scratch
+
+jobs:
+  release-contract:
+    name: Release contract (10k/100k)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf-core-loop-${{ runner.os }}-${{ runner.arch }}
+          cache-on-failure: true
+
+      - name: Prepare benchmark scratch space
+        run: |
+          sudo mkdir -p /home/scratch
+          sudo chown "$(id -u):$(id -g)" /home/scratch
+
+      - name: Compile release harness (out of band)
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'release_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
+            cargo build --locked --release -p heddle-cli \
+              --bin heddle --bin heddle-fsmonitor-worker 2>&1 | tee release-compile.txt
+          /usr/bin/time -f 'release_test_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
+            cargo test --locked --release -p heddle-cli --test cli_integration \
+              --no-run 2>&1 | tee -a release-compile.txt
+
+      - name: Enforce instant core-loop contract
+        run: |
+          set -o pipefail
+          cargo test --locked --release -p heddle-cli --test cli_integration \
+            core_loop_release_contract -- --ignored --nocapture 2>&1 | tee core-loop-contract.txt
+
+      - name: Publish contract summary
+        if: always()
+        run: |
+          {
+            echo '## Instant core-loop release contract'
+            echo
+            echo 'Compilation and fixture construction are reported separately from command samples.'
+            echo
+            echo '```text'
+            grep -E '^(RUNNER|SETUP|RESULT|COUNTERS|BAND|SCALE|GATES|PERF GATE)' \
+              core-loop-contract.txt 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-loop-release-contract
+          path: |
+            release-compile.txt
+            core-loop-contract.txt
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats

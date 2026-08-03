@@ -43,31 +43,41 @@ rendering.
 Sley-backed Git engine work should show up inside the command-specific phases
 rather than as a hidden subprocess floor.
 
-## Release Smoke Benchmark
+## Release Regression Contract
 
-Run the command-surface smoke benchmark with:
+Run the Wave 0 release contract with:
 
 ```sh
+TMPDIR=/home/scratch \
 cargo test --release -p heddle-cli --test cli_integration \
-  core_loop_command_surface_perf_smoke -- --ignored --nocapture
+  core_loop_release_contract -- --ignored --nocapture
 ```
 
-The fixture creates a small native repository, captures a baseline, creates
-multiple threads, leaves one dirty file, then times the core loop:
+Compilation happens before the test process starts. The harness also reports
+fixture construction (`SETUP`) separately, before starting any command sample.
+It prints the runner fingerprint and p50/p95/p99/max for end-to-end wall time,
+profile total, process startup, warm repository work, monitor startup,
+rendering, and network work. Structural counters use the same percentiles.
 
-- `heddle`
-- `heddle help`
-- `heddle help --output json`
-- `heddle status`
-- `heddle status --short`
-- `heddle status --output json`
-- `heddle status --output json`
-- `heddle thread list --output json`
-- `heddle log --output json`
-- `heddle diff --output json`
-- `heddle ready --output json`
+Wave 0 covers `--version`, `help`, clean status, one-dirty-path status, and a
+one-path capture. Repository fixtures contain 10k and 100k paths. Version and
+help enforce the cold-process band; repository commands run after two explicit
+native-monitor warmups. The versioned baseline and target gaps live in
+`docs/perf/cli-core-loop-baseline.json`.
 
-The test is ignored by default because release builds and wall-clock budgets are
-too expensive and environment-sensitive for the normal test loop. Treat it as a
-manual smoke check for obvious command-loop regressions rather than a CI gate or
-a claim about expected speed.
+The ignored marker keeps the harness out of debug and ordinary unit-test runs;
+the dedicated release workflow runs it on a controlled runner. Absolute bands
+already met use the product target. Missed bands use a baseline ratchet and keep
+the target gap explicit.
+
+The three repeatable negative controls are:
+
+```sh
+HEDDLE_PERF_NEGATIVE_CONTROL=latency HEDDLE_PERF_SAMPLES=5 <command-above>
+HEDDLE_PERF_NEGATIVE_CONTROL=full-scan HEDDLE_PERF_SAMPLES=5 <command-above>
+HEDDLE_PERF_NEGATIVE_CONTROL=duplicate-open HEDDLE_PERF_SAMPLES=5 <command-above>
+```
+
+They respectively inject 50 ms into the timed window, disable the monitor and
+remove the warm index before every sample, and execute a second repository open
+inside each sample. Each invocation must fail with `PERF GATE RED`.

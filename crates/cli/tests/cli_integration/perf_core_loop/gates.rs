@@ -32,19 +32,17 @@ struct BaselineCase {
     disposition: String,
 }
 
-pub(super) fn print_runner_fingerprint(
-    binary: &Path,
-    samples: usize,
-    negative: NegativeControl,
-) {
+pub(super) fn print_runner_fingerprint(binary: &Path, samples: usize, negative: NegativeControl) {
     let cpu = fs::read_to_string("/proc/cpuinfo")
         .ok()
         .and_then(|contents| {
-            contents.lines().find_map(|line| {
-                line.strip_prefix("model name\t: ")
-                    .or_else(|| line.strip_prefix("Model\t\t: "))
-            })
-            .map(str::to_string)
+            contents
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("model name\t: ")
+                        .or_else(|| line.strip_prefix("Model\t\t: "))
+                })
+                .map(str::to_string)
         })
         .unwrap_or_else(|| "unknown".to_string());
     let kernel = command_output("uname", &["-sr"]);
@@ -185,8 +183,8 @@ fn find(results: &[CaseResult], kind: CaseKind, path_count: usize) -> Option<&Ca
 }
 
 fn load_baseline() -> BaselineFile {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/perf/cli-core-loop-baseline.json");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/perf/cli-core-loop-baseline.json");
     let contents = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read baseline {}: {error}", path.display()));
     serde_json::from_str(&contents)

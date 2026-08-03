@@ -8,8 +8,10 @@ use std::{
 
 use serde_json::Value;
 
-use super::fixture::{PerfFixture, base_command};
-use super::profile::sample_from_trace;
+use super::{
+    fixture::{PerfFixture, base_command},
+    profile::sample_from_trace,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NegativeControl {
@@ -147,7 +149,11 @@ impl CaseResult {
         println!(
             "RESULT case={} mode={} paths={} samples={} wall_ms={} total_ms={} startup_ms={} warm_repo_ms={} monitor_ms={} render_ms={} network_ms={}",
             self.kind.name(),
-            if self.path_count == 0 { "cold_process" } else { "warm_repo" },
+            if self.path_count == 0 {
+                "cold_process"
+            } else {
+                "warm_repo"
+            },
             self.path_count,
             self.samples.len(),
             wall,
@@ -170,7 +176,9 @@ impl CaseResult {
             self.counter(|value| value.ref_reads),
             self.counter(|value| value.oplog_reads),
             self.counter(|value| value.repository_opens),
-            self.samples.iter().any(|sample| sample.counters.network_client_initialized),
+            self.samples
+                .iter()
+                .any(|sample| sample.counters.network_client_initialized),
         );
     }
 }
@@ -230,7 +238,10 @@ pub(super) fn measure_case(
         if negative == NegativeControl::DuplicateOpen {
             sample = sample.combine(run_profiled(binary, kind.args(), &cwd, negative));
         }
-        assert!(sample.wall_ms.is_finite(), "sample {index} should be finite");
+        assert!(
+            sample.wall_ms.is_finite(),
+            "sample {index} should be finite"
+        );
         samples.push(sample);
     }
     CaseResult {

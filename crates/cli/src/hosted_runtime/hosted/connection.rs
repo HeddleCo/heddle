@@ -26,6 +26,7 @@ impl HostedConnection {
         descriptor: &VerifiedEndpointDescriptor,
         config: &ClientConfig,
     ) -> Result<Arc<Self>> {
+        heddle_perf_contract::record_network_client_initialization();
         let relays = descriptor.relay_urls()?;
         let address = descriptor.endpoint_addr()?;
         let relay_mode = if relays.is_empty() {
@@ -45,6 +46,7 @@ impl HostedConnection {
     }
 
     pub(super) async fn connect(endpoint: Endpoint, address: EndpointAddr) -> Result<Arc<Self>> {
+        heddle_perf_contract::record_network_client_initialization();
         Self::connect_inner(endpoint, address, None).await
     }
 
@@ -53,7 +55,6 @@ impl HostedConnection {
         address: EndpointAddr,
         provider_transport: Option<ProviderWebSocketTransport>,
     ) -> Result<Arc<Self>> {
-        heddle_perf_contract::record_network_client_initialization();
         let connection = match endpoint.connect(address, api::HOSTED_ALPN_V1).await {
             Ok(connection) => connection,
             Err(error) => {

@@ -108,7 +108,10 @@ fn perf_trace_jsonl_status_reports_structural_counters() {
     )
     .expect("status should run");
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    assert!(output.status.success(), "profiled status should succeed: {stderr}");
+    assert!(
+        output.status.success(),
+        "profiled status should succeed: {stderr}"
+    );
 
     let trace = profile_trace_from_stderr(stderr);
     let structural = trace["phases"]
@@ -148,7 +151,10 @@ fn perf_trace_jsonl_version_reports_startup_totals() {
     .expect("version should run");
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
 
-    assert!(output.status.success(), "profiled version should succeed: {stderr}");
+    assert!(
+        output.status.success(),
+        "profiled version should succeed: {stderr}"
+    );
     let trace = profile_trace_from_stderr(stderr);
     assert_eq!(trace["command"], "version");
     assert_eq!(trace["totals"]["total_ms"]["unit"], "milliseconds");

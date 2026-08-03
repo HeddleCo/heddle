@@ -113,7 +113,10 @@ fn write_files(root: &Path, count: usize) {
 }
 
 fn run_setup(binary: &Path, args: &[&str], cwd: &Path) {
-    let output = base_command(binary, cwd).args(args).output().expect("run setup command");
+    let output = base_command(binary, cwd)
+        .args(args)
+        .output()
+        .expect("run setup command");
     assert!(
         output.status.success(),
         "setup {args:?} failed; stdout={} stderr={}",
