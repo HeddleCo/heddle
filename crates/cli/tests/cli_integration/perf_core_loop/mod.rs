@@ -18,10 +18,9 @@ const DEFAULT_SAMPLES: usize = 20;
 #[ignore = "release-only instant core-loop contract; run with `TMPDIR=/home/scratch cargo test --release -p heddle-cli --test cli_integration core_loop_release_contract -- --ignored --nocapture`"]
 #[test]
 fn core_loop_release_contract() {
-    assert!(
-        !cfg!(debug_assertions),
-        "core-loop performance contract requires cargo test --release"
-    );
+    if std::hint::black_box(cfg!(debug_assertions)) {
+        panic!("core-loop performance contract requires cargo test --release");
+    }
     let samples = env_usize("HEDDLE_PERF_SAMPLES", DEFAULT_SAMPLES);
     assert!(samples >= 5, "HEDDLE_PERF_SAMPLES must be at least 5");
     let negative = NegativeControl::from_env();
