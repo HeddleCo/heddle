@@ -30,6 +30,10 @@ toward these bands:
   not re-open; verify skips the plain-Git probe when a Heddle repo is already
   injected; CLI profile folds the shell open into `repo_open_ms` so the phase
   is truthful; verify no longer opens a second time only for repo config/JSON.
+- Add the Wave 0 release contract for version/help and 10k/100k clean,
+  one-dirty-path, and one-path-capture fixtures, including percentile phase
+  totals, structural counters, a runner fingerprint, baseline ratchets, and
+  repeatable red negative controls.
 
 ## Next
 
@@ -39,5 +43,5 @@ toward these bands:
   only needs sorted path lists.
 - Reduce repo-open work by skipping migration/hydrator probes when a repo has a
   clean schema ledger and no lazy-hydrator file.
-- Add release smoke baselines for a large real-ish repo fixture, not only the
-  small synthetic core-loop fixture.
+- Close the recorded Wave 0 target and scale-ratchet gaps in
+  `docs/perf/cli-core-loop-baseline.json`.

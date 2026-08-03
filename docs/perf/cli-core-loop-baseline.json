@@ -1,0 +1,135 @@
+{
+  "schema": "heddle-cli-core-loop-baseline/v2",
+  "recorded_at": "2026-08-03",
+  "sample_count": 20,
+  "profiles": [
+    {
+      "name": "ci-blacksmith-4vcpu-ubuntu-2404",
+      "runner_fingerprint": "linux/x86_64; Linux 6.6.141; Intel Xeon Processor; 4 logical cores; rustc 1.97.0 (2d8144b78 2026-07-07); release binary 56572120 bytes",
+      "cases": [
+        {
+          "case": "version",
+          "paths": 0,
+          "target_p95_ms": 20.0,
+          "measured_p95_ms": 2.024,
+          "gate_p95_ms": 20.0,
+          "disposition": "target"
+        },
+        {
+          "case": "help",
+          "paths": 0,
+          "target_p95_ms": 20.0,
+          "measured_p95_ms": 8.930,
+          "gate_p95_ms": 20.0,
+          "disposition": "target"
+        },
+        {
+          "case": "status_clean",
+          "paths": 100000,
+          "target_p95_ms": 50.0,
+          "measured_p95_ms": 337.419,
+          "gate_p95_ms": 372.0,
+          "disposition": "controlled-runner baseline + 10% noise; 287.419 ms above target"
+        },
+        {
+          "case": "status_one_dirty",
+          "paths": 100000,
+          "target_p95_ms": 75.0,
+          "measured_p95_ms": 537.327,
+          "gate_p95_ms": 592.0,
+          "disposition": "controlled-runner baseline + 10% noise; 462.327 ms above target"
+        },
+        {
+          "case": "capture_one",
+          "paths": 100000,
+          "target_p95_ms": 100.0,
+          "measured_p95_ms": 2000.495,
+          "gate_p95_ms": 2201.0,
+          "disposition": "controlled-runner baseline + 10% noise; 1900.495 ms above target"
+        }
+      ],
+      "scale_cases": [
+        {
+          "case": "status_clean",
+          "measured_wall_ratio": 7.564,
+          "gate_wall_ratio": 8.33,
+          "measured_directory_ratio": 1.0,
+          "gate_directory_ratio": 3.0,
+          "disposition": "controlled-runner wall-time ratchet; structural directory invariant enforced"
+        },
+        {
+          "case": "status_one_dirty",
+          "measured_wall_ratio": 8.686,
+          "gate_wall_ratio": 9.56,
+          "measured_directory_ratio": 9.824,
+          "gate_directory_ratio": 10.0,
+          "disposition": "controlled-runner wall and directory ratchets; gaps remain for Instant Heddle"
+        }
+      ]
+    },
+    {
+      "name": "local-calibration",
+      "runner_fingerprint": "linux/x86_64; Linux 7.0.0-22-generic; AMD Ryzen 7 7700 8-Core Processor; 16 logical cores; rustc 1.97.0 (2d8144b78 2026-07-07); release binary 56669328 bytes",
+      "cases": [
+        {
+          "case": "version",
+          "paths": 0,
+          "target_p95_ms": 20.0,
+          "measured_p95_ms": 1.564,
+          "gate_p95_ms": 20.0,
+          "disposition": "target"
+        },
+        {
+          "case": "help",
+          "paths": 0,
+          "target_p95_ms": 20.0,
+          "measured_p95_ms": 4.951,
+          "gate_p95_ms": 20.0,
+          "disposition": "target"
+        },
+        {
+          "case": "status_clean",
+          "paths": 100000,
+          "target_p95_ms": 50.0,
+          "measured_p95_ms": 218.697,
+          "gate_p95_ms": 241.0,
+          "disposition": "local baseline + 10% noise; 168.697 ms above target"
+        },
+        {
+          "case": "status_one_dirty",
+          "paths": 100000,
+          "target_p95_ms": 75.0,
+          "measured_p95_ms": 415.569,
+          "gate_p95_ms": 458.0,
+          "disposition": "local baseline + 10% noise; 340.569 ms above target"
+        },
+        {
+          "case": "capture_one",
+          "paths": 100000,
+          "target_p95_ms": 100.0,
+          "measured_p95_ms": 2436.937,
+          "gate_p95_ms": 2681.0,
+          "disposition": "local baseline + 10% noise; 2336.937 ms above target"
+        }
+      ],
+      "scale_cases": [
+        {
+          "case": "status_clean",
+          "measured_wall_ratio": 6.712,
+          "gate_wall_ratio": 7.4,
+          "measured_directory_ratio": 1.0,
+          "gate_directory_ratio": 3.0,
+          "disposition": "local wall-time ratchet; structural directory invariant enforced"
+        },
+        {
+          "case": "status_one_dirty",
+          "measured_wall_ratio": 7.755,
+          "gate_wall_ratio": 8.55,
+          "measured_directory_ratio": 9.824,
+          "gate_directory_ratio": 10.0,
+          "disposition": "local wall and directory ratchets; gaps remain for Instant Heddle"
+        }
+      ]
+    }
+  ]
+}

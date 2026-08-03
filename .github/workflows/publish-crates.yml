@@ -79,6 +79,7 @@ env:
     heddle-object-model
     heddle-fs-prims
     heddle-pack
+    heddle-perf-contract
     heddle-objects
     heddle-crypto
     heddle-runtime-bridge

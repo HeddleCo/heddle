@@ -325,6 +325,14 @@ impl Repository {
         }
         let monitor_persist_ms = persist_start.elapsed().as_millis();
 
+        heddle_perf_contract::record_worktree_scan(
+            stats.directories_scanned,
+            stats.directories_skipped,
+            stats.files_hashed,
+            stats.monitor_changed_paths,
+            monitor_prepare_ms.try_into().unwrap_or(u64::MAX),
+        );
+
         debug!(
             index_load_ms,
             index_snapshot_load_ms = load_stats.snapshot_load_ms,

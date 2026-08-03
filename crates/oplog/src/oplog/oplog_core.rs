@@ -299,6 +299,7 @@ impl OpLog {
 
     /// Load from cache or disk (for read operations).
     fn load_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<PackedOpLogIndex>>> {
+        heddle_perf_contract::record_oplog_read();
         self.finish_pending_reconstructible_view()?;
         let guard = self.cached.lock_or_poisoned();
         if guard.is_some() {
@@ -325,6 +326,7 @@ impl OpLog {
     /// view that would miss a batch another process wrote (heddle#354 r6, cid
     /// 3329711888).
     fn refresh_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<PackedOpLogIndex>>> {
+        heddle_perf_contract::record_oplog_read();
         self.finish_pending_reconstructible_view()?;
         self.ensure_current_format()?;
         let mut guard = self.cached.lock_or_poisoned();

@@ -24,7 +24,7 @@ pub enum ProfileMode {
 #[derive(Clone, Copy, Debug)]
 pub struct ProfileField {
     pub name: &'static str,
-    pub value: u128,
+    pub value: ProfileMetricScalar,
     unit: ProfileMetricUnit,
 }
 
@@ -32,7 +32,7 @@ impl ProfileField {
     pub fn millis(name: &'static str, value_ms: u128) -> Self {
         Self {
             name,
-            value: value_ms,
+            value: ProfileMetricScalar::Number(value_ms),
             unit: ProfileMetricUnit::Milliseconds,
         }
     }
@@ -40,7 +40,7 @@ impl ProfileField {
     pub fn duration(name: &'static str, value: Duration) -> Self {
         Self {
             name,
-            value: value.as_millis(),
+            value: ProfileMetricScalar::Number(value.as_millis()),
             unit: ProfileMetricUnit::Milliseconds,
         }
     }
@@ -48,8 +48,16 @@ impl ProfileField {
     pub fn count(name: &'static str, value: impl Into<u128>) -> Self {
         Self {
             name,
-            value: value.into(),
+            value: ProfileMetricScalar::Number(value.into()),
             unit: ProfileMetricUnit::Count,
+        }
+    }
+
+    pub fn boolean(name: &'static str, value: bool) -> Self {
+        Self {
+            name,
+            value: ProfileMetricScalar::Boolean(value),
+            unit: ProfileMetricUnit::Boolean,
         }
     }
 }
@@ -59,11 +67,19 @@ impl ProfileField {
 pub enum ProfileMetricUnit {
     Milliseconds,
     Count,
+    Boolean,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(untagged)]
+pub enum ProfileMetricScalar {
+    Number(u128),
+    Boolean(bool),
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ProfileMetricValue {
-    value: u128,
+    value: ProfileMetricScalar,
     unit: ProfileMetricUnit,
 }
 
@@ -126,15 +142,43 @@ pub fn emit_command_profile(command: &str, exit_status: i32, totals: &[ProfileFi
     match profile_mode() {
         ProfileMode::Off => {}
         ProfileMode::Human => emit_human_profile(command, totals),
-        ProfileMode::Jsonl => emit_jsonl_trace(command, exit_status, totals),
+        ProfileMode::Jsonl => {
+            record_structural_counters();
+            emit_jsonl_trace(command, exit_status, totals);
+        }
     }
+}
+
+fn record_structural_counters() {
+    let counters = heddle_perf_contract::snapshot();
+    record_phase(
+        "structural counters",
+        &[
+            ProfileField::count("directories_scanned", counters.directories_scanned),
+            ProfileField::count("directories_skipped", counters.directories_skipped),
+            ProfileField::count("files_hashed", counters.files_hashed),
+            ProfileField::count("monitor_changed_paths", counters.monitor_changed_paths),
+            ProfileField::millis("monitor_startup_ms", counters.monitor_startup_ms.into()),
+            ProfileField::count("object_decodes", counters.object_decodes),
+            ProfileField::count("ref_reads", counters.ref_reads),
+            ProfileField::count("oplog_reads", counters.oplog_reads),
+            ProfileField::count("repository_opens", counters.repository_opens),
+            ProfileField::boolean(
+                "network_client_initialized",
+                counters.network_client_initialized,
+            ),
+        ],
+    );
 }
 
 fn emit_human_profile(command: &str, fields: &[ProfileField]) {
     eprintln!("heddle profile:");
     eprintln!("  command: {command}");
     for field in fields {
-        eprintln!("  {}: {}", field.name, field.value);
+        match field.value {
+            ProfileMetricScalar::Number(value) => eprintln!("  {}: {value}", field.name),
+            ProfileMetricScalar::Boolean(value) => eprintln!("  {}: {value}", field.name),
+        }
     }
 }
 

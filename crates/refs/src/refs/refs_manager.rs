@@ -391,6 +391,7 @@ impl RefManager {
     /// from inside here — the maintenance path `pack_refs` is the one allowlisted
     /// non-logical caller. With no reconciler this is the plain raw load.
     fn reconciled_load(&self, req: LoadRequest) -> Result<Loaded> {
+        heddle_perf_contract::record_ref_read();
         let Some(reconciler) = self.reconciler.as_ref() else {
             return self.raw_load(&req);
         };

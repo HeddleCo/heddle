@@ -1024,6 +1024,7 @@ impl Repository {
     ///   authority), `.heddle/HEAD` (per-checkout), `.heddle/state/`
     ///   (per-checkout cached state).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        heddle_perf_contract::record_repository_open();
         let requested_path = path.as_ref();
         let start_path = requested_path.canonicalize().map_err(|error| {
             HeddleError::Io(enrich_fs_error(

@@ -2053,6 +2053,7 @@ dependencies = [
  "heddle-mount",
  "heddle-objects",
  "heddle-oplog",
+ "heddle-perf-contract",
  "heddle-refs",
  "heddle-repo",
  "heddle-semantic",
@@ -2416,6 +2417,7 @@ dependencies = [
  "heddle-fs-prims",
  "heddle-object-model",
  "heddle-pack",
+ "heddle-perf-contract",
  "hex",
  "ignore",
  "libc",
@@ -2442,6 +2444,7 @@ dependencies = [
  "chrono",
  "criterion",
  "heddle-objects",
+ "heddle-perf-contract",
  "heddle-runtime-bridge",
  "heddle-schema",
  "pollster",
@@ -2471,6 +2474,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "heddle-perf-contract"
+version = "0.11.0"
+
+[[package]]
 name = "heddle-refs"
 version = "0.11.0"
 dependencies = [
@@ -2478,6 +2485,7 @@ dependencies = [
  "criterion",
  "fs2",
  "heddle-objects",
+ "heddle-perf-contract",
  "heddle-runtime-bridge",
  "heddle-schema",
  "pollster",
@@ -2502,6 +2510,7 @@ dependencies = [
  "heddle-crypto",
  "heddle-objects",
  "heddle-oplog",
+ "heddle-perf-contract",
  "heddle-refs",
  "heddle-semantic",
  "heddle-state-review",

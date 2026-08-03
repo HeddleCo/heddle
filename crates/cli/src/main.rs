@@ -74,6 +74,7 @@ fn main() -> Result<()> {
 }
 
 async fn async_main() -> Result<()> {
+    let total_start = Instant::now();
     let embedding_args = std::env::args().skip(1).collect::<Vec<_>>();
     if let Some(result) =
         heddle_git_projection::credential::dispatch_embedded_credential_helper(&embedding_args)
@@ -108,7 +109,6 @@ async fn async_main() -> Result<()> {
     // and we drop the binding entirely. Keeping the shim trait + Noop
     // visible for downstream consumers and post-split closed builds.
 
-    let total_start = Instant::now();
     let profile = profile_enabled();
     // Intercept the bare-help shapes BEFORE clap parses, so we
     // serve the curated everyday list instead of clap's auto-help.
@@ -120,6 +120,21 @@ async fn async_main() -> Result<()> {
     // to replace.
     {
         let raw: Vec<String> = std::env::args().skip(1).collect();
+        if raw == ["--version"] || raw == ["-V"] {
+            let command_start = Instant::now();
+            println!("heddle {}", env!("CARGO_PKG_VERSION"));
+            if profile {
+                emit_command_profile(
+                    "version",
+                    0,
+                    &[
+                        ProfileField::duration("command_body_ms", command_start.elapsed()),
+                        ProfileField::duration("total_ms", total_start.elapsed()),
+                    ],
+                );
+            }
+            return Ok(());
+        }
         let bare = raw.is_empty()
             || raw == ["--help"]
             || raw == ["-h"]

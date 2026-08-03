@@ -279,6 +279,7 @@ pub async fn cmd_snapshot(
         }
     }
 
+    let render_start = Instant::now();
     if as_json {
         write_command_json(
             &output,
@@ -345,6 +346,7 @@ pub async fn cmd_snapshot(
             print_next("heddle ready");
         }
     }
+    let render_ms = render_start.elapsed().as_millis();
 
     let captured_thread_targets_integration = current_thread(&repo)
         .ok()
@@ -388,6 +390,7 @@ pub async fn cmd_snapshot(
                     "snapshot_thread_metadata_ms",
                     snapshot_profile.thread_metadata_ms,
                 ),
+                ProfileField::millis("render_ms", render_ms),
             ],
         );
     }
