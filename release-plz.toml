@@ -28,6 +28,10 @@ name = "heddle-pack"
 release = true
 
 [[package]]
+name = "heddle-perf-contract"
+release = true
+
+[[package]]
 name = "heddle-objects"
 release = true
 
