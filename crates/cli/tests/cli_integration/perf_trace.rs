@@ -98,6 +98,72 @@ fn perf_trace_jsonl_status_keeps_stdout_json_and_stderr_parseable() {
 }
 
 #[test]
+fn perf_trace_jsonl_status_reports_structural_counters() {
+    let temp = setup_profile_repo_with_sensitive_input();
+
+    let output = heddle_output_with_env(
+        &["--output", "json", "status"],
+        Some(temp.path()),
+        &[("HEDDLE_PROFILE", "jsonl")],
+    )
+    .expect("status should run");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    assert!(output.status.success(), "profiled status should succeed: {stderr}");
+
+    let trace = profile_trace_from_stderr(stderr);
+    let structural = trace["phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["name"] == "structural counters")
+        .unwrap_or_else(|| panic!("trace should include structural counters: {trace}"));
+    let metrics = structural["metrics"].as_object().unwrap();
+    for name in [
+        "directories_scanned",
+        "directories_skipped",
+        "files_hashed",
+        "monitor_changed_paths",
+        "object_decodes",
+        "ref_reads",
+        "oplog_reads",
+        "repository_opens",
+    ] {
+        assert!(metrics.contains_key(name), "missing `{name}` in {trace}");
+    }
+    assert_eq!(
+        metrics["network_client_initialized"]["value"],
+        Value::Bool(false),
+        "local status must report an actual false boolean: {trace}"
+    );
+}
+
+#[test]
+fn perf_trace_jsonl_version_reports_startup_totals() {
+    let temp = TempDir::new().unwrap();
+    let output = heddle_output_with_env(
+        &["--version"],
+        Some(temp.path()),
+        &[("HEDDLE_PROFILE", "jsonl")],
+    )
+    .expect("version should run");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+
+    assert!(output.status.success(), "profiled version should succeed: {stderr}");
+    let trace = profile_trace_from_stderr(stderr);
+    assert_eq!(trace["command"], "version");
+    assert_eq!(trace["totals"]["total_ms"]["unit"], "milliseconds");
+    assert_eq!(
+        trace["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|phase| phase["name"] == "structural counters")
+            .unwrap()["metrics"]["network_client_initialized"]["value"],
+        Value::Bool(false)
+    );
+}
+
+#[test]
 fn perf_trace_jsonl_thread_list_uses_named_phase_records() {
     let temp = setup_profile_repo_with_sensitive_input();
 
