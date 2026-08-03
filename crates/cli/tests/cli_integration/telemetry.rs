@@ -64,6 +64,18 @@ fn opted_in_real_command_reaches_otlp_http_collector() {
             .any(|window| window == b"heddle.command"),
         "OTLP protobuf body should contain the command span name"
     );
+    assert!(
+        request[header_end..]
+            .windows(b"heddle.phase".len())
+            .any(|window| window == b"heddle.phase"),
+        "OTLP protobuf body should contain profile phase child spans"
+    );
+    assert!(
+        !request[header_end..]
+            .windows(repo.path().as_os_str().as_encoded_bytes().len())
+            .any(|window| window == repo.path().as_os_str().as_encoded_bytes()),
+        "OTLP protobuf body must not contain the repository path"
+    );
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
