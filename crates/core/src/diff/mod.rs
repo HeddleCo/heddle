@@ -2,7 +2,7 @@
 //! Embeddable diff facade and report model.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -10,8 +10,8 @@ use anyhow::{Result, anyhow};
 use objects::{
     HeddleError, RecoveryDetails,
     object::{
-        AnnotationStatus, Blob, ContextTarget, DiffKind, EntryType, FileChangeSet, FileMode,
-        SemanticChange, State, StateId, Tree, TreeEntry,
+        AnnotationStatus, Blob, ContentHash, ContextTarget, DiffKind, EntryType, FileChangeSet,
+        FileMode, SemanticChange, State, StateId, Tree, TreeEntry,
     },
     store::ObjectStore,
     worktree::{WorktreeStatus, diff_blobs},
@@ -32,6 +32,7 @@ pub use patch::{render_diff_patch, render_diff_patch_bytes, write_diff_patch};
 pub use types::*;
 
 const BINARY_DIFF_ERROR: &str = "binary file";
+const RENAME_SIMILARITY_THRESHOLD: f64 = 0.75;
 
 #[derive(Clone, Debug, Default)]
 struct SemanticDiffResult {
@@ -1904,6 +1905,44 @@ fn detect_clear_renames(
     include_lines: bool,
     unified: usize,
 ) -> Result<Vec<FileChange>> {
+    detect_clear_renames_with_stats(
+        repo,
+        from_tree,
+        to_tree,
+        changes,
+        include_lines,
+        unified,
+        &mut RenameDetectionStats::default(),
+    )
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RenameDetectionStats {
+    blob_reads: usize,
+    lcs_comparisons: usize,
+}
+
+struct PreparedRenameBlob {
+    blob: Blob,
+    content_hash: ContentHash,
+    text: Option<RenameTextFingerprint>,
+}
+
+struct RenameTextFingerprint {
+    line_count: usize,
+    line_hash_counts: BTreeMap<u64, usize>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn detect_clear_renames_with_stats(
+    repo: &Repository,
+    from_tree: Option<&Tree>,
+    to_tree: Option<&Tree>,
+    changes: Vec<FileChange>,
+    include_lines: bool,
+    unified: usize,
+    stats: &mut RenameDetectionStats,
+) -> Result<Vec<FileChange>> {
     let deleted = changes
         .iter()
         .filter(|change| change.kind == "deleted")
@@ -1938,11 +1977,21 @@ fn detect_clear_renames(
         .map(|change| (change.path.as_str(), change.mode))
         .collect::<std::collections::BTreeMap<&str, Option<FileMode>>>();
 
+    let mut added_blobs = BTreeMap::new();
+    for new_path in &added {
+        stats.blob_reads += 1;
+        if let Some(blob) = new_blob_for_rename(repo, to_tree, new_path)? {
+            added_blobs.insert(*new_path, prepare_rename_blob(blob));
+        }
+    }
+
     let mut candidates = Vec::new();
     for old_path in &deleted {
+        stats.blob_reads += 1;
         let Some(old_blob) = blob_from_tree(repo, from_tree, old_path)? else {
             continue;
         };
+        let old_blob = prepare_rename_blob(old_blob);
         for new_path in &added {
             // A delete + add at the *same* path is a type change
             // (regular ↔ symlink), not a rename — `expand_type_changes`
@@ -1963,11 +2012,11 @@ fn detect_clear_renames(
             ) {
                 continue;
             }
-            let Some(new_blob) = new_blob_for_rename(repo, to_tree, new_path)? else {
+            let Some(new_blob) = added_blobs.get(new_path) else {
                 continue;
             };
-            let score = rename_similarity(&old_blob, &new_blob);
-            if score >= 0.75 {
+            let score = rename_similarity(&old_blob, new_blob, stats);
+            if score >= RENAME_SIMILARITY_THRESHOLD {
                 candidates.push((score, (*old_path).to_string(), (*new_path).to_string()));
             }
         }
@@ -2147,23 +2196,95 @@ fn rename_mode_compatible(old: Option<FileMode>, new: Option<FileMode>) -> bool 
     is_symlink(old) == is_symlink(new)
 }
 
-fn rename_similarity(old_blob: &Blob, new_blob: &Blob) -> f64 {
-    if old_blob.content() == new_blob.content() {
+fn prepare_rename_blob(blob: Blob) -> PreparedRenameBlob {
+    let content_hash = blob.hash();
+    let text = blob.content_str().and_then(|text| {
+        if text.chars().any(is_terminal_hostile_control) {
+            return None;
+        }
+        let mut line_count = 0;
+        let mut line_hash_counts = BTreeMap::new();
+        for line in text.lines() {
+            line_count += 1;
+            *line_hash_counts.entry(cheap_line_hash(line)).or_insert(0) += 1;
+        }
+        Some(RenameTextFingerprint {
+            line_count,
+            line_hash_counts,
+        })
+    });
+    PreparedRenameBlob {
+        blob,
+        content_hash,
+        text,
+    }
+}
+
+fn cheap_line_hash(line: &str) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    line.as_bytes().iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+    })
+}
+
+fn can_reach_rename_threshold(
+    old_text: &RenameTextFingerprint,
+    new_text: &RenameTextFingerprint,
+) -> bool {
+    let total_lines = old_text.line_count + new_text.line_count;
+    if old_text.line_count == 0 || new_text.line_count == 0 {
+        return false;
+    }
+
+    let length_upper_bound = old_text.line_count.min(new_text.line_count);
+    if (length_upper_bound as u128) * 8 < (total_lines as u128) * 3 {
+        return false;
+    }
+
+    // An LCS cannot contain more copies of a line than the two inputs share.
+    // Hash collisions only raise this upper bound, so they can admit extra
+    // LCS work but can never reject a qualifying pair.
+    let shared_hash_upper_bound = old_text
+        .line_hash_counts
+        .iter()
+        .filter_map(|(hash, old_count)| {
+            new_text
+                .line_hash_counts
+                .get(hash)
+                .map(|new_count| old_count.min(new_count))
+        })
+        .sum::<usize>();
+    (shared_hash_upper_bound as u128) * 8 >= (total_lines as u128) * 3
+}
+
+fn rename_similarity(
+    old_blob: &PreparedRenameBlob,
+    new_blob: &PreparedRenameBlob,
+    stats: &mut RenameDetectionStats,
+) -> f64 {
+    if old_blob.content_hash == new_blob.content_hash
+        && old_blob.blob.content() == new_blob.blob.content()
+    {
         return 1.0;
     }
-    let (Some(old_text), Some(new_text)) = (old_blob.content_str(), new_blob.content_str()) else {
+    let (Some(old_fingerprint), Some(new_fingerprint)) = (&old_blob.text, &new_blob.text) else {
         return 0.0;
     };
-    if old_text.chars().any(is_terminal_hostile_control)
-        || new_text.chars().any(is_terminal_hostile_control)
-    {
+    if !can_reach_rename_threshold(old_fingerprint, new_fingerprint) {
         return 0.0;
     }
+    let old_text = old_blob
+        .blob
+        .content_str()
+        .expect("text fingerprint requires UTF-8 content");
+    let new_text = new_blob
+        .blob
+        .content_str()
+        .expect("text fingerprint requires UTF-8 content");
     let old_lines = old_text.lines().collect::<Vec<_>>();
     let new_lines = new_text.lines().collect::<Vec<_>>();
-    if old_lines.is_empty() || new_lines.is_empty() {
-        return 0.0;
-    }
+    stats.lcs_comparisons += 1;
     let shared = lcs_len(&old_lines, &new_lines);
     (shared * 2) as f64 / (old_lines.len() + new_lines.len()) as f64
 }
@@ -2487,9 +2608,243 @@ fn change_file_modes(
 #[cfg(test)]
 mod tests {
     use super::{
-        DiffStats, FileChange, FileEolState, LineCounts, LineDiff, change_line_counts,
-        summarize_context, unified_hunks,
+        DiffStats, FileChange, FileEolState, LineCounts, LineDiff, RENAME_SIMILARITY_THRESHOLD,
+        RenameDetectionStats, change_line_counts, detect_clear_renames_with_stats, lcs_len,
+        prepare_rename_blob, rename_similarity, summarize_context, unified_hunks,
     };
+    use objects::{
+        object::{Blob, FileMode, Tree, TreeEntry},
+        store::ObjectStore,
+    };
+    use repo::Repository;
+    use tempfile::TempDir;
+
+    type RenameSummary = Vec<(String, String, Option<String>, Option<f64>)>;
+
+    fn rename_fixture(
+        shared_line_counts: &[usize],
+    ) -> (TempDir, Repository, Tree, Tree, Vec<FileChange>) {
+        let temp = TempDir::new().expect("create rename fixture");
+        let repo = Repository::init_default(temp.path()).expect("initialize rename fixture");
+        let mut old_entries = Vec::with_capacity(shared_line_counts.len());
+        let mut new_entries = Vec::with_capacity(shared_line_counts.len());
+        let mut changes = Vec::with_capacity(shared_line_counts.len() * 2);
+
+        for (file_index, shared_lines) in shared_line_counts.iter().copied().enumerate() {
+            let old_content = (0..32)
+                .map(|line_index| format!("file {file_index} original line {line_index}\n"))
+                .collect::<String>();
+            let new_content = (0..32)
+                .map(|line_index| {
+                    if line_index < shared_lines {
+                        format!("file {file_index} original line {line_index}\n")
+                    } else {
+                        format!("file {file_index} replacement line {line_index}\n")
+                    }
+                })
+                .collect::<String>();
+            let old_hash = repo
+                .store()
+                .put_blob(&Blob::from(old_content))
+                .expect("store old rename blob");
+            let new_hash = repo
+                .store()
+                .put_blob(&Blob::from(new_content))
+                .expect("store new rename blob");
+            let old_path = format!("old_{file_index:04}.txt");
+            let new_path = format!("new_{file_index:04}.txt");
+            old_entries
+                .push(TreeEntry::file(&old_path, old_hash, false).expect("build old tree entry"));
+            new_entries
+                .push(TreeEntry::file(&new_path, new_hash, false).expect("build new tree entry"));
+            changes.push(FileChange {
+                path: old_path,
+                kind: "deleted".to_string(),
+                mode: Some(FileMode::Normal),
+                ..Default::default()
+            });
+            changes.push(FileChange {
+                path: new_path,
+                kind: "added".to_string(),
+                mode: Some(FileMode::Normal),
+                ..Default::default()
+            });
+        }
+
+        (
+            temp,
+            repo,
+            Tree::from_entries(old_entries),
+            Tree::from_entries(new_entries),
+            changes,
+        )
+    }
+
+    fn run_rename_fixture(shared_line_counts: &[usize]) -> (RenameSummary, RenameDetectionStats) {
+        let (_temp, repo, old_tree, new_tree, changes) = rename_fixture(shared_line_counts);
+        let mut stats = RenameDetectionStats::default();
+        let output = detect_clear_renames_with_stats(
+            &repo,
+            Some(&old_tree),
+            Some(&new_tree),
+            changes,
+            false,
+            0,
+            &mut stats,
+        )
+        .expect("detect fixture renames");
+        let summary = output
+            .into_iter()
+            .map(|change| {
+                (
+                    change.path,
+                    change.kind,
+                    change.old_path,
+                    change.similarity_score,
+                )
+            })
+            .collect();
+        (summary, stats)
+    }
+
+    #[test]
+    fn rename_fixture_characterizes_exact_threshold_and_rejected_pairs() {
+        let (summary, _) = run_rename_fixture(&[32, 31, 24, 23]);
+
+        assert_eq!(
+            summary,
+            vec![
+                (
+                    "new_0000.txt".to_string(),
+                    "renamed".to_string(),
+                    Some("old_0000.txt".to_string()),
+                    Some(1.0),
+                ),
+                (
+                    "new_0001.txt".to_string(),
+                    "renamed".to_string(),
+                    Some("old_0001.txt".to_string()),
+                    Some(31.0 / 32.0),
+                ),
+                (
+                    "new_0002.txt".to_string(),
+                    "renamed".to_string(),
+                    Some("old_0002.txt".to_string()),
+                    Some(0.75),
+                ),
+                (
+                    "old_0003.txt".to_string(),
+                    "deleted".to_string(),
+                    None,
+                    None,
+                ),
+                ("new_0003.txt".to_string(), "added".to_string(), None, None,),
+            ]
+        );
+    }
+
+    #[test]
+    fn many_rename_detection_reads_each_blob_once_and_limits_lcs_to_candidates() {
+        const FILE_COUNT: usize = 32;
+        let (summary, stats) = run_rename_fixture(&[31; FILE_COUNT]);
+
+        assert_eq!(summary.len(), FILE_COUNT);
+        assert!(summary.iter().all(|(_, kind, _, _)| kind == "renamed"));
+        assert_eq!(
+            stats.blob_reads,
+            FILE_COUNT * 2,
+            "each old and added blob should be read once per diff"
+        );
+        assert_eq!(
+            stats.lcs_comparisons, FILE_COUNT,
+            "only the one plausible modified target per deleted file should reach LCS"
+        );
+    }
+
+    #[test]
+    fn rename_prefilter_preserves_all_qualifying_short_line_pairs() {
+        let mut contents = vec![String::new()];
+        for line_count in 1..=5 {
+            for bits in 0..(1usize << line_count) {
+                let content = (0..line_count)
+                    .map(|line| {
+                        if bits & (1 << line) == 0 {
+                            "alpha"
+                        } else {
+                            "beta"
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                contents.push(content);
+            }
+        }
+
+        for old_content in &contents {
+            for new_content in &contents {
+                let old_lines = old_content.lines().collect::<Vec<_>>();
+                let new_lines = new_content.lines().collect::<Vec<_>>();
+                let expected = if old_content == new_content {
+                    1.0
+                } else if old_lines.is_empty() || new_lines.is_empty() {
+                    0.0
+                } else {
+                    (lcs_len(&old_lines, &new_lines) * 2) as f64
+                        / (old_lines.len() + new_lines.len()) as f64
+                };
+                if expected < RENAME_SIMILARITY_THRESHOLD {
+                    continue;
+                }
+
+                let old_blob = prepare_rename_blob(Blob::from(old_content.clone()));
+                let new_blob = prepare_rename_blob(Blob::from(new_content.clone()));
+                let actual =
+                    rename_similarity(&old_blob, &new_blob, &mut RenameDetectionStats::default());
+                assert_eq!(
+                    actual, expected,
+                    "qualifying pair changed score: old={old_content:?}, new={new_content:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "focused release-mode wall-time measurement"]
+    fn benchmark_many_modified_renames() {
+        use std::time::Instant;
+
+        const FILE_COUNT: usize = 128;
+        const SAMPLES: usize = 7;
+        let shared_line_counts = vec![31; FILE_COUNT];
+        let (_temp, repo, old_tree, new_tree, changes) = rename_fixture(&shared_line_counts);
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let mut final_stats = RenameDetectionStats::default();
+
+        for _ in 0..SAMPLES {
+            let mut stats = RenameDetectionStats::default();
+            let started = Instant::now();
+            let output = detect_clear_renames_with_stats(
+                &repo,
+                Some(&old_tree),
+                Some(&new_tree),
+                changes.clone(),
+                false,
+                0,
+                &mut stats,
+            )
+            .expect("benchmark rename detection");
+            assert_eq!(output.len(), FILE_COUNT);
+            samples.push(started.elapsed());
+            final_stats = stats;
+        }
+        samples.sort();
+        eprintln!(
+            "rename_diff files={FILE_COUNT} samples={SAMPLES} median_ms={:.3} blob_reads={} lcs_comparisons={}",
+            samples[SAMPLES / 2].as_secs_f64() * 1_000.0,
+            final_stats.blob_reads,
+            final_stats.lcs_comparisons,
+        );
+    }
 
     fn stat_change(kind: &str, counts: LineCounts) -> FileChange {
         FileChange {
