@@ -24,7 +24,10 @@ use api::heddle::api::v1alpha1::{
 };
 use objects::{
     Progress,
-    object::{ContentHash, MarkerName, StateId, ThreadName},
+    object::{
+        AnnotationStatus, ContentHash, ContextBlob, ContextTarget, Discussion, DiscussionsBlob,
+        MarkerName, StateAttachmentBody, StateAttachmentKind, StateId, ThreadName,
+    },
     store::{AnyStore, ObjectStore, PackObjectId, SnapshotCommitDescriptor},
 };
 use repo::{
@@ -57,6 +60,140 @@ struct PullOptions<'a> {
     depth: Option<u32>,
     target_state: Option<StateId>,
     materialization: PullMaterialization,
+}
+
+const PULL_BOOTSTRAP_LINE_PREFIX: &str = "heddle-pull-bootstrap-v1:";
+type PullBootstrapPayload = (
+    bool,
+    Vec<Discussion>,
+    bool,
+    Vec<(ContextTarget, ContextBlob)>,
+);
+
+#[derive(Debug, Clone)]
+pub(crate) struct PullBootstrapMetadata {
+    discussions_from_pack: bool,
+    pub discussions: Vec<Discussion>,
+    context_from_pack: bool,
+    pub context: Vec<(ContextTarget, ContextBlob)>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedPullBootstrapMetadata {
+    pub discussions: Vec<Discussion>,
+    pub context: Vec<(ContextTarget, ContextBlob)>,
+}
+
+impl PullBootstrapMetadata {
+    pub(crate) fn resolve(
+        &self,
+        repo: &Repository,
+        state_id: Option<StateId>,
+    ) -> Result<ResolvedPullBootstrapMetadata, ProtocolError> {
+        let state_id = state_id.ok_or_else(|| {
+            ProtocolError::InvalidState("pull bootstrap is missing its final state".to_string())
+        })?;
+        let discussions = if self.discussions_from_pack {
+            discussions_from_pull_pack(repo, state_id)?
+        } else {
+            self.discussions.clone()
+        };
+        let context = if self.context_from_pack {
+            context_from_pull_pack(repo, state_id)?
+        } else {
+            self.context.clone()
+        };
+        Ok(ResolvedPullBootstrapMetadata {
+            discussions,
+            context,
+        })
+    }
+}
+
+pub(crate) fn decode_pull_bootstrap(
+    checkpoint: &[u8],
+) -> Result<Option<PullBootstrapMetadata>, ProtocolError> {
+    let checkpoint = std::str::from_utf8(checkpoint)
+        .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+    let Some(payload) = checkpoint
+        .lines()
+        .find_map(|line| line.strip_prefix(PULL_BOOTSTRAP_LINE_PREFIX))
+    else {
+        return Ok(None);
+    };
+    let payload = payload
+        .split_once('\t')
+        .map(|(payload, _)| payload)
+        .ok_or_else(|| {
+            ProtocolError::InvalidState("decode pull bootstrap: missing sentinel state".to_string())
+        })?;
+    let payload = hex::decode(payload)
+        .map_err(|error| ProtocolError::InvalidState(format!("decode pull bootstrap: {error}")))?;
+    let (discussions_from_pack, discussions, context_from_pack, context): PullBootstrapPayload =
+        rmp_serde::from_slice(&payload).map_err(|error| {
+            ProtocolError::InvalidState(format!("decode pull bootstrap: {error}"))
+        })?;
+    Ok(Some(PullBootstrapMetadata {
+        discussions_from_pack,
+        discussions,
+        context_from_pack,
+        context,
+    }))
+}
+
+fn discussions_from_pull_pack(
+    repo: &Repository,
+    state_id: StateId,
+) -> Result<Vec<Discussion>, ProtocolError> {
+    let Some(attachment) =
+        repo.latest_state_attachment(&state_id, StateAttachmentKind::Discussions)?
+    else {
+        return Err(ProtocolError::InvalidState(
+            "pull bootstrap advertised packed discussions but the attachment is missing"
+                .to_string(),
+        ));
+    };
+    let StateAttachmentBody::Discussions(hash) = attachment.body else {
+        return Err(ProtocolError::InvalidState(
+            "packed discussions attachment has the wrong kind".to_string(),
+        ));
+    };
+    let blob = repo.store().get_blob(&hash)?.ok_or_else(|| {
+        ProtocolError::InvalidState(format!(
+            "packed discussions attachment references missing blob {hash}"
+        ))
+    })?;
+    DiscussionsBlob::decode(blob.content())
+        .map(|blob| blob.discussions)
+        .map_err(|error| ProtocolError::InvalidState(error.to_string()))
+}
+
+fn context_from_pull_pack(
+    repo: &Repository,
+    state_id: StateId,
+) -> Result<Vec<(ContextTarget, ContextBlob)>, ProtocolError> {
+    let Some(attachment) = repo.latest_state_attachment(&state_id, StateAttachmentKind::Context)?
+    else {
+        return Err(ProtocolError::InvalidState(
+            "pull bootstrap advertised packed context but the attachment is missing".to_string(),
+        ));
+    };
+    let StateAttachmentBody::Context(root) = attachment.body else {
+        return Err(ProtocolError::InvalidState(
+            "packed context attachment has the wrong kind".to_string(),
+        ));
+    };
+    let mut entries = repo
+        .list_context_entries(&root, None)?
+        .into_iter()
+        .map(|entry| (entry.target, entry.blob))
+        .collect::<Vec<_>>();
+    for (_, blob) in &mut entries {
+        blob.annotations
+            .retain(|annotation| annotation.status == AnnotationStatus::Active);
+    }
+    entries.retain(|(_, blob)| !blob.annotations.is_empty());
+    Ok(entries)
 }
 
 struct PullWantPlan {
@@ -2349,22 +2486,178 @@ fn apply_marker_snapshot(repo: &Repository, checkpoint: &[u8]) -> Result<bool, P
         };
         let state_id =
             StateId::parse(state_id).map_err(|err| ProtocolError::InvalidState(err.to_string()))?;
-        if !repo.store().has_state(&state_id)? {
-            continue;
-        }
-        let name = MarkerName::from(name);
-        match repo.refs().get_marker(&name)? {
-            Some(existing) if existing == state_id => {}
-            Some(existing) => repo.set_marker_recorded_cas(
-                &name,
-                refs::RefExpectation::Value(existing),
-                &state_id,
-            )?,
-            None => repo.create_marker_recorded(&name, &state_id)?,
-        }
+        apply_marker_entry(repo, name, state_id)?;
     }
 
     Ok(true)
+}
+
+fn apply_marker_entry(
+    repo: &Repository,
+    name: &str,
+    state_id: StateId,
+) -> Result<(), ProtocolError> {
+    if !repo.store().has_state(&state_id)? {
+        return Ok(());
+    }
+    let name = MarkerName::from(name);
+    match repo.refs().get_marker(&name)? {
+        Some(existing) if existing == state_id => {}
+        Some(existing) => {
+            repo.set_marker_recorded_cas(&name, refs::RefExpectation::Value(existing), &state_id)?
+        }
+        None => repo.create_marker_recorded(&name, &state_id)?,
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod pull_bootstrap_tests {
+    use chrono::Utc;
+    use objects::object::{
+        Annotation, AnnotationKind, AnnotationScope, Attribution, Blob, DiscussionResolution,
+        DiscussionTurn, Principal, StateAttachment, SymbolAnchor, VisibilityTier,
+    };
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn bootstrap_decoder_accepts_structured_empty_metadata_and_old_server_falls_back() {
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        std::fs::write(temp.path().join("README.md"), "bootstrap\n").expect("write fixture");
+        let snapshot = repo
+            .snapshot(Some("bootstrap marker".to_string()), None)
+            .expect("snapshot");
+        let payload = rmp_serde::to_vec_named(&(
+            true,
+            Vec::<Discussion>::new(),
+            true,
+            Vec::<(ContextTarget, ContextBlob)>::new(),
+        ))
+        .expect("encode server-compatible pull bootstrap");
+        let checkpoint = format!(
+            "heddle-markers-v1\nrelease\t{}\n{PULL_BOOTSTRAP_LINE_PREFIX}{}\t{}\n",
+            snapshot.state_id.to_string_full(),
+            hex::encode(payload),
+            StateId::from_bytes([0; 32]).to_string_full()
+        );
+
+        let decoded = decode_pull_bootstrap(checkpoint.as_bytes())
+            .expect("decode pull bootstrap")
+            .expect("new-server header must select bootstrap metadata");
+        assert!(decoded.discussions.is_empty());
+        assert!(decoded.context.is_empty());
+        assert!(
+            apply_marker_snapshot(&repo, checkpoint.as_bytes())
+                .expect("the legacy marker parser accepts the additive ASCII line")
+        );
+        assert_eq!(
+            repo.refs()
+                .get_marker(&MarkerName::from("release"))
+                .expect("read marker"),
+            Some(snapshot.state_id)
+        );
+        assert!(
+            decode_pull_bootstrap(b"heddle-markers-v1\n")
+                .expect("legacy checkpoint is valid")
+                .is_none(),
+            "an old server must retain the unary metadata fallback"
+        );
+    }
+
+    #[test]
+    fn malformed_advertised_bootstrap_fails_loud() {
+        let error = decode_pull_bootstrap(
+            format!(
+                "heddle-markers-v1\nheddle-pull-bootstrap-v1:not-hex\t{}\n",
+                StateId::from_bytes([0; 32]).to_string_full()
+            )
+            .as_bytes(),
+        )
+        .expect_err("advertised but malformed metadata must not silently fall back");
+        assert!(error.to_string().contains("decode pull bootstrap"));
+    }
+
+    #[test]
+    fn packed_bootstrap_resolves_the_same_discussion_and_context_domain_content() {
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").expect("write source");
+        let snapshot = repo
+            .snapshot(Some("seed".to_string()), None)
+            .expect("snapshot");
+        let principal = Principal::new("Ada", "ada@example.com");
+        let discussion = Discussion {
+            id: "discussion-1".to_string(),
+            anchor: SymbolAnchor::new("lib.rs", "run"),
+            opened_against_state: snapshot.state_id,
+            opened_at: 1_700_000_000,
+            thread_ref: None,
+            turns: vec![DiscussionTurn {
+                author: principal.clone(),
+                body: "keep this invariant".to_string(),
+                posted_at: 1_700_000_001,
+            }],
+            resolution: DiscussionResolution::Open,
+            body_changed_since_open: false,
+            orphaned: false,
+            visibility: VisibilityTier::Public,
+            resolved_annotation_id: None,
+        };
+        let discussions_blob = DiscussionsBlob::new(vec![discussion.clone()]);
+        let discussions_hash = repo
+            .store()
+            .put_blob(&Blob::from(
+                discussions_blob.encode().expect("encode discussions"),
+            ))
+            .expect("store discussions");
+        repo.put_state_attachment(&StateAttachment {
+            state_id: snapshot.state_id,
+            body: StateAttachmentBody::Discussions(discussions_hash),
+            attribution: Attribution::human(principal.clone()),
+            created_at: Utc::now(),
+            supersedes: None,
+        })
+        .expect("attach discussions");
+
+        let target = ContextTarget::file("lib.rs").expect("context target");
+        let annotation = Annotation::new(
+            AnnotationScope::File,
+            AnnotationKind::Invariant,
+            "run remains public".to_string(),
+            vec!["contract".to_string()],
+            principal.to_string(),
+            1_700_000_002,
+            None,
+            Some(snapshot.state_id),
+        );
+        let context_blob = ContextBlob::new(vec![annotation.clone()]);
+        let context_root = repo
+            .set_context_blob(None, &target, &context_blob)
+            .expect("store context");
+        repo.put_state_attachment(&StateAttachment {
+            state_id: snapshot.state_id,
+            body: StateAttachmentBody::Context(context_root),
+            attribution: Attribution::human(principal),
+            created_at: Utc::now(),
+            supersedes: None,
+        })
+        .expect("attach context");
+
+        let resolved = PullBootstrapMetadata {
+            discussions_from_pack: true,
+            discussions: Vec::new(),
+            context_from_pack: true,
+            context: Vec::new(),
+        }
+        .resolve(&repo, Some(snapshot.state_id))
+        .expect("resolve packed bootstrap");
+
+        assert_eq!(resolved.discussions, vec![discussion]);
+        assert_eq!(resolved.context, vec![(target, context_blob)]);
+    }
 }
 
 fn state_id_string_to_bytes(s: &str) -> Vec<u8> {
