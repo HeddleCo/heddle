@@ -535,6 +535,9 @@ mod tests {
         let cache = SemanticParseCache::default();
         cache.clear();
         let options = SemanticDiffOptions::default();
+        let expected =
+            crate::analysis::classify_modification_with_confidence(Path::new("lib.rs"), old, new);
+        crate::parser::reset_parse_count();
 
         let engine = SemanticEngine::new(
             file_changes,
@@ -545,8 +548,7 @@ mod tests {
         );
 
         let result = engine.full().expect("semantic diff should succeed");
-        let expected =
-            crate::analysis::classify_modification_with_confidence(Path::new("lib.rs"), old, new);
+        let parse_count = crate::parser::parse_count();
 
         assert!(result.changes.iter().any(|change| matches!(
             change,
@@ -561,6 +563,10 @@ mod tests {
                 && confidence == &Some(expected.2)
         )));
         assert_eq!(cache.stats().stores, 2);
+        assert_eq!(
+            parse_count, 2,
+            "one modified file has two unique contents and each must reach tree-sitter once"
+        );
     }
 
     #[test]

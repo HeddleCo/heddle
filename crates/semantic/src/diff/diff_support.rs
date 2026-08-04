@@ -12,9 +12,9 @@ use objects::object::{DiffKind, FileChange, FileChangeSet, SemanticChange};
 use super::{diff_options::SemanticDiffOptions, diff_types::SemanticFallbackReason};
 use crate::{
     analysis::{
-        AggregationResult, classify_modification_with_confidence,
-        classify_modification_with_parsed, detect_file_renames,
-        detect_function_changes_with_parsed, detect_import_changes_with_parsed,
+        AggregationResult, classify_modification_with_confidence, classify_with_parsed,
+        detect_file_renames, detect_function_changes_with_parsed,
+        detect_import_changes_with_parsed,
     },
     parser::ParsedFile,
 };
@@ -290,12 +290,9 @@ fn push_modified_change(
                             .and_then(|value| value.as_deref()),
                     )
             }) {
-                Some((old_parsed, new_parsed)) => classify_modification_with_parsed(
-                    old_content,
-                    new_content,
-                    old_parsed,
-                    new_parsed,
-                ),
+                Some((old_parsed, new_parsed)) => {
+                    classify_with_parsed(old_content, new_content, old_parsed, new_parsed)
+                }
                 None => {
                     classify_modification_with_confidence(&change.path, old_content, new_content)
                 }

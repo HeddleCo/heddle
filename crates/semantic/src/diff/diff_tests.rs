@@ -1025,7 +1025,16 @@ fn semantic_large_diff_benchmark_matrix() {
         },
     ];
 
+    let filter = std::env::var("HEDDLE_SEMANTIC_BENCH_FILTER").ok();
+    let mut matched_rows = 0usize;
     for row in rows {
+        if filter
+            .as_deref()
+            .is_some_and(|filter| !row.name.contains(filter))
+        {
+            continue;
+        }
+        matched_rows += 1;
         let store = InMemoryStore::new();
         let fixture = build_semantic_bench_fixture(&store, &row.fixture);
         let cache = SemanticParseCache::new(1024);
@@ -1075,6 +1084,10 @@ fn semantic_large_diff_benchmark_matrix() {
             result.fallback_reasons
         );
     }
+    assert!(
+        matched_rows > 0,
+        "semantic benchmark filter matched no rows"
+    );
 }
 
 struct BenchFixtureData {

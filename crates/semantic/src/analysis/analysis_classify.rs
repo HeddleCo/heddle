@@ -46,16 +46,16 @@ pub fn classify_modification_with_confidence(
     let old_parsed = ParsedFile::parse(old_content, language);
     let new_parsed = ParsedFile::parse(new_content, language);
 
-    classify_parse_result(
-        old_content,
-        new_content,
-        old_parsed.as_ref(),
-        new_parsed.as_ref(),
-        token_sim.value,
-    )
+    match (old_parsed.as_ref(), new_parsed.as_ref()) {
+        (Some(old_ast), Some(new_ast)) => {
+            classify_with_parsed(old_content, new_content, old_ast, new_ast)
+        }
+        _ => classify_without_ast(old_content, new_content, token_sim.value),
+    }
 }
 
-pub(crate) fn classify_modification_with_parsed(
+/// Classify a modification using ASTs already parsed by the caller.
+pub(crate) fn classify_with_parsed(
     old_content: &str,
     new_content: &str,
     old_ast: &ParsedFile,
@@ -105,24 +105,6 @@ fn classify_common_prefix(old_content: &str, new_content: &str) -> TokenSimilari
     TokenSimilarityCheck {
         value: token_sim,
         result: None,
-    }
-}
-
-fn classify_parse_result(
-    old_content: &str,
-    new_content: &str,
-    old_parsed: Option<&ParsedFile>,
-    new_parsed: Option<&ParsedFile>,
-    token_sim: f64,
-) -> ClassificationResult {
-    match (old_parsed, new_parsed) {
-        (Some(old_ast), Some(new_ast)) => {
-            classify_with_ast(old_content, new_content, old_ast, new_ast)
-        }
-        _ => {
-            // Parse failed — fall back to token-level heuristics (lower confidence).
-            classify_without_ast(old_content, new_content, token_sim)
-        }
     }
 }
 
@@ -345,14 +327,36 @@ mod tests {
 
     #[test]
     fn test_classify_with_parsed_matches_direct_classifier() {
-        let old = "use std::io;\n\nfn compute() -> i32 {\n    1\n}\n";
-        let new = "use std::io;\nuse std::fs;\n\nfn compute() -> i32 {\n    1\n}\n";
-        let old_ast = ParsedFile::parse(old, Language::Rust).expect("old Rust should parse");
-        let new_ast = ParsedFile::parse(new, Language::Rust).expect("new Rust should parse");
+        let fixtures = [
+            (
+                "formatting",
+                "fn compute() -> i32 { 1 }\n",
+                "fn compute() -> i32 {\n    1\n}\n",
+            ),
+            (
+                "comments",
+                "// before\nfn compute() -> i32 { 1 }\n",
+                "// after\nfn compute() -> i32 { 1 }\n",
+            ),
+            (
+                "imports",
+                "use std::io;\n\nfn compute() -> i32 {\n    1\n}\n",
+                "use std::io;\nuse std::fs;\n\nfn compute() -> i32 {\n    1\n}\n",
+            ),
+            (
+                "logic",
+                "fn compute(input: i32) -> i32 { input + 1 }\n",
+                "fn compute(input: i32) -> i32 { input * 2 }\n",
+            ),
+        ];
 
-        let direct = classify_modification_with_confidence(Path::new("test.rs"), old, new);
-        let cached = classify_modification_with_parsed(old, new, &old_ast, &new_ast);
+        for (name, old, new) in fixtures {
+            let old_ast = ParsedFile::parse(old, Language::Rust).expect("old Rust should parse");
+            let new_ast = ParsedFile::parse(new, Language::Rust).expect("new Rust should parse");
+            let direct = classify_modification_with_confidence(Path::new("test.rs"), old, new);
+            let cached = classify_with_parsed(old, new, &old_ast, &new_ast);
 
-        assert_eq!(cached, direct);
+            assert_eq!(cached, direct, "classification drift for {name}");
+        }
     }
 }

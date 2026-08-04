@@ -474,6 +474,8 @@ fn _state_anchor(_: &State) {}
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use objects::{
         object::{Attribution, Principal, State, StateId, Tree, TreeEntry},
         store::InMemoryStore,
@@ -535,6 +537,71 @@ mod tests {
         let id_c = state_c.state_id;
 
         (id_c, store)
+    }
+
+    fn build_semantic_benchmark_chain(
+        state_count: usize,
+        functions_per_file: usize,
+    ) -> (StateId, InMemoryStore) {
+        assert!(state_count >= 2);
+        let store = InMemoryStore::new();
+        let mut parent = None;
+
+        for state_index in 0..state_count {
+            let mut source = String::new();
+            for function_index in 0..functions_per_file {
+                writeln!(
+                    source,
+                    "fn compute_{function_index}() -> usize {{ {state_index} + {function_index} }}"
+                )
+                .expect("writing Rust fixture to String should succeed");
+            }
+            let blob = store
+                .put_blob(&objects::object::Blob::from_slice(source.as_bytes()))
+                .unwrap();
+            let tree = store
+                .put_tree(&Tree::from_entries(vec![
+                    TreeEntry::file("lib.rs".to_string(), blob, false).unwrap(),
+                ]))
+                .unwrap();
+            let state = State::new(
+                tree,
+                parent.into_iter().collect(),
+                Attribution::human(principal("benchmark")),
+            );
+            store.put_state(&state).unwrap();
+            parent = Some(state.state_id);
+        }
+
+        (parent.expect("benchmark chain has a head"), store)
+    }
+
+    #[test]
+    #[ignore = "semantic hot-spots benchmark; run explicitly with --release --ignored --nocapture"]
+    fn semantic_hot_spots_parse_reuse_benchmark() {
+        const STATE_COUNT: usize = 201;
+        const FUNCTIONS_PER_FILE: usize = 100;
+
+        let (head, store) = build_semantic_benchmark_chain(STATE_COUNT, FUNCTIONS_PER_FILE);
+        SemanticParseCache::shared().clear();
+        crate::parser::reset_parse_count();
+
+        let started = Instant::now();
+        let report = analyze_hot_spots(&store, head, &HotSpotParams::default()).unwrap();
+        let elapsed = started.elapsed();
+        let parse_count = crate::parser::parse_count();
+        let state_pairs = STATE_COUNT - 1;
+
+        println!(
+            "semantic hot-spots bench state_pairs={state_pairs} unique_contents={STATE_COUNT} tree_sitter_parses={parse_count} parses_per_unique_content={:.2} elapsed_ms={:.3}",
+            parse_count as f64 / STATE_COUNT as f64,
+            elapsed.as_secs_f64() * 1_000.0,
+        );
+        assert_eq!(report.states_walked, state_pairs);
+        assert_eq!(
+            parse_count, STATE_COUNT,
+            "hot-spots must parse each unique content once across adjacent state pairs"
+        );
     }
 
     #[test]
