@@ -421,6 +421,9 @@ struct HotBuffer {
     bytes: Vec<u8>,
     /// Last write time, used by the idle-promotion check.
     last_touched: Instant,
+    /// Monotonic mutation generation used to keep promotion from
+    /// retiring a buffer that changed while CAS I/O was in flight.
+    revision: u64,
 }
 
 /// A single warm-tier entry — a path that has been promoted to CAS
@@ -430,6 +433,159 @@ struct PendingEntry {
     blob: ContentHash,
     mode: FileMode,
     size: u64,
+}
+
+/// Direct-child summary stored by the pending namespace index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingChildKind {
+    HotFile {
+        node: NodeId,
+        size: u64,
+        mode: FileMode,
+    },
+    WarmFile {
+        size: u64,
+        mode: FileMode,
+    },
+    Symlink {
+        size: u64,
+    },
+    Dir,
+}
+
+#[derive(Default)]
+struct DirChildren {
+    names: BTreeSet<OsString>,
+}
+
+/// Incremental projection of the pending namespace.
+///
+/// `entries` owns the exact pending facts while `by_dir` projects
+/// those facts onto every ancestor edge. A path insertion/removal is
+/// therefore O(path depth), and a directory read only visits that
+/// directory's direct children.
+#[derive(Default)]
+struct PendingChildIndex {
+    entries: BTreeMap<PathBuf, PendingChildKind>,
+    by_dir: BTreeMap<PathBuf, DirChildren>,
+}
+
+impl PendingChildIndex {
+    fn insert(&mut self, path: PathBuf, kind: PendingChildKind) {
+        let is_new = self.entries.insert(path.clone(), kind).is_none();
+        if !is_new {
+            return;
+        }
+
+        let mut child = path.as_path();
+        while !child.as_os_str().is_empty() {
+            let Some(parent) = child.parent() else {
+                break;
+            };
+            let Some(name) = child.file_name() else {
+                break;
+            };
+            self.by_dir
+                .entry(parent.to_path_buf())
+                .or_default()
+                .names
+                .insert(name.to_os_string());
+            child = parent;
+        }
+    }
+
+    fn remove(&mut self, path: &Path) -> Option<PendingChildKind> {
+        let removed = self.entries.remove(path)?;
+        let mut child = path;
+        while !child.as_os_str().is_empty() {
+            let child_still_exists = self.entries.contains_key(child)
+                || self
+                    .by_dir
+                    .get(child)
+                    .is_some_and(|children| !children.names.is_empty());
+            if child_still_exists {
+                break;
+            }
+
+            let Some(parent) = child.parent() else {
+                break;
+            };
+            let Some(name) = child.file_name() else {
+                break;
+            };
+            let remove_parent = if let Some(children) = self.by_dir.get_mut(parent) {
+                children.names.remove(name);
+                children.names.is_empty()
+            } else {
+                false
+            };
+            if remove_parent {
+                self.by_dir.remove(parent);
+            }
+            child = parent;
+        }
+        Some(removed)
+    }
+
+    fn update_file_mode(&mut self, path: &Path, mode: FileMode) {
+        if let Some(
+            PendingChildKind::HotFile { mode: current, .. }
+            | PendingChildKind::WarmFile { mode: current, .. },
+        ) = self.entries.get_mut(path)
+        {
+            *current = mode;
+        }
+    }
+
+    fn rebase_prefix(&mut self, old: &Path, new: &Path) {
+        self.remove(new);
+        let rebased: Vec<(PathBuf, PathBuf, PendingChildKind)> = self
+            .entries
+            .iter()
+            .filter_map(|(path, kind)| {
+                let tail = path.strip_prefix(old).ok()?;
+                Some((path.clone(), new.join(tail), *kind))
+            })
+            .collect();
+        for (old_path, _, _) in &rebased {
+            self.remove(old_path);
+        }
+        for (_, new_path, kind) in rebased {
+            self.insert(new_path, kind);
+        }
+    }
+
+    fn dir_exists(&self, dir: &Path) -> bool {
+        matches!(self.entries.get(dir), Some(PendingChildKind::Dir))
+            || self
+                .by_dir
+                .get(dir)
+                .is_some_and(|children| !children.names.is_empty())
+    }
+
+    fn children_at(&self, dir: &Path) -> Vec<(String, PendingChildKind)> {
+        let Some(children) = self.by_dir.get(dir) else {
+            return Vec::new();
+        };
+        children
+            .names
+            .iter()
+            .filter_map(|name| {
+                let name = name.to_str()?.to_string();
+                let path = join_child(dir, &name);
+                let kind = match self.entries.get(&path).copied() {
+                    Some(PendingChildKind::Dir) | None => PendingChildKind::Dir,
+                    Some(kind) => kind,
+                };
+                Some((name, kind))
+            })
+            .collect()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.by_dir.clear();
+    }
 }
 
 /// Per-NodeId lifecycle state. Tracks both whether an inode is still
@@ -512,6 +668,10 @@ pub struct Pending<'brand> {
     /// `symlink`; capture hashes them into a CAS blob. Symlinks are
     /// not openable for IO; no orphan story applies.
     symlinks: BTreeMap<PathBuf, Vec<u8>>,
+    /// Authoritative namespace projection for pending-only lookup and
+    /// enumeration. Updated in the same critical sections as the
+    /// path-keyed overlay maps.
+    child_index: PendingChildIndex,
     /// Per-NodeId lifecycle state. See [`NodeState`]. Replaces the
     /// pre-spike `orphans: BTreeSet<u64>` + `open_handles:
     /// BTreeMap<u64, u32>` pair. Absence from this map is the third
@@ -622,13 +782,19 @@ impl<'brand> Pending<'brand> {
         w: &crate::pending::KernelForgetWitness<'_, 'brand>,
     ) -> bool {
         let id = w.id();
+        let mut removed_path = None;
         if let Some(buf) = self.hot.remove(&id)
             && self.hot_by_path.get(&buf.path) == Some(&id)
         {
             self.hot_by_path.remove(&buf.path);
+            removed_path = Some(buf.path);
         }
         self.state.remove(&id);
-        self.warm.contains_key(&id)
+        let warm_survives = self.warm.contains_key(&id);
+        if !warm_survives && let Some(path) = removed_path {
+            self.child_index.remove(&path);
+        }
+        warm_survives
     }
 
     /// Apply the retention/clear pass of [`crate::pending::Pending::drain_for_capture`].
@@ -654,6 +820,7 @@ impl<'brand> Pending<'brand> {
         self.dir_tombstones.clear();
         self.explicit_dirs.clear();
         self.symlinks.clear();
+        self.child_index.clear();
     }
 
     /// Test-only: insert a per-NodeId lifecycle entry directly,
@@ -679,6 +846,7 @@ impl<'brand> Pending<'brand> {
                 mode: FileMode::Normal,
                 bytes,
                 last_touched: Instant::now(),
+                revision: 0,
             },
         );
     }
@@ -1545,6 +1713,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             pending.state.remove(&node_id);
         }
         pending.symlinks.remove(&path);
+        pending.child_index.remove(&path);
         pending.tombstones.insert(path.clone());
         drop(pending);
         if bound_id.is_some() {
@@ -1647,9 +1816,18 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                     mode,
                     bytes: Vec::new(),
                     last_touched: Instant::now(),
+                    revision: 0,
                 },
             );
-            pending.hot_by_path.insert(child_path, node.0);
+            pending.hot_by_path.insert(child_path.clone(), node.0);
+            pending.child_index.insert(
+                child_path,
+                PendingChildKind::HotFile {
+                    node,
+                    size: 0,
+                    mode,
+                },
+            );
         }
 
         Ok(Entry {
@@ -1684,6 +1862,9 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             // Clear any colliding file tombstone too.
             pending.tombstones.remove(&child_path);
             pending.explicit_dirs.insert(child_path.clone());
+            pending
+                .child_index
+                .insert(child_path.clone(), PendingChildKind::Dir);
         }
 
         let node = self.intern(NodeRecord::PendingDir { path: child_path });
@@ -1755,6 +1936,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             // Symlinks are path-keyed; their overlay goes when the
             // directory entry goes.
             pending.symlinks.remove(&child_path);
+            pending.child_index.remove(&child_path);
             pending.tombstones.insert(child_path.clone());
         }
         // Retire the path→inode mapping so a subsequent `create_file`
@@ -1796,6 +1978,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         {
             let mut pending = self.inner.pending.lock_or_poisoned();
             pending.explicit_dirs.remove(&child_path);
+            pending.child_index.remove(&child_path);
             pending.dir_tombstones.insert(child_path.clone());
         }
         // Codex r12 thread 3293510310 (P1): retire the path → inode
@@ -2008,6 +2191,48 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                 && let Some(buf) = pending.hot.get_mut(&src_id)
             {
                 buf.path = new_path.clone();
+                buf.revision = buf.revision.wrapping_add(1);
+            }
+            match src.kind {
+                NodeKind::Directory => pending.child_index.rebase_prefix(&old_path, &new_path),
+                NodeKind::File => {
+                    let moved = pending.child_index.remove(&old_path);
+                    pending.child_index.remove(&new_path);
+                    let indexed = moved.or_else(|| {
+                        let id = rebased_src?;
+                        if let Some(buf) = pending.hot.get(&id) {
+                            Some(PendingChildKind::HotFile {
+                                node: NodeId(id),
+                                size: buf.bytes.len() as u64,
+                                mode: buf.mode,
+                            })
+                        } else {
+                            pending
+                                .warm
+                                .get(&id)
+                                .map(|entry| PendingChildKind::WarmFile {
+                                    size: entry.size,
+                                    mode: entry.mode,
+                                })
+                        }
+                    });
+                    if let Some(kind) = indexed {
+                        pending.child_index.insert(new_path.clone(), kind);
+                    }
+                }
+                NodeKind::Symlink => {
+                    pending.child_index.remove(&old_path);
+                    pending.child_index.remove(&new_path);
+                    if let Some(size) = pending
+                        .symlinks
+                        .get(&new_path)
+                        .map(|target| target.len() as u64)
+                    {
+                        pending
+                            .child_index
+                            .insert(new_path.clone(), PendingChildKind::Symlink { size });
+                    }
+                }
             }
             if let Some(dest_id) = displaced_dest {
                 // T3: the displaced destination transitions to Orphan
@@ -2116,6 +2341,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         if let Some(id) = pending.hot_by_path.remove(old_path) {
             if let Some(buf) = pending.hot.get_mut(&id) {
                 buf.path = new_path.to_path_buf();
+                buf.revision = buf.revision.wrapping_add(1);
             }
             pending.hot_by_path.insert(new_path.to_path_buf(), id);
         }
@@ -2246,6 +2472,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         for (id, new_p) in hot_path_updates {
             if let Some(buf) = pending.hot.get_mut(&id) {
                 buf.path = new_p;
+                buf.revision = buf.revision.wrapping_add(1);
             }
         }
         // Ensure the destination directory itself is registered.
@@ -2376,6 +2603,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                 // the live buffer for non-orphan callers.
                 if let Some(buf) = pending.hot.get_mut(&node.0) {
                     buf.mode = new_mode;
+                    buf.revision = buf.revision.wrapping_add(1);
                 }
                 // Orphan branch: `unlink_entry` / `rename_entry`
                 // recorded this NodeId because the kernel still
@@ -2392,6 +2620,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                         && let Some(buf) = pending.hot.get_mut(&other_id)
                     {
                         buf.mode = new_mode;
+                        buf.revision = buf.revision.wrapping_add(1);
                     }
                     // Warm is NodeId-keyed: rebind via inodes if the
                     // path still resolves Live to a tracked NodeId.
@@ -2404,6 +2633,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                     {
                         entry.mode = new_mode;
                     }
+                    pending.child_index.update_file_mode(&path, new_mode);
                 }
             }
         }
@@ -2477,6 +2707,18 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             {
                 buf.bytes.resize(new_size, 0);
                 buf.last_touched = Instant::now();
+                buf.revision = buf.revision.wrapping_add(1);
+                let mode = buf.mode;
+                if !orphan {
+                    pending.child_index.insert(
+                        path.clone(),
+                        PendingChildKind::HotFile {
+                            node: NodeId(id),
+                            size: new_size as u64,
+                            mode,
+                        },
+                    );
+                }
                 Phase1::ResizedInPlace
             } else {
                 let seed = if orphan {
@@ -2521,6 +2763,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                     mode,
                     bytes,
                     last_touched: Instant::now(),
+                    revision: 0,
                 },
             );
         } else {
@@ -2532,9 +2775,18 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                     mode,
                     bytes,
                     last_touched: Instant::now(),
+                    revision: 0,
                 },
             );
-            pending.hot_by_path.insert(path, node.0);
+            pending.hot_by_path.insert(path.clone(), node.0);
+            pending.child_index.insert(
+                path,
+                PendingChildKind::HotFile {
+                    node,
+                    size: new_size as u64,
+                    mode,
+                },
+            );
         }
         Ok(())
     }
@@ -2561,6 +2813,10 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             let mut pending = self.inner.pending.lock_or_poisoned();
             pending.tombstones.remove(&child_path);
             pending.symlinks.insert(child_path.clone(), target_bytes);
+            pending.child_index.insert(
+                child_path.clone(),
+                PendingChildKind::Symlink { size: target_len },
+            );
         }
         let node = self.intern(NodeRecord::PendingSymlink { path: child_path });
         Ok(Entry {
@@ -2688,41 +2944,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             return false;
         }
         let pending = self.inner.pending.lock_or_poisoned();
-        if pending.explicit_dirs.contains(dir) {
-            return true;
-        }
-        let prefix = dir;
-        let probe = |path: &Path| -> bool {
-            path.strip_prefix(prefix)
-                .ok()
-                .and_then(|tail| tail.components().next())
-                .is_some()
-        };
-        // Warm is NodeId-keyed under the unified shape; resolve paths
-        // via the inode registry. Skip orphans (their NodeRecord may
-        // still carry the pre-orphan path, but bytes are unreachable
-        // by path post-T1/T3).
-        let warm_under = {
-            let inodes = self.inner.inodes.lock_or_poisoned();
-            pending.warm.keys().any(|id| {
-                if pending.is_orphan(*id) {
-                    return false;
-                }
-                let Some(record) = inodes.by_id.get(id) else {
-                    return false;
-                };
-                match warm_path_of_record(record) {
-                    Some(p) => !pending.tombstones.contains(p) && probe(p),
-                    None => false,
-                }
-            })
-        };
-        warm_under
-            || pending
-                .hot_by_path
-                .keys()
-                .any(|p| !pending.tombstones.contains(p) && probe(p))
-            || pending.symlinks.keys().any(|p| probe(p))
+        pending.child_index.dir_exists(dir)
     }
 
     /// Direct children of `dir` that exist purely in the pending
@@ -2733,8 +2955,65 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     /// implicit dir of root). Tombstones suppress paths.
     fn pending_children_at(&self, dir: &Path) -> Vec<(String, PendingChildKind)> {
         let pending = self.inner.pending.lock_or_poisoned();
-        let mut out: BTreeMap<String, PendingChildKind> = BTreeMap::new();
+        pending.child_index.children_at(dir)
+    }
 
+    /// Pre-index implementation retained as a test-only differential
+    /// oracle and negative control. `work` counts pending entries
+    /// inspected, making the former O(all pending) behavior explicit.
+    #[cfg(test)]
+    fn pending_dir_exists_full_scan(&self, dir: &Path) -> (bool, usize) {
+        if dir.as_os_str().is_empty() {
+            return (false, 0);
+        }
+        let pending = self.inner.pending.lock_or_poisoned();
+        let mut work = 1;
+        if pending.explicit_dirs.contains(dir) {
+            return (true, work);
+        }
+        let probe = |path: &Path| {
+            path.strip_prefix(dir)
+                .ok()
+                .and_then(|tail| tail.components().next())
+                .is_some()
+        };
+        let inodes = self.inner.inodes.lock_or_poisoned();
+        for id in pending.warm.keys() {
+            work += 1;
+            if pending.is_orphan(*id) {
+                continue;
+            }
+            if let Some(path) = inodes.by_id.get(id).and_then(warm_path_of_record)
+                && !pending.tombstones.contains(path)
+                && probe(path)
+            {
+                return (true, work);
+            }
+        }
+        drop(inodes);
+        for path in pending.hot_by_path.keys() {
+            work += 1;
+            if !pending.tombstones.contains(path) && probe(path) {
+                return (true, work);
+            }
+        }
+        for path in pending.symlinks.keys() {
+            work += 1;
+            if probe(path) {
+                return (true, work);
+            }
+        }
+        (false, work)
+    }
+
+    #[cfg(test)]
+    fn pending_children_at_full_scan(
+        &self,
+        dir: &Path,
+    ) -> (Vec<(String, PendingChildKind)>, usize) {
+        let pending = self.inner.pending.lock_or_poisoned();
+        let mut out: BTreeMap<String, PendingChildKind> = BTreeMap::new();
+        let mut work = 0;
         let project = |path: &Path| -> Option<(String, bool)> {
             let suffix = if dir.as_os_str().is_empty() {
                 Some(path)
@@ -2742,16 +3021,15 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                 path.strip_prefix(dir).ok()
             }?;
             let mut comps = suffix.components();
-            let first = comps.next()?;
-            let name = match first {
-                Component::Normal(n) => n.to_str()?.to_string(),
+            let name = match comps.next()? {
+                Component::Normal(name) => name.to_str()?.to_string(),
                 _ => return None,
             };
-            let is_dir = comps.next().is_some();
-            Some((name, is_dir))
+            Some((name, comps.next().is_some()))
         };
 
-        for (path, node_id) in pending.hot_by_path.iter() {
+        for (path, node_id) in &pending.hot_by_path {
+            work += 1;
             if pending.tombstones.contains(path) {
                 continue;
             }
@@ -2771,18 +3049,14 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                 );
             }
         }
-        // Warm is NodeId-keyed; resolve each entry's current path via
-        // the inode registry. Skip orphans (no path identity) and
-        // skip entries whose path tombstones (deleted overlays).
+
         let inodes = self.inner.inodes.lock_or_poisoned();
-        for (id, entry) in pending.warm.iter() {
+        for (id, entry) in &pending.warm {
+            work += 1;
             if pending.is_orphan(*id) {
                 continue;
             }
-            let Some(record) = inodes.by_id.get(id) else {
-                continue;
-            };
-            let Some(path) = warm_path_of_record(record) else {
+            let Some(path) = inodes.by_id.get(id).and_then(warm_path_of_record) else {
                 continue;
             };
             if pending.tombstones.contains(path) {
@@ -2801,7 +3075,9 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             }
         }
         drop(inodes);
-        for (path, target) in pending.symlinks.iter() {
+
+        for (path, target) in &pending.symlinks {
+            work += 1;
             let Some((name, is_dir)) = project(path) else {
                 continue;
             };
@@ -2813,17 +3089,94 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                 });
             }
         }
-        // Explicit empty mkdirs that haven't picked up any pending
-        // children yet. Surface them as direct children when their
-        // parent matches `dir`, and as transitive implicit dirs when
-        // an ancestor matches.
-        for explicit in pending.explicit_dirs.iter() {
-            let Some((name, _is_deeper)) = project(explicit) else {
-                continue;
-            };
-            out.entry(name).or_insert(PendingChildKind::Dir);
+        for path in &pending.explicit_dirs {
+            work += 1;
+            if let Some((name, _)) = project(path) {
+                out.entry(name).or_insert(PendingChildKind::Dir);
+            }
         }
-        out.into_iter().collect()
+        (out.into_iter().collect(), work)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_index_matches_full_scan(&self) -> std::result::Result<(), String> {
+        let dirs = {
+            let pending = self.inner.pending.lock_or_poisoned();
+            let inodes = self.inner.inodes.lock_or_poisoned();
+            let mut paths: Vec<PathBuf> = pending.hot_by_path.keys().cloned().collect();
+            paths.extend(pending.symlinks.keys().cloned());
+            paths.extend(pending.explicit_dirs.iter().cloned());
+            paths.extend(
+                pending
+                    .warm
+                    .keys()
+                    .filter(|id| !pending.is_orphan(**id))
+                    .filter_map(|id| inodes.by_id.get(id).and_then(warm_path_of_record))
+                    .map(Path::to_path_buf),
+            );
+            let mut dirs = BTreeSet::from([PathBuf::new()]);
+            for path in paths {
+                let mut cursor = path.parent();
+                while let Some(dir) = cursor {
+                    dirs.insert(dir.to_path_buf());
+                    cursor = dir.parent();
+                }
+                if pending.explicit_dirs.contains(&path) {
+                    dirs.insert(path);
+                }
+            }
+            dirs
+        };
+
+        for dir in dirs {
+            let indexed_exists = self.pending_dir_exists(&dir);
+            let (scanned_exists, _) = self.pending_dir_exists_full_scan(&dir);
+            if indexed_exists != scanned_exists {
+                return Err(format!(
+                    "exists mismatch at {}: indexed={indexed_exists}, scan={scanned_exists}",
+                    dir.display()
+                ));
+            }
+            let indexed_children = self.pending_children_at(&dir);
+            let (scanned_children, _) = self.pending_children_at_full_scan(&dir);
+            if indexed_children != scanned_children {
+                return Err(format!(
+                    "children mismatch at {}: indexed={indexed_children:?}, scan={scanned_children:?}",
+                    dir.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_index_work(&self, dir: &Path) -> (usize, usize, usize, usize) {
+        let indexed = self.inner.pending.lock_or_poisoned();
+        let indexed_exists_work = usize::from(!dir.as_os_str().is_empty());
+        let indexed_children_work = indexed
+            .child_index
+            .by_dir
+            .get(dir)
+            .map_or(0, |children| children.names.len());
+        drop(indexed);
+        let (_, scan_exists_work) = self.pending_dir_exists_full_scan(dir);
+        let (_, scan_children_work) = self.pending_children_at_full_scan(dir);
+        (
+            indexed_exists_work,
+            indexed_children_work,
+            scan_exists_work,
+            scan_children_work,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn time_pending_index(&self, dir: &Path, iterations: usize) -> Duration {
+        let start = Instant::now();
+        for _ in 0..iterations {
+            std::hint::black_box(self.pending_dir_exists(dir));
+            std::hint::black_box(self.pending_children_at(dir));
+        }
+        start.elapsed()
     }
 }
 
@@ -2953,26 +3306,6 @@ enum PendingHit {
     Tombstone,
 }
 
-/// Direct-child summary for `pending_children_at`. Either a file
-/// (with metadata enough to answer `lookup`/`stat`) or an implicit
-/// subdirectory whose actual content lives further down in the
-/// pending map.
-enum PendingChildKind {
-    HotFile {
-        node: NodeId,
-        size: u64,
-        mode: FileMode,
-    },
-    WarmFile {
-        size: u64,
-        mode: FileMode,
-    },
-    Symlink {
-        size: u64,
-    },
-    Dir,
-}
-
 impl<S: ObjectStore> MountInner<S> {
     /// Drain any hot buffer whose `last_touched` is older than
     /// `idle_after`. Mirrors `ContentAddressedMount::promote_idle_buffers`
@@ -3007,8 +3340,8 @@ impl<S: ObjectStore> MountInner<S> {
     /// fds need both). Only [`Self::release_node`] — invoked on the
     /// last-close-per-FUSE-open — clears the marker.
     fn flush_node(&self, node: NodeId) -> Result<()> {
-        let (path, mode, bytes) = {
-            let mut pending = self.pending.lock_or_poisoned();
+        let (path, mode, bytes, revision) = {
+            let pending = self.pending.lock_or_poisoned();
             // Orphan: keep the buffer alive across `flush` events.
             // POSIX open-unlinked semantics: bytes persist for the
             // surviving fds; the state survives so subsequent writes
@@ -3018,18 +3351,14 @@ impl<S: ObjectStore> MountInner<S> {
             if pending.is_orphan(node.0) {
                 return Ok(());
             }
-            let Some(buf) = pending.hot.remove(&node.0) else {
+            let Some(buf) = pending.hot.get(&node.0) else {
                 return Ok(());
             };
-            // Only retract the path mapping if it still points at
-            // us; an unlink-then-recreate that happened between
-            // write and flush may have moved the live mapping to a
-            // fresh inode (whose path coincidentally matches), and
-            // a blind `remove` would yank that fresh entry.
-            if pending.hot_by_path.get(&buf.path) == Some(&node.0) {
-                pending.hot_by_path.remove(&buf.path);
-            }
-            (buf.path, buf.mode, buf.bytes)
+            // Keep the hot buffer published while CAS I/O runs. The
+            // namespace index and `pending_lookup` therefore continue
+            // to agree throughout promotion instead of exposing a
+            // transient false-negative window.
+            (buf.path.clone(), buf.mode, buf.bytes.clone(), buf.revision)
         };
         let size = bytes.len() as u64;
         let blob = Blob::new(bytes);
@@ -3040,6 +3369,14 @@ impl<S: ObjectStore> MountInner<S> {
             .map_err(MountError::Store)?;
         debug!(?path, %blob_oid, size, "promoted hot buffer to CAS");
         let mut pending = self.pending.lock_or_poisoned();
+        if pending.is_orphan(node.0) {
+            return Ok(());
+        }
+        let Some(current) = pending.hot.get(&node.0) else {
+            return Ok(());
+        };
+        let unchanged =
+            current.revision == revision && current.path == path && current.mode == mode;
         // Warm is NodeId-keyed. The path-keyed tombstone clear below
         // is a separate concern (directory-entry level).
         pending.warm.insert(
@@ -3050,8 +3387,24 @@ impl<S: ObjectStore> MountInner<S> {
                 size,
             },
         );
-        // Promotion supersedes any prior tombstone for this path.
-        pending.tombstones.remove(&path);
+        if !unchanged {
+            return Ok(());
+        }
+
+        pending.hot.remove(&node.0);
+        // Only retract the path mapping if it still points at us; an
+        // unlink-then-recreate during CAS I/O may have rebound the
+        // same path to a fresh inode.
+        let owns_path = pending.hot_by_path.get(&path) == Some(&node.0);
+        if owns_path {
+            pending.hot_by_path.remove(&path);
+            pending
+                .child_index
+                .insert(path.clone(), PendingChildKind::WarmFile { size, mode });
+            // Promotion supersedes any prior tombstone only while this
+            // inode still owns the directory entry.
+            pending.tombstones.remove(&path);
+        }
         Ok(())
     }
 
@@ -3593,6 +3946,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
             mode,
             bytes: seed_bytes.unwrap_or_default(),
             last_touched: Instant::now(),
+            revision: 0,
         });
         // POSIX `pwrite` past EOF zero-fills the gap.
         if buf.bytes.len() < end {
@@ -3600,6 +3954,15 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
         }
         buf.bytes[offset..end].copy_from_slice(data);
         buf.last_touched = Instant::now();
+        buf.revision = buf.revision.wrapping_add(1);
+        if !orphan {
+            let indexed = PendingChildKind::HotFile {
+                node,
+                size: buf.bytes.len() as u64,
+                mode: buf.mode,
+            };
+            pending.child_index.insert(path.clone(), indexed);
+        }
         let written = data.len();
         drop(pending);
         // Cheap idle-promotion sweep — an agent that's gone quiet on
