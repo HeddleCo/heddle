@@ -58,7 +58,7 @@ impl TimelinePackSet {
         for (pack_path, index_path) in paired_pack_paths(&self.packs_dir)? {
             let reader = PackReader::open(&pack_path, &index_path)?;
             let pack_index = packs.len();
-            for id in reader.list_ids() {
+            for id in reader.list_ids()? {
                 let operation_id = timeline_id_from_pack_id(id)?;
                 operation_locations
                     .entry(operation_id)
@@ -180,7 +180,7 @@ fn verify_candidate_pack(
     expected: &BTreeMap<TimelineOperationId, Vec<u8>>,
 ) -> Result<()> {
     let reader = PackReader::from_slice(pack_data, index_data)?;
-    if reader.list_ids().len() != expected.len() {
+    if reader.list_ids()?.len() != expected.len() {
         return Err(HeddleError::InvalidObject(
             "new timeline pack entry count differs from canonical operations".to_string(),
         ));

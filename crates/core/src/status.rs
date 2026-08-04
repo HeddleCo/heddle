@@ -2093,22 +2093,44 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
     let (git_worktree_status_result, git_index) = load_git_overlay_status_and_index_plan(repo);
     let git_overlay_status_ms = git_overlay_status_start.elapsed().as_millis();
 
+    let native_worktree_status_start = Instant::now();
+    let (worktree_status_result, native_worktree_profile) =
+        if repo.capability() == RepositoryCapability::GitOverlay {
+            (git_worktree_status_result, None)
+        } else {
+            match current_state.as_ref() {
+                Some(state) => {
+                    match repo
+                        .require_tree_for_worktree_status(&state.tree)
+                        .and_then(|tree| {
+                            repo.compare_worktree_cached_profiled_with_options(
+                                &tree,
+                                &opts.worktree_status_options,
+                            )
+                        }) {
+                        Ok((status, profile)) => (Ok(Some(status)), Some(profile)),
+                        Err(error) => (Err(error), None),
+                    }
+                }
+                None => (Ok(Some(WorktreeStatus::default())), None),
+            }
+        };
+    let native_worktree_status_ms = native_worktree_status_start.elapsed().as_millis();
+
     let verification_start = Instant::now();
-    let verification_health = build_repository_verification_health_with_worktree_status(
-        repo,
-        &git_worktree_status_result,
-    );
+    let verification_health =
+        build_repository_verification_health_with_worktree_status(repo, &worktree_status_result);
     let trust = build_repository_verification_state_with_worktree_status_and_machine_contract(
         repo,
         verification_health.clone(),
-        &git_worktree_status_result,
+        &worktree_status_result,
         &opts.machine_contract_input,
     );
     let verification_ms = verification_start.elapsed().as_millis();
     let remote_tracking =
         remote_tracking.map(|remote| remote_tracking_with_verification_action(remote, &trust));
 
-    let git_worktree_status = git_worktree_status_result.unwrap_or(None);
+    let worktree_status = worktree_status_result.unwrap_or(None);
 
     let git_index_ms = 0;
 
@@ -2116,7 +2138,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
     let git_clean_mapping_blocker = matches!(
         trust.status.as_str(),
         "needs_import" | "needs_reconcile" | "git_branch_advanced"
-    ) && git_worktree_status
+    ) && worktree_status
         .as_ref()
         .is_some_and(WorktreeStatus::is_clean);
     let git_backed_mapping = trust.mapping_state == "git_backed";
@@ -2124,14 +2146,22 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
     let worktree_status_start = Instant::now();
     let (changes, worktree_profile) = if git_clean_mapping_blocker {
         (ChangesInfo::default(), None)
-    } else if let Some(status) = git_worktree_status.as_ref()
+    } else if let Some(profile) = native_worktree_profile {
+        (
+            worktree_status
+                .as_ref()
+                .map(changes_from_worktree_status)
+                .unwrap_or_default(),
+            Some(profile),
+        )
+    } else if let Some(status) = worktree_status.as_ref()
         && !status.is_clean()
         && trust.status != "needs_checkpoint"
     {
         (changes_from_worktree_status(status), None)
     } else if git_backed_mapping {
         (
-            git_worktree_status
+            worktree_status
                 .as_ref()
                 .map(changes_from_worktree_status)
                 .unwrap_or_default(),
@@ -2142,7 +2172,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         let (status, profile) = repo
             .compare_worktree_cached_profiled_with_options(&tree, &opts.worktree_status_options)?;
         (changes_from_worktree_status(&status), Some(profile))
-    } else if let Some(status) = git_worktree_status {
+    } else if let Some(status) = worktree_status {
         (changes_from_worktree_status(&status), None)
     } else {
         let tree = objects::object::Tree::new();
@@ -2153,7 +2183,8 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         changes.deleted.clear();
         (changes, Some(profile))
     };
-    let worktree_status_ms = worktree_status_start.elapsed().as_millis();
+    let worktree_status_ms =
+        native_worktree_status_ms + worktree_status_start.elapsed().as_millis();
 
     if opts.detail.short_path() {
         return Ok(build_short_path_report(ShortPathInputs {

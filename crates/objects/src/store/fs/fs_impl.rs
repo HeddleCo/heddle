@@ -215,7 +215,7 @@ impl FsStore {
 /// both apply the same checksum validation and report the same
 /// installed ids regardless of how the bytes reach the store.
 fn validate_and_list_pack(reader: &crate::store::pack::PackReader) -> Result<Vec<PackObjectId>> {
-    let ids = reader.list_ids();
+    let ids = reader.list_ids()?;
     for id in &ids {
         let Some((obj_type, data)) = reader.get_object_bytes(id)? else {
             continue;
@@ -333,13 +333,7 @@ impl FsStore {
             && obj_type == ObjectType::Blob
         {
             trace!("Found blob in packfile");
-            // Step 2: skip the BLAKE3 re-hash. The pack reader already
-            // located this entry by its content-addressed key in the
-            // pack index — anything served here either matches or
-            // means the pack itself is corrupted in ways a per-read
-            // hash check can't recover from cleanly. For multi-MB
-            // blobs the verify was the dominant tail of the cold
-            // read (~3GB/s × 10MB ≈ 3.3ms per call).
+            validate_blob_bytes(&data, *hash)?;
             let blob = Blob::new(data);
             heddle_perf_contract::record_object_decode();
             self.cache_recent_blob(*hash, &blob);
@@ -509,6 +503,7 @@ impl FsStore {
             && let Some((obj_type, data)) = manager.get_hashed_object(hash)?
             && obj_type == ObjectType::Tree
         {
+            validate_tree_serialized(&data, *hash)?;
             return Ok(Some(data));
         }
 
@@ -615,6 +610,7 @@ impl ObjectStore for FsStore {
             && let Some((obj_type, data)) = manager.get_hashed_object_bytes(hash)?
             && obj_type == crate::store::pack::ObjectType::Blob
         {
+            validate_blob_bytes(data.as_ref(), *hash)?;
             return Ok(Some(data));
         }
         Ok(self

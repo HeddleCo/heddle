@@ -9,7 +9,8 @@ use heddle_format::delta::{DeltaDecoder, MAX_DELTA_OUTPUT_SIZE};
 use super::{
     ObjectType, PackObjectId, PackObjectRecord, append_container_checksum,
     decode_tagged_entry_header, decompress_pack_payload, has_zstd_magic, pack_container_spec,
-    pack_index::PackIndex, varint, verify_container, write_container_header,
+    pack_index::PackIndex, varint, verify_container, verify_container_layout,
+    write_container_header,
 };
 use crate::{
     object::ContentHash,
@@ -94,10 +95,26 @@ impl PackReader<'static> {
     /// to benefit (the same threshold the loose-blob path uses for
     /// its own mmap decision); read-into-heap otherwise.
     pub fn open(pack_path: &Path, index_path: &Path) -> Result<Self> {
+        Self::open_with_verification(pack_path, index_path, true)
+    }
+
+    pub(super) fn open_lazy(pack_path: &Path, index_path: &Path) -> Result<Self> {
+        Self::open_with_verification(pack_path, index_path, false)
+    }
+
+    fn open_with_verification(
+        pack_path: &Path,
+        index_path: &Path,
+        verify_checksum: bool,
+    ) -> Result<Self> {
         let pack_bytes = read_file_bytes_for_pack(pack_path)?;
-        let index_data = std::fs::read(index_path)?;
-        let (_, _, content_end) = verify_container(&pack_bytes, pack_container_spec())?;
-        let index = PackIndex::from_bytes(&index_data)?;
+        let index_data = read_file_bytes_for_pack(index_path)?;
+        let (_, _, content_end) = if verify_checksum {
+            verify_container(&pack_bytes, pack_container_spec())?
+        } else {
+            verify_container_layout(&pack_bytes, pack_container_spec())?
+        };
+        let index = PackIndex::from_owned_bytes(index_data)?;
         Ok(Self {
             data: PackData::Owned(pack_bytes),
             index,
@@ -129,22 +146,23 @@ impl<'a> PackReader<'a> {
     }
 
     /// List all object ids in this pack.
-    pub fn list_ids(&self) -> Vec<PackObjectId> {
+    pub fn list_ids(&self) -> Result<Vec<PackObjectId>> {
         self.index.ids()
     }
 
-    pub fn list_hashes(&self) -> Vec<ContentHash> {
-        self.list_ids()
+    pub fn list_hashes(&self) -> Result<Vec<ContentHash>> {
+        Ok(self
+            .list_ids()?
             .into_iter()
             .filter_map(|id| match id {
                 PackObjectId::Hash(hash) => Some(hash),
                 PackObjectId::StateId(_) => None,
             })
-            .collect()
+            .collect())
     }
 
-    pub fn has_object(&self, id: &PackObjectId) -> bool {
-        self.index.find(id).is_some()
+    pub fn has_object(&self, id: &PackObjectId) -> Result<bool> {
+        Ok(self.index.find(id)?.is_some())
     }
 
     /// Copy a validated subset of non-delta encoded entries into a standalone
@@ -176,7 +194,7 @@ impl<'a> PackReader<'a> {
         let mut index = PackIndex::new();
         let mut encoded_bytes_copied = 0u64;
         for (expected_id, expected_type, expected_size) in expected {
-            let Some(offset) = self.index.find(expected_id) else {
+            let Some(offset) = self.index.find(expected_id)? else {
                 return Ok(None);
             };
             let offset = checked_index_offset(offset)?;
@@ -246,7 +264,7 @@ impl<'a> PackReader<'a> {
     /// surfaced via the consumer-side hash verify (see
     /// `FsStore::loose_blob_path` for the blob equivalent).
     pub fn get_object(&self, id: &PackObjectId) -> Result<Option<(ObjectType, Vec<u8>)>> {
-        let offset = match self.index.find(id) {
+        let offset = match self.index.find(id)? {
             Some(offset) => checked_index_offset(offset)?,
             None => return Ok(None),
         };
@@ -270,7 +288,7 @@ impl<'a> PackReader<'a> {
     /// between the mount and vanilla FS at the 1 MB+ tier is the
     /// per-blob memcpy this method eliminates.
     pub fn get_object_bytes(&self, id: &PackObjectId) -> Result<Option<(ObjectType, Bytes)>> {
-        let Some(offset) = self.index.find(id) else {
+        let Some(offset) = self.index.find(id)? else {
             return Ok(None);
         };
         let offset = checked_index_offset(offset)?;
@@ -331,7 +349,7 @@ impl<'a> PackReader<'a> {
     /// listing hot path so the fallback is acceptable.
     pub fn get_hashed_object_size(&self, hash: &ContentHash) -> Result<Option<u64>> {
         let id = PackObjectId::Hash(*hash);
-        let Some(offset) = self.index.find(&id) else {
+        let Some(offset) = self.index.find(&id)? else {
             return Ok(None);
         };
         let offset = checked_index_offset(offset)?;
@@ -455,7 +473,7 @@ impl<'a> PackReader<'a> {
         let base_hash = Self::require_delta_base_hash(base_id)?;
         let base_offset = self
             .index
-            .find(&PackObjectId::Hash(base_hash))
+            .find(&PackObjectId::Hash(base_hash))?
             .ok_or_else(|| StoreError::NotFound(base_hash.to_string()))?;
         let base_offset = checked_index_offset(base_offset)?;
         let base_record = self.read_record_at_depth(base_offset, depth + 1)?;

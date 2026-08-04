@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pack index for fast object lookup within packfiles.
 
+use bytes::Bytes;
+
 use crate::store::{
     Result,
     pack::{
@@ -11,7 +13,7 @@ use crate::store::{
 
 pub(super) const INDEX_MAGIC: &[u8; 4] = b"LMI\0";
 pub(super) const INDEX_VERSION: u32 = 2;
-const MIN_INDEX_ENTRY_LEN: usize = 17 + 8;
+const INDEX_ENTRY_LEN: usize = 33 + 8;
 
 /// Entry in the pack index.
 #[derive(Debug, Clone, Copy)]
@@ -24,6 +26,14 @@ pub struct IndexEntry {
 #[derive(Debug)]
 pub struct PackIndex {
     entries: Vec<IndexEntry>,
+    encoded: Option<EncodedIndex>,
+}
+
+#[derive(Debug)]
+struct EncodedIndex {
+    data: Bytes,
+    entries_start: usize,
+    count: usize,
 }
 
 impl PackIndex {
@@ -31,29 +41,50 @@ impl PackIndex {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            encoded: None,
         }
     }
 
     /// Add an entry.
     pub fn add(&mut self, id: PackObjectId, offset: u64) {
+        debug_assert!(self.encoded.is_none());
         self.entries.push(IndexEntry { id, offset });
     }
 
     /// Sort entries by hash for binary search.
     pub fn sort(&mut self) {
+        debug_assert!(self.encoded.is_none());
         self.entries.sort_by_key(|e| e.id);
     }
 
     /// Find an entry by hash.
-    pub fn find(&self, id: &PackObjectId) -> Option<u64> {
-        self.entries
-            .binary_search_by_key(id, |e| e.id)
-            .ok()
-            .map(|idx| self.entries[idx].offset)
+    pub fn find(&self, id: &PackObjectId) -> Result<Option<u64>> {
+        let Some(encoded) = &self.encoded else {
+            return Ok(self
+                .entries
+                .binary_search_by_key(id, |entry| entry.id)
+                .ok()
+                .map(|index| self.entries[index].offset));
+        };
+        let mut low = 0;
+        let mut high = encoded.count;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let entry = encoded.entry(middle)?;
+            match entry.id.cmp(id) {
+                std::cmp::Ordering::Less => low = middle + 1,
+                std::cmp::Ordering::Greater => high = middle,
+                std::cmp::Ordering::Equal => return Ok(Some(entry.offset)),
+            }
+        }
+        Ok(None)
     }
 
     /// Serialize to bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
+        if let Some(encoded) = &self.encoded {
+            return encoded.data.to_vec();
+        }
         let mut result = Vec::new();
         index_header().write_vec(&mut result, self.entries.len() as u64);
         for entry in &self.entries {
@@ -65,9 +96,13 @@ impl PackIndex {
 
     /// Deserialize from bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        let header = index_header().verify(data)?;
+        Self::from_owned_bytes(Bytes::copy_from_slice(data))
+    }
+
+    pub fn from_owned_bytes(data: Bytes) -> Result<Self> {
+        let header = index_header().verify(&data)?;
         let count = header.count;
-        let max_entries = ((data.len() - header.header_len) / MIN_INDEX_ENTRY_LEN) as u64;
+        let max_entries = ((data.len() - header.header_len) / INDEX_ENTRY_LEN) as u64;
         if count > max_entries {
             return Err(crate::store::StoreError::InvalidObject(format!(
                 "Index entry count {} exceeds available data capacity {}",
@@ -79,30 +114,41 @@ impl PackIndex {
                 "Index entry count exceeds platform limits".to_string(),
             )
         })?;
-        let mut entries = Vec::with_capacity(count);
-        let mut pos = header.header_len;
-        for _ in 0..count {
-            let (id, id_len) = PackObjectId::decode_tagged(&data[pos..])?;
-            pos += id_len;
-            if pos + 8 > data.len() {
-                return Err(crate::store::StoreError::InvalidObject(
-                    "Index data truncated".to_string(),
-                ));
-            }
-            let offset = u64::from_be_bytes(data[pos..pos + 8].try_into().map_err(|_| {
-                crate::store::StoreError::InvalidObject("Invalid offset length".to_string())
-            })?);
-            entries.push(IndexEntry { id, offset });
-            pos += 8;
-        }
-        Ok(Self { entries })
+        Ok(Self {
+            entries: Vec::new(),
+            encoded: Some(EncodedIndex {
+                data,
+                entries_start: header.header_len,
+                count,
+            }),
+        })
+    }
+}
+
+impl EncodedIndex {
+    fn entry(&self, index: usize) -> Result<IndexEntry> {
+        let start = self.entries_start + index * INDEX_ENTRY_LEN;
+        let end = start + INDEX_ENTRY_LEN;
+        let bytes = self.data.get(start..end).ok_or_else(|| {
+            crate::store::StoreError::InvalidObject("Index data truncated".to_string())
+        })?;
+        let (id, id_len) = PackObjectId::decode_tagged(bytes)?;
+        let offset = u64::from_be_bytes(bytes[id_len..].try_into().map_err(|_| {
+            crate::store::StoreError::InvalidObject("Invalid offset length".to_string())
+        })?);
+        Ok(IndexEntry { id, offset })
     }
 }
 
 impl PackIndex {
     /// Return all ids in this index.
-    pub fn ids(&self) -> Vec<PackObjectId> {
-        self.entries.iter().map(|e| e.id).collect()
+    pub fn ids(&self) -> Result<Vec<PackObjectId>> {
+        if let Some(encoded) = &self.encoded {
+            return (0..encoded.count)
+                .map(|index| encoded.entry(index).map(|entry| entry.id))
+                .collect();
+        }
+        Ok(self.entries.iter().map(|entry| entry.id).collect())
     }
 }
 

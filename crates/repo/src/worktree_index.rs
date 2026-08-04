@@ -76,6 +76,8 @@ mod worktree_index_storage;
 
 use self::worktree_index_storage::{self as storage, JournalOp};
 
+pub(crate) type GitlinkSummary = (ContentHash, Vec<(String, String)>);
+
 /// Magic bytes for the index file format.
 pub(crate) const INDEX_MAGIC: &[u8; 8] = b"HDLEIDX\x00";
 pub(crate) const JOURNAL_MAGIC: &[u8; 8] = b"HDLEJNL\x00";
@@ -345,6 +347,12 @@ impl WorktreeIndex {
         storage::load_hot_profiled_for_directories(path, directories)
     }
 
+    pub(crate) fn load_hot_gitlinks_summary(
+        path: &Path,
+    ) -> Result<Option<GitlinkSummary>, IndexError> {
+        storage::load_hot_gitlinks_summary(path)
+    }
+
     /// Save the index to a binary file.
     pub fn save(&self, path: &Path) -> Result<(), IndexError> {
         storage::save_profiled(self, path).map(|_| ())
@@ -534,12 +542,9 @@ impl WorktreeIndex {
         removed_any
     }
 
+    #[cfg(test)]
     pub(crate) fn gitlinks(&self) -> &BTreeMap<String, String> {
         &self.gitlinks
-    }
-
-    pub(crate) fn gitlinks_tree(&self) -> Option<ContentHash> {
-        self.gitlinks_tree
     }
 
     pub(crate) fn set_gitlinks_tree(&mut self, tree: ContentHash) {

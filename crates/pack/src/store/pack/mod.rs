@@ -24,7 +24,8 @@ pub use shared::{
     PACK_CHECKSUM_LEN, PackContainerSpec, PackEntryHeader, PackObjectId, PackObjectRecord,
     append_container_checksum, compress_pack_payload, decode_tagged_entry_header,
     decompress_pack_payload, encode_tagged_entry, encode_tagged_entry_parts, has_zstd_magic,
-    try_decode_tagged_entry_header, verify_container, write_container_header,
+    try_decode_tagged_entry_header, verify_container, verify_container_layout,
+    write_container_header,
 };
 pub use streaming_builder::{StreamingPackBuilder, SyncData};
 

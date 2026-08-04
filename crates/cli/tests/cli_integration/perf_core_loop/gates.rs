@@ -90,6 +90,17 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
                 observed_opens.max
             ));
         }
+        if result.path_count > 0 {
+            let repository_open = result.metric(|sample| sample.repository_open_ms);
+            if repository_open.p95 > 2.0 {
+                failures.push(format!(
+                    "repository-open latency gate: {} @ {} paths p95 {:.3} ms > 2.000 ms",
+                    result.kind.name(),
+                    result.path_count,
+                    repository_open.p95
+                ));
+            }
+        }
         if let Some(contract) = baseline
             .cases
             .iter()
@@ -125,10 +136,30 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
     if let Some(clean_100k) = find(results, CaseKind::StatusClean, 100_000) {
         let dirs = clean_100k.counter(|counters| counters.directories_scanned);
         let hashes = clean_100k.counter(|counters| counters.files_hashed);
-        if dirs.p95 > 10.0 || hashes.p95 > 1.0 {
+        if dirs.p95 > 10.0 || hashes.max > 0.0 {
             failures.push(format!(
-                "warm structural gate: clean status @ 100k dirs p95 {:.0} (<=10), files hashed p95 {:.0} (<=1)",
-                dirs.p95, hashes.p95
+                "warm structural gate: clean status @ 100k dirs p95 {:.0} (<=10), files hashed max {:.0} (=0)",
+                dirs.p95, hashes.max
+            ));
+        }
+    }
+    if let Some(dirty_100k) = find(results, CaseKind::StatusDirty, 100_000) {
+        let dirs = dirty_100k.counter(|counters| counters.directories_scanned);
+        let hashes = dirty_100k.counter(|counters| counters.files_hashed);
+        if dirs.p95 > 12.0 || hashes.max > 1.0 {
+            failures.push(format!(
+                "warm structural gate: one-path status @ 100k dirs p95 {:.0} (<=12), files hashed max {:.0} (<=1)",
+                dirs.p95, hashes.max
+            ));
+        }
+    }
+    if let Some(capture_100k) = find(results, CaseKind::CaptureOne, 100_000) {
+        let dirs = capture_100k.counter(|counters| counters.directories_scanned);
+        let hashes = capture_100k.counter(|counters| counters.files_hashed);
+        if dirs.p95 > 20.0 || hashes.max > 1.0 {
+            failures.push(format!(
+                "warm structural gate: one-path capture @ 100k dirs p95 {:.0} (<=20), files hashed max {:.0} (<=1)",
+                dirs.p95, hashes.max
             ));
         }
     }

@@ -245,24 +245,30 @@ impl Repository {
     }
 
     pub fn require_tree_for_worktree_status(&self, hash: &ContentHash) -> Result<Tree> {
-        if let Ok((index, _)) = WorktreeIndex::load_hot_profiled_for_directories(
-            &self.worktree_index_path(),
-            &std::collections::BTreeSet::from([String::new()]),
-        ) && let Some(tree) = index.clean_tree("", hash)
+        let cache_path = self.root().join(".heddle/state/worktree-current-tree.bin");
+        if let Ok(bytes) = fs::read(&cache_path)
+            && let Ok(tree) = rmp_serde::from_slice::<Tree>(&bytes)
+            && tree.validate().is_ok()
+            && tree.hash() == *hash
         {
-            return Ok(tree.clone());
+            return Ok(tree);
         }
-        self.require_tree(hash)
+        let tree = self.require_tree(hash)?;
+        if let Ok(bytes) = rmp_serde::to_vec_named(&tree)
+            && let Err(error) = objects::fs_atomic::write_file_atomic(&cache_path, &bytes)
+        {
+            warn!(path = %cache_path.display(), %error, "Could not refresh worktree tree cache");
+        }
+        Ok(tree)
     }
 
     pub fn state_for_worktree_status(&self, id: &StateId) -> Result<State> {
-        let cache_path = self
-            .root()
-            .join(".heddle/state/worktree-current-state.bin");
+        let cache_path = self.root().join(".heddle/state/worktree-current-state.bin");
         if let Ok(bytes) = fs::read(&cache_path)
-            && let Ok(state) = rmp_serde::from_slice::<State>(&bytes)
+            && let Ok(mut state) = rmp_serde::from_slice::<State>(&bytes)
             && state.id() == *id
         {
+            state.state_id = *id;
             return Ok(state);
         }
         let state = self
@@ -286,18 +292,9 @@ impl Repository {
     /// Return the complete gitlink summary cached for `tree`, when the hot
     /// index proves that its root directory summary was built from that tree.
     pub fn cached_gitlinks_for_tree(&self, tree: &Tree) -> Option<Vec<(String, String)>> {
-        let (index, _) = WorktreeIndex::load_hot_profiled_for_directories(
-            &self.worktree_index_path(),
-            &std::collections::BTreeSet::from([String::new()]),
-        )
-        .ok()?;
-        (index.gitlinks_tree() == Some(tree.hash())).then(|| {
-            index
-                .gitlinks()
-                .iter()
-                .map(|(path, target)| (path.clone(), target.clone()))
-                .collect()
-        })
+        let (root, gitlinks) =
+            WorktreeIndex::load_hot_gitlinks_summary(&self.worktree_index_path()).ok()??;
+        (root == tree.hash()).then_some(gitlinks)
     }
 
     pub fn compare_worktree_cached_detailed(&self, tree: &Tree) -> Result<WorktreeStatusDetailed> {
@@ -651,6 +648,14 @@ impl<'a> TreeBuildPolicy<'a> {
         })
     }
 
+    fn changed_path_mode(&self) -> bool {
+        self.incremental_state
+            .as_ref()
+            .is_some_and(|(index, monitor)| {
+                monitor.status == MonitorStatus::Usable && index.get_directory("").is_some()
+            })
+    }
+
     /// Push a blob into the pending pack if it's not already in the
     /// store and not already queued. The hash is always the canonical
     /// blob hash — caller passes a precomputed one to avoid hashing
@@ -659,7 +664,7 @@ impl<'a> TreeBuildPolicy<'a> {
         if self.seen.contains(&hash) {
             return Ok(());
         }
-        if self.repo.store.has_blob_locally(&hash)? {
+        if !self.changed_path_mode() && self.repo.store.has_blob_locally(&hash)? {
             self.seen.insert(hash);
             return Ok(());
         }
@@ -808,7 +813,8 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         // since materialise time. Skips the read+hash entirely for
         // unchanged files — the dominant cost on a "one file edited
         // in a big repo" capture.
-        if let Some(hash) = self.lookup_stat_cache_hash(&entry)
+        if !self.changed_path_mode()
+            && let Some(hash) = self.lookup_stat_cache_hash(&entry)
             && self.repo.store.has_blob_locally(&hash)?
         {
             self.record_revalidation_file(&entry, hash, state)?;

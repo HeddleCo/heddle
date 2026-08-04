@@ -48,6 +48,13 @@ impl VersionedHeader {
     }
 
     pub fn verify(self, data: &[u8]) -> Result<VerifiedHeader> {
+        let header = self.verify_layout(data)?;
+        self.checksum
+            .verify(data, header.content_end, self.checksum_mismatch)?;
+        Ok(header)
+    }
+
+    pub fn verify_layout(self, data: &[u8]) -> Result<VerifiedHeader> {
         let trailer_len = self.checksum.trailer_len();
         if data.len() < VERSIONED_HEADER_LEN + trailer_len {
             return Err(StoreError::InvalidObject(self.too_short.to_string()));
@@ -65,9 +72,6 @@ impl VersionedHeader {
         }
 
         let content_end = data.len() - trailer_len;
-        self.checksum
-            .verify(data, content_end, self.checksum_mismatch)?;
-
         let count = u64::from_be_bytes([
             data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
         ]);

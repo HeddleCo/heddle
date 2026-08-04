@@ -887,7 +887,7 @@ mod tests {
         assert_eq!(stats.object_count, 0);
         // PackReader can parse the empty pack and reports zero objects.
         let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
-        assert!(reader.list_ids().is_empty());
+        assert!(reader.list_ids().unwrap().is_empty());
         // Bucket dir was removed.
         assert!(
             !bucket_dir.exists(),
@@ -907,7 +907,7 @@ mod tests {
         assert_eq!(stats.object_count, 1);
         let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
         let id = PackObjectId::Hash(hash);
-        assert!(reader.has_object(&id));
+        assert!(reader.has_object(&id).unwrap());
         let (got_type, got_data) = reader.get_object(&id).unwrap().unwrap();
         assert_eq!(got_type, ObjectType::Blob);
         assert_eq!(got_data, payload);
@@ -1004,7 +1004,7 @@ mod tests {
         assert_eq!(stats.object_count, 10_000);
 
         let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
-        assert_eq!(reader.list_ids().len(), 10_000);
+        assert_eq!(reader.list_ids().unwrap().len(), 10_000);
         // Spot-check ten across the range.
         for i in [0, 1, 99, 1234, 5_000, 9_999] {
             let id = PackObjectId::Hash(hashes[i]);
@@ -1049,7 +1049,7 @@ mod tests {
         assert_eq!(stats.object_count, TOTAL_BUCKETS as u64);
         let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
         for id in ids {
-            assert!(reader.has_object(&id), "missing id {id:?}");
+            assert!(reader.has_object(&id).unwrap(), "missing id {id:?}");
         }
     }
 
@@ -1106,8 +1106,8 @@ mod tests {
         // Same set of ids in the same sorted order — that's the
         // contract for binary search to work.
         assert_eq!(
-            streaming_reader.list_ids(),
-            classic_reader.list_ids(),
+            streaming_reader.list_ids().unwrap(),
+            classic_reader.list_ids().unwrap(),
             "streaming and classic indices should report the same id sequence"
         );
         // Spot-check that each id resolves to a payload that matches
@@ -1158,7 +1158,7 @@ mod tests {
         let count = u64::from_be_bytes(pack_data[8..16].try_into().unwrap());
         assert_eq!(count, 7);
         let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
-        assert_eq!(reader.list_ids().len(), 7);
+        assert_eq!(reader.list_ids().unwrap().len(), 7);
     }
 
     #[test]
@@ -1195,8 +1195,8 @@ mod tests {
         assert_eq!(stats.object_count, 2);
         assert_eq!(u64::from_be_bytes(pack_data[8..16].try_into().unwrap()), 2);
         let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
-        assert!(reader.has_object(&PackObjectId::Hash(hash)));
-        assert!(reader.has_object(&PackObjectId::Hash(second_hash)));
+        assert!(reader.has_object(&PackObjectId::Hash(hash)).unwrap());
+        assert!(reader.has_object(&PackObjectId::Hash(second_hash)).unwrap());
     }
 
     #[test]
@@ -1519,7 +1519,7 @@ mod tests {
         }
         let (pack_data, index_data, _) = finalize_cursor(b, &idx_path);
         let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
-        let mut got = reader.list_ids();
+        let mut got = reader.list_ids().unwrap();
         // PackReader's list_ids returns index order — should already be
         // sorted because we sort on finalize.
         let mut sorted = got.clone();

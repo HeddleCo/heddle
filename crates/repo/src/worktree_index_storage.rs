@@ -11,9 +11,10 @@ use objects::object::ContentHash;
 use tracing::{debug, warn};
 
 use super::{
-    DirectoryCacheEntry, HEADER_SIZE_V4, HEADER_SIZE_V5, HEADER_SIZE_V6, INDEX_MAGIC,
-    INDEX_VERSION, IndexEntry, IndexEntryKind, IndexError, MAX_JOURNAL_REPLAY_MS_BEFORE_COMPACT,
-    UntrackedDirectoryCacheEntry, WorktreeIndex, WorktreeIndexLoadStats, WorktreeIndexSaveStats,
+    DirectoryCacheEntry, GitlinkSummary, HEADER_SIZE_V4, HEADER_SIZE_V5, HEADER_SIZE_V6,
+    INDEX_MAGIC, INDEX_VERSION, IndexEntry, IndexEntryKind, IndexError,
+    MAX_JOURNAL_REPLAY_MS_BEFORE_COMPACT, UntrackedDirectoryCacheEntry, WorktreeIndex,
+    WorktreeIndexLoadStats, WorktreeIndexSaveStats,
 };
 
 const JOURNAL_MAGIC: &[u8; 8] = super::JOURNAL_MAGIC;
@@ -140,7 +141,7 @@ pub(crate) fn load_hot_profiled_for_directories(
     index.hot_loaded = true;
     for key in directory_keys {
         if let Some((directory, untracked, clean_tree, bytes)) =
-            load_hot_directory_record(path, key)?
+            load_hot_directory_record(path, key, !key.is_empty())?
         {
             stats.snapshot_bytes = stats.snapshot_bytes.saturating_add(bytes);
             if let Some(directory) = directory {
@@ -163,7 +164,10 @@ pub(crate) fn load_hot_profiled_for_directories(
 
     let journal_path = journal_path(path);
     if journal_path.exists() {
-        stats.journal_bytes = journal_path.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        stats.journal_bytes = journal_path
+            .metadata()
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
         let replay_start = Instant::now();
         stats.journal_ops = apply_journal(&mut index, &journal_path)?;
         stats.journal_replay_ms = replay_start.elapsed().as_millis();
@@ -172,6 +176,18 @@ pub(crate) fn load_hot_profiled_for_directories(
     index.pending_ops.clear();
     index.set_last_load_stats(&stats);
     Ok((index, stats))
+}
+
+pub(crate) fn load_hot_gitlinks_summary(path: &Path) -> Result<Option<GitlinkSummary>, IndexError> {
+    let mut index = WorktreeIndex::new();
+    let mut stats = WorktreeIndexLoadStats::default();
+    if !load_hot_gitlinks(path, &mut index, &mut stats)? {
+        return Ok(None);
+    }
+    let Some(root) = index.gitlinks_tree else {
+        return Ok(None);
+    };
+    Ok(Some((root, index.gitlinks.into_iter().collect())))
 }
 
 fn load_profiled_inner(
@@ -1238,6 +1254,7 @@ type HotDirectoryRecord = (
 fn load_hot_directory_record(
     snapshot_path: &Path,
     expected_key: &str,
+    decode_clean_tree: bool,
 ) -> Result<Option<HotDirectoryRecord>, IndexError> {
     let bytes = match fs::read(hot_directory_record_path(snapshot_path, expected_key)) {
         Ok(bytes) => bytes,
@@ -1287,10 +1304,16 @@ fn load_hot_directory_record(
             .checked_add(len)
             .filter(|end| *end <= body.len())
             .ok_or_else(|| IndexError::InvalidFormat("truncated hot tree".to_string()))?;
-        let tree = rmp_serde::from_slice(&body[offset..end])
-            .map_err(|error| IndexError::InvalidFormat(error.to_string()))?;
+        let tree = if decode_clean_tree {
+            Some(
+                rmp_serde::from_slice(&body[offset..end])
+                    .map_err(|error| IndexError::InvalidFormat(error.to_string()))?,
+            )
+        } else {
+            None
+        };
         offset = end;
-        Some(tree)
+        tree
     } else {
         None
     };
@@ -2015,11 +2038,8 @@ mod tests {
         );
         save_snapshot_profiled(&index, &path).unwrap();
 
-        let (hot, _) = load_hot_profiled_for_directories(
-            &path,
-            &BTreeSet::from([String::new()]),
-        )
-        .unwrap();
+        let (hot, _) =
+            load_hot_profiled_for_directories(&path, &BTreeSet::from([String::new()])).unwrap();
         assert_eq!(hot.len(), 0);
         assert_eq!(hot.directory_len(), 1);
         assert!(hot.get_directory("unchanged-sibling").is_none());
@@ -2034,11 +2054,8 @@ mod tests {
         assert!(!full.is_hot_loaded());
 
         fs::write(hot_directory_record_path(&path, ""), b"corrupt").unwrap();
-        let (self_healed, _) = load_hot_profiled_for_directories(
-            &path,
-            &BTreeSet::from([String::new()]),
-        )
-        .unwrap();
+        let (self_healed, _) =
+            load_hot_profiled_for_directories(&path, &BTreeSet::from([String::new()])).unwrap();
         assert!(self_healed.get_directory("").is_none());
     }
 

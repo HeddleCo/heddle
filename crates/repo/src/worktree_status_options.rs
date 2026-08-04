@@ -4,23 +4,18 @@
 use serde::{Deserialize, Serialize};
 
 /// Optional fsmonitor backend selection for worktree status hot paths.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FsMonitorMode {
     /// Disable fsmonitor integration.
     Off,
     /// Auto-detect a supported backend at runtime.
+    #[default]
     Auto,
     /// Use Heddle's local native backend.
     Native,
     /// Use the Watchman CLI backend when available.
     Watchman,
-}
-
-impl Default for FsMonitorMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl FsMonitorMode {

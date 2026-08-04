@@ -1381,9 +1381,10 @@ mod tests {
                 let index = PackIndex::from_bytes(&std::fs::read(index_path).unwrap()).unwrap();
                 index
                     .ids()
+                    .unwrap()
                     .into_iter()
                     .filter(|id| {
-                        let offset = index.find(id).unwrap() as usize;
+                        let offset = index.find(id).unwrap().expect("indexed fixture id") as usize;
                         decode_tagged_entry_header(&pack[offset..])
                             .is_ok_and(|header| header.obj_type == ObjectType::Delta)
                     })

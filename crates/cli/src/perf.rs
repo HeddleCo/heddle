@@ -127,9 +127,9 @@ pub fn emit_profile(command: &'static str, fields: &[ProfileField]) {
     let duration_ms = fields
         .iter()
         .filter(|field| matches!(field.unit, ProfileMetricUnit::Milliseconds))
-        .map(|field| match field.value {
-            ProfileMetricScalar::Number(value) => u64::try_from(value).unwrap_or(u64::MAX),
-            ProfileMetricScalar::Boolean(_) => unreachable!("filtered to millisecond metrics"),
+        .filter_map(|field| match field.value {
+            ProfileMetricScalar::Number(value) => Some(u64::try_from(value).unwrap_or(u64::MAX)),
+            ProfileMetricScalar::Boolean(_) => None,
         })
         .max()
         .unwrap_or(0);

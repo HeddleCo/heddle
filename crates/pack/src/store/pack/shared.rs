@@ -107,6 +107,14 @@ pub fn verify_container(data: &[u8], spec: PackContainerSpec) -> Result<(u64, us
     Ok((header.count, header.header_len, header.content_end))
 }
 
+pub fn verify_container_layout(
+    data: &[u8],
+    spec: PackContainerSpec,
+) -> Result<(u64, usize, usize)> {
+    let header = pack_container_header(spec).verify_layout(data)?;
+    Ok((header.count, header.header_len, header.content_end))
+}
+
 pub fn append_container_checksum(buf: &mut Vec<u8>) {
     HeaderChecksum::Blake3Trailer.append(buf);
 }

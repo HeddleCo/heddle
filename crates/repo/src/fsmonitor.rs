@@ -574,12 +574,21 @@ impl LocalMonitorServer {
         if should_ignore_event_kind(&event.kind) {
             return;
         }
-        if matches!(event.kind, EventKind::Any | EventKind::Other) || event.paths.is_empty() {
+        if event.paths.is_empty() {
             self.desync_reason = Some("overflow_or_dropped_event".to_string());
             self.recent_changes.clear();
             return;
         }
-        for changed_path in normalized_event_paths(&self.repo_root, &event) {
+        let changed_paths = normalized_event_paths(&self.repo_root, &event);
+        if changed_paths.is_empty() {
+            return;
+        }
+        if matches!(event.kind, EventKind::Any | EventKind::Other) {
+            self.desync_reason = Some("overflow_or_dropped_event".to_string());
+            self.recent_changes.clear();
+            return;
+        }
+        for changed_path in changed_paths {
             self.current_cursor = self.current_cursor.saturating_add(1);
             self.recent_changes
                 .insert(changed_path, self.current_cursor);
@@ -1310,6 +1319,24 @@ mod tests {
             Some("overflow_or_dropped_event")
         );
         assert!(overflow.changed_paths.is_empty());
+    }
+
+    #[test]
+    fn internal_other_events_do_not_desync_the_worktree_monitor() {
+        let temp = TempDir::new().unwrap();
+        let state_path = temp.path().join(".heddle/state/fsmonitor.toml");
+        let mut server =
+            super::LocalMonitorServer::new(temp.path().to_path_buf(), state_path).unwrap();
+        let cursor = server.current_cursor.to_string();
+        server.apply_event(
+            notify::Event::new(notify::EventKind::Other)
+                .add_path(temp.path().join(".heddle/state/index.bin")),
+        );
+
+        let response = server.query(Some(&cursor)).unwrap();
+
+        assert_eq!(response.status, "usable");
+        assert!(response.changed_paths.is_empty());
     }
 
     #[test]
