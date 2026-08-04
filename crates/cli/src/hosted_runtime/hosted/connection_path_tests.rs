@@ -1,4 +1,5 @@
 use std::{
+    env,
     net::Ipv4Addr,
     time::{Duration, Instant},
 };
@@ -13,6 +14,14 @@ use iroh::{Endpoint, RelayMode, endpoint::presets};
 use n0_watcher::Watcher;
 
 use super::{DescriptorKeyring, VerifiedEndpointDescriptor, connection::HostedConnection};
+
+const HOSTED_ENDPOINT_CLOSE_P95_BUDGET: Duration = Duration::from_millis(20);
+const DEFAULT_CLOSE_SAMPLE_COUNT: usize = 20;
+
+fn require_release_build() {
+    #[cfg(debug_assertions)]
+    panic!("hosted endpoint close contract must run with --release");
+}
 
 fn verified_descriptor(
     endpoint_id: iroh::EndpointId,
@@ -50,12 +59,29 @@ fn verified_descriptor(
 }
 
 #[tokio::test]
-#[ignore = "manual five-sample loopback transport measurement"]
-async fn measure_loopback_transport_setup_and_close() {
+#[ignore = "release-only hosted endpoint close performance contract"]
+async fn hosted_endpoint_close_release_contract() {
+    require_release_build();
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
         .try_init();
+    let sample_count = env::var("HEDDLE_HOSTED_CLOSE_SAMPLES")
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .expect("sample count must be an integer")
+        })
+        .unwrap_or(DEFAULT_CLOSE_SAMPLE_COUNT);
+    assert!(
+        sample_count >= 5,
+        "close contract requires at least 5 samples"
+    );
+    let negative_control = match env::var("HEDDLE_HOSTED_CLOSE_NEGATIVE_CONTROL").as_deref() {
+        Ok("latency") => true,
+        Ok(value) => panic!("unknown HEDDLE_HOSTED_CLOSE_NEGATIVE_CONTROL `{value}`"),
+        Err(_) => false,
+    };
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
         .relay_mode(RelayMode::Disabled)
@@ -75,7 +101,7 @@ async fn measure_loopback_transport_setup_and_close() {
         server.addr().ip_addrs().map(ToString::to_string).collect(),
     );
     let server_task = tokio::spawn(async move {
-        for _ in 0..5 {
+        for _ in 0..sample_count {
             let connection = server
                 .accept()
                 .await
@@ -87,23 +113,52 @@ async fn measure_loopback_transport_setup_and_close() {
         server.close().await;
     });
 
-    for sample in 1..=5 {
-        let started = Instant::now();
+    let mut close_ms = Vec::with_capacity(sample_count);
+    for _ in 0..sample_count {
         let connection =
             HostedConnection::connect_verified(&descriptor, &cli_shared::ClientConfig::default())
                 .await
                 .unwrap();
-        let setup = started.elapsed();
+        let endpoint_observer = connection.endpoint.clone();
+        let close_started = Instant::now();
+        if negative_control {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         connection.close().await;
-        let total = started.elapsed();
-        println!(
-            "LOOPBACK sample={sample} setup_ms={:.3} close_ms={:.3} total_ms={:.3}",
-            setup.as_secs_f64() * 1_000.0,
-            (total - setup).as_secs_f64() * 1_000.0,
-            total.as_secs_f64() * 1_000.0,
+        close_ms.push(close_started.elapsed().as_secs_f64() * 1_000.0);
+        assert!(
+            endpoint_observer.is_closed(),
+            "successful hosted teardown must close the endpoint before drop"
         );
+        drop(connection);
+        drop(endpoint_observer);
     }
     server_task.await.unwrap();
+
+    close_ms.sort_by(f64::total_cmp);
+    let middle = close_ms.len() / 2;
+    let median = if close_ms.len().is_multiple_of(2) {
+        (close_ms[middle - 1] + close_ms[middle]) / 2.0
+    } else {
+        close_ms[middle]
+    };
+    let p95 = percentile_ms(&close_ms, 95);
+    let min = close_ms[0];
+    let max = close_ms[close_ms.len() - 1];
+    let budget_ms = HOSTED_ENDPOINT_CLOSE_P95_BUDGET.as_secs_f64() * 1_000.0;
+    println!(
+        "HOSTED_CLOSE samples={sample_count} median_ms={median:.3} p95_ms={p95:.3} min_ms={min:.3} max_ms={max:.3} budget_p95_ms={budget_ms:.3} negative_control={negative_control}"
+    );
+    assert!(
+        p95 <= budget_ms,
+        "HOSTED CLOSE GATE RED: p95 {p95:.3} ms > {budget_ms:.3} ms budget"
+    );
+    println!("HOSTED_CLOSE_GATES green");
+}
+
+fn percentile_ms(sorted_values: &[f64], percentile: usize) -> f64 {
+    let rank = (sorted_values.len() * percentile).div_ceil(100);
+    sorted_values[rank.saturating_sub(1)]
 }
 
 #[tokio::test]
