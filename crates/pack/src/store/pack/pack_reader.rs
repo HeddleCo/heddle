@@ -278,6 +278,22 @@ impl<'a> PackReader<'a> {
         self.get_object(&PackObjectId::Hash(*hash))
     }
 
+    /// Read an object's logical type from pack headers without reading or
+    /// decoding its payload.
+    ///
+    /// Delta entries inherit the type of their base, so this follows only the
+    /// tagged base ids and headers until it reaches a non-delta entry. No
+    /// compressed or delta payload bytes are decoded. Missing hashes return
+    /// `Ok(None)`.
+    pub fn get_hashed_object_type(&self, hash: &ContentHash) -> Result<Option<ObjectType>> {
+        let id = PackObjectId::Hash(*hash);
+        let Some(offset) = self.index.find(&id) else {
+            return Ok(None);
+        };
+        self.read_object_type_at_depth(&id, checked_index_offset(offset)?, 0)
+            .map(Some)
+    }
+
     /// Zero-copy fast path: when the entry is non-delta and stored
     /// uncompressed, returns `Bytes::slice` into the pack's
     /// (mmap-backed) buffer — no allocation, no memcpy. Compressed
@@ -373,6 +389,38 @@ impl<'a> PackReader<'a> {
             return Ok(Some(uncompressed_size));
         }
         Ok(Some(uncompressed_size))
+    }
+
+    fn read_object_type_at_depth(
+        &self,
+        requested_id: &PackObjectId,
+        offset: usize,
+        depth: usize,
+    ) -> Result<ObjectType> {
+        if depth > MAX_DELTA_CHAIN_DEPTH {
+            return Err(StoreError::InvalidObject(format!(
+                "Delta chain depth {depth} exceeds max {MAX_DELTA_CHAIN_DEPTH}"
+            )));
+        }
+        if offset >= self.content_end {
+            return Err(StoreError::InvalidObject(
+                "Entry offset out of bounds".to_string(),
+            ));
+        }
+
+        let header = decode_tagged_entry_header(self.content_from(offset)?)?;
+        verify_record_id_matches(requested_id, &header.id)?;
+        if header.obj_type != ObjectType::Delta {
+            return Ok(header.obj_type);
+        }
+
+        let base_hash = Self::require_delta_base_hash(header.delta_base)?;
+        let base_id = PackObjectId::Hash(base_hash);
+        let base_offset = self
+            .index
+            .find(&base_id)
+            .ok_or_else(|| StoreError::NotFound(base_hash.to_string()))?;
+        self.read_object_type_at_depth(&base_id, checked_index_offset(base_offset)?, depth + 1)
     }
 
     fn read_record_at_depth(&self, offset: usize, depth: usize) -> Result<PackObjectRecord> {
