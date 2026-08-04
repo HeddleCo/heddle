@@ -36,7 +36,7 @@ env:
 jobs:
   facade-render-free:
     name: Facade render-free
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
 
     steps:
@@ -60,7 +60,7 @@ jobs:
   #   package_names_csv — selected workspace packages, including reverse dependents.
   changes:
     name: Detect changed paths
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:
       rust: ${{ steps.decide.outputs.rust }}
@@ -469,7 +469,7 @@ jobs:
       - feature-contracts
       - postgres-tests
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 5
     steps:
       - name: Require every extracted quality gate
@@ -592,7 +592,7 @@ jobs:
     name: FUSE mount smoke (Linux)
     needs: changes
     if: needs.changes.outputs.mount == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
