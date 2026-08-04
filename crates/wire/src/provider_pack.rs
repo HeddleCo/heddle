@@ -155,7 +155,7 @@ impl ProviderPackSpool {
             .iter()
             .map(|extent| extent.objects.len())
             .sum::<usize>();
-        if reader.list_ids().len() != expected_objects {
+        if reader.list_ids()?.len() != expected_objects {
             return Err(ProtocolError::InvalidState(
                 "provider pack index does not match its manifest".to_string(),
             ));
@@ -560,8 +560,14 @@ mod tests {
     fn split_manifest() -> (ProviderPackManifest, Vec<Vec<u8>>, Vec<u8>, Vec<u8>) {
         let (pack, index, ids) = source_pack();
         let parsed_index = PackIndex::from_bytes(&index).unwrap();
-        let first = parsed_index.find(&ids[0]).unwrap();
-        let second = parsed_index.find(&ids[1]).unwrap();
+        let first = parsed_index
+            .find(&ids[0])
+            .unwrap()
+            .expect("first fixture object indexed");
+        let second = parsed_index
+            .find(&ids[1])
+            .unwrap()
+            .expect("second fixture object indexed");
         let (first_id, first_offset, second_id, second_offset) = if first < second {
             (ids[0], first, ids[1], second)
         } else {

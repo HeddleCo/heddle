@@ -18,6 +18,8 @@ pub(super) enum NegativeControl {
     None,
     Latency,
     FullScan,
+    SubtreeSkip,
+    EagerPackIndex,
     DuplicateOpen,
 }
 
@@ -26,6 +28,8 @@ impl NegativeControl {
         match env::var("HEDDLE_PERF_NEGATIVE_CONTROL").as_deref() {
             Ok("latency") => Self::Latency,
             Ok("full-scan") => Self::FullScan,
+            Ok("subtree-skip") => Self::SubtreeSkip,
+            Ok("eager-pack-index") => Self::EagerPackIndex,
             Ok("duplicate-open") => Self::DuplicateOpen,
             Ok(value) => panic!("unknown HEDDLE_PERF_NEGATIVE_CONTROL `{value}`"),
             Err(_) => Self::None,
@@ -77,6 +81,18 @@ pub(super) struct Sample {
     pub profile_total_ms: f64,
     pub startup_ms: f64,
     pub warm_repository_ms: f64,
+    pub repository_open_ms: f64,
+    pub current_state_ms: f64,
+    pub verification_ms: f64,
+    pub worktree_status_ms: f64,
+    pub thread_summary_ms: f64,
+    pub snapshot_ms: f64,
+    pub snapshot_tree_walk_ms: f64,
+    pub snapshot_blob_prep_ms: f64,
+    pub snapshot_blob_write_ms: f64,
+    pub snapshot_tree_write_ms: f64,
+    pub snapshot_state_ref_oplog_ms: f64,
+    pub snapshot_thread_metadata_ms: f64,
     pub monitor_ms: f64,
     pub rendering_ms: f64,
     pub network_ms: f64,
@@ -102,6 +118,18 @@ impl Sample {
         self.profile_total_ms += other.profile_total_ms;
         self.startup_ms += other.startup_ms;
         self.warm_repository_ms += other.warm_repository_ms;
+        self.repository_open_ms += other.repository_open_ms;
+        self.current_state_ms += other.current_state_ms;
+        self.verification_ms += other.verification_ms;
+        self.worktree_status_ms += other.worktree_status_ms;
+        self.thread_summary_ms += other.thread_summary_ms;
+        self.snapshot_ms += other.snapshot_ms;
+        self.snapshot_tree_walk_ms += other.snapshot_tree_walk_ms;
+        self.snapshot_blob_prep_ms += other.snapshot_blob_prep_ms;
+        self.snapshot_blob_write_ms += other.snapshot_blob_write_ms;
+        self.snapshot_tree_write_ms += other.snapshot_tree_write_ms;
+        self.snapshot_state_ref_oplog_ms += other.snapshot_state_ref_oplog_ms;
+        self.snapshot_thread_metadata_ms += other.snapshot_thread_metadata_ms;
         self.monitor_ms += other.monitor_ms;
         self.rendering_ms += other.rendering_ms;
         self.network_ms += other.network_ms;
@@ -147,7 +175,7 @@ impl CaseResult {
     pub(super) fn print(&self) {
         let wall = self.metric(|sample| sample.wall_ms);
         println!(
-            "RESULT case={} mode={} paths={} samples={} wall_ms={} total_ms={} startup_ms={} warm_repo_ms={} monitor_ms={} render_ms={} network_ms={}",
+            "RESULT case={} mode={} paths={} samples={} wall_ms={} total_ms={} startup_ms={} warm_repo_ms={} repo_open_ms={} current_state_ms={} verification_ms={} worktree_status_ms={} thread_summary_ms={} snapshot_ms={} snapshot_tree_walk_ms={} snapshot_blob_prep_ms={} snapshot_blob_write_ms={} snapshot_tree_write_ms={} snapshot_state_ref_oplog_ms={} snapshot_thread_metadata_ms={} monitor_ms={} render_ms={} network_ms={}",
             self.kind.name(),
             if self.path_count == 0 {
                 "cold_process"
@@ -160,6 +188,18 @@ impl CaseResult {
             self.metric(|sample| sample.profile_total_ms),
             self.metric(|sample| sample.startup_ms),
             self.metric(|sample| sample.warm_repository_ms),
+            self.metric(|sample| sample.repository_open_ms),
+            self.metric(|sample| sample.current_state_ms),
+            self.metric(|sample| sample.verification_ms),
+            self.metric(|sample| sample.worktree_status_ms),
+            self.metric(|sample| sample.thread_summary_ms),
+            self.metric(|sample| sample.snapshot_ms),
+            self.metric(|sample| sample.snapshot_tree_walk_ms),
+            self.metric(|sample| sample.snapshot_blob_prep_ms),
+            self.metric(|sample| sample.snapshot_blob_write_ms),
+            self.metric(|sample| sample.snapshot_tree_write_ms),
+            self.metric(|sample| sample.snapshot_state_ref_oplog_ms),
+            self.metric(|sample| sample.snapshot_thread_metadata_ms),
             self.metric(|sample| sample.monitor_ms),
             self.metric(|sample| sample.rendering_ms),
             self.metric(|sample| sample.network_ms),
@@ -256,11 +296,15 @@ fn run_profiled(binary: &Path, args: &[&str], cwd: &Path, negative: NegativeCont
     if negative == NegativeControl::Latency {
         std::thread::sleep(Duration::from_millis(50));
     }
-    let output = base_command(binary, cwd)
-        .env("HEDDLE_PROFILE", "jsonl")
-        .args(args)
-        .output()
-        .expect("run profiled command");
+    let mut command = base_command(binary, cwd);
+    command.env("HEDDLE_PROFILE", "jsonl");
+    if negative == NegativeControl::SubtreeSkip {
+        command.env("HEDDLE_PERF_DISABLE_SUBTREE_SKIP", "1");
+    }
+    if negative == NegativeControl::EagerPackIndex {
+        command.env("HEDDLE_PERF_FORCE_EAGER_PACK_INDEX", "1");
+    }
+    let output = command.args(args).output().expect("run profiled command");
     let wall_ms = start.elapsed().as_secs_f64() * 1_000.0;
     assert!(
         output.status.success(),

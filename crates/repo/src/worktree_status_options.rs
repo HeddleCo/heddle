@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum FsMonitorMode {
     /// Disable fsmonitor integration.
-    #[default]
     Off,
     /// Auto-detect a supported backend at runtime.
+    #[default]
     Auto,
     /// Use Heddle's local native backend.
     Native,

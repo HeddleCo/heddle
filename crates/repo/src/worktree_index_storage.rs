@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Seek, Write},
     path::Path,
@@ -11,15 +11,18 @@ use objects::object::ContentHash;
 use tracing::{debug, warn};
 
 use super::{
-    DirectoryCacheEntry, HEADER_SIZE_V4, HEADER_SIZE_V5, INDEX_MAGIC, INDEX_VERSION, IndexEntry,
-    IndexEntryKind, IndexError, MAX_JOURNAL_REPLAY_MS_BEFORE_COMPACT, UntrackedDirectoryCacheEntry,
-    WorktreeIndex, WorktreeIndexLoadStats, WorktreeIndexSaveStats,
+    DirectoryCacheEntry, GitlinkSummary, HEADER_SIZE_V4, HEADER_SIZE_V5, HEADER_SIZE_V6,
+    INDEX_MAGIC, INDEX_VERSION, IndexEntry, IndexEntryKind, IndexError,
+    MAX_JOURNAL_REPLAY_MS_BEFORE_COMPACT, UntrackedDirectoryCacheEntry, WorktreeIndex,
+    WorktreeIndexLoadStats, WorktreeIndexSaveStats,
 };
 
 const JOURNAL_MAGIC: &[u8; 8] = super::JOURNAL_MAGIC;
 const JOURNAL_VERSION: u32 = super::JOURNAL_VERSION;
 const MAX_JOURNAL_OPS_BEFORE_COMPACT: usize = super::MAX_JOURNAL_OPS_BEFORE_COMPACT;
 const MAX_JOURNAL_BYTES_BEFORE_COMPACT: u64 = super::MAX_JOURNAL_BYTES_BEFORE_COMPACT;
+const HOT_RECORD_MAGIC: &[u8; 8] = b"HDLEHOT\0";
+const HOT_RECORD_VERSION: u32 = 1;
 
 fn read_u32_be(bytes: &[u8], context: &str) -> Result<u32, IndexError> {
     let array = read_be_at::<4>(bytes, context)?;
@@ -50,6 +53,7 @@ enum IndexEntryType {
     File = 0x01,
     Directory = 0x02,
     UntrackedDirectory = 0x03,
+    Gitlink = 0x04,
 }
 
 impl IndexEntryType {
@@ -58,6 +62,7 @@ impl IndexEntryType {
             0x01 => Some(Self::File),
             0x02 => Some(Self::Directory),
             0x03 => Some(Self::UntrackedDirectory),
+            0x04 => Some(Self::Gitlink),
             _ => None,
         }
     }
@@ -90,6 +95,13 @@ pub(crate) enum JournalOp {
     RemoveUntrackedDirectory {
         path: String,
     },
+    UpsertGitlink {
+        path: String,
+        target: String,
+    },
+    RemoveGitlink {
+        path: String,
+    },
 }
 
 pub(crate) fn load(path: &Path) -> Result<WorktreeIndex, IndexError> {
@@ -98,6 +110,89 @@ pub(crate) fn load(path: &Path) -> Result<WorktreeIndex, IndexError> {
 
 pub(crate) fn load_profiled(
     path: &Path,
+) -> Result<(WorktreeIndex, WorktreeIndexLoadStats), IndexError> {
+    load_profiled_inner(path, false)
+}
+
+pub(crate) fn load_hot_profiled_for_directories(
+    path: &Path,
+    directory_keys: &BTreeSet<String>,
+) -> Result<(WorktreeIndex, WorktreeIndexLoadStats), IndexError> {
+    let mut stats = WorktreeIndexLoadStats::default();
+    if !path.exists() {
+        return Ok((WorktreeIndex::new(), stats));
+    }
+    let load_start = Instant::now();
+    let mut snapshot = File::open(path)?;
+    let mut header = [0_u8; 12];
+    snapshot.read_exact(&mut header)?;
+    if &header[..8] != INDEX_MAGIC {
+        return Err(IndexError::InvalidFormat("missing magic bytes".to_string()));
+    }
+    let version = read_u32_be(&header[8..12], "index version")?;
+    if version != INDEX_VERSION {
+        return Err(IndexError::VersionMismatch {
+            expected: INDEX_VERSION,
+            got: version,
+        });
+    }
+
+    let mut index = WorktreeIndex::new();
+    index.hot_loaded = true;
+    for key in directory_keys {
+        if let Some((directory, untracked, clean_tree, bytes)) =
+            load_hot_directory_record(path, key, !key.is_empty())?
+        {
+            stats.snapshot_bytes = stats.snapshot_bytes.saturating_add(bytes);
+            if let Some(directory) = directory {
+                index.directories.insert(key.clone(), directory);
+            }
+            if let Some(untracked) = untracked {
+                index.untracked_directories.insert(key.clone(), untracked);
+            }
+            if let Some(clean_tree) = clean_tree {
+                index.clean_trees.insert(key.clone(), clean_tree);
+            }
+        }
+    }
+
+    let gitlinks_valid = load_hot_gitlinks(path, &mut index, &mut stats)?;
+    if !gitlinks_valid {
+        index.directories.remove("");
+    }
+    stats.snapshot_load_ms = load_start.elapsed().as_millis();
+
+    let journal_path = journal_path(path);
+    if journal_path.exists() {
+        stats.journal_bytes = journal_path
+            .metadata()
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let replay_start = Instant::now();
+        stats.journal_ops = apply_journal(&mut index, &journal_path)?;
+        stats.journal_replay_ms = replay_start.elapsed().as_millis();
+    }
+    index.dirty = false;
+    index.pending_ops.clear();
+    index.set_last_load_stats(&stats);
+    Ok((index, stats))
+}
+
+pub(crate) fn load_hot_gitlinks_summary(path: &Path) -> Result<Option<GitlinkSummary>, IndexError> {
+    let mut index = WorktreeIndex::new();
+    let mut stats = WorktreeIndexLoadStats::default();
+    if !load_hot_gitlinks(path, &mut index, &mut stats)? {
+        return Ok(None);
+    }
+    let Some(root) = index.gitlinks_tree else {
+        return Ok(None);
+    };
+    Ok(Some((root, index.gitlinks.into_iter().collect())))
+}
+
+fn load_profiled_inner(
+    path: &Path,
+    hot_only: bool,
 ) -> Result<(WorktreeIndex, WorktreeIndexLoadStats), IndexError> {
     let mut stats = WorktreeIndexLoadStats::default();
     if !path.exists() {
@@ -130,7 +225,8 @@ pub(crate) fn load_profiled(
         2 if file_size >= HEADER_SIZE_V4 as u64 + 4 => load_v2(&mut file, file_size),
         3 if file_size >= HEADER_SIZE_V4 as u64 + 4 => load_v3(&mut file, file_size),
         4 if file_size >= HEADER_SIZE_V4 as u64 + 4 => load_v4(&mut file, file_size),
-        5 if file_size >= HEADER_SIZE_V5 as u64 + 4 => load_v5(&mut file, file_size),
+        5 if !hot_only && file_size >= HEADER_SIZE_V5 as u64 + 4 => load_v5(&mut file, file_size),
+        6 if file_size >= HEADER_SIZE_V6 as u64 + 4 => load_v6(&mut file, file_size, hot_only),
         v => Err(IndexError::VersionMismatch {
             expected: INDEX_VERSION,
             got: v,
@@ -151,13 +247,7 @@ pub(crate) fn load_profiled(
                 op_count
             }
             Err(error) => {
-                stats.journal_replay_ms = replay_start.elapsed().as_millis();
-                warn!(
-                    journal_path = %journal_path.display(),
-                    %error,
-                    "Ignoring unreadable worktree index journal"
-                );
-                0
+                return Err(error);
             }
         }
     } else {
@@ -193,6 +283,8 @@ pub(crate) fn save_profiled(
         return Ok(stats);
     }
 
+    write_hot_sidecars(index, path)?;
+
     let journal_path = journal_path(path);
     let journal_exists = journal_path.exists();
     let journal_len = journal_path
@@ -201,11 +293,13 @@ pub(crate) fn save_profiled(
         .unwrap_or(0);
     let compact_reason = if !path.exists() {
         Some("missing_snapshot")
-    } else if index.pending_ops.len() > MAX_JOURNAL_OPS_BEFORE_COMPACT {
+    } else if !index.is_hot_loaded() && index.pending_ops.len() > MAX_JOURNAL_OPS_BEFORE_COMPACT {
         Some("pending_ops")
-    } else if journal_len > MAX_JOURNAL_BYTES_BEFORE_COMPACT {
+    } else if !index.is_hot_loaded() && journal_len > MAX_JOURNAL_BYTES_BEFORE_COMPACT {
         Some("journal_bytes")
-    } else if index.last_journal_replay_ms() > MAX_JOURNAL_REPLAY_MS_BEFORE_COMPACT {
+    } else if !index.is_hot_loaded()
+        && index.last_journal_replay_ms() > MAX_JOURNAL_REPLAY_MS_BEFORE_COMPACT
+    {
         Some("replay_ms")
     } else {
         None
@@ -267,6 +361,7 @@ pub(crate) fn save_snapshot_profiled(
 ) -> Result<WorktreeIndexSaveStats, IndexError> {
     let journal_path = journal_path(path);
     let write_start = Instant::now();
+    write_hot_sidecars(index, path)?;
     write_snapshot(index, path)?;
     let snapshot_write_ms = write_start.elapsed().as_millis();
     let snapshot_bytes = path.metadata().map(|metadata| metadata.len()).unwrap_or(0);
@@ -376,11 +471,15 @@ fn load_v1(file: &mut File, file_size: u64) -> Result<WorktreeIndex, IndexError>
         entries,
         directories: BTreeMap::new(),
         untracked_directories: BTreeMap::new(),
+        gitlinks: BTreeMap::new(),
+        gitlinks_tree: None,
+        clean_trees: BTreeMap::new(),
         dirty: false,
         pending_ops: Vec::new(),
         last_journal_bytes: 0,
         last_journal_ops: 0,
         last_journal_replay_ms: 0,
+        hot_loaded: false,
     })
 }
 
@@ -398,6 +497,112 @@ fn load_v4(file: &mut File, file_size: u64) -> Result<WorktreeIndex, IndexError>
 
 fn load_v5(file: &mut File, file_size: u64) -> Result<WorktreeIndex, IndexError> {
     load_compact_versioned_with_untracked(file, file_size)
+}
+
+fn load_v6(file: &mut File, file_size: u64, hot_only: bool) -> Result<WorktreeIndex, IndexError> {
+    file.seek(std::io::SeekFrom::Start(0))?;
+    let mut header = [0u8; HEADER_SIZE_V6];
+    file.read_exact(&mut header)?;
+    let file_count = read_u32_be(&header[12..16], "index file count")?;
+    let dir_count = read_u32_be(&header[16..20], "index directory count")?;
+    let untracked_count = read_u32_be(&header[20..24], "index untracked directory count")?;
+    let gitlink_count = read_u32_be(&header[24..28], "index gitlink count")?;
+    let hot_len = read_u64_be(&header[28..36], "index hot section length")?;
+    let hot_checksum = read_u32_be(&header[36..40], "index hot section checksum")?;
+    let data_len = file_size
+        .checked_sub(HEADER_SIZE_V6 as u64 + 4)
+        .ok_or_else(|| IndexError::InvalidFormat("truncated v6 index".to_string()))?;
+    if hot_len > data_len {
+        return Err(IndexError::InvalidFormat(
+            "hot section exceeds index data".to_string(),
+        ));
+    }
+
+    let mut hot_data = vec![0_u8; hot_len as usize];
+    file.read_exact(&mut hot_data)?;
+    if crc32(&hot_data) != hot_checksum {
+        return Err(IndexError::ChecksumMismatch);
+    }
+    let mut directories = BTreeMap::new();
+    let mut untracked_directories = BTreeMap::new();
+    let mut gitlinks = BTreeMap::new();
+    let mut offset = 0;
+    for _ in 0..dir_count {
+        offset = expect_entry_type(&hot_data, offset, IndexEntryType::Directory)?;
+        offset = read_compact_directory_entry(&hot_data, offset, &mut directories)?;
+    }
+    for _ in 0..untracked_count {
+        offset = expect_entry_type(&hot_data, offset, IndexEntryType::UntrackedDirectory)?;
+        offset = read_untracked_directory_entry(&hot_data, offset, &mut untracked_directories)?;
+    }
+    for _ in 0..gitlink_count {
+        offset = expect_entry_type(&hot_data, offset, IndexEntryType::Gitlink)?;
+        let path = read_string(&hot_data, &mut offset)?;
+        let target = read_string(&hot_data, &mut offset)?;
+        gitlinks.insert(path, target);
+    }
+    if offset != hot_data.len() {
+        return Err(IndexError::InvalidFormat(
+            "trailing bytes in hot index section".to_string(),
+        ));
+    }
+
+    let mut entries = BTreeMap::new();
+    if !hot_only {
+        let file_data_len = data_len - hot_len;
+        let mut file_data = vec![0_u8; file_data_len as usize];
+        file.read_exact(&mut file_data)?;
+        let mut file_offset = 0;
+        for _ in 0..file_count {
+            file_offset = expect_entry_type(&file_data, file_offset, IndexEntryType::File)?;
+            file_offset = read_file_entry(&file_data, file_offset, &mut entries)?;
+        }
+        if file_offset != file_data.len() {
+            return Err(IndexError::InvalidFormat(
+                "trailing bytes in file index section".to_string(),
+            ));
+        }
+        let mut checksum_bytes = [0_u8; 4];
+        file.read_exact(&mut checksum_bytes)?;
+        let mut all_data = hot_data.clone();
+        all_data.extend_from_slice(&file_data);
+        if crc32(&all_data) != u32::from_be_bytes(checksum_bytes) {
+            return Err(IndexError::ChecksumMismatch);
+        }
+    }
+
+    Ok(WorktreeIndex {
+        entries,
+        directories,
+        untracked_directories,
+        gitlinks,
+        gitlinks_tree: None,
+        clean_trees: BTreeMap::new(),
+        dirty: false,
+        pending_ops: Vec::new(),
+        last_journal_bytes: 0,
+        last_journal_ops: 0,
+        last_journal_replay_ms: 0,
+        hot_loaded: hot_only,
+    })
+}
+
+fn expect_entry_type(
+    data: &[u8],
+    offset: usize,
+    expected: IndexEntryType,
+) -> Result<usize, IndexError> {
+    let Some(value) = data.get(offset).copied() else {
+        return Err(IndexError::InvalidFormat(
+            "truncated entry type".to_string(),
+        ));
+    };
+    if IndexEntryType::from_u8(value) != Some(expected) {
+        return Err(IndexError::InvalidFormat(format!(
+            "unexpected index entry type {value}"
+        )));
+    }
+    Ok(offset + 1)
 }
 
 fn load_compact_versioned_with_untracked(
@@ -509,11 +714,15 @@ fn load_compact_versioned_with_untracked(
         entries,
         directories,
         untracked_directories,
+        gitlinks: BTreeMap::new(),
+        gitlinks_tree: None,
+        clean_trees: BTreeMap::new(),
         dirty: false,
         pending_ops: Vec::new(),
         last_journal_bytes: 0,
         last_journal_ops: 0,
         last_journal_replay_ms: 0,
+        hot_loaded: false,
     })
 }
 
@@ -602,11 +811,15 @@ fn load_legacy_versioned(
         entries,
         directories,
         untracked_directories: BTreeMap::new(),
+        gitlinks: BTreeMap::new(),
+        gitlinks_tree: None,
+        clean_trees: BTreeMap::new(),
         dirty: false,
         pending_ops: Vec::new(),
         last_journal_bytes: 0,
         last_journal_ops: 0,
         last_journal_replay_ms: 0,
+        hot_loaded: false,
     })
 }
 
@@ -684,11 +897,15 @@ fn load_compact_versioned(file: &mut File, file_size: u64) -> Result<WorktreeInd
         entries,
         directories,
         untracked_directories: BTreeMap::new(),
+        gitlinks: BTreeMap::new(),
+        gitlinks_tree: None,
+        clean_trees: BTreeMap::new(),
         dirty: false,
         pending_ops: Vec::new(),
         last_journal_bytes: 0,
         last_journal_ops: 0,
         last_journal_replay_ms: 0,
+        hot_loaded: false,
     })
 }
 
@@ -927,41 +1144,266 @@ fn read_untracked_directory_entry(
     Ok(offset)
 }
 
+fn hot_sidecar_dir(snapshot_path: &Path) -> std::path::PathBuf {
+    snapshot_path.with_extension("hot")
+}
+
+fn hot_directory_record_path(snapshot_path: &Path, key: &str) -> std::path::PathBuf {
+    let hash = ContentHash::compute_typed("worktree-index-hot-path", key.as_bytes());
+    hot_sidecar_dir(snapshot_path).join(format!("{hash}.bin"))
+}
+
+fn hot_gitlinks_path(snapshot_path: &Path) -> std::path::PathBuf {
+    hot_sidecar_dir(snapshot_path).join("gitlinks.bin")
+}
+
+fn write_reconstructible_atomic(path: &Path, bytes: &[u8]) -> Result<(), IndexError> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary.flush()?;
+    let (_file, temporary_path) = temporary
+        .keep()
+        .map_err(|error| IndexError::Io(error.error))?;
+    match fs::rename(&temporary_path, path) {
+        Ok(()) => Ok(()),
+        Err(_error) if path.exists() => {
+            fs::remove_file(path)?;
+            fs::rename(temporary_path, path)?;
+            Ok(())
+        }
+        Err(error) => Err(IndexError::Io(error)),
+    }
+}
+
+fn frame_hot_record(mut body: Vec<u8>) -> Vec<u8> {
+    let checksum = crc32(&body);
+    body.extend_from_slice(&checksum.to_be_bytes());
+    body
+}
+
+fn verified_hot_body(bytes: &[u8]) -> Option<&[u8]> {
+    let body_len = bytes.len().checked_sub(4)?;
+    let stored = u32::from_be_bytes(bytes[body_len..].try_into().ok()?);
+    (crc32(&bytes[..body_len]) == stored).then_some(&bytes[..body_len])
+}
+
+fn write_hot_sidecars(index: &WorktreeIndex, snapshot_path: &Path) -> Result<(), IndexError> {
+    let keys = index
+        .directories
+        .keys()
+        .chain(index.untracked_directories.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for key in keys {
+        let mut body = Vec::new();
+        body.extend_from_slice(HOT_RECORD_MAGIC);
+        body.extend_from_slice(&HOT_RECORD_VERSION.to_be_bytes());
+        write_string(&mut body, &key)?;
+        let directory = index.directories.get(&key);
+        body.push(u8::from(directory.is_some()));
+        if let Some(directory) = directory {
+            write_directory_entry_payload(&mut body, directory)?;
+        }
+        let untracked = index.untracked_directories.get(&key);
+        body.push(u8::from(untracked.is_some()));
+        if let Some(untracked) = untracked {
+            write_untracked_directory_entry_payload(&mut body, untracked)?;
+        }
+        let clean_tree = index.clean_trees.get(&key);
+        body.push(u8::from(clean_tree.is_some()));
+        if let Some(clean_tree) = clean_tree {
+            let encoded = rmp_serde::to_vec_named(clean_tree)
+                .map_err(|error| IndexError::InvalidFormat(error.to_string()))?;
+            body.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+            body.extend_from_slice(&encoded);
+        }
+        write_reconstructible_atomic(
+            &hot_directory_record_path(snapshot_path, &key),
+            &frame_hot_record(body),
+        )?;
+    }
+
+    let mut body = Vec::new();
+    body.extend_from_slice(HOT_RECORD_MAGIC);
+    body.extend_from_slice(&HOT_RECORD_VERSION.to_be_bytes());
+    let root_tree_hash = index.gitlinks_tree;
+    body.push(u8::from(root_tree_hash.is_some()));
+    body.extend_from_slice(
+        root_tree_hash
+            .as_ref()
+            .map(ContentHash::as_bytes)
+            .unwrap_or(&[0_u8; 32]),
+    );
+    body.extend_from_slice(&(index.gitlinks.len() as u32).to_be_bytes());
+    for (path, target) in &index.gitlinks {
+        write_string(&mut body, path)?;
+        write_string(&mut body, target)?;
+    }
+    write_reconstructible_atomic(&hot_gitlinks_path(snapshot_path), &frame_hot_record(body))
+}
+
+type HotDirectoryRecord = (
+    Option<DirectoryCacheEntry>,
+    Option<UntrackedDirectoryCacheEntry>,
+    Option<objects::object::Tree>,
+    u64,
+);
+
+fn load_hot_directory_record(
+    snapshot_path: &Path,
+    expected_key: &str,
+    decode_clean_tree: bool,
+) -> Result<Option<HotDirectoryRecord>, IndexError> {
+    let bytes = match fs::read(hot_directory_record_path(snapshot_path, expected_key)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(IndexError::Io(error)),
+    };
+    let Some(body) = verified_hot_body(&bytes) else {
+        return Ok(None);
+    };
+    if body.len() < 12 || &body[..8] != HOT_RECORD_MAGIC {
+        return Ok(None);
+    }
+    if read_u32_be(&body[8..12], "hot record version")? != HOT_RECORD_VERSION {
+        return Ok(None);
+    }
+    let mut offset = 12;
+    let key = read_string(body, &mut offset)?;
+    if key != expected_key {
+        return Ok(None);
+    }
+    let Some(has_directory) = body.get(offset).copied() else {
+        return Ok(None);
+    };
+    offset += 1;
+    let directory = if has_directory != 0 {
+        Some(read_directory_entry_payload(body, &mut offset)?)
+    } else {
+        None
+    };
+    let Some(has_untracked) = body.get(offset).copied() else {
+        return Ok(None);
+    };
+    offset += 1;
+    let untracked = if has_untracked != 0 {
+        Some(read_untracked_directory_entry_payload(body, &mut offset)?)
+    } else {
+        None
+    };
+    let Some(has_tree) = body.get(offset).copied() else {
+        return Ok(None);
+    };
+    offset += 1;
+    let clean_tree = if has_tree != 0 {
+        let len = read_u32_be(&body[offset..], "hot tree length")? as usize;
+        offset += 4;
+        let end = offset
+            .checked_add(len)
+            .filter(|end| *end <= body.len())
+            .ok_or_else(|| IndexError::InvalidFormat("truncated hot tree".to_string()))?;
+        let tree = if decode_clean_tree {
+            Some(
+                rmp_serde::from_slice(&body[offset..end])
+                    .map_err(|error| IndexError::InvalidFormat(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        offset = end;
+        tree
+    } else {
+        None
+    };
+    if offset != body.len() {
+        return Ok(None);
+    }
+    Ok(Some((directory, untracked, clean_tree, bytes.len() as u64)))
+}
+
+fn load_hot_gitlinks(
+    snapshot_path: &Path,
+    index: &mut WorktreeIndex,
+    stats: &mut WorktreeIndexLoadStats,
+) -> Result<bool, IndexError> {
+    let bytes = match fs::read(hot_gitlinks_path(snapshot_path)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(IndexError::Io(error)),
+    };
+    stats.snapshot_bytes = stats.snapshot_bytes.saturating_add(bytes.len() as u64);
+    let Some(body) = verified_hot_body(&bytes) else {
+        return Ok(false);
+    };
+    if body.len() < 12 + 1 + 32 + 4 || &body[..8] != HOT_RECORD_MAGIC {
+        return Ok(false);
+    }
+    if read_u32_be(&body[8..12], "hot gitlink version")? != HOT_RECORD_VERSION {
+        return Ok(false);
+    }
+    let mut offset = 12;
+    let has_root = body[offset] != 0;
+    offset += 1;
+    let root_hash = if has_root {
+        let mut hash = [0_u8; 32];
+        hash.copy_from_slice(&body[offset..offset + 32]);
+        Some(ContentHash::from_bytes(hash))
+    } else {
+        None
+    };
+    offset += 32;
+    if root_hash.is_none() {
+        return Ok(false);
+    }
+    index.gitlinks_tree = root_hash;
+    let count = read_u32_be(&body[offset..], "hot gitlink count")?;
+    offset += 4;
+    for _ in 0..count {
+        let path = read_string(body, &mut offset)?;
+        let target = read_string(body, &mut offset)?;
+        index.gitlinks.insert(path, target);
+    }
+    Ok(offset == body.len())
+}
+
 fn write_snapshot(index: &WorktreeIndex, path: &Path) -> Result<(), IndexError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let mut entry_data = Vec::new();
+    let mut hot_data = Vec::new();
+    let mut file_data = Vec::new();
 
     for (path, entry) in &index.entries {
         let path_bytes = path.as_bytes();
-        entry_data.reserve_exact(1 + 4 + path_bytes.len() + 32 + 8 + 8 + 4 + 1 + 1);
+        file_data.reserve_exact(1 + 4 + path_bytes.len() + 32 + 8 + 8 + 4 + 1 + 1);
 
-        entry_data.push(IndexEntryType::File.to_u8());
-        entry_data.extend_from_slice(&(path_bytes.len() as u32).to_be_bytes());
-        entry_data.extend_from_slice(path_bytes);
-        entry_data.extend_from_slice(entry.hash.as_bytes());
-        entry_data.extend_from_slice(&entry.size.to_be_bytes());
-        entry_data.extend_from_slice(&entry.modified_sec.to_be_bytes());
-        entry_data.extend_from_slice(&entry.modified_nsec.to_be_bytes());
-        entry_data.push(if entry.executable { 1 } else { 0 });
-        entry_data.push(entry.kind.to_u8());
+        file_data.push(IndexEntryType::File.to_u8());
+        file_data.extend_from_slice(&(path_bytes.len() as u32).to_be_bytes());
+        file_data.extend_from_slice(path_bytes);
+        file_data.extend_from_slice(entry.hash.as_bytes());
+        file_data.extend_from_slice(&entry.size.to_be_bytes());
+        file_data.extend_from_slice(&entry.modified_sec.to_be_bytes());
+        file_data.extend_from_slice(&entry.modified_nsec.to_be_bytes());
+        file_data.push(if entry.executable { 1 } else { 0 });
+        file_data.push(entry.kind.to_u8());
     }
 
     for (path, dir) in &index.directories {
         let path_bytes = path.as_bytes();
-        entry_data.reserve_exact(1 + 4 + path_bytes.len() + 8 + 4 + 4 + 32 + 1 + 32);
+        hot_data.reserve_exact(1 + 4 + path_bytes.len() + 8 + 4 + 4 + 32 + 1 + 32);
 
-        entry_data.push(IndexEntryType::Directory.to_u8());
-        entry_data.extend_from_slice(&(path_bytes.len() as u32).to_be_bytes());
-        entry_data.extend_from_slice(path_bytes);
-        entry_data.extend_from_slice(&dir.mtime_sec.to_be_bytes());
-        entry_data.extend_from_slice(&dir.mtime_nsec.to_be_bytes());
-        entry_data.extend_from_slice(&dir.child_count.to_be_bytes());
-        entry_data.extend_from_slice(dir.child_digest.as_bytes());
-        entry_data.push(u8::from(dir.clean_tree_hash.is_some()));
-        entry_data.extend_from_slice(
+        hot_data.push(IndexEntryType::Directory.to_u8());
+        hot_data.extend_from_slice(&(path_bytes.len() as u32).to_be_bytes());
+        hot_data.extend_from_slice(path_bytes);
+        hot_data.extend_from_slice(&dir.mtime_sec.to_be_bytes());
+        hot_data.extend_from_slice(&dir.mtime_nsec.to_be_bytes());
+        hot_data.extend_from_slice(&dir.child_count.to_be_bytes());
+        hot_data.extend_from_slice(dir.child_digest.as_bytes());
+        hot_data.push(u8::from(dir.clean_tree_hash.is_some()));
+        hot_data.extend_from_slice(
             dir.clean_tree_hash
                 .as_ref()
                 .map(ContentHash::as_bytes)
@@ -971,30 +1413,45 @@ fn write_snapshot(index: &WorktreeIndex, path: &Path) -> Result<(), IndexError> 
 
     for (path, dir) in &index.untracked_directories {
         let path_bytes = path.as_bytes();
-        entry_data.push(IndexEntryType::UntrackedDirectory.to_u8());
-        entry_data.extend_from_slice(&(path_bytes.len() as u32).to_be_bytes());
-        entry_data.extend_from_slice(path_bytes);
-        write_untracked_directory_entry_payload(&mut entry_data, dir)?;
+        hot_data.push(IndexEntryType::UntrackedDirectory.to_u8());
+        hot_data.extend_from_slice(&(path_bytes.len() as u32).to_be_bytes());
+        hot_data.extend_from_slice(path_bytes);
+        write_untracked_directory_entry_payload(&mut hot_data, dir)?;
     }
 
+    for (path, target) in &index.gitlinks {
+        hot_data.push(IndexEntryType::Gitlink.to_u8());
+        write_string(&mut hot_data, path)?;
+        write_string(&mut hot_data, target)?;
+    }
+
+    let mut entry_data = hot_data.clone();
+    entry_data.extend_from_slice(&file_data);
     let checksum = crc32(&entry_data);
 
-    let mut file_data = Vec::with_capacity(HEADER_SIZE_V5 + entry_data.len() + 4);
-    file_data.extend_from_slice(INDEX_MAGIC);
-    file_data.extend_from_slice(&INDEX_VERSION.to_be_bytes());
-    file_data.extend_from_slice(&(index.entries.len() as u32).to_be_bytes());
-    file_data.extend_from_slice(&(index.directories.len() as u32).to_be_bytes());
-    file_data.extend_from_slice(&(index.untracked_directories.len() as u32).to_be_bytes());
-    file_data.extend_from_slice(&entry_data);
-    file_data.extend_from_slice(&checksum.to_be_bytes());
+    let mut encoded = Vec::with_capacity(HEADER_SIZE_V6 + entry_data.len() + 4);
+    encoded.extend_from_slice(INDEX_MAGIC);
+    encoded.extend_from_slice(&INDEX_VERSION.to_be_bytes());
+    encoded.extend_from_slice(&(index.entries.len() as u32).to_be_bytes());
+    encoded.extend_from_slice(&(index.directories.len() as u32).to_be_bytes());
+    encoded.extend_from_slice(&(index.untracked_directories.len() as u32).to_be_bytes());
+    encoded.extend_from_slice(&(index.gitlinks.len() as u32).to_be_bytes());
+    encoded.extend_from_slice(&(hot_data.len() as u64).to_be_bytes());
+    encoded.extend_from_slice(&crc32(&hot_data).to_be_bytes());
+    encoded.extend_from_slice(&entry_data);
+    encoded.extend_from_slice(&checksum.to_be_bytes());
 
     let mut temp_file = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))?;
-    temp_file.write_all(&file_data)?;
+    temp_file.write_all(&encoded)?;
     temp_file.flush()?;
+    temp_file.as_file().sync_all()?;
     let (_file, temp_path) = temp_file
         .keep()
         .map_err(|error| IndexError::Io(error.error))?;
     fs::rename(&temp_path, path)?;
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
 
     Ok(())
 }
@@ -1004,6 +1461,7 @@ fn append_journal(index: &WorktreeIndex, journal_path: &Path) -> Result<(), Inde
         fs::create_dir_all(parent)?;
     }
 
+    let journal_existed = journal_path.exists();
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -1020,6 +1478,10 @@ fn append_journal(index: &WorktreeIndex, journal_path: &Path) -> Result<(), Inde
     file.write_all(&crc32(&payload).to_be_bytes())?;
     file.write_all(&payload)?;
     file.flush()?;
+    file.sync_data()?;
+    if !journal_existed && let Some(parent) = journal_path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 
@@ -1072,11 +1534,8 @@ fn apply_journal(index: &mut WorktreeIndex, journal_path: &Path) -> Result<usize
         }
 
         if crc32(&payload) != expected_checksum {
-            warn!(
-                journal_path = %journal_path.display(),
-                "Stopping worktree index journal replay at corrupt frame"
-            );
-            break;
+            warn!(journal_path = %journal_path.display(), "Rejecting corrupt worktree index journal");
+            return Err(IndexError::ChecksumMismatch);
         }
 
         let ops = deserialize_journal_ops(&payload)?;
@@ -1100,6 +1559,12 @@ fn apply_journal(index: &mut WorktreeIndex, journal_path: &Path) -> Result<usize
                 }
                 JournalOp::RemoveUntrackedDirectory { path } => {
                     let _ = index.untracked_directories.remove(&path);
+                }
+                JournalOp::UpsertGitlink { path, target } => {
+                    index.gitlinks.insert(path, target);
+                }
+                JournalOp::RemoveGitlink { path } => {
+                    let _ = index.gitlinks.remove(&path);
                 }
             }
         }
@@ -1320,6 +1785,15 @@ fn write_journal_op(writer: &mut impl Write, op: &JournalOp) -> Result<(), Index
             writer.write_all(&[0x06])?;
             write_string(writer, path)?;
         }
+        JournalOp::UpsertGitlink { path, target } => {
+            writer.write_all(&[0x07])?;
+            write_string(writer, path)?;
+            write_string(writer, target)?;
+        }
+        JournalOp::RemoveGitlink { path } => {
+            writer.write_all(&[0x08])?;
+            write_string(writer, path)?;
+        }
     }
     Ok(())
 }
@@ -1367,6 +1841,15 @@ fn deserialize_journal_ops(payload: &[u8]) -> Result<Vec<JournalOp>, IndexError>
             0x06 => {
                 let path = read_string(payload, &mut offset)?;
                 ops.push(JournalOp::RemoveUntrackedDirectory { path });
+            }
+            0x07 => {
+                let path = read_string(payload, &mut offset)?;
+                let target = read_string(payload, &mut offset)?;
+                ops.push(JournalOp::UpsertGitlink { path, target });
+            }
+            0x08 => {
+                let path = read_string(payload, &mut offset)?;
+                ops.push(JournalOp::RemoveGitlink { path });
             }
             _ => {
                 return Err(IndexError::InvalidFormat(
@@ -1430,7 +1913,7 @@ mod tests {
     ) {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(INDEX_MAGIC);
-        bytes.extend_from_slice(&INDEX_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&5_u32.to_be_bytes());
         bytes.extend_from_slice(&file_count.to_be_bytes());
         bytes.extend_from_slice(&dir_count.to_be_bytes());
         bytes.extend_from_slice(&untracked_dir_count.to_be_bytes());
@@ -1490,7 +1973,7 @@ mod tests {
     }
 
     #[test]
-    fn v5_snapshot_round_trips_untracked_directories() {
+    fn v6_snapshot_round_trips_untracked_directories() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("index.bin");
 
@@ -1508,7 +1991,7 @@ mod tests {
         assert_eq!(loaded.untracked_directory_len(), 1);
         let entry = loaded
             .get_untracked_directory("scratch")
-            .expect("untracked directory entry should survive v5 roundtrip");
+            .expect("untracked directory entry should survive v6 roundtrip");
         assert_eq!(
             entry.added_paths,
             vec!["nested/one.txt".to_string(), "nested/two.txt".to_string()]
@@ -1517,6 +2000,63 @@ mod tests {
             entry.ignore_fingerprint,
             sample_untracked_directory_entry().ignore_fingerprint
         );
+    }
+
+    #[test]
+    fn v6_hot_load_reads_directory_proofs_without_file_table() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("index.bin");
+        let mut index = WorktreeIndex::new();
+        for name in ["a.txt", "b.txt"] {
+            index.insert(name.to_string(), sample_file_entry(name));
+        }
+        let root_hash = ContentHash::compute_typed("tree", b"root");
+        index.insert_directory(
+            String::new(),
+            DirectoryCacheEntry {
+                mtime_sec: 1,
+                mtime_nsec: 2,
+                child_count: 2,
+                child_digest: ContentHash::compute_typed("dirnames", b"a.txt\0b.txt"),
+                clean_tree_hash: Some(root_hash),
+            },
+        );
+        index.insert_directory(
+            "unchanged-sibling".to_string(),
+            DirectoryCacheEntry {
+                mtime_sec: 3,
+                mtime_nsec: 4,
+                child_count: 0,
+                child_digest: ContentHash::compute_typed("dirnames", b""),
+                clean_tree_hash: Some(ContentHash::compute_typed("tree", b"sibling")),
+            },
+        );
+        index.set_gitlinks_tree(root_hash);
+        index.insert_gitlink(
+            "vendor/library".to_string(),
+            "0123456789012345678901234567890123456789".to_string(),
+        );
+        save_snapshot_profiled(&index, &path).unwrap();
+
+        let (hot, _) =
+            load_hot_profiled_for_directories(&path, &BTreeSet::from([String::new()])).unwrap();
+        assert_eq!(hot.len(), 0);
+        assert_eq!(hot.directory_len(), 1);
+        assert!(hot.get_directory("unchanged-sibling").is_none());
+        assert_eq!(
+            hot.gitlinks().get("vendor/library").map(String::as_str),
+            Some("0123456789012345678901234567890123456789")
+        );
+        assert!(hot.is_hot_loaded());
+        let (full, _) = load_profiled(&path).unwrap();
+        assert_eq!(full.len(), 2);
+        assert_eq!(full.directory_len(), 2);
+        assert!(!full.is_hot_loaded());
+
+        fs::write(hot_directory_record_path(&path, ""), b"corrupt").unwrap();
+        let (self_healed, _) =
+            load_hot_profiled_for_directories(&path, &BTreeSet::from([String::new()])).unwrap();
+        assert!(self_healed.get_directory("").is_none());
     }
 
     #[test]
@@ -1547,7 +2087,7 @@ mod tests {
     }
 
     #[test]
-    fn journal_replay_preserves_good_frames_before_corrupt_tail() {
+    fn journal_checksum_corruption_invalidates_the_whole_index() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("index.bin");
         let journal_path = journal_path(&path);
@@ -1575,11 +2115,9 @@ mod tests {
         journal[second_frame_start + 4] ^= 0xFF;
         fs::write(&journal_path, journal).unwrap();
 
-        let (loaded, stats) = load_profiled(&path).unwrap();
-
-        assert!(loaded.get("base.txt").is_some());
-        assert!(loaded.get("good.txt").is_some());
-        assert!(loaded.get("tail.txt").is_none());
-        assert_eq!(stats.journal_ops, 1);
+        assert!(matches!(
+            load_profiled(&path),
+            Err(IndexError::ChecksumMismatch)
+        ));
     }
 }

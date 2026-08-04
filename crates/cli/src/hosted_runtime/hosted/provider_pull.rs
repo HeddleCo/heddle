@@ -1876,7 +1876,13 @@ mod tests {
             .iter()
             .copied()
             .enumerate()
-            .map(|(index, id)| (parsed_index.find(&id).unwrap(), index, id))
+            .map(|(index, id)| {
+                (
+                    parsed_index.find(&id).unwrap().expect("fixture id indexed"),
+                    index,
+                    id,
+                )
+            })
             .collect::<Vec<_>>();
         ordered.sort_unstable_by_key(|(offset, _, _)| *offset);
 
@@ -2066,6 +2072,7 @@ mod tests {
             PackIndex::from_bytes(&fixture.source_index)
                 .unwrap()
                 .ids()
+                .unwrap()
                 .len()
         );
         println!(

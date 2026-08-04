@@ -22,8 +22,7 @@ use super::{
     repository_materialization::{MaterializedTree, WorktreeWriteOp},
 };
 use crate::{
-    FsMonitorSettings, WorktreeIndex,
-    fsmonitor::persist_current_monitor_cursor,
+    WorktreeIndex,
     worktree_index::{DirectoryCacheEntry, WorktreeIndexLoadStats, WorktreeIndexSaveStats},
     worktree_walk::{build_cached_entry, cache_key},
 };
@@ -777,9 +776,9 @@ impl Repository {
     }
 
     fn refresh_fsmonitor_after_incremental_apply(&self) {
-        let settings = FsMonitorSettings::from(self.config.worktree.fsmonitor);
-        if let Err(error) = persist_current_monitor_cursor(self.root(), settings) {
-            warn!(root = %self.root().display(), %error, "Failed to refresh monitor cursor after incremental apply");
+        let cursor = self.root.join(".heddle/state").join("fsmonitor.toml");
+        if let Err(error) = self.remove_if_exists(&cursor) {
+            warn!(root = %self.root().display(), %error, "Failed to invalidate monitor cursor after worktree apply");
         }
     }
 

@@ -9,7 +9,7 @@ use std::{
 };
 
 use objects::{
-    object::{Blob, ContentHash, Tree, TreeEntry},
+    object::{Blob, ContentHash, State, StateId, Tree, TreeEntry},
     store::ObjectStore,
     util::gitlink_placeholder_bytes,
     worktree::WorktreeStatus,
@@ -22,7 +22,7 @@ use super::{
 };
 use crate::{
     FsMonitorSettings, WorktreeIndex, WorktreeStatusOptions,
-    fsmonitor::ChangeMonitorSession,
+    fsmonitor::{ChangeMonitorSession, MonitorStatus},
     thread_manifest::ManifestFile,
     worktree_ignore::WorktreeIgnoreMatcher,
     worktree_index::{WorktreeIndexLoadStats, WorktreeIndexSaveStats},
@@ -34,6 +34,8 @@ use crate::{
 
 #[derive(Debug, Clone, Default)]
 pub struct WorktreeCompareProfile {
+    pub scan_mode: String,
+    pub fallback_reason: Option<String>,
     pub index_load_ms: u128,
     pub index_snapshot_load_ms: u128,
     pub index_journal_replay_ms: u128,
@@ -202,7 +204,24 @@ impl Repository {
     ) -> Result<TreeBuildOutput> {
         let ignore_matcher =
             WorktreeIgnoreMatcher::new(patterns).with_nested_worktree_exclusions(nested_exclusions);
-        let mut policy = TreeBuildPolicy::new(self, dir, stat_cache);
+        let incremental_state = (dir == self.root() && baseline_tree.is_some()).then(|| {
+            let monitor = ChangeMonitorSession::prepare(
+                self.root(),
+                self.default_worktree_status_options().fsmonitor,
+            );
+            let index = if monitor.status == MonitorStatus::Usable {
+                WorktreeIndex::load_hot_profiled_for_directories(
+                    &self.worktree_index_path(),
+                    &monitor.changed_directory_keys(),
+                )
+            } else {
+                WorktreeIndex::load_profiled(&self.worktree_index_path())
+            }
+            .map(|(index, _)| index)
+            .unwrap_or_default();
+            (index, monitor)
+        });
+        let mut policy = TreeBuildPolicy::new(self, dir, stat_cache, incremental_state);
         let mut output = walk_worktree(self, dir, &ignore_matcher, baseline_tree, &mut policy)?;
 
         // Flush every newly-seen blob as a single packfile. Stores
@@ -223,6 +242,59 @@ impl Repository {
     /// Compare the worktree against a tree using the persisted binary index.
     pub fn compare_worktree_cached(&self, tree: &Tree) -> Result<WorktreeStatus> {
         self.compare_worktree_cached_with_options(tree, &self.default_worktree_status_options())
+    }
+
+    pub fn require_tree_for_worktree_status(&self, hash: &ContentHash) -> Result<Tree> {
+        let cache_path = self.root().join(".heddle/state/worktree-current-tree.bin");
+        if let Ok(bytes) = fs::read(&cache_path)
+            && let Ok(tree) = rmp_serde::from_slice::<Tree>(&bytes)
+            && tree.validate().is_ok()
+            && tree.hash() == *hash
+        {
+            return Ok(tree);
+        }
+        let tree = self.require_tree(hash)?;
+        if let Ok(bytes) = rmp_serde::to_vec_named(&tree)
+            && let Err(error) = objects::fs_atomic::write_file_atomic(&cache_path, &bytes)
+        {
+            warn!(path = %cache_path.display(), %error, "Could not refresh worktree tree cache");
+        }
+        Ok(tree)
+    }
+
+    pub fn state_for_worktree_status(&self, id: &StateId) -> Result<State> {
+        let cache_path = self.root().join(".heddle/state/worktree-current-state.bin");
+        if let Ok(bytes) = fs::read(&cache_path)
+            && let Ok(mut state) = rmp_serde::from_slice::<State>(&bytes)
+            && state.id() == *id
+        {
+            state.state_id = *id;
+            return Ok(state);
+        }
+        let state = self
+            .store()
+            .get_state(id)?
+            .ok_or(HeddleError::StateNotFound(*id))?;
+        if let Ok(bytes) = rmp_serde::to_vec_named(&state)
+            && let Err(error) = objects::fs_atomic::write_file_atomic(&cache_path, &bytes)
+        {
+            warn!(path = %cache_path.display(), %error, "Could not refresh worktree state cache");
+        }
+        Ok(state)
+    }
+
+    pub fn current_state_for_worktree_status(&self) -> Result<Option<State>> {
+        self.head()?
+            .map(|id| self.state_for_worktree_status(&id))
+            .transpose()
+    }
+
+    /// Return the complete gitlink summary cached for `tree`, when the hot
+    /// index proves that its root directory summary was built from that tree.
+    pub fn cached_gitlinks_for_tree(&self, tree: &Tree) -> Option<Vec<(String, String)>> {
+        let (root, gitlinks) =
+            WorktreeIndex::load_hot_gitlinks_summary(&self.worktree_index_path()).ok()??;
+        (root == tree.hash()).then_some(gitlinks)
     }
 
     pub fn compare_worktree_cached_detailed(&self, tree: &Tree) -> Result<WorktreeStatusDetailed> {
@@ -275,24 +347,46 @@ impl Repository {
         options: &WorktreeStatusOptions,
     ) -> Result<(WorktreeStatusDetailed, WorktreeCompareProfile)> {
         let index_path = self.worktree_index_path();
+        let index_existed = index_path.exists();
+        let mut index_invalidation_reason = None;
+        let monitor_prepare_start = Instant::now();
+        let monitor = ChangeMonitorSession::prepare(self.root(), options.fsmonitor);
+        let monitor_prepare_ms = monitor_prepare_start.elapsed().as_millis();
         let load_start = Instant::now();
-        let (mut index, load_stats) = match WorktreeIndex::load_profiled(&index_path) {
+        let index_result = if monitor.status == MonitorStatus::Usable {
+            WorktreeIndex::load_hot_profiled_for_directories(
+                &index_path,
+                &monitor.changed_directory_keys(),
+            )
+        } else {
+            WorktreeIndex::load_profiled(&index_path)
+        };
+        let (mut index, load_stats) = match index_result {
             Ok(result) => result,
             Err(error) => {
+                index_invalidation_reason = Some(match &error {
+                    crate::worktree_index::IndexError::VersionMismatch { .. } => {
+                        "index_version_changed"
+                    }
+                    crate::worktree_index::IndexError::ChecksumMismatch
+                    | crate::worktree_index::IndexError::InvalidFormat(_)
+                    | crate::worktree_index::IndexError::InvalidUtf8(_) => "index_corrupt",
+                    crate::worktree_index::IndexError::Io(_) => "index_io_error",
+                });
                 warn!(path = %index_path.display(), %error, "Ignoring unreadable worktree index");
                 (WorktreeIndex::new(), WorktreeIndexLoadStats::default())
             }
         };
+        if !index_existed {
+            index_invalidation_reason = Some("missing_index");
+        }
         let index_load_ms = load_start.elapsed().as_millis();
-
-        let monitor_prepare_start = Instant::now();
-        let monitor = ChangeMonitorSession::prepare(self.root(), options.fsmonitor);
-        let monitor_prepare_ms = monitor_prepare_start.elapsed().as_millis();
 
         let patterns = self.ignore_patterns()?;
         let nested_exclusions = self.nested_thread_worktree_exclusions(self.root())?;
         let ignore_matcher = WorktreeIgnoreMatcher::new(&patterns)
             .with_nested_worktree_exclusions(nested_exclusions);
+        let changed_path_mode = monitor.can_filter_directory_children(Path::new(""), &index);
         let compare_start = Instant::now();
         let (status, stats) = compare_worktree_with_index_detailed(
             self,
@@ -304,23 +398,23 @@ impl Repository {
         let compare_ms = compare_start.elapsed().as_millis();
 
         let save_start = Instant::now();
-        let (index_save_ms, save_stats) = if index.is_dirty() {
+        let (index_save_ms, save_stats, index_persisted) = if index.is_dirty() {
             match index.save_profiled(&index_path) {
                 Ok(stats) => {
                     index.mark_clean();
-                    (save_start.elapsed().as_millis(), stats)
+                    (save_start.elapsed().as_millis(), stats, true)
                 }
                 Err(error) => {
                     warn!(path = %index_path.display(), %error, "Failed to persist worktree index");
-                    (0, WorktreeIndexSaveStats::default())
+                    (0, WorktreeIndexSaveStats::default(), false)
                 }
             }
         } else {
-            (0, WorktreeIndexSaveStats::default())
+            (0, WorktreeIndexSaveStats::default(), true)
         };
 
         let persist_start = Instant::now();
-        if let Err(error) = monitor.persist() {
+        if index_persisted && let Err(error) = monitor.persist(status.is_clean()) {
             warn!(path = %self.root().display(), %error, "Failed to persist monitor state");
         }
         let monitor_persist_ms = persist_start.elapsed().as_millis();
@@ -369,9 +463,22 @@ impl Repository {
             "Worktree compare complete"
         );
 
+        let fallback_reason = (!changed_path_mode).then(|| {
+            index_invalidation_reason
+                .map(str::to_string)
+                .or_else(|| monitor.reason.clone())
+                .unwrap_or_else(|| "missing_index_baseline".to_string())
+        });
+
         Ok((
             status,
             WorktreeCompareProfile {
+                scan_mode: if changed_path_mode {
+                    "changed_paths".to_string()
+                } else {
+                    "fallback_scan".to_string()
+                },
+                fallback_reason,
                 index_load_ms,
                 index_snapshot_load_ms: load_stats.snapshot_load_ms,
                 index_journal_replay_ms: load_stats.journal_replay_ms,
@@ -436,7 +543,6 @@ impl Repository {
     ) -> Result<crate::ChangeMonitorReport> {
         let session = ChangeMonitorSession::prepare(self.root(), options.fsmonitor);
         let report = session.report();
-        session.persist()?;
         Ok(report)
     }
 }
@@ -458,6 +564,7 @@ struct TreeBuildPolicy<'a> {
     /// their hash reused — no `read + hash + put_blob` cycle. Tracked
     /// in `stat_cache_hits` for diagnostics.
     stat_cache: Option<&'a crate::thread_manifest::ThreadManifest>,
+    incremental_state: Option<(WorktreeIndex, ChangeMonitorSession)>,
     stat_cache_hits: u64,
     /// Blobs encountered during the walk that aren't already in the
     /// store. Drained once at the end of the walk into a single
@@ -474,11 +581,13 @@ impl<'a> TreeBuildPolicy<'a> {
         repo: &'a Repository,
         walk_root: &'a Path,
         stat_cache: Option<&'a crate::thread_manifest::ThreadManifest>,
+        incremental_state: Option<(WorktreeIndex, ChangeMonitorSession)>,
     ) -> Self {
         Self {
             repo,
             walk_root,
             stat_cache,
+            incremental_state,
             stat_cache_hits: 0,
             pending_blobs: Vec::new(),
             seen: HashSet::new(),
@@ -491,7 +600,6 @@ impl<'a> TreeBuildPolicy<'a> {
     /// match is exact; `None` otherwise. The caller falls back to
     /// the read-and-hash path.
     fn lookup_stat_cache_hash(&self, entry: &WalkEntry<'_>) -> Option<ContentHash> {
-        let cache = self.stat_cache?;
         let rel = entry.path.strip_prefix(self.walk_root).ok()?;
         // Manifest keys use forward-slash separators (cross-platform
         // by construction; see `populate_manifest_from_tree`).
@@ -505,22 +613,47 @@ impl<'a> TreeBuildPolicy<'a> {
             }
             rel_str.push_str(s.to_str()?);
         }
-        let cached = cache.files.get(&rel_str)?;
-        let (size, inode, mtime_ns, ctime_ns, mode) =
-            crate::stat_signature::stat_signature(entry.path, &entry.metadata);
-        let stat = crate::thread_manifest::ManifestFile {
-            hash: cached.hash,
-            size,
-            inode,
-            mtime_ns,
-            ctime_ns,
-            mode,
-        };
-        if stat.matches(cached) {
-            Some(cached.hash)
-        } else {
-            None
+        if let Some(cached) = self.stat_cache.and_then(|cache| cache.files.get(&rel_str)) {
+            let (size, inode, mtime_ns, ctime_ns, mode) =
+                crate::stat_signature::stat_signature(entry.path, &entry.metadata);
+            let stat = crate::thread_manifest::ManifestFile {
+                hash: cached.hash,
+                size,
+                inode,
+                mtime_ns,
+                ctime_ns,
+                mode,
+            };
+            if stat.matches(cached) {
+                return Some(cached.hash);
+            }
         }
+        let cached = self
+            .incremental_state
+            .as_ref()
+            .and_then(|(index, _)| index.fresh_entry(&rel_str, &entry.metadata))?;
+        Some(cached.hash)
+    }
+
+    fn monitor_proves_unchanged(&self, entry: &WalkEntry<'_>) -> bool {
+        let Some((index, monitor)) = &self.incremental_state else {
+            return false;
+        };
+        entry.path.strip_prefix(self.walk_root).is_ok_and(|path| {
+            let parent = path.parent().unwrap_or_else(|| Path::new(""));
+            index
+                .get_directory(&crate::worktree_walk::cache_key(parent))
+                .is_some()
+                && !monitor.path_may_have_changed(path)
+        })
+    }
+
+    fn changed_path_mode(&self) -> bool {
+        self.incremental_state
+            .as_ref()
+            .is_some_and(|(index, monitor)| {
+                monitor.status == MonitorStatus::Usable && index.get_directory("").is_some()
+            })
     }
 
     /// Push a blob into the pending pack if it's not already in the
@@ -531,7 +664,7 @@ impl<'a> TreeBuildPolicy<'a> {
         if self.seen.contains(&hash) {
             return Ok(());
         }
-        if self.repo.store.has_blob_locally(&hash)? {
+        if !self.changed_path_mode() && self.repo.store.has_blob_locally(&hash)? {
             self.seen.insert(hash);
             return Ok(());
         }
@@ -574,6 +707,51 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
     type DirectoryState = TreeBuildState;
     type Output = TreeBuildOutput;
 
+    fn reuse_tree_entry_before_metadata(
+        &mut self,
+        rel_path: &Path,
+        tree_entry: &TreeEntry,
+        state: &mut Self::DirectoryState,
+    ) -> Result<bool> {
+        let Some(tree_hash) = tree_entry.tree_hash() else {
+            return Ok(false);
+        };
+        let Some((index, monitor)) = &self.incremental_state else {
+            return Ok(false);
+        };
+        let key = crate::worktree_walk::cache_key(rel_path);
+        let reusable = !monitor.path_may_have_changed(rel_path)
+            && index
+                .get_directory(&key)
+                .is_some_and(|entry| entry.clean_tree_hash == Some(tree_hash));
+        if reusable {
+            state.entries.push(tree_entry.clone());
+            state.profile.dir_count += 1;
+        }
+        Ok(reusable)
+    }
+
+    fn skip_directory_before_enumeration(
+        &mut self,
+        rel_path: &Path,
+        _metadata: &fs::Metadata,
+        tree: Option<&Tree>,
+    ) -> Result<Option<Self::Output>> {
+        let Some((index, monitor)) = &self.incremental_state else {
+            return Ok(None);
+        };
+        let Some(tree) = tree else {
+            return Ok(None);
+        };
+        Ok(monitor
+            .can_skip_directory(rel_path, Some(tree), index)
+            .then(|| TreeBuildOutput {
+                tree: tree.clone(),
+                profile: TreeBuildProfile::default(),
+                revalidation_files: BTreeMap::new(),
+            }))
+    }
+
     fn enter_directory(
         &mut self,
         _directory: &WalkDirectory<'_>,
@@ -589,6 +767,16 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         state: &mut Self::DirectoryState,
     ) -> Result<()> {
         trace!(file = %entry.path.display(), size = entry.metadata.len(), "Processing file");
+
+        if self.monitor_proves_unchanged(&entry)
+            && let Some(tree_entry) = tree_entry
+            && let Some(hash) = tree_entry.blob_hash()
+        {
+            self.record_revalidation_file(&entry, hash, state)?;
+            state.profile.file_count += 1;
+            state.entries.push(tree_entry.clone());
+            return Ok(());
+        }
 
         if let Some(target) = tree_entry.and_then(TreeEntry::gitlink_target) {
             let read_start = Instant::now();
@@ -625,7 +813,8 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         // since materialise time. Skips the read+hash entirely for
         // unchanged files — the dominant cost on a "one file edited
         // in a big repo" capture.
-        if let Some(hash) = self.lookup_stat_cache_hash(&entry)
+        if !self.changed_path_mode()
+            && let Some(hash) = self.lookup_stat_cache_hash(&entry)
             && self.repo.store.has_blob_locally(&hash)?
         {
             self.record_revalidation_file(&entry, hash, state)?;
@@ -667,9 +856,17 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
     fn visit_symlink(
         &mut self,
         entry: WalkEntry<'_>,
-        _tree_entry: Option<&TreeEntry>,
+        tree_entry: Option<&TreeEntry>,
         state: &mut Self::DirectoryState,
     ) -> Result<()> {
+        if self.monitor_proves_unchanged(&entry)
+            && let Some(tree_entry) = tree_entry
+            && let Some(hash) = tree_entry.symlink_hash()
+        {
+            self.record_revalidation_file(&entry, hash, state)?;
+            state.entries.push(tree_entry.clone());
+            return Ok(());
+        }
         let target = fs::read_link(entry.path)?;
         // Validate symlink escape against the *walk root*, not
         // `repo.root()`. When `capture_thread_from_disk` builds a

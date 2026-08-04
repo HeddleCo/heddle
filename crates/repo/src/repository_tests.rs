@@ -755,6 +755,10 @@ fn compare_worktree_cached_treats_materialized_gitlink_as_clean_leaf() {
     assert!(status.added.is_empty(), "added={:?}", status.added);
     assert!(status.deleted.is_empty(), "deleted={:?}", status.deleted);
     assert_eq!(
+        repo.cached_gitlinks_for_tree(&tree),
+        Some(vec![("vendor".to_string(), target.to_string())])
+    );
+    assert_eq!(
         fs::read(temp_dir.path().join("vendor")).expect("gitlink placeholder"),
         gitlink_placeholder_bytes(&target)
     );
@@ -1903,6 +1907,8 @@ fn test_maintenance_run_builds_commit_graph_and_worktree_index() {
 
     let graph_path = temp_dir.path().join(".heddle/state/commit-graph.bin");
     let index_path = temp_dir.path().join(".heddle/state/index.bin");
+    let _ = fs::remove_file(&index_path);
+    let _ = fs::remove_file(temp_dir.path().join(".heddle/state/index.journal"));
     assert!(!graph_path.exists());
     assert!(!index_path.exists());
 

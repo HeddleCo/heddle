@@ -1705,6 +1705,7 @@ fn test_undo_thread_refresh_restores_base_state() {
     };
 
     heddle_must_succeed(&["thread", "refresh", "feature"], temp.path());
+    let feature_tip_after_refresh = head_short(temp.path());
     assert_eq!(
         std::fs::read_to_string(temp.path().join("feature.txt")).unwrap(),
         "feature\n",
@@ -1768,6 +1769,27 @@ fn test_undo_thread_refresh_restores_base_state() {
         restored.current_state.as_deref(),
         Some(current_before_refresh.as_str()),
         "undo of refresh must restore the manager record's current_state too"
+    );
+
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
+    let feature_ref = repo
+        .refs()
+        .get_thread(&ThreadName::new("feature"))
+        .unwrap()
+        .expect("feature ref survives refresh redo")
+        .short();
+    assert_eq!(
+        feature_ref, feature_tip_after_refresh,
+        "redo of refresh must restore the refreshed feature ref"
+    );
+    assert!(
+        temp.path().join("main.txt").exists(),
+        "redo of refresh on the checked-out thread must restore files introduced by refresh"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("feature.txt")).unwrap(),
+        "feature\n",
+        "redo of refresh must preserve the feature worktree content"
     );
 }
 

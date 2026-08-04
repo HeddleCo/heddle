@@ -307,7 +307,12 @@ impl<'a> EntrySteps<'_, 'a> {
 
     /// Re-materialize the currently attached thread at `target`, preserving its
     /// attached HEAD. No-op when undo/redo is replaying a different thread's ref.
-    fn restore_active_thread_worktree(&mut self, name: &str, target: StateId) -> HeddleResult<()> {
+    fn restore_active_thread_worktree(
+        &mut self,
+        name: &str,
+        target: StateId,
+        materialized: StateId,
+    ) -> HeddleResult<()> {
         let repo = self.repo();
         let head_ref = repo.head_ref()?;
         let Head::Attached { thread } = &head_ref else {
@@ -317,9 +322,9 @@ impl<'a> EntrySteps<'_, 'a> {
             return Ok(());
         }
         self.step_nonatomic(
-            move || Ok((repo.head()?, repo.head_ref()?)),
+            move || Ok((Some(materialized), repo.head_ref()?)),
             move |(prev_state, prev_head_ref)| restore_head(repo, prev_state, &prev_head_ref),
-            move || repo.fast_forward_attached_without_record_discard_local(&target),
+            move || repo.restore_worktree_state_only(&target, Some(&materialized)),
         )
     }
 
@@ -707,6 +712,7 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         OpRecord::ThreadUpdate {
             name,
             old_state,
+            new_state,
             manager_snapshots,
             ..
         } => {
@@ -717,7 +723,7 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
                 steps.delete_thread(name.as_str())?;
             } else {
                 steps.set_thread(name.as_str(), *old_state)?;
-                steps.restore_active_thread_worktree(name.as_str(), *old_state)?;
+                steps.restore_active_thread_worktree(name.as_str(), *old_state, *new_state)?;
             }
             if let Some(snapshots) = manager_snapshots.as_ref() {
                 if !snapshots.old_records.is_empty() || !snapshots.new_records.is_empty() {
@@ -914,12 +920,13 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         }
         OpRecord::ThreadUpdate {
             name,
+            old_state,
             new_state,
             manager_snapshots,
             ..
         } => {
             steps.set_thread(name.as_str(), *new_state)?;
-            steps.restore_active_thread_worktree(name.as_str(), *new_state)?;
+            steps.restore_active_thread_worktree(name.as_str(), *new_state, *old_state)?;
             if let Some(snapshots) = manager_snapshots.as_ref() {
                 if !snapshots.old_records.is_empty() || !snapshots.new_records.is_empty() {
                     steps.restore_thread_record_set(

@@ -563,7 +563,7 @@ mod tests {
         let config = RepoConfig::default();
 
         assert_eq!(config.worktree.ignore, vec![".heddle".to_string()]);
-        assert_eq!(config.worktree.fsmonitor.mode, crate::FsMonitorMode::Off);
+        assert_eq!(config.worktree.fsmonitor.mode, crate::FsMonitorMode::Auto);
         assert_eq!(
             config.repository.source_authority,
             RepositorySourceAuthority::Native

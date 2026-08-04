@@ -932,13 +932,13 @@ mod tests {
         assert_eq!(stats.object_count, wanted.len());
         assert!(stats.encoded_bytes_copied > 0);
         let reused = PackReader::open(&bundle.pack_path, &bundle.index_path).unwrap();
-        let mut reused_ids = reused.list_ids();
+        let mut reused_ids = reused.list_ids().unwrap();
         reused_ids.sort();
         let mut wanted_ids = vec![blob.0, tree.0, state.0];
         wanted_ids.sort();
         assert_eq!(reused_ids, wanted_ids);
-        assert!(!reused.has_object(&attachment_id));
-        assert!(!reused.has_object(&artifact_id));
+        assert!(!reused.has_object(&attachment_id).unwrap());
+        assert!(!reused.has_object(&artifact_id).unwrap());
 
         for path in [&bundle.pack_path, &bundle.index_path] {
             let expected_wire_bytes = std::fs::read(path).unwrap();

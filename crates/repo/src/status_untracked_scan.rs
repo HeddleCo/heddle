@@ -127,6 +127,15 @@ fn scan_directory(
             continue;
         }
 
+        let child_rel_path = join_relative_path(rel_path, &entry.name);
+        if ctx
+            .monitor
+            .can_filter_directory_children(rel_path, ctx.index)
+            && !ctx.monitor.path_may_have_changed(&child_rel_path)
+        {
+            continue;
+        }
+
         while next_tree_entry < tree_entries.len()
             && tree_entries[next_tree_entry].name() < entry.name.as_str()
         {
@@ -140,7 +149,6 @@ fn scan_directory(
             next_tree_entry += 1;
         }
 
-        let child_rel_path = join_relative_path(rel_path, &entry.name);
         let child_key = cache_key(&child_rel_path);
 
         match entry.kind {
@@ -149,9 +157,18 @@ fn scan_directory(
                 let child_tree = match tree_entry {
                     Some(tree_entry) if tree_entry.entry_type() == EntryType::Tree => {
                         let tree_hash = tree_entry.require_content_hash();
-                        Some(ctx.repo.store().get_tree(&tree_hash)?.ok_or_else(|| {
-                            objects::error::HeddleError::NotFound(format!("tree {}", tree_hash))
-                        })?)
+                        Some(
+                            if let Some(tree) = ctx.index.clean_tree(&child_key, &tree_hash) {
+                                tree.clone()
+                            } else {
+                                ctx.repo.store().get_tree(&tree_hash)?.ok_or_else(|| {
+                                    objects::error::HeddleError::NotFound(format!(
+                                        "tree {}",
+                                        tree_hash
+                                    ))
+                                })?
+                            },
+                        )
                     }
                     _ => None,
                 };

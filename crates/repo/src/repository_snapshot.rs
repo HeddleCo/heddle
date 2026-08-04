@@ -17,7 +17,9 @@ use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result, repository_tree::TreeBuildProfile};
 use crate::{
+    WorktreeIndex,
     atomic::{AtomicMutation, RewindLedger, StagedCommit, Tx, execute, execute_reconstructible},
+    fsmonitor::{ChangeMonitorSession, MonitorStatus},
     thread_manifest::ManifestFile,
     worktree_ignore::WorktreeIgnoreMatcher,
     worktree_walk::{
@@ -79,7 +81,18 @@ mod contention_retry_tests {
             },
         )]);
         let cutoff = mtime_ns.min(ctime_ns);
-        let policy = SnapshotFingerprintPolicy::new(dir.path(), &files, cutoff);
+        let policy = SnapshotFingerprintPolicy::new(
+            dir.path(),
+            &files,
+            cutoff,
+            crate::WorktreeIndex::new(),
+            crate::fsmonitor::ChangeMonitorSession::prepare(
+                dir.path(),
+                crate::FsMonitorSettings {
+                    mode: crate::FsMonitorMode::Off,
+                },
+            ),
+        );
         let entry = WalkEntry {
             path: &path,
             name: "tracked",
@@ -570,14 +583,17 @@ impl SnapshotMutation<'_> {
     ) -> Result<(Tree, TreeBuildProfile, BTreeMap<String, ManifestFile>)> {
         let baseline_tree = match self.prev_head {
             Some(prev_head) => {
-                let state = self
-                    .repo
-                    .store
-                    .get_state(&prev_head)?
-                    .ok_or(HeddleError::StateNotFound(prev_head))?;
-                Some(self.repo.store.get_tree(&state.tree)?.ok_or_else(|| {
-                    HeddleError::NotFound(format!("tree {} (for state {})", state.tree, prev_head))
-                })?)
+                let state = self.repo.state_for_worktree_status(&prev_head)?;
+                Some(
+                    self.repo
+                        .require_tree_for_worktree_status(&state.tree)
+                        .map_err(|error| {
+                            HeddleError::NotFound(format!(
+                                "tree {} (for state {}): {error}",
+                                state.tree, prev_head
+                            ))
+                        })?,
+                )
             }
             None => None,
         };
@@ -624,6 +640,8 @@ struct SnapshotFingerprintPolicy<'a> {
     walk_root: &'a std::path::Path,
     files: &'a BTreeMap<String, ManifestFile>,
     racy_cutoff_ns: i64,
+    index: WorktreeIndex,
+    monitor: ChangeMonitorSession,
 }
 
 impl<'a> SnapshotFingerprintPolicy<'a> {
@@ -631,11 +649,15 @@ impl<'a> SnapshotFingerprintPolicy<'a> {
         walk_root: &'a std::path::Path,
         files: &'a BTreeMap<String, ManifestFile>,
         racy_cutoff_ns: i64,
+        index: WorktreeIndex,
+        monitor: ChangeMonitorSession,
     ) -> Self {
         Self {
             walk_root,
             files,
             racy_cutoff_ns,
+            index,
+            monitor,
         }
     }
 
@@ -661,6 +683,42 @@ impl<'a> SnapshotFingerprintPolicy<'a> {
 impl WorktreeWalkPolicy for SnapshotFingerprintPolicy<'_> {
     type DirectoryState = SnapshotFingerprintState;
     type Output = SnapshotFingerprintOutput;
+
+    fn reuse_tree_entry_before_metadata(
+        &mut self,
+        rel_path: &std::path::Path,
+        tree_entry: &TreeEntry,
+        state: &mut Self::DirectoryState,
+    ) -> Result<bool> {
+        let Some(tree_hash) = tree_entry.tree_hash() else {
+            return Ok(false);
+        };
+        let key = crate::worktree_walk::cache_key(rel_path);
+        let reusable = !self.monitor.path_may_have_changed(rel_path)
+            && self
+                .index
+                .get_directory(&key)
+                .is_some_and(|entry| entry.clean_tree_hash == Some(tree_hash));
+        if reusable {
+            state.entries.push(tree_entry.clone());
+        }
+        Ok(reusable)
+    }
+
+    fn skip_directory_before_enumeration(
+        &mut self,
+        rel_path: &std::path::Path,
+        _metadata: &std::fs::Metadata,
+        tree: Option<&Tree>,
+    ) -> Result<Option<Self::Output>> {
+        let Some(tree) = tree else {
+            return Ok(None);
+        };
+        Ok(self
+            .monitor
+            .can_skip_directory(rel_path, Some(tree), &self.index)
+            .then(|| SnapshotFingerprintOutput { tree: tree.clone() }))
+    }
 
     fn enter_directory(
         &mut self,
@@ -915,7 +973,23 @@ impl Repository {
         let nested_exclusions = self.nested_thread_worktree_exclusions(&self.root)?;
         let ignore_matcher = WorktreeIgnoreMatcher::new(&patterns)
             .with_nested_worktree_exclusions(nested_exclusions);
-        let mut policy = SnapshotFingerprintPolicy::new(&self.root, files, racy_cutoff_ns);
+        let monitor = ChangeMonitorSession::prepare(
+            self.root(),
+            crate::FsMonitorSettings::from(self.config.worktree.fsmonitor),
+        );
+        let index_path = self.root.join(".heddle/state/index.bin");
+        let index = if monitor.status == MonitorStatus::Usable {
+            WorktreeIndex::load_hot_profiled_for_directories(
+                &index_path,
+                &monitor.changed_directory_keys(),
+            )
+        } else {
+            WorktreeIndex::load_profiled(&index_path)
+        }
+        .map(|(index, _)| index)
+        .unwrap_or_default();
+        let mut policy =
+            SnapshotFingerprintPolicy::new(&self.root, files, racy_cutoff_ns, index, monitor);
         Ok(
             walk_worktree(self, &self.root, &ignore_matcher, Some(tree), &mut policy)?
                 .tree
@@ -1090,6 +1164,9 @@ impl Repository {
             reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
             execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
             refresh_materialized_thread_manifest(self, &head, &execution.state, &execution.tree);
+            if let Err(error) = self.compare_worktree_cached_detailed(&execution.tree) {
+                tracing::warn!(%error, "Captured state, but could not refresh worktree monitor/index baseline");
+            }
             return Ok(execution);
         }
     }

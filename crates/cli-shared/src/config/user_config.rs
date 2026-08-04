@@ -610,7 +610,7 @@ impl UserConfig {
             .fsmonitor
             .mode
             .or_else(|| repo_config.map(|config| config.worktree.fsmonitor.mode))
-            .unwrap_or(FsMonitorMode::Off);
+            .unwrap_or_default();
         if let Ok(value) = std::env::var("HEDDLE_FSMONITOR")
             && let Some(parsed) = FsMonitorMode::parse(&value)
         {
@@ -874,6 +874,14 @@ mod tests {
         let options = config.worktree_status_options(Some(&repo));
 
         assert_eq!(options.fsmonitor.mode, FsMonitorMode::Watchman);
+    }
+
+    #[test]
+    fn user_worktree_status_options_default_to_auto() {
+        let config = UserConfig::default();
+        let options = config.worktree_status_options(None);
+
+        assert_eq!(options.fsmonitor.mode, FsMonitorMode::Auto);
     }
 
     #[test]

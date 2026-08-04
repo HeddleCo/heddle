@@ -124,6 +124,9 @@ mod repository_tree;
 pub(crate) mod repository_worktree_apply;
 #[path = "repository_worktree_status.rs"]
 mod repository_worktree_status;
+#[cfg(test)]
+#[path = "status_monitor_tests.rs"]
+mod status_monitor_tests;
 #[path = "status_tracked_refresh.rs"]
 mod status_tracked_refresh;
 #[path = "status_untracked_scan.rs"]

@@ -646,6 +646,7 @@ fn decode_native_pack(pack_data: &[u8], index_data: &[u8]) -> Vec<ObjectData> {
     let reader = objects::store::PackReader::from_slice(pack_data, index_data).unwrap();
     reader
         .list_ids()
+        .unwrap()
         .into_iter()
         .map(|id| {
             let (obj_type, data) = reader.get_object(&id).unwrap().unwrap();

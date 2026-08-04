@@ -73,7 +73,13 @@ fn test_pack_index_header_codec_matches_legacy_bytes() {
     let encoded = PackIndex::new().to_bytes();
 
     assert_eq!(encoded, legacy);
-    assert!(PackIndex::from_bytes(&legacy).unwrap().ids().is_empty());
+    assert!(
+        PackIndex::from_bytes(&legacy)
+            .unwrap()
+            .ids()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -88,19 +94,27 @@ fn test_pack_index_roundtrip() {
     let restored = PackIndex::from_bytes(&bytes).expect("Failed to deserialize index");
 
     assert_eq!(
-        restored.find(&PackObjectId::Hash(create_test_hash(1))),
+        restored
+            .find(&PackObjectId::Hash(create_test_hash(1)))
+            .unwrap(),
         Some(100)
     );
     assert_eq!(
-        restored.find(&PackObjectId::Hash(create_test_hash(2))),
+        restored
+            .find(&PackObjectId::Hash(create_test_hash(2)))
+            .unwrap(),
         Some(200)
     );
     assert_eq!(
-        restored.find(&PackObjectId::StateId(StateId::from_bytes([3; 32]))),
+        restored
+            .find(&PackObjectId::StateId(StateId::from_bytes([3; 32])))
+            .unwrap(),
         Some(300)
     );
     assert_eq!(
-        restored.find(&PackObjectId::Hash(create_test_hash(4))),
+        restored
+            .find(&PackObjectId::Hash(create_test_hash(4)))
+            .unwrap(),
         None
     );
 }
@@ -576,9 +590,11 @@ fn stale_index_swapped_offsets_surfaces_as_invalid_object() {
     let original_index = PackIndex::from_bytes(&index_data).unwrap();
     let offset_a = original_index
         .find(&PackObjectId::Hash(hash_a))
+        .unwrap()
         .expect("index has A");
     let offset_b = original_index
         .find(&PackObjectId::Hash(hash_b))
+        .unwrap()
         .expect("index has B");
     assert_ne!(offset_a, offset_b);
     let mut stale = PackIndex::new();

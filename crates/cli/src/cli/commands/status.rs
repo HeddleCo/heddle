@@ -48,6 +48,8 @@ fn emit_status_worktree_profile(profile: Option<&WorktreeCompareProfile>) {
         return;
     };
     let fields = [
+        ProfileField::boolean("changed_path_mode", profile.scan_mode == "changed_paths"),
+        ProfileField::boolean("fallback_scan", profile.scan_mode == "fallback_scan"),
         ProfileField::millis("index_load_ms", profile.index_load_ms),
         ProfileField::millis("index_snapshot_load_ms", profile.index_snapshot_load_ms),
         ProfileField::millis("index_journal_replay_ms", profile.index_journal_replay_ms),
@@ -82,7 +84,13 @@ fn emit_status_worktree_profile(profile: Option<&WorktreeCompareProfile>) {
     ];
     match profile_mode() {
         ProfileMode::Off | ProfileMode::Jsonl => emit_profile("status worktree detail", &fields),
-        ProfileMode::Human => emit_profile("status worktree", &fields),
+        ProfileMode::Human => {
+            emit_profile("status worktree", &fields);
+            eprintln!("  scan_mode: {}", profile.scan_mode);
+            if let Some(reason) = &profile.fallback_reason {
+                eprintln!("  fallback_reason: {reason}");
+            }
+        }
     }
 }
 

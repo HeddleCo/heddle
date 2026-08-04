@@ -81,6 +81,15 @@ pub(crate) trait WorktreeWalkPolicy {
         tree: Option<&Tree>,
     ) -> Result<Self::DirectoryState>;
 
+    fn reuse_tree_entry_before_metadata(
+        &mut self,
+        _rel_path: &Path,
+        _tree_entry: &TreeEntry,
+        _state: &mut Self::DirectoryState,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     fn visit_file(
         &mut self,
         entry: WalkEntry<'_>,
@@ -225,6 +234,17 @@ fn walk_directory<P: WorktreeWalkPolicy>(
                 .filter(|entry| entry.name() == name);
             if tree_entry.is_some() {
                 next_tree_entry += 1;
+            }
+
+            if let Some(tree_entry) = tree_entry
+                && policy.reuse_tree_entry_before_metadata(
+                    &directory.rel_path.join(name),
+                    tree_entry,
+                    &mut state,
+                )?
+            {
+                pop_key_component(&mut entry_key, location.key);
+                continue;
             }
 
             let metadata = match &entry.metadata {

@@ -494,9 +494,10 @@ fn count_pack_deltas(store: &FsStore) -> usize {
             let index = PackIndex::from_bytes(&std::fs::read(index_path).unwrap()).unwrap();
             index
                 .ids()
+                .unwrap()
                 .into_iter()
                 .filter(|id| {
-                    let offset = index.find(id).unwrap() as usize;
+                    let offset = index.find(id).unwrap().unwrap() as usize;
                     decode_tagged_entry_header(&pack[offset..])
                         .is_ok_and(|header| header.obj_type == PackObjectType::Delta)
                 })
