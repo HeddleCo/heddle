@@ -356,7 +356,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, path::Path};
+    use std::{
+        cell::Cell,
+        collections::HashMap,
+        fmt::Write as _,
+        path::{Path, PathBuf},
+        time::Instant,
+    };
 
     use objects::object::{DiffKind, FileChangeSet};
 
@@ -567,6 +573,71 @@ mod tests {
             parse_count, 2,
             "one modified file has two unique contents and each must reach tree-sitter once"
         );
+    }
+
+    #[test]
+    #[ignore = "semantic diff benchmark; run explicitly with --release --ignored --nocapture"]
+    fn semantic_diff_parse_reuse_benchmark() {
+        const CHANGED_FILES: usize = 100;
+        const FUNCTIONS_PER_FILE: usize = 100;
+
+        let mut file_changes = FileChangeSet::new();
+        let mut contents = HashMap::new();
+        for file_index in 0..CHANGED_FILES {
+            let path = PathBuf::from(format!("file_{file_index:03}.rs"));
+            file_changes.push((path.to_string_lossy().into_owned(), DiffKind::Modified).into());
+            contents.insert(
+                path,
+                (
+                    semantic_diff_benchmark_source(file_index, 1, FUNCTIONS_PER_FILE),
+                    semantic_diff_benchmark_source(file_index, 2, FUNCTIONS_PER_FILE),
+                ),
+            );
+        }
+
+        let cache = SemanticParseCache::new(CHANGED_FILES * 2);
+        crate::parser::reset_parse_count();
+        let started = Instant::now();
+        let result = SemanticEngine::new(
+            file_changes,
+            |path| Ok(contents.get(path).map(|(old, _)| old.clone())),
+            |path| Ok(contents.get(path).map(|(_, new)| new.clone())),
+            &SemanticDiffOptions::default(),
+            &cache,
+        )
+        .full()
+        .expect("semantic diff benchmark should succeed");
+        let elapsed = started.elapsed();
+        let parse_count = crate::parser::parse_count();
+        let unique_contents = CHANGED_FILES * 2;
+
+        println!(
+            "semantic diff parse bench changed_files={CHANGED_FILES} functions_per_file={FUNCTIONS_PER_FILE} unique_contents={unique_contents} tree_sitter_parses={parse_count} parses_per_unique_content={:.2} elapsed_ms={:.3}",
+            parse_count as f64 / unique_contents as f64,
+            elapsed.as_secs_f64() * 1_000.0,
+        );
+        assert!(!result.changes.is_empty());
+        assert_eq!(
+            parse_count, unique_contents,
+            "diff must parse each unique old/new content once"
+        );
+    }
+
+    fn semantic_diff_benchmark_source(
+        file_index: usize,
+        revision: usize,
+        function_count: usize,
+    ) -> String {
+        let mut source = String::new();
+        let operator = if revision == 1 { "+" } else { "*" };
+        for function_index in 0..function_count {
+            writeln!(
+                source,
+                "fn compute_{file_index}_{function_index}(input: usize) -> usize {{ input {operator} ({file_index} + {function_index}) }}"
+            )
+            .expect("writing Rust fixture to String should succeed");
+        }
+        source
     }
 
     #[test]
