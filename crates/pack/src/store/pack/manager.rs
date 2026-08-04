@@ -170,6 +170,15 @@ impl PackManager {
         self.get_object(&PackObjectId::Hash(*hash))
     }
 
+    /// Look up the logical object type without decoding the object payload.
+    pub fn get_hashed_object_type(&self, hash: &ContentHash) -> Result<Option<ObjectType>> {
+        let id = PackObjectId::Hash(*hash);
+        let Some(pack_index) = self.object_locations.get(&id).copied() else {
+            return Ok(None);
+        };
+        self.packs[pack_index].reader.get_hashed_object_type(hash)
+    }
+
     /// Zero-copy variant of `get_hashed_object`. Returns
     /// [`bytes::Bytes`] views into the underlying pack mmap when
     /// the entry is non-delta and stored uncompressed; falls back
