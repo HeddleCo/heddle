@@ -64,12 +64,28 @@ jobs:
           /usr/bin/time -f 'release_test_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
             cargo test --locked --release -p heddle-cli --test cli_integration \
               --no-run 2>&1 | tee -a release-compile.txt
+          /usr/bin/time -f 'release_hosted_close_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
+            cargo test --locked --release -p heddle-cli --lib \
+              --no-run 2>&1 | tee -a release-compile.txt
 
       - name: Enforce instant core-loop contract
         run: |
           set -o pipefail
           cargo test --locked --release -p heddle-cli --test cli_integration \
             core_loop_release_contract -- --ignored --nocapture 2>&1 | tee core-loop-contract.txt
+
+      - name: Enforce hosted endpoint close contract
+        run: |
+          set -o pipefail
+          RUST_LOG=iroh=error cargo test --locked --release -p heddle-cli --lib \
+            hosted_endpoint_close_release_contract -- --ignored --nocapture \
+            2>&1 | tee hosted-close-contract.txt
+          if grep -Fq 'Endpoint dropped without calling `Endpoint::close`' \
+            hosted-close-contract.txt; then
+            echo 'HOSTED_CLOSE_LEAK_GUARD red: endpoint was dropped ungracefully'
+            exit 1
+          fi
+          echo 'HOSTED_CLOSE_LEAK_GUARD green'
 
       - name: Publish contract summary
         if: always()
@@ -83,6 +99,13 @@ jobs:
             grep -E '^(RUNNER|SETUP|RESULT|COUNTERS|BASELINE|BAND|SCALE|GATES|PERF GATE)' \
               core-loop-contract.txt 2>/dev/null || true
             echo '```'
+            echo
+            echo '## Hosted endpoint close release contract'
+            echo
+            echo '```text'
+            grep -E '^(HOSTED_CLOSE|HOSTED CLOSE GATE)' \
+              hosted-close-contract.txt 2>/dev/null || true
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload release evidence
@@ -93,6 +116,7 @@ jobs:
           path: |
             release-compile.txt
             core-loop-contract.txt
+            hosted-close-contract.txt
 
       - name: sccache stats
         if: always()
