@@ -12,12 +12,12 @@ use api::{
 };
 use cli_shared::ClientConfig;
 use crypto::{Ed25519Signer, Signer as _};
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 use opentelemetry::propagation::{Injector, TextMapPropagator};
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use prost_types::Timestamp;
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use super::{HostedError, Result};
@@ -305,14 +305,14 @@ impl CallContextFactory {
     }
 }
 
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 #[derive(Default)]
 struct TraceHeaders {
     traceparent: Option<String>,
     tracestate: Option<String>,
 }
 
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 impl Injector for TraceHeaders {
     fn set(&mut self, key: &str, value: String) {
         match key {
@@ -323,7 +323,7 @@ impl Injector for TraceHeaders {
     }
 }
 
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 fn active_trace_context() -> Option<TraceContext> {
     let context = tracing::Span::current().context();
     let mut headers = TraceHeaders::default();
@@ -335,7 +335,7 @@ fn active_trace_context() -> Option<TraceContext> {
     })
 }
 
-#[cfg(not(feature = "observability"))]
+#[cfg(not(feature = "telemetry"))]
 fn active_trace_context() -> Option<TraceContext> {
     None
 }
@@ -414,14 +414,14 @@ fn deadline(timeout: Duration) -> Result<Timestamp> {
 mod tests {
     use api::UNARY_SIGNING_V1_FIXTURE_JSON;
     use crypto::Signer as _;
-    #[cfg(feature = "observability")]
+    #[cfg(feature = "telemetry")]
     use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
-    #[cfg(feature = "observability")]
+    #[cfg(feature = "telemetry")]
     use opentelemetry_sdk::trace::SdkTracerProvider;
     use serde::Deserialize;
-    #[cfg(feature = "observability")]
+    #[cfg(feature = "telemetry")]
     use tracing_opentelemetry::OpenTelemetrySpanExt as _;
-    #[cfg(feature = "observability")]
+    #[cfg(feature = "telemetry")]
     use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
@@ -444,7 +444,7 @@ mod tests {
         assert!(context.trace.is_none());
     }
 
-    #[cfg(feature = "observability")]
+    #[cfg(feature = "telemetry")]
     #[test]
     fn active_span_traceparent_is_carried_in_the_iroh_request_prelude() {
         let provider = SdkTracerProvider::builder().build();

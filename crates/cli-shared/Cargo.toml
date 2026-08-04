@@ -30,7 +30,7 @@ tracing-subscriber.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 
 [features]
-observability = [
+telemetry = [
     "dep:opentelemetry",
     "dep:opentelemetry-otlp",
     "dep:opentelemetry_sdk",

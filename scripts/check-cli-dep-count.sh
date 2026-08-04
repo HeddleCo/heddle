@@ -10,13 +10,14 @@
 # that nobody notices until a cold build is slow again.
 #
 # This script counts the `heddle-cli` crate's transitive dependency closure
-# (default features, normal edges only — the same method the audit doc uses)
+# (default features, normal edges only)
 # and FAILS if the live count exceeds baseline + slack. We persist only the
 # count, not the full dep set, so on a regression the failure message points
 # the author at `cargo tree` to find the new subtree.
 #
-# It uses `cargo metadata` only — no crate build — so it is cheap enough to
-# run on every PR.
+# It uses `cargo tree` plus dependency-free workspace metadata — no crate build
+# — so it is cheap enough to run on every PR. Selecting the CLI package keeps
+# dev-only features from unrelated workspace targets out of the normal graph.
 #
 # Knobs:
 #   HEDDLE_CLI_DEP_BASELINE_FILE — path to the baseline JSON
@@ -38,62 +39,49 @@ if [[ ! -f "$BASELINE_FILE" ]]; then
   exit 1
 fi
 
-# Resolve the dependency graph from the workspace root so the active
-# Cargo.lock is used. Write to a temp file (not a pipe) because the python
-# below is itself fed on stdin via a heredoc — stdin is not available for the
-# metadata payload.
-META_FILE="$(mktemp)"
-trap 'rm -f "$META_FILE"' EXIT
-(cd "$WORKSPACE_ROOT" && cargo metadata --format-version 1 --quiet) >"$META_FILE"
+PACKAGE_NAME="$(
+  python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("package", "heddle-cli"))' \
+    "$BASELINE_FILE"
+)"
 
-# Single python pass: read the baseline JSON, walk the cli closure over normal
-# edges (default features), compare against baseline + slack. Exit non-zero on
-# regression. Keeps the graph-walk identical to docs/CLI_DEP_AUDIT_2026-05-12.md.
-BASELINE_FILE="$BASELINE_FILE" META_FILE="$META_FILE" python3 - <<'PY'
+# Resolve the package-scoped normal graph from the workspace root so the active
+# Cargo.lock is used. Full-workspace metadata unifies dev-only features from
+# every member into shared dependencies and can count test server stacks in the
+# production CLI closure.
+TREE_FILE="$(mktemp)"
+WORKSPACE_META_FILE="$(mktemp)"
+trap 'rm -f "$TREE_FILE" "$WORKSPACE_META_FILE"' EXIT
+(cd "$WORKSPACE_ROOT" && cargo tree --locked --package "$PACKAGE_NAME" \
+  --edges normal --prefix none --format '{p}') >"$TREE_FILE"
+(cd "$WORKSPACE_ROOT" && cargo metadata --format-version 1 --no-deps \
+  --locked --quiet) >"$WORKSPACE_META_FILE"
+
+# Single python pass: read the baseline JSON and package-scoped tree, compare
+# the unique external crate names against baseline + slack, and exit non-zero
+# on regression.
+BASELINE_FILE="$BASELINE_FILE" TREE_FILE="$TREE_FILE" \
+WORKSPACE_META_FILE="$WORKSPACE_META_FILE" python3 - <<'PY'
 import json
 import os
 import sys
 
-with open(os.environ["META_FILE"]) as f:
-    meta = json.load(f)
-
 with open(os.environ["BASELINE_FILE"]) as f:
     base = json.load(f)
+
+with open(os.environ["WORKSPACE_META_FILE"]) as f:
+    workspace_meta = json.load(f)
 
 pkg_name = base.get("package", "heddle-cli")
 baseline = int(base["baseline"])
 slack = int(base.get("slack", 0))
 ceiling = baseline + slack
 
-# Workspace members (source is None) are not counted as external deps.
-ws = {p["name"] for p in meta["packages"] if p["source"] is None}
-node_by_id = {n["id"]: n for n in meta["resolve"]["nodes"]}
-pkg_by_id = {p["id"]: p for p in meta["packages"]}
-
-try:
-    cli_id = next(
-        p["id"]
-        for p in meta["packages"]
-        if p["name"] == pkg_name and p["source"] is None
-    )
-except StopIteration:
-    print(f"error: workspace package {pkg_name!r} not found in cargo metadata", file=sys.stderr)
-    sys.exit(1)
-
-# Reachable closure over normal (non-dev, non-build) edges only.
-seen, stack = set(), [cli_id]
-while stack:
-    nid = stack.pop()
-    if nid in seen:
-        continue
-    seen.add(nid)
-    for d in node_by_id[nid]["deps"]:
-        # dep_kinds entry with kind == None is a normal (runtime) edge.
-        if not any(k.get("kind") is None for k in d.get("dep_kinds", [])):
-            continue
-        stack.append(d["pkg"])
-
-external = {pkg_by_id[i]["name"] for i in seen if pkg_by_id[i]["name"] not in ws}
+# `cargo tree --prefix none --format '{p}'` starts each line with the package
+# name. Count names, not versions, to preserve the audit's metric.
+workspace_names = {package["name"] for package in workspace_meta["packages"]}
+with open(os.environ["TREE_FILE"]) as f:
+    tree_names = {line.split(maxsplit=1)[0] for line in f if line.strip()}
+external = tree_names - workspace_names
 count = len(external)
 
 print(f"{pkg_name} transitive deps (default features): {count}")
