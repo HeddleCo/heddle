@@ -1571,52 +1571,114 @@ async fn clone_network_connected(
         println!("Connected to {}", addr);
     }
 
-    let remote_refs = client
-        .list_refs_with_revision_addresses(repo_path)
-        .await?
-        .into_iter()
-        .filter(|entry| entry.is_thread)
-        .collect::<Vec<_>>();
-    let track_name = select_hosted_clone_thread(
-        thread.as_deref(),
-        remote_refs.iter().map(|entry| entry.name.as_str()),
-        repo_path,
-    )?;
-    let git_overlay_clone = hosted_clone_thread_revision_address(&remote_refs, &track_name)
-        .is_some_and(|address| address.starts_with("git:"));
-
     let mut cleanup = CloneDestinationCleanup::new(local_path);
-
-    // Create the local directory only after TLS/auth prevalidation and remote
-    // ref discovery. Git-backed hosted refs need `.git` present before
-    // Repository::init so the destination is opened as Git-overlay and accepts
-    // the Git lane transfers during pull.
-    fs::create_dir_all(local_path)?;
-    if git_overlay_clone {
-        SleyRepository::init(local_path).map_err(anyhow::Error::msg)?;
-    }
-
-    // Initialize the local repository only after TLS/auth prevalidation.
-    let local_repo = Repository::init(local_path)?;
-    let origin_url = hosted_clone_origin_url(&endpoint_spec, repo_path);
-    if git_overlay_clone {
-        configure_git_overlay_origin(local_path, &origin_url)?;
-    }
     let materialization = if lazy {
         PullMaterialization::Lazy
     } else {
         PullMaterialization::Full
     };
-    let result = client
-        .pull_with_depth_and_materialization(
-            &local_repo,
+    let mut folded_refs = None;
+    let folded = client
+        .clone_pull_with_depth_and_materialization(
             repo_path,
-            &track_name,
-            Some(&track_name),
+            thread.as_deref(),
             depth,
             materialization,
+            |ready| {
+                let checkpoint = ready
+                    .transfer
+                    .as_ref()
+                    .map(|transfer| transfer.checkpoint.as_slice())
+                    .unwrap_or_default();
+                let refs = crate::hosted_runtime::hosted::decode_pull_refs(checkpoint)?
+                    .ok_or_else(|| {
+                        wire::ProtocolError::InvalidState(
+                            "server does not advertise folded clone refs".to_string(),
+                        )
+                    })?;
+                let track_name = select_hosted_clone_thread(
+                    thread.as_deref(),
+                    refs.refs
+                        .iter()
+                        .filter(|entry| entry.is_thread)
+                        .map(|entry| entry.name.as_str()),
+                    repo_path,
+                )
+                .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
+                let git_overlay_clone =
+                    hosted_clone_thread_revision_address(&refs.refs, &track_name)
+                        .is_some_and(|address| address.starts_with("git:"));
+                fs::create_dir_all(local_path)
+                    .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
+                if git_overlay_clone {
+                    SleyRepository::init(local_path)
+                        .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
+                }
+                let repo = Repository::init(local_path).map_err(wire::ProtocolError::from)?;
+                folded_refs = Some(refs.refs);
+                Ok(repo)
+            },
         )
-        .await?;
+        .await;
+    let (result, local_repo, remote_refs) = match folded {
+        Ok((result, local_repo)) => (
+            result,
+            local_repo,
+            folded_refs.context("folded clone response is missing its refs")?,
+        ),
+        Err(error) if !local_path.join(".heddle").exists() && !local_path.join(".git").exists() => {
+            let remote_refs = client
+                .list_refs_with_revision_addresses(repo_path)
+                .await?
+                .into_iter()
+                .filter(|entry| entry.is_thread)
+                .collect::<Vec<_>>();
+            let track_name = select_hosted_clone_thread(
+                thread.as_deref(),
+                remote_refs.iter().map(|entry| entry.name.as_str()),
+                repo_path,
+            )?;
+            let git_overlay_clone = hosted_clone_thread_revision_address(&remote_refs, &track_name)
+                .is_some_and(|address| address.starts_with("git:"));
+            fs::create_dir_all(local_path)?;
+            if git_overlay_clone {
+                SleyRepository::init(local_path).map_err(anyhow::Error::msg)?;
+            }
+            let local_repo = Repository::init(local_path)?;
+            let result = client
+                .pull_with_depth_and_materialization(
+                    &local_repo,
+                    repo_path,
+                    &track_name,
+                    Some(&track_name),
+                    depth,
+                    materialization,
+                )
+                .await
+                .map_err(|fallback| {
+                    let error = format!(
+                        "folded clone bootstrap failed ({error}); ListRefs fallback failed ({fallback})"
+                    );
+                    anyhow!(RecoveryAdvice::network_clone_failed(&error, local_path))
+                })?;
+            (result, local_repo, remote_refs)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let track_name = select_hosted_clone_thread(
+        thread.as_deref(),
+        remote_refs
+            .iter()
+            .filter(|entry| entry.is_thread)
+            .map(|entry| entry.name.as_str()),
+        repo_path,
+    )?;
+    let git_overlay_clone = hosted_clone_thread_revision_address(&remote_refs, &track_name)
+        .is_some_and(|address| address.starts_with("git:"));
+    let origin_url = hosted_clone_origin_url(&endpoint_spec, repo_path);
+    if git_overlay_clone {
+        configure_git_overlay_origin(local_path, &origin_url)?;
+    }
     let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
         .context("decode hosted clone bootstrap")?;
     let bootstrap = if result.success {

@@ -14,8 +14,8 @@ use api::heddle::api::v1alpha1::{
     GitRefKind as ProtoGitRefKind, GitRefUpdateTransfer,
     IntegrationPolicyStatus as ProtoIntegrationPolicyStatus, ListRefsRequest,
     ObjectAvailabilityStatus, ObjectDescriptor, PackChunk, PackStreamKind, PartialFetchStatus,
-    ProviderPlanChallenge, PullClientFrame, PullRequest, PullServerFrame, PushClientFrame,
-    PushRequest, PushServerFrame, RedactionTransfer, StateAttachmentTransfer,
+    ProviderPlanChallenge, PullClientFrame, PullReady, PullRequest, PullServerFrame,
+    PushClientFrame, PushRequest, PushServerFrame, RedactionTransfer, StateAttachmentTransfer,
     StateVisibilityTransfer, StreamOpeningProof, ThreadConfidenceSummary,
     ThreadFreshness as ProtoThreadFreshness, ThreadIntegrationPolicy, ThreadMetadata,
     ThreadMode as ProtoThreadMode, ThreadVerificationSummary, TransportMode, UpdateRefRequest,
@@ -63,12 +63,21 @@ struct PullOptions<'a> {
 }
 
 const PULL_BOOTSTRAP_LINE_PREFIX: &str = "heddle-pull-bootstrap-v1:";
+const PULL_REFS_LINE_PREFIX: &str = "heddle-pull-refs-v1:";
+const PULL_CLONE_BOOTSTRAP_THREAD_PREFIX: &str = "heddle-clone-bootstrap-v1:";
 type PullBootstrapPayload = (
     bool,
     Vec<Discussion>,
     bool,
     Vec<(ContextTarget, ContextBlob)>,
 );
+type PullRefsPayload = (
+    String,
+    Option<Vec<u8>>,
+    Vec<(String, Vec<u8>, bool, String)>,
+);
+type PullRepositoryInitializer<'a> =
+    Box<dyn FnOnce(&PullReady) -> Result<Repository, ProtocolError> + 'a>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PullBootstrapMetadata {
@@ -82,6 +91,11 @@ pub(crate) struct PullBootstrapMetadata {
 pub(crate) struct ResolvedPullBootstrapMetadata {
     pub discussions: Vec<Discussion>,
     pub context: Vec<(ContextTarget, ContextBlob)>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PullBootstrapRefs {
+    pub refs: Vec<HostedRefEntry>,
 }
 
 impl PullBootstrapMetadata {
@@ -139,6 +153,56 @@ pub(crate) fn decode_pull_bootstrap(
         context_from_pack,
         context,
     }))
+}
+
+pub(crate) fn decode_pull_refs(
+    checkpoint: &[u8],
+) -> Result<Option<PullBootstrapRefs>, ProtocolError> {
+    let checkpoint = std::str::from_utf8(checkpoint)
+        .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+    let Some(payload) = checkpoint
+        .lines()
+        .find_map(|line| line.strip_prefix(PULL_REFS_LINE_PREFIX))
+    else {
+        return Ok(None);
+    };
+    let payload = payload
+        .split_once('\t')
+        .map(|(payload, _)| payload)
+        .ok_or_else(|| {
+            ProtocolError::InvalidState("decode pull refs: missing sentinel state".to_string())
+        })?;
+    let payload = hex::decode(payload)
+        .map_err(|error| ProtocolError::InvalidState(format!("decode pull refs: {error}")))?;
+    let (_head_thread, head_state, refs): PullRefsPayload = rmp_serde::from_slice(&payload)
+        .map_err(|error| ProtocolError::InvalidState(format!("decode pull refs: {error}")))?;
+    let head_state = head_state
+        .map(|value| decode_bootstrap_state_id(value, "head state"))
+        .transpose()?;
+    let refs = refs
+        .into_iter()
+        .map(|(name, state_id, is_thread, revision_address)| {
+            let state_id = decode_bootstrap_state_id(state_id, "ref state")?;
+            Ok(HostedRefEntry {
+                name,
+                state_id,
+                is_thread,
+                revision_address,
+            })
+        })
+        .collect::<Result<Vec<_>, ProtocolError>>()?;
+    let _ = head_state;
+    Ok(Some(PullBootstrapRefs { refs }))
+}
+
+fn decode_bootstrap_state_id(value: Vec<u8>, field: &str) -> Result<StateId, ProtocolError> {
+    let value: [u8; 32] = value.try_into().map_err(|value: Vec<u8>| {
+        ProtocolError::InvalidState(format!(
+            "decode pull refs {field}: expected 32 bytes, got {}",
+            value.len()
+        ))
+    })?;
+    Ok(StateId::from_bytes(value))
 }
 
 fn discussions_from_pull_pack(
@@ -1145,6 +1209,41 @@ impl HostedClient {
         .await
     }
 
+    pub async fn clone_pull_with_depth_and_materialization<F>(
+        &mut self,
+        repo_path: &str,
+        requested_thread: Option<&str>,
+        depth: Option<u32>,
+        materialization: PullMaterialization,
+        initialize: F,
+    ) -> Result<(PullComplete, Repository), ProtocolError>
+    where
+        F: FnOnce(&PullReady) -> Result<Repository, ProtocolError>,
+    {
+        let remote_thread = format!(
+            "{PULL_CLONE_BOOTSTRAP_THREAD_PREFIX}{}",
+            requested_thread.unwrap_or_default()
+        );
+        let (exchange, repo) = self
+            .pull_exchange_inner(
+                None,
+                repo_path,
+                &remote_thread,
+                PullOptions {
+                    local_thread: None,
+                    depth,
+                    target_state: None,
+                    materialization,
+                },
+                Some(Box::new(initialize)),
+            )
+            .await?;
+        let repo = repo.ok_or_else(|| {
+            ProtocolError::InvalidState("clone pull did not initialize its repository".to_string())
+        })?;
+        Ok((exchange.result, repo))
+    }
+
     pub async fn pull_with_depth(
         &mut self,
         repo: &Repository,
@@ -1276,6 +1375,19 @@ impl HostedClient {
         remote_thread: &str,
         options: PullOptions<'_>,
     ) -> Result<PullExchange, ProtocolError> {
+        self.pull_exchange_inner(Some(repo), repo_path, remote_thread, options, None)
+            .await
+            .map(|(exchange, _)| exchange)
+    }
+
+    async fn pull_exchange_inner<'a>(
+        &mut self,
+        initial_repo: Option<&Repository>,
+        repo_path: &str,
+        remote_thread: &str,
+        options: PullOptions<'_>,
+        initializer: Option<PullRepositoryInitializer<'a>>,
+    ) -> Result<(PullExchange, Option<Repository>), ProtocolError> {
         let exchange_start = Instant::now();
         let mut exclude_states = Vec::new();
         // Whether the head comes from an explicit `--local-thread` or is
@@ -1288,17 +1400,23 @@ impl HostedClient {
         // incomplete repo. Both branches therefore share the same completeness
         // gate; when it refuses, we fall back to the correct (slower)
         // empty-exclude full pull.
-        let advertised_head = if let Some(local_thread) = options.local_thread {
-            locally_complete_local_thread_head(repo, local_thread, options.target_state)?
+        let advertised_head = if let Some(repo) = initial_repo {
+            if let Some(local_thread) = options.local_thread {
+                locally_complete_local_thread_head(repo, local_thread, options.target_state)?
+            } else {
+                locally_complete_pull_head(repo, remote_thread, options.target_state)?
+            }
         } else {
-            locally_complete_pull_head(repo, remote_thread, options.target_state)?
+            None
         };
         if let Some(head) = advertised_head {
             exclude_states.push(head);
         }
         let allow_partial_fetch = options.materialization.allows_partial_fetch();
-        let fresh_full_pull =
-            supports_compact_full_pull(repo, allow_partial_fetch, &exclude_states)?;
+        let fresh_full_pull = match initial_repo {
+            Some(repo) => supports_compact_full_pull(repo, allow_partial_fetch, &exclude_states)?,
+            None => !allow_partial_fetch,
+        };
 
         let transfer_id = pull_transfer_id(
             repo_path,
@@ -1331,7 +1449,9 @@ impl HostedClient {
                     0,
                     false,
                 )),
-                partial_fetch_status: partial_fetch_status_for_repo(repo),
+                partial_fetch_status: initial_repo
+                    .map(partial_fetch_status_for_repo)
+                    .unwrap_or(PartialFetchStatus::Disabled as i32),
                 allow_partial_fetch,
                 fresh_full_pull,
                 target_revision_address: options
@@ -1386,6 +1506,17 @@ impl HostedClient {
             ready_wait: exchange_start.elapsed(),
             ..PullProfile::default()
         };
+        let owned_repo = match initial_repo {
+            Some(_) => None,
+            None => Some(initializer.ok_or_else(|| {
+                ProtocolError::InvalidState(
+                    "pull is missing its repository initializer".to_string(),
+                )
+            })?(&ready)?),
+        };
+        let repo = initial_repo.or(owned_repo.as_ref()).ok_or_else(|| {
+            ProtocolError::InvalidState("pull repository initialization failed".to_string())
+        })?;
         let remote_state = super::helpers::parse_proto_state_id(ready.remote_state)?
             .ok_or_else(|| ProtocolError::InvalidState("missing remote state".to_string()))?;
         let advertised_object_count = ready.objects_to_fetch.len();
@@ -1773,11 +1904,60 @@ impl HostedClient {
                         }
                         profile.metadata_sync = metadata_start.elapsed();
                         profile.objects_received = received;
-                        return Ok(PullExchange {
+                        return Ok((
+                            PullExchange {
+                                result: PullComplete {
+                                    success: true,
+                                    final_state,
+                                    error: None,
+                                    transfer_id: complete
+                                        .transfer
+                                        .as_ref()
+                                        .map(|transfer| transfer.transfer_id.clone())
+                                        .unwrap_or_default(),
+                                    transport_mode: complete
+                                        .transfer
+                                        .as_ref()
+                                        .map(|transfer| {
+                                            transport_mode_name(transfer.transport_mode)
+                                        })
+                                        .unwrap_or("native-pack")
+                                        .to_string(),
+                                    resume_offset: complete
+                                        .transfer
+                                        .as_ref()
+                                        .map(|transfer| transfer.resume_offset)
+                                        .unwrap_or_default(),
+                                    chunk_index: complete
+                                        .transfer
+                                        .as_ref()
+                                        .map(|transfer| transfer.chunk_index)
+                                        .unwrap_or_default(),
+                                    checkpoint: complete
+                                        .transfer
+                                        .as_ref()
+                                        .map(|transfer| transfer.checkpoint.clone())
+                                        .unwrap_or_default(),
+                                    is_complete: complete
+                                        .transfer
+                                        .as_ref()
+                                        .map(|transfer| transfer.is_complete)
+                                        .unwrap_or(false),
+                                },
+                                object_count: received,
+                                profile,
+                            },
+                            owned_repo,
+                        ));
+                    }
+
+                    profile.objects_received = received;
+                    return Ok((
+                        PullExchange {
                             result: PullComplete {
-                                success: true,
+                                success: false,
                                 final_state,
-                                error: None,
+                                error: (!complete.error.is_empty()).then_some(complete.error),
                                 transfer_id: complete
                                     .transfer
                                     .as_ref()
@@ -1812,50 +1992,9 @@ impl HostedClient {
                             },
                             object_count: received,
                             profile,
-                        });
-                    }
-
-                    profile.objects_received = received;
-                    return Ok(PullExchange {
-                        result: PullComplete {
-                            success: false,
-                            final_state,
-                            error: (!complete.error.is_empty()).then_some(complete.error),
-                            transfer_id: complete
-                                .transfer
-                                .as_ref()
-                                .map(|transfer| transfer.transfer_id.clone())
-                                .unwrap_or_default(),
-                            transport_mode: complete
-                                .transfer
-                                .as_ref()
-                                .map(|transfer| transport_mode_name(transfer.transport_mode))
-                                .unwrap_or("native-pack")
-                                .to_string(),
-                            resume_offset: complete
-                                .transfer
-                                .as_ref()
-                                .map(|transfer| transfer.resume_offset)
-                                .unwrap_or_default(),
-                            chunk_index: complete
-                                .transfer
-                                .as_ref()
-                                .map(|transfer| transfer.chunk_index)
-                                .unwrap_or_default(),
-                            checkpoint: complete
-                                .transfer
-                                .as_ref()
-                                .map(|transfer| transfer.checkpoint.clone())
-                                .unwrap_or_default(),
-                            is_complete: complete
-                                .transfer
-                                .as_ref()
-                                .map(|transfer| transfer.is_complete)
-                                .unwrap_or(false),
                         },
-                        object_count: received,
-                        profile,
-                    });
+                        owned_repo,
+                    ));
                 }
                 _ => {}
             }
@@ -2578,6 +2717,53 @@ mod pull_bootstrap_tests {
         )
         .expect_err("advertised but malformed metadata must not silently fall back");
         assert!(error.to_string().contains("decode pull bootstrap"));
+    }
+
+    #[test]
+    fn folded_refs_decode_identically_and_old_server_selects_fallback() {
+        let main = StateId::from_bytes([7; 32]);
+        let release = StateId::from_bytes([8; 32]);
+        let payload: PullRefsPayload = (
+            "main".to_string(),
+            Some(main.as_bytes().to_vec()),
+            vec![
+                (
+                    "main".to_string(),
+                    main.as_bytes().to_vec(),
+                    true,
+                    "git:0123456789abcdef".to_string(),
+                ),
+                (
+                    "release".to_string(),
+                    release.as_bytes().to_vec(),
+                    false,
+                    RevisionAddress::heddle(release).to_string(),
+                ),
+            ],
+        );
+        let checkpoint = format!(
+            "{PULL_REFS_LINE_PREFIX}{}\t{}\n",
+            hex::encode(rmp_serde::to_vec_named(&payload).expect("encode refs fixture")),
+            StateId::from_bytes([0; 32]).to_string_full(),
+        );
+
+        let decoded = decode_pull_refs(checkpoint.as_bytes())
+            .expect("decode folded refs")
+            .expect("new server advertises refs");
+        assert_eq!(decoded.refs.len(), 2);
+        assert_eq!(decoded.refs[0].name, "main");
+        assert_eq!(decoded.refs[0].state_id, main);
+        assert!(decoded.refs[0].is_thread);
+        assert_eq!(decoded.refs[0].revision_address, "git:0123456789abcdef");
+        assert_eq!(decoded.refs[1].name, "release");
+        assert_eq!(decoded.refs[1].state_id, release);
+        assert!(!decoded.refs[1].is_thread);
+        assert!(
+            decode_pull_refs(b"heddle-markers-v1\n")
+                .expect("old-server checkpoint remains valid")
+                .is_none(),
+            "absence of folded refs must select the standalone ListRefs fallback"
+        );
     }
 
     #[test]

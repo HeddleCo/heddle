@@ -17,12 +17,13 @@ mod fixture {
 
     use api::{
         HOSTED_ALPN_V1,
-        framing::encode_failure_response,
+        framing::{decode_request_prelude, encode_failure_response},
         heddle::api::v1alpha1::{
             CallFailure, CallFailureCode, EndpointDescriptor, SignedEndpointDescriptor,
         },
         signing::endpoint_descriptor_bytes,
     };
+    use biscuit_auth::KeyPair;
     use crypto::{Ed25519Signer, Signer};
     use iroh::{Endpoint, RelayMode, endpoint::presets};
     use prost::Message;
@@ -41,7 +42,7 @@ mod fixture {
     #[test]
     fn clone_json_peer_disconnect_after_connection_emits_structured_error() {
         let temp = TempDir::new().expect("create clone contract fixture root");
-        let (endpoint_id, direct_address, iroh_thread) = disconnecting_iroh_server();
+        let (endpoint_id, direct_address, iroh_thread) = disconnecting_iroh_server(None);
         let signer = Ed25519Signer::generate().expect("generate descriptor signer");
         let descriptor = signed_descriptor(&endpoint_id, &direct_address, &signer);
         let https = TestHttpsServer::start(HashMap::from([(
@@ -108,7 +109,95 @@ mod fixture {
         assert!(!destination.exists());
     }
 
-    fn disconnecting_iroh_server() -> (String, String, thread::JoinHandle<()>) {
+    #[test]
+    fn authenticated_clone_starts_with_folded_pull_instead_of_list_refs() {
+        const PULL: &str = "/heddle.api.v1alpha1.RepoSyncService/Pull";
+
+        let temp = TempDir::new().expect("create folded clone fixture root");
+        let (endpoint_id, direct_address, iroh_thread) = disconnecting_iroh_server(Some(PULL));
+        let signer = Ed25519Signer::generate().expect("generate descriptor signer");
+        let descriptor = signed_descriptor(&endpoint_id, &direct_address, &signer);
+        let https = TestHttpsServer::start(HashMap::from([(
+            DESCRIPTOR_PATH.to_string(),
+            VecDeque::from([descriptor]),
+        )]));
+        let certificate = temp.path().join("descriptor-ca.pem");
+        std::fs::write(&certificate, &https.certificate_pem).expect("write descriptor test CA");
+        let credential = temp.path().join("clone-test.hcred");
+        write_test_credential(&credential, &https.authority);
+        let destination = temp.path().join("clone");
+        let remote = format!("heddle://{}/owner/repo", https.authority);
+        let descriptor_public_key = hex::encode(signer.public_key());
+        let heddle_home = temp.path().join("heddle-home");
+
+        let output = heddle_output_with_env(
+            &[
+                "clone",
+                &remote,
+                destination.to_str().expect("UTF-8 destination"),
+            ],
+            Some(temp.path()),
+            &[
+                (
+                    "HEDDLE_REMOTE_TLS_CA_CERT",
+                    certificate.to_str().expect("UTF-8 CA path"),
+                ),
+                ("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID", "clone-test-key"),
+                (
+                    "HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
+                    &descriptor_public_key,
+                ),
+                ("HEDDLE_HOME", heddle_home.to_str().expect("UTF-8 home")),
+                (
+                    "HEDDLE_CREDENTIAL",
+                    credential.to_str().expect("UTF-8 credential path"),
+                ),
+            ],
+        )
+        .expect("invoke authenticated clone against route fixture");
+
+        iroh_thread.join().expect("route-check Iroh server exits");
+        assert!(
+            !output.status.success(),
+            "fixture terminates the folded Pull"
+        );
+        assert!(!destination.exists());
+    }
+
+    fn write_test_credential(path: &std::path::Path, server: &str) {
+        let signer = Ed25519Signer::generate().expect("generate credential proof key");
+        let token = biscuit_auth::Biscuit::builder()
+            .fact(r#"user("clone-test")"#)
+            .expect("credential subject fact")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
+            .expect("credential proof-key fact")
+            .build(&KeyPair::new())
+            .expect("mint test credential")
+            .to_base64()
+            .expect("encode test credential");
+        let encoded = serde_json::to_vec_pretty(&serde_json::json!({
+            "format": "heddle-credential",
+            "version": 1,
+            "server": server,
+            "kind": "device",
+            "subject": "clone-test",
+            "token": token,
+            "proof_key_pem": signer.to_pem().expect("encode credential proof key"),
+            "credential_id": null,
+        }))
+        .expect("encode credential file");
+        std::fs::write(path, encoded).expect("write credential file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .expect("restrict credential file permissions");
+        }
+    }
+
+    fn disconnecting_iroh_server(
+        expected_method: Option<&'static str>,
+    ) -> (String, String, thread::JoinHandle<()>) {
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let thread = thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -136,7 +225,35 @@ mod fixture {
 
                 let incoming = endpoint.accept().await.expect("accept clone connection");
                 let connection = incoming.await.expect("complete clone connection");
-                let (mut send, _recv) = connection.accept_bi().await.expect("accept ListRefs RPC");
+                let (mut send, mut recv) = connection
+                    .accept_bi()
+                    .await
+                    .expect("accept initial Pull RPC");
+                let mut request = vec![0_u8; 70 * 1024];
+                let mut received = 0;
+                let method = loop {
+                    let read = recv
+                        .read(&mut request[received..])
+                        .await
+                        .expect("read clone request prelude")
+                        .expect("clone request ended before its prelude");
+                    received += read;
+                    if let Some((prelude, _)) = decode_request_prelude(&request[..received])
+                        .expect("decode request prelude")
+                    {
+                        break prelude.method.to_string();
+                    }
+                    assert!(
+                        received < request.len(),
+                        "clone request prelude is oversized"
+                    );
+                };
+                if let Some(expected_method) = expected_method {
+                    assert_eq!(
+                        method, expected_method,
+                        "an authenticated clone must start with folded Pull, not ListRefs"
+                    );
+                }
                 let failure = encode_failure_response(&CallFailure {
                     code: CallFailureCode::Unavailable as i32,
                     message: "Broken pipe".to_string(),
