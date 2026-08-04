@@ -2,6 +2,7 @@
 //! ObjectStore implementation for FsStore.
 
 use std::{
+    collections::HashSet,
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
 };
@@ -104,6 +105,50 @@ fn validate_loaded_action(requested_id: &ActionId, action: Action) -> Result<Act
 fn validate_action_serialized(data: &[u8], id: ActionId) -> Result<Action> {
     let action: Action = rmp_serde::from_slice(data)?;
     validate_loaded_action(&id, action)
+}
+
+trait EnumerationCounter {
+    fn membership_check(&mut self);
+    fn header_read(&mut self);
+}
+
+struct NoopEnumerationCounter;
+
+impl EnumerationCounter for NoopEnumerationCounter {
+    fn membership_check(&mut self) {}
+    fn header_read(&mut self) {}
+}
+
+fn append_packed_hashes_with_counter(
+    hashes: &mut Vec<ContentHash>,
+    manager: &PackManager,
+    expected_type: ObjectType,
+    counter: &mut impl EnumerationCounter,
+) -> Result<()> {
+    let mut known: HashSet<_> = hashes.iter().copied().collect();
+    for id in manager.list_all_ids()? {
+        let PackObjectId::Hash(hash) = id else {
+            continue;
+        };
+        counter.membership_check();
+        if known.contains(&hash) {
+            continue;
+        }
+        counter.header_read();
+        if manager.get_hashed_object_type(&hash)? == Some(expected_type) {
+            known.insert(hash);
+            hashes.push(hash);
+        }
+    }
+    Ok(())
+}
+
+fn append_packed_hashes(
+    hashes: &mut Vec<ContentHash>,
+    manager: &PackManager,
+    expected_type: ObjectType,
+) -> Result<()> {
+    append_packed_hashes_with_counter(hashes, manager, expected_type, &mut NoopEnumerationCounter)
 }
 
 impl FsStore {
@@ -1178,7 +1223,7 @@ impl ObjectStore for FsStore {
     #[instrument(skip(self))]
     fn list_actions(&self) -> Result<Vec<ActionId>> {
         let dir = actions_dir(&self.root);
-        let mut actions = Vec::new();
+        let mut action_hashes = Vec::new();
         if dir.exists() {
             for entry in fs::read_dir(&dir)? {
                 let entry = entry?;
@@ -1187,21 +1232,17 @@ impl ObjectStore for FsStore {
                     && let Some(name_str) = name.to_str()
                     && let Ok(hash) = ContentHash::from_hex(name_str)
                 {
-                    actions.push(ActionId::from_hash(hash));
+                    action_hashes.push(hash);
                 }
             }
         }
         if let Ok(manager) = self.pack_manager().read() {
-            for id in manager.list_all_ids()? {
-                if let PackObjectId::Hash(hash) = id
-                    && !actions.iter().any(|action_id| action_id.as_hash() == &hash)
-                    && let Some((obj_type, _)) = manager.get_hashed_object(&hash)?
-                    && obj_type == ObjectType::Action
-                {
-                    actions.push(ActionId::from_hash(hash));
-                }
-            }
+            append_packed_hashes(&mut action_hashes, &manager, ObjectType::Action)?;
         }
+        let actions = action_hashes
+            .into_iter()
+            .map(ActionId::from_hash)
+            .collect::<Vec<_>>();
         debug!(count = actions.len(), "Listed actions");
         Ok(actions)
     }
@@ -1211,15 +1252,7 @@ impl ObjectStore for FsStore {
         let dir = blobs_dir(&self.root);
         let mut blobs = list_hashes_from_dir(&dir)?;
         if let Ok(manager) = self.pack_manager().read() {
-            for id in manager.list_all_ids()? {
-                if let PackObjectId::Hash(hash) = id
-                    && !blobs.contains(&hash)
-                    && let Some((obj_type, _)) = manager.get_hashed_object(&hash)?
-                    && obj_type == ObjectType::Blob
-                {
-                    blobs.push(hash);
-                }
-            }
+            append_packed_hashes(&mut blobs, &manager, ObjectType::Blob)?;
         }
         Ok(blobs)
     }
@@ -1229,15 +1262,7 @@ impl ObjectStore for FsStore {
         let dir = trees_dir(&self.root);
         let mut trees = list_hashes_from_dir(&dir)?;
         if let Ok(manager) = self.pack_manager().read() {
-            for id in manager.list_all_ids()? {
-                if let PackObjectId::Hash(hash) = id
-                    && !trees.contains(&hash)
-                    && let Some((obj_type, _)) = manager.get_hashed_object(&hash)?
-                    && obj_type == ObjectType::Tree
-                {
-                    trees.push(hash);
-                }
-            }
+            append_packed_hashes(&mut trees, &manager, ObjectType::Tree)?;
         }
         Ok(trees)
     }
@@ -1563,5 +1588,263 @@ mod state_attachment_tests {
             vec![attachment]
         );
         assert!(!rebuild_marker.exists());
+    }
+}
+
+#[cfg(test)]
+mod enumeration_tests {
+    use heddle_format::{compression::CompressionConfig, delta::DeltaEncoder};
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::store::pack::{
+        PackBuilder, PackContainerSpec, PackIndex, append_container_checksum,
+        encode_tagged_entry_parts, write_container_header,
+    };
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    struct TestEnumerationMetrics {
+        membership_checks: u64,
+        header_reads: u64,
+        full_object_decodes: u64,
+    }
+
+    impl EnumerationCounter for TestEnumerationMetrics {
+        fn membership_check(&mut self) {
+            self.membership_checks += 1;
+        }
+
+        fn header_read(&mut self) {
+            self.header_reads += 1;
+        }
+    }
+
+    fn install_pack_files(
+        dir: &TempDir,
+        name: &str,
+        pack_data: &[u8],
+        index_data: &[u8],
+    ) -> PackManager {
+        fs::write(dir.path().join(format!("{name}.pack")), pack_data).unwrap();
+        fs::write(dir.path().join(format!("{name}.idx")), index_data).unwrap();
+        PackManager::new(dir.path().to_path_buf())
+    }
+
+    fn raw_mixed_manager() -> (TempDir, PackManager, Vec<(ContentHash, ObjectType)>) {
+        let dir = TempDir::new().unwrap();
+        let objects = [
+            (ObjectType::Blob, b"packed blob".as_slice()),
+            (ObjectType::Tree, b"packed tree".as_slice()),
+            (ObjectType::Action, b"packed action".as_slice()),
+        ];
+        let mut builder = PackBuilder::new(CompressionConfig::disabled());
+        let mut classified = Vec::new();
+        for (obj_type, data) in objects {
+            let hash = ContentHash::compute_typed("enumeration-test", data);
+            builder.add(hash, obj_type, data.to_vec());
+            classified.push((hash, obj_type));
+        }
+        let (pack, index, _) = builder.build().unwrap();
+        let manager = install_pack_files(&dir, "mixed", &pack, &index);
+        (dir, manager, classified)
+    }
+
+    fn delta_chain_manager() -> (TempDir, PackManager, Vec<ContentHash>) {
+        const SPEC: PackContainerSpec = PackContainerSpec {
+            magic: b"LMPK",
+            version: 3,
+        };
+        let dir = TempDir::new().unwrap();
+        let base = b"delta-chain base payload ".repeat(64);
+        let mut middle = base.clone();
+        middle[200..208].copy_from_slice(b"middle!!");
+        let mut tip = middle.clone();
+        tip[900..908].copy_from_slice(b"tip!!!!!");
+        let bodies = [&base, &middle, &tip];
+        let hashes = bodies
+            .iter()
+            .map(|body| ContentHash::compute_typed("blob", body))
+            .collect::<Vec<_>>();
+        let middle_delta = DeltaEncoder::encode(&base, &middle);
+        let tip_delta = DeltaEncoder::encode(&middle, &tip);
+
+        let mut pack = Vec::new();
+        let mut index = PackIndex::new();
+        write_container_header(&mut pack, SPEC, 3);
+        for (position, payload) in [
+            base.as_slice(),
+            middle_delta.as_slice(),
+            tip_delta.as_slice(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            index.add(PackObjectId::Hash(hashes[position]), pack.len() as u64);
+            let (stored_type, base_id) = if position == 0 {
+                (ObjectType::Blob, None)
+            } else {
+                (
+                    ObjectType::Delta,
+                    Some(PackObjectId::Hash(hashes[position - 1])),
+                )
+            };
+            encode_tagged_entry_parts(
+                &mut pack,
+                PackObjectId::Hash(hashes[position]),
+                stored_type,
+                bodies[position].len(),
+                base_id,
+                payload,
+            )
+            .unwrap();
+        }
+        index.sort();
+        append_container_checksum(&mut pack);
+        let manager = install_pack_files(&dir, "delta-chain", &pack, &index.to_bytes());
+        (dir, manager, hashes)
+    }
+
+    fn legacy_append_packed_hashes(
+        hashes: &mut Vec<ContentHash>,
+        manager: &PackManager,
+        expected_type: ObjectType,
+    ) -> Result<TestEnumerationMetrics> {
+        let mut metrics = TestEnumerationMetrics::default();
+        for id in manager.list_all_ids()? {
+            let PackObjectId::Hash(hash) = id else {
+                continue;
+            };
+            let mut already_listed = false;
+            for listed in hashes.iter() {
+                metrics.membership_checks += 1;
+                if listed == &hash {
+                    already_listed = true;
+                    break;
+                }
+            }
+            if already_listed {
+                continue;
+            }
+            metrics.full_object_decodes += 1;
+            if let Some((obj_type, _)) = manager.get_hashed_object(&hash)?
+                && obj_type == expected_type
+            {
+                hashes.push(hash);
+            }
+        }
+        Ok(metrics)
+    }
+
+    fn assert_new_matches_legacy(
+        label: &str,
+        manager: &PackManager,
+        loose: Vec<ContentHash>,
+        expected_type: ObjectType,
+    ) {
+        let mut new = loose.clone();
+        let mut new_metrics = TestEnumerationMetrics::default();
+        append_packed_hashes_with_counter(&mut new, manager, expected_type, &mut new_metrics)
+            .unwrap();
+        let mut legacy = loose;
+        legacy_append_packed_hashes(&mut legacy, manager, expected_type).unwrap();
+        assert_eq!(new, legacy, "fixture {label} changed output or ordering");
+        assert_eq!(new_metrics.full_object_decodes, 0, "fixture {label}");
+    }
+
+    #[test]
+    fn type_only_enumeration_matches_full_decode_across_fixture_set() {
+        let empty_dir = TempDir::new().unwrap();
+        let empty = PackManager::new(empty_dir.path().to_path_buf());
+        let loose_hash = ContentHash::compute(b"loose only");
+        assert_new_matches_legacy("loose-only", &empty, vec![loose_hash], ObjectType::Blob);
+
+        let (_raw_dir, raw, classified) = raw_mixed_manager();
+        for expected_type in [ObjectType::Blob, ObjectType::Tree, ObjectType::Action] {
+            assert_new_matches_legacy("packed-only", &raw, Vec::new(), expected_type);
+            assert_new_matches_legacy(
+                "mixed",
+                &raw,
+                vec![ContentHash::compute_typed("loose", &[expected_type as u8])],
+                expected_type,
+            );
+            let duplicate = classified
+                .iter()
+                .find_map(|(hash, obj_type)| (*obj_type == expected_type).then_some(*hash))
+                .unwrap();
+            assert_new_matches_legacy(
+                "duplicate-loose-packed",
+                &raw,
+                vec![duplicate],
+                expected_type,
+            );
+        }
+        for (hash, expected_type) in classified {
+            assert_eq!(
+                raw.get_hashed_object_type(&hash).unwrap(),
+                raw.get_hashed_object(&hash)
+                    .unwrap()
+                    .map(|(obj_type, _)| obj_type)
+            );
+            assert_eq!(
+                raw.get_hashed_object_type(&hash).unwrap(),
+                Some(expected_type)
+            );
+        }
+
+        let (_delta_dir, delta, delta_hashes) = delta_chain_manager();
+        assert_new_matches_legacy("two-link-delta-chain", &delta, Vec::new(), ObjectType::Blob);
+        for hash in delta_hashes {
+            assert_eq!(
+                delta.get_hashed_object_type(&hash).unwrap(),
+                Some(ObjectType::Blob)
+            );
+            assert_eq!(
+                delta.get_hashed_object_type(&hash).unwrap(),
+                delta
+                    .get_hashed_object(&hash)
+                    .unwrap()
+                    .map(|(obj_type, _)| obj_type)
+            );
+        }
+    }
+
+    #[test]
+    fn structural_counter_rejects_vec_scan_and_full_decode_negative_control() {
+        let (_dir, manager, _) = raw_mixed_manager();
+        let loose = (0..64u8)
+            .map(|byte| ContentHash::compute_typed("loose", &[byte]))
+            .collect::<Vec<_>>();
+        let packed_hashes = manager
+            .list_all_ids()
+            .unwrap()
+            .into_iter()
+            .filter(|id| matches!(id, PackObjectId::Hash(_)))
+            .count() as u64;
+
+        for expected_type in [ObjectType::Blob, ObjectType::Tree, ObjectType::Action] {
+            let mut optimized = loose.clone();
+            let mut optimized_metrics = TestEnumerationMetrics::default();
+            append_packed_hashes_with_counter(
+                &mut optimized,
+                &manager,
+                expected_type,
+                &mut optimized_metrics,
+            )
+            .unwrap();
+            assert_eq!(optimized_metrics.membership_checks, packed_hashes);
+            assert_eq!(optimized_metrics.header_reads, packed_hashes);
+            assert_eq!(optimized_metrics.full_object_decodes, 0);
+
+            let mut legacy = loose.clone();
+            let legacy_metrics =
+                legacy_append_packed_hashes(&mut legacy, &manager, expected_type).unwrap();
+            assert!(legacy_metrics.membership_checks >= loose.len() as u64 * packed_hashes);
+            assert_eq!(legacy_metrics.full_object_decodes, packed_hashes);
+            assert!(
+                !(legacy_metrics.membership_checks <= packed_hashes
+                    && legacy_metrics.full_object_decodes == 0),
+                "negative control unexpectedly passed the structural contract: {legacy_metrics:?}"
+            );
+        }
     }
 }

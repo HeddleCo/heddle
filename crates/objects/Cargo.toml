@@ -68,6 +68,11 @@ harness = false
 required-features = ["bench"]
 
 [[bench]]
+name = "object_enumeration"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
 name = "tree_diff"
 harness = false
 required-features = ["bench"]
