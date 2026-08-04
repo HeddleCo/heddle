@@ -1794,7 +1794,10 @@ async fn clone_network_connected(
         // then may refs/HEAD become visible; the intent is cleared last.
         durability.commit()?;
         if durability.barrier_count() != 1 {
-            anyhow::bail!("clone durability commit executed more than once");
+            return Err(HeddleError::InvalidObject(
+                "clone durability commit executed more than once".to_string(),
+            )
+            .into());
         }
         client
             .publish_clone_markers(&local_repo, repo_path, &result.checkpoint)
@@ -2006,7 +2009,10 @@ async fn recover_interrupted_clone_connected(
     }
     durability.commit()?;
     if durability.barrier_count() != 1 {
-        anyhow::bail!("clone recovery durability commit executed more than once");
+        return Err(HeddleError::InvalidObject(
+            "clone recovery durability commit executed more than once".to_string(),
+        )
+        .into());
     }
     client
         .publish_clone_markers(&repo, &intent.repository, &result.checkpoint)
