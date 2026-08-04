@@ -287,7 +287,7 @@ impl<'a> PackReader<'a> {
     /// `Ok(None)`.
     pub fn get_hashed_object_type(&self, hash: &ContentHash) -> Result<Option<ObjectType>> {
         let id = PackObjectId::Hash(*hash);
-        let Some(offset) = self.index.find(&id) else {
+        let Some(offset) = self.index.find(&id)? else {
             return Ok(None);
         };
         self.read_object_type_at_depth(&id, checked_index_offset(offset)?, 0)
@@ -418,7 +418,7 @@ impl<'a> PackReader<'a> {
         let base_id = PackObjectId::Hash(base_hash);
         let base_offset = self
             .index
-            .find(&base_id)
+            .find(&base_id)?
             .ok_or_else(|| StoreError::NotFound(base_hash.to_string()))?;
         self.read_object_type_at_depth(&base_id, checked_index_offset(base_offset)?, depth + 1)
     }

@@ -308,10 +308,13 @@ impl PackManager {
     /// Look up the logical object type without decoding the object payload.
     pub fn get_hashed_object_type(&self, hash: &ContentHash) -> Result<Option<ObjectType>> {
         let id = PackObjectId::Hash(*hash);
-        let Some(pack_index) = self.object_locations.get(&id).copied() else {
+        let Some(pack_index) = self.object_location(&id)? else {
             return Ok(None);
         };
-        self.packs[pack_index].reader.get_hashed_object_type(hash)
+        let Some(reader) = self.packs[pack_index].reader() else {
+            return Ok(None);
+        };
+        reader.get_hashed_object_type(hash)
     }
 
     /// Zero-copy variant of `get_hashed_object`. Returns
