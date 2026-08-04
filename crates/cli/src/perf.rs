@@ -127,7 +127,10 @@ pub fn emit_profile(command: &'static str, fields: &[ProfileField]) {
     let duration_ms = fields
         .iter()
         .filter(|field| matches!(field.unit, ProfileMetricUnit::Milliseconds))
-        .map(|field| u64::try_from(field.value).unwrap_or(u64::MAX))
+        .map(|field| match field.value {
+            ProfileMetricScalar::Number(value) => u64::try_from(value).unwrap_or(u64::MAX),
+            ProfileMetricScalar::Boolean(_) => unreachable!("filtered to millisecond metrics"),
+        })
         .max()
         .unwrap_or(0);
     record_phase_span(command, duration_ms);

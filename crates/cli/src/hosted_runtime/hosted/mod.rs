@@ -7,6 +7,8 @@ mod bootstrap;
 mod call;
 mod collaboration;
 mod connection;
+#[cfg(test)]
+mod connection_path_tests;
 mod content;
 mod context;
 mod credential;
