@@ -334,6 +334,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -353,6 +355,15 @@ jobs:
           cargo check --locked -p heddle-repo --no-default-features --features native,zstd
           cargo check --locked -p heddle-cli --no-default-features --features git-overlay,client,semantic,zstd
           cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd
+
+      - name: Telemetry build, clippy, and tests
+        run: |
+          set -euo pipefail
+          cargo build --locked -p heddle-cli --features telemetry --tests --bin heddle
+          cargo clippy --locked -p heddle-cli -p heddle-cli-shared \
+            --features heddle-cli/telemetry --lib --bins --tests --examples -- -D warnings
+          cargo test --locked -p heddle-cli -p heddle-cli-shared \
+            --features heddle-cli/telemetry
 
       - name: sccache stats
         run: sccache --show-stats

@@ -12,7 +12,7 @@ pub(super) const TELEMETRY_TARGET: &str = "heddle_telemetry";
 
 static TRACE_EXPORT_ENABLED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 pub(super) fn set_trace_export_enabled(enabled: bool) {
     TRACE_EXPORT_ENABLED.store(enabled, Ordering::Release);
 }

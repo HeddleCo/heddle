@@ -1,10 +1,17 @@
 # CLI trace export
 
-Heddle can export command traces to an OpenTelemetry collector. Export is off
-by default: unless a trace endpoint is configured, Heddle does not construct a
-tracer provider, exporter, or telemetry network client.
+Heddle can export command traces to an OpenTelemetry collector. The default
+CLI build does not include the OTLP exporter. Build it explicitly with:
 
-Opt in for one shell with the collector's OTLP/HTTP base endpoint:
+```sh
+cargo build -p heddle-cli --features telemetry
+```
+
+In a telemetry build, export remains off at runtime unless a trace endpoint is
+configured. Without one, Heddle does not construct a tracer provider, exporter,
+or telemetry network client.
+
+Then opt in for one shell with the collector's OTLP/HTTP base endpoint:
 
 ```sh
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318

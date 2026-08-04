@@ -24,19 +24,19 @@
 //! ```
 
 use std::io::{self, IsTerminal};
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 use std::time::Duration;
 
 mod trace;
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 use opentelemetry::{KeyValue, global, trace::TracerProvider as _};
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 use opentelemetry_otlp::WithExportConfig;
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 use opentelemetry_sdk::{Resource, metrics::SdkMeterProvider, trace::SdkTracerProvider};
 pub use trace::{CommandTrace, record_phase_span, trace_export_enabled};
 use tracing::Level;
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::{
     EnvFilter, Layer as _, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
@@ -75,9 +75,9 @@ pub struct LoggingConfig {
 
 #[derive(Debug, Default)]
 pub struct LoggingGuard {
-    #[cfg(feature = "observability")]
+    #[cfg(feature = "telemetry")]
     tracer_provider: Option<SdkTracerProvider>,
-    #[cfg(feature = "observability")]
+    #[cfg(feature = "telemetry")]
     meter_provider: Option<SdkMeterProvider>,
 }
 
@@ -87,7 +87,7 @@ impl LoggingGuard {
     }
 
     fn shutdown_inner(&mut self) {
-        #[cfg(feature = "observability")]
+        #[cfg(feature = "telemetry")]
         {
             if let Some(meter_provider) = self.meter_provider.take() {
                 let _ = meter_provider.shutdown_with_timeout(Duration::from_millis(250));
@@ -106,7 +106,7 @@ impl Drop for LoggingGuard {
     }
 }
 
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 #[derive(Debug, Clone)]
 struct OtelConfig {
     service_name: String,
@@ -239,7 +239,7 @@ impl LoggingConfig {
     }
 }
 
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 impl OtelConfig {
     fn from_logging_config(config: &LoggingConfig) -> Self {
         Self {
@@ -262,7 +262,6 @@ impl OtelConfig {
         self.trace_endpoint.is_some() || self.metrics_endpoint.is_some()
     }
 
-    #[cfg(feature = "observability")]
     fn resource(&self) -> Resource {
         Resource::builder_empty()
             .with_attributes([KeyValue::new("service.name", self.service_name.clone())])
@@ -270,7 +269,7 @@ impl OtelConfig {
     }
 }
 
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 fn signal_endpoint(base: Option<&str>, signal_path: &str) -> Option<String> {
     base.map(|endpoint| format!("{}/{signal_path}", endpoint.trim_end_matches('/')))
 }
@@ -299,7 +298,7 @@ pub fn init_logging(config: LoggingConfig) -> LoggingGuard {
     let telemetry = init_otel(&config);
     let registry = tracing_subscriber::registry();
 
-    #[cfg(feature = "observability")]
+    #[cfg(feature = "telemetry")]
     let init_result = match (config.format, telemetry.tracer_provider.as_ref()) {
         (LogFormat::Text, Some(provider)) => registry
             .with(
@@ -373,7 +372,7 @@ pub fn init_logging(config: LoggingConfig) -> LoggingGuard {
             .try_init(),
     };
 
-    #[cfg(not(feature = "observability"))]
+    #[cfg(not(feature = "telemetry"))]
     let init_result = match config.format {
         LogFormat::Text => registry
             .with(
@@ -458,15 +457,15 @@ macro_rules! log_repo_event {
 
 struct TelemetryInit {
     guard: LoggingGuard,
-    #[cfg(feature = "observability")]
+    #[cfg(feature = "telemetry")]
     tracer_provider: Option<SdkTracerProvider>,
-    #[cfg(feature = "observability")]
+    #[cfg(feature = "telemetry")]
     service_name: String,
-    #[cfg(all(test, feature = "observability"))]
+    #[cfg(all(test, feature = "telemetry"))]
     network_client_initialized: bool,
 }
 
-#[cfg(feature = "observability")]
+#[cfg(feature = "telemetry")]
 fn init_otel(logging: &LoggingConfig) -> TelemetryInit {
     let config = OtelConfig::from_logging_config(logging);
     if !config.enabled() {
@@ -474,7 +473,7 @@ fn init_otel(logging: &LoggingConfig) -> TelemetryInit {
             guard: LoggingGuard::default(),
             tracer_provider: None,
             service_name: config.service_name,
-            #[cfg(all(test, feature = "observability"))]
+            #[cfg(all(test, feature = "telemetry"))]
             network_client_initialized: false,
         };
     }
@@ -524,13 +523,13 @@ fn init_otel(logging: &LoggingConfig) -> TelemetryInit {
         },
         tracer_provider,
         service_name: config.service_name,
-        #[cfg(all(test, feature = "observability"))]
+        #[cfg(all(test, feature = "telemetry"))]
         network_client_initialized: config.trace_endpoint.is_some()
             || config.metrics_endpoint.is_some(),
     }
 }
 
-#[cfg(not(feature = "observability"))]
+#[cfg(not(feature = "telemetry"))]
 fn init_otel(_logging: &LoggingConfig) -> TelemetryInit {
     TelemetryInit {
         guard: LoggingGuard::default(),
@@ -539,11 +538,11 @@ fn init_otel(_logging: &LoggingConfig) -> TelemetryInit {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "observability")]
+    #[cfg(feature = "telemetry")]
     use opentelemetry::trace::TracerProvider as _;
-    #[cfg(feature = "observability")]
+    #[cfg(feature = "telemetry")]
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SimpleSpanProcessor};
-    #[cfg(feature = "observability")]
+    #[cfg(feature = "telemetry")]
     use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
@@ -591,7 +590,7 @@ mod tests {
         assert!(!is_truthy("random"));
     }
 
-    #[cfg(feature = "observability")]
+    #[cfg(feature = "telemetry")]
     #[test]
     fn endpoint_gate_is_network_dormant_and_command_spans_export_when_enabled() {
         let shared = LoggingConfig {
