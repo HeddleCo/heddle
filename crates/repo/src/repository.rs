@@ -882,6 +882,68 @@ impl Repository {
         Self::init_with_source_authority(path, RepositorySourceAuthority::Native)
     }
 
+    /// Build or resume the unpublished local skeleton for a hosted clone.
+    ///
+    /// A durable [`crate::clone_intent::CloneIntent`] must already exist. This
+    /// initializer deliberately creates no HEAD or thread ref: those are the
+    /// publication gate and are written only after the fetched closure passes
+    /// hash verification and its clone durability batch commits.
+    pub fn init_clone(path: impl AsRef<Path>) -> Result<Self> {
+        let root = path.as_ref().to_path_buf();
+        let heddle_dir = root.join(".heddle");
+        if crate::clone_intent::CloneIntent::load(&root)?.is_none() {
+            return Err(HeddleError::Config(format!(
+                "clone initialization at {} requires a durable clone intent",
+                root.display()
+            )));
+        }
+
+        objects::fs_atomic::create_private_dir_all(&heddle_dir)?;
+        let store = FsStore::new(&heddle_dir);
+        store.init()?;
+        let refs = RefManager::new(&heddle_dir);
+        refs.init()?;
+        let oplog = OpLog::new_unattributed(&heddle_dir);
+        oplog.init()?;
+
+        let config_path = heddle_dir.join("config.toml");
+        let config = match RepoConfig::load_for_repository(&config_path) {
+            Ok(config) => config,
+            Err(HeddleError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                let config = RepoConfig::default();
+                config.save(&config_path)?;
+                config
+            }
+            Err(error) => return Err(error),
+        };
+
+        let reconciler = std::sync::Arc::new(crate::atomic::OplogRefReconciler::new(
+            &heddle_dir,
+            compute_op_scope(&root),
+        ));
+        let committer = std::sync::Arc::new(crate::atomic::OplogRefCommitter::new(
+            &heddle_dir,
+            objects::object::Principal::new("<unknown>", ""),
+        ));
+        let refs = refs.with_reconciler(reconciler).with_committer(committer);
+        refs.init_reconcile_watermark()?;
+        let repo = Self {
+            root,
+            heddle_dir: heddle_dir.clone(),
+            capability: repository_capability_for_authority(config.repository.source_authority),
+            store: AnyStore::Fs(store),
+            refs,
+            oplog,
+            config,
+            shallow: RwLock::new(ShallowInfo::load(&heddle_dir)?),
+            blob_hydrator: RwLock::new(None),
+            git_overlay_repo: RwLock::new(None),
+            progress: RwLock::new(Progress::null()),
+        };
+        crate::migration::apply_pending(&repo)?;
+        Ok(repo)
+    }
+
     fn init_with_source_authority(
         path: impl AsRef<Path>,
         source_authority: RepositorySourceAuthority,
@@ -1062,6 +1124,10 @@ impl Repository {
                 discovered_git_root = Some(dir.to_path_buf());
             }
             let heddle_path = dir.join(".heddle");
+
+            if crate::clone_intent::CloneIntent::path(dir).is_file() {
+                return Err(HeddleError::IncompleteClone(dir.to_path_buf()));
+            }
 
             if is_heddle_repository_root(dir) {
                 let pointer_path = heddle_path.join("objectstore");

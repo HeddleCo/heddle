@@ -336,6 +336,34 @@ fn install_pack_streaming_publishes_via_durable_rename_and_loads_objects() {
 }
 
 #[test]
+fn interrupted_clone_discards_only_short_pack_and_accepts_remote_repair() {
+    let (_temp, store) = create_test_store();
+    let blob = Blob::from("authoritative remote clone payload");
+    let hash = blob.hash();
+    let mut builder = PackBuilder::new(CompressionConfig::disabled());
+    builder.add(hash, PackObjectType::Blob, blob.content().to_vec());
+    let (pack_data, index_data, _) = builder.build().unwrap();
+    store.install_pack(&pack_data, &index_data).unwrap();
+
+    let pack_path = std::fs::read_dir(packs_dir(store.root()))
+        .unwrap()
+        .map(Result::unwrap)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().and_then(|value| value.to_str()) == Some("pack"))
+        .unwrap();
+    std::fs::write(&pack_path, &pack_data[..pack_data.len() / 2]).unwrap();
+
+    assert_eq!(store.discard_corrupt_clone_packs().unwrap(), 1);
+    assert!(store.get_blob(&hash).unwrap().is_none());
+
+    // The incremental pull installs only the pair that contained the corrupt
+    // object. Reusing the authoritative bytes makes the object byte-identical.
+    store.install_pack(&pack_data, &index_data).unwrap();
+    let repaired = store.get_blob(&hash).unwrap().unwrap();
+    assert_eq!(repaired.content(), blob.content());
+}
+
+#[test]
 fn install_pack_rejects_hash_mismatch_without_partial_commit() {
     let (_temp, store) = create_test_store();
 

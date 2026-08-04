@@ -592,7 +592,7 @@ impl PackStreamSpool {
     fn close(&mut self) -> Result<()> {
         if let Some(mut file) = self.file.take() {
             file.flush()?;
-            file.sync_all()?;
+            objects::fs_atomic::sync_file(&file, &self.path)?;
         }
         Ok(())
     }

@@ -254,6 +254,9 @@ impl ObjectStore for AnyStore {
     fn prune_loose_objects(&self) -> Result<(u64, u64)> {
         any_store_dispatch!(self, prune_loose_objects())
     }
+    fn discard_corrupt_clone_packs(&self) -> Result<usize> {
+        any_store_dispatch!(self, discard_corrupt_clone_packs())
+    }
     fn begin_snapshot_write_batch(&self) -> Result<()> {
         any_store_dispatch!(self, begin_snapshot_write_batch())
     }
@@ -713,6 +716,12 @@ pub trait ObjectStore: Send + Sync {
 
     fn prune_loose_objects(&self) -> Result<(u64, u64)> {
         Ok((0, 0))
+    }
+
+    /// Remove only pack/index pairs that fail checksum, index, or object-hash
+    /// validation so a clone repair pull advertises their objects as missing.
+    fn discard_corrupt_clone_packs(&self) -> Result<usize> {
+        Ok(0)
     }
 
     fn begin_snapshot_write_batch(&self) -> Result<()> {

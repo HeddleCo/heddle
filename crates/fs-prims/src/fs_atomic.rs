@@ -3,9 +3,104 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[derive(Default)]
+struct CloneDurabilityStats {
+    barriers: AtomicU64,
+    skipped: AtomicU64,
+}
+
+#[derive(Clone)]
+struct CloneDurabilityEntry {
+    root: PathBuf,
+    stats: Arc<CloneDurabilityStats>,
+}
+
+fn clone_durability_entries() -> &'static Mutex<Vec<CloneDurabilityEntry>> {
+    static ENTRIES: OnceLock<Mutex<Vec<CloneDurabilityEntry>>> = OnceLock::new();
+    ENTRIES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn deferred_clone_stats(path: &Path) -> Option<Arc<CloneDurabilityStats>> {
+    clone_durability_entries()
+        .lock()
+        .ok()?
+        .iter()
+        .rev()
+        .find(|entry| path.starts_with(&entry.root))
+        .map(|entry| Arc::clone(&entry.stats))
+}
+
+pub fn clone_write_is_deferred(path: &Path) -> bool {
+    deferred_clone_stats(path).is_some()
+}
+
+pub fn record_deferred_clone_barrier(path: &Path) {
+    if let Some(stats) = deferred_clone_stats(path) {
+        stats.skipped.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Path-scoped durability suppression for reconstructible clone writes.
+///
+/// The caller must first persist a clone-intent marker outside this scope and
+/// must call [`commit`](Self::commit) only after hash-verifying the fetched
+/// closure. Writes outside `root` retain their ordinary per-operation fsyncs.
+pub struct CloneDurabilityBatch {
+    root: PathBuf,
+    stats: Arc<CloneDurabilityStats>,
+}
+
+impl CloneDurabilityBatch {
+    pub fn begin(root: impl AsRef<Path>) -> Self {
+        let root = root.as_ref().to_path_buf();
+        let stats = Arc::new(CloneDurabilityStats::default());
+        clone_durability_entries()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(CloneDurabilityEntry {
+                root: root.clone(),
+                stats: Arc::clone(&stats),
+            });
+        Self { root, stats }
+    }
+
+    /// Flush every dirty file and directory on the destination filesystem in
+    /// one kernel barrier. Refs remain unpublished while this runs.
+    pub fn commit(&self) -> io::Result<()> {
+        sync_filesystem(&self.root)?;
+        self.stats.barriers.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn barrier_count(&self) -> u64 {
+        self.stats.barriers.load(Ordering::Relaxed)
+    }
+
+    pub fn skipped_barrier_count(&self) -> u64 {
+        self.stats.skipped.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for CloneDurabilityBatch {
+    fn drop(&mut self) {
+        let mut entries = clone_durability_entries()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = entries
+            .iter()
+            .rposition(|entry| entry.root == self.root && Arc::ptr_eq(&entry.stats, &self.stats))
+        {
+            entries.remove(index);
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 enum AtomicWriteKind {
@@ -251,8 +346,7 @@ pub fn stage_temp_files_durable(files: &[(PathBuf, Vec<u8>)]) -> io::Result<()> 
     // Barrier pass: by now most files' writeback is already in flight (or done),
     // so each `sync_all` blocks only on the tail, not a cold synchronous flush.
     for (file, (temp_path, _)) in handles.iter().zip(files) {
-        file.sync_all()
-            .map_err(|err| enrich_write_error(temp_path, err))?;
+        sync_file(file, temp_path).map_err(|err| enrich_write_error(temp_path, err))?;
     }
     Ok(())
 }
@@ -287,8 +381,70 @@ pub fn sync_directory(_path: &Path) -> io::Result<()> {
 
 #[cfg(not(windows))]
 pub fn sync_directory(path: &Path) -> io::Result<()> {
+    if let Some(stats) = deferred_clone_stats(path) {
+        stats.skipped.fetch_add(1, Ordering::Relaxed);
+        return Ok(());
+    }
     let dir = OpenOptions::new().read(true).open(path)?;
     dir.sync_all()
+}
+
+/// Sync one file unless it belongs to an active clone durability batch.
+pub fn sync_file(file: &File, path: &Path) -> io::Result<()> {
+    if let Some(stats) = deferred_clone_stats(path) {
+        stats.skipped.fetch_add(1, Ordering::Relaxed);
+        return Ok(());
+    }
+    file.sync_all()
+}
+
+pub fn sync_file_data(file: &File, path: &Path) -> io::Result<()> {
+    if let Some(stats) = deferred_clone_stats(path) {
+        stats.skipped.fetch_add(1, Ordering::Relaxed);
+        return Ok(());
+    }
+    file.sync_data()
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn sync_filesystem(path: &Path) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let file = OpenOptions::new().read(true).open(path)?;
+    // SAFETY: `file` owns a live descriptor for the duration of the call.
+    if unsafe { libc::syncfs(file.as_raw_fd()) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+fn sync_filesystem(_path: &Path) -> io::Result<()> {
+    // `syncfs(2)` is Linux-specific. `sync(2)` is the closest portable Unix
+    // whole-filesystem commit primitive and avoids a barrier per clone object.
+    unsafe { libc::sync() };
+    Ok(())
+}
+
+#[cfg(windows)]
+fn sync_filesystem(path: &Path) -> io::Result<()> {
+    // Windows exposes no non-privileged `syncfs` equivalent. Keep one logical
+    // clone commit phase, flushing every clone file only after verification;
+    // directory metadata is covered by NTFS journaling (see `sync_directory`).
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            sync_filesystem(&entry.path())?;
+        } else if file_type.is_file() {
+            OpenOptions::new()
+                .read(true)
+                .open(entry.path())?
+                .sync_all()?;
+        }
+    }
+    Ok(())
 }
 
 /// Collect missing path components (deepest-first) and the deepest pre-existing
@@ -556,7 +712,7 @@ fn stage_file_atomic_impl(
         kind.enforce_before_write(&file)?;
         before_write(&file, &tmp)?;
         file.write_all(bytes)?;
-        file.sync_all()?;
+        sync_file(&file, &tmp)?;
         Ok(())
     })();
 
@@ -670,8 +826,7 @@ fn fsync_file_data(path: &Path) -> io::Result<()> {
         .write(true)
         .open(path)
         .map_err(|e| enrich_fs_error(path, "opening", e))?;
-    file.sync_all()
-        .map_err(|e| enrich_fs_error(path, "syncing", e))
+    sync_file(&file, path).map_err(|e| enrich_fs_error(path, "syncing", e))
 }
 
 pub fn publish_file_durable(src: &Path, dst: &Path) -> io::Result<()> {

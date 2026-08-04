@@ -7,7 +7,10 @@ use std::{
     time::Instant,
 };
 
-use objects::object::ContentHash;
+use objects::{
+    fs_atomic::{sync_directory, sync_file, sync_file_data},
+    object::ContentHash,
+};
 use tracing::{debug, warn};
 
 use super::{
@@ -1444,13 +1447,13 @@ fn write_snapshot(index: &WorktreeIndex, path: &Path) -> Result<(), IndexError> 
     let mut temp_file = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))?;
     temp_file.write_all(&encoded)?;
     temp_file.flush()?;
-    temp_file.as_file().sync_all()?;
+    sync_file(temp_file.as_file(), temp_file.path())?;
     let (_file, temp_path) = temp_file
         .keep()
         .map_err(|error| IndexError::Io(error.error))?;
     fs::rename(&temp_path, path)?;
     if let Some(parent) = path.parent() {
-        File::open(parent)?.sync_all()?;
+        sync_directory(parent)?;
     }
 
     Ok(())
@@ -1478,9 +1481,9 @@ fn append_journal(index: &WorktreeIndex, journal_path: &Path) -> Result<(), Inde
     file.write_all(&crc32(&payload).to_be_bytes())?;
     file.write_all(&payload)?;
     file.flush()?;
-    file.sync_data()?;
+    sync_file_data(&file, journal_path)?;
     if !journal_existed && let Some(parent) = journal_path.parent() {
-        File::open(parent)?.sync_all()?;
+        sync_directory(parent)?;
     }
     Ok(())
 }

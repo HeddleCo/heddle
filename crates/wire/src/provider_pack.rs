@@ -145,7 +145,7 @@ impl ProviderPackSpool {
         let body_end = self.manifest.output_pack_length - PACK_TRAILER_LEN as u64;
         let trailer_digest = hash_file_prefix(&self.file, body_end)?;
         write_all_at(&self.file, &trailer_digest, body_end)?;
-        self.file.sync_all()?;
+        objects::fs_atomic::sync_file(&self.file, &self.pack_path)?;
         write_provider_index(&self.index_path, &self.manifest)?;
 
         let reader = PackReader::open(&self.pack_path, &self.index_path)?;
@@ -288,7 +288,7 @@ fn write_provider_index(path: &Path, manifest: &ProviderPackManifest) -> Result<
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(&index.to_bytes())?;
     file.flush()?;
-    file.sync_all()?;
+    objects::fs_atomic::sync_file(&file, path)?;
     Ok(())
 }
 
