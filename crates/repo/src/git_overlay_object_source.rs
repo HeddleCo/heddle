@@ -128,11 +128,11 @@ impl ExternalObjectSource for GitOverlayObjectSource {
                         .ok_or_else(|| missing_mapping("tree", &child.oid, &git_sha))?;
                     TreeEntry::directory(name, parse_hash(&mapped)?)
                 }
-                0o100644 | 0o100755 => {
+                mode if mode & 0o170000 == 0o100000 => {
                     let mapped = self
                         .heddle_for_git(&child.oid, KIND_BLOB)?
                         .ok_or_else(|| missing_mapping("blob", &child.oid, &git_sha))?;
-                    TreeEntry::file(name, parse_hash(&mapped)?, child.mode == 0o100755)
+                    TreeEntry::file(name, parse_hash(&mapped)?, mode & 0o111 != 0)
                 }
                 0o120000 => {
                     let mapped = self

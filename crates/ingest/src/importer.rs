@@ -1447,6 +1447,52 @@ mod tests {
         git_output(path, &["update-ref", "refs/heads/main", &commit], None);
     }
 
+    fn append_git_oid(tree: &mut Vec<u8>, sha: &str) {
+        for pair in sha.as_bytes().chunks_exact(2) {
+            let hex = std::str::from_utf8(pair).expect("Git object id is ASCII");
+            tree.push(u8::from_str_radix(hex, 16).expect("Git object id is hexadecimal"));
+        }
+    }
+
+    fn seed_raw_tree_repo(path: &Path, entries: &[(&str, &str)]) {
+        let status = Command::new("git")
+            .args(["init", "-q", "--initial-branch=main"])
+            .current_dir(path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init failed");
+
+        // Build the raw tree body instead of using `git mktree`: mktree
+        // canonicalizes these historical modes before writing the object.
+        let mut tree_body = Vec::new();
+        for (mode, name) in entries {
+            let blob = git_output(
+                path,
+                &["hash-object", "-w", "--stdin"],
+                Some(format!("{name}\n").as_bytes()),
+            );
+            tree_body.extend_from_slice(format!("{mode} {name}\0").as_bytes());
+            append_git_oid(&mut tree_body, &blob);
+        }
+        let tree = git_output(
+            path,
+            &["hash-object", "--literally", "-w", "-t", "tree", "--stdin"],
+            Some(&tree_body),
+        );
+        let commit = git_output(path, &["commit-tree", &tree, "-m", "legacy modes"], None);
+        git_output(path, &["update-ref", "refs/heads/main", &commit], None);
+    }
+
+    fn seed_noncanonical_mode_repo(path: &Path) {
+        seed_raw_tree_repo(path, &[("100664", "legacy.txt"), ("100775", "run.sh")]);
+    }
+
+    fn seed_unknown_mode_repo(path: &Path) {
+        seed_raw_tree_repo(path, &[("140000", "unknown")]);
+    }
+
     #[test]
     fn imports_commits_refs_and_tag_end_to_end() {
         let gitdir = TempDir::new().unwrap();
@@ -1675,6 +1721,62 @@ mod tests {
             "error explains conversion: {message}"
         );
         assert!(message.contains("--lossy"), "error names opt-in: {message}");
+    }
+
+    #[test]
+    fn import_git_into_normalizes_noncanonical_regular_file_modes() {
+        let gitdir = TempDir::new().unwrap();
+        let heddledir = TempDir::new().unwrap();
+        seed_noncanonical_mode_repo(gitdir.path());
+
+        let (stats, _map) =
+            import_git_into(gitdir.path(), heddledir.path()).expect("legacy modes import");
+        assert_eq!(stats.commits_imported, 1);
+
+        let repo = repo::Repository::open(heddledir.path()).unwrap();
+        let main = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("main thread");
+        let state = repo.store().get_state(&main).unwrap().expect("main state");
+        let tree = repo
+            .store()
+            .get_tree(&state.tree)
+            .unwrap()
+            .expect("root tree");
+
+        assert_eq!(
+            tree.get("legacy.txt")
+                .expect("legacy file")
+                .mode()
+                .to_unix_mode(),
+            0o100644,
+            "100664 must normalize to Git's 100644"
+        );
+        assert_eq!(
+            tree.get("run.sh")
+                .expect("executable file")
+                .mode()
+                .to_unix_mode(),
+            0o100755,
+            "100775 must normalize to Git's 100755"
+        );
+    }
+
+    #[test]
+    fn import_git_into_rejects_unknown_tree_modes() {
+        let gitdir = TempDir::new().unwrap();
+        let heddledir = TempDir::new().unwrap();
+        seed_unknown_mode_repo(gitdir.path());
+
+        let error = import_git_into(gitdir.path(), heddledir.path())
+            .expect_err("unknown tree mode must fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("unsupported mode 140000"),
+            "error should identify the unknown mode: {message}"
+        );
     }
 
     #[test]

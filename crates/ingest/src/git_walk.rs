@@ -547,10 +547,11 @@ impl GitSource {
         for entry in entries {
             let kind = match entry.mode {
                 0o040000 => TreeChildKind::Tree,
-                0o100644 => TreeChildKind::Blob { executable: false },
-                0o100755 => TreeChildKind::Blob { executable: true },
                 0o120000 => TreeChildKind::Symlink,
                 0o160000 => TreeChildKind::Gitlink,
+                mode if mode & 0o170000 == 0o100000 => TreeChildKind::Blob {
+                    executable: mode & 0o111 != 0,
+                },
                 mode => {
                     return Err(IngestError::Git(format!(
                         "tree entry {} has unsupported mode {:o}",
