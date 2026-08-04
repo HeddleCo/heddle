@@ -24,7 +24,7 @@ use heddle_schema::op_record::{
 };
 use objects::{
     error::{HeddleError, Result},
-    fs_atomic::{create_dir_all_durable, sync_directory, temp_path, write_file_atomic},
+    fs_atomic::{create_dir_all_durable, sync_directory, sync_file, temp_path, write_file_atomic},
     fs_clone::{ReflinkOutcome, try_reflink},
 };
 
@@ -818,7 +818,7 @@ impl PackedOpLogIndex {
             },
         )?;
         if durable {
-            out.sync_all()?;
+            sync_file(&out, tmp)?;
         }
         Ok(footer)
     }

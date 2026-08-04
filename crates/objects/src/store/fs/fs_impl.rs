@@ -1387,6 +1387,43 @@ impl ObjectStore for FsStore {
         self.prune_loose_objects_impl()
     }
 
+    fn discard_corrupt_clone_packs(&self) -> Result<usize> {
+        let packs = super::fs_paths::packs_dir(&self.root);
+        let mut removed = 0;
+        for entry in match fs::read_dir(&packs) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error.into()),
+        } {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("pack") {
+                continue;
+            }
+            let index = path.with_extension("idx");
+            let valid = crate::store::pack::PackReader::open(&path, &index)
+                .and_then(|reader| {
+                    for id in reader.list_ids()? {
+                        let (kind, bytes) = reader.get_object(&id)?.ok_or_else(|| {
+                            HeddleError::InvalidObject(format!("pack index lost object {id:?}"))
+                        })?;
+                        validate_pack_entry(&id, kind, &bytes)?;
+                    }
+                    Ok(())
+                })
+                .is_ok();
+            if !valid {
+                let _ = fs::remove_file(&path);
+                let _ = fs::remove_file(&index);
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            self.reload_packs()?;
+            self.clear_recent_object_caches();
+        }
+        Ok(removed)
+    }
+
     #[instrument(skip(self))]
     fn begin_snapshot_write_batch(&self) -> Result<()> {
         self.begin_snapshot_write_batch_impl()

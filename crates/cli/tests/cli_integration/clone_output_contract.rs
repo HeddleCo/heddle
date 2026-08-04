@@ -106,7 +106,14 @@ mod fixture {
                 .is_some_and(|message| message.contains("Broken pipe")),
             "error envelope must retain the peer disconnect: {error}"
         );
-        assert!(!destination.exists());
+        assert!(
+            repo::clone_intent::CloneIntent::path(&destination).is_file(),
+            "a connected interrupted clone retains its durable recovery intent"
+        );
+        assert!(matches!(
+            repo::Repository::open(&destination),
+            Err(repo::HeddleError::IncompleteClone(path)) if path == destination
+        ));
     }
 
     #[test]
@@ -161,7 +168,10 @@ mod fixture {
             !output.status.success(),
             "fixture terminates the folded Pull"
         );
-        assert!(!destination.exists());
+        assert!(
+            repo::clone_intent::CloneIntent::path(&destination).is_file(),
+            "folded-pull interruption must remain detectable and resumable"
+        );
     }
 
     fn write_test_credential(path: &std::path::Path, server: &str) {

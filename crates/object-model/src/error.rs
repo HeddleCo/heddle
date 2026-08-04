@@ -166,6 +166,8 @@ pub enum HeddleError {
     RepositoryNotFound(std::path::PathBuf),
     #[error("repository already exists at {0}")]
     RepositoryExists(std::path::PathBuf),
+    #[error("repository clone at {0} is incomplete and must be repaired from its origin")]
+    IncompleteClone(std::path::PathBuf),
     #[error(
         "repository config at {path} uses repository format {found} but this binary supports {supported}; upgrade heddle or run `heddle migrate`"
     )]

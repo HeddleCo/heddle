@@ -307,6 +307,14 @@ async fn async_main() -> Result<()> {
         std::process::exit(code.into());
     }
 
+    #[cfg(feature = "client")]
+    if command_contract.targets_current_repository
+        && !matches!(&cli.command, Commands::Init(_) | Commands::Clone(_))
+    {
+        let start = cli.repo.clone().unwrap_or(std::env::current_dir()?);
+        cli::cli::commands::recover_interrupted_clone(&cli, &start).await?;
+    }
+
     match run_local_idempotency_if_requested(&cli, &command_name, command_supports_op_id) {
         Ok(true) => {
             shutdown_command_telemetry(command_trace, command_span_guard, telemetry, 0);

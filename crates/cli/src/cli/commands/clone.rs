@@ -33,6 +33,8 @@ use heddle_git_projection::git_core::{
     clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference, write_head_symref,
 };
 use ingest::ImportOptions;
+#[cfg(feature = "client")]
+use objects::fs_atomic::CloneDurabilityBatch;
 use objects::{
     Progress,
     error::{HeddleError, Result as HeddleResult},
@@ -41,6 +43,8 @@ use objects::{
     sync::LockExt,
 };
 use refs::Head;
+#[cfg(feature = "client")]
+use repo::clone_intent::CloneIntent;
 use repo::{BlobHydrator, Repository};
 use serde::Serialize;
 #[cfg(feature = "client")]
@@ -1572,6 +1576,18 @@ async fn clone_network_connected(
     }
 
     let mut cleanup = CloneDestinationCleanup::new(local_path);
+    let intent = CloneIntent {
+        origin: hosted_clone_origin_url(&endpoint_spec, repo_path),
+        endpoint: endpoint_spec.clone(),
+        repository: repo_path.to_string(),
+        thread: thread.clone(),
+        depth,
+        lazy,
+    };
+    intent.create(local_path)?;
+    // Failures after the durable intent are resumable and must remain on disk.
+    cleanup.disarm();
+    let durability = CloneDurabilityBatch::begin(local_path);
     let materialization = if lazy {
         PullMaterialization::Lazy
     } else {
@@ -1614,19 +1630,19 @@ async fn clone_network_connected(
                     SleyRepository::init(local_path)
                         .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
                 }
-                let repo = Repository::init(local_path).map_err(wire::ProtocolError::from)?;
+                let repo = Repository::init_clone(local_path).map_err(wire::ProtocolError::from)?;
                 folded_refs = Some(refs.refs);
                 Ok(repo)
             },
         )
         .await;
-    let (result, local_repo, remote_refs) = match folded {
+    let (mut result, local_repo, remote_refs) = match folded {
         Ok((result, local_repo)) => (
             result,
             local_repo,
             folded_refs.context("folded clone response is missing its refs")?,
         ),
-        Err(error) if !local_path.join(".heddle").exists() && !local_path.join(".git").exists() => {
+        Err(error) if folded_refs.is_none() && !local_path.join(".git").exists() => {
             let remote_refs = client
                 .list_refs_with_revision_addresses(repo_path)
                 .await?
@@ -1644,13 +1660,12 @@ async fn clone_network_connected(
             if git_overlay_clone {
                 SleyRepository::init(local_path).map_err(anyhow::Error::msg)?;
             }
-            let local_repo = Repository::init(local_path)?;
+            let local_repo = Repository::init_clone(local_path)?;
             let result = client
-                .pull_with_depth_and_materialization(
+                .repair_clone_with_depth_and_materialization(
                     &local_repo,
                     repo_path,
                     &track_name,
-                    Some(&track_name),
                     depth,
                     materialization,
                 )
@@ -1679,34 +1694,49 @@ async fn clone_network_connected(
     if git_overlay_clone {
         configure_git_overlay_origin(local_path, &origin_url)?;
     }
-    let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
-        .context("decode hosted clone bootstrap")?;
-    let bootstrap = if result.success {
-        bootstrap
-            .as_ref()
-            .map(|metadata| metadata.resolve(&local_repo, result.final_state))
-            .transpose()
-            .context("resolve hosted clone bootstrap")?
-    } else {
-        None
-    };
     if result.success {
-        let final_state = result.final_state;
-        if let Some(state) = final_state {
-            local_repo.set_thread_recorded(&ThreadName::new(&track_name), &state)?;
+        objects::fault_inject::maybe_panic_at("clone_after_fetch_before_verify");
+        let mut final_state = result
+            .final_state
+            .context("hosted clone completed without a final state")?;
+        if let Err(first_error) = verify_hosted_clone(&local_repo, final_state, depth, lazy) {
+            local_repo.store().discard_corrupt_clone_packs()?;
+            result = client
+                .repair_clone_with_depth_and_materialization(
+                    &local_repo,
+                    repo_path,
+                    &track_name,
+                    depth,
+                    materialization,
+                )
+                .await
+                .map_err(|repair| {
+                    anyhow!(
+                        "clone verification failed ({first_error}); targeted repair failed ({repair})"
+                    )
+                })?;
+            if !result.success {
+                anyhow::bail!(
+                    "clone verification failed ({first_error}); targeted repair was rejected: {}",
+                    result.error.as_deref().unwrap_or("unknown remote error")
+                );
+            }
+            final_state = result
+                .final_state
+                .context("targeted clone repair completed without a final state")?;
+            verify_hosted_clone(&local_repo, final_state, depth, lazy)
+                .context("clone remained incomplete after targeted remote repair")?;
         }
-        // Lazy clone: persist the hydrator metadata so future
-        // `Repository::open` calls (in any process) can reconstruct
-        // the on-read hydrator. Without this, lazy clones would only
-        // hydrate inside the single `cmd_clone` process — every
-        // subsequent `heddle <verb>` would surface MissingObject on
-        // any blob read.
+
+        let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
+            .context("decode hosted clone bootstrap")?
+            .as_ref()
+            .map(|metadata| metadata.resolve(&local_repo, Some(final_state)))
+            .transpose()
+            .context("resolve hosted clone bootstrap")?;
+
         if lazy {
             use repo::lazy_hydrator::LazyHydratorConfig;
-            // Persist the original `host:port` spec (not `addr.to_string()`,
-            // which is a resolved IP). The hydrator re-resolves DNS on
-            // every process start so a future LB rotation doesn't pin us
-            // to a stale IP.
             let cfg = LazyHydratorConfig::hosted(
                 endpoint_spec.clone(),
                 repo_path,
@@ -1715,16 +1745,9 @@ async fn clone_network_connected(
             );
             cfg.save(local_repo.heddle_dir())
                 .context("failed to persist lazy-hydrator.toml")?;
-        } else if git_overlay_clone {
-            finish_hosted_git_overlay_checkout(&local_repo, &track_name)
-                .context("failed to finish hosted Git-overlay checkout")?;
-            configure_git_overlay_origin_tracking(local_path, &track_name)?;
-        } else if let Some(state) = final_state {
-            local_repo
-                .goto_from_materialized_state(&state, None)
-                .context("failed to materialize hosted clone worktree")?;
         }
         configure_hosted_clone_origin(&local_repo, &endpoint_spec, repo_path)?;
+
         // Read path for hosted discussions (heddle discuss): materialize the
         // hosted CollaborationService discussions for the cloned head into the
         // local op-log so `discuss list` / `discuss show` see them. Best-effort:
@@ -1765,6 +1788,44 @@ async fn clone_network_connected(
                 eprintln!("{} context sync skipped: {error:#}", style::warn_marker());
             }
         }
+
+        // Ordering invariant: the reachable object closure is hash-complete;
+        // one whole-filesystem barrier commits all direct clone data; only
+        // then may refs/HEAD become visible; the intent is cleared last.
+        durability.commit()?;
+        if durability.barrier_count() != 1 {
+            return Err(HeddleError::InvalidObject(
+                "clone durability commit executed more than once".to_string(),
+            )
+            .into());
+        }
+        client
+            .publish_clone_markers(&local_repo, repo_path, &result.checkpoint)
+            .await?;
+        local_repo.set_thread_recorded(&ThreadName::new(&track_name), &final_state)?;
+        // Lazy clone: persist the hydrator metadata so future
+        // `Repository::open` calls (in any process) can reconstruct
+        // the on-read hydrator. Without this, lazy clones would only
+        // hydrate inside the single `cmd_clone` process — every
+        // subsequent `heddle <verb>` would surface MissingObject on
+        // any blob read.
+        if lazy {
+            local_repo.refs().write_head(&Head::Attached {
+                thread: ThreadName::new(&track_name),
+            })?;
+        } else if git_overlay_clone {
+            finish_hosted_git_overlay_checkout(&local_repo, &track_name)
+                .context("failed to finish hosted Git-overlay checkout")?;
+            configure_git_overlay_origin_tracking(local_path, &track_name)?;
+        } else {
+            local_repo
+                .goto_from_materialized_state(&final_state, None)
+                .context("failed to materialize hosted clone worktree")?;
+            local_repo.refs().write_head(&Head::Attached {
+                thread: ThreadName::new(&track_name),
+            })?;
+        }
+        CloneIntent::clear(local_path)?;
         if should_output_json(cli, Some(local_repo.config())) {
             let output = heddle_clone_output(
                 origin_url.clone(),
@@ -1772,7 +1833,7 @@ async fn clone_network_connected(
                 track_name.clone(),
                 local_repo.capability_label(),
                 None,
-                final_state.map(|state| state.to_string()),
+                Some(final_state.to_string()),
                 Some(build_repository_verification_state(&local_repo)),
             );
             crate::cli::render::write_json_stdout(&output)?;
@@ -1785,12 +1846,10 @@ async fn clone_network_connected(
                 style::bold(&local_path.display().to_string()),
                 style::dim(&depth_info)
             );
-            if let Some(state) = final_state {
-                println!(
-                    "  {}",
-                    style::field("state", &style::state_id(&state.to_string()))
-                );
-            }
+            println!(
+                "  {}",
+                style::field("state", &style::state_id(&final_state.to_string()))
+            );
         }
     } else {
         let err = result.error.unwrap_or_else(|| "Unknown error".to_string());
@@ -1799,8 +1858,204 @@ async fn clone_network_connected(
         )));
     }
 
-    cleanup.disarm();
     Ok(())
+}
+
+#[cfg(feature = "client")]
+pub async fn recover_interrupted_clone(cli: &Cli, start: &Path) -> Result<bool> {
+    use crate::{
+        client::{HostedAuthMode, HostedSession},
+        config::UserConfig,
+    };
+
+    let Some(root) = repo::clone_intent::find_clone_intent_root(start) else {
+        return Ok(false);
+    };
+    let intent = CloneIntent::load(&root)?
+        .context("clone intent disappeared while recovery was starting")?;
+    let target = RemoteTarget::parse(&intent.origin).map_err(anyhow::Error::msg)?;
+    let RemoteTarget::Network { addr, .. } = target else {
+        anyhow::bail!(
+            "clone intent origin is not a hosted remote: {}",
+            intent.origin
+        );
+    };
+    let user_config = UserConfig::load_default()?;
+    let server_key = credential_key_from_remote_url(&intent.origin);
+    let session =
+        HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?;
+    let mut client = session.connect(addr).await?;
+    let recovered = recover_interrupted_clone_connected(cli, &root, &intent, &mut client).await;
+    client.close().await;
+    recovered?;
+    Ok(true)
+}
+
+#[cfg(feature = "client")]
+async fn recover_interrupted_clone_connected(
+    _cli: &Cli,
+    root: &Path,
+    intent: &CloneIntent,
+    client: &mut HostedClient,
+) -> Result<()> {
+    let durability = CloneDurabilityBatch::begin(root);
+    let repo = Repository::init_clone(root)?;
+    let remote_refs = client
+        .list_refs_with_revision_addresses(&intent.repository)
+        .await?;
+    let track_name = select_hosted_clone_thread(
+        intent.thread.as_deref(),
+        remote_refs
+            .iter()
+            .filter(|entry| entry.is_thread)
+            .map(|entry| entry.name.as_str()),
+        &intent.repository,
+    )?;
+    let git_overlay_clone = hosted_clone_thread_revision_address(&remote_refs, &track_name)
+        .is_some_and(|address| address.starts_with("git:"));
+    if git_overlay_clone && !root.join(".git").exists() {
+        SleyRepository::init(root).map_err(anyhow::Error::msg)?;
+    }
+    let materialization = if intent.lazy {
+        PullMaterialization::Lazy
+    } else {
+        PullMaterialization::Full
+    };
+    let mut result = client
+        .repair_clone_with_depth_and_materialization(
+            &repo,
+            &intent.repository,
+            &track_name,
+            intent.depth,
+            materialization,
+        )
+        .await?;
+    if !result.success {
+        anyhow::bail!(
+            "clone repair failed: {}",
+            result.error.as_deref().unwrap_or("unknown remote error")
+        );
+    }
+    let mut final_state = result
+        .final_state
+        .context("clone repair completed without a final state")?;
+    if verify_hosted_clone(&repo, final_state, intent.depth, intent.lazy).is_err() {
+        repo.store().discard_corrupt_clone_packs()?;
+        result = client
+            .repair_clone_with_depth_and_materialization(
+                &repo,
+                &intent.repository,
+                &track_name,
+                intent.depth,
+                materialization,
+            )
+            .await?;
+        if !result.success {
+            anyhow::bail!(
+                "clone repair retry failed: {}",
+                result.error.as_deref().unwrap_or("unknown remote error")
+            );
+        }
+        final_state = result
+            .final_state
+            .context("clone repair retry completed without a final state")?;
+        verify_hosted_clone(&repo, final_state, intent.depth, intent.lazy)?;
+    }
+
+    if intent.lazy {
+        use repo::lazy_hydrator::LazyHydratorConfig;
+        LazyHydratorConfig::hosted(
+            intent.endpoint.clone(),
+            &intent.repository,
+            &track_name,
+            &track_name,
+        )
+        .save(repo.heddle_dir())?;
+    }
+    configure_hosted_clone_origin(&repo, &intent.endpoint, &intent.repository)?;
+    let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)?
+        .as_ref()
+        .map(|metadata| metadata.resolve(&repo, Some(final_state)))
+        .transpose()?;
+    if let Err(error) = crate::client::discussion_sync::pull_discussions(
+        &repo,
+        client,
+        &intent.repository,
+        bootstrap
+            .as_ref()
+            .map(|metadata| metadata.discussions.as_slice()),
+    )
+    .await
+    {
+        eprintln!(
+            "{} discussion sync skipped during clone recovery: {error:#}",
+            style::warn_marker()
+        );
+    }
+    if let Err(error) = crate::client::context_sync::pull_context(
+        &repo,
+        client,
+        &intent.repository,
+        bootstrap
+            .as_ref()
+            .map(|metadata| metadata.context.as_slice()),
+    )
+    .await
+    {
+        eprintln!(
+            "{} context sync skipped during clone recovery: {error:#}",
+            style::warn_marker()
+        );
+    }
+    durability.commit()?;
+    if durability.barrier_count() != 1 {
+        return Err(HeddleError::InvalidObject(
+            "clone recovery durability commit executed more than once".to_string(),
+        )
+        .into());
+    }
+    client
+        .publish_clone_markers(&repo, &intent.repository, &result.checkpoint)
+        .await?;
+    repo.set_thread_recorded(&ThreadName::new(&track_name), &final_state)?;
+    if intent.lazy {
+        repo.refs().write_head(&Head::Attached {
+            thread: ThreadName::new(&track_name),
+        })?;
+    } else if git_overlay_clone {
+        finish_hosted_git_overlay_checkout(&repo, &track_name)?;
+        configure_git_overlay_origin(root, &intent.origin)?;
+        configure_git_overlay_origin_tracking(root, &track_name)?;
+    } else {
+        repo.goto_from_materialized_state(&final_state, None)?;
+        repo.refs().write_head(&Head::Attached {
+            thread: ThreadName::new(&track_name),
+        })?;
+    }
+    CloneIntent::clear(root)?;
+    Ok(())
+}
+
+#[cfg(feature = "client")]
+fn verify_hosted_clone(
+    repo: &Repository,
+    final_state: objects::object::StateId,
+    depth: Option<u32>,
+    lazy: bool,
+) -> Result<usize> {
+    let options = wire::StateClosureOptions {
+        depth,
+        exclude_states: Vec::new(),
+    };
+    if lazy {
+        wire::enumerate_state_closure_plan_with_options(repo.store(), final_state, options)
+            .map(|objects| objects.len())
+            .map_err(anyhow::Error::new)
+    } else {
+        wire::enumerate_state_closure_with_options(repo.store(), final_state, options)
+            .map(|objects| objects.len())
+            .map_err(anyhow::Error::new)
+    }
 }
 
 /// Recursive MONOREPO clone (Spool epic P9, weft#358).

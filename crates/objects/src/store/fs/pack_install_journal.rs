@@ -43,7 +43,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     fault_inject,
     fs_atomic::{
-        create_dir_all_durable, publish_file_durable, sync_directory, temp_path, write_file_atomic,
+        create_dir_all_durable, publish_file_durable, sync_directory, sync_file, temp_path,
+        write_file_atomic,
     },
     lock::RepoLock,
     object::ContentHash,
@@ -1002,8 +1003,8 @@ fn stage_snapshot_pack_pair_durable(
     index.write_all(&index_data)?;
 
     let (pack_sync, index_sync) = thread::scope(|scope| {
-        let pack_sync = scope.spawn(move || pack.sync_all());
-        let index_sync = scope.spawn(move || index.sync_all());
+        let pack_sync = scope.spawn(move || sync_file(&pack, pack_path));
+        let index_sync = scope.spawn(move || sync_file(&index, index_path));
         (pack_sync.join(), index_sync.join())
     });
     pack_sync.map_err(|_| io::Error::other("snapshot pack sync worker panicked"))??;

@@ -18,6 +18,7 @@ pub(crate) fn test_state_id() -> objects::object::StateId {
 }
 
 pub mod atomic;
+pub mod clone_intent;
 mod collaboration_migration;
 mod collaboration_store;
 pub mod daemon;

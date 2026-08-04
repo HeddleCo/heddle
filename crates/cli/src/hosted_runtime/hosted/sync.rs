@@ -60,6 +60,7 @@ struct PullOptions<'a> {
     depth: Option<u32>,
     target_state: Option<StateId>,
     materialization: PullMaterialization,
+    publish_refs: bool,
 }
 
 const PULL_BOOTSTRAP_LINE_PREFIX: &str = "heddle-pull-bootstrap-v1:";
@@ -1138,6 +1139,7 @@ impl HostedClient {
                 depth: None,
                 target_state: None,
                 materialization: PullMaterialization::Full,
+                publish_refs: true,
             },
         )
         .await
@@ -1159,6 +1161,7 @@ impl HostedClient {
                 depth: None,
                 target_state: None,
                 materialization: PullMaterialization::Full,
+                publish_refs: true,
             },
         )
         .await
@@ -1181,6 +1184,7 @@ impl HostedClient {
                 depth: None,
                 target_state: None,
                 materialization: PullMaterialization::Lazy,
+                publish_refs: true,
             },
         )
         .await
@@ -1204,6 +1208,30 @@ impl HostedClient {
                 depth,
                 target_state: None,
                 materialization,
+                publish_refs: true,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn repair_clone_with_depth_and_materialization(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        remote_thread: &str,
+        depth: Option<u32>,
+        materialization: PullMaterialization,
+    ) -> Result<PullComplete, ProtocolError> {
+        self.pull_with_options(
+            repo,
+            repo_path,
+            remote_thread,
+            PullOptions {
+                local_thread: None,
+                depth,
+                target_state: None,
+                materialization,
+                publish_refs: false,
             },
         )
         .await
@@ -1234,6 +1262,7 @@ impl HostedClient {
                     depth,
                     target_state: None,
                     materialization,
+                    publish_refs: false,
                 },
                 Some(Box::new(initialize)),
             )
@@ -1279,6 +1308,7 @@ impl HostedClient {
                 depth: None,
                 target_state: Some(target_state),
                 materialization: PullMaterialization::Full,
+                publish_refs: true,
             },
         )
         .await
@@ -1301,6 +1331,7 @@ impl HostedClient {
                 depth: None,
                 target_state: Some(target_state),
                 materialization: PullMaterialization::Lazy,
+                publish_refs: true,
             },
         )
         .await
@@ -1349,6 +1380,7 @@ impl HostedClient {
                     depth: None,
                     target_state: Some(target_state),
                     materialization: PullMaterialization::Full,
+                    publish_refs: true,
                 },
             )
             .await?;
@@ -1893,14 +1925,16 @@ impl HostedClient {
                         } else if final_state.is_some() {
                             let _ = repo.clear_all_missing_blobs()?;
                         }
-                        let synced_markers = complete
-                            .transfer
-                            .as_ref()
-                            .map(|transfer| apply_marker_snapshot(repo, &transfer.checkpoint))
-                            .transpose()?
-                            .unwrap_or(false);
-                        if !synced_markers {
-                            self.sync_local_markers(repo, repo_path).await?;
+                        if options.publish_refs {
+                            let synced_markers = complete
+                                .transfer
+                                .as_ref()
+                                .map(|transfer| apply_marker_snapshot(repo, &transfer.checkpoint))
+                                .transpose()?
+                                .unwrap_or(false);
+                            if !synced_markers {
+                                self.sync_local_markers(repo, repo_path).await?;
+                            }
                         }
                         profile.metadata_sync = metadata_start.elapsed();
                         profile.objects_received = received;
@@ -2079,6 +2113,18 @@ impl HostedClient {
                 )?,
                 None => repo.create_marker_recorded(&marker_name, &marker.state_id)?,
             }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn publish_clone_markers(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        checkpoint: &[u8],
+    ) -> Result<(), ProtocolError> {
+        if !apply_marker_snapshot(repo, checkpoint)? {
+            self.sync_local_markers(repo, repo_path).await?;
         }
         Ok(())
     }

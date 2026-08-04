@@ -87,6 +87,8 @@ pub use agent_cmd::{
     agent_api_schema, cmd_agent_capture, cmd_agent_heartbeat, cmd_agent_list, cmd_agent_ready,
     cmd_agent_release, cmd_agent_reserve,
 };
+#[cfg(feature = "client")]
+pub use clone::recover_interrupted_clone;
 pub use clone::{
     CLONE_CONNECTION_OUTPUT_KIND, CLONE_OUTPUT_KIND, GitOverlayBlobHydrator, cmd_clone,
     register_git_overlay_factory,

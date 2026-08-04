@@ -14,7 +14,8 @@ use std::{
 use crate::{
     error::HeddleError,
     fs_atomic::{
-        create_dir_all_durable, enrich_fs_error, enrich_rename_error, sync_directory, temp_path,
+        create_dir_all_durable, enrich_fs_error, enrich_rename_error, sync_directory, sync_file,
+        temp_path,
     },
     store::Result,
 };
@@ -101,7 +102,7 @@ pub(super) fn write_atomic(
             // before rename, then directory fsync after — so the file
             // is fully on disk and discoverable through the parent
             // directory before this returns.
-            AtomicWriteMode::Durable => file.sync_all()?,
+            AtomicWriteMode::Durable => sync_file(&file, &temp_path)?,
             // `BatchDirectorySync` keeps per-file content durability
             // (so a crash mid-batch can't leave a renamed-but-empty
             // file behind) but defers parent-directory fsyncs to
@@ -113,7 +114,13 @@ pub(super) fn write_atomic(
             // flush could leave a file that "exists" in the directory
             // but whose data blocks weren't flushed — exactly the
             // ACID violation we want to avoid for state/tree writes.
-            AtomicWriteMode::BatchDirectorySync => file.sync_data()?,
+            AtomicWriteMode::BatchDirectorySync => {
+                if crate::fs_atomic::clone_write_is_deferred(&temp_path) {
+                    crate::fs_atomic::record_deferred_clone_barrier(&temp_path);
+                } else {
+                    file.sync_data()?;
+                }
+            }
             // Cache-mirror writes: no fsync. Caller guards reads
             // with a hash check, so torn-write corruption is
             // recoverable (re-promote from the authoritative copy).
