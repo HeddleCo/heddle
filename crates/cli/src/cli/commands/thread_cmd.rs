@@ -73,6 +73,17 @@ pub(crate) fn thread_manager(repo: &Repository) -> ThreadManager {
     ThreadManager::new(repo.heddle_dir())
 }
 
+fn remove_thread_checkout(path: &Path) -> Result<()> {
+    let monitor_guard = path
+        .join(".heddle")
+        .is_dir()
+        .then(|| repo::shutdown_local_monitor_helper(path))
+        .transpose()?;
+    remove_path_recursively(path)?;
+    drop(monitor_guard);
+    Ok(())
+}
+
 pub(crate) fn current_thread_ref_state_with_presence(
     repo: &Repository,
     thread: &Thread,
@@ -1304,7 +1315,7 @@ fn cmd_thread_promote(
             existing_has_heddle,
             same_existing_dir(existing, &target),
         ) {
-            remove_path_recursively(existing)?;
+            remove_thread_checkout(existing)?;
         }
     }
 
@@ -1451,7 +1462,7 @@ pub(crate) fn drop_thread_silent(
         // point. After unmount it should be an empty directory we
         // can safely rmdir; if the unmount failed `remove_path_recursively`
         // will also fail and the user gets a clear error.
-        remove_path_recursively(&thread.execution_path)?;
+        remove_thread_checkout(&thread.execution_path)?;
     }
     // Drop the manifest sidecar last — it has no on-disk dependencies
     // and a leftover would surface as a phantom entry in
@@ -1991,7 +2002,7 @@ fn apply_thread_drop(repo: &Repository, manager: &ThreadManager, thread: &Thread
         }
     }
     if plan.remove_execution_path {
-        remove_path_recursively(&thread.execution_path)?;
+        remove_thread_checkout(&thread.execution_path)?;
     }
     if plan.remove_manifest {
         repo::thread_manifest::remove_thread_manifest_dir(repo.heddle_dir(), &thread.thread)?;

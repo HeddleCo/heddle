@@ -104,7 +104,10 @@ pub use collaboration_store::{
     CollaborationWriteOutcome,
 };
 pub use ephemeral_thread::{CollapsedThread, collapse_expired_ephemeral_threads};
-pub use fsmonitor::{ChangeMonitorReport, run_local_monitor_helper};
+pub use fsmonitor::{
+    ChangeMonitorReport, LocalMonitorShutdownGuard, run_local_monitor_helper,
+    shutdown_local_monitor_helper,
+};
 pub use git_ref_name::{
     GitRefContentNamespace, GitRefKind, GitRefName, GitRefNamespace, ParsedGitRef,
     REMOTE_NAME_FOR_LOCAL_GIT_REPO, is_reserved_git_remote_name,

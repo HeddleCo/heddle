@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use ignore::WalkBuilder;
@@ -89,6 +89,8 @@ struct WatchmanMonitor;
 /// The mount daemon ships with its own protocol version (v2) on a
 /// separate endpoint file — see `crates/repo/src/daemon/mount.rs`.
 const HELPER_PROTOCOL_VERSION: u32 = 1;
+const HELPER_START_POLL_MS: u64 = 5;
+const HELPER_START_POLLS: usize = 400;
 /// Query result and persisted state for one compare run.
 #[derive(Debug, Default)]
 pub(crate) struct ChangeMonitorSession {
@@ -347,6 +349,7 @@ pub fn run_local_monitor_helper(repo_root: &Path) -> Result<(), HeddleError> {
         pid: Some(std::process::id()),
     };
     persist_endpoint(&endpoint_path, &endpoint)?;
+    remove_starting_helper_if_owned(&state_path, std::process::id());
 
     let mut server = LocalMonitorServer::new(repo_root.to_path_buf(), state_path)?;
     let result = run_local_monitor_helper_loop(&listener, &mut server);
@@ -371,6 +374,9 @@ impl DaemonHandler for LocalMonitorServer {
     }
 
     fn on_tick(&mut self, idle_for: std::time::Duration) -> IdleDecision {
+        if self.shutdown_requested {
+            return IdleDecision::Exit;
+        }
         // fsmonitor drains pending notify events between accepts so
         // the change cursor stays current even when no CLI is
         // querying. Errors here historically propagated; preserve
@@ -418,6 +424,7 @@ struct LocalMonitorServer {
     last_activity: Instant,
     event_rx: Receiver<notify::Result<Event>>,
     _watcher: RecommendedWatcher,
+    shutdown_requested: bool,
 }
 
 impl LocalMonitorServer {
@@ -453,6 +460,7 @@ impl LocalMonitorServer {
             last_activity: Instant::now(),
             event_rx,
             _watcher: watcher,
+            shutdown_requested: false,
         })
     }
 
@@ -684,6 +692,32 @@ fn helper_lifetime_lock_path(state_path: &Path) -> PathBuf {
     state_path.with_file_name("monitor-helper-lifetime.lock")
 }
 
+fn helper_starting_path(state_path: &Path) -> PathBuf {
+    state_path.with_file_name("monitor-helper-starting")
+}
+
+fn load_starting_helper_pid(state_path: &Path) -> Option<u32> {
+    fs::read_to_string(helper_starting_path(state_path))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn persist_starting_helper_pid(state_path: &Path, pid: u32) -> Result<(), HeddleError> {
+    objects::fs_atomic::write_file_atomic(
+        &helper_starting_path(state_path),
+        format!("{pid}\n").as_bytes(),
+    )?;
+    Ok(())
+}
+
+fn remove_starting_helper_if_owned(state_path: &Path, pid: u32) {
+    if load_starting_helper_pid(state_path) == Some(pid) {
+        let _ = fs::remove_file(helper_starting_path(state_path));
+    }
+}
+
 fn try_local_helper_query(
     repo_root: &Path,
     state_path: &Path,
@@ -777,7 +811,9 @@ fn try_local_helper_refresh(repo_root: &Path, state_path: &Path) -> Result<bool,
 }
 
 fn try_spawn_local_helper(repo_root: &Path, state_path: &Path) -> Result<bool, HeddleError> {
-    try_spawn_local_helper_with(state_path, || spawn_local_helper_background(repo_root))
+    try_spawn_local_helper_with(state_path, || {
+        spawn_local_helper_background(repo_root, state_path)
+    })
 }
 
 fn try_spawn_local_helper_with(
@@ -854,11 +890,11 @@ fn retire_failed_helper_endpoint(
     Ok(())
 }
 
-fn spawn_local_helper_background(repo_root: &Path) -> Result<(), HeddleError> {
+fn spawn_local_helper_background(repo_root: &Path, state_path: &Path) -> Result<(), HeddleError> {
     let current_exe = std::env::current_exe()
         .map_err(|error| HeddleError::Config(format!("locate heddle executable: {error}")))?;
     let helper = local_helper_binary_for_executable(&current_exe);
-    if let Err(error) = Command::new(helper)
+    let mut child = match Command::new(helper)
         .arg("--repo-root")
         .arg(repo_root)
         .stdin(Stdio::null())
@@ -866,7 +902,24 @@ fn spawn_local_helper_background(repo_root: &Path) -> Result<(), HeddleError> {
         .stderr(Stdio::null())
         .spawn()
     {
-        warn!(%error, root = %repo_root.display(), "Failed to spawn local monitor helper");
+        Ok(child) => child,
+        Err(error) => {
+            warn!(%error, root = %repo_root.display(), "Failed to spawn local monitor helper");
+            return Ok(());
+        }
+    };
+    let pid = child.id();
+    if let Err(error) = persist_starting_helper_pid(state_path, pid) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    if crate::daemon::load_endpoint(&helper_endpoint_path(state_path))
+        .ok()
+        .and_then(|endpoint| endpoint.pid)
+        == Some(pid)
+    {
+        remove_starting_helper_if_owned(state_path, pid);
     }
     Ok(())
 }
@@ -900,6 +953,18 @@ fn handle_local_helper_request(
         "query" => server.query(request.since.as_deref()),
         "refresh" => server.refresh(),
         "baseline" => server.establish_baseline(request.since.as_deref()),
+        "shutdown" => {
+            server.shutdown_requested = true;
+            Ok(MonitorHelperResponse {
+                version: HELPER_PROTOCOL_VERSION,
+                ok: true,
+                status: "disabled".to_string(),
+                reason: Some("shutdown".to_string()),
+                clock: None,
+                changed_paths: Vec::new(),
+                error: None,
+            })
+        }
         command => Err(HeddleError::Config(format!(
             "unknown helper command: {command}"
         ))),
@@ -917,6 +982,90 @@ fn handle_local_helper_request(
             error: Some(error.to_string()),
         },
     }
+}
+
+/// Proof that no native change-monitor helper can create files beneath a
+/// worktree while its checkout directory is being removed.
+pub struct LocalMonitorShutdownGuard {
+    _start_lease: objects::lock::WriteLockGuard,
+    _lifetime_lease: objects::lock::WriteLockGuard,
+}
+
+/// Stop and drain the native change monitor for `repo_root`.
+///
+/// The returned guard keeps both the startup and lifetime locks held. Callers
+/// removing the worktree must retain it until recursive removal completes.
+pub fn shutdown_local_monitor_helper(
+    repo_root: &Path,
+) -> Result<LocalMonitorShutdownGuard, HeddleError> {
+    let state_path = repo_root.join(".heddle/state/fsmonitor.toml");
+    let start_lease = objects::lock::RepoLock::at(helper_start_lock_path(&state_path)).write()?;
+    let endpoint_path = helper_endpoint_path(&state_path);
+
+    let mut endpoint = crate::daemon::load_endpoint(&endpoint_path).ok();
+    if endpoint.is_none()
+        && let Some(starting_pid) = load_starting_helper_pid(&state_path)
+    {
+        for _ in 0..HELPER_START_POLLS {
+            endpoint = crate::daemon::load_endpoint(&endpoint_path).ok();
+            if endpoint.is_some() || !pid_alive(starting_pid) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(HELPER_START_POLL_MS));
+        }
+        if endpoint.is_none() && pid_alive(starting_pid) {
+            return Err(HeddleError::Config(format!(
+                "native monitor helper {starting_pid} did not finish starting before teardown"
+            )));
+        }
+        remove_starting_helper_if_owned(&state_path, starting_pid);
+    }
+
+    if let Some(endpoint) = endpoint {
+        let response: MonitorHelperResponse = send_json_request(
+            &endpoint,
+            &MonitorHelperRequest {
+                version: HELPER_PROTOCOL_VERSION,
+                command: "shutdown".to_string(),
+                since: None,
+            },
+        )?;
+        if !response.ok {
+            return Err(HeddleError::Config(
+                response
+                    .error
+                    .unwrap_or_else(|| "native monitor refused shutdown".to_string()),
+            ));
+        }
+    }
+
+    let lifetime_lock = objects::lock::RepoLock::at(helper_lifetime_lock_path(&state_path));
+    let mut lifetime_lease = None;
+    for _ in 0..HELPER_START_POLLS {
+        if let Some(lease) = lifetime_lock.try_write()? {
+            lifetime_lease = Some(lease);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(HELPER_START_POLL_MS));
+    }
+    let lifetime_lease = lifetime_lease.ok_or_else(|| {
+        HeddleError::Config("native monitor helper did not drain before teardown".to_string())
+    })?;
+
+    remove_endpoint(&endpoint_path);
+    let _ = fs::remove_file(helper_starting_path(&state_path));
+    for artifact in [&state_path, &snapshot_path(&state_path)] {
+        match fs::remove_file(artifact) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(HeddleError::Io(error)),
+        }
+    }
+
+    Ok(LocalMonitorShutdownGuard {
+        _start_lease: start_lease,
+        _lifetime_lease: lifetime_lease,
+    })
 }
 
 fn change_monitor_session_from_helper_response(
@@ -1214,7 +1363,8 @@ mod tests {
 
     use super::{
         HELPER_HOST, HELPER_PROTOCOL_VERSION, helper_endpoint_path,
-        local_helper_binary_for_executable, subtree_has_changes, try_spawn_local_helper_with,
+        local_helper_binary_for_executable, shutdown_local_monitor_helper, subtree_has_changes,
+        try_spawn_local_helper_with,
     };
     use crate::{DirectoryCacheEntry, WorktreeIndex};
 
@@ -1297,6 +1447,43 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_millis(100),
             "cold spawn should return immediately instead of polling"
+        );
+    }
+
+    #[test]
+    fn shutdown_drains_native_watcher_before_checkout_removal() {
+        let temp = TempDir::new().unwrap();
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".heddle/state")).unwrap();
+        std::fs::write(checkout.join("tracked.txt"), b"tracked\n").unwrap();
+        let state_path = checkout.join(".heddle/state/fsmonitor.toml");
+        let endpoint_path = helper_endpoint_path(&state_path);
+        let helper_root = checkout.clone();
+        let helper = thread::spawn(move || super::run_local_monitor_helper(&helper_root));
+
+        for _ in 0..400 {
+            if endpoint_path.exists() {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            endpoint_path.exists(),
+            "native helper endpoint should appear"
+        );
+
+        let shutdown = shutdown_local_monitor_helper(&checkout).unwrap();
+        assert!(
+            !endpoint_path.exists(),
+            "shutdown should remove the helper endpoint"
+        );
+        objects::fs_ops::remove_path_recursively(&checkout).unwrap();
+        drop(shutdown);
+
+        helper.join().unwrap().unwrap();
+        assert!(
+            !checkout.exists(),
+            "a drained watcher must not recreate its checkout"
         );
     }
 
