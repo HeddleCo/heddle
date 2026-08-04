@@ -3940,6 +3940,174 @@ mod write_ops {
             attrs.unix_mode
         );
     }
+
+    fn assert_pending_index_matches_scan(mount: &ContentAddressedMount) {
+        mount
+            .pending_index_matches_full_scan()
+            .expect("pending child index diverged from full-scan oracle");
+    }
+
+    #[test]
+    fn pending_child_index_matches_full_scan_across_mutations() {
+        let (_temp, mount) = open_mount();
+        assert_pending_index_matches_scan(&mount);
+
+        let alpha = mount
+            .make_dir(NodeId::ROOT, OsStr::new("alpha"))
+            .expect("mkdir alpha");
+        let beta = mount
+            .make_dir(NodeId::ROOT, OsStr::new("beta"))
+            .expect("mkdir beta");
+        assert_pending_index_matches_scan(&mount);
+
+        let warm = mount
+            .create_file(alpha.node, OsStr::new("warm.txt"), FileMode::Normal, false)
+            .expect("create warm file");
+        mount
+            .write(warm.node, 0, b"pending")
+            .expect("write warm file");
+        assert_pending_index_matches_scan(&mount);
+        mount.flush(warm.node).expect("promote warm file");
+        assert_pending_index_matches_scan(&mount);
+
+        let nested = mount
+            .make_dir(alpha.node, OsStr::new("nested"))
+            .expect("mkdir nested");
+        let deep = mount
+            .create_file(
+                nested.node,
+                OsStr::new("deep.rs"),
+                FileMode::Executable,
+                false,
+            )
+            .expect("create nested file");
+        mount
+            .write(deep.node, 0, b"fn main() {}")
+            .expect("write nested file");
+        mount
+            .create_symlink(alpha.node, OsStr::new("link"), Path::new("warm.txt"))
+            .expect("create symlink");
+        mount
+            .create_file(alpha.node, OsStr::new("Case"), FileMode::Normal, false)
+            .expect("create case-sensitive upper name");
+        mount
+            .create_file(alpha.node, OsStr::new("case"), FileMode::Normal, false)
+            .expect("create case-sensitive lower name");
+        assert_pending_index_matches_scan(&mount);
+
+        mount
+            .rename_entry(
+                alpha.node,
+                OsStr::new("warm.txt"),
+                beta.node,
+                OsStr::new("moved.txt"),
+            )
+            .expect("rename warm file across directories");
+        assert_pending_index_matches_scan(&mount);
+        mount
+            .unlink_entry(beta.node, OsStr::new("moved.txt"))
+            .expect("unlink moved file");
+        assert_pending_index_matches_scan(&mount);
+
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("alpha"),
+                NodeId::ROOT,
+                OsStr::new("gamma"),
+            )
+            .expect("rename overlay directory");
+        assert_pending_index_matches_scan(&mount);
+
+        let gamma = mount
+            .lookup(NodeId::ROOT, OsStr::new("gamma"))
+            .unwrap()
+            .expect("renamed directory resolves");
+        mount
+            .unlink_entry(gamma.node, OsStr::new("link"))
+            .expect("unlink rebased symlink");
+        assert_pending_index_matches_scan(&mount);
+    }
+
+    fn mount_with_pending_burst(count: usize) -> (TempDir, ContentAddressedMount) {
+        let (temp, mount) = open_mount();
+        let target = mount
+            .make_dir(NodeId::ROOT, OsStr::new("target"))
+            .expect("mkdir target");
+        mount
+            .create_file(target.node, OsStr::new("only.txt"), FileMode::Normal, false)
+            .expect("create target child");
+        for index in 0..count {
+            mount
+                .create_file(
+                    NodeId::ROOT,
+                    OsStr::new(&format!("burst-{index:05}.tmp")),
+                    FileMode::Normal,
+                    false,
+                )
+                .expect("create burst file");
+        }
+        (temp, mount)
+    }
+
+    #[test]
+    fn pending_child_index_bounds_work_and_full_scan_is_negative_control() {
+        const PENDING_FILES: usize = 2_048;
+        let (_small_temp, small) = mount_with_pending_burst(32);
+        let (_temp, mount) = mount_with_pending_burst(PENDING_FILES);
+        assert_pending_index_matches_scan(&mount);
+
+        let (_, _, small_scan_exists_work, small_scan_children_work) =
+            small.pending_index_work(Path::new("missing"));
+
+        let (exists_work, children_work, scan_exists_work, scan_children_work) =
+            mount.pending_index_work(Path::new("missing"));
+        assert_eq!(exists_work, 1, "indexed exists is one directory lookup");
+        assert_eq!(children_work, 0, "missing directory has no direct children");
+        assert!(
+            scan_exists_work >= PENDING_FILES,
+            "negative-control exists scan inspected only {scan_exists_work} entries"
+        );
+        assert!(
+            scan_children_work >= PENDING_FILES,
+            "negative-control listing scan inspected only {scan_children_work} entries"
+        );
+        assert!(
+            scan_exists_work > small_scan_exists_work * 32,
+            "negative-control exists work did not grow with N: 32 files={small_scan_exists_work}, {PENDING_FILES} files={scan_exists_work}"
+        );
+        assert!(
+            scan_children_work > small_scan_children_work * 32,
+            "negative-control listing work did not grow with N: 32 files={small_scan_children_work}, {PENDING_FILES} files={scan_children_work}"
+        );
+
+        let (_, target_children_work, _, target_scan_work) =
+            mount.pending_index_work(Path::new("target"));
+        assert_eq!(
+            target_children_work, 1,
+            "indexed listing work must equal target-directory fanout"
+        );
+        assert!(target_scan_work >= PENDING_FILES);
+        eprintln!(
+            "pending-index counters: indexed exists={exists_work}, missing children={children_work}, target children={target_children_work}; full-scan missing exists 32→{PENDING_FILES}={small_scan_exists_work}→{scan_exists_work}, missing children={small_scan_children_work}→{scan_children_work}, target children={target_scan_work}"
+        );
+    }
+
+    #[test]
+    fn pending_child_index_burst_latency_stays_flat() {
+        let (_small_temp, small) = mount_with_pending_burst(64);
+        let (_large_temp, large) = mount_with_pending_burst(4_096);
+        let iterations = 20_000;
+        let small_elapsed = small.time_pending_index(Path::new("target"), iterations);
+        let large_elapsed = large.time_pending_index(Path::new("target"), iterations);
+        eprintln!(
+            "pending-index burst latency: 64 files={small_elapsed:?}, 4096 files={large_elapsed:?}, iterations={iterations}"
+        );
+        assert!(
+            large_elapsed <= small_elapsed.saturating_mul(6) + std::time::Duration::from_millis(2),
+            "pending lookup/listing latency scaled with total pending entries: small={small_elapsed:?}, large={large_elapsed:?}"
+        );
+    }
 }
 
 // D1. Property test for two-tier semantics.
