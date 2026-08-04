@@ -505,7 +505,11 @@ pub fn build_repository_verification_health_with_worktree_status(
     match current_branch_tip(repo) {
         Ok(Some(tip))
             if !tip.history_imported
-                && repo.current_state().ok().flatten().is_some()
+                && repo
+                    .current_state_for_worktree_status()
+                    .ok()
+                    .flatten()
+                    .is_some()
                 && import_hint
                     .as_ref()
                     .is_some_and(import_guidance_includes_active_branch) =>
@@ -706,8 +710,8 @@ pub fn build_repository_verification_health_with_worktree_status(
                 }
             }
             if !head_mapping_is_git_backed(&checks)
-                && let Ok(Some(state)) = repo.current_state()
-                && let Ok(tree) = repo.require_tree(&state.tree)
+                && let Ok(Some(state)) = repo.current_state_for_worktree_status()
+                && let Ok(tree) = repo.require_tree_for_worktree_status(&state.tree)
                 && let Ok(status) = repo.compare_worktree_cached_with_options(
                     &tree,
                     &core_worktree_status_options(repo),
@@ -1137,10 +1141,10 @@ fn core_worktree_status_options(repo: &Repository) -> repo::WorktreeStatusOption
 /// only supplied a git-overlay walk (`Ok(None)` on native repos) so the
 /// native verification path can still report uncaptured edits honestly.
 fn native_worktree_status(repo: &Repository) -> Result<Option<WorktreeStatus>> {
-    let Some(state) = repo.current_state()? else {
+    let Some(state) = repo.current_state_for_worktree_status()? else {
         return Ok(Some(WorktreeStatus::default()));
     };
-    let tree = repo.require_tree(&state.tree)?;
+    let tree = repo.require_tree_for_worktree_status(&state.tree)?;
     repo.compare_worktree_cached_with_options(&tree, &core_worktree_status_options(repo))
         .map(Some)
 }
@@ -1161,10 +1165,10 @@ pub(crate) fn git_default_remote_name_from_repo(repo: &SleyRepository) -> Option
 }
 
 fn heddle_worktree_is_clean(repo: &Repository) -> bool {
-    let Ok(Some(state)) = repo.current_state() else {
+    let Ok(Some(state)) = repo.current_state_for_worktree_status() else {
         return false;
     };
-    let Ok(tree) = repo.require_tree(&state.tree) else {
+    let Ok(tree) = repo.require_tree_for_worktree_status(&state.tree) else {
         return false;
     };
     repo.compare_worktree_cached_with_options(&tree, &core_worktree_status_options(repo))
@@ -1594,7 +1598,7 @@ fn collect_status_submodules(
     if let Some(state) = state
         && !is_synthetic_root(state)
     {
-        let tree = repo.require_tree(&state.tree)?;
+        let tree = repo.require_tree_for_worktree_status(&state.tree)?;
         if let Some(cached) = repo.cached_gitlinks_for_tree(&tree) {
             return Ok(cached
                 .into_iter()
@@ -2062,7 +2066,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
     let body_start = Instant::now();
 
     let current_state_start = Instant::now();
-    let current_state = repo.current_state()?;
+    let current_state = repo.current_state_for_worktree_status()?;
     let current_state_ms = current_state_start.elapsed().as_millis();
 
     let operation_start = Instant::now();
@@ -2134,7 +2138,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
             None,
         )
     } else if let Some(ref state) = current_state {
-        let tree = repo.require_tree(&state.tree)?;
+        let tree = repo.require_tree_for_worktree_status(&state.tree)?;
         let (status, profile) = repo
             .compare_worktree_cached_profiled_with_options(&tree, &opts.worktree_status_options)?;
         (changes_from_worktree_status(&status), Some(profile))

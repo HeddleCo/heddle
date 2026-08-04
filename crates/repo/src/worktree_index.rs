@@ -68,7 +68,7 @@ use std::{
     path::Path,
 };
 
-use objects::object::ContentHash;
+use objects::object::{ContentHash, Tree};
 use thiserror::Error;
 
 #[path = "worktree_index_storage.rs"]
@@ -301,6 +301,7 @@ pub struct WorktreeIndex {
     untracked_directories: BTreeMap<String, UntrackedDirectoryCacheEntry>,
     gitlinks: BTreeMap<String, String>,
     gitlinks_tree: Option<ContentHash>,
+    clean_trees: BTreeMap<String, Tree>,
     dirty: bool,
     pending_ops: Vec<JournalOp>,
     last_journal_bytes: u64,
@@ -318,6 +319,7 @@ impl WorktreeIndex {
             untracked_directories: BTreeMap::new(),
             gitlinks: BTreeMap::new(),
             gitlinks_tree: None,
+            clean_trees: BTreeMap::new(),
             dirty: false,
             pending_ops: Vec::new(),
             last_journal_bytes: 0,
@@ -542,6 +544,16 @@ impl WorktreeIndex {
 
     pub(crate) fn set_gitlinks_tree(&mut self, tree: ContentHash) {
         self.gitlinks_tree = Some(tree);
+    }
+
+    pub(crate) fn insert_clean_tree(&mut self, path: String, tree: Tree) {
+        self.clean_trees.insert(path, tree);
+    }
+
+    pub(crate) fn clean_tree(&self, path: &str, expected: &ContentHash) -> Option<&Tree> {
+        self.clean_trees
+            .get(path)
+            .filter(|tree| tree.hash() == *expected)
     }
 
     pub(crate) fn insert_gitlink(&mut self, path: String, target: String) {

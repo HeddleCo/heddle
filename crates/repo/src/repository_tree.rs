@@ -9,7 +9,7 @@ use std::{
 };
 
 use objects::{
-    object::{Blob, ContentHash, Tree, TreeEntry},
+    object::{Blob, ContentHash, State, StateId, Tree, TreeEntry},
     store::ObjectStore,
     util::gitlink_placeholder_bytes,
     worktree::WorktreeStatus,
@@ -242,6 +242,45 @@ impl Repository {
     /// Compare the worktree against a tree using the persisted binary index.
     pub fn compare_worktree_cached(&self, tree: &Tree) -> Result<WorktreeStatus> {
         self.compare_worktree_cached_with_options(tree, &self.default_worktree_status_options())
+    }
+
+    pub fn require_tree_for_worktree_status(&self, hash: &ContentHash) -> Result<Tree> {
+        if let Ok((index, _)) = WorktreeIndex::load_hot_profiled_for_directories(
+            &self.worktree_index_path(),
+            &std::collections::BTreeSet::from([String::new()]),
+        ) && let Some(tree) = index.clean_tree("", hash)
+        {
+            return Ok(tree.clone());
+        }
+        self.require_tree(hash)
+    }
+
+    pub fn state_for_worktree_status(&self, id: &StateId) -> Result<State> {
+        let cache_path = self
+            .root()
+            .join(".heddle/state/worktree-current-state.bin");
+        if let Ok(bytes) = fs::read(&cache_path)
+            && let Ok(state) = rmp_serde::from_slice::<State>(&bytes)
+            && state.id() == *id
+        {
+            return Ok(state);
+        }
+        let state = self
+            .store()
+            .get_state(id)?
+            .ok_or(HeddleError::StateNotFound(*id))?;
+        if let Ok(bytes) = rmp_serde::to_vec_named(&state)
+            && let Err(error) = objects::fs_atomic::write_file_atomic(&cache_path, &bytes)
+        {
+            warn!(path = %cache_path.display(), %error, "Could not refresh worktree state cache");
+        }
+        Ok(state)
+    }
+
+    pub fn current_state_for_worktree_status(&self) -> Result<Option<State>> {
+        self.head()?
+            .map(|id| self.state_for_worktree_status(&id))
+            .transpose()
     }
 
     /// Return the complete gitlink summary cached for `tree`, when the hot

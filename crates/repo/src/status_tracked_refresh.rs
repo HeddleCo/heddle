@@ -58,6 +58,8 @@ fn refresh_tracked_directory(
     dir_key: &str,
     tree: &Tree,
 ) -> Result<bool> {
+    ctx.index
+        .insert_clean_tree(dir_key.to_string(), tree.clone());
     let dir_path = if dir_key.is_empty() {
         ctx.repo.root().to_path_buf()
     } else {
@@ -106,9 +108,13 @@ fn refresh_tracked_directory(
             EntryType::Symlink => refresh_tracked_symlink(ctx, &child_rel_path, &child_key, entry)?,
             EntryType::Tree => {
                 let tree_hash = entry.require_content_hash();
-                let subtree = ctx.repo.store().get_tree(&tree_hash)?.ok_or_else(|| {
-                    objects::error::HeddleError::NotFound(format!("tree {}", tree_hash))
-                })?;
+                let subtree = if let Some(tree) = ctx.index.clean_tree(&child_key, &tree_hash) {
+                    tree.clone()
+                } else {
+                    ctx.repo.store().get_tree(&tree_hash)?.ok_or_else(|| {
+                        objects::error::HeddleError::NotFound(format!("tree {}", tree_hash))
+                    })?
+                };
                 refresh_tracked_directory(ctx, &child_rel_path, &child_key, &subtree)?
             }
             EntryType::Gitlink => {

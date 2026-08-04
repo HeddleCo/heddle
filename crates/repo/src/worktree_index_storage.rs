@@ -139,13 +139,18 @@ pub(crate) fn load_hot_profiled_for_directories(
     let mut index = WorktreeIndex::new();
     index.hot_loaded = true;
     for key in directory_keys {
-        if let Some((directory, untracked, bytes)) = load_hot_directory_record(path, key)? {
+        if let Some((directory, untracked, clean_tree, bytes)) =
+            load_hot_directory_record(path, key)?
+        {
             stats.snapshot_bytes = stats.snapshot_bytes.saturating_add(bytes);
             if let Some(directory) = directory {
                 index.directories.insert(key.clone(), directory);
             }
             if let Some(untracked) = untracked {
                 index.untracked_directories.insert(key.clone(), untracked);
+            }
+            if let Some(clean_tree) = clean_tree {
+                index.clean_trees.insert(key.clone(), clean_tree);
             }
         }
     }
@@ -452,6 +457,7 @@ fn load_v1(file: &mut File, file_size: u64) -> Result<WorktreeIndex, IndexError>
         untracked_directories: BTreeMap::new(),
         gitlinks: BTreeMap::new(),
         gitlinks_tree: None,
+        clean_trees: BTreeMap::new(),
         dirty: false,
         pending_ops: Vec::new(),
         last_journal_bytes: 0,
@@ -555,6 +561,7 @@ fn load_v6(file: &mut File, file_size: u64, hot_only: bool) -> Result<WorktreeIn
         untracked_directories,
         gitlinks,
         gitlinks_tree: None,
+        clean_trees: BTreeMap::new(),
         dirty: false,
         pending_ops: Vec::new(),
         last_journal_bytes: 0,
@@ -693,6 +700,7 @@ fn load_compact_versioned_with_untracked(
         untracked_directories,
         gitlinks: BTreeMap::new(),
         gitlinks_tree: None,
+        clean_trees: BTreeMap::new(),
         dirty: false,
         pending_ops: Vec::new(),
         last_journal_bytes: 0,
@@ -789,6 +797,7 @@ fn load_legacy_versioned(
         untracked_directories: BTreeMap::new(),
         gitlinks: BTreeMap::new(),
         gitlinks_tree: None,
+        clean_trees: BTreeMap::new(),
         dirty: false,
         pending_ops: Vec::new(),
         last_journal_bytes: 0,
@@ -874,6 +883,7 @@ fn load_compact_versioned(file: &mut File, file_size: u64) -> Result<WorktreeInd
         untracked_directories: BTreeMap::new(),
         gitlinks: BTreeMap::new(),
         gitlinks_tree: None,
+        clean_trees: BTreeMap::new(),
         dirty: false,
         pending_ops: Vec::new(),
         last_journal_bytes: 0,
@@ -1185,6 +1195,14 @@ fn write_hot_sidecars(index: &WorktreeIndex, snapshot_path: &Path) -> Result<(),
         if let Some(untracked) = untracked {
             write_untracked_directory_entry_payload(&mut body, untracked)?;
         }
+        let clean_tree = index.clean_trees.get(&key);
+        body.push(u8::from(clean_tree.is_some()));
+        if let Some(clean_tree) = clean_tree {
+            let encoded = rmp_serde::to_vec_named(clean_tree)
+                .map_err(|error| IndexError::InvalidFormat(error.to_string()))?;
+            body.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+            body.extend_from_slice(&encoded);
+        }
         write_reconstructible_atomic(
             &hot_directory_record_path(snapshot_path, &key),
             &frame_hot_record(body),
@@ -1213,6 +1231,7 @@ fn write_hot_sidecars(index: &WorktreeIndex, snapshot_path: &Path) -> Result<(),
 type HotDirectoryRecord = (
     Option<DirectoryCacheEntry>,
     Option<UntrackedDirectoryCacheEntry>,
+    Option<objects::object::Tree>,
     u64,
 );
 
@@ -1257,10 +1276,28 @@ fn load_hot_directory_record(
     } else {
         None
     };
+    let Some(has_tree) = body.get(offset).copied() else {
+        return Ok(None);
+    };
+    offset += 1;
+    let clean_tree = if has_tree != 0 {
+        let len = read_u32_be(&body[offset..], "hot tree length")? as usize;
+        offset += 4;
+        let end = offset
+            .checked_add(len)
+            .filter(|end| *end <= body.len())
+            .ok_or_else(|| IndexError::InvalidFormat("truncated hot tree".to_string()))?;
+        let tree = rmp_serde::from_slice(&body[offset..end])
+            .map_err(|error| IndexError::InvalidFormat(error.to_string()))?;
+        offset = end;
+        Some(tree)
+    } else {
+        None
+    };
     if offset != body.len() {
         return Ok(None);
     }
-    Ok(Some((directory, untracked, bytes.len() as u64)))
+    Ok(Some((directory, untracked, clean_tree, bytes.len() as u64)))
 }
 
 fn load_hot_gitlinks(

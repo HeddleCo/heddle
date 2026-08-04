@@ -267,7 +267,7 @@ pub async fn cmd_snapshot(
     // not fail the command. `capture` is a Heddle parent/state change —
     // the call frequency jj's `update_intent_to_add` is designed for.
     if git_overlay {
-        match repo.current_state() {
+        match repo.current_state_for_worktree_status() {
             Ok(Some(state)) => {
                 let bridge = GitProjection::new(&repo);
                 if let Err(err) = bridge.update_intent_to_add(&state.state_id) {
@@ -432,13 +432,13 @@ fn nothing_to_capture_advice() -> RecoveryAdvice {
 }
 
 fn capture_has_worktree_changes(repo: &Repository) -> Result<bool> {
-    if repo.current_state()?.is_none()
+    if repo.current_state_for_worktree_status()?.is_none()
         && let Some(status) = repo.git_overlay_worktree_status()?
     {
         return Ok(!status.is_clean());
     }
-    let tree = match repo.current_state()? {
-        Some(state) => repo.require_tree(&state.tree)?,
+    let tree = match repo.current_state_for_worktree_status()? {
+        Some(state) => repo.require_tree_for_worktree_status(&state.tree)?,
         None => Tree::new(),
     };
     let status = repo.compare_worktree_cached_with_options(
@@ -573,7 +573,7 @@ pub(crate) fn ensure_current_state(
     user_config: &UserConfig,
     intent: Option<String>,
 ) -> Result<StateId> {
-    if let Some(state) = repo.current_state()? {
+    if let Some(state) = repo.current_state_for_worktree_status()? {
         return Ok(state.state_id);
     }
 

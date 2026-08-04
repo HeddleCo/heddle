@@ -583,14 +583,17 @@ impl SnapshotMutation<'_> {
     ) -> Result<(Tree, TreeBuildProfile, BTreeMap<String, ManifestFile>)> {
         let baseline_tree = match self.prev_head {
             Some(prev_head) => {
-                let state = self
-                    .repo
-                    .store
-                    .get_state(&prev_head)?
-                    .ok_or(HeddleError::StateNotFound(prev_head))?;
-                Some(self.repo.store.get_tree(&state.tree)?.ok_or_else(|| {
-                    HeddleError::NotFound(format!("tree {} (for state {})", state.tree, prev_head))
-                })?)
+                let state = self.repo.state_for_worktree_status(&prev_head)?;
+                Some(
+                    self.repo
+                        .require_tree_for_worktree_status(&state.tree)
+                        .map_err(|error| {
+                            HeddleError::NotFound(format!(
+                                "tree {} (for state {}): {error}",
+                                state.tree, prev_head
+                            ))
+                        })?,
+                )
             }
             None => None,
         };
