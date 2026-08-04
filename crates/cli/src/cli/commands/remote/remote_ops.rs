@@ -1050,6 +1050,17 @@ async fn pull_network_connected(
             },
         )
         .await?;
+    let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
+        .context("decode hosted pull bootstrap")?;
+    let bootstrap = if result.success {
+        bootstrap
+            .as_ref()
+            .map(|metadata| metadata.resolve(repo, result.final_state))
+            .transpose()
+            .context("resolve hosted pull bootstrap")?
+    } else {
+        None
+    };
 
     // Keep typed StateId for ref/worktree I/O; map string fields for pure parse.
     let final_state_id = result.final_state;
@@ -1120,7 +1131,16 @@ async fn pull_network_connected(
             // new hosted CollaborationService discussions/turns for the pulled
             // head into the local op-log. Best-effort — a fetch hiccup warns
             // rather than failing the pull.
-            match crate::client::discussion_sync::pull_discussions(repo, client, repo_path).await {
+            match crate::client::discussion_sync::pull_discussions(
+                repo,
+                client,
+                repo_path,
+                bootstrap
+                    .as_ref()
+                    .map(|metadata| metadata.discussions.as_slice()),
+            )
+            .await
+            {
                 Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                     println!(
                         "{} synced {count} discussion(s) from {}",
@@ -1137,7 +1157,16 @@ async fn pull_network_connected(
                 }
             }
             // Read path for hosted context annotations — same seam as discussions.
-            match crate::client::context_sync::pull_context(repo, client, repo_path).await {
+            match crate::client::context_sync::pull_context(
+                repo,
+                client,
+                repo_path,
+                bootstrap
+                    .as_ref()
+                    .map(|metadata| metadata.context.as_slice()),
+            )
+            .await
+            {
                 Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                     println!(
                         "{} synced {count} annotation(s) from {}",

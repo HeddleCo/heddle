@@ -1617,6 +1617,17 @@ async fn clone_network_connected(
             materialization,
         )
         .await?;
+    let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
+        .context("decode hosted clone bootstrap")?;
+    let bootstrap = if result.success {
+        bootstrap
+            .as_ref()
+            .map(|metadata| metadata.resolve(&local_repo, result.final_state))
+            .transpose()
+            .context("resolve hosted clone bootstrap")?
+    } else {
+        None
+    };
     if result.success {
         let final_state = result.final_state;
         if let Some(state) = final_state {
@@ -1656,7 +1667,15 @@ async fn clone_network_connected(
         // hosted CollaborationService discussions for the cloned head into the
         // local op-log so `discuss list` / `discuss show` see them. Best-effort:
         // a fetch hiccup warns rather than failing an otherwise-good clone.
-        match crate::client::discussion_sync::pull_discussions(&local_repo, client, repo_path).await
+        match crate::client::discussion_sync::pull_discussions(
+            &local_repo,
+            client,
+            repo_path,
+            bootstrap
+                .as_ref()
+                .map(|metadata| metadata.discussions.as_slice()),
+        )
+        .await
         {
             Ok(_) => {}
             Err(error) => {
@@ -1669,7 +1688,16 @@ async fn clone_network_connected(
         // Read path for hosted context annotations (heddle context): materialize
         // the hosted head's annotations into the local Context attachment so
         // `context list` sees them. Best-effort, mirroring discussions.
-        match crate::client::context_sync::pull_context(&local_repo, client, repo_path).await {
+        match crate::client::context_sync::pull_context(
+            &local_repo,
+            client,
+            repo_path,
+            bootstrap
+                .as_ref()
+                .map(|metadata| metadata.context.as_slice()),
+        )
+        .await
+        {
             Ok(_) => {}
             Err(error) => {
                 eprintln!("{} context sync skipped: {error:#}", style::warn_marker());

@@ -732,6 +732,7 @@ pub async fn pull_context(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
+    bootstrap: Option<&[(ContextTarget, ContextBlob)]>,
 ) -> Result<usize> {
     let Some(head_id) = repo.head().context("resolve repository head")? else {
         return Ok(0);
@@ -744,11 +745,6 @@ pub async fn pull_context(
         return Ok(0);
     };
 
-    let server = list_server_targets(client, repo_path).await?;
-    if server.is_empty() {
-        return Ok(0);
-    }
-
     let user_config = crate::config::UserConfig::load_default().unwrap_or_default();
     let self_local_attr = crate::cli::commands::snapshot::resolve_attribution(repo, &user_config)
         .ok()
@@ -758,8 +754,42 @@ pub async fn pull_context(
     let heddle_dir = repo.heddle_dir().to_path_buf();
     let mut mirror = load_mirror(&heddle_dir)?;
     let mut changed = 0usize;
+    if let Some(entries) = bootstrap {
+        for (target, blob) in entries {
+            for annotation in &blob.annotations {
+                if annotation.status == AnnotationStatus::Superseded {
+                    continue;
+                }
+                let result = pull_one_annotation(
+                    repo,
+                    repo_path,
+                    &head_state,
+                    target,
+                    annotation,
+                    self_local_attr.as_deref(),
+                    username.as_deref(),
+                    &mut mirror,
+                );
+                save_mirror(&heddle_dir, &mirror)?;
+                match result {
+                    Ok(true) => changed += 1,
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!(
+                            "{} hosted context {}: {error:#}",
+                            crate::cli::style::warn_marker(),
+                            annotation.annotation_id
+                        );
+                    }
+                }
+            }
+        }
+        return Ok(changed);
+    }
+
+    let server = list_server_targets(client, repo_path).await?;
     for (target, annotation) in server {
-        let result = pull_one(
+        let result = pull_one_rpc(
             repo,
             client,
             repo_path,
@@ -788,7 +818,7 @@ pub async fn pull_context(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn pull_one(
+async fn pull_one_rpc(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
@@ -799,9 +829,42 @@ async fn pull_one(
     username: Option<&str>,
     mirror: &mut HostedContextMirror,
 ) -> Result<bool> {
-    let local_id =
-        local_id_for_server(mirror, repo_path, &server.id).unwrap_or_else(|| server.id.clone());
     let server_revs = fetch_history(client, repo_path, &server.id).await?;
+    let annotation = Annotation {
+        annotation_id: server.id.clone(),
+        scope: scope_from_proto(server.scope.as_ref()),
+        status: status_from_proto(server.status),
+        revisions: server_revs,
+        supersedes_annotation_id: server.supersedes_annotation_id.clone(),
+        supersedes_rewrite_pct: server.supersedes_rewrite_pct,
+        visibility: objects::object::VisibilityTier::default(),
+        resolved_from_discussion: None,
+    };
+    pull_one_annotation(
+        repo,
+        repo_path,
+        head_state,
+        target,
+        &annotation,
+        self_local_attr,
+        username,
+        mirror,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pull_one_annotation(
+    repo: &Repository,
+    repo_path: &str,
+    head_state: &State,
+    target: &ContextTarget,
+    server: &Annotation,
+    self_local_attr: Option<&str>,
+    username: Option<&str>,
+    mirror: &mut HostedContextMirror,
+) -> Result<bool> {
+    let local_id = local_id_for_server(mirror, repo_path, &server.annotation_id)
+        .unwrap_or_else(|| server.annotation_id.clone());
 
     let context_root = context_root_for_state(repo, head_state)?;
     let mut blob = match &context_root {
@@ -829,7 +892,7 @@ async fn pull_one(
 
     let (new_revisions, new_links) = reconcile_revisions_pull(
         &existing_revisions,
-        &server_revs,
+        &server.revisions,
         &existing_links,
         self_local_attr,
         username,
@@ -837,20 +900,19 @@ async fn pull_one(
 
     {
         let entry = get_or_create_entry(mirror, repo_path, &local_id);
-        entry.server_id = server.id.clone();
+        entry.server_id = server.annotation_id.clone();
         entry.revision_links = new_links;
     }
 
-    let new_status = status_from_proto(server.status);
     let changed = match existing_index {
         Some(index) => {
             let annotation = &mut blob.annotations[index];
             let differs = annotation.revisions != new_revisions
-                || annotation.status != new_status
+                || annotation.status != server.status
                 || annotation.supersedes_annotation_id != server.supersedes_annotation_id
                 || annotation.supersedes_rewrite_pct != server.supersedes_rewrite_pct;
             annotation.revisions = new_revisions;
-            annotation.status = new_status;
+            annotation.status = server.status;
             annotation.supersedes_annotation_id = server.supersedes_annotation_id.clone();
             annotation.supersedes_rewrite_pct = server.supersedes_rewrite_pct;
             differs
@@ -858,13 +920,13 @@ async fn pull_one(
         None => {
             blob.annotations.push(Annotation {
                 annotation_id: local_id.clone(),
-                scope: scope_from_proto(server.scope.as_ref()),
-                status: new_status,
+                scope: server.scope.clone(),
+                status: server.status,
                 revisions: new_revisions,
                 supersedes_annotation_id: server.supersedes_annotation_id.clone(),
                 supersedes_rewrite_pct: server.supersedes_rewrite_pct,
-                visibility: objects::object::VisibilityTier::default(),
-                resolved_from_discussion: None,
+                visibility: server.visibility.clone(),
+                resolved_from_discussion: server.resolved_from_discussion.clone(),
             });
             true
         }

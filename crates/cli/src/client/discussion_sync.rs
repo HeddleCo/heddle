@@ -10,9 +10,9 @@
 //!   symbol-anchored discussion turns *we authored* to the server via the
 //!   caller-authenticated `OpenDiscussion` / `AppendTurn` RPCs (enforce-mode
 //!   signed). #549 rejects attachments in the pack, so they cannot ride it.
-//! * **Pull/clone (read path):** after a successful clone/pull, `ListByState`
-//!   the head state's discussions and materialize any turns we do not already
-//!   hold into the local op-log so `discuss list` / `discuss show` see them.
+//! * **Pull/clone (read path):** after a successful clone/pull, consume the
+//!   pull bootstrap's discussions when present, falling back to `ListByState`
+//!   for older servers, and materialize unseen turns into the local op-log.
 //!
 //! ## Turn identity
 //!
@@ -74,8 +74,9 @@ use objects::{
     fs_atomic::write_file_atomic,
     object::{
         Attribution, CollabOpId, CollaborationAnchor, CollaborationIdempotencyKey,
-        CollaborationOperationBodyV1, CollaborationOperationEnvelope, DiscussionRecordId,
-        DiscussionTurnV1, MaterializedDiscussion, Principal, StateId, VisibilityTier,
+        CollaborationOperationBodyV1, CollaborationOperationEnvelope, Discussion,
+        DiscussionRecordId, DiscussionTurnV1, MaterializedDiscussion, Principal, StateId,
+        VisibilityTier,
     },
     store::ObjectStore,
 };
@@ -431,6 +432,7 @@ pub async fn pull_discussions(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
+    bootstrap: Option<&[Discussion]>,
 ) -> Result<usize> {
     // Hosted discussions arrive as server-minted `Discussions` state-attachments
     // on the pulled objects. Those are the transport form of what we
@@ -454,10 +456,17 @@ pub async fn pull_discussions(
     };
     let change_id = state.change_id;
 
-    let hosted = client
-        .list_discussions_by_state(repo_path, change_id, "all")
-        .await
-        .context("list hosted discussions")?;
+    let hosted = match bootstrap {
+        Some(discussions) => discussions
+            .iter()
+            .cloned()
+            .map(hosted_discussion_from_bootstrap)
+            .collect(),
+        None => client
+            .list_discussions_by_state(repo_path, change_id, "all")
+            .await
+            .context("list hosted discussions")?,
+    };
     if hosted.is_empty() {
         return Ok(0);
     }
@@ -495,6 +504,26 @@ pub async fn pull_discussions(
     }
 
     Ok(changed)
+}
+
+fn hosted_discussion_from_bootstrap(discussion: Discussion) -> HostedDiscussion {
+    HostedDiscussion {
+        id: discussion.id,
+        file: discussion.anchor.file,
+        symbol: discussion.anchor.symbol,
+        opened_against_state: Some(discussion.opened_against_state),
+        visibility: discussion.visibility.as_str().to_string(),
+        turns: discussion
+            .turns
+            .into_iter()
+            .map(|turn| HostedDiscussionTurn {
+                author_name: turn.author.name,
+                author_email: turn.author.email,
+                body: turn.body,
+                posted_at_secs: turn.posted_at,
+            })
+            .collect(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
