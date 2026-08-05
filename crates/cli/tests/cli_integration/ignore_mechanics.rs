@@ -163,4 +163,178 @@ fn heddleignore_help_topic_prints_the_documented_contract() {
     assert!(help.contains("# `.heddleignore`"));
     assert!(help.contains("one ordered rule stream"));
     assert!(help.contains("500 or more paths"));
+    assert!(help.contains("[worktree] ignore"));
+    assert!(help.contains("no `--path` filter") || help.contains("no `--path`"));
+}
+
+#[test]
+fn ignore_help_alias_renders_the_same_topic() {
+    let help = heddle_help(&["help", "ignore"]);
+    assert!(!help.contains("no topic or command"));
+    assert!(help.contains("# `.heddleignore`"));
+    assert!(help.contains(".gitignore"));
+    assert!(help.contains("[worktree] ignore"));
+}
+
+#[test]
+fn status_and_capture_omit_python_build_junk_listed_in_gitignore() {
+    // Evaluator repro for heddle#1155: pytest leaves `__pycache__` / `.pyc`
+    // next to source; with those patterns in root `.gitignore`, status must
+    // not list them and capture must not record them.
+    let temp = TempDir::new().unwrap();
+    std::fs::write(
+        temp.path().join(".gitignore"),
+        "__pycache__/\n*.pyc\n.pytest_cache/\n",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("app.py"), "print('hi')\n").unwrap();
+    std::fs::write(temp.path().join("kept.txt"), "real\n").unwrap();
+    std::fs::create_dir_all(temp.path().join("__pycache__")).unwrap();
+    std::fs::create_dir_all(temp.path().join("src/__pycache__")).unwrap();
+    std::fs::create_dir_all(temp.path().join(".pytest_cache/v")).unwrap();
+    std::fs::write(
+        temp.path().join("__pycache__/app.cpython-312.pyc"),
+        "binary",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("src/__pycache__/mod.cpython-312.pyc"),
+        "binary",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("src/app.pyc"), "binary").unwrap();
+    std::fs::write(temp.path().join(".pytest_cache/v/cache"), "cache").unwrap();
+
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let status = heddle(&["status"], Some(temp.path())).unwrap();
+    assert!(
+        !status.contains("__pycache__")
+            && !status.contains(".pyc")
+            && !status.contains(".pytest_cache"),
+        "status must not list gitignored build junk: {status}"
+    );
+    assert!(
+        status.contains("kept.txt") && status.contains("app.py"),
+        "status must still list real worktree files: {status}"
+    );
+
+    heddle(
+        &["capture", "-m", "seed without build junk"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    assert!(!captured_path_exists(
+        temp.path(),
+        "__pycache__/app.cpython-312.pyc"
+    ));
+    assert!(!captured_path_exists(
+        temp.path(),
+        "src/__pycache__/mod.cpython-312.pyc"
+    ));
+    assert!(!captured_path_exists(temp.path(), "src/app.pyc"));
+    assert!(!captured_path_exists(temp.path(), ".pytest_cache/v/cache"));
+    assert!(captured_path_exists(temp.path(), "kept.txt"));
+    assert!(captured_path_exists(temp.path(), "app.py"));
+}
+
+#[test]
+fn thread_checkout_status_and_capture_honour_root_gitignore() {
+    // heddle#1155: isolated thread checkouts must use the same ignore
+    // stream as the origin root, including root `.gitignore`.
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin");
+    let thread = temp.path().join("thread");
+    std::fs::create_dir(&origin).unwrap();
+    std::fs::write(
+        origin.join(".gitignore"),
+        "__pycache__/\n*.pyc\n.pytest_cache/\n",
+    )
+    .unwrap();
+    std::fs::write(origin.join("app.py"), "print('hi')\n").unwrap();
+    heddle(&["init"], Some(&origin)).unwrap();
+    heddle(&["capture", "-m", "seed"], Some(&origin)).unwrap();
+    heddle(
+        &[
+            "start",
+            "feature/pytest",
+            "--path",
+            thread.to_str().expect("utf-8 thread path"),
+        ],
+        Some(&origin),
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(thread.join("__pycache__")).unwrap();
+    std::fs::create_dir_all(thread.join("src/__pycache__")).unwrap();
+    std::fs::create_dir_all(thread.join(".pytest_cache/v")).unwrap();
+    std::fs::write(thread.join("__pycache__/app.cpython-312.pyc"), "binary").unwrap();
+    std::fs::write(thread.join("src/__pycache__/mod.cpython-312.pyc"), "binary").unwrap();
+    std::fs::write(thread.join(".pytest_cache/v/cache"), "cache").unwrap();
+    std::fs::write(thread.join("feature.txt"), "new feature\n").unwrap();
+
+    let status = heddle(&["status"], Some(&thread)).unwrap();
+    assert!(
+        !status.contains("__pycache__")
+            && !status.contains(".pyc")
+            && !status.contains(".pytest_cache"),
+        "thread status must not list gitignored build junk: {status}"
+    );
+    assert!(
+        status.contains("feature.txt"),
+        "thread status must list the real unignored change: {status}"
+    );
+
+    heddle(&["capture", "-m", "after pytest junk"], Some(&thread)).unwrap();
+    assert!(!captured_path_exists(
+        &thread,
+        "__pycache__/app.cpython-312.pyc"
+    ));
+    assert!(!captured_path_exists(
+        &thread,
+        "src/__pycache__/mod.cpython-312.pyc"
+    ));
+    assert!(!captured_path_exists(&thread, ".pytest_cache/v/cache"));
+    assert!(captured_path_exists(&thread, "feature.txt"));
+    assert!(captured_path_exists(&thread, "app.py"));
+}
+
+#[test]
+fn removing_gitignore_rule_makes_junk_reappear_in_status_and_capture() {
+    // Guard is load-bearing: without the ignore rule the same paths return.
+    let temp = TempDir::new().unwrap();
+    std::fs::write(temp.path().join(".gitignore"), "__pycache__/\n").unwrap();
+    std::fs::write(temp.path().join("kept.txt"), "real\n").unwrap();
+    std::fs::create_dir(temp.path().join("__pycache__")).unwrap();
+    std::fs::write(temp.path().join("__pycache__/app.pyc"), "binary").unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(&["capture", "-m", "ignored junk"], Some(temp.path())).unwrap();
+    assert!(!captured_path_exists(temp.path(), "__pycache__/app.pyc"));
+
+    std::fs::write(temp.path().join(".gitignore"), "").unwrap();
+    let status = heddle(&["status"], Some(temp.path())).unwrap();
+    assert!(
+        status.contains("__pycache__") || status.contains("app.pyc"),
+        "clearing the ignore rule must surface the junk again: {status}"
+    );
+    heddle(
+        &["capture", "-m", "junk no longer ignored"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    assert!(captured_path_exists(temp.path(), "__pycache__/app.pyc"));
+    assert!(captured_path_exists(temp.path(), "kept.txt"));
+}
+
+#[test]
+fn init_text_points_at_ignore_help_when_heddleignore_not_installed() {
+    let temp = TempDir::new().unwrap();
+    let out = heddle(&["init"], Some(temp.path())).unwrap();
+    assert!(
+        out.contains("heddle help ignore") || out.contains("`heddle help ignore`"),
+        "init must point at ignore docs when it does not install .heddleignore: {out}"
+    );
+    assert!(
+        out.contains(".heddleignore") || out.contains("Ignore:"),
+        "init must name the ignore surface: {out}"
+    );
 }

@@ -291,6 +291,14 @@ fn render_init(output: &InitOutput, json: bool) -> Result<()> {
                 println!("  - {effect}");
             }
         }
+        // heddle#1155: init never installs ignore policy, but must not leave
+        // that fact silent — operators need a pointer before the first
+        // capture sweeps build junk into permanent history.
+        if !output.installed_heddleignore {
+            println!(
+                "Ignore: not installed. Root `.gitignore` is honoured; add Heddle-only rules in `.heddleignore` (see `heddle help ignore`)."
+            );
+        }
         if let Some(next) = output.recommended_action.as_deref() {
             print_next(next);
         }

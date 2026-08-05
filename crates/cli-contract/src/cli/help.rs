@@ -157,7 +157,7 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
                  or `heddle help <topic>` for a topic page (e.g. `git-concepts`, \
                  `git-overlay`, \
                  `threads`, `daemon`, `signals`, `git-projection`, `operation-ids`, \
-                 `remotes`, `output-formats`, `heddleignore`, `git-dependencies`)."
+                 `remotes`, `output-formats`, `ignore`/`heddleignore`, `git-dependencies`)."
             );
         }
         [name] if name == "advanced" => {
