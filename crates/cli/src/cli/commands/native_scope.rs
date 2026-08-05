@@ -32,6 +32,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use repo::{Repository, RepositoryCapability, discover_heddle_root};
+use serde::Serialize;
 use sley::Repository as SleyRepository;
 
 use super::action_line::print_command;
@@ -54,13 +55,13 @@ impl AnnotationSurface {
         }
     }
 
-    /// Key holding the (always empty) result set, so an absent-store envelope
-    /// stays shape-compatible with the populated one. Only the list surfaces
-    /// carry a collection; the rest report absence without one.
-    fn items_key(self) -> &'static str {
+    /// The surface's empty result set, under the key its populated envelope
+    /// uses, so an absent-store envelope stays shape-compatible with a
+    /// populated one. Only the list surfaces carry a collection.
+    fn empty_collection(self) -> EmptyCollection {
         match self {
-            Self::Context => "items",
-            Self::Discuss => "discussions",
+            Self::Context => EmptyCollection::Context { items: [] },
+            Self::Discuss => EmptyCollection::Discuss { discussions: [] },
         }
     }
 
@@ -146,6 +147,36 @@ fn plain_git_root(path: &Path) -> Option<PathBuf> {
         .and_then(|git| git.workdir())
 }
 
+/// The absent-store report, as data. Serializes directly to the machine
+/// envelope, so the JSON and the human text cannot describe different states.
+#[derive(Serialize)]
+pub(crate) struct AbsentStoreOutput {
+    output_kind: String,
+    /// Always `false` — this shape exists only for the absent case. It is the
+    /// field a machine consumer reads to tell an absent store from an empty
+    /// one, which is the whole point of heddle#1145.
+    store_present: bool,
+    store_scope: &'static str,
+    path: String,
+    git_checkout: bool,
+    reason: String,
+    /// The surface's empty collection, under its usual key, so a `list`
+    /// caller's parser sees the shape it always sees.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    collection: Option<EmptyCollection>,
+    #[serde(skip)]
+    records: &'static str,
+    #[serde(skip)]
+    first_step: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(crate) enum EmptyCollection {
+    Context { items: [(); 0] },
+    Discuss { discussions: [(); 0] },
+}
+
 /// Report that no Heddle store backs this path — distinct from an empty one.
 ///
 /// Exits successfully: the command answered the question it was asked. The
@@ -164,26 +195,32 @@ pub(crate) fn report_absent_store(
     absent: &AbsentStore,
 ) -> Result<()> {
     let records = surface.records();
+    let output = AbsentStoreOutput {
+        output_kind: output_kind.to_string(),
+        store_present: false,
+        store_scope: "native-heddle-only",
+        path: absent.path.display().to_string(),
+        git_checkout: absent.in_git_checkout(),
+        reason: format!(
+            "no Heddle store at this path; {records} are native-only and are not carried by \
+             git clone"
+        ),
+        collection: with_items.then_some(surface.empty_collection()),
+        records,
+        first_step: surface.first_step(),
+    };
+    render_absent_store(cli, &output)
+}
+
+fn render_absent_store(cli: &Cli, output: &AbsentStoreOutput) -> Result<()> {
     if should_output_json(cli, None) {
-        let mut envelope = serde_json::json!({
-            "output_kind": output_kind,
-            "store_present": false,
-            "store_scope": "native-heddle-only",
-            "path": absent.path.display().to_string(),
-            "git_checkout": absent.in_git_checkout(),
-            "reason": format!(
-                "no Heddle store at this path; {records} are native-only and are not carried by git clone"
-            ),
-        });
-        if with_items && let Some(map) = envelope.as_object_mut() {
-            map.insert(surface.items_key().to_string(), serde_json::json!([]));
-        }
-        println!("{}", serde_json::to_string(&envelope)?);
+        println!("{}", serde_json::to_string(output)?);
         return Ok(());
     }
 
+    let records = output.records;
     println!("No Heddle store here — cannot say whether {records} exist.");
-    if absent.in_git_checkout() {
+    if output.git_checkout {
         println!(
             "This is a Git checkout with no `.heddle` store, and {records} are a native Heddle \
              feature — not projected into Git, so `git clone` does not carry them."
@@ -193,12 +230,12 @@ pub(crate) fn report_absent_store(
         print_command("heddle init");
         println!(
             "  then: {}   (records stay local to this working copy)",
-            surface.first_step()
+            output.first_step
         );
     } else {
         println!(
             "No Heddle repository was found at {} or in its ancestors.",
-            absent.path.display()
+            output.path
         );
         println!();
         println!("{}", style::bold("Next"));
