@@ -42,25 +42,23 @@ pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
     // Mutating subcommands still bootstrap: overlay discussions are allowed,
     // they are just local, and `emit_locality_notice_once` says so.
     let repo = match command {
-        DiscussCommands::List(_) | DiscussCommands::Show(_) => {
-            match open_annotation_store(cli)? {
-                AnnotationStore::Present(repo) => *repo,
-                AnnotationStore::Absent(absent) => {
-                    let output_kind = match command {
-                        DiscussCommands::Show(_) => "discuss_show",
-                        _ => "discuss_list",
-                    };
-                    let with_items = matches!(command, DiscussCommands::List(_));
-                    return report_absent_store(
-                        cli,
-                        AnnotationSurface::Discuss,
-                        output_kind,
-                        with_items,
-                        &absent,
-                    );
-                }
+        DiscussCommands::List(_) | DiscussCommands::Show(_) => match open_annotation_store(cli)? {
+            AnnotationStore::Present(repo) => *repo,
+            AnnotationStore::Absent(absent) => {
+                let output_kind = match command {
+                    DiscussCommands::Show(_) => "discuss_show",
+                    _ => "discuss_list",
+                };
+                let with_items = matches!(command, DiscussCommands::List(_));
+                return report_absent_store(
+                    cli,
+                    AnnotationSurface::Discuss,
+                    output_kind,
+                    with_items,
+                    &absent,
+                );
             }
-        }
+        },
         _ => cli.open_repo().context("open Heddle repository")?,
     };
     let store = open_store(&repo)?;

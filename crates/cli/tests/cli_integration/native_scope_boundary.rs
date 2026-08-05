@@ -28,7 +28,14 @@ fn overlay_with_records() -> TempDir {
     heddle(&["init"], Some(dir)).expect("heddle init");
     heddle(
         &[
-            "context", "set", "--path", "f.txt", "--kind", "invariant", "-m", "stays lowercase",
+            "context",
+            "set",
+            "--path",
+            "f.txt",
+            "--kind",
+            "invariant",
+            "-m",
+            "stays lowercase",
         ],
         Some(dir),
     )
@@ -156,7 +163,10 @@ fn absent_store_and_empty_store_report_differently() {
         absent_discuss.contains("No Heddle store here"),
         "{absent_discuss}"
     );
-    assert!(empty_discuss.contains("(no discussions)"), "{empty_discuss}");
+    assert!(
+        empty_discuss.contains("(no discussions)"),
+        "{empty_discuss}"
+    );
     assert_ne!(absent_discuss, empty_discuss);
 }
 
@@ -208,7 +218,16 @@ fn overlay_creation_warns_once_per_working_copy() {
     let notice = "local to this working copy";
 
     let first = heddle_output(
-        &["context", "set", "--path", "f.txt", "--kind", "invariant", "-m", "one"],
+        &[
+            "context",
+            "set",
+            "--path",
+            "f.txt",
+            "--kind",
+            "invariant",
+            "-m",
+            "one",
+        ],
         Some(dir),
     )
     .expect("context set");
@@ -221,7 +240,15 @@ fn overlay_creation_warns_once_per_working_copy() {
     for message in ["two", "three"] {
         let repeat = heddle_output(
             &[
-                "context", "set", "--path", "f.txt", "--scope", "file", "--kind", "invariant", "-m",
+                "context",
+                "set",
+                "--path",
+                "f.txt",
+                "--scope",
+                "file",
+                "--kind",
+                "invariant",
+                "-m",
                 message,
             ],
             Some(dir),
@@ -235,11 +262,8 @@ fn overlay_creation_warns_once_per_working_copy() {
     }
 
     // `discuss` states the same boundary for its own records, also once.
-    let first_discuss = heddle_output(
-        &["discuss", "open", "f.txt", "greeting", "why?"],
-        Some(dir),
-    )
-    .expect("discuss open");
+    let first_discuss = heddle_output(&["discuss", "open", "f.txt", "greeting", "why?"], Some(dir))
+        .expect("discuss open");
     let discuss_stderr = String::from_utf8_lossy(&first_discuss.stderr).into_owned();
     assert!(
         discuss_stderr.contains(notice),
@@ -263,7 +287,14 @@ fn native_creation_does_not_claim_records_are_local() {
     let native = native_repo();
     let output = heddle_output(
         &[
-            "context", "set", "--path", "g.txt", "--kind", "invariant", "-m", "native",
+            "context",
+            "set",
+            "--path",
+            "g.txt",
+            "--kind",
+            "invariant",
+            "-m",
+            "native",
         ],
         Some(native.path()),
     )
@@ -320,7 +351,10 @@ fn overlay_records_leave_no_git_residue() {
         .output()
         .expect("git status");
     assert!(
-        str::from_utf8(&status.stdout).expect("utf8").trim().is_empty(),
+        str::from_utf8(&status.stdout)
+            .expect("utf8")
+            .trim()
+            .is_empty(),
         "annotations must not touch the Git worktree: {}",
         String::from_utf8_lossy(&status.stdout)
     );
