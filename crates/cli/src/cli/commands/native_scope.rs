@@ -34,7 +34,8 @@ use anyhow::{Context as _, Result};
 use repo::{Repository, RepositoryCapability, discover_heddle_root};
 use sley::Repository as SleyRepository;
 
-use crate::cli::{Cli, should_output_json};
+use super::action_line::print_command;
+use crate::cli::{Cli, should_output_json, style};
 
 /// Which annotation surface is asking. Drives wording only; both surfaces
 /// share the same storage boundary.
@@ -188,8 +189,8 @@ pub(crate) fn report_absent_store(
              feature — not projected into Git, so `git clone` does not carry them."
         );
         println!();
-        println!("Next");
-        println!("  command: heddle init");
+        println!("{}", style::bold("Next"));
+        print_command("heddle init");
         println!(
             "  then: {}   (records stay local to this working copy)",
             surface.first_step()
@@ -200,8 +201,8 @@ pub(crate) fn report_absent_store(
             absent.path.display()
         );
         println!();
-        println!("Next");
-        println!("  command: heddle init");
+        println!("{}", style::bold("Next"));
+        print_command("heddle init");
     }
     Ok(())
 }
