@@ -178,6 +178,39 @@ fn ignore_rule_transitions_force_the_same_safe_result_as_a_full_scan() {
 }
 
 #[test]
+fn gitignore_rule_transitions_force_the_same_safe_result_as_a_full_scan() {
+    // heddle#1155: clearing root `.gitignore` must re-surface previously
+    // ignored untracked paths under the change monitor, not leave them
+    // hidden until something inside the junk tree is touched.
+    let (temp, repo, tree, index) = seed_repo();
+    fs::create_dir_all(temp.path().join("__pycache__")).unwrap();
+    fs::write(temp.path().join("__pycache__/app.pyc"), "binary").unwrap();
+    fs::write(temp.path().join(".gitignore"), "__pycache__/\n").unwrap();
+    assert_monitor_matches_full(
+        &repo,
+        &tree,
+        &index,
+        &BTreeSet::from([".gitignore".to_string()]),
+    );
+
+    fs::write(temp.path().join(".gitignore"), "").unwrap();
+    assert_monitor_matches_full(
+        &repo,
+        &tree,
+        &index,
+        &BTreeSet::from([".gitignore".to_string()]),
+    );
+
+    fs::write(temp.path().join(".gitignore"), "__pycache__/\n").unwrap();
+    assert_monitor_matches_full(
+        &repo,
+        &tree,
+        &index,
+        &BTreeSet::from([".gitignore".to_string()]),
+    );
+}
+
+#[test]
 fn missing_or_cursor_lagging_index_never_reports_false_clean() {
     let (temp, repo, tree, mut index) = seed_repo();
     fs::write(temp.path().join("src/a.txt"), "changed after cursor").unwrap();

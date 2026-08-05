@@ -49,8 +49,35 @@ Native mode reads `.gitignore` directly from the worktree even when no `.git`
 directory exists. Reading it does not discover, initialize, or otherwise
 require a Git repository.
 
+`heddle status` and `heddle capture` share this matcher in the root checkout
+and in isolated thread checkouts (`heddle start --path …`). Build junk that
+matches a root ignore rule is never listed as unsaved work and never enters
+permanent history.
+
 Heddle always protects its own `.heddle/` metadata. Other paths must
-be explicit in `.gitignore` or `.heddleignore`.
+be explicit in `.gitignore`, `.heddleignore`, or the config key below.
+
+## Config key: `[worktree] ignore`
+
+Repository config (`.heddle/config.toml`) can also contribute patterns:
+
+```toml
+[worktree]
+ignore = [".heddle", "scratch/"]
+```
+
+Config patterns are loaded first, then root `.gitignore`, then
+`.heddle/info/exclude`, then root `.heddleignore`. Prefer the ignore files
+for project policy; use `[worktree] ignore` for operator-local or
+repo-engine defaults that should not appear as a tracked ignore file.
+Default config always includes `.heddle`.
+
+## Capture path scoping
+
+`heddle capture` has no `--path` filter and no staging area: it saves the
+full unignored worktree. Exclude build junk with ignore rules before
+capture; do not expect path selection on the capture command. Path-scoped
+capture is a possible follow-up feature, not current behaviour.
 
 Ignore changes affect future captures only. Existing states are immutable, so
 previously captured artifacts remain in history. To clean the current line of

@@ -166,7 +166,11 @@ impl ChangeMonitorSession {
         let Some(changed_paths) = &self.changed_paths else {
             return true;
         };
-        if changed_paths.contains(".heddleignore") {
+        // Ignore-policy files rewrite which paths are visible. Any change to
+        // them invalidates per-path monitor skips so previously-ignored junk
+        // reappears (and newly-ignored paths disappear) without requiring a
+        // touch inside those trees (heddle#1155).
+        if ignore_policy_paths_changed(changed_paths) {
             return true;
         }
         let key = cache_key(rel_path);
@@ -208,7 +212,7 @@ impl ChangeMonitorSession {
             Some(paths) => paths,
             None => return false,
         };
-        if changed_paths.contains(".heddleignore") {
+        if ignore_policy_paths_changed(changed_paths) {
             return false;
         }
         let tree = match tree {
@@ -283,6 +287,15 @@ impl ChangeMonitorSession {
 fn subtree_skip_disabled() -> bool {
     std::env::var("HEDDLE_PERF_DISABLE_SUBTREE_SKIP")
         .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+}
+
+/// Root ignore-policy files whose content rewrite which paths status/capture
+/// may observe. A change to any of these forces a full ignore re-evaluation
+/// under the change monitor (same as editing a tracked source file would).
+fn ignore_policy_paths_changed(changed_paths: &BTreeSet<String>) -> bool {
+    changed_paths.iter().any(|path| {
+        path == ".heddleignore" || path == ".gitignore" || path == ".heddle/info/exclude"
+    })
 }
 
 const fn native_backend_supported() -> bool {
