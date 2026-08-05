@@ -13,6 +13,7 @@ mod diff;
 mod discussion;
 mod hash;
 mod identifiers;
+pub mod manifest;
 mod operation_id;
 mod redaction;
 mod risk_signal;
@@ -50,6 +51,13 @@ pub use discussion::{
 };
 pub use hash::{ChangeId, ChangeIdParseError, ContentHash, StateId, StateIdParseError};
 pub use identifiers::{MarkerName, Scope, ThreadName};
+pub use manifest::{
+    BuiltManifest, FsckFinding, FsckOptions, FsckReport, FsckRule, ManifestBinding,
+    ManifestBuildError, ManifestFacet, ManifestKey, ManifestNode, ManifestNodeSource,
+    ManifestObject, ManifestObjectKind, ManifestOwnerKind, PackRangeAudit, PackRangeClaim,
+    PackRecord, build_manifest, expand_manifest, fsck_manifest, fsck_manifest_with,
+    fsck_pack_range,
+};
 pub use operation_id::{OperationId, OperationIdParseError};
 pub use redaction::{
     REDACTION_SIGNING_PAYLOAD_VERSION_TAG, Redaction, RedactionError, RedactionsBlob,
