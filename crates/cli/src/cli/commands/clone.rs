@@ -560,7 +560,7 @@ fn finish_git_overlay_clone(
     remote_display: String,
 ) -> Result<FinishedGitOverlayClone> {
     configure_git_overlay_origin(local_path, &remote_label)?;
-    let repo = Repository::init_git_overlay_sidecar(local_path)?;
+    let repo = Repository::init_git_overlay_sidecar(local_path)?.without_fsmonitor();
     let refs = options
         .thread
         .as_ref()
@@ -1201,7 +1201,7 @@ async fn clone_local(
     // Create and initialize the local repository only after all
     // preflight target selection has succeeded.
     fs::create_dir_all(local_path)?;
-    let local_repo = Repository::init(local_path)?;
+    let local_repo = Repository::init(local_path)?.without_fsmonitor();
 
     // Fetch the state and dependencies
     let mut objects_copied = if let Some(d) = depth {
@@ -2337,7 +2337,8 @@ async fn execute_monorepo_node_steps(
             MonorepoNodeExecutionStep::InitRepo => {
                 repo = Some(
                     Repository::init(dest)
-                        .with_context(|| format!("failed at {}", progress.label()))?,
+                        .with_context(|| format!("failed at {}", progress.label()))?
+                        .without_fsmonitor(),
                 );
             }
             MonorepoNodeExecutionStep::FetchContent { state } => {
@@ -2473,7 +2474,9 @@ fn initialize_hosted_clone_repository(
         SleyRepository::init(root)
             .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
     }
-    Repository::init_clone(root, source_authority).map_err(wire::ProtocolError::from)
+    Repository::init_clone(root, source_authority)
+        .map(Repository::without_fsmonitor)
+        .map_err(wire::ProtocolError::from)
 }
 
 #[cfg(feature = "client")]

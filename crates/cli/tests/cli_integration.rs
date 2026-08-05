@@ -266,6 +266,8 @@ mod basics;
 mod cli_help_consistency;
 #[path = "cli_integration/cli_premium_output.rs"]
 mod cli_premium_output;
+#[path = "cli_integration/clone_fsmonitor_decoupling.rs"]
+mod clone_fsmonitor_decoupling;
 #[path = "cli_integration/clone_output_contract.rs"]
 mod clone_output_contract;
 #[path = "cli_integration/compact_output.rs"]
