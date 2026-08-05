@@ -330,6 +330,39 @@ pub(crate) fn rebuild_local_monitor_snapshot(
 pub fn run_local_monitor_helper(repo_root: &Path) -> Result<(), HeddleError> {
     let state_path = repo_root.join(".heddle/state").join("fsmonitor.toml");
     let endpoint_path = helper_endpoint_path(&state_path);
+
+    // Nothing to serve, and — more importantly — nothing to create.
+    // A checkout can be torn down between the spawn and this process
+    // getting scheduled, and `RepoLock` creates its lock file's parent
+    // directory, so touching a lock first would rebuild
+    // `.heddle/state/` inside the directory `heddle thread drop` had
+    // just reported gone. `.heddle` alone is not the test: the
+    // scaffolding a lock acquisition leaves behind satisfies that, and
+    // a pointer worktree's `.heddle` holds no `objects` at all.
+    if !crate::repository::is_heddle_repository_root(repo_root) {
+        return Ok(());
+    }
+
+    // Startup runs under the start lock, and that bracket *is* the
+    // readiness signal. Everyone who cares whether a helper is up —
+    // `try_spawn_local_helper_with` and
+    // `shutdown_local_monitor_helper` — takes this same lock, so once
+    // they hold it this process has either published its endpoint or
+    // exited. There is no interval where a helper is half-started and
+    // an observer has to guess, which is what the pid-liveness probe
+    // this replaces was trying and failing to do. heddle#1243.
+    let start_lease = objects::lock::RepoLock::at(helper_start_lock_path(&state_path)).write()?;
+
+    // Re-checked under the lock, because the check above raced a
+    // teardown that had not yet taken it. Past this point a teardown
+    // cannot be running: it takes this same lock before removing
+    // anything.
+    if !crate::repository::is_heddle_repository_root(repo_root) {
+        drop(start_lease);
+        discard_recreated_helper_state(repo_root, &state_path);
+        return Ok(());
+    }
+
     let Some(_lifetime_lease) =
         objects::lock::RepoLock::at(helper_lifetime_lock_path(&state_path)).try_write()?
     else {
@@ -341,6 +374,17 @@ pub fn run_local_monitor_helper(repo_root: &Path) -> Result<(), HeddleError> {
 
     let listener = TcpListener::bind((HELPER_HOST, 0))?;
     let port = listener.local_addr()?.port();
+
+    // Built before the endpoint is published, so the file only ever
+    // names a helper that can actually answer. Publishing first made
+    // "endpoint exists" mean no more than "a port was bound once":
+    // `LocalMonitorServer::new` fails when `inotify_init` returns
+    // EMFILE — the steady state of a box holding more live helpers
+    // than `fs.inotify.max_user_instances` allows — and every client
+    // that read the file got ECONNREFUSED from a port that had died
+    // with the process. heddle#1243.
+    let mut server = LocalMonitorServer::new(repo_root.to_path_buf(), state_path)?;
+
     let endpoint = EndpointState {
         version: HELPER_PROTOCOL_VERSION,
         host: HELPER_HOST.to_string(),
@@ -348,26 +392,40 @@ pub fn run_local_monitor_helper(repo_root: &Path) -> Result<(), HeddleError> {
         pid: Some(std::process::id()),
     };
     persist_endpoint(&endpoint_path, &endpoint)?;
-    remove_starting_helper_if_owned(&state_path, std::process::id());
+    // Ready: bound, watching, and about to accept. Releasing the start
+    // lease here is what unblocks anyone waiting on that readiness.
+    drop(start_lease);
 
-    // The endpoint is already published, so every failure from here
-    // on has to retract it. It names a port that dies with this
-    // process: a client that reads a stale one gets ECONNREFUSED,
-    // which `shutdown_local_monitor_helper` reports as a hard error,
-    // rather than the "no helper yet" path it knows how to recover
-    // from. Watcher startup is the failure that actually fires —
-    // `inotify_init` returns EMFILE once a box has more live helpers
-    // than `fs.inotify.max_user_instances` allows. heddle#1243.
-    let mut server = match LocalMonitorServer::new(repo_root.to_path_buf(), state_path) {
-        Ok(server) => server,
-        Err(error) => {
-            remove_endpoint_if_owned(&endpoint_path, &endpoint);
-            return Err(error);
-        }
-    };
     let result = run_local_monitor_helper_loop(&listener, &mut server);
     remove_endpoint_if_owned(&endpoint_path, &endpoint);
     result
+}
+
+/// Undo the scaffolding a lock acquisition rebuilds inside a checkout
+/// that was removed while this helper was starting.
+///
+/// `RepoLock::write` calls `create_dir_all` on its lock file's parent,
+/// so a helper that loses the race with `heddle thread drop` leaves
+/// `<checkout>/.heddle/state/` standing — and `thread drop` has
+/// already told its caller that directory is gone. Every directory
+/// step is `remove_dir`, which refuses a non-empty directory, so this
+/// cannot take a live checkout with it: the first entry it cannot
+/// remove stops the walk.
+fn discard_recreated_helper_state(repo_root: &Path, state_path: &Path) {
+    let _ = fs::remove_file(helper_start_lock_path(state_path));
+    let _ = fs::remove_file(helper_lifetime_lock_path(state_path));
+    for directory in [
+        state_path.parent().map(Path::to_path_buf),
+        Some(repo_root.join(".heddle")),
+        Some(repo_root.to_path_buf()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if fs::remove_dir(&directory).is_err() {
+            return;
+        }
+    }
 }
 
 fn run_local_monitor_helper_loop(
@@ -705,31 +763,12 @@ fn helper_lifetime_lock_path(state_path: &Path) -> PathBuf {
     state_path.with_file_name("monitor-helper-lifetime.lock")
 }
 
-fn helper_starting_path(state_path: &Path) -> PathBuf {
-    state_path.with_file_name("monitor-helper-starting")
-}
-
-fn load_starting_helper_pid(state_path: &Path) -> Option<u32> {
-    fs::read_to_string(helper_starting_path(state_path))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
-}
-
-fn persist_starting_helper_pid(state_path: &Path, pid: u32) -> Result<(), HeddleError> {
-    objects::fs_atomic::write_file_atomic(
-        &helper_starting_path(state_path),
-        format!("{pid}\n").as_bytes(),
-    )?;
-    Ok(())
-}
-
-fn remove_starting_helper_if_owned(state_path: &Path, pid: u32) {
-    if load_starting_helper_pid(state_path) == Some(pid) {
-        let _ = fs::remove_file(helper_starting_path(state_path));
-    }
-}
+/// Marker an older build wrote to name a helper it had spawned but
+/// not yet seen come up. The start-lock bracket in
+/// [`run_local_monitor_helper`] supersedes it; teardown only sweeps
+/// the file so a checkout that ran one of those builds does not keep
+/// it forever.
+const LEGACY_HELPER_STARTING_FILE: &str = "monitor-helper-starting";
 
 fn try_local_helper_query(
     repo_root: &Path,
@@ -824,9 +863,7 @@ fn try_local_helper_refresh(repo_root: &Path, state_path: &Path) -> Result<bool,
 }
 
 fn try_spawn_local_helper(repo_root: &Path, state_path: &Path) -> Result<bool, HeddleError> {
-    try_spawn_local_helper_with(state_path, || {
-        spawn_local_helper_background(repo_root, state_path)
-    })
+    try_spawn_local_helper_with(state_path, || spawn_local_helper_background(repo_root))
 }
 
 fn try_spawn_local_helper_with(
@@ -903,7 +940,7 @@ fn retire_failed_helper_endpoint(
     Ok(())
 }
 
-fn spawn_local_helper_background(repo_root: &Path, state_path: &Path) -> Result<(), HeddleError> {
+fn spawn_local_helper_background(repo_root: &Path) -> Result<(), HeddleError> {
     let current_exe = std::env::current_exe()
         .map_err(|error| HeddleError::Config(format!("locate heddle executable: {error}")))?;
     let helper = local_helper_binary_for_executable(&current_exe);
@@ -921,19 +958,17 @@ fn spawn_local_helper_background(repo_root: &Path, state_path: &Path) -> Result<
             return Ok(());
         }
     };
-    let pid = child.id();
-    if let Err(error) = persist_starting_helper_pid(state_path, pid) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
-    }
-    if crate::daemon::load_endpoint(&helper_endpoint_path(state_path))
-        .ok()
-        .and_then(|endpoint| endpoint.pid)
-        == Some(pid)
-    {
-        remove_starting_helper_if_owned(state_path, pid);
-    }
+    // Non-blocking by contract — `cold_start_never_polls_for_worker_
+    // readiness` pins it, and the caller falls back to a full scan for
+    // this one command. The helper announces itself by taking the
+    // start lock we are still holding, so it cannot get ahead of us.
+    //
+    // A single `try_wait` reaps the one child that never will: an exec
+    // that failed after `spawn` returned. Left unreaped it lingers as
+    // a zombie, and a zombie answers `kill(pid, 0)` exactly like a
+    // live process — which is how a dead helper used to read as one
+    // that was still starting. heddle#1243.
+    let _ = child.try_wait();
     Ok(())
 }
 
@@ -1012,27 +1047,19 @@ pub fn shutdown_local_monitor_helper(
     repo_root: &Path,
 ) -> Result<LocalMonitorShutdownGuard, HeddleError> {
     let state_path = repo_root.join(".heddle/state/fsmonitor.toml");
+    // Blocking, and deliberately the first thing we do. A helper holds
+    // this lock for the whole of its startup, so acquiring it is how
+    // we wait out one that is still coming up: by the time we are
+    // through, it has published its endpoint below or given up. There
+    // is no "still starting" state left to observe, which is why this
+    // no longer polls a pid and no longer fails the caller's command
+    // when that pid is still alive — `heddle thread drop` used to exit
+    // 78 over a helper it simply had not waited for, and an unreaped
+    // one looked alive forever. heddle#1243.
     let start_lease = objects::lock::RepoLock::at(helper_start_lock_path(&state_path)).write()?;
     let endpoint_path = helper_endpoint_path(&state_path);
 
-    let mut endpoint = crate::daemon::load_endpoint(&endpoint_path).ok();
-    if endpoint.is_none()
-        && let Some(starting_pid) = load_starting_helper_pid(&state_path)
-    {
-        for _ in 0..HELPER_START_POLLS {
-            endpoint = crate::daemon::load_endpoint(&endpoint_path).ok();
-            if endpoint.is_some() || !pid_alive(starting_pid) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(HELPER_START_POLL_MS));
-        }
-        if endpoint.is_none() && pid_alive(starting_pid) {
-            return Err(HeddleError::Config(format!(
-                "native monitor helper {starting_pid} did not finish starting before teardown"
-            )));
-        }
-        remove_starting_helper_if_owned(&state_path, starting_pid);
-    }
+    let endpoint = crate::daemon::load_endpoint(&endpoint_path).ok();
 
     if let Some(endpoint) = endpoint {
         let asked: Result<MonitorHelperResponse, HeddleError> = send_json_request(
@@ -1087,7 +1114,11 @@ pub fn shutdown_local_monitor_helper(
     })?;
 
     remove_endpoint(&endpoint_path);
-    let _ = fs::remove_file(helper_starting_path(&state_path));
+    // Swept, not consulted: builds before the start-lock readiness
+    // bracket announced a starting helper through this file, and a
+    // checkout carried over from one of them should not keep the
+    // stale marker.
+    let _ = fs::remove_file(state_path.with_file_name(LEGACY_HELPER_STARTING_FILE));
     for artifact in [&state_path, &snapshot_path(&state_path)] {
         match fs::remove_file(artifact) {
             Ok(()) => {}
@@ -1471,6 +1502,44 @@ mod tests {
         assert_eq!(spawns.load(Ordering::SeqCst), 1);
     }
 
+    /// `run_local_monitor_helper` refuses to start anywhere that is not
+    /// a repository root, and `.heddle/state/` alone is not one — that
+    /// is exactly the scaffolding a lock acquisition leaves behind. Any
+    /// test that expects the helper to actually come up has to look
+    /// like a checkout.
+    fn seed_repository_marker(checkout: &std::path::Path) {
+        std::fs::create_dir_all(checkout.join(".heddle")).unwrap();
+        std::fs::write(checkout.join(".heddle/HEAD"), b"ref: refs/threads/main\n").unwrap();
+    }
+
+    /// heddle#1243. A helper spawned just before `heddle thread drop`
+    /// can be scheduled only after the checkout is gone. It must not
+    /// rebuild it: `RepoLock` creates its lock file's parent, so a
+    /// helper that reaches for a lock first resurrects
+    /// `<checkout>/.heddle/state/` — and `thread drop` has already
+    /// returned success, telling its caller the directory is gone.
+    /// The integration suite sees that as a `thread drop` that reports
+    /// success while the materialised checkout is still on disk.
+    #[test]
+    fn a_helper_scheduled_after_teardown_does_not_resurrect_the_checkout() {
+        let temp = TempDir::new().unwrap();
+        let checkout = temp.path().join("checkout");
+        seed_repository_marker(&checkout);
+        std::fs::create_dir_all(checkout.join(".heddle/state")).unwrap();
+        // The teardown this helper lost the race to.
+        objects::fs_ops::remove_path_recursively(&checkout).unwrap();
+
+        super::run_local_monitor_helper(&checkout)
+            .expect("a removed checkout is nothing to serve, not a failure");
+
+        assert!(
+            !checkout.exists(),
+            "helper startup rebuilt the checkout that thread drop had removed: {:?}",
+            std::fs::read_dir(checkout.join(".heddle"))
+                .map(|entries| entries.flatten().map(|e| e.path()).collect::<Vec<_>>())
+        );
+    }
+
     #[test]
     fn cold_start_never_polls_for_worker_readiness() {
         let temp = TempDir::new().unwrap();
@@ -1484,11 +1553,13 @@ mod tests {
         );
     }
 
-    /// heddle#1243. The helper publishes its endpoint the moment it has
-    /// a port, before the `notify` watcher exists. If startup then
-    /// fails, the file survives the process and names a dead port —
-    /// and clients reading it get ECONNREFUSED rather than the
-    /// "no helper yet" path they know how to recover from.
+    /// heddle#1243. An endpoint file must name a helper that can
+    /// answer, so it is published only once `LocalMonitorServer::new`
+    /// has returned. An earlier shape published the moment a port was
+    /// bound, before the `notify` watcher existed: a startup that then
+    /// failed left the file naming a port that died with the process,
+    /// and clients reading it got ECONNREFUSED rather than the "no
+    /// helper yet" path they know how to recover from.
     ///
     /// In the field the failing step is `inotify_init`, which returns
     /// EMFILE once a box holds more live helpers than
@@ -1497,13 +1568,14 @@ mod tests {
     /// fallible step in `LocalMonitorServer::new`: an undecodable
     /// snapshot file.
     #[test]
-    fn a_helper_that_fails_to_start_retracts_its_endpoint() {
+    fn a_helper_that_fails_to_start_never_publishes_an_endpoint() {
         let temp = TempDir::new().unwrap();
         let checkout = temp.path().join("checkout");
         std::fs::create_dir_all(checkout.join(".heddle/state")).unwrap();
         let state_path = checkout.join(".heddle/state/fsmonitor.toml");
-        // Not msgpack, so `load_snapshot` fails — and it fails *after*
-        // the endpoint has been persisted.
+        seed_repository_marker(&checkout);
+        // Not msgpack, so `load_snapshot` fails — the step that now
+        // gates publication.
         std::fs::write(super::snapshot_path(&state_path), b"not a monitor snapshot").unwrap();
 
         let error = super::run_local_monitor_helper(&checkout)
@@ -1560,12 +1632,93 @@ mod tests {
         drop(guard);
     }
 
+    /// heddle#1243. Teardown used to infer "a helper is still coming
+    /// up" from a `monitor-helper-starting` file naming a pid, wait two
+    /// seconds for an endpoint, and then fail the caller's command if
+    /// the pid was still alive — `configuration error: native monitor
+    /// helper <pid> did not finish starting before teardown`, exit 78
+    /// out of `heddle thread drop`.
+    ///
+    /// The probe could not tell the three states apart that matter. A
+    /// helper genuinely mid-startup, a helper that exited without being
+    /// reaped (a zombie answers `kill(pid, 0)` exactly like a live
+    /// process), and a recycled pid all read as "still starting". This
+    /// test pins the state that produced the CI failure and is the one
+    /// no probe can get right: a marker naming a pid that is certainly
+    /// alive — our own — with no helper behind it at all.
+    ///
+    /// Readiness is now the start-lock bracket in
+    /// `run_local_monitor_helper` instead, which teardown has already
+    /// acquired by this point, so there is nothing left to guess at.
+    #[test]
+    fn a_starting_marker_naming_a_live_pid_does_not_fail_teardown() {
+        let temp = TempDir::new().unwrap();
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".heddle/state")).unwrap();
+        let state_path = checkout.join(".heddle/state/fsmonitor.toml");
+        let marker = state_path.with_file_name(super::LEGACY_HELPER_STARTING_FILE);
+        // Our own pid: alive for the whole test by construction, so the
+        // liveness probe this replaces could only ever conclude "still
+        // starting" and fail.
+        std::fs::write(&marker, format!("{}\n", std::process::id())).unwrap();
+
+        let started = std::time::Instant::now();
+        let guard = shutdown_local_monitor_helper(&checkout)
+            .expect("a marker is not a helper; teardown must not fail on one");
+        let elapsed = started.elapsed();
+
+        assert!(
+            !marker.exists(),
+            "teardown should sweep the stale marker at {}",
+            marker.display()
+        );
+        // The old path burned HELPER_START_POLLS * HELPER_START_POLL_MS
+        // polling for an endpoint that was never coming.
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "teardown spent {elapsed:?} waiting on a marker it should not consult"
+        );
+        drop(guard);
+    }
+
+    /// The other half of heddle#1243's teardown change: dropping the
+    /// "did not finish starting" error must not have made teardown
+    /// unconditionally succeed. A helper that is genuinely live holds
+    /// the lifetime lock, and that — not the endpoint file, not a pid —
+    /// is what teardown proves before letting a caller remove the
+    /// checkout out from under a running watcher.
+    #[test]
+    fn teardown_still_refuses_while_a_helper_holds_the_lifetime_lock() {
+        let temp = TempDir::new().unwrap();
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".heddle/state")).unwrap();
+        let state_path = checkout.join(".heddle/state/fsmonitor.toml");
+
+        // Stand in for a live helper: hold the lifetime lock, and
+        // nothing else. No endpoint, no marker — so the only thing that
+        // can produce a refusal is the lock itself.
+        let held = objects::lock::RepoLock::at(super::helper_lifetime_lock_path(&state_path))
+            .write()
+            .unwrap();
+
+        let error = match shutdown_local_monitor_helper(&checkout) {
+            Err(error) => error,
+            Ok(_) => panic!("a helper holding the lifetime lock has not drained"),
+        };
+        assert!(
+            error.to_string().contains("did not drain before teardown"),
+            "expected the drain proof to be what refused, got: {error}"
+        );
+        drop(held);
+    }
+
     #[test]
     fn shutdown_drains_native_watcher_before_checkout_removal() {
         let temp = TempDir::new().unwrap();
         let checkout = temp.path().join("checkout");
         std::fs::create_dir_all(checkout.join(".heddle/state")).unwrap();
         std::fs::write(checkout.join("tracked.txt"), b"tracked\n").unwrap();
+        seed_repository_marker(&checkout);
         let state_path = checkout.join(".heddle/state/fsmonitor.toml");
         let endpoint_path = helper_endpoint_path(&state_path);
         let helper_root = checkout.clone();
