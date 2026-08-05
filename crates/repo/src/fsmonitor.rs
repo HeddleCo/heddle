@@ -448,6 +448,30 @@ impl DaemonHandler for LocalMonitorServer {
         if self.shutdown_requested {
             return IdleDecision::Exit;
         }
+        // A watcher whose worktree is gone has nothing left to
+        // answer, and holding it open is not free: each live helper
+        // owns an `inotify` instance, and the kernel caps those at
+        // `fs.inotify.max_user_instances` per user — 128 on a stock
+        // Ubuntu runner. Without this, a helper outlived its checkout
+        // by the full `HELPER_IDLE_TIMEOUT_SECS`, so a test suite that
+        // creates and drops repositories faster than five minutes
+        // accumulated one daemon per repository until `inotify_init`
+        // started returning EMFILE. Measured at 1,006 live helpers,
+        // every one of them watching a directory that no longer
+        // existed, which is what broke `LocalMonitorServer::new` for
+        // everything that came after. heddle#1243.
+        //
+        // Symmetric with startup: `run_local_monitor_helper` refuses
+        // to begin serving anywhere that is not a repository root, so
+        // it should not keep serving somewhere that has stopped being
+        // one. The members the check looks for are durable, not
+        // rewritten in place, so a live repository cannot blink out
+        // between ticks — and a helper retired in error is respawned
+        // by the next command, which falls back to a full scan
+        // meanwhile.
+        if !crate::repository::is_heddle_repository_root(&self.repo_root) {
+            return IdleDecision::Exit;
+        }
         // fsmonitor drains pending notify events between accepts so
         // the change cursor stays current even when no CLI is
         // querying. Errors here historically propagated; preserve
@@ -1747,6 +1771,77 @@ mod tests {
         assert!(
             !checkout.exists(),
             "a drained watcher must not recreate its checkout"
+        );
+    }
+
+    /// heddle#1243. A helper must not outlive the worktree it
+    /// watches. Every live helper owns an `inotify` instance, and the
+    /// kernel caps those per user — `fs.inotify.max_user_instances`,
+    /// 128 on a stock Ubuntu runner. A helper that idles out the full
+    /// `HELPER_IDLE_TIMEOUT_SECS` after its checkout is gone therefore
+    /// costs one of 128 slots for five minutes, and a suite that
+    /// creates and drops repositories faster than that exhausts them:
+    /// running `heddle-cli --test cli_integration` on this branch left
+    /// 1,006 live helpers, every one watching a directory that no
+    /// longer existed. The next process to call `inotify_init` — the
+    /// `heddle-repo` unit tests, two minutes later in the same CI job
+    /// — got EMFILE out of `LocalMonitorServer::new`, which is both
+    /// why three of them panicked on `Too many open files` and why
+    /// `shutdown_drains_native_watcher_before_checkout_removal` never
+    /// saw an endpoint appear: its helper failed to build a watcher,
+    /// so it correctly published nothing.
+    ///
+    /// The timeout below is what makes this a real test rather than a
+    /// hang. Without the check in `on_tick` the helper sits in its
+    /// accept loop for the full five minutes, so `recv_timeout`
+    /// expires and the assertion fails by name instead of stalling
+    /// the suite until the harness kills it.
+    #[test]
+    fn a_helper_exits_once_its_worktree_is_gone() {
+        let temp = TempDir::new().unwrap();
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".heddle/state")).unwrap();
+        std::fs::write(checkout.join("tracked.txt"), b"tracked\n").unwrap();
+        seed_repository_marker(&checkout);
+        let endpoint_path = helper_endpoint_path(&checkout.join(".heddle/state/fsmonitor.toml"));
+
+        let (exited_tx, exited) = std::sync::mpsc::channel();
+        let helper_root = checkout.clone();
+        thread::spawn(move || {
+            let _ = exited_tx.send(super::run_local_monitor_helper(&helper_root));
+        });
+        for _ in 0..400 {
+            if endpoint_path.exists() {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            endpoint_path.exists(),
+            "the helper under test has to come up before its worktree is removed"
+        );
+
+        // No `shutdown` RPC and no `thread drop`: the worktree simply
+        // goes away, which is what a dropped `TempDir` does to every
+        // repository an integration suite builds.
+        objects::fs_ops::remove_path_recursively(&checkout).unwrap();
+
+        // Generous next to the ~1s tick interval, tight next to the
+        // 300s idle timeout this is proving the helper does not wait
+        // out.
+        let result = exited
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "helper was still watching a deleted worktree 30s on ({error}); \
+                     it is holding an inotify instance until its {}s idle timeout",
+                    crate::daemon::HELPER_IDLE_TIMEOUT_SECS
+                )
+            });
+        result.expect("a vanished worktree is nothing left to serve, not a failure");
+        assert!(
+            !checkout.exists(),
+            "a retiring helper must not rebuild the worktree it was watching"
         );
     }
 
