@@ -312,6 +312,8 @@ mod identity_resolution;
 mod ignore_mechanics;
 #[path = "cli_integration/misc.rs"]
 mod misc;
+#[path = "cli_integration/native_scope_boundary.rs"]
+mod native_scope_boundary;
 #[path = "cli_integration/next_action_contract.rs"]
 mod next_action_contract;
 #[path = "cli_integration/oplog_salvage.rs"]

@@ -41,6 +41,7 @@ mod maintenance;
 mod marker;
 mod merge;
 mod mount_lifecycle;
+pub(crate) mod native_scope;
 mod next_action;
 mod operator_core;
 mod operator_loop;

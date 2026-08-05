@@ -280,7 +280,17 @@ Examples:
     /// resolve by edit or dismiss. Anchors
     /// travel across renames and cross-file moves on subsequent
     /// state mutations.
+    ///
+    /// Native Heddle only. Discussions live in `.heddle` and travel
+    /// over `heddle push` / `heddle pull` to a Heddle remote. They are
+    /// not projected into Git, so `git clone` does not carry them; in
+    /// Git Overlay mode they are local to that working copy.
     #[command(after_help = "\
+Scope:
+  Native Heddle only. Discussions are stored in `.heddle` and move over
+  `heddle push` / `heddle pull`. Git does not carry them: a `git clone` of a
+  Git Overlay repository arrives with no discussions and no Heddle store.
+
 Examples:
   heddle discuss open src/auth.rs verify 'Should this reject expired tokens?'  # anchor a discussion
   heddle discuss append <id> 'switched to argon2'          # add a turn
@@ -436,7 +446,19 @@ Examples:
     },
 
     /// Manage code context annotations.
+    ///
+    /// Native Heddle only. Annotations live in `.heddle`, and travel
+    /// over `heddle push` / `heddle pull` to a Heddle remote. They are
+    /// deliberately not projected into Git — not into `refs/notes/*`,
+    /// not into a tracked file — so `git push` and `git clone` do not
+    /// carry them. In Git Overlay mode annotations still work and are
+    /// still useful; they are simply local to that working copy.
     #[command(after_help = "\
+Scope:
+  Native Heddle only. Annotations are stored in `.heddle` and move over
+  `heddle push` / `heddle pull`. Git does not carry them: a `git clone` of a
+  Git Overlay repository arrives with no annotations and no Heddle store.
+
 Examples:
   heddle context set --path src/auth.rs --scope symbol:verify --kind invariant -m 'returns false on timing mismatch'
   heddle context get --path src/auth.rs --scope symbol:verify
