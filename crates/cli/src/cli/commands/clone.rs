@@ -43,9 +43,9 @@ use objects::{
     sync::LockExt,
 };
 use refs::Head;
-#[cfg(feature = "client")]
-use repo::clone_intent::CloneIntent;
 use repo::{BlobHydrator, Repository};
+#[cfg(feature = "client")]
+use repo::{RepositorySourceAuthority, clone_intent::CloneIntent};
 use serde::Serialize;
 #[cfg(feature = "client")]
 use sley::plumbing::sley_worktree;
@@ -1621,16 +1621,7 @@ async fn clone_network_connected(
                     repo_path,
                 )
                 .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
-                let git_overlay_clone =
-                    hosted_clone_thread_revision_address(&refs.refs, &track_name)
-                        .is_some_and(|address| address.starts_with("git:"));
-                fs::create_dir_all(local_path)
-                    .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
-                if git_overlay_clone {
-                    SleyRepository::init(local_path)
-                        .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
-                }
-                let repo = Repository::init_clone(local_path).map_err(wire::ProtocolError::from)?;
+                let repo = initialize_hosted_clone_repository(local_path, &refs.refs, &track_name)?;
                 folded_refs = Some(refs.refs);
                 Ok(repo)
             },
@@ -1654,13 +1645,8 @@ async fn clone_network_connected(
                 remote_refs.iter().map(|entry| entry.name.as_str()),
                 repo_path,
             )?;
-            let git_overlay_clone = hosted_clone_thread_revision_address(&remote_refs, &track_name)
-                .is_some_and(|address| address.starts_with("git:"));
-            fs::create_dir_all(local_path)?;
-            if git_overlay_clone {
-                SleyRepository::init(local_path).map_err(anyhow::Error::msg)?;
-            }
-            let local_repo = Repository::init_clone(local_path)?;
+            let local_repo =
+                initialize_hosted_clone_repository(local_path, &remote_refs, &track_name)?;
             let result = client
                 .repair_clone_with_depth_and_materialization(
                     &local_repo,
@@ -1898,8 +1884,6 @@ async fn recover_interrupted_clone_connected(
     intent: &CloneIntent,
     client: &mut HostedClient,
 ) -> Result<()> {
-    let durability = CloneDurabilityBatch::begin(root);
-    let repo = Repository::init_clone(root)?;
     let remote_refs = client
         .list_refs_with_revision_addresses(&intent.repository)
         .await?;
@@ -1913,9 +1897,8 @@ async fn recover_interrupted_clone_connected(
     )?;
     let git_overlay_clone = hosted_clone_thread_revision_address(&remote_refs, &track_name)
         .is_some_and(|address| address.starts_with("git:"));
-    if git_overlay_clone && !root.join(".git").exists() {
-        SleyRepository::init(root).map_err(anyhow::Error::msg)?;
-    }
+    let durability = CloneDurabilityBatch::begin(root);
+    let repo = initialize_hosted_clone_repository(root, &remote_refs, &track_name)?;
     let materialization = if intent.lazy {
         PullMaterialization::Lazy
     } else {
@@ -2472,6 +2455,28 @@ fn hosted_clone_thread_revision_address<'a>(
 }
 
 #[cfg(feature = "client")]
+fn initialize_hosted_clone_repository(
+    root: &Path,
+    remote_refs: &[HostedRefEntry],
+    track_name: &str,
+) -> std::result::Result<Repository, wire::ProtocolError> {
+    let source_authority = if hosted_clone_thread_revision_address(remote_refs, track_name)
+        .is_some_and(|address| address.starts_with("git:"))
+    {
+        RepositorySourceAuthority::GitOverlay
+    } else {
+        RepositorySourceAuthority::Native
+    };
+    fs::create_dir_all(root)
+        .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
+    if source_authority == RepositorySourceAuthority::GitOverlay && !root.join(".git").exists() {
+        SleyRepository::init(root)
+            .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
+    }
+    Repository::init_clone(root, source_authority).map_err(wire::ProtocolError::from)
+}
+
+#[cfg(feature = "client")]
 fn finish_hosted_git_overlay_checkout(repo: &Repository, branch: &str) -> Result<()> {
     Repository::ensure_git_overlay_local_excludes(repo.root())?;
     let git_repo = SleyRepository::discover(repo.root()).map_err(anyhow::Error::msg)?;
@@ -2790,6 +2795,67 @@ mod tests {
                 .expect("thread selected");
 
         assert_eq!(selected, "feature");
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_clone_initialization_adopts_advertised_git_lane() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let root = temp.path().join("clone");
+        CloneIntent {
+            origin: "heddle://127.0.0.1:8421/owner/repo".to_string(),
+            endpoint: "127.0.0.1:8421".to_string(),
+            repository: "owner/repo".to_string(),
+            thread: Some("main".to_string()),
+            depth: None,
+            lazy: false,
+        }
+        .create(&root)
+        .expect("create clone intent");
+        let remote_refs = vec![HostedRefEntry {
+            name: "main".to_string(),
+            state_id: objects::object::StateId::from_bytes([1; 32]),
+            is_thread: true,
+            revision_address: "git:5b2471720c93ee30e5764a19f3d3b3ae9ec9712a".to_string(),
+        }];
+
+        let repo = initialize_hosted_clone_repository(&root, &remote_refs, "main")
+            .expect("initialize Git-lane clone");
+
+        assert_eq!(
+            repo.source_authority(),
+            RepositorySourceAuthority::GitOverlay
+        );
+        assert!(root.join(".git").is_dir());
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_clone_initialization_keeps_native_lane_native() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let root = temp.path().join("clone");
+        CloneIntent {
+            origin: "heddle://127.0.0.1:8421/owner/repo".to_string(),
+            endpoint: "127.0.0.1:8421".to_string(),
+            repository: "owner/repo".to_string(),
+            thread: Some("main".to_string()),
+            depth: None,
+            lazy: false,
+        }
+        .create(&root)
+        .expect("create clone intent");
+        let remote_refs = vec![HostedRefEntry {
+            name: "main".to_string(),
+            state_id: objects::object::StateId::from_bytes([2; 32]),
+            is_thread: true,
+            revision_address: "heddle:0123456789abcdef".to_string(),
+        }];
+
+        let repo = initialize_hosted_clone_repository(&root, &remote_refs, "main")
+            .expect("initialize native clone");
+
+        assert_eq!(repo.source_authority(), RepositorySourceAuthority::Native);
+        assert!(!root.join(".git").exists());
     }
 
     // weft#633: the hosted ListRefs response for a git-overlay repo carries

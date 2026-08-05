@@ -4714,6 +4714,33 @@ mod git_lane_pull_staging_tests {
             .expect_err("duplicate ref update must be rejected");
         assert!(duplicate.to_string().contains("duplicate"));
     }
+
+    #[test]
+    fn hosted_pull_rejects_git_lane_transfer_for_native_repository() {
+        let temp = tempfile::TempDir::new().expect("temp native repo");
+        let repo = Repository::init_default(temp.path()).expect("init native repo");
+        let mut git_repo = None;
+        let mut pack_state = GitPackPullInstallState::default();
+        let mut staged = staging(true);
+
+        let error = accept_git_lane_pull_transfer(
+            &repo,
+            &mut git_repo,
+            &mut pack_state,
+            &mut staged,
+            GitLaneTransfer {
+                body: Some(git_lane_transfer::Body::Checkpoint(
+                    GitCheckpointTransfer::default(),
+                )),
+            },
+        )
+        .expect_err("native repositories must reject Git-lane transfers");
+
+        println!("{error}");
+        assert!(error.to_string().contains(
+            "received git-lane pull transfer for non-GitOverlay repository (capability NativeHeddle)"
+        ));
+    }
 }
 
 #[cfg(test)]

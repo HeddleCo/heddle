@@ -885,10 +885,14 @@ impl Repository {
     /// Build or resume the unpublished local skeleton for a hosted clone.
     ///
     /// A durable [`crate::clone_intent::CloneIntent`] must already exist. This
-    /// initializer deliberately creates no HEAD or thread ref: those are the
-    /// publication gate and are written only after the fetched closure passes
-    /// hash verification and its clone durability batch commits.
-    pub fn init_clone(path: impl AsRef<Path>) -> Result<Self> {
+    /// initializer persists the source authority selected from the server's
+    /// bootstrap refs, but deliberately creates no HEAD or thread ref: those
+    /// are the publication gate and are written only after the fetched closure
+    /// passes hash verification and its clone durability batch commits.
+    pub fn init_clone(
+        path: impl AsRef<Path>,
+        source_authority: RepositorySourceAuthority,
+    ) -> Result<Self> {
         let root = path.as_ref().to_path_buf();
         let heddle_dir = root.join(".heddle");
         if crate::clone_intent::CloneIntent::load(&root)?.is_none() {
@@ -907,15 +911,16 @@ impl Repository {
         oplog.init()?;
 
         let config_path = heddle_dir.join("config.toml");
-        let config = match RepoConfig::load_for_repository(&config_path) {
+        let mut config = match RepoConfig::load_for_repository(&config_path) {
             Ok(config) => config,
             Err(HeddleError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                let config = RepoConfig::default();
-                config.save(&config_path)?;
-                config
+                RepoConfig::default()
             }
             Err(error) => return Err(error),
         };
+        config.repository.source_authority = source_authority;
+        config.save(&config_path)?;
+        let store = Self::build_store(&config, &root, &heddle_dir, None)?;
 
         let reconciler = std::sync::Arc::new(crate::atomic::OplogRefReconciler::new(
             &heddle_dir,
@@ -931,7 +936,7 @@ impl Repository {
             root,
             heddle_dir: heddle_dir.clone(),
             capability: repository_capability_for_authority(config.repository.source_authority),
-            store: AnyStore::Fs(store),
+            store,
             refs,
             oplog,
             config,

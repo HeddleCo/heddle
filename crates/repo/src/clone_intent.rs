@@ -71,14 +71,15 @@ pub fn find_clone_intent_root(start: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::Repository;
     use objects::{
         fs_atomic::CloneDurabilityBatch,
         object::{Attribution, Principal, State, ThreadName, Tree},
         store::ObjectStore,
     };
     use refs::Head;
+
+    use super::*;
+    use crate::{Repository, RepositorySourceAuthority};
 
     fn intent() -> CloneIntent {
         CloneIntent {
@@ -98,7 +99,7 @@ mod tests {
         intent().create(&root).unwrap();
 
         let durability = CloneDurabilityBatch::begin(&root);
-        let repo = Repository::init_clone(&root).unwrap();
+        let repo = Repository::init_clone(&root, RepositorySourceAuthority::Native).unwrap();
         assert!(!repo.heddle_dir().join("HEAD").exists());
         assert!(matches!(
             Repository::open(&root),
