@@ -47,5 +47,7 @@ pub use mount_proto::{
     MountDaemonRequest, MountDaemonResponse, MountRegistryFile, MountStatus, PersistedMount,
     mount_daemon_endpoint_path, mount_daemon_registry_path,
 };
-pub use protocol::{HELPER_HOST, HELPER_IDLE_POLL_MS, HELPER_IDLE_TIMEOUT_SECS, send_json_request};
+pub use protocol::{
+    HELPER_HOST, HELPER_IDLE_TIMEOUT_SECS, HELPER_TICK_INTERVAL_MS, send_json_request,
+};
 pub use server::{IdleDecision, mount_idle_policy, run_server_loop};

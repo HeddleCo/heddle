@@ -3,25 +3,37 @@
 //!
 //! Spawns nothing on its own — the caller binds the [`TcpListener`]
 //! and provides a [`DaemonHandler`] for per-connection RPC + idle
-//! ticks. We handle the accept loop, the idle-poll heartbeat, and
-//! the per-connection JSON framing. The daemon-specific logic (verb
+//! ticks. We handle the accept loop, the idle heartbeat, and the
+//! per-connection JSON framing. The daemon-specific logic (verb
 //! switch, registry mutation, persisted state) stays out of here.
+//!
+//! The wait is event-driven. An earlier shape put the listener in
+//! non-blocking mode and spun `accept()` / `sleep(5ms)`, which cost
+//! ~60,000 `accept4`-EAGAIN + `clock_nanosleep` pairs over a single
+//! helper's 300s idle lifetime — measured at 46,680 `accept4` (46,679
+//! failing) and 46,678 `clock_nanosleep` in the heddle#1243 clone
+//! trace. Now a dedicated thread parks in a blocking `accept()` and
+//! hands sockets over a channel; the main loop parks on that channel
+//! with [`DaemonHandler::tick_interval`] as its timeout.
 
 use std::{
     io::{BufRead, BufReader, ErrorKind, Write},
     net::{TcpListener, TcpStream},
+    sync::mpsc::{self, Receiver, RecvTimeoutError},
+    thread,
     time::{Duration, Instant},
 };
 
 use objects::error::HeddleError;
 
-use super::protocol::{HELPER_IDLE_POLL_MS, HELPER_IDLE_TIMEOUT_SECS};
+use super::protocol::{HELPER_IDLE_TIMEOUT_SECS, HELPER_TICK_INTERVAL_MS};
 
 /// Decision returned by the per-tick policy when no connection is
 /// pending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdleDecision {
-    /// Loop again, sleep for the standard poll interval.
+    /// Keep serving: park until the next connection lands or the
+    /// tick interval elapses, whichever comes first.
     Continue,
     /// Time to exit cleanly. The caller is expected to have removed
     /// the endpoint file before returning.
@@ -41,37 +53,99 @@ pub trait DaemonHandler {
     /// request/response types implement serde.
     fn handle(&mut self, stream: TcpStream) -> Result<(), HeddleError>;
 
-    /// Called between accepts. Implementations may drain background
-    /// state (e.g. fsmonitor's `notify` events) and decide whether
-    /// the loop should continue or exit. `idle_for` is the duration
-    /// since the last successful accept.
+    /// Called after every serviced connection and whenever
+    /// [`DaemonHandler::tick_interval`] elapses with no connection.
+    /// Implementations may drain background state (e.g. fsmonitor's
+    /// `notify` events) and decide whether the loop should continue
+    /// or exit. `idle_for` is the duration since the last accepted
+    /// connection.
     fn on_tick(&mut self, idle_for: Duration) -> IdleDecision;
+
+    /// How long to park waiting for a connection before running an
+    /// idle tick anyway.
+    ///
+    /// This does not delay RPC service — a connection wakes the loop
+    /// immediately. It only bounds how stale a handler's background
+    /// state may get between requests, and how coarsely the idle
+    /// timeout is observed.
+    fn tick_interval(&self) -> Duration {
+        Duration::from_millis(HELPER_TICK_INTERVAL_MS)
+    }
 }
 
 /// Drive `listener` with `handler` until the handler returns
-/// [`IdleDecision::Exit`] from its tick. The listener must be
-/// configured non-blocking by the caller.
+/// [`IdleDecision::Exit`] from its tick.
+///
+/// The listener is switched to blocking mode: a scoped acceptor
+/// thread owns the `accept()` call and forwards each socket over a
+/// channel, so an idle helper costs one parked thread rather than a
+/// poll-sleep loop.
 pub fn run_server_loop<H: DaemonHandler>(
     listener: &TcpListener,
     handler: &mut H,
 ) -> Result<(), HeddleError> {
-    let mut last_activity = Instant::now();
-    loop {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                last_activity = Instant::now();
-                handler.handle(stream)?;
-            }
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                let elapsed = last_activity.elapsed();
-                match handler.on_tick(elapsed) {
-                    IdleDecision::Continue => {
-                        std::thread::sleep(Duration::from_millis(HELPER_IDLE_POLL_MS));
+    listener.set_nonblocking(false)?;
+    // Captured before the acceptor starts so the exit path can dial
+    // the listener back and unblock it.
+    let local_addr = listener.local_addr()?;
+    let (connection_tx, connection_rx) = mpsc::channel::<TcpStream>();
+
+    thread::scope(|scope| {
+        let acceptor = scope.spawn(move || {
+            loop {
+                match listener.accept() {
+                    // A send error means the serve loop is gone; so are we.
+                    Ok((stream, _)) => {
+                        if connection_tx.send(stream).is_err() {
+                            return;
+                        }
                     }
-                    IdleDecision::Exit => return Ok(()),
+                    Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                    Err(_) => return,
                 }
             }
-            Err(error) => return Err(HeddleError::Io(error)),
+        });
+
+        let result = serve_connections(handler, &connection_rx);
+
+        // Retire the acceptor before the scope joins it. Dropping the
+        // receiver alone is not enough — the thread is parked inside
+        // `accept()` and only notices once a connection lands, so we
+        // dial our own listener to hand it one. The socket is bound to
+        // loopback, so this cannot leave the network.
+        drop(connection_rx);
+        let _ = TcpStream::connect(local_addr);
+        let _ = acceptor.join();
+        result
+    })
+}
+
+/// Service connections until the handler asks to exit. Split out of
+/// [`run_server_loop`] so the acceptor teardown above runs on every
+/// exit path, including the error one.
+fn serve_connections<H: DaemonHandler>(
+    handler: &mut H,
+    connections: &Receiver<TcpStream>,
+) -> Result<(), HeddleError> {
+    let mut last_activity = Instant::now();
+    loop {
+        let decision = match connections.recv_timeout(handler.tick_interval()) {
+            Ok(stream) => {
+                last_activity = Instant::now();
+                handler.handle(stream)?;
+                // Tick straight after the RPC rather than waiting out
+                // a whole interval: a `shutdown` verb sets its flag
+                // during `handle`, and this is where the handler gets
+                // to act on it.
+                handler.on_tick(last_activity.elapsed())
+            }
+            Err(RecvTimeoutError::Timeout) => handler.on_tick(last_activity.elapsed()),
+            // The acceptor gave up (listener error). Nothing more will
+            // ever arrive, so shut down cleanly.
+            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+        };
+        if decision == IdleDecision::Exit {
+            return Ok(());
         }
     }
 }
@@ -145,10 +219,19 @@ mod tests {
     //! the daemon binary itself is Linux-only doesn't gate the
     //! correctness check.
 
-    use std::time::Duration;
+    use std::{
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        thread,
+        time::{Duration, Instant},
+    };
 
-    use super::{IdleDecision, default_idle_policy, mount_idle_policy};
-    use crate::daemon::HELPER_IDLE_TIMEOUT_SECS;
+    use objects::error::HeddleError;
+
+    use super::{
+        DaemonHandler, IdleDecision, default_idle_policy, mount_idle_policy, run_server_loop,
+    };
+    use crate::daemon::{HELPER_HOST, HELPER_IDLE_TIMEOUT_SECS};
 
     #[test]
     fn fsmonitor_idle_policy_exits_at_timeout() {
@@ -192,5 +275,129 @@ mod tests {
         // The caller is responsible for draining mounts before exit.
         let decision = mount_idle_policy(true, 5, Duration::from_secs(0));
         assert_eq!(decision, IdleDecision::Exit);
+    }
+
+    /// Handler that records how many idle ticks it saw and exits once
+    /// it has been alive for `lifetime`.
+    struct TickCounter {
+        ticks: usize,
+        started: Instant,
+        lifetime: Duration,
+        tick: Duration,
+    }
+
+    impl DaemonHandler for TickCounter {
+        fn handle(&mut self, _stream: TcpStream) -> Result<(), HeddleError> {
+            Ok(())
+        }
+
+        fn on_tick(&mut self, _idle_for: Duration) -> IdleDecision {
+            self.ticks += 1;
+            if self.started.elapsed() >= self.lifetime {
+                IdleDecision::Exit
+            } else {
+                IdleDecision::Continue
+            }
+        }
+
+        fn tick_interval(&self) -> Duration {
+            self.tick
+        }
+    }
+
+    /// Regression test for heddle#1243: an idle helper must park, not
+    /// spin. The tick count over a fixed idle window is the observable
+    /// proxy for the syscall storm — the pre-fix loop woke every 5ms
+    /// (an `accept4`-EAGAIN plus a `clock_nanosleep` each time), so
+    /// this 500ms window would have produced ~100 ticks instead of ~5.
+    #[test]
+    fn an_idle_helper_ticks_on_its_interval_instead_of_spinning() {
+        let listener = TcpListener::bind((HELPER_HOST, 0)).unwrap();
+        let lifetime = Duration::from_millis(500);
+        let tick = Duration::from_millis(100);
+        let mut handler = TickCounter {
+            ticks: 0,
+            started: Instant::now(),
+            lifetime,
+            tick,
+        };
+
+        run_server_loop(&listener, &mut handler).unwrap();
+
+        // The loop cannot tick faster than its interval, so the ceiling
+        // is the window divided by the interval, plus slack for a
+        // loaded CI box. A 5ms poll-sleep would blow straight past it.
+        let ceiling = 2 * (lifetime.as_millis() / tick.as_millis()) as usize;
+        assert!(
+            handler.ticks <= ceiling,
+            "idle helper ticked {} times in {lifetime:?} at a {tick:?} interval (ceiling {ceiling}) — the loop is spinning",
+            handler.ticks
+        );
+        assert!(
+            handler.ticks >= 2,
+            "idle helper should still tick at all; saw {}",
+            handler.ticks
+        );
+    }
+
+    /// Handler that answers one connection and then exits.
+    struct OneShot {
+        served: bool,
+        tick: Duration,
+    }
+
+    impl DaemonHandler for OneShot {
+        fn handle(&mut self, mut stream: TcpStream) -> Result<(), HeddleError> {
+            stream.write_all(b"ok\n")?;
+            self.served = true;
+            Ok(())
+        }
+
+        fn on_tick(&mut self, _idle_for: Duration) -> IdleDecision {
+            if self.served {
+                IdleDecision::Exit
+            } else {
+                IdleDecision::Continue
+            }
+        }
+
+        fn tick_interval(&self) -> Duration {
+            self.tick
+        }
+    }
+
+    /// The other half of the fix: parking on a long interval must not
+    /// delay RPC service. A connection has to wake the loop straight
+    /// away, and the post-RPC tick has to observe the handler's own
+    /// exit request without waiting out another interval.
+    #[test]
+    fn a_connection_is_served_without_waiting_out_the_tick_interval() {
+        let listener = TcpListener::bind((HELPER_HOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        // Far longer than the test's own timeout: if service were gated
+        // on the tick, this test would hang rather than merely fail.
+        let tick = Duration::from_secs(300);
+
+        let client = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).unwrap();
+            reply
+        });
+
+        let started = Instant::now();
+        let mut handler = OneShot {
+            served: false,
+            tick,
+        };
+        run_server_loop(&listener, &mut handler).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(client.join().unwrap(), "ok\n");
+        assert!(handler.served);
+        assert!(
+            elapsed < Duration::from_secs(30),
+            "serving one RPC took {elapsed:?}; the loop is gating accepts on its tick interval"
+        );
     }
 }

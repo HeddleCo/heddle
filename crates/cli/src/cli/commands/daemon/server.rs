@@ -42,7 +42,6 @@ pub fn run_mount_daemon(repo_root: &Path) -> Result<()> {
     }
 
     let listener = TcpListener::bind((HELPER_HOST, 0))?;
-    listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     persist_endpoint(
         &endpoint_path,

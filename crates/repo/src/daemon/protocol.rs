@@ -20,7 +20,21 @@ use super::endpoint::EndpointState;
 pub const HELPER_HOST: &str = "127.0.0.1";
 pub const HELPER_CONNECT_TIMEOUT_MS: u64 = 1000;
 pub const HELPER_IDLE_TIMEOUT_SECS: u64 = 300;
-pub const HELPER_IDLE_POLL_MS: u64 = 5;
+
+/// How long a helper parks waiting for a connection before running an
+/// idle tick.
+///
+/// This is a heartbeat, not a poll interval: the listener loop blocks
+/// in `accept()` on a dedicated thread and parks on a channel here, so
+/// a connection is serviced the moment it lands regardless of this
+/// value. It only bounds how long a handler waits before it next gets
+/// to drain background state and re-check the idle timeout.
+///
+/// It used to be 5ms, with the loop spinning `accept()` non-blocking
+/// and sleeping between tries. Over one 300s idle lifetime that cost
+/// ~60,000 `accept4`-EAGAIN + `clock_nanosleep` pairs per live helper —
+/// the busy-wait measured in heddle#1243.
+pub const HELPER_TICK_INTERVAL_MS: u64 = 1_000;
 
 /// Send a single JSON request to a helper and decode its single-line
 /// JSON reply. Used by both the fsmonitor and mount daemon clients.

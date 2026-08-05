@@ -340,7 +340,6 @@ pub fn run_local_monitor_helper(repo_root: &Path) -> Result<(), HeddleError> {
     }
 
     let listener = TcpListener::bind((HELPER_HOST, 0))?;
-    listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     let endpoint = EndpointState {
         version: HELPER_PROTOCOL_VERSION,
