@@ -28,6 +28,12 @@ use objects::error::HeddleError;
 
 use super::protocol::{HELPER_IDLE_TIMEOUT_SECS, HELPER_TICK_INTERVAL_MS};
 
+/// How long the exit path waits on its own listener when handing the
+/// acceptor thread the connection that retires it. Bounded because
+/// the dial is a courtesy, not a requirement — see the teardown note
+/// in [`run_server_loop`].
+const ACCEPTOR_RETIRE_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// Decision returned by the per-tick policy when no connection is
 /// pending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +82,7 @@ pub trait DaemonHandler {
 /// Drive `listener` with `handler` until the handler returns
 /// [`IdleDecision::Exit`] from its tick.
 ///
-/// The listener is switched to blocking mode: a scoped acceptor
+/// The listener is switched to blocking mode: a detached acceptor
 /// thread owns the `accept()` call and forwards each socket over a
 /// channel, so an idle helper costs one parked thread rather than a
 /// poll-sleep loop.
@@ -85,39 +91,43 @@ pub fn run_server_loop<H: DaemonHandler>(
     handler: &mut H,
 ) -> Result<(), HeddleError> {
     listener.set_nonblocking(false)?;
-    // Captured before the acceptor starts so the exit path can dial
-    // the listener back and unblock it.
+    // Cloned so the acceptor owns a `'static` listener: the thread is
+    // deliberately not joined (see the teardown note below), so it
+    // cannot borrow from this frame.
     let local_addr = listener.local_addr()?;
+    let acceptor_listener = listener.try_clone()?;
     let (connection_tx, connection_rx) = mpsc::channel::<TcpStream>();
 
-    thread::scope(|scope| {
-        let acceptor = scope.spawn(move || {
-            loop {
-                match listener.accept() {
-                    // A send error means the serve loop is gone; so are we.
-                    Ok((stream, _)) => {
-                        if connection_tx.send(stream).is_err() {
-                            return;
-                        }
+    thread::spawn(move || {
+        loop {
+            match acceptor_listener.accept() {
+                // A send error means the serve loop is gone; so are we.
+                Ok((stream, _)) => {
+                    if connection_tx.send(stream).is_err() {
+                        return;
                     }
-                    Err(error) if error.kind() == ErrorKind::Interrupted => {}
-                    Err(_) => return,
                 }
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(_) => return,
             }
-        });
+        }
+    });
 
-        let result = serve_connections(handler, &connection_rx);
+    let result = serve_connections(handler, &connection_rx);
 
-        // Retire the acceptor before the scope joins it. Dropping the
-        // receiver alone is not enough — the thread is parked inside
-        // `accept()` and only notices once a connection lands, so we
-        // dial our own listener to hand it one. The socket is bound to
-        // loopback, so this cannot leave the network.
-        drop(connection_rx);
-        let _ = TcpStream::connect(local_addr);
-        let _ = acceptor.join();
-        result
-    })
+    // Retire the acceptor, but never *wait* on it. The thread is
+    // parked inside `accept()` and only notices the dropped receiver
+    // once a connection lands, so we hand it one by dialling our own
+    // loopback listener. That dial is best-effort: it is exactly the
+    // operation that fails when the box is out of file descriptors,
+    // and an earlier revision of this function joined the acceptor
+    // afterwards — which turned a failed dial into a helper that
+    // parks forever, holding its inotify instance and its endpoint
+    // file. Detaching instead bounds the exit path unconditionally;
+    // a still-parked acceptor dies with the process.
+    drop(connection_rx);
+    let _ = TcpStream::connect_timeout(&local_addr, ACCEPTOR_RETIRE_TIMEOUT);
+    result
 }
 
 /// Service connections until the handler asks to exit. Split out of
@@ -398,6 +408,51 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(30),
             "serving one RPC took {elapsed:?}; the loop is gating accepts on its tick interval"
+        );
+    }
+
+    /// Handler that exits on its very first tick, without ever being
+    /// handed a connection.
+    struct ExitAtOnce;
+
+    impl DaemonHandler for ExitAtOnce {
+        fn handle(&mut self, _stream: TcpStream) -> Result<(), HeddleError> {
+            Ok(())
+        }
+
+        fn on_tick(&mut self, _idle_for: Duration) -> IdleDecision {
+            IdleDecision::Exit
+        }
+
+        fn tick_interval(&self) -> Duration {
+            Duration::from_millis(10)
+        }
+    }
+
+    /// The exit path must be bounded. It retires the acceptor thread by
+    /// dialling the loop's own listener, and that dial can fail — it is
+    /// the first thing to break when a box is out of file descriptors,
+    /// which is exactly the condition a helper storm creates. An
+    /// earlier revision joined the acceptor after the dial, so a failed
+    /// dial parked the helper forever: it never released its inotify
+    /// instance and never removed its endpoint file, and clients that
+    /// later read that file got ECONNREFUSED.
+    ///
+    /// This pins the observable half of that contract — the loop
+    /// returns without a connection ever arriving. The dial-fails case
+    /// is excluded structurally rather than simulated: there is no
+    /// `join`, so no code path can wait on the acceptor at all.
+    #[test]
+    fn the_exit_path_does_not_wait_on_the_acceptor_thread() {
+        let listener = TcpListener::bind((HELPER_HOST, 0)).unwrap();
+
+        let started = Instant::now();
+        run_server_loop(&listener, &mut ExitAtOnce).unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "exiting an idle loop took {elapsed:?}; the teardown is blocking on the acceptor"
         );
     }
 }

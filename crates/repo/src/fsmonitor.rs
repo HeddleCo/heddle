@@ -350,7 +350,21 @@ pub fn run_local_monitor_helper(repo_root: &Path) -> Result<(), HeddleError> {
     persist_endpoint(&endpoint_path, &endpoint)?;
     remove_starting_helper_if_owned(&state_path, std::process::id());
 
-    let mut server = LocalMonitorServer::new(repo_root.to_path_buf(), state_path)?;
+    // The endpoint is already published, so every failure from here
+    // on has to retract it. It names a port that dies with this
+    // process: a client that reads a stale one gets ECONNREFUSED,
+    // which `shutdown_local_monitor_helper` reports as a hard error,
+    // rather than the "no helper yet" path it knows how to recover
+    // from. Watcher startup is the failure that actually fires —
+    // `inotify_init` returns EMFILE once a box has more live helpers
+    // than `fs.inotify.max_user_instances` allows. heddle#1243.
+    let mut server = match LocalMonitorServer::new(repo_root.to_path_buf(), state_path) {
+        Ok(server) => server,
+        Err(error) => {
+            remove_endpoint_if_owned(&endpoint_path, &endpoint);
+            return Err(error);
+        }
+    };
     let result = run_local_monitor_helper_loop(&listener, &mut server);
     remove_endpoint_if_owned(&endpoint_path, &endpoint);
     result
@@ -1021,20 +1035,41 @@ pub fn shutdown_local_monitor_helper(
     }
 
     if let Some(endpoint) = endpoint {
-        let response: MonitorHelperResponse = send_json_request(
+        let asked: Result<MonitorHelperResponse, HeddleError> = send_json_request(
             &endpoint,
             &MonitorHelperRequest {
                 version: HELPER_PROTOCOL_VERSION,
                 command: "shutdown".to_string(),
                 since: None,
             },
-        )?;
-        if !response.ok {
-            return Err(HeddleError::Config(
-                response
-                    .error
-                    .unwrap_or_else(|| "native monitor refused shutdown".to_string()),
-            ));
+        );
+        match asked {
+            Ok(response) if !response.ok => {
+                return Err(HeddleError::Config(
+                    response
+                        .error
+                        .unwrap_or_else(|| "native monitor refused shutdown".to_string()),
+                ));
+            }
+            Ok(_) => {}
+            // Asking is the courtesy; the lifetime-lock acquisition
+            // below is the proof. An endpoint file can outlive the
+            // process that wrote it (crash, kill, a startup that
+            // failed after publishing), and dialling one of those is
+            // ECONNREFUSED — the very state we are asking for. Failing
+            // the caller's command there aborts `thread drop` over a
+            // helper that is already gone, so carry on and let the
+            // lock decide: a helper that is genuinely still alive
+            // holds it, and we report "did not drain" instead.
+            Err(error) => {
+                warn!(
+                    %error,
+                    host = %endpoint.host,
+                    port = endpoint.port,
+                    "Native monitor helper unreachable during shutdown; \
+                     confirming it has drained via the lifetime lock"
+                );
+            }
         }
     }
 
@@ -1447,6 +1482,82 @@ mod tests {
             started.elapsed() < std::time::Duration::from_millis(100),
             "cold spawn should return immediately instead of polling"
         );
+    }
+
+    /// heddle#1243. The helper publishes its endpoint the moment it has
+    /// a port, before the `notify` watcher exists. If startup then
+    /// fails, the file survives the process and names a dead port —
+    /// and clients reading it get ECONNREFUSED rather than the
+    /// "no helper yet" path they know how to recover from.
+    ///
+    /// In the field the failing step is `inotify_init`, which returns
+    /// EMFILE once a box holds more live helpers than
+    /// `fs.inotify.max_user_instances` allows. That is not reproducible
+    /// in a unit test, so this drives the same seam through the other
+    /// fallible step in `LocalMonitorServer::new`: an undecodable
+    /// snapshot file.
+    #[test]
+    fn a_helper_that_fails_to_start_retracts_its_endpoint() {
+        let temp = TempDir::new().unwrap();
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".heddle/state")).unwrap();
+        let state_path = checkout.join(".heddle/state/fsmonitor.toml");
+        // Not msgpack, so `load_snapshot` fails — and it fails *after*
+        // the endpoint has been persisted.
+        std::fs::write(super::snapshot_path(&state_path), b"not a monitor snapshot").unwrap();
+
+        let error = super::run_local_monitor_helper(&checkout)
+            .expect_err("an undecodable snapshot must fail the helper");
+        assert!(
+            error.to_string().contains("decode monitor snapshot"),
+            "expected the snapshot decode to be what failed, got: {error}"
+        );
+        assert!(
+            !helper_endpoint_path(&state_path).exists(),
+            "a helper that never served a request must not leave an endpoint \
+             file pointing at its dead port"
+        );
+    }
+
+    /// heddle#1243. An endpoint file can outlive the process that wrote
+    /// it — a crash, a kill, or a startup that failed after publishing.
+    /// Dialling one of those is ECONNREFUSED, which is the state
+    /// `shutdown` is asking for; reporting it as an error aborted
+    /// `heddle thread drop` (exit 75) over a helper that was already
+    /// gone. The lifetime lock, not the RPC, is what proves the helper
+    /// has drained.
+    #[test]
+    fn shutdown_succeeds_when_the_endpoint_outlived_its_helper() {
+        let temp = TempDir::new().unwrap();
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".heddle/state")).unwrap();
+        let state_path = checkout.join(".heddle/state/fsmonitor.toml");
+        let endpoint_path = helper_endpoint_path(&state_path);
+
+        // Bind then drop, so the port is one nothing is listening on.
+        let dead_port = std::net::TcpListener::bind((HELPER_HOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        crate::daemon::persist_endpoint(
+            &endpoint_path,
+            &crate::daemon::EndpointState {
+                version: HELPER_PROTOCOL_VERSION,
+                host: HELPER_HOST.to_string(),
+                port: dead_port,
+                pid: None,
+            },
+        )
+        .unwrap();
+
+        let guard = shutdown_local_monitor_helper(&checkout)
+            .expect("an unreachable helper is already shut down, not a failure");
+        assert!(
+            !endpoint_path.exists(),
+            "shutdown should sweep the stale endpoint"
+        );
+        drop(guard);
     }
 
     #[test]
