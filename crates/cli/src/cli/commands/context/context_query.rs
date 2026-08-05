@@ -23,7 +23,46 @@ use super::{
     context_root_for_state, parse_scope, print_context_get, resolve_state, resolve_state_id,
     target_label,
 };
-use crate::cli::{Cli, commands::RecoveryAdvice, should_output_json};
+use crate::cli::{
+    Cli,
+    commands::{
+        RecoveryAdvice,
+        native_scope::{
+            AnnotationStore, AnnotationSurface, open_annotation_store, report_absent_store,
+        },
+    },
+    should_output_json,
+};
+
+/// Open the context store for a read-only command, or report honestly that
+/// there is none.
+///
+/// Read-only commands must not go through [`Cli::open_repo`], which bootstraps
+/// a Git-overlay sidecar when it lands on a plain Git tree. In a fresh
+/// `git clone` that side effect created a `.heddle` store and made the next
+/// `heddle status` report `Repository: Git + Heddle` (heddle#1145).
+///
+/// Returns `Ok(None)` once the absent-store report has been printed, so the
+/// caller simply returns.
+fn open_for_read(
+    cli: &Cli,
+    output_kind: &str,
+    with_items: bool,
+) -> Result<Option<repo::Repository>> {
+    match open_annotation_store(cli)? {
+        AnnotationStore::Present(repo) => Ok(Some(*repo)),
+        AnnotationStore::Absent(absent) => {
+            report_absent_store(
+                cli,
+                AnnotationSurface::Context,
+                output_kind,
+                with_items,
+                &absent,
+            )?;
+            Ok(None)
+        }
+    }
+}
 
 #[derive(Serialize)]
 struct SuggestionOutput {
@@ -46,7 +85,9 @@ pub async fn cmd_context_get(
     tag: Option<String>,
     r#ref: Option<String>,
 ) -> Result<()> {
-    let repo = cli.open_repo()?;
+    let Some(repo) = open_for_read(cli, "context_get", false)? else {
+        return Ok(());
+    };
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let target = super::resolve_target(&repo, path, state)?;
     let Some(context_root) = context_root_for_state(&repo, &state_obj)? else {
@@ -81,7 +122,9 @@ pub async fn cmd_context_list(
     r#ref: Option<String>,
     include_superseded: bool,
 ) -> Result<()> {
-    let repo = cli.open_repo()?;
+    let Some(repo) = open_for_read(cli, "context_list", true)? else {
+        return Ok(());
+    };
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let Some(context_root) = context_root_for_state(&repo, &state_obj)? else {
         if should_output_json(cli, None) {
@@ -158,7 +201,9 @@ pub async fn cmd_context_history(
     annotation_id: String,
     r#ref: Option<String>,
 ) -> Result<()> {
-    let repo = cli.open_repo()?;
+    let Some(repo) = open_for_read(cli, "context_history", false)? else {
+        return Ok(());
+    };
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let context_root = context_root_for_state(&repo, &state_obj)?
         .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
@@ -220,7 +265,9 @@ pub async fn cmd_context_check(
     tag: Option<String>,
     r#ref: Option<String>,
 ) -> Result<()> {
-    let repo = cli.open_repo()?;
+    let Some(repo) = open_for_read(cli, "context_check", false)? else {
+        return Ok(());
+    };
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let context_root = context_root_for_state(&repo, &state_obj)?
         .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
@@ -349,7 +396,9 @@ pub async fn cmd_context_check(
 }
 
 pub async fn cmd_context_suggest(cli: &Cli, r#ref: Option<String>, limit: usize) -> Result<()> {
-    let repo = cli.open_repo()?;
+    let Some(repo) = open_for_read(cli, "context_suggest", false)? else {
+        return Ok(());
+    };
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let suggestions = repo.suggest_context_targets(&state_obj, limit)?;
 
@@ -389,7 +438,9 @@ pub async fn cmd_context_suggest(cli: &Cli, r#ref: Option<String>, limit: usize)
 }
 
 pub async fn cmd_context_audit(cli: &Cli, r#ref: Option<String>) -> Result<()> {
-    let repo = cli.open_repo()?;
+    let Some(repo) = open_for_read(cli, "context_audit", false)? else {
+        return Ok(());
+    };
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let Some(context_root) = context_root_for_state(&repo, &state_obj)? else {
         if should_output_json(cli, None) {

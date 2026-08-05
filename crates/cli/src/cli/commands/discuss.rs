@@ -16,7 +16,13 @@ use repo::{
 use serde::Serialize;
 
 use super::{
-    advice::RecoveryAdvice, history_target::resolve_state_id, snapshot::ensure_current_state,
+    advice::RecoveryAdvice,
+    history_target::resolve_state_id,
+    native_scope::{
+        AnnotationStore, AnnotationSurface, emit_locality_notice_once, open_annotation_store,
+        report_absent_store,
+    },
+    snapshot::ensure_current_state,
 };
 use crate::{
     cli::{
@@ -30,7 +36,33 @@ use crate::{
 };
 
 pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
-    let repo = cli.open_repo().context("open Heddle repository")?;
+    // Read-only subcommands must not bootstrap a store just to report it
+    // empty — that side effect is what made `heddle status` claim
+    // `Repository: Git + Heddle` in a clone that never had one (heddle#1145).
+    // Mutating subcommands still bootstrap: overlay discussions are allowed,
+    // they are just local, and `emit_locality_notice_once` says so.
+    let repo = match command {
+        DiscussCommands::List(_) | DiscussCommands::Show(_) => {
+            match open_annotation_store(cli)? {
+                AnnotationStore::Present(repo) => *repo,
+                AnnotationStore::Absent(absent) => {
+                    let output_kind = match command {
+                        DiscussCommands::Show(_) => "discuss_show",
+                        _ => "discuss_list",
+                    };
+                    let with_items = matches!(command, DiscussCommands::List(_));
+                    return report_absent_store(
+                        cli,
+                        AnnotationSurface::Discuss,
+                        output_kind,
+                        with_items,
+                        &absent,
+                    );
+                }
+            }
+        }
+        _ => cli.open_repo().context("open Heddle repository")?,
+    };
     let store = open_store(&repo)?;
     match command {
         DiscussCommands::Open(args) => run_open(cli, &repo, &store, args),
@@ -166,6 +198,7 @@ fn run_open(
         },
     )?;
     let outcome = store.write_operation(&operation)?;
+    emit_locality_notice_once(repo, AnnotationSurface::Discuss);
     emit_write(cli, "discuss_open", store, discussion_id, outcome)
 }
 

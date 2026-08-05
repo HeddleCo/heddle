@@ -885,6 +885,14 @@ novelty > test_reachability.\n";
 
 const DISCUSS_TOPIC: &str = "`heddle discuss open | append | resolve | reopen | list | show`\n\
 \n\
+Scope: native Heddle only. Discussions are stored in `.heddle` and travel over\n\
+`heddle push` / `heddle pull` to a Heddle remote. They are deliberately not\n\
+projected into Git — not into `refs/notes/*`, not into a tracked file — so\n\
+`git push` and `git clone` do not carry them. In Git Overlay mode discussions\n\
+still work; they are local to that working copy, and `heddle discuss open`\n\
+says so once. A clone with no `.heddle` reports that no store is present\n\
+rather than reporting zero discussions.\n\
+\n\
 Discussions are stable records in the repository collaboration log. Turns,\n\
 resolutions, and reopenings append immutable operations; concurrent turns\n\
 converge without rewriting source history. Symbol anchors record the state,\n\
@@ -904,6 +912,13 @@ Use this when `.git` should remain the source authority while Heddle adds
 captures, isolated threads, merge previews, undo, provenance, and machine-safe
 JSON in `.heddle`. Sley is the embedded Git engine; no Git executable is
 required. Normal Git Overlay operation neither creates nor reads `.heddle/git`.
+
+What `.heddle` adds here is local to this working copy. Context annotations
+(`heddle context`) and discussions (`heddle discuss`) are a native Heddle
+feature: they move over `heddle push` / `heddle pull` to a Heddle remote, and
+are not projected into Git. Collaborators who `git clone` this repository get
+the source history and no Heddle store — `heddle context list` there reports
+that no store is present, not that there are no annotations.
 
 Start in an existing Git checkout:
 

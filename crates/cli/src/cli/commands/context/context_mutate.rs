@@ -21,7 +21,14 @@ use super::{
 use crate::{
     cli::{
         Cli,
-        commands::{RecoveryAdvice, snapshot::resolve_attribution},
+        commands::{
+            RecoveryAdvice,
+            native_scope::{
+                AnnotationStore, AnnotationSurface, emit_locality_notice_once,
+                open_annotation_store, report_absent_store,
+            },
+            snapshot::resolve_attribution,
+        },
         should_output_json,
     },
     config::UserConfig,
@@ -113,6 +120,7 @@ pub async fn cmd_context_set(
         );
     }
 
+    emit_locality_notice_once(&repo, AnnotationSurface::Context);
     Ok(())
 }
 
@@ -284,7 +292,21 @@ pub async fn cmd_context_rm(
     scope: Option<String>,
     all: bool,
 ) -> Result<()> {
-    let repo = cli.open_repo()?;
+    // Removal is the one mutation with nothing to bootstrap for: creating a
+    // store so it can report that there is nothing to remove would be the same
+    // silent side effect the read paths just stopped doing (heddle#1145).
+    let repo = match open_annotation_store(cli)? {
+        AnnotationStore::Present(repo) => *repo,
+        AnnotationStore::Absent(absent) => {
+            return report_absent_store(
+                cli,
+                AnnotationSurface::Context,
+                "context_rm",
+                false,
+                &absent,
+            );
+        }
+    };
     let target = resolve_target(&repo, path, state)?;
 
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;
