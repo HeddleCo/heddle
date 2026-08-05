@@ -2841,6 +2841,34 @@ impl Repository {
         &self.config
     }
 
+    /// Turn the filesystem monitor off for this handle only.
+    ///
+    /// Every worktree-status walk resolves its fsmonitor mode from
+    /// `config.worktree.fsmonitor` — `default_worktree_status_options`,
+    /// maintenance, snapshot fingerprints, and core's verification-health walk
+    /// all read it — so clearing it here disables the monitor for *all* status
+    /// this handle performs, including the walks that resolve their own
+    /// options deep inside core rather than accepting them from the caller.
+    ///
+    /// This is in-memory only. Nothing persists `self.config`: every
+    /// `config.toml` write reloads the file first (see
+    /// [`Repository::transition_source_authority`]), so the next process to
+    /// open the repository sees its configured mode again.
+    ///
+    /// `heddle clone` uses this. A clone materializes a worktree and exits; it
+    /// has no ongoing worktree to watch, but a monitor-backed status walk would
+    /// spawn the long-lived `heddle-fsmonitor-worker` daemon as a child of the
+    /// clone process, leaving anything that waits on the clone's process tree
+    /// blocked on the helper's idle lifetime long after the clone finished
+    /// (heddle#1243). The monitor is deferred, not removed: the first
+    /// `heddle status` in the cloned repository starts the helper on demand
+    /// exactly as it always has.
+    #[must_use]
+    pub fn without_fsmonitor(mut self) -> Self {
+        self.config.worktree.fsmonitor.mode = crate::FsMonitorMode::Off;
+        self
+    }
+
     pub fn config(&self) -> &RepoConfig {
         self.repo_config()
     }
