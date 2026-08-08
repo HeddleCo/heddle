@@ -93,18 +93,11 @@ impl HostedRoutes<'_> {
         Invitation
     );
     unary_method!(
-        create_namespace,
+        create_spool,
         "RegistryService",
-        "CreateNamespace",
-        CreateNamespaceRequest,
-        HostedNamespace
-    );
-    unary_method!(
-        create_repository,
-        "RegistryService",
-        "CreateRepository",
-        CreateRepositoryRequest,
-        HostedRepository
+        "CreateSpool",
+        CreateSpoolRequest,
+        HostedSpool
     );
     unary_method!(
         delete_grant,
@@ -128,11 +121,11 @@ impl HostedRoutes<'_> {
         DeleteResponse
     );
     unary_method!(
-        get_current_user_namespace,
+        get_current_user_spool,
         "RegistryService",
-        "GetCurrentUserNamespace",
-        GetCurrentUserNamespaceRequest,
-        HostedNamespace
+        "GetCurrentUserSpool",
+        GetCurrentUserSpoolRequest,
+        HostedSpool
     );
     unary_method!(
         grant_support_access,
@@ -412,7 +405,7 @@ mod tests {
     };
 
     #[test]
-    fn shipped_native_inventory_is_43_unary_two_server_streams_and_two_bidi() {
+    fn shipped_native_inventory_is_42_unary_two_server_streams_and_two_bidi() {
         const ROUTES: &[MethodRoute] = &[
             MethodRoute::CollaborationServiceAppendTurn,
             MethodRoute::CollaborationServiceListByState,
@@ -427,12 +420,11 @@ mod tests {
             MethodRoute::IdentityServiceWhoAmI,
             MethodRoute::RegistryServiceCreateGrant,
             MethodRoute::RegistryServiceCreateInvitation,
-            MethodRoute::RegistryServiceCreateNamespace,
-            MethodRoute::RegistryServiceCreateRepository,
+            MethodRoute::RegistryServiceCreateSpool,
             MethodRoute::RegistryServiceDeleteGrant,
             MethodRoute::RegistryServiceDeleteNamespace,
             MethodRoute::RegistryServiceDeleteRepository,
-            MethodRoute::RegistryServiceGetCurrentUserNamespace,
+            MethodRoute::RegistryServiceGetCurrentUserSpool,
             MethodRoute::RegistryServiceGrantSupportAccess,
             MethodRoute::RegistryServiceListGrants,
             MethodRoute::RegistryServiceListSpools,
@@ -471,13 +463,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(shipped.len(), 47);
+        assert_eq!(shipped.len(), 46);
         assert_eq!(
             shipped
                 .iter()
                 .filter(|method| method.streaming == StreamingShape::Unary)
                 .count(),
-            43
+            42
         );
         assert_eq!(
             shipped

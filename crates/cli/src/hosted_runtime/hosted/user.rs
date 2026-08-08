@@ -1,14 +1,14 @@
 use api::heddle::api::v1alpha1::{
     ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, CheckMergeEligibilityRequest,
     CheckMergeEligibilityResponse, CreateGrantRequest, CreateInvitationRequest,
-    CreateRepositoryRequest, CreateServiceAccountRequest, DeleteGrantRequest,
-    DeleteNamespaceRequest, DeleteRepositoryRequest, GetCurrentUserNamespaceRequest,
-    GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
-    IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
-    ListSpoolsRequest, ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
-    ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
-    ServiceAccountResponse, SpoolSummary, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
-    UpdateNamespaceRequest, UpdateRepositoryRequest, grant_target_ref::Target as GrantTargetKind,
+    CreateServiceAccountRequest, CreateSpoolRequest, DeleteGrantRequest, DeleteNamespaceRequest,
+    DeleteRepositoryRequest, GetCurrentUserSpoolRequest, GrantSupportAccessRequest, GrantTargetRef,
+    Invitation as ProtoInvitation, IssueServiceAccountCredentialRequest, IssuedCredentialResponse,
+    ListGrantsRequest, ListSpoolsRequest, ListSupportAccessGrantsRequest,
+    ListThreadApprovalsRequest, MonorepoNode, ResolveMonorepoRequest, RevokeApprovalRequest,
+    RevokeSupportAccessRequest, ServiceAccountResponse, SpoolSummary, SpoolVisibility,
+    SupportAccessGrant, ThreadApproval, UpdateGrantRequest, UpdateNamespaceRequest,
+    UpdateRepositoryRequest, grant_target_ref::Target as GrantTargetKind,
 };
 use wire::ProtocolError;
 
@@ -16,6 +16,7 @@ use super::{
     HostedClient,
     helpers::{
         hosted_to_protocol_error, to_protocol_grant, to_protocol_namespace, to_protocol_repository,
+        to_protocol_spool,
     },
     operation_id::ClientOperationId,
 };
@@ -56,29 +57,6 @@ macro_rules! workflow_call {
             $msg
         )
     }};
-}
-
-fn default_spool_settings_request() -> api::heddle::api::v1alpha1::SpoolSettings {
-    use api::heddle::api::v1alpha1::{
-        SpoolBootstrapKind, SpoolBootstrapSyncDirection, SpoolChildPolicy, SpoolHoldLifecycle,
-        SpoolInitialTooling, SpoolSettings, SpoolStateVisibility, SpoolSyncBehavior,
-        SpoolVisibility, SpoolWritePolicy,
-    };
-
-    SpoolSettings {
-        visibility: SpoolVisibility::Private as i32,
-        default_state_visibility: SpoolStateVisibility::Internal as i32,
-        bootstrap_kind: SpoolBootstrapKind::Empty as i32,
-        bootstrap_source: String::new(),
-        write_policy: SpoolWritePolicy::Developers as i32,
-        child_policy: SpoolChildPolicy::Maintainers as i32,
-        initial_tooling: Some(SpoolInitialTooling::default()),
-        sync_behavior: SpoolSyncBehavior::Manual as i32,
-        bootstrap_sync_direction: SpoolBootstrapSyncDirection::Pull as i32,
-        description: String::new(),
-        // UNSPECIFIED = inherit; effective root default is EXPLICIT_SUPERSESSION.
-        hold_lifecycle: SpoolHoldLifecycle::Unspecified as i32,
-    }
 }
 
 impl HostedClient {
@@ -140,16 +118,14 @@ impl HostedClient {
         Ok((response.challenge_id, response.challenge, expires_at_secs))
     }
 
-    pub async fn get_current_user_namespace(
-        &mut self,
-    ) -> Result<wire::HostedNamespaceInfo, ProtocolError> {
-        let namespace = authed_call!(
+    pub async fn get_current_user_spool(&mut self) -> Result<wire::HostedSpoolInfo, ProtocolError> {
+        let spool = authed_call!(
             self,
-            get_current_user_namespace,
-            "GetCurrentUserNamespace",
-            GetCurrentUserNamespaceRequest {}
+            get_current_user_spool,
+            "GetCurrentUserSpool",
+            GetCurrentUserSpoolRequest {}
         );
-        Ok(to_protocol_namespace(namespace))
+        Ok(to_protocol_spool(spool))
     }
 
     pub async fn list_spools(
@@ -165,49 +141,29 @@ impl HostedClient {
         Ok(response.spools)
     }
 
-    pub async fn create_namespace(
+    pub async fn create_spool(
         &mut self,
-        kind: &str,
+        parent_path: &str,
         slug: &str,
-        parent_path: Option<&str>,
+        kind: wire::HostedSpoolKind,
         display_name: Option<String>,
-    ) -> Result<wire::HostedNamespaceInfo, ProtocolError> {
+    ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
         let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateNamespace");
-        let namespace = authed_call!(
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateSpool");
+        let spool = authed_call!(
             self,
-            create_namespace,
-            "CreateNamespace",
-            api::heddle::api::v1alpha1::CreateNamespaceRequest {
-                kind: parse_namespace_kind_arg(kind)? as i32,
+            create_spool,
+            "CreateSpool",
+            CreateSpoolRequest {
+                parent_path: parent_path.to_string(),
                 slug: slug.to_string(),
-                parent_path: parent_path.unwrap_or_default().to_string(),
-                display_name: display_name.unwrap_or_default(),
-                settings: Some(default_spool_settings_request()),
+                is_repo: kind.is_repo(),
+                display_name,
+                visibility: SpoolVisibility::Private as i32,
                 client_operation_id: operation_id.to_wire(),
             }
         );
-        Ok(to_protocol_namespace(namespace))
-    }
-
-    pub async fn create_repository(
-        &mut self,
-        namespace_path: &str,
-        slug: &str,
-    ) -> Result<wire::HostedRepositoryInfo, ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateRepository");
-        let repo = authed_call!(
-            self,
-            create_repository,
-            "CreateRepository",
-            CreateRepositoryRequest {
-                namespace_path: namespace_path.to_string(),
-                slug: slug.to_string(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        Ok(to_protocol_repository(repo))
+        Ok(to_protocol_spool(spool))
     }
 
     pub async fn create_invitation(
@@ -621,23 +577,6 @@ fn build_target_ref(
         _ => Err(ProtocolError::InvalidState(
             "exactly one of namespace_path or repo_path must be set".into(),
         )),
-    }
-}
-
-/// Parse a CLI-supplied namespace kind string ("user" / "namespace" /
-/// "team", with "org" accepted as an alias for "namespace") into the
-/// proto `NamespaceKind` enum.
-fn parse_namespace_kind_arg(
-    value: &str,
-) -> Result<api::heddle::api::v1alpha1::NamespaceKind, ProtocolError> {
-    use api::heddle::api::v1alpha1::NamespaceKind;
-    match value.trim().to_ascii_lowercase().as_str() {
-        "user" => Ok(NamespaceKind::User),
-        "namespace" | "org" => Ok(NamespaceKind::Org),
-        "team" => Ok(NamespaceKind::Team),
-        other => Err(ProtocolError::InvalidState(format!(
-            "invalid namespace kind '{other}': expected user|namespace|team"
-        ))),
     }
 }
 
