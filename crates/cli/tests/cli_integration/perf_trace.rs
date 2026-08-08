@@ -254,6 +254,44 @@ fn perf_trace_jsonl_verify_uses_named_phase_records() {
 }
 
 #[test]
+fn perf_trace_jsonl_git_overlay_clone_separates_copy_and_state_store_write() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source");
+    let destination = temp.path().join("clone");
+    let git = SleyRepository::init(&source).unwrap();
+    let tree = git_empty_tree_oid(&git);
+    git_commit_with_tree(&git, Some("refs/heads/main"), tree, "seed", &[]);
+    let source_arg = source.to_str().unwrap();
+    let destination_arg = destination.to_str().unwrap();
+
+    let output = heddle_output_with_env(
+        &["--output", "json", "clone", source_arg, destination_arg],
+        Some(temp.path()),
+        &[("HEDDLE_PROFILE", "jsonl")],
+    )
+    .expect("profiled Git-overlay clone should run");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    assert!(output.status.success(), "clone should succeed: {stderr}");
+
+    let trace = profile_trace_from_stderr(stderr);
+    let phase = trace["phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["name"] == "git overlay clone phases")
+        .unwrap_or_else(|| panic!("trace should separate Git copy from Heddle ingest: {trace}"));
+    let metrics = phase["metrics"].as_object().unwrap();
+    for name in [
+        "sley_mirror_copy_ms",
+        "heddle_ingest_ms",
+        "state_store_write_ms",
+    ] {
+        assert!(metrics.contains_key(name), "missing `{name}` in {trace}");
+        assert_eq!(metrics[name]["unit"], "milliseconds");
+    }
+}
+
+#[test]
 fn perf_trace_human_mode_still_writes_profile_text() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Core FsStore structure.
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     hash::Hash,
@@ -244,6 +246,8 @@ pub struct FsStore {
     pub(super) external_source: Option<Arc<dyn super::super::ExternalObjectSource>>,
     loose_object_write_mode: LooseObjectWriteMode,
     pending_directory_syncs: Mutex<BTreeSet<PathBuf>>,
+    #[cfg(test)]
+    snapshot_batch_flushes: AtomicUsize,
     /// In-process trust cache for loose-blob cache mirrors. A hash
     /// enters this LRU when this process either (a) wrote the blob
     /// itself via `promote_to_loose_uncompressed` or (b) successfully
@@ -301,6 +305,8 @@ impl FsStore {
             external_source: None,
             loose_object_write_mode: LooseObjectWriteMode::Durable,
             pending_directory_syncs: Mutex::new(BTreeSet::new()),
+            #[cfg(test)]
+            snapshot_batch_flushes: AtomicUsize::new(0),
             verified_loose_blobs: RwLock::new(RecentObjectCache::with_capacity(
                 VERIFIED_LOOSE_BLOB_CACHE_CAPACITY,
             )),
@@ -328,6 +334,8 @@ impl FsStore {
             external_source: None,
             loose_object_write_mode: LooseObjectWriteMode::Durable,
             pending_directory_syncs: Mutex::new(BTreeSet::new()),
+            #[cfg(test)]
+            snapshot_batch_flushes: AtomicUsize::new(0),
             verified_loose_blobs: RwLock::new(RecentObjectCache::with_capacity(
                 VERIFIED_LOOSE_BLOB_CACHE_CAPACITY,
             )),
@@ -579,6 +587,9 @@ impl FsStore {
             return Ok(());
         }
 
+        #[cfg(test)]
+        self.snapshot_batch_flushes.fetch_add(1, Ordering::Relaxed);
+
         // Batches may overlap across snapshot preparers. Each successful
         // preparer must establish durability for its own writes before it can
         // publish an oplog edge, even while another batch remains active.
@@ -621,5 +632,10 @@ impl FsStore {
             .lock()
             .map(|pending| pending.len())
             .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub(super) fn snapshot_batch_flush_count(&self) -> usize {
+        self.snapshot_batch_flushes.load(Ordering::Relaxed)
     }
 }

@@ -50,6 +50,7 @@ struct AdoptOutput {
 struct AdoptImportStats {
     commits_imported: usize,
     states_created: usize,
+    state_store_write_ms: u128,
     branches_synced: usize,
     tags_synced: usize,
     skipped_non_commit_refs: usize,
@@ -126,6 +127,7 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
             "adopt",
             &[
                 ProfileField::millis("import_ms", import_ms),
+                ProfileField::millis("state_store_write_ms", stats.state_store_write_ms),
                 ProfileField::millis("verification_ms", verification_ms),
                 ProfileField::millis(
                     "verification_worktree_status_ms",
@@ -223,6 +225,7 @@ fn import_ingest_for_adopt(
     Ok(AdoptImportStats {
         commits_imported: stats.commits_imported,
         states_created: stats.states_created,
+        state_store_write_ms: stats.state_store_write_ms,
         branches_synced: stats.refs.threads_written,
         tags_synced: stats.refs.markers_written,
         skipped_non_commit_refs: stats.refs_seen.non_commit_skipped,
