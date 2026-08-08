@@ -38,6 +38,7 @@ pub mod migration;
 pub mod namespace_policy;
 pub mod operation_dedup;
 mod repository;
+mod repository_key_binding;
 mod repository_redaction;
 #[path = "repository_resolve_for_command.rs"]
 mod repository_resolve_for_command;
@@ -154,6 +155,7 @@ pub use repository::{
 pub use repository::{GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitOverlayShortStatus};
 #[cfg(feature = "async-source")]
 pub use repository::{find_merge_base_async, is_ancestor_async};
+pub use repository_key_binding::AuthorshipVerification;
 pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
 pub use repository_resolve_for_command::{
     EmptyHeadBootstrap, ResolvePolicy, ResolvedState, StateResolveError, StateResolveFailure,
