@@ -72,6 +72,7 @@ use crate::{
         should_output_json, style,
     },
     client::LocalSync,
+    perf::{ProfileField, emit_profile},
     remote::{Remote, RemoteConfig, RemoteTarget},
 };
 
@@ -429,6 +430,8 @@ struct FinishedGitOverlayClone {
     branch: String,
     commits_imported: usize,
     states_created: usize,
+    ingest_ms: u128,
+    state_store_write_ms: u128,
     trust: RepositoryVerificationState,
 }
 
@@ -445,6 +448,7 @@ fn clone_git_overlay_url(
         .filter
         .as_deref()
         .or_else(|| options.lazy.then_some("blob:none"));
+    let mirror_copy_start = std::time::Instant::now();
     clone_url_to_bare(
         url,
         &staging.path().join(".git"),
@@ -453,6 +457,7 @@ fn clone_git_overlay_url(
         &mut progress,
     )
     .map_err(anyhow::Error::msg)?;
+    let mirror_copy_ms = mirror_copy_start.elapsed().as_millis();
     finish_line(
         &progress.progress,
         &format!(
@@ -469,6 +474,7 @@ fn clone_git_overlay_url(
         redact_url_for_display(url),
     )?;
     staging.publish()?;
+    emit_git_overlay_clone_profile(mirror_copy_ms, &finished);
     render_finished_git_overlay_clone(local_path, finished)?;
     Ok(())
 }
@@ -482,8 +488,10 @@ fn clone_git_overlay_path(
     reject_unsupported_for_git_overlay(options)?;
     let staging = AtomicCloneDestination::new(local_path)?;
     SleyRepository::init(staging.path()).map_err(anyhow::Error::msg)?;
+    let mirror_copy_start = std::time::Instant::now();
     copy_local_repo_to_bare(remote_path, &staging.path().join(".git"))
         .map_err(anyhow::Error::msg)?;
+    let mirror_copy_ms = mirror_copy_start.elapsed().as_millis();
     let remote_label = fs::canonicalize(remote_path)
         .unwrap_or_else(|_| remote_path.to_path_buf())
         .display()
@@ -496,6 +504,7 @@ fn clone_git_overlay_path(
         remote_label,
     )?;
     staging.publish()?;
+    emit_git_overlay_clone_profile(mirror_copy_ms, &finished);
     render_finished_git_overlay_clone(local_path, finished)?;
     Ok(())
 }
@@ -582,6 +591,7 @@ fn finish_git_overlay_clone(
     );
     progress.begin_commit_import();
     let mut on_commit = |event| progress.commit_tick(event);
+    let ingest_start = std::time::Instant::now();
     let (stats, _map) = ingest::import_git_into_scoped_with_options_and_progress(
         local_path,
         local_path,
@@ -599,6 +609,7 @@ fn finish_git_overlay_clone(
             err.to_string()
         ))
     })?;
+    let ingest_ms = ingest_start.elapsed().as_millis();
     progress.begin_ref_write();
     progress.finish();
 
@@ -634,8 +645,21 @@ fn finish_git_overlay_clone(
         branch: track_name,
         commits_imported: stats.commits_imported,
         states_created: stats.states_created,
+        ingest_ms,
+        state_store_write_ms: stats.state_store_write_ms,
         trust,
     })
+}
+
+fn emit_git_overlay_clone_profile(mirror_copy_ms: u128, finished: &FinishedGitOverlayClone) {
+    emit_profile(
+        "git overlay clone phases",
+        &[
+            ProfileField::millis("sley_mirror_copy_ms", mirror_copy_ms),
+            ProfileField::millis("heddle_ingest_ms", finished.ingest_ms),
+            ProfileField::millis("state_store_write_ms", finished.state_store_write_ms),
+        ],
+    );
 }
 
 fn render_finished_git_overlay_clone(

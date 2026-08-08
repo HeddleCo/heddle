@@ -152,6 +152,29 @@ fn append_packed_hashes(
 }
 
 impl FsStore {
+    /// Publish the authoritative loose copies of packed states behind one
+    /// parent-directory durability barrier. A later pack may refresh mutable
+    /// tail fields under the same StateId, so the loose bodies cannot be
+    /// dropped even though the pack already contains each state.
+    fn write_packed_state_mirrors_batch(&self, states: Vec<(StateId, Vec<u8>)>) -> Result<()> {
+        if states.is_empty() {
+            return Ok(());
+        }
+
+        self.begin_snapshot_write_batch_impl()?;
+        for (id, data) in states {
+            if let Err(error) = ObjectStore::put_state_serialized(self, &data, id) {
+                self.abort_snapshot_write_batch_impl();
+                return Err(error);
+            }
+        }
+        if let Err(error) = self.flush_snapshot_write_batch_impl() {
+            self.abort_snapshot_write_batch_impl();
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn with_state_attachment_index_lock<T>(
         &self,
         state: &StateId,
@@ -1308,9 +1331,7 @@ impl ObjectStore for FsStore {
         let ids = validate_and_list_pack(&reader)?;
         let state_entries = state_entries_from_pack(&reader, &ids)?;
         self.install_pack_files(pack_data, index_data)?;
-        for (id, data) in state_entries {
-            self.put_state_serialized(&data, id)?;
-        }
+        self.write_packed_state_mirrors_batch(state_entries)?;
         for id in &ids {
             let Some((ObjectType::StateAttachment, data)) = reader.get_object(id)? else {
                 continue;
@@ -1373,9 +1394,7 @@ impl ObjectStore for FsStore {
             attachment_entries_from_pack(&reader, &ids)?
         };
         self.install_pack_files_streaming(pack_path, index_path)?;
-        for (id, data) in state_entries {
-            self.put_state_serialized(&data, id)?;
-        }
+        self.write_packed_state_mirrors_batch(state_entries)?;
         for attachment in attachment_entries {
             self.put_state_attachment(&attachment)?;
         }

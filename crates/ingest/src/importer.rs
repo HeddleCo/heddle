@@ -65,6 +65,9 @@ pub struct ImportStats {
     /// New Heddle states written during this import. Re-runs can inspect the
     /// same commits while creating zero new states.
     pub states_created: usize,
+    /// Time spent installing the native pack and publishing its authoritative
+    /// loose state bodies.
+    pub state_store_write_ms: u128,
     /// Distinct trees materialized (after memoization).
     pub trees_imported: usize,
     /// Distinct blobs materialized (after memoization).
@@ -431,9 +434,11 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
                     last_log = idx;
                 }
             }
-            let stats = packed.stats;
+            let mut stats = packed.stats;
             if stats.object_count > 0 {
+                let state_store_write_start = std::time::Instant::now();
                 packed.builder.finish(self.store, &pack_path, &index_path)?;
+                stats.state_store_write_ms = state_store_write_start.elapsed().as_millis();
             } else {
                 // No objects to install — drop the empty staging file.
                 let _ = std::fs::remove_file(&pack_path);
@@ -505,6 +510,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             refs_seen,
             commits_imported: commits.len(),
             states_created: packed_stats.states,
+            state_store_write_ms: packed_stats.state_store_write_ms,
             trees_imported: packed_stats.trees,
             blobs_imported: packed_stats.blobs,
             refs: ref_stats,
@@ -519,6 +525,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
 struct PackedImportStats {
     object_count: usize,
     states: usize,
+    state_store_write_ms: u128,
     trees: usize,
     blobs: usize,
     lossy_entries: Vec<LossyImportEntry>,

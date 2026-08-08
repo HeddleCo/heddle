@@ -6,7 +6,7 @@ use tempfile::TempDir;
 
 use super::{
     FsStore, LooseObjectWriteMode,
-    fs_paths::{blobs_dir, hash_path, packs_dir, trees_dir},
+    fs_paths::{blobs_dir, hash_path, packs_dir, state_path, trees_dir},
 };
 use crate::{
     fs_atomic::temp_path,
@@ -333,6 +333,48 @@ fn install_pack_streaming_publishes_via_durable_rename_and_loads_objects() {
 
     let loaded = store.get_blob(&blob_hash).unwrap().expect("packed blob");
     assert_eq!(loaded.content(), blob.content());
+}
+
+#[test]
+fn install_pack_batches_authoritative_loose_state_writes() {
+    let (_temp, store) = create_test_store();
+    let attribution = Attribution::human(Principal::new("Batch", "batch@example.com"));
+    let first = State::new(
+        ContentHash::compute(b"first tree"),
+        vec![],
+        attribution.clone(),
+    );
+    let second = State::new(
+        ContentHash::compute(b"second tree"),
+        vec![first.id()],
+        attribution,
+    );
+    let states = [&first, &second];
+    let mut builder = PackBuilder::new(CompressionConfig::disabled());
+    for state in states {
+        builder.add_id(
+            PackObjectId::StateId(state.id()),
+            PackObjectType::State,
+            rmp_serde::to_vec_named(state).unwrap(),
+        );
+    }
+    let (pack_data, index_data, _) = builder.build().unwrap();
+
+    store.install_pack(&pack_data, &index_data).unwrap();
+
+    assert_eq!(
+        store.snapshot_batch_flush_count(),
+        1,
+        "one pack must publish every loose state behind one directory-sync flush"
+    );
+    assert_eq!(store.pending_directory_sync_count(), 0);
+    for state in states {
+        assert!(
+            state_path(store.root(), &state.id()).is_file(),
+            "packed state must retain its authoritative loose copy"
+        );
+        assert_eq!(store.get_state(&state.id()).unwrap().as_ref(), Some(state));
+    }
 }
 
 #[test]
