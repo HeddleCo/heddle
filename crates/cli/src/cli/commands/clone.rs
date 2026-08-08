@@ -1820,7 +1820,7 @@ async fn clone_network_connected(
         // subsequent `heddle <verb>` would surface MissingObject on
         // any blob read.
         if lazy {
-            local_repo.refs().write_head(&Head::Attached {
+            local_repo.write_head_recorded(&Head::Attached {
                 thread: ThreadName::new(&track_name),
             })?;
         } else if git_overlay_clone {
@@ -1831,7 +1831,7 @@ async fn clone_network_connected(
             local_repo
                 .goto_from_materialized_state(&final_state, None)
                 .context("failed to materialize hosted clone worktree")?;
-            local_repo.refs().write_head(&Head::Attached {
+            local_repo.write_head_recorded(&Head::Attached {
                 thread: ThreadName::new(&track_name),
             })?;
         }
@@ -2026,7 +2026,7 @@ async fn recover_interrupted_clone_connected(
         .await?;
     repo.set_thread_recorded(&ThreadName::new(&track_name), &final_state)?;
     if intent.lazy {
-        repo.refs().write_head(&Head::Attached {
+        repo.write_head_recorded(&Head::Attached {
             thread: ThreadName::new(&track_name),
         })?;
     } else if git_overlay_clone {
@@ -2035,7 +2035,7 @@ async fn recover_interrupted_clone_connected(
         configure_git_overlay_origin_tracking(root, &track_name)?;
     } else {
         repo.goto_from_materialized_state(&final_state, None)?;
-        repo.refs().write_head(&Head::Attached {
+        repo.write_head_recorded(&Head::Attached {
             thread: ThreadName::new(&track_name),
         })?;
     }

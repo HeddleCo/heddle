@@ -84,6 +84,7 @@ async-source = ["objects/async-source"]
 [dev-dependencies]
 hex.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.11", features = ["async-source", "memory-backend"] }
+proptest.workspace = true
 tempfile.workspace = true
 
 [lib]

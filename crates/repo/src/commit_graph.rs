@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! In-memory commit graph index with persistence and Bloom filter support.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use anyhow::Result;
 #[cfg(feature = "async-source")]
@@ -32,6 +32,31 @@ struct CommitGraphNode {
     bloom: Option<[u8; 256]>,
 }
 
+const PAINT_A: u8 = 1;
+const PAINT_B: u8 = 2;
+const PAINT_BOTH: u8 = PAINT_A | PAINT_B;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MergeBaseSearch {
+    merge_base: Option<StateId>,
+    ancestors_visited: u64,
+}
+
+trait MergeBaseGraph {
+    fn generation(&self, state_id: StateId) -> Option<usize>;
+    fn parents(&self, state_id: StateId) -> Option<&[StateId]>;
+}
+
+impl MergeBaseGraph for HashMap<StateId, CommitGraphNode> {
+    fn generation(&self, state_id: StateId) -> Option<usize> {
+        self.get(&state_id).map(|node| node.generation)
+    }
+
+    fn parents(&self, state_id: StateId) -> Option<&[StateId]> {
+        self.get(&state_id).map(|node| node.parents.as_slice())
+    }
+}
+
 type CommitGraphStateData = (Vec<StateId>, ContentHash, i64, Option<String>);
 
 impl CommitGraphNode {
@@ -48,6 +73,17 @@ impl CommitGraphNode {
 struct AsyncCommitGraphNode {
     parents: Vec<StateId>,
     generation: usize,
+}
+
+#[cfg(feature = "async-source")]
+impl MergeBaseGraph for HashMap<StateId, AsyncCommitGraphNode> {
+    fn generation(&self, state_id: StateId) -> Option<usize> {
+        self.get(&state_id).map(|node| node.generation)
+    }
+
+    fn parents(&self, state_id: StateId) -> Option<&[StateId]> {
+        self.get(&state_id).map(|node| node.parents.as_slice())
+    }
 }
 
 /// Cached metadata for a node — cheap to return by value.
@@ -172,35 +208,9 @@ where
         self.ensure_loaded(*state_a)?;
         self.ensure_loaded(*state_b)?;
 
-        let ancestors_a = self.collect_ancestors(*state_a)?;
-        let ancestors_b = self.collect_ancestors(*state_b)?;
-        let best = ancestors_a
-            .intersection(&ancestors_b)
-            .copied()
-            .max_by(|left, right| {
-                self.generation(*left)
-                    .cmp(&self.generation(*right))
-                    .then_with(|| right.as_bytes().cmp(left.as_bytes()))
-            });
-
-        Ok(best)
-    }
-
-    fn collect_ancestors(&mut self, start: StateId) -> Result<HashSet<StateId>> {
-        self.ensure_loaded(start)?;
-
-        let mut ancestors = HashSet::new();
-        let mut stack = vec![start];
-        while let Some(state_id) = stack.pop() {
-            if !ancestors.insert(state_id) {
-                continue;
-            }
-            if let Some(node) = self.nodes.get(&state_id) {
-                stack.extend(node.parents.iter().copied());
-            }
-        }
-
-        Ok(ancestors)
+        let search = find_merge_base_in_graph(&self.nodes, *state_a, *state_b);
+        heddle_perf_contract::record_merge_base_ancestors_visited(search.ancestors_visited);
+        Ok(search.merge_base)
     }
 
     pub fn ensure_loaded(&mut self, state_id: StateId) -> Result<()> {
@@ -399,6 +409,77 @@ impl LoadedCommitGraphExt for LoadedCommitGraph {
     }
 }
 
+/// Paint both ancestries in generation order. Once a common ancestor is
+/// found, only the rest of that generation is drained so the historical
+/// state-id tie-break remains unchanged.
+fn find_merge_base_in_graph<G>(graph: &G, state_a: StateId, state_b: StateId) -> MergeBaseSearch
+where
+    G: MergeBaseGraph,
+{
+    let mut queue = BinaryHeap::new();
+    let mut paint = HashMap::new();
+    let mut propagated = HashMap::new();
+    paint_state(graph, &mut queue, &mut paint, state_a, PAINT_A);
+    paint_state(graph, &mut queue, &mut paint, state_b, PAINT_B);
+
+    let mut best: Option<(Option<usize>, StateId)> = None;
+    let mut ancestors_visited = 0;
+    while let Some((generation, state_id)) = queue.pop() {
+        if best.is_some_and(|(best_generation, _)| generation < best_generation) {
+            break;
+        }
+
+        let colors = paint[&state_id];
+        let already_propagated = propagated.entry(state_id).or_insert(0);
+        if colors & !*already_propagated == 0 {
+            continue;
+        }
+        *already_propagated = colors;
+        ancestors_visited += 1;
+
+        if colors == PAINT_BOTH {
+            match best {
+                Some((best_generation, best_id))
+                    if (generation, std::cmp::Reverse(state_id))
+                        <= (best_generation, std::cmp::Reverse(best_id)) => {}
+                _ => best = Some((generation, state_id)),
+            }
+            continue;
+        }
+
+        if best.is_some() {
+            continue;
+        }
+        if let Some(parents) = graph.parents(state_id) {
+            for parent in parents {
+                paint_state(graph, &mut queue, &mut paint, *parent, colors);
+            }
+        }
+    }
+
+    MergeBaseSearch {
+        merge_base: best.map(|(_, state_id)| state_id),
+        ancestors_visited,
+    }
+}
+
+fn paint_state<G>(
+    graph: &G,
+    queue: &mut BinaryHeap<(Option<usize>, StateId)>,
+    paint: &mut HashMap<StateId, u8>,
+    state_id: StateId,
+    colors: u8,
+) where
+    G: MergeBaseGraph,
+{
+    let entry = paint.entry(state_id).or_insert(0);
+    let combined = *entry | colors;
+    if combined != *entry {
+        *entry = combined;
+        queue.push((graph.generation(state_id), state_id));
+    }
+}
+
 /// Return whether `ancestor_id` is reachable from `descendant_id` using an async object source.
 #[cfg(feature = "async-source")]
 pub async fn is_ancestor_async<S>(
@@ -458,43 +539,9 @@ where
     ensure_loaded_async(source, &mut nodes, *state_a).await?;
     ensure_loaded_async(source, &mut nodes, *state_b).await?;
 
-    let ancestors_a = collect_ancestors_async(source, &mut nodes, *state_a).await?;
-    let ancestors_b = collect_ancestors_async(source, &mut nodes, *state_b).await?;
-    let best = ancestors_a
-        .intersection(&ancestors_b)
-        .copied()
-        .max_by(|left, right| {
-            generation_async(&nodes, *left)
-                .cmp(&generation_async(&nodes, *right))
-                .then_with(|| right.as_bytes().cmp(left.as_bytes()))
-        });
-
-    Ok(best)
-}
-
-#[cfg(feature = "async-source")]
-async fn collect_ancestors_async<S>(
-    source: &S,
-    nodes: &mut HashMap<StateId, AsyncCommitGraphNode>,
-    start: StateId,
-) -> Result<HashSet<StateId>>
-where
-    S: AsyncObjectSource + ?Sized,
-{
-    ensure_loaded_async(source, nodes, start).await?;
-
-    let mut ancestors = HashSet::new();
-    let mut stack = vec![start];
-    while let Some(state_id) = stack.pop() {
-        if !ancestors.insert(state_id) {
-            continue;
-        }
-        if let Some(node) = nodes.get(&state_id) {
-            stack.extend(node.parents.iter().copied());
-        }
-    }
-
-    Ok(ancestors)
+    let search = find_merge_base_in_graph(&nodes, *state_a, *state_b);
+    heddle_perf_contract::record_merge_base_ancestors_visited(search.ancestors_visited);
+    Ok(search.merge_base)
 }
 
 #[cfg(feature = "async-source")]
@@ -581,21 +628,19 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::HashSet, fs};
 
     use anyhow::Result;
-    use objects::{
-        object::{Attribution, ContentHash, Principal, State, Tree},
-        store::ObjectStore,
-    };
     #[cfg(feature = "async-source")]
+    use objects::{object::Blob, store::AsyncObjectSource};
     use objects::{
-        object::{Blob, StateId},
-        store::{AsyncObjectSource, InMemoryStore},
+        object::{Attribution, ContentHash, Principal, State, StateId, Tree},
+        store::{InMemoryStore, ObjectStore},
     };
+    use proptest::prelude::*;
     use tempfile::TempDir;
 
-    use super::{super::Repository, CommitGraphIndex};
+    use super::{super::Repository, CommitGraphIndex, find_merge_base_in_graph};
 
     fn commit_graph_path(repo: &Repository) -> std::path::PathBuf {
         repo.root().join(".heddle/state").join("commit-graph.bin")
@@ -824,6 +869,152 @@ mod tests {
         assert!(bloom_maybe_contains(bloom, "alpha.txt"));
 
         Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn bounded_merge_base_matches_full_dfs_across_random_dags(
+            parent_selectors in prop::collection::vec(
+                prop::collection::vec(any::<u16>(), 0..=3),
+                0..64,
+            ),
+            query_a in any::<u16>(),
+            query_b in any::<u16>(),
+        ) {
+            let store = InMemoryStore::new();
+
+            // Every generated graph includes a criss-cross pair with two
+            // merge bases and a separate root for the unrelated-history case.
+            let root = put_graph_state(&store, vec![]);
+            let left_base = put_graph_state(&store, vec![root.id()]);
+            let right_base = put_graph_state(&store, vec![root.id()]);
+            let merge_a = put_graph_state(&store, vec![left_base.id(), right_base.id()]);
+            let merge_b = put_graph_state(&store, vec![right_base.id(), left_base.id()]);
+            let unrelated = put_graph_state(&store, vec![]);
+            let mut states = vec![root, left_base, right_base, merge_a, merge_b, unrelated];
+
+            for selectors in parent_selectors {
+                let mut parents = selectors
+                    .into_iter()
+                    .map(|selector| states[usize::from(selector) % states.len()].id())
+                    .collect::<Vec<_>>();
+                parents.sort_unstable();
+                parents.dedup();
+                states.push(put_graph_state(&store, parents));
+            }
+
+            let random_pair = (
+                states[usize::from(query_a) % states.len()].id(),
+                states[usize::from(query_b) % states.len()].id(),
+            );
+            let cases = [
+                (states[3].id(), states[4].id()),
+                (states[3].id(), states[5].id()),
+                random_pair,
+            ];
+            let mut graph = CommitGraphIndex::with_cache(
+                &store,
+                super::super::commit_graph_persistence::NullCommitGraphCache,
+            );
+
+            for (left, right) in cases {
+                let actual = graph.find_merge_base(&left, &right).unwrap();
+                let (expected, _) = full_dfs_merge_base(&graph, left, right);
+                prop_assert_eq!(
+                    actual,
+                    expected,
+                    "merge base mismatch for {} and {}",
+                    left,
+                    right,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn merge_base_walk_prunes_deep_history_after_near_base() {
+        const HISTORY_LEN: usize = 2_048;
+
+        let store = InMemoryStore::new();
+        let mut tip = put_graph_state(&store, vec![]);
+        for _ in 1..HISTORY_LEN {
+            tip = put_graph_state(&store, vec![tip.id()]);
+        }
+        let left = put_graph_state(&store, vec![tip.id()]);
+        let right = put_graph_state(&store, vec![tip.id()]);
+        let mut graph = CommitGraphIndex::with_cache(
+            &store,
+            super::super::commit_graph_persistence::NullCommitGraphCache,
+        );
+        graph.ensure_loaded(left.id()).unwrap();
+        graph.ensure_loaded(right.id()).unwrap();
+
+        let bounded = find_merge_base_in_graph(&graph.nodes, left.id(), right.id());
+        let (old_result, old_visited) = full_dfs_merge_base(&graph, left.id(), right.id());
+
+        assert_eq!(bounded.merge_base, Some(tip.id()));
+        assert_eq!(bounded.merge_base, old_result);
+        assert!(
+            bounded.ancestors_visited < (HISTORY_LEN / 10) as u64,
+            "bounded walk visited {} ancestors in a {HISTORY_LEN}-node history",
+            bounded.ancestors_visited,
+        );
+        assert!(
+            old_visited >= HISTORY_LEN * 2,
+            "legacy full DFS visited only {old_visited} ancestors"
+        );
+        eprintln!(
+            "merge-base pruning: bounded_visited={} old_full_dfs_visited={old_visited} history_len={HISTORY_LEN}",
+            bounded.ancestors_visited,
+        );
+    }
+
+    fn full_dfs_merge_base(
+        graph: &CommitGraphIndex<'_, InMemoryStore>,
+        state_a: StateId,
+        state_b: StateId,
+    ) -> (Option<StateId>, usize) {
+        let ancestors_a = collect_ancestors_full_dfs(graph, state_a);
+        let ancestors_b = collect_ancestors_full_dfs(graph, state_b);
+        let best = ancestors_a
+            .intersection(&ancestors_b)
+            .copied()
+            .max_by(|left, right| {
+                graph
+                    .generation(*left)
+                    .cmp(&graph.generation(*right))
+                    .then_with(|| right.as_bytes().cmp(left.as_bytes()))
+            });
+        (best, ancestors_a.len() + ancestors_b.len())
+    }
+
+    fn collect_ancestors_full_dfs(
+        graph: &CommitGraphIndex<'_, InMemoryStore>,
+        start: StateId,
+    ) -> HashSet<StateId> {
+        let mut ancestors = HashSet::new();
+        let mut stack = vec![start];
+        while let Some(state_id) = stack.pop() {
+            if !ancestors.insert(state_id) {
+                continue;
+            }
+            if let Some(node) = graph.nodes.get(&state_id) {
+                stack.extend(node.parents.iter().copied());
+            }
+        }
+        ancestors
+    }
+
+    fn put_graph_state(store: &InMemoryStore, parents: Vec<StateId>) -> State {
+        let state = State::new(
+            Tree::new().hash(),
+            parents,
+            Attribution::human(Principal::new("Test User", "test@example.com")),
+        );
+        store.put_state(&state).unwrap();
+        state
     }
 
     #[cfg(feature = "async-source")]

@@ -110,6 +110,7 @@ pub(super) struct Counters {
     pub oplog_reads: u64,
     pub repository_opens: u64,
     pub network_client_initialized: bool,
+    pub merge_base_ancestors_visited: u64,
 }
 
 impl Sample {
@@ -149,6 +150,7 @@ impl Counters {
         self.oplog_reads += other.oplog_reads;
         self.repository_opens += other.repository_opens;
         self.network_client_initialized |= other.network_client_initialized;
+        self.merge_base_ancestors_visited += other.merge_base_ancestors_visited;
     }
 }
 
@@ -205,7 +207,7 @@ impl CaseResult {
             self.metric(|sample| sample.network_ms),
         );
         println!(
-            "COUNTERS case={} paths={} dirs_scanned={} dirs_skipped={} files_hashed={} monitor_paths={} object_decodes={} ref_reads={} oplog_reads={} repo_opens={} network_initialized={}",
+            "COUNTERS case={} paths={} dirs_scanned={} dirs_skipped={} files_hashed={} monitor_paths={} object_decodes={} ref_reads={} oplog_reads={} repo_opens={} network_initialized={} merge_base_ancestors_visited={}",
             self.kind.name(),
             self.path_count,
             self.counter(|value| value.directories_scanned),
@@ -219,6 +221,7 @@ impl CaseResult {
             self.samples
                 .iter()
                 .any(|sample| sample.counters.network_client_initialized),
+            self.counter(|value| value.merge_base_ancestors_visited),
         );
     }
 }
