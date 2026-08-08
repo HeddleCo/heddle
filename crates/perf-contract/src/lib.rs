@@ -17,6 +17,7 @@ static REF_READS: AtomicU64 = AtomicU64::new(0);
 static OPLOG_READS: AtomicU64 = AtomicU64::new(0);
 static REPOSITORY_OPENS: AtomicU64 = AtomicU64::new(0);
 static NETWORK_CLIENT_INITIALIZATIONS: AtomicU64 = AtomicU64::new(0);
+static MERGE_BASE_ANCESTORS_VISITED: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct StructuralCounters {
@@ -30,6 +31,7 @@ pub struct StructuralCounters {
     pub oplog_reads: u64,
     pub repository_opens: u64,
     pub network_client_initialized: bool,
+    pub merge_base_ancestors_visited: u64,
 }
 
 fn enabled() -> bool {
@@ -83,6 +85,10 @@ pub fn record_network_client_initialization() {
     add(&NETWORK_CLIENT_INITIALIZATIONS, 1);
 }
 
+pub fn record_merge_base_ancestors_visited(ancestors_visited: u64) {
+    add(&MERGE_BASE_ANCESTORS_VISITED, ancestors_visited);
+}
+
 pub fn snapshot() -> StructuralCounters {
     StructuralCounters {
         directories_scanned: DIRECTORIES_SCANNED.load(Ordering::Relaxed),
@@ -95,5 +101,6 @@ pub fn snapshot() -> StructuralCounters {
         oplog_reads: OPLOG_READS.load(Ordering::Relaxed),
         repository_opens: REPOSITORY_OPENS.load(Ordering::Relaxed),
         network_client_initialized: NETWORK_CLIENT_INITIALIZATIONS.load(Ordering::Relaxed) > 0,
+        merge_base_ancestors_visited: MERGE_BASE_ANCESTORS_VISITED.load(Ordering::Relaxed),
     }
 }

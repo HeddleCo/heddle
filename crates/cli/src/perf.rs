@@ -170,6 +170,10 @@ fn record_structural_counters() {
                 "network_client_initialized",
                 counters.network_client_initialized,
             ),
+            ProfileField::count(
+                "merge_base_ancestors_visited",
+                counters.merge_base_ancestors_visited,
+            ),
         ],
     );
 }
