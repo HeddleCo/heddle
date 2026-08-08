@@ -1,17 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Hosted namespace and repository admin message payloads.
+//! Hosted spool and grant admin message payloads.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostedSpoolKind {
+    Org,
+    Project,
+}
+
+impl HostedSpoolKind {
+    /// Whether the spool can store repository content.
+    pub fn is_repo(self) -> bool {
+        matches!(self, Self::Project)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateNamespace {
+pub struct HostedSpoolInfo {
+    pub spool_id: String,
+    pub full_path: String,
     pub kind: String,
-    pub slug: String,
-    #[serde(default)]
-    pub parent_path: Option<String>,
-    #[serde(default)]
+    pub is_repo: bool,
     pub display_name: Option<String>,
 }
 
@@ -26,11 +39,6 @@ pub struct HostedNamespaceInfo {
     pub parent_id: Option<String>,
     pub display_name: Option<String>,
     pub full_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NamespaceCreated {
-    pub namespace: HostedNamespaceInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,12 +71,6 @@ pub struct NamespacesList {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateHostedRepository {
-    pub namespace_path: String,
-    pub slug: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListHostedRepositories {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,11 +80,6 @@ pub struct HostedRepositoryInfo {
     pub slug: String,
     pub path: PathBuf,
     pub full_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepositoryCreated {
-    pub repository: HostedRepositoryInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,6 +246,17 @@ pub struct SessionDiffSummary {
 pub struct WorktreeChangeBaseline {
     pub path: String,
     pub kind: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HostedSpoolKind;
+
+    #[test]
+    fn hosted_spool_kinds_map_org_and_project_capabilities() {
+        assert!(!HostedSpoolKind::Org.is_repo());
+        assert!(HostedSpoolKind::Project.is_repo());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -2,9 +2,10 @@ use core::convert::TryFrom;
 use std::time::Duration;
 
 use api::heddle::api::v1alpha1::{
-    HostedGrant, HostedNamespace, HostedObjectType, HostedRepository, ObjectAvailabilityStatus,
-    ObjectDescriptor, RepositoryRef, StateAttachmentKind as ProtoStateAttachmentKind,
-    StateId as ProtoStateId, TransferCheckpoint, TransportMode, repository_ref::Reference,
+    HostedGrant, HostedNamespace, HostedObjectType, HostedRepository, HostedSpool,
+    ObjectAvailabilityStatus, ObjectDescriptor, RepositoryRef,
+    StateAttachmentKind as ProtoStateAttachmentKind, StateId as ProtoStateId, TransferCheckpoint,
+    TransportMode, repository_ref::Reference,
 };
 use base64::Engine as _;
 use cli_shared::ClientConfig;
@@ -443,6 +444,16 @@ pub(super) fn to_protocol_repository(repository: HostedRepository) -> wire::Host
         slug: repository.slug,
         path: repository.path.into(),
         full_path: repository.full_path,
+    }
+}
+
+pub(super) fn to_protocol_spool(spool: HostedSpool) -> wire::HostedSpoolInfo {
+    wire::HostedSpoolInfo {
+        spool_id: spool.spool_id,
+        full_path: spool.full_path,
+        kind: spool.kind,
+        is_repo: spool.is_repo,
+        display_name: (!spool.display_name.is_empty()).then_some(spool.display_name),
     }
 }
 

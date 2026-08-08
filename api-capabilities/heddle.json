@@ -276,6 +276,36 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.AttestationService/RecordSignature",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.AttestationService/VerifySignature",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.CollaborationService/AppendTurn",
       "layers": {
         "client": {
@@ -289,6 +319,21 @@
           "evidence": [],
           "follow_up": null,
           "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.CollaborationService/GetDiscussion",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
         }
       }
     },
@@ -378,6 +423,21 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.IdentityService/BeginRecovery",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.IdentityService/BeginWebAuthnAuthentication",
       "layers": {
         "client": {
@@ -416,6 +476,21 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.IdentityService/BindSignupInviteEmail",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.IdentityService/ClaimHandle",
       "layers": {
         "client": {
@@ -429,6 +504,21 @@
           "evidence": [],
           "follow_up": null,
           "reason": "The shared handle adapter is not a shipped Heddle CLI surface."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/CompleteRecovery",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
         }
       }
     },
@@ -478,6 +568,21 @@
               "contains": ".create_service_account("
             }
           ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/DeclareRecoveryMethod",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
           "follow_up": null
         }
       }
@@ -618,6 +723,21 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.IdentityService/IssueSignupEmailChallenge",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.IdentityService/LinkOAuthIdentity",
       "layers": {
         "client": {
@@ -728,6 +848,21 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.IdentityService/RecordSubscription",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.IdentityService/RegisterPublicKey",
       "layers": {
         "client": {
@@ -775,6 +910,21 @@
           "evidence": [],
           "follow_up": null,
           "reason": "The shared handle adapter is not a shipped Heddle CLI surface."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/ResolveSignupInvite",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
         }
       }
     },
@@ -864,6 +1014,21 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.IdentityService/SubmitRecoveryProof",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.IdentityService/VerifySignupEmail",
       "layers": {
         "client": {
@@ -877,6 +1042,21 @@
           "evidence": [],
           "follow_up": null,
           "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/VetoRecovery",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
         }
       }
     },
@@ -1172,13 +1352,8 @@
       "rpc": "heddle.api.v1alpha1.RegistryService/CreateNamespace",
       "layers": {
         "client": {
-          "status": "shipped",
-          "evidence": [
-            {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
-              "contains": "create_namespace"
-            }
-          ],
+          "status": "intentionally-unsupported",
+          "evidence": [],
           "follow_up": null
         },
         "cli": {
@@ -1193,11 +1368,26 @@
       "rpc": "heddle.api.v1alpha1.RegistryService/CreateRepository",
       "layers": {
         "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/CreateSpool",
+      "layers": {
+        "client": {
           "status": "shipped",
           "evidence": [
             {
               "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
-              "contains": "create_repository"
+              "contains": "create_spool"
             }
           ],
           "follow_up": null
@@ -1207,7 +1397,7 @@
           "evidence": [
             {
               "path": "crates/cli/src/cli/commands/remote/mod.rs",
-              "contains": "create_repository"
+              "contains": ".create_spool("
             }
           ],
           "follow_up": null
@@ -1295,6 +1485,21 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.RegistryService/DeleteSpool",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.RegistryService/DetachChild",
       "layers": {
         "client": {
@@ -1315,11 +1520,26 @@
       "rpc": "heddle.api.v1alpha1.RegistryService/GetCurrentUserNamespace",
       "layers": {
         "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/GetCurrentUserSpool",
+      "layers": {
+        "client": {
           "status": "shipped",
           "evidence": [
             {
               "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
-              "contains": "get_current_user_namespace"
+              "contains": "get_current_user_spool"
             }
           ],
           "follow_up": null
@@ -1329,7 +1549,7 @@
           "evidence": [
             {
               "path": "crates/cli/src/cli/commands/remote/mod.rs",
-              "contains": "get_current_user_namespace"
+              "contains": ".get_current_user_spool("
             }
           ],
           "follow_up": null
@@ -1371,6 +1591,21 @@
           "evidence": [],
           "follow_up": null,
           "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/ListActors",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
         }
       }
     },
@@ -1460,6 +1695,21 @@
           "evidence": [],
           "follow_up": null,
           "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RegistryService/ListExploreMetadata",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
         }
       }
     },
@@ -1700,6 +1950,21 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.RegistryService/UpdateSpool",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.RegistryService/UpdateSpoolSettings",
       "layers": {
         "client": {
@@ -1883,7 +2148,7 @@
         "cli": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1026",
+          "follow_up": null,
           "reason": "The local diff command does not call the hosted GetCompare client mapping."
         }
       }
@@ -2185,6 +2450,21 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.StateReviewService/GetRepoSignalHealth",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.StateReviewService/GetReviewPayload",
       "layers": {
         "client": {
@@ -2194,13 +2474,23 @@
           "reason": "No Heddle hosted-client mapping is shipped."
         },
         "cli": {
-          "status": "shipped",
-          "evidence": [
-            {
-              "path": "crates/cli/src/cli/commands/review.rs",
-              "contains": "get_review_payload"
-            }
-          ],
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.StateReviewService/GetReviewProgress",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
           "follow_up": null
         }
       }
@@ -2215,13 +2505,38 @@
           "reason": "No Heddle hosted-client mapping is shipped."
         },
         "cli": {
-          "status": "shipped",
-          "evidence": [
-            {
-              "path": "crates/cli/src/cli/commands/review.rs",
-              "contains": "list_signatures"
-            }
-          ],
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.StateReviewService/RecordCheckAck",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.StateReviewService/RecordVerdict",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
           "follow_up": null
         }
       }
@@ -2236,13 +2551,8 @@
           "reason": "No Heddle hosted-client mapping is shipped."
         },
         "cli": {
-          "status": "shipped",
-          "evidence": [
-            {
-              "path": "crates/cli/src/cli/commands/review.rs",
-              "contains": "sign_state"
-            }
-          ],
+          "status": "intentionally-unsupported",
+          "evidence": [],
           "follow_up": null
         }
       }
@@ -2253,13 +2563,13 @@
         "client": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this client gap."
         },
         "cli": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this CLI gap."
         }
       }
@@ -2270,13 +2580,13 @@
         "client": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this client gap."
         },
         "cli": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this CLI gap."
         }
       }
@@ -2337,13 +2647,13 @@
         "client": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this client gap."
         },
         "cli": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this CLI gap."
         }
       }
@@ -2354,13 +2664,13 @@
         "client": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this client gap."
         },
         "cli": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this CLI gap."
         }
       }
@@ -2371,13 +2681,13 @@
         "client": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this client gap."
         },
         "cli": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this CLI gap."
         }
       }
@@ -2388,14 +2698,29 @@
         "client": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this client gap."
         },
         "cli": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this CLI gap."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/GetThread",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
         }
       }
     },
@@ -2422,13 +2747,13 @@
         "client": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this client gap."
         },
         "cli": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this CLI gap."
         }
       }
@@ -2464,13 +2789,13 @@
         "client": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this client gap."
         },
         "cli": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this CLI gap."
         }
       }
@@ -2498,13 +2823,13 @@
         "client": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this client gap."
         },
         "cli": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this CLI gap."
         }
       }
@@ -2515,13 +2840,13 @@
         "client": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this client gap."
         },
         "cli": {
           "status": "planned",
           "evidence": [],
-          "follow_up": "https://github.com/HeddleCo/heddle/issues/1023",
+          "follow_up": null,
           "reason": "The workflow-policy administration follow-up owns this CLI gap."
         }
       }
