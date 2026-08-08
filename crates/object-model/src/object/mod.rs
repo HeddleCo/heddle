@@ -13,6 +13,7 @@ mod diff;
 mod discussion;
 mod hash;
 mod identifiers;
+mod key_binding;
 pub mod manifest;
 mod operation_id;
 mod redaction;
@@ -51,6 +52,9 @@ pub use discussion::{
 };
 pub use hash::{ChangeId, ChangeIdParseError, ContentHash, StateId, StateIdParseError};
 pub use identifiers::{MarkerName, Scope, ThreadName};
+pub use key_binding::{
+    KEY_BINDING_SIGNING_PAYLOAD_VERSION_TAG, KeyBinding, KeyBindingError, KeyBindingRegistry,
+};
 pub use manifest::{
     BuiltManifest, FsckFinding, FsckOptions, FsckReport, FsckRule, ManifestBinding,
     ManifestBuildError, ManifestFacet, ManifestKey, ManifestNode, ManifestNodeSource,
