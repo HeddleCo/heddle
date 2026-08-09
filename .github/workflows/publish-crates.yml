@@ -35,9 +35,9 @@ name: Publish crates
 #     by scanning Cargo.toml for `publish = true`. Adding a new
 #     publishable crate is a one-line workflow edit, reviewed in PR.
 #
-# Asserter: scripts/check-publish-pipeline.sh runs on every PR
-# touching this workflow (release-pipeline-check.yml). It fails if any
-# of the structural guarantees above regress.
+# Asserter: scripts/check-publish-pipeline.sh runs in the full-ci / landing
+# suite (release-pipeline-check.yml). It fails if any of the structural
+# guarantees above regress.
 
 on:
   push:
