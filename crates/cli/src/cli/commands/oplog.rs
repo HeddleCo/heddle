@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Oplog command — operator-facing inspection and recovery.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use heddle_core::oplog_plan::{
     OplogRecoverFacts, oplog_recover_detail_fields, oplog_recover_headline_from_facts,
     oplog_recover_shows_detail, plan_oplog_recover,
 };
 use oplog::OplogRecoveryReport;
+use repo::Repository;
 use serde::Serialize;
 
 use crate::cli::{Cli, OplogCommands, should_output_json, style};
@@ -23,8 +24,8 @@ struct RecoverOutput {
     output_kind: &'static str,
     /// True when the oplog parsed cleanly and no salvage ran this invocation.
     already_healthy: bool,
-    /// True when the reported numbers come from a sidecar left by an EARLIER
-    /// recovery (the silent auto-fallback ran before this command).
+    /// True when the reported numbers come from a sidecar left by an earlier
+    /// automatic validation repair or operator recovery.
     prior_recovery: bool,
     /// Strategy that located the recovered prefix: `footer-guided` or
     /// `forward-greedy` (absent when no recovery is known).
@@ -47,6 +48,11 @@ struct RecoverOutput {
     /// prior recovery).
     #[serde(skip_serializing_if = "Option::is_none")]
     sidecar_path: Option<String>,
+    /// Later immutable containers explicitly dropped because recovery of an
+    /// earlier segment broke the contiguous EntryId chain.
+    suffix_segments_discarded: u64,
+    /// Complete records contained by those dropped suffix containers.
+    suffix_entries_discarded: u64,
 }
 
 impl From<&OplogRecoveryReport> for RecoverOutput {
@@ -68,6 +74,8 @@ impl From<&OplogRecoveryReport> for RecoverOutput {
                 .sidecar_path
                 .as_ref()
                 .map(|p| p.display().to_string()),
+            suffix_segments_discarded: report.suffix_segments_discarded,
+            suffix_entries_discarded: report.suffix_entries_discarded,
         }
     }
 }
@@ -93,7 +101,16 @@ fn recover_facts(report: &OplogRecoveryReport) -> OplogRecoverFacts {
 }
 
 fn cmd_oplog_recover(cli: &Cli) -> Result<()> {
-    let repo = cli.open_repo()?;
+    let cwd;
+    let repo_path = match cli.repo.as_ref() {
+        Some(path) => path,
+        None => {
+            cwd = std::env::current_dir().context("get current working directory")?;
+            &cwd
+        }
+    };
+    let repo = Repository::open_for_oplog_recovery(repo_path)
+        .context("open Heddle repository for oplog recovery")?;
     let report = repo.oplog().recover()?;
 
     if should_output_json(cli, Some(repo.config())) {
@@ -116,5 +133,53 @@ fn cmd_oplog_recover(cli: &Cli) -> Result<()> {
     for (label, value) in oplog_recover_detail_fields(&facts) {
         println!("  {}", style::field(label, &value));
     }
+    if report.suffix_segments_discarded > 0 {
+        println!(
+            "  {}",
+            style::field(
+                "Suffix segments discarded",
+                &report.suffix_segments_discarded.to_string(),
+            )
+        );
+        println!(
+            "  {}",
+            style::field(
+                "Suffix entries discarded",
+                &report.suffix_entries_discarded.to_string(),
+            )
+        );
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report_with_suffix(segments: u64, entries: u64) -> OplogRecoveryReport {
+        OplogRecoveryReport {
+            already_healthy: segments == 0,
+            prior_recovery: false,
+            strategy: None,
+            entries_recovered: 0,
+            entries_lost: None,
+            damaged_byte_start: 0,
+            damaged_byte_end: 0,
+            quarantine_path: None,
+            sidecar_path: None,
+            suffix_segments_discarded: segments,
+            suffix_entries_discarded: entries,
+        }
+    }
+
+    #[test]
+    fn recover_json_always_reports_zero_or_nonzero_suffix_loss() {
+        let zero = serde_json::to_value(RecoverOutput::from(&report_with_suffix(0, 0))).unwrap();
+        assert_eq!(zero["suffix_segments_discarded"], 0);
+        assert_eq!(zero["suffix_entries_discarded"], 0);
+
+        let loss = serde_json::to_value(RecoverOutput::from(&report_with_suffix(2, 7))).unwrap();
+        assert_eq!(loss["suffix_segments_discarded"], 2);
+        assert_eq!(loss["suffix_entries_discarded"], 7);
+    }
 }

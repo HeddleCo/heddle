@@ -52,14 +52,15 @@ pub const DEFAULT_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DedupEntry {
     pub operation_id: OperationId,
-    /// Hosted method name or CLI verb name. Lets two distinct verbs share an
-    /// operation id without colliding (rare but supported).
+    /// Hosted method name or CLI verb name, including the replay encoding
+    /// generation when relevant. Operation IDs remain unique across the store;
+    /// reusing one under a different verb is a conflict.
     pub verb: String,
-    /// BLAKE3-256 of the request body bytes. The server is responsible for
-    /// producing a canonical encoding before hashing — usually the prost-
-    /// encoded protobuf bytes.
+    /// BLAKE3-256 of the request body bytes. The caller is responsible for
+    /// choosing a deterministic encoding and including its generation in the
+    /// verb whenever an encoding change would make cached data incompatible.
     pub request_hash: [u8; 32],
-    /// Cached response bytes. Same canonical encoding as the request.
+    /// Cached response bytes in the caller-owned encoding for this verb.
     /// Empty (`Vec::new()`) when [`pending`](Self::pending) is `true` —
     /// i.e. the slot is reserved but the response hasn't been recorded yet.
     pub response: Vec<u8>,

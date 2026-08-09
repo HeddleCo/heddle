@@ -3,24 +3,24 @@
 ## Running Tests
 
 ```bash
-# All tests
-cargo test
+# All non-ignored, default-feature tests in every workspace member
+cargo test --workspace
 
-# Specific test
-cargo test test_name
+# Specific CLI test
+cargo test -p heddle-cli test_name
 
-# Show output
-cargo test -- --nocapture
+# Show output for the complete workspace suite
+cargo test --workspace -- --nocapture
 
 # Run specific test file
-cargo test --test comprehensive
-cargo test --test production_features
+cargo test -p heddle-cli --test comprehensive
+cargo test -p heddle-cli --test production_features
 
 # Feature-gated backend coverage
-cargo test --features postgres
+cargo test --workspace --features postgres
 
 # With zstd compression (required for full pack/delta coverage)
-cargo test --features zstd
+cargo test --workspace --features zstd
 ```
 
 ## Test Categories
@@ -41,7 +41,7 @@ cargo test --features zstd
 Before considering a change complete:
 
 - [ ] `cargo build` succeeds
-- [ ] `cargo test` passes
+- [ ] `cargo test --workspace` passes
 - [ ] `cargo clippy -- -D warnings` has no warnings
 - [ ] `cargo fmt --check` passes
 - [ ] New public APIs have doc comments

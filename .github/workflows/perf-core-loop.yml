@@ -16,6 +16,10 @@ on:
       - .github/workflows/perf-core-loop.yml
   push:
     branches: [main]
+  schedule:
+    # Weekly full contract: Tuesdays 06:23 UTC. The offset avoids the
+    # top-of-hour Actions scheduling stampede.
+    - cron: '23 6 * * 2'
   workflow_dispatch:
 
 concurrency:
@@ -34,8 +38,46 @@ env:
   HEDDLE_PERF_BASELINE: ci-blacksmith-4vcpu-ubuntu-2404
 
 jobs:
+  pr-smoke:
+    name: Relevant PR smoke
+    if: github.event_name == 'pull_request'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf-core-loop-smoke-${{ runner.os }}-${{ runner.arch }}
+          cache-on-failure: true
+
+      - name: Prepare benchmark scratch space
+        run: |
+          sudo mkdir -p /home/scratch
+          sudo chown "$(id -u):$(id -g)" /home/scratch
+
+      # A deterministic 1,000-file snapshot guard catches catastrophic
+      # regressions on relevant PRs without constructing the full 10k/100k
+      # release fixtures. Main, schedule, and manual runs retain the complete
+      # controlled-runner contract below.
+      - name: Enforce snapshot smoke budget
+        env:
+          HEDDLE_PERF_ASSERT: "1"
+        run: |
+          cargo test --locked -p heddle-cli --test performance \
+            test_snapshot_many_small_files -- --nocapture
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
   release-contract:
     name: Release contract (10k/100k)
+    if: github.event_name != 'pull_request'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     steps:

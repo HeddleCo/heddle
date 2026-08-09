@@ -87,6 +87,19 @@ Binary ownership follows the same split:
 - `heddle` (this repo) owns local repository operations and its private hosted transport/downloader runtime
 - the hosted server runtime and admin operations live in the sibling **weft** repo (no `hosted` binary in this workspace)
 
+Native review commands call `daemon::local_review::LocalStateReview` directly
+in-process. That module uses Heddle-owned domain types; it is not an
+implementation of the API-owned hosted `StateReviewService` and does not use
+Prost as its local interface. Its repository-local idempotency cache encodes
+responses as JSON under the explicit `local.state_review.sign/json-v1`
+generation. The generation is private replay metadata, not a public JSON schema
+or a durable Heddle object encoding.
+
+Hosted review calls remain a separate boundary: `HeddleCo/api` owns the
+protobuf contract and Prost-generated Rust messages, and Weft owns the hosted
+producer. Native `heddle-wire` type removal does not migrate that hosted
+producer by implication.
+
 ## Core Repository Model
 
 ### Objects

@@ -2,6 +2,7 @@
 //! Core operation log logic — packed single-file format.
 
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread::JoinHandle,
@@ -22,14 +23,15 @@ use super::{
         ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
         is_transaction_commit, is_transaction_commit_for, isolation_keys_for_record,
     },
-    packed_oplog::{OplogRecoveryReport, PackedOpLog, PackedOpLogIndex, recover_oplog_at},
+    packed_oplog::{OplogRecoveryReport, PackedOpLog},
+    segmented_oplog::SegmentedOpLogIndex,
 };
 
 /// Operation log for tracking operations and enabling undo.
 pub struct OpLog {
     pub(crate) root: PathBuf,
-    cached: Mutex<Option<PackedOpLogIndex>>,
-    pending_reconstructible_view: Mutex<Option<JoinHandle<Result<PackedOpLogIndex>>>>,
+    cached: Mutex<Option<SegmentedOpLogIndex>>,
+    pending_reconstructible_view: Mutex<Option<JoinHandle<Result<SegmentedOpLogIndex>>>>,
     actor: Arc<Principal>,
 }
 
@@ -99,7 +101,7 @@ impl OpLog {
         // The immutable pack above is the commit point. Rebuilding the packed
         // oplog is only a reconstructible materialized view, so overlap that
         // rewrite with the caller's ensuing network push instead of putting its
-        // full-file clone/index rewrite on snapshot latency. Keep the oplog
+        // tail/index publication on snapshot latency. Keep the oplog
         // write lock in the worker: another writer cannot validate against the
         // old view while this committed batch is being materialized.
         let committed_tip = entries.last().map_or(index.head_id(), |entry| entry.id);
@@ -137,7 +139,7 @@ impl OpLog {
         create_dir_all_durable(&self.oplog_dir())?;
         create_dir_all_durable(&self.root.join("locks"))?;
         let path = self.oplog_path();
-        if !path.exists() {
+        if !SegmentedOpLogIndex::exists(&path) {
             let log = PackedOpLog::new(path);
             log.save()?;
         }
@@ -189,10 +191,27 @@ impl OpLog {
     /// Validate the fixed on-disk format header without mutating the oplog.
     pub fn validate_current_format(&self) -> Result<()> {
         let path = self.oplog_path();
-        if path.exists() {
-            PackedOpLog::validate_header(&path)?;
+        if SegmentedOpLogIndex::exists(&path) {
+            SegmentedOpLogIndex::validate_strict(&path)?;
         }
         Ok(())
+    }
+
+    /// Validate manifest/container versions and fixed header/trailer framing
+    /// without reading entry streams or derived indexes and without mutation.
+    /// This is the repository-open gate; complete validation happens once a
+    /// caller actually opens the indexed oplog view.
+    pub fn validate_structural_health(&self) -> Result<()> {
+        let path = self.oplog_path();
+        if !SegmentedOpLogIndex::exists(&path) {
+            return Ok(());
+        }
+        if SegmentedOpLogIndex::is_healthy(&path)? {
+            return Ok(());
+        }
+        Err(HeddleError::InvalidObject(
+            "oplog container framing is damaged; run `heddle oplog recover`".to_string(),
+        ))
     }
 
     fn build_entries(
@@ -239,45 +258,56 @@ impl OpLog {
     /// (`adopt`/`status` of 800 refs reparsed a 142 KB oplog ~3.4k times and sat
     /// ~14 s). Dropping the discarded open removed that per-read full parse.
     ///
-    /// But the discarded open had a load-bearing SIDE EFFECT: opening the index
-    /// runs `PackedOpLogIndex::open`'s auto-salvage, which HEALS (and persists to
-    /// disk) a truncated-but-header-valid oplog on a plain read. Header
-    /// validation succeeds after truncation, so gating solely on it left the
-    /// damaged file in place. Checking the trailer keeps the healthy path O(1)
-    /// and routes damaged oplogs into the locked salvage branch.
+    /// Historically the discarded open also auto-salvaged damage as a hidden
+    /// side effect. Index opens are now strict and read-only: the cheap probe
+    /// routes obvious damage here, while a later strict-open failure catches
+    /// semantic index corruption. Both paths acquire the write lock before
+    /// `validate_current` performs any quarantine, rebuild, or manifest update.
     fn ensure_current_format(&self) -> Result<()> {
         let path = self.oplog_path();
-        if !path.exists() {
+        if !SegmentedOpLogIndex::exists(&path) {
             return Ok(());
         }
-        // Early-return ONLY when the oplog is both current-format AND its index
-        // trailer is intact. A truncated oplog keeps a valid header but loses
-        // its footer, so it must fall through to salvage.
-        PackedOpLog::validate_header(&path)?;
-        if PackedOpLog::trailer_ok(&path)? {
-            return Ok(());
+        match SegmentedOpLogIndex::is_healthy(&path) {
+            Ok(true) => return Ok(()),
+            Err(
+                error @ (HeddleError::StorageFormatMigrationRequired { .. }
+                | HeddleError::StorageFormatTooNew { .. }),
+            ) => {
+                return Err(error);
+            }
+            Ok(false) | Err(_) => {}
         }
         let _lock = self.write_lock()?;
-        PackedOpLog::ensure_current(&path)
+        // Another process may have repaired the selected generation while this
+        // reader waited. Recheck under the same cross-process write lock used by
+        // append before invoking the mutating salvage path.
+        if matches!(SegmentedOpLogIndex::is_healthy(&path), Ok(true)) {
+            return Ok(());
+        }
+        SegmentedOpLogIndex::validate_current(&path)
     }
 
     /// Load from disk, bypassing cache (used after acquiring write lock).
     fn load_fresh_for_write(&self) -> Result<PackedOpLog> {
         let path = self.oplog_path();
-        if path.exists() {
-            PackedOpLog::ensure_current(&path)?;
-            PackedOpLog::load(&path)
+        if SegmentedOpLogIndex::exists(&path) {
+            let view = SegmentedOpLogIndex::open(&path)?;
+            let entries = view.materialize_entries()?;
+            let mut packed = PackedOpLog::new(path);
+            packed.head_id = view.head_id();
+            packed.entries = entries;
+            Ok(packed)
         } else {
             Ok(PackedOpLog::new(path))
         }
     }
 
-    fn open_index_for_write(&self) -> Result<PackedOpLogIndex> {
+    fn open_index_for_write(&self) -> Result<SegmentedOpLogIndex> {
         let path = self.oplog_path();
-        if path.exists() {
-            let disk_head = PackedOpLog::read_head_id(&path);
-            let trailer_ok = PackedOpLog::trailer_ok(&path);
-            if let (Ok(disk_head), Ok(true)) = (disk_head, trailer_ok) {
+        if SegmentedOpLogIndex::exists(&path) {
+            let disk_head = SegmentedOpLogIndex::read_head_id(&path);
+            if let Ok(disk_head) = disk_head {
                 let cached = self.cached.lock_or_poisoned();
                 if let Some(index) = cached.as_ref()
                     && index.head_id() == disk_head
@@ -290,15 +320,15 @@ impl OpLog {
             // A different process may have advanced or rewritten the file
             // while this handle waited for the write lock. Header/trailer
             // damage also comes here so the existing full open can salvage it.
-            PackedOpLog::ensure_current(&path)?;
+            SegmentedOpLogIndex::validate_current(&path)?;
         } else {
             PackedOpLog::new(path.clone()).save()?;
         }
-        PackedOpLogIndex::open(&path)
+        SegmentedOpLogIndex::open(&path)
     }
 
     /// Load from cache or disk (for read operations).
-    fn load_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<PackedOpLogIndex>>> {
+    fn load_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<SegmentedOpLogIndex>>> {
         heddle_perf_contract::record_oplog_read();
         self.finish_pending_reconstructible_view()?;
         let guard = self.cached.lock_or_poisoned();
@@ -311,10 +341,10 @@ impl OpLog {
         let mut guard = self.cached.lock_or_poisoned();
         if guard.is_none() {
             let path = self.oplog_path();
-            *guard = Some(if path.exists() {
-                PackedOpLogIndex::open(&path)?
+            *guard = Some(if SegmentedOpLogIndex::exists(&path) {
+                self.open_index_for_read(&path)?
             } else {
-                PackedOpLogIndex::empty(path)
+                SegmentedOpLogIndex::empty(path)
             });
         }
         Ok(guard)
@@ -325,18 +355,39 @@ impl OpLog {
     /// [`load_cached`]: a long-lived handle's already-populated cache is a stale
     /// view that would miss a batch another process wrote (heddle#354 r6, cid
     /// 3329711888).
-    fn refresh_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<PackedOpLogIndex>>> {
+    fn refresh_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<SegmentedOpLogIndex>>> {
         heddle_perf_contract::record_oplog_read();
         self.finish_pending_reconstructible_view()?;
         self.ensure_current_format()?;
         let mut guard = self.cached.lock_or_poisoned();
         let path = self.oplog_path();
-        *guard = Some(if path.exists() {
-            PackedOpLogIndex::open(&path)?
+        *guard = Some(if SegmentedOpLogIndex::exists(&path) {
+            self.open_index_for_read(&path)?
         } else {
-            PackedOpLogIndex::empty(path)
+            SegmentedOpLogIndex::empty(path)
         });
         Ok(guard)
+    }
+
+    /// Strict opens are side-effect free. If full index validation discovers
+    /// damage missed by the fixed header/trailer health probe, serialize the
+    /// repair under the oplog write lock and retry the strict open.
+    fn open_index_for_read(&self, path: &Path) -> Result<SegmentedOpLogIndex> {
+        match SegmentedOpLogIndex::open(path) {
+            Ok(index) => Ok(index),
+            Err(
+                error @ (HeddleError::StorageFormatMigrationRequired { .. }
+                | HeddleError::StorageFormatTooNew { .. }),
+            ) => Err(error),
+            Err(_) => {
+                let _lock = self.write_lock()?;
+                if let Ok(index) = SegmentedOpLogIndex::open(path) {
+                    return Ok(index);
+                }
+                SegmentedOpLogIndex::validate_current(path)?;
+                SegmentedOpLogIndex::open(path)
+            }
+        }
     }
 
     /// Force this handle's in-memory cache to reload from disk, so it observes
@@ -356,22 +407,25 @@ impl OpLog {
     /// report what was salvaged.
     ///
     /// This is the operator entrypoint behind `heddle oplog recover`. It runs
-    /// the SAME recovery the silent auto-fallback in `load()`/`ensure_current()`
-    /// would run — footer-guided first, then forward-greedy — quarantines the
-    /// damaged original to `.corrupt`, writes the `.oplog.recovery` sidecar, and
-    /// rebuilds `oplog.bin`. When the oplog is already healthy it returns an
+    /// footer-guided recovery first, then forward-greedy recovery, quarantines
+    /// the damaged original to `.corrupt`, writes the `.oplog.recovery` sidecar,
+    /// and rebuilds the selected container. Unlike automatic validation, this
+    /// path may explicitly remove a now-non-contiguous later segment suffix
+    /// from the selected generation after quarantining each container, and
+    /// reports its complete container and entry counts. When the oplog is
+    /// already healthy it returns an
     /// `already_healthy` report with no side effects.
     ///
     /// Takes the oplog write lock so the salvage cannot race a concurrent
     /// committer, and invalidates this handle's cache afterward.
     pub fn recover(&self) -> Result<OplogRecoveryReport> {
         let path = self.oplog_path();
-        if !path.exists() {
+        if !SegmentedOpLogIndex::exists(&path) {
             return Ok(OplogRecoveryReport::from_prior_sidecar(&path)
                 .unwrap_or_else(OplogRecoveryReport::healthy));
         }
         let _lock = self.write_lock()?;
-        let report = recover_oplog_at(&path)?;
+        let report = SegmentedOpLogIndex::recover(&path)?;
         // Drop any cached (now-stale) index view so subsequent reads see the
         // rebuilt oplog.
         *self.cached.lock_or_poisoned() = None;
@@ -567,10 +621,10 @@ impl OpLog {
     pub fn head_id(&self) -> Result<u64> {
         self.finish_pending_reconstructible_view()?;
         self.ensure_current_format()?;
-        match PackedOpLog::read_head_id(&self.oplog_path()) {
+        match SegmentedOpLogIndex::read_head_id(&self.oplog_path()) {
             Ok(id) => Ok(id),
             // Treat a not-yet-created oplog as generation 0.
-            Err(_) if !self.oplog_path().exists() => Ok(0),
+            Err(_) if !SegmentedOpLogIndex::exists(&self.oplog_path()) => Ok(0),
             Err(e) => Err(e),
         }
     }
@@ -583,7 +637,7 @@ impl OpLog {
     /// widening the packed-oplog internals.
     #[cfg(feature = "bench")]
     pub fn read_head_id_for_bench(&self) -> Result<u64> {
-        PackedOpLog::read_head_id(&self.oplog_path())
+        SegmentedOpLogIndex::read_head_id(&self.oplog_path())
     }
 
     /// Replace the on-disk oplog with prebuilt entries for I/O benchmarks.
@@ -601,7 +655,7 @@ impl OpLog {
         packed.entries = entries;
         packed.head_id = head_id;
         packed.save()?;
-        *self.cached.lock_or_poisoned() = Some(PackedOpLogIndex::open(&self.oplog_path())?);
+        *self.cached.lock_or_poisoned() = Some(SegmentedOpLogIndex::open(&self.oplog_path())?);
         Ok(())
     }
 
@@ -630,6 +684,24 @@ impl OpLog {
             .committed_batch_records(transaction_id)
     }
 
+    /// Take one fresh, validated oplog view and return the candidate
+    /// transaction identities indexed by it.
+    ///
+    /// This is the bulk classification interface for crash-recovery code. It
+    /// preserves the cross-process freshness contract of
+    /// [`Self::committed_batch_records`] without forcing callers to reopen and
+    /// validate the complete packed oplog once per durable artifact.
+    pub fn committed_transaction_ids<'a>(
+        &self,
+        candidates: impl IntoIterator<Item = &'a str>,
+    ) -> Result<HashSet<String>> {
+        let guard = self.refresh_cached()?;
+        guard
+            .as_ref()
+            .unwrap()
+            .committed_transaction_ids(candidates)
+    }
+
     /// Return the exact batch carrying a committed transaction sentinel.
     /// The indexed lookup is unbounded by recency, so delayed land recovery
     /// cannot confuse an unrelated newer integration with its own batch.
@@ -642,14 +714,15 @@ impl OpLog {
         let _lock = self.write_lock()?;
         let mut packed = self.load_fresh_for_write()?;
         packed.set_undone(batch.id, undone);
-        packed.save()?;
+        let current = SegmentedOpLogIndex::open(&self.oplog_path())?;
+        let updated_view = current.replace_entries(packed.entries.clone())?;
 
         let mut updated_entries = batch.entries.clone();
         for e in &mut updated_entries {
             e.undone = undone;
         }
 
-        *self.cached.lock_or_poisoned() = Some(PackedOpLogIndex::open(&self.oplog_path())?);
+        *self.cached.lock_or_poisoned() = Some(updated_view);
 
         Ok(OpBatch {
             id: batch.id,
@@ -897,12 +970,13 @@ impl OpLogBackend for OpLog {
             entry.batch_index = batch_index as u32;
         }
 
-        packed.save()?;
+        let current = SegmentedOpLogIndex::open(&self.oplog_path())?;
+        let updated_view = current.replace_entries(packed.entries.clone())?;
         let entries = matching_indices
             .into_iter()
             .map(|idx| packed.entries[idx].clone())
             .collect::<Vec<_>>();
-        *self.cached.lock_or_poisoned() = Some(PackedOpLogIndex::open(&self.oplog_path())?);
+        *self.cached.lock_or_poisoned() = Some(updated_view);
 
         Ok(OpBatch {
             id: primary_batch_id,
@@ -916,6 +990,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::oplog::packed_oplog::{packed_file_full_reads, reset_packed_file_full_reads};
 
     fn snapshot_record() -> OpRecord {
         let state = crate::oplog::fresh_state_id();
@@ -980,7 +1055,7 @@ mod tests {
             "on-disk oplog trailer must be restored after a plain read"
         );
         assert!(
-            PackedOpLogIndex::open(&path).is_ok(),
+            SegmentedOpLogIndex::open(&path).is_ok(),
             "repaired oplog must open + validate cleanly"
         );
         // The damaged original was quarantined to `.corrupt`, proving the
@@ -1018,6 +1093,100 @@ mod tests {
         );
     }
 
+    #[test]
+    fn repository_open_health_gate_does_not_fully_read_containers() {
+        let tmp = TempDir::new().unwrap();
+        let oplog = OpLog::new_unattributed(tmp.path());
+        oplog.init().unwrap();
+        for _ in 0..7 {
+            oplog.record_batch(vec![snapshot_record()]).unwrap();
+        }
+
+        reset_packed_file_full_reads();
+        oplog.validate_structural_health().unwrap();
+        assert_eq!(
+            packed_file_full_reads(),
+            0,
+            "repository-open framing checks must not parse complete containers"
+        );
+    }
+
+    #[test]
+    fn newer_manifest_version_is_rejected_without_mutation() {
+        let tmp = TempDir::new().unwrap();
+        let oplog = OpLog::new_unattributed(tmp.path());
+        oplog.init().unwrap();
+        oplog.record_batch(vec![snapshot_record()]).unwrap();
+
+        let manifest = tmp.path().join("oplog/oplog.manifest");
+        let mut bytes = std::fs::read(&manifest).unwrap();
+        bytes[8..12].copy_from_slice(&3u32.to_le_bytes());
+        std::fs::write(&manifest, &bytes).unwrap();
+        let mut directory_before = std::fs::read_dir(tmp.path().join("oplog"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        directory_before.sort();
+
+        for error in [
+            oplog.validate_structural_health().unwrap_err(),
+            oplog.head_id().unwrap_err(),
+        ] {
+            assert!(
+                matches!(
+                    error,
+                    HeddleError::StorageFormatTooNew {
+                        ref storage,
+                        found: 3,
+                        supported: 2,
+                    } if storage == "oplog manifest"
+                ),
+                "{error}"
+            );
+        }
+        assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
+        let mut directory_after = std::fs::read_dir(tmp.path().join("oplog"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        directory_after.sort();
+        assert_eq!(directory_after, directory_before);
+    }
+
+    #[test]
+    fn validate_current_format_does_not_repair_or_rewrite_damage() {
+        let tmp = TempDir::new().unwrap();
+        let oplog = OpLog::new_unattributed(tmp.path());
+        oplog.init().unwrap();
+        oplog.record_batch(vec![snapshot_record()]).unwrap();
+
+        let manifest = tmp.path().join("oplog/oplog.manifest");
+        let segment = std::fs::read_dir(tmp.path().join("oplog/oplog.segments"))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("segment-"))
+            })
+            .expect("selected append segment");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&segment)
+            .unwrap();
+        file.set_len(file.metadata().unwrap().len() - 16).unwrap();
+        let manifest_before = std::fs::read(&manifest).unwrap();
+        let segment_before = std::fs::read(&segment).unwrap();
+
+        assert!(oplog.validate_current_format().is_err());
+        assert_eq!(std::fs::read(&manifest).unwrap(), manifest_before);
+        assert_eq!(std::fs::read(&segment).unwrap(), segment_before);
+        assert!(
+            !segment.with_extension("bin.corrupt").exists(),
+            "read-only validation must not quarantine or repair selected files"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn open_index_for_write_reloads_same_head_file_replacement() {
@@ -1033,14 +1202,15 @@ mod tests {
         }
 
         // Simulate a different process coalescing two batches. This replaces
-        // the file but deliberately keeps the same head_id, so a head-only
-        // cache gate would reuse stale footer offsets.
+        // the manifest-selected base generation but deliberately keeps the
+        // same head_id, so a head-only cache gate would reuse stale indexes.
         let path = oplog.oplog_path();
-        let mut rewritten = PackedOpLog::load(&path).unwrap();
-        rewritten.entries[1].batch_id = rewritten.entries[0].batch_id;
-        rewritten.entries[1].batch_index = 1;
-        rewritten.save().unwrap();
-        assert_eq!(PackedOpLog::read_head_id(&path).unwrap(), 2);
+        let current = SegmentedOpLogIndex::open(&path).unwrap();
+        let mut entries = current.materialize_entries().unwrap();
+        entries[1].batch_id = entries[0].batch_id;
+        entries[1].batch_index = 1;
+        current.replace_entries(entries).unwrap();
+        assert_eq!(SegmentedOpLogIndex::read_head_id(&path).unwrap(), 2);
         {
             let cached = oplog.cached.lock_or_poisoned();
             assert!(!cached.as_ref().unwrap().matches_file_on_disk().unwrap());
@@ -1051,5 +1221,93 @@ mod tests {
         let batches = index.collect_batches_scoped(10, |_| true, None).unwrap();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].entries.len(), 2);
+    }
+
+    #[test]
+    fn concurrent_readers_serialize_manifest_segment_salvage() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        let writer = OpLog::new_unattributed(&root);
+        writer.init().unwrap();
+        writer.record_batch(vec![snapshot_record()]).unwrap();
+
+        let segment = std::fs::read_dir(root.join("oplog/oplog.segments"))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("segment-"))
+            })
+            .expect("active append segment");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&segment)
+            .unwrap();
+        let shortened = file.metadata().unwrap().len() - 16;
+        file.set_len(shortened).unwrap();
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let readers = (0..2)
+            .map(|_| {
+                let root = root.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let reader = OpLog::new_unattributed(root);
+                    barrier.wait();
+                    reader.head_id()
+                })
+            })
+            .collect::<Vec<_>>();
+        for reader in readers {
+            assert_eq!(reader.join().unwrap().unwrap(), 1);
+        }
+        assert!(SegmentedOpLogIndex::open(&writer.oplog_path()).is_ok());
+    }
+
+    #[test]
+    fn concurrent_readers_serialize_valid_trailer_index_repair() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        let writer = OpLog::new_unattributed(&root);
+        writer.init().unwrap();
+        writer.record_batch(vec![snapshot_record()]).unwrap();
+
+        let segment = std::fs::read_dir(root.join("oplog/oplog.segments"))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("segment-"))
+            })
+            .expect("active append segment");
+        let mut bytes = std::fs::read(&segment).unwrap();
+        const FOOTER_LEN: usize = 120;
+        let footer_start = bytes.len() - FOOTER_LEN;
+        let offset_field = footer_start + 16 + 8;
+        let entry_offsets_offset =
+            u64::from_le_bytes(bytes[offset_field..offset_field + 8].try_into().unwrap()) as usize;
+        bytes[entry_offsets_offset..entry_offsets_offset + 8].copy_from_slice(&99u64.to_le_bytes());
+        std::fs::write(&segment, bytes).unwrap();
+        assert!(PackedOpLog::trailer_ok(&segment).unwrap());
+        assert!(SegmentedOpLogIndex::open(&writer.oplog_path()).is_err());
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let readers = (0..2)
+            .map(|_| {
+                let root = root.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let reader = OpLog::new_unattributed(root);
+                    barrier.wait();
+                    reader.recent_batches(1)
+                })
+            })
+            .collect::<Vec<_>>();
+        for reader in readers {
+            assert_eq!(reader.join().unwrap().unwrap().len(), 1);
+        }
+        assert!(SegmentedOpLogIndex::open(&writer.oplog_path()).is_ok());
     }
 }

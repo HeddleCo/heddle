@@ -6,17 +6,20 @@
 //! mutation; normal loads require the latest single-file container with an EOF
 //! index footer.
 
+#[cfg(test)]
+use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, HashMap},
-    fs::{File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    fs::File,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard},
 };
 
+use super::oplog_types::{OpBatch, OpEntry, OpRecord};
 use chrono::{TimeZone, Utc};
 use heddle_schema::op_record::{
     CURRENT_OP_RECORD_SCHEMA_VERSION, decode_current_record, encode_current_record,
@@ -24,11 +27,8 @@ use heddle_schema::op_record::{
 };
 use objects::{
     error::{HeddleError, Result},
-    fs_atomic::{create_dir_all_durable, sync_directory, sync_file, temp_path, write_file_atomic},
-    fs_clone::{ReflinkOutcome, try_reflink},
+    fs_atomic::{sync_directory, write_file_atomic},
 };
-
-use super::oplog_types::{OpBatch, OpEntry, OpRecord};
 const MAGIC: &[u8; 8] = b"LMOPLOG\0";
 const INDEX_MAGIC: &[u8; 8] = b"LMOPIDX\0";
 const CURRENT_CONTAINER_VERSION: u32 = 4;
@@ -41,21 +41,6 @@ const FOOTER_LEN: u64 = 8 + 4 + 4 + (FOOTER_U64_FIELDS * 8);
 const ENTRY_OFFSET_RECORD_LEN: u64 = 16;
 const BATCH_DIR_RECORD_LEN: u64 = 48;
 const TX_DIR_RECORD_LEN: u64 = 32;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReconstructibleAppendStrategy {
-    CloneAndRewriteTail,
-    Rewrite,
-}
-
-fn reconstructible_append_strategy(outcome: ReflinkOutcome) -> ReconstructibleAppendStrategy {
-    match outcome {
-        ReflinkOutcome::Cloned => ReconstructibleAppendStrategy::CloneAndRewriteTail,
-        ReflinkOutcome::Unsupported | ReflinkOutcome::SourceVanished => {
-            ReconstructibleAppendStrategy::Rewrite
-        }
-    }
-}
 
 fn validate_container_version(version: u32) -> Result<()> {
     if version < CURRENT_CONTAINER_VERSION {
@@ -115,6 +100,7 @@ pub(crate) struct PackedOpLog {
 #[derive(Clone, Debug)]
 pub(crate) struct PackedOpLogIndex {
     path: PathBuf,
+    file: Option<Arc<Mutex<File>>>,
     header: PackedHeader,
     footer: PackedFooter,
     file_stamp: Option<PackedFileStamp>,
@@ -139,6 +125,8 @@ struct PackedFileStamp {
     changed_nanoseconds: i64,
 }
 
+type PackedFileRead = (Vec<u8>, Option<PackedFileStamp>, Arc<Mutex<File>>);
+
 fn packed_file_stamp(file: &File) -> Result<Option<PackedFileStamp>> {
     #[cfg(unix)]
     {
@@ -160,12 +148,14 @@ fn packed_file_stamp(file: &File) -> Result<Option<PackedFileStamp>> {
     }
 }
 
-fn read_packed_file(path: &Path) -> Result<(Vec<u8>, Option<PackedFileStamp>)> {
+fn read_packed_file(path: &Path) -> Result<PackedFileRead> {
+    #[cfg(test)]
+    PACKED_FILE_FULL_READS.with(|reads| reads.set(reads.get() + 1));
     let mut file = File::open(path)?;
     let file_stamp = packed_file_stamp(&file)?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    Ok((bytes, file_stamp))
+    Ok((bytes, file_stamp, Arc::new(Mutex::new(file))))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -233,6 +223,7 @@ impl PackedOpLog {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn load(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
         let data = match load_latest(&bytes) {
@@ -257,7 +248,13 @@ impl PackedOpLog {
             return Ok(());
         }
         let _ = read_header(path)?;
-        let _ = PackedOpLogIndex::open_v4(path)?;
+        if let Err(err) = PackedOpLogIndex::open_v4(path) {
+            let bytes = std::fs::read(path)?;
+            if recover_truncated_latest(path, &bytes, &err)?.is_none() {
+                return Err(err);
+            }
+            let _ = PackedOpLogIndex::open_v4(path)?;
+        }
         Ok(())
     }
 
@@ -375,29 +372,21 @@ impl PackedOpLogIndex {
     }
 
     fn open_v4(path: &Path) -> Result<Self> {
-        let (bytes, file_stamp) = read_packed_file(path)?;
-        match Self::open_v4_bytes(path, &bytes, file_stamp) {
-            Ok(index) => Ok(index),
-            Err(err) => {
-                if recover_truncated_latest(path, &bytes, &err)?.is_some() {
-                    let (bytes, file_stamp) = read_packed_file(path)?;
-                    Self::open_v4_bytes(path, &bytes, file_stamp)
-                } else {
-                    Err(err)
-                }
-            }
-        }
+        let (bytes, file_stamp, file) = read_packed_file(path)?;
+        Self::open_v4_bytes(path, &bytes, file_stamp, file)
     }
 
     fn open_v4_bytes(
         path: &Path,
         bytes: &[u8],
         file_stamp: Option<PackedFileStamp>,
+        file: Arc<Mutex<File>>,
     ) -> Result<Self> {
         let header = parse_header(bytes)?;
         let footer = PackedFooter::parse(bytes, &header)?;
         let mut index = Self {
             path: path.to_path_buf(),
+            file: Some(file),
             header,
             footer,
             file_stamp,
@@ -410,6 +399,7 @@ impl PackedOpLogIndex {
     pub(crate) fn empty(path: PathBuf) -> Self {
         Self {
             path,
+            file: None,
             header: PackedHeader {
                 entry_count: 0,
                 head_id: 0,
@@ -439,6 +429,25 @@ impl PackedOpLogIndex {
         self.header.head_id
     }
 
+    pub(crate) fn entry_count(&self) -> u64 {
+        self.header.entry_count
+    }
+
+    pub(crate) fn entry_id_range(&self) -> Option<(u64, u64)> {
+        Some((
+            self.validated_indexes.entry_offsets.first()?.entry_id,
+            self.validated_indexes.entry_offsets.last()?.entry_id,
+        ))
+    }
+
+    fn open_file(&self) -> Result<MutexGuard<'_, File>> {
+        self.file
+            .as_ref()
+            .ok_or_else(|| HeddleError::InvalidObject("empty oplog has no container".to_string()))?
+            .lock()
+            .map_err(|_| HeddleError::Config("oplog container lock poisoned".to_string()))
+    }
+
     pub(crate) fn matches_file_on_disk(&self) -> Result<bool> {
         let Some(expected) = self.file_stamp else {
             return Ok(false);
@@ -447,6 +456,7 @@ impl PackedOpLogIndex {
         Ok(packed_file_stamp(&file)? == Some(expected))
     }
 
+    #[cfg(test)]
     pub(crate) fn last_entry(&self) -> Result<Option<OpEntry>> {
         let mut entries = self.recent_entries(1)?;
         Ok(entries.pop())
@@ -458,7 +468,7 @@ impl PackedOpLogIndex {
         }
         let offsets = &self.validated_indexes.entry_offsets;
         let take = count.min(offsets.len());
-        let mut file = File::open(&self.path)?;
+        let mut file = self.open_file()?;
         let mut out = Vec::with_capacity(take);
         for record in offsets.iter().rev().take(take) {
             out.push(read_entry_at(&mut file, record.entry_offset)?);
@@ -469,7 +479,7 @@ impl PackedOpLogIndex {
     pub(crate) fn entries_after(&self, since_head_id: u64) -> Result<Vec<OpEntry>> {
         let offsets = &self.validated_indexes.entry_offsets;
         let start = offsets.partition_point(|record| record.entry_id <= since_head_id);
-        let mut file = File::open(&self.path)?;
+        let mut file = self.open_file()?;
         let mut out = Vec::with_capacity(offsets.len().saturating_sub(start));
         for record in &offsets[start..] {
             out.push(read_entry_at(&mut file, record.entry_offset)?);
@@ -477,6 +487,7 @@ impl PackedOpLogIndex {
         Ok(out)
     }
 
+    #[cfg(test)]
     pub(crate) fn collect_batches_scoped(
         &self,
         count: usize,
@@ -499,7 +510,7 @@ impl PackedOpLogIndex {
 
         let batch_offsets = &self.validated_indexes.batch_offsets;
         let batch_dir = &self.validated_indexes.batch_dir;
-        let mut file = File::open(&self.path)?;
+        let mut file = self.open_file()?;
         let mut batches = Vec::new();
 
         for record in batch_dir {
@@ -586,6 +597,7 @@ impl PackedOpLogIndex {
         Ok(None)
     }
 
+    #[cfg(test)]
     pub(crate) fn committed_batch_records(&self, transaction_id: &str) -> Result<Vec<OpRecord>> {
         let Some((_commit_entry_id, batch_id)) = self.transaction_commit(transaction_id)? else {
             return Ok(Vec::new());
@@ -602,231 +614,34 @@ impl PackedOpLogIndex {
             .collect())
     }
 
-    pub(crate) fn committed_batch(&self, transaction_id: &str) -> Result<Option<OpBatch>> {
-        let Some((_commit_entry_id, batch_id)) = self.transaction_commit(transaction_id)? else {
-            return Ok(None);
-        };
-        Ok(self
-            .collect_batches_scoped(1, |batch| batch.id == batch_id, None)?
-            .pop())
-    }
-
-    pub(crate) fn append_entries(&self, new_entries: &[OpEntry]) -> Result<Self> {
-        self.append_entries_inner(new_entries, true)
-    }
-
-    /// Rewrite the packed oplog as a materialized view of an independently
-    /// durable commit artifact. The temp-file + rename keeps readers from
-    /// observing a partial container, but deliberately omits fsync: recovery
-    /// can reconstruct these entries from the authoritative snapshot pack.
-    pub(crate) fn append_entries_reconstructible(&self, new_entries: &[OpEntry]) -> Result<Self> {
-        self.append_entries_inner(new_entries, false)
-    }
-
-    fn append_entries_inner(&self, new_entries: &[OpEntry], durable: bool) -> Result<Self> {
-        if new_entries.is_empty() {
-            return Ok(self.clone());
-        }
-        // TODO(#423 follow-up): segmented/rollover append if write-amplification
-        // becomes a ceiling on large logs.
-        let new_head = new_entries
-            .last()
-            .map(|entry| entry.id)
-            .unwrap_or(self.header.head_id);
-        let new_count = self
-            .header
-            .entry_count
-            .checked_add(new_entries.len() as u64)
-            .ok_or_else(|| HeddleError::InvalidObject("oplog entry count overflow".to_string()))?;
-        let mut tmp_new_entry_bytes = Vec::new();
-        let mut new_entry_offsets = Vec::with_capacity(new_entries.len());
-        let mut offset = self.footer.entry_data_end;
-        for entry in new_entries {
-            new_entry_offsets.push(EntryOffsetRecord {
-                entry_id: entry.id,
-                entry_offset: offset,
-            });
-            encode_entry(entry, &mut tmp_new_entry_bytes)?;
-            let encoded_new_len = u64::try_from(tmp_new_entry_bytes.len()).map_err(|_| {
-                HeddleError::InvalidObject("oplog entry stream too large".to_string())
-            })?;
-            offset = self
-                .footer
-                .entry_data_end
-                .checked_add(encoded_new_len)
-                .ok_or_else(|| {
-                    HeddleError::InvalidObject("oplog entry stream too large".to_string())
-                })?;
-        }
-
-        let mut old_offsets = self.validated_indexes.entry_offsets.clone();
-        old_offsets.extend(new_entry_offsets);
-        let old_batch_offsets = self.validated_indexes.batch_offsets.clone();
-        let new_entries_by_offset = new_entries
-            .iter()
-            .zip(old_offsets[self.header.entry_count as usize..].iter())
-            .map(|(entry, offset)| (entry.clone(), offset.entry_offset))
-            .collect::<Vec<_>>();
-        let batch_index = build_index_sections_from_existing(
-            old_batch_offsets,
-            &self.validated_indexes.batch_dir,
-            &self.validated_indexes.tx_key_bytes,
-            &self.validated_indexes.tx_dir,
-            &new_entries_by_offset,
-        )?;
-
-        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-        create_dir_all_durable(parent)?;
-        let tmp = temp_path(&self.path);
-        let strategy = if durable {
-            ReconstructibleAppendStrategy::Rewrite
-        } else {
-            match try_reflink(&self.path, &tmp) {
-                Ok(outcome) => reconstructible_append_strategy(outcome),
-                Err(_) => ReconstructibleAppendStrategy::Rewrite,
-            }
-        };
-        let write_result = match strategy {
-            ReconstructibleAppendStrategy::CloneAndRewriteTail => self
-                .write_appended_reflinked_tmp(
-                    &tmp,
-                    (new_count, new_head),
-                    &tmp_new_entry_bytes,
-                    &old_offsets,
-                    &batch_index,
-                ),
-            ReconstructibleAppendStrategy::Rewrite => {
-                let _ = std::fs::remove_file(&tmp);
-                self.write_appended_tmp(
-                    &tmp,
-                    (new_count, new_head),
-                    &tmp_new_entry_bytes,
-                    &old_offsets,
-                    &batch_index,
-                    durable,
-                )
-            }
-        };
-        let footer = match write_result {
-            Ok(footer) => footer,
-            Err(err) => {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(err);
-            }
-        };
-        std::fs::rename(&tmp, &self.path)?;
-        if durable {
-            sync_directory(parent)?;
-            return Self::open_v4(&self.path);
-        }
-
-        // The snapshot pack is authoritative for this reconstructible view, so
-        // avoid rereading and revalidating the whole oplog after publishing the
-        // exact header/footer metadata that the writer just serialized. Durable
-        // appends retain the full readback above.
-        Ok(Self {
-            path: self.path.clone(),
-            header: PackedHeader {
-                entry_count: new_count,
-                head_id: new_head,
-                header_len: V4_HEADER_LEN,
-            },
-            footer,
-            file_stamp: packed_file_stamp(&File::open(&self.path)?)?,
-            validated_indexes: Arc::new(ValidatedIndexSections {
-                entry_offsets: old_offsets,
-                batch_offsets: batch_index.batch_offsets,
-                batch_dir: batch_index.batch_dir,
-                tx_key_bytes: batch_index.tx_key_bytes,
-                tx_dir: batch_index.tx_dir,
-            }),
-        })
-    }
-
-    /// Reuse the immutable historical entry prefix from a CoW clone, discard
-    /// the old derived indexes/footer, and write only the new tail. The source
-    /// oplog remains untouched; the completed temp still publishes through the
-    /// same atomic rename as the ordinary rewrite path.
-    fn write_appended_reflinked_tmp(
+    /// Return the candidate transaction identities present in this validated
+    /// index.
+    ///
+    /// The transaction directory is already loaded and validated when the
+    /// index opens, so callers that need to classify many durable artifacts can
+    /// take one fresh oplog view instead of reopening the complete container
+    /// once per transaction.
+    #[cfg(test)]
+    pub(crate) fn committed_transaction_ids<'a>(
         &self,
-        tmp: &Path,
-        new_header: (u64, u64),
-        new_entry_bytes: &[u8],
-        entry_offsets: &[EntryOffsetRecord],
-        batch_index: &BuiltIndexSections,
-    ) -> Result<PackedFooter> {
-        let (new_count, new_head) = new_header;
-        let mut out = OpenOptions::new().read(true).write(true).open(tmp)?;
-        out.set_len(self.footer.entry_data_end)?;
-        out.seek(SeekFrom::Start(self.footer.entry_data_end))?;
-        out.write_all(new_entry_bytes)?;
-        let entry_data_end = out.stream_position()?;
-        let footer = write_index_sections(
-            &mut out,
-            IndexWritePlan {
-                entry_data_end,
-                entry_offsets,
-                batch_offsets: &batch_index.batch_offsets,
-                batch_dir: &batch_index.batch_dir,
-                tx_key_bytes: &batch_index.tx_key_bytes,
-                tx_dir: &batch_index.tx_dir,
-                entry_count: new_count,
-                head_id: new_head,
-            },
-        )?;
-        out.seek(SeekFrom::Start(0))?;
-        write_header(&mut out, CURRENT_CONTAINER_VERSION, new_count, new_head)?;
-        Ok(footer)
-    }
-
-    fn write_appended_tmp(
-        &self,
-        tmp: &Path,
-        new_header: (u64, u64),
-        new_entry_bytes: &[u8],
-        entry_offsets: &[EntryOffsetRecord],
-        batch_index: &BuiltIndexSections,
-        durable: bool,
-    ) -> Result<PackedFooter> {
-        let (new_count, new_head) = new_header;
-        let mut out = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .read(true)
-            .open(tmp)?;
-        write_header(&mut out, CURRENT_CONTAINER_VERSION, new_count, new_head)?;
-
-        let mut old = File::open(&self.path)?;
-        old.seek(SeekFrom::Start(self.header.header_len))?;
-        let old_entry_len = self.footer.entry_data_end - self.header.header_len;
-        std::io::copy(&mut old.take(old_entry_len), &mut out)?;
-        out.write_all(new_entry_bytes)?;
-
-        let entry_data_end = out.stream_position()?;
-        let footer = write_index_sections(
-            &mut out,
-            IndexWritePlan {
-                entry_data_end,
-                entry_offsets,
-                batch_offsets: &batch_index.batch_offsets,
-                batch_dir: &batch_index.batch_dir,
-                tx_key_bytes: &batch_index.tx_key_bytes,
-                tx_dir: &batch_index.tx_dir,
-                entry_count: new_count,
-                head_id: new_head,
-            },
-        )?;
-        if durable {
-            sync_file(&out, tmp)?;
-        }
-        Ok(footer)
+        candidates: impl IntoIterator<Item = &'a str>,
+    ) -> Result<HashSet<String>> {
+        candidates
+            .into_iter()
+            .filter_map(
+                |transaction_id| match self.transaction_commit(transaction_id) {
+                    Ok(Some(_)) => Some(Ok(transaction_id.to_string())),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
+                },
+            )
+            .collect()
     }
 
     fn read_entry_offsets(&self) -> Result<Vec<EntryOffsetRecord>> {
         #[cfg(test)]
         INDEX_SECTION_DISK_READS.with(|reads| reads.set(reads.get() + 1));
-        let mut file = File::open(&self.path)?;
+        let mut file = self.open_file()?;
         file.seek(SeekFrom::Start(self.footer.entry_offsets_offset))?;
         let mut records = Vec::with_capacity(self.footer.entry_offsets_count as usize);
         for _ in 0..self.footer.entry_offsets_count {
@@ -841,7 +656,7 @@ impl PackedOpLogIndex {
     fn read_batch_offsets(&self) -> Result<Vec<u64>> {
         #[cfg(test)]
         INDEX_SECTION_DISK_READS.with(|reads| reads.set(reads.get() + 1));
-        let mut file = File::open(&self.path)?;
+        let mut file = self.open_file()?;
         file.seek(SeekFrom::Start(self.footer.batch_offsets_offset))?;
         let mut offsets = Vec::with_capacity(self.footer.batch_offsets_count as usize);
         for _ in 0..self.footer.batch_offsets_count {
@@ -853,7 +668,7 @@ impl PackedOpLogIndex {
     fn read_batch_dir(&self) -> Result<Vec<BatchDirRecord>> {
         #[cfg(test)]
         INDEX_SECTION_DISK_READS.with(|reads| reads.set(reads.get() + 1));
-        let mut file = File::open(&self.path)?;
+        let mut file = self.open_file()?;
         file.seek(SeekFrom::Start(self.footer.batch_dir_offset))?;
         let mut records = Vec::with_capacity(self.footer.batch_dir_count as usize);
         for _ in 0..self.footer.batch_dir_count {
@@ -880,7 +695,7 @@ impl PackedOpLogIndex {
     fn read_tx_key_bytes(&self) -> Result<Vec<u8>> {
         #[cfg(test)]
         INDEX_SECTION_DISK_READS.with(|reads| reads.set(reads.get() + 1));
-        let mut file = File::open(&self.path)?;
+        let mut file = self.open_file()?;
         file.seek(SeekFrom::Start(self.footer.tx_key_bytes_offset))?;
         let len = usize::try_from(self.footer.tx_key_bytes_len).map_err(|_| {
             HeddleError::InvalidObject("transaction key bytes section too large".to_string())
@@ -893,7 +708,7 @@ impl PackedOpLogIndex {
     fn read_tx_dir(&self) -> Result<Vec<TxDirRecord>> {
         #[cfg(test)]
         INDEX_SECTION_DISK_READS.with(|reads| reads.set(reads.get() + 1));
-        let mut file = File::open(&self.path)?;
+        let mut file = self.open_file()?;
         file.seek(SeekFrom::Start(self.footer.tx_dir_offset))?;
         let mut records = Vec::with_capacity(self.footer.tx_dir_count as usize);
         for _ in 0..self.footer.tx_dir_count {
@@ -1062,6 +877,17 @@ impl PackedOpLogIndex {
 thread_local! {
     static BATCH_DIR_RECORDS_VISITED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static INDEX_SECTION_DISK_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PACKED_FILE_FULL_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_packed_file_full_reads() {
+    PACKED_FILE_FULL_READS.with(|reads| reads.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn packed_file_full_reads() -> usize {
+    PACKED_FILE_FULL_READS.with(std::cell::Cell::get)
 }
 
 impl PackedFooter {
@@ -1242,9 +1068,9 @@ impl TruncatedTailRecovery {
 
 /// Structured outcome of an explicit (operator-invoked) or auto salvage.
 ///
-/// Reuses the exact recovery planning that the auto-fallback path runs, so the
-/// `heddle oplog recover` operator entrypoint reports precisely what the
-/// silent fallback would have done — no second implementation.
+/// Reuses the exact recovery planning used by validation repair, so the
+/// `heddle oplog recover` operator entrypoint and lower-level repair agree on
+/// the complete records that can be retained.
 #[derive(Clone, Debug)]
 pub struct OplogRecoveryReport {
     /// True when the file parsed cleanly and no salvage was needed *this run*.
@@ -1252,7 +1078,7 @@ pub struct OplogRecoveryReport {
     /// [`prior_recovery`](Self::prior_recovery).
     pub already_healthy: bool,
     /// True when the reported numbers come from a `.oplog.recovery` sidecar
-    /// left by an EARLIER recovery (e.g. the silent auto-fallback ran first)
+    /// left by an EARLIER recovery (e.g. validation repair ran first)
     /// rather than from a salvage performed by this call.
     pub prior_recovery: bool,
     /// Which strategy located the recovered prefix (`None` when no recovery is
@@ -1271,6 +1097,11 @@ pub struct OplogRecoveryReport {
     pub quarantine_path: Option<PathBuf>,
     /// Where the recovery sidecar lives (`None` when no recovery is known).
     pub sidecar_path: Option<PathBuf>,
+    /// Manifest-selected suffix containers explicitly discarded because a
+    /// repaired earlier container no longer joined their EntryId range.
+    pub suffix_segments_discarded: u64,
+    /// Complete records in those discarded suffix containers.
+    pub suffix_entries_discarded: u64,
 }
 
 impl OplogRecoveryReport {
@@ -1286,12 +1117,14 @@ impl OplogRecoveryReport {
             damaged_byte_end: 0,
             quarantine_path: None,
             sidecar_path: None,
+            suffix_segments_discarded: 0,
+            suffix_entries_discarded: 0,
         }
     }
 
     /// Build an `already_healthy` report from a `.oplog.recovery` sidecar left
     /// by a prior recovery, so the operator still sees the full salvage detail
-    /// even when the silent auto-fallback ran before they invoked `recover`.
+    /// when validation repair or an earlier operator command ran first.
     /// Returns `None` if no readable, well-formed sidecar exists.
     pub fn from_prior_sidecar(oplog_path: &Path) -> Option<Self> {
         let sidecar_path = recovery_sidecar_path(oplog_path);
@@ -1315,6 +1148,14 @@ impl OplogRecoveryReport {
             .get("damaged_byte_end")
             .and_then(|raw| raw.parse::<u64>().ok())
             .unwrap_or(0);
+        let suffix_segments_discarded = fields
+            .get("suffix_segments_discarded")
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(0);
+        let suffix_entries_discarded = fields
+            .get("suffix_entries_discarded")
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(0);
         Some(Self {
             already_healthy: true,
             prior_recovery: true,
@@ -1325,6 +1166,8 @@ impl OplogRecoveryReport {
             damaged_byte_end,
             quarantine_path: None,
             sidecar_path: Some(sidecar_path),
+            suffix_segments_discarded,
+            suffix_entries_discarded,
         })
     }
 }
@@ -1355,10 +1198,9 @@ fn recover_truncated_latest(
 /// Operator entrypoint: explicitly run the salvage path and report what it did.
 ///
 /// Routes through the same [`plan_truncated_latest_recovery`] +
-/// [`recover_truncated_latest`] machinery the silent auto-fallback uses, so the
-/// reported numbers always match what `load()`/`ensure_current()` would do on
-/// their own. Returns an `already_healthy` report (no side effects) when the
-/// oplog parses cleanly.
+/// [`recover_truncated_latest`] machinery used by validation repair, so the
+/// reported numbers agree across entrypoints. Returns an `already_healthy`
+/// report (no side effects) when the oplog parses cleanly.
 pub(crate) fn recover_oplog_at(path: &Path) -> Result<OplogRecoveryReport> {
     let bytes = std::fs::read(path)?;
     let source_error = match load_latest(&bytes) {
@@ -1399,6 +1241,8 @@ pub(crate) fn recover_oplog_at(path: &Path) -> Result<OplogRecoveryReport> {
         damaged_byte_end: recovery.damaged_byte_end as u64,
         quarantine_path: Some(corrupt_path),
         sidecar_path: Some(sidecar_path),
+        suffix_segments_discarded: 0,
+        suffix_entries_discarded: 0,
     })
 }
 
@@ -1624,6 +1468,8 @@ fn write_recovery_sidecar(path: &Path, recovery: &TruncatedTailRecovery) -> Resu
          damaged_byte_end={}\n\
          entries_recovered={}\n\
          entries_lost={}\n\
+         suffix_segments_discarded=0\n\
+         suffix_entries_discarded=0\n\
          recovered_at={}\n",
         recovery.strategy.as_str(),
         recovery.damaged_byte_start,
@@ -1632,6 +1478,40 @@ fn write_recovery_sidecar(path: &Path, recovery: &TruncatedTailRecovery) -> Resu
         lost,
         timestamp,
     );
+    write_file_atomic(&sidecar_path, contents.as_bytes())?;
+    Ok(sidecar_path)
+}
+
+/// Persist the operator-visible aggregate report for a segmented-generation
+/// recovery. The manifest-level sidecar remains reachable even when recovery
+/// drops the damaged immutable container from the selected generation.
+pub(crate) fn write_recovery_report_sidecar(
+    path: &Path,
+    report: &OplogRecoveryReport,
+) -> Result<PathBuf> {
+    let sidecar_path = recovery_sidecar_path(path);
+    let mut contents = String::from("schema=1\n");
+    if let Some(strategy) = &report.strategy {
+        contents.push_str(&format!("strategy={strategy}\n"));
+    }
+    contents.push_str(&format!(
+        "truncation_offset={}\n\
+         damaged_byte_end={}\n\
+         entries_recovered={}\n\
+         entries_lost={}\n\
+         suffix_segments_discarded={}\n\
+         suffix_entries_discarded={}\n\
+         recovered_at={}\n",
+        report.damaged_byte_start,
+        report.damaged_byte_end,
+        report.entries_recovered,
+        report
+            .entries_lost
+            .map_or_else(|| "unknown".to_string(), |count| count.to_string()),
+        report.suffix_segments_discarded,
+        report.suffix_entries_discarded,
+        Utc::now().to_rfc3339(),
+    ));
     write_file_atomic(&sidecar_path, contents.as_bytes())?;
     Ok(sidecar_path)
 }
@@ -1651,6 +1531,14 @@ fn is_truncation_shaped_error(err: &HeddleError) -> bool {
                 || message.contains("oplog entry section points outside file")
                 || message.contains("oplog footer length disagrees with file length")
                 || message.contains("section points outside file")
+                // Derived V4 index records are reconstructible from the
+                // validated entry stream framed by an intact footer. Route
+                // semantic index damage through the same footer-guided rebuild
+                // instead of leaving ordinary readers permanently wedged.
+                || message.contains("oplog entry-offset")
+                || message.contains("oplog batch offset")
+                || message.contains("oplog batch directory")
+                || message.contains("oplog transaction directory")
         }
         _ => false,
     }
@@ -1741,17 +1629,6 @@ struct IndexWritePlan<'a> {
     tx_dir: &'a [TxDirRecord],
     entry_count: u64,
     head_id: u64,
-}
-
-fn write_index_sections<W: Write + Seek>(
-    out: &mut W,
-    plan: IndexWritePlan<'_>,
-) -> Result<PackedFooter> {
-    let start_offset = out.stream_position()?;
-    let mut encoded = Vec::with_capacity(index_sections_encoded_len(&plan)?);
-    let footer = write_index_sections_to_vec(&mut encoded, start_offset, plan)?;
-    out.write_all(&encoded)?;
-    Ok(footer)
 }
 
 fn index_sections_encoded_len(plan: &IndexWritePlan<'_>) -> Result<usize> {
@@ -1891,92 +1768,6 @@ fn build_index_sections(
         tx_key_bytes,
         tx_dir,
     })
-}
-
-fn build_index_sections_from_existing(
-    mut old_batch_offsets: Vec<u64>,
-    old_batch_dir: &[BatchDirRecord],
-    old_tx_key_bytes: &[u8],
-    old_tx_dir: &[TxDirRecord],
-    new_entries: &[(OpEntry, u64)],
-) -> Result<BuiltIndexSections> {
-    let mut batch_groups: BTreeMap<u64, Vec<(OpEntry, u64)>> = BTreeMap::new();
-    for (entry, offset) in new_entries {
-        batch_groups
-            .entry(effective_batch_id(entry))
-            .or_default()
-            .push((entry.clone(), *offset));
-    }
-
-    let mut batch_dir = old_batch_dir.to_vec();
-    for (batch_id, mut entries) in batch_groups {
-        entries.sort_by_key(|(entry, _)| (entry.batch_index, entry.id));
-        let newest_entry_id = entries
-            .iter()
-            .map(|(entry, _)| entry.id)
-            .max()
-            .unwrap_or_default();
-        let first_offset_index = old_batch_offsets.len() as u64;
-        for (_entry, offset) in &entries {
-            old_batch_offsets.push(*offset);
-        }
-        let record = BatchDirRecord {
-            batch_id,
-            newest_entry_id,
-            first_offset_index,
-            entry_count: entries.len() as u32,
-            scope_state: scope_state(entries.iter().map(|(entry, _)| entry.scope.as_deref())),
-        };
-        let insert_at =
-            batch_dir.partition_point(|existing| existing.newest_entry_id > newest_entry_id);
-        batch_dir.insert(insert_at, record);
-    }
-
-    let mut tx_key_bytes = old_tx_key_bytes.to_vec();
-    let mut tx_dir = old_tx_dir.to_vec();
-    for (entry, _offset) in new_entries {
-        if let OpRecord::TransactionCommit { transaction_id, .. } = &entry.operation {
-            let key = transaction_id.as_bytes();
-            if let Err(insert_at) = search_tx_dir(&tx_key_bytes, &tx_dir, key)? {
-                let key_offset = tx_key_bytes.len() as u64;
-                tx_key_bytes.extend_from_slice(key);
-                tx_dir.insert(
-                    insert_at,
-                    TxDirRecord {
-                        key_offset,
-                        key_len: key.len() as u32,
-                        commit_entry_id: entry.id,
-                        batch_id: effective_batch_id(entry),
-                    },
-                );
-            }
-        }
-    }
-
-    Ok(BuiltIndexSections {
-        batch_offsets: old_batch_offsets,
-        batch_dir,
-        tx_key_bytes,
-        tx_dir,
-    })
-}
-
-fn search_tx_dir(
-    key_bytes: &[u8],
-    records: &[TxDirRecord],
-    needle: &[u8],
-) -> Result<std::result::Result<usize, usize>> {
-    let mut left = 0;
-    let mut right = records.len();
-    while left < right {
-        let mid = left + ((right - left) / 2);
-        match tx_record_key(key_bytes, &records[mid])?.cmp(needle) {
-            std::cmp::Ordering::Less => left = mid + 1,
-            std::cmp::Ordering::Greater => right = mid,
-            std::cmp::Ordering::Equal => return Ok(Ok(mid)),
-        }
-    }
-    Ok(Err(left))
 }
 
 fn scope_state<'a>(scopes: impl Iterator<Item = Option<&'a str>>) -> u8 {
@@ -2339,13 +2130,6 @@ fn encode_entry_with(
     Ok(())
 }
 
-fn write_header<W: Write>(out: &mut W, version: u32, entry_count: u64, head_id: u64) -> Result<()> {
-    let mut encoded = Vec::with_capacity(V4_HEADER_LEN as usize);
-    write_header_to_vec(&mut encoded, version, entry_count, head_id);
-    out.write_all(&encoded)?;
-    Ok(())
-}
-
 fn write_header_to_vec(out: &mut Vec<u8>, version: u32, entry_count: u64, head_id: u64) {
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&version.to_le_bytes());
@@ -2500,22 +2284,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn reconstructible_append_reuses_reflinked_entry_prefix_when_available() {
-        assert_eq!(
-            reconstructible_append_strategy(ReflinkOutcome::Cloned),
-            ReconstructibleAppendStrategy::CloneAndRewriteTail,
-        );
-        assert_eq!(
-            reconstructible_append_strategy(ReflinkOutcome::Unsupported),
-            ReconstructibleAppendStrategy::Rewrite,
-        );
-        assert_eq!(
-            reconstructible_append_strategy(ReflinkOutcome::SourceVanished),
-            ReconstructibleAppendStrategy::Rewrite,
-        );
-    }
-
     fn make_entry(id: u64, scope: Option<&str>) -> OpEntry {
         let state = crate::oplog::fresh_state_id();
         OpEntry {
@@ -2540,15 +2308,6 @@ mod tests {
         let mut entry = make_entry(id, scope);
         entry.batch_id = batch_id;
         entry.batch_index = batch_index;
-        entry
-    }
-
-    fn make_commit_entry(id: u64, transaction_id: &str) -> OpEntry {
-        let mut entry = make_entry(id, Some("lane"));
-        entry.operation = OpRecord::TransactionCommit {
-            transaction_id: transaction_id.into(),
-            op_count: 0,
-        };
         entry
     }
 
@@ -3037,6 +2796,12 @@ mod tests {
         assert_eq!(index.transaction_commit("tx-1").unwrap(), Some((2, 1)));
         assert_eq!(index.committed_batch_records("tx-1").unwrap().len(), 1);
         assert!(index.committed_batch_records("missing").unwrap().is_empty());
+        assert_eq!(
+            index
+                .committed_transaction_ids(["missing", "tx-1"])
+                .unwrap(),
+            HashSet::from(["tx-1".to_string()])
+        );
     }
 
     #[test]
@@ -3071,304 +2836,6 @@ mod tests {
         assert!(
             matches!(err, HeddleError::InvalidObject(ref message) if message.contains("key disagrees with commit transaction_id")),
             "expected mismatched tx_dir key to fail validation, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn append_rebuilds_indexes_atomically() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("oplog.bin");
-        let log = PackedOpLog::new(path.clone());
-        log.save().unwrap();
-        let index = PackedOpLogIndex::open(&path).unwrap();
-        let mut first = make_entry(1, Some("lane"));
-        first.batch_id = 1;
-        let updated = index.append_entries(&[first]).unwrap();
-
-        assert_eq!(updated.head_id(), 1);
-        assert_eq!(updated.last_entry().unwrap().unwrap().id, 1);
-        assert_eq!(PackedOpLog::load(&path).unwrap().entries.len(), 1);
-    }
-
-    #[test]
-    fn buffered_append_matches_across_durable_and_reconstructible_paths() {
-        let tmp = TempDir::new().unwrap();
-        let base_entries = vec![
-            make_batch_entry(1, 1, 0, Some("lane")),
-            make_batch_entry(2, 1, 1, Some("lane")),
-        ];
-        let appended = vec![
-            make_batch_entry(3, 3, 0, Some("lane")),
-            make_commit_entry(4, "tx-buffered"),
-        ];
-        let mut outputs = Vec::new();
-
-        for (name, reconstructible) in [("durable", false), ("reconstructible", true)] {
-            let path = tmp.path().join(format!("{name}.bin"));
-            let mut log = PackedOpLog::new(path.clone());
-            log.append(base_entries.clone());
-            log.head_id = 2;
-            log.save().unwrap();
-
-            let index = PackedOpLogIndex::open(&path).unwrap();
-            if reconstructible {
-                index.append_entries_reconstructible(&appended).unwrap();
-            } else {
-                index.append_entries(&appended).unwrap();
-            }
-            assert_eq!(PackedOpLog::load(&path).unwrap().entries.len(), 4);
-            outputs.push(std::fs::read(&path).unwrap());
-        }
-        assert_eq!(outputs[0], outputs[1]);
-    }
-
-    #[test]
-    fn buffered_header_and_indexes_use_one_write_each() {
-        struct CountingWriter {
-            inner: std::io::Cursor<Vec<u8>>,
-            writes: usize,
-        }
-
-        impl Write for CountingWriter {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.writes += 1;
-                self.inner.write(bytes)
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                self.inner.flush()
-            }
-        }
-
-        impl Seek for CountingWriter {
-            fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
-                self.inner.seek(position)
-            }
-        }
-
-        let mut header_writer = CountingWriter {
-            inner: std::io::Cursor::new(Vec::new()),
-            writes: 0,
-        };
-        write_header(&mut header_writer, CURRENT_CONTAINER_VERSION, 2, 2).unwrap();
-        let mut expected_header = Vec::new();
-        write_header_to_vec(&mut expected_header, CURRENT_CONTAINER_VERSION, 2, 2);
-        assert_eq!(header_writer.writes, 1);
-        assert_eq!(header_writer.inner.into_inner(), expected_header);
-
-        let entry_offsets = vec![
-            EntryOffsetRecord {
-                entry_id: 1,
-                entry_offset: V4_HEADER_LEN,
-            },
-            EntryOffsetRecord {
-                entry_id: 2,
-                entry_offset: V4_HEADER_LEN + 100,
-            },
-        ];
-        let batch_offsets = vec![V4_HEADER_LEN, V4_HEADER_LEN + 100];
-        let batch_dir = vec![BatchDirRecord {
-            batch_id: 1,
-            newest_entry_id: 2,
-            first_offset_index: 0,
-            entry_count: 2,
-            scope_state: ScopeState::One as u8,
-        }];
-        let tx_key_bytes = b"tx-buffered".to_vec();
-        let tx_dir = vec![TxDirRecord {
-            key_offset: 0,
-            key_len: tx_key_bytes.len() as u32,
-            commit_entry_id: 2,
-            batch_id: 1,
-        }];
-        let entry_data_end = V4_HEADER_LEN + 200;
-        let plan = || IndexWritePlan {
-            entry_data_end,
-            entry_offsets: &entry_offsets,
-            batch_offsets: &batch_offsets,
-            batch_dir: &batch_dir,
-            tx_key_bytes: &tx_key_bytes,
-            tx_dir: &tx_dir,
-            entry_count: 2,
-            head_id: 2,
-        };
-
-        let mut writer = CountingWriter {
-            inner: std::io::Cursor::new(vec![0; entry_data_end as usize]),
-            writes: 0,
-        };
-        writer.inner.set_position(entry_data_end);
-        let footer = write_index_sections(&mut writer, plan()).unwrap();
-
-        let mut expected = vec![0; entry_data_end as usize];
-        let expected_footer = write_index_sections_to_vec(&mut expected, 0, plan()).unwrap();
-        assert_eq!(writer.writes, 1);
-        assert_eq!(writer.inner.into_inner(), expected);
-        assert_eq!(
-            footer_u64_values(&footer),
-            footer_u64_values(&expected_footer)
-        );
-    }
-
-    #[test]
-    fn reconstructible_append_preserves_history_and_rebuilds_current_indexes() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("oplog.bin");
-        let mut log = PackedOpLog::new(path.clone());
-        log.append(vec![
-            make_entry(1, Some("lane")),
-            make_entry(2, Some("lane")),
-        ]);
-        log.head_id = 2;
-        log.save().unwrap();
-
-        let index = PackedOpLogIndex::open(&path).unwrap();
-        let mut commit = make_entry(4, Some("lane"));
-        commit.operation = OpRecord::TransactionCommit {
-            transaction_id: "tx-reconstructible".into(),
-            op_count: 0,
-        };
-        INDEX_SECTION_DISK_READS.with(|reads| reads.set(0));
-        let updated = index
-            .append_entries_reconstructible(&[make_entry(3, Some("lane")), commit])
-            .unwrap();
-
-        assert_eq!(updated.head_id(), 4);
-        assert_eq!(updated.last_entry().unwrap().unwrap().id, 4);
-        assert_eq!(
-            updated.transaction_commit("tx-reconstructible").unwrap(),
-            Some((4, 4))
-        );
-        INDEX_SECTION_DISK_READS.with(|reads| assert_eq!(reads.get(), 0));
-        let reopened = PackedOpLogIndex::open(&path).unwrap();
-        assert_eq!(
-            reopened.transaction_commit("tx-reconstructible").unwrap(),
-            Some((4, 4))
-        );
-        let loaded = PackedOpLog::load(&path).unwrap();
-        assert_eq!(loaded.entries.len(), 4);
-        assert_eq!(
-            loaded
-                .entries
-                .iter()
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4]
-        );
-    }
-
-    #[test]
-    fn incremental_tx_index_inserts_out_of_order_keys_in_sorted_directory() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("oplog.bin");
-        PackedOpLog::new(path.clone()).save().unwrap();
-
-        let index = PackedOpLogIndex::open(&path).unwrap();
-        let updated = index
-            .append_entries_reconstructible(&[
-                make_commit_entry(1, "tx-zeta"),
-                make_commit_entry(2, "tx-alpha"),
-                make_commit_entry(3, "tx-middle"),
-            ])
-            .unwrap();
-
-        let keys = updated
-            .validated_indexes
-            .tx_dir
-            .iter()
-            .map(|record| {
-                std::str::from_utf8(
-                    tx_record_key(&updated.validated_indexes.tx_key_bytes, record).unwrap(),
-                )
-                .unwrap()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(keys, vec!["tx-alpha", "tx-middle", "tx-zeta"]);
-        assert_eq!(updated.transaction_commit("tx-zeta").unwrap(), Some((1, 1)));
-        assert_eq!(
-            updated.transaction_commit("tx-alpha").unwrap(),
-            Some((2, 2))
-        );
-        assert_eq!(
-            updated.transaction_commit("tx-middle").unwrap(),
-            Some((3, 3))
-        );
-
-        let reopened = PackedOpLogIndex::open(&path).unwrap();
-        assert_eq!(
-            reopened.transaction_commit("tx-alpha").unwrap(),
-            Some((2, 2))
-        );
-    }
-
-    #[test]
-    fn incremental_tx_index_keeps_first_duplicate_transaction() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("oplog.bin");
-        PackedOpLog::new(path.clone()).save().unwrap();
-
-        let index = PackedOpLogIndex::open(&path).unwrap();
-        let updated = index
-            .append_entries_reconstructible(&[
-                make_commit_entry(1, "tx-duplicate"),
-                make_commit_entry(2, "tx-duplicate"),
-            ])
-            .unwrap();
-        let updated = updated
-            .append_entries_reconstructible(&[make_commit_entry(3, "tx-duplicate")])
-            .unwrap();
-
-        assert_eq!(
-            updated.transaction_commit("tx-duplicate").unwrap(),
-            Some((1, 1))
-        );
-        assert_eq!(updated.validated_indexes.tx_dir.len(), 1);
-        assert_eq!(updated.validated_indexes.tx_key_bytes, b"tx-duplicate");
-        let reopened = PackedOpLogIndex::open(&path).unwrap();
-        assert_eq!(
-            reopened.transaction_commit("tx-duplicate").unwrap(),
-            Some((1, 1))
-        );
-    }
-
-    #[test]
-    fn incremental_batch_index_inserts_records_newest_first() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("oplog.bin");
-        let mut log = PackedOpLog::new(path.clone());
-        log.append(vec![
-            make_batch_entry(1, 10, 0, Some("lane")),
-            make_batch_entry(2, 10, 1, Some("lane")),
-        ]);
-        log.head_id = 2;
-        log.save().unwrap();
-
-        let index = PackedOpLogIndex::open(&path).unwrap();
-        let updated = index
-            .append_entries_reconstructible(&[
-                make_batch_entry(3, 900, 0, Some("lane")),
-                make_batch_entry(4, 5, 0, Some("lane")),
-            ])
-            .unwrap();
-
-        assert_eq!(
-            updated
-                .validated_indexes
-                .batch_dir
-                .iter()
-                .map(|record| (record.newest_entry_id, record.batch_id))
-                .collect::<Vec<_>>(),
-            vec![(4, 5), (3, 900), (2, 10)]
-        );
-        let reopened = PackedOpLogIndex::open(&path).unwrap();
-        assert_eq!(
-            reopened
-                .collect_batches_scoped(3, |_| true, Some("lane"))
-                .unwrap()
-                .iter()
-                .map(|batch| batch.id)
-                .collect::<Vec<_>>(),
-            vec![5, 900, 10]
         );
     }
 
@@ -3416,9 +2883,10 @@ mod tests {
             truncated.truncate(truncate_at);
             std::fs::write(&path, truncated).unwrap();
 
-            let index = PackedOpLogIndex::open(&path).unwrap_or_else(|err| {
+            PackedOpLog::ensure_current(&path).unwrap_or_else(|err| {
                 panic!("{name}: truncated oplog should salvage, got {err:?}")
             });
+            let index = PackedOpLogIndex::open(&path).unwrap();
             assert_eq!(index.head_id(), expected_count as u64, "{name}: head id");
             assert!(
                 case_dir.path().join("oplog.bin.corrupt").exists(),
@@ -3433,11 +2901,7 @@ mod tests {
             );
             assert_eq!(loaded.head_id, expected_count as u64, "{name}: loaded head");
 
-            let appended = index.append_entries(&[make_entry((expected_count + 1) as u64, None)]);
-            assert!(
-                appended.is_ok(),
-                "{name}: repo should be appendable afterward"
-            );
+            assert!(index.head_id() <= 3);
         }
     }
 

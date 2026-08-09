@@ -7,11 +7,12 @@ use clap::Subcommand;
 pub enum OplogCommands {
     /// Salvage a truncated or torn operation log and report what was recovered.
     ///
-    /// Runs the same recovery the everyday read path runs automatically:
-    /// keeps every complete oplog record, quarantines the damaged file to
-    /// `oplog.bin.corrupt`, writes an `oplog.bin.oplog.recovery` sidecar, and
-    /// rebuilds `oplog.bin`. Unlike the silent auto-fallback, this reports the
-    /// outcome (records recovered/lost, damaged byte range, quarantine path).
+    /// Explicitly authorizes recovery before ordinary repository open: keeps
+    /// every complete oplog record, quarantines a damaged selected container
+    /// beside the original with a `.corrupt` suffix, writes its
+    /// `.oplog.recovery` sidecar, and rebuilds that container. If repairing an
+    /// earlier immutable segment breaks the EntryId chain, the command also
+    /// reports the complete later segments and entries it discarded.
     ///
     /// When the oplog is already healthy it makes no changes and, if a prior
     /// recovery left a sidecar, reports that last recovery instead.

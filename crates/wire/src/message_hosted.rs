@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Hosted spool and grant admin message payloads.
+//! Local projections retained after hosted protocol mapping.
 
 use std::path::PathBuf;
 
@@ -29,9 +29,6 @@ pub struct HostedSpoolInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListHostedNamespaces {}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostedNamespaceInfo {
     pub namespace_id: String,
     pub kind: String,
@@ -40,38 +37,6 @@ pub struct HostedNamespaceInfo {
     pub display_name: Option<String>,
     pub full_path: String,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateNamespace {
-    pub full_path: String,
-    #[serde(default)]
-    pub new_slug: Option<String>,
-    #[serde(default)]
-    pub display_name: Option<Option<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeleteNamespace {
-    pub full_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NamespaceUpdated {
-    pub namespace: HostedNamespaceInfo,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NamespaceDeleted {
-    pub full_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NamespacesList {
-    pub namespaces: Vec<HostedNamespaceInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListHostedRepositories {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostedRepositoryInfo {
@@ -83,64 +48,6 @@ pub struct HostedRepositoryInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateHostedRepository {
-    pub full_path: String,
-    pub new_slug: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeleteHostedRepository {
-    pub full_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepositoryUpdated {
-    pub repository: HostedRepositoryInfo,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepositoryDeleted {
-    pub full_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepositoriesList {
-    pub repositories: Vec<HostedRepositoryInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateHostedGrant {
-    pub subject: String,
-    pub role: String,
-    #[serde(default)]
-    pub namespace_path: Option<String>,
-    #[serde(default)]
-    pub repo_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeleteHostedGrant {
-    pub subject: String,
-    #[serde(default)]
-    pub namespace_path: Option<String>,
-    #[serde(default)]
-    pub repo_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateHostedGrant {
-    pub subject: String,
-    pub role: String,
-    #[serde(default)]
-    pub namespace_path: Option<String>,
-    #[serde(default)]
-    pub repo_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListHostedGrants {}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostedGrantInfo {
     pub subject: String,
     pub role: String,
@@ -148,30 +55,6 @@ pub struct HostedGrantInfo {
     pub namespace_path: Option<String>,
     #[serde(default)]
     pub repo_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HostedGrantCreated {
-    pub grant: HostedGrantInfo,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HostedGrantDeleted {
-    pub subject: String,
-    #[serde(default)]
-    pub namespace_path: Option<String>,
-    #[serde(default)]
-    pub repo_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HostedGrantUpdated {
-    pub grant: HostedGrantInfo,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HostedGrantsList {
-    pub grants: Vec<HostedGrantInfo>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

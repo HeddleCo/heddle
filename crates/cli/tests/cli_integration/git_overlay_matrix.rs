@@ -16,6 +16,8 @@ fn seed_heddle_bisect_state(path: &std::path::Path) {
 
 fn init_git_repo_with_branch(path: &std::path::Path, branch: &str) {
     let status = Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .arg("init")
         .current_dir(path)
         .status()
@@ -23,6 +25,8 @@ fn init_git_repo_with_branch(path: &std::path::Path, branch: &str) {
     assert!(status.success(), "git init should succeed");
 
     let status = Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .args(["config", "user.name", "Heddle Test"])
         .current_dir(path)
         .status()
@@ -30,6 +34,8 @@ fn init_git_repo_with_branch(path: &std::path::Path, branch: &str) {
     assert!(status.success());
 
     let status = Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .args(["config", "user.email", "heddle@example.com"])
         .current_dir(path)
         .status()
@@ -37,6 +43,8 @@ fn init_git_repo_with_branch(path: &std::path::Path, branch: &str) {
     assert!(status.success());
 
     let status = Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .args(["checkout", "-b", branch])
         .current_dir(path)
         .status()
@@ -46,6 +54,8 @@ fn init_git_repo_with_branch(path: &std::path::Path, branch: &str) {
 
 fn git(args: &[&str], path: &std::path::Path) {
     let status = Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .args(args)
         .current_dir(path)
         .status()
@@ -55,6 +65,8 @@ fn git(args: &[&str], path: &std::path::Path) {
 
 fn git_stdout(path: &std::path::Path, args: &[&str]) -> String {
     let output = Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .args(args)
         .current_dir(path)
         .output()

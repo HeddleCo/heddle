@@ -5,6 +5,8 @@ fn git(path: &std::path::Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
         .current_dir(path)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .output()
         .unwrap();
     assert!(

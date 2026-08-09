@@ -10,7 +10,6 @@ pub mod diff;
 pub mod merge_driver;
 pub mod parser;
 pub mod semantic_index;
-mod symbol_extraction;
 pub mod symbol_resolver;
 
 pub use analysis::{

@@ -14,6 +14,124 @@ use tracing::debug;
 
 use super::SemanticSimilarityFn;
 
+/// Scored one-to-one rename chosen from a [`RenameCandidateIndex`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RenameAssignment {
+    pub source_index: usize,
+    pub target_index: usize,
+    pub score: f64,
+}
+
+/// Deterministic assignment seam shared by rename detectors.
+///
+/// Callers retain their own candidate pruning and scoring policy. This module
+/// owns the cross-policy invariant: highest score wins, equal scores use input
+/// index order, and a source or target can be assigned at most once.
+#[derive(Debug)]
+pub struct RenameCandidateIndex {
+    source_count: usize,
+    target_count: usize,
+    candidates: Vec<RenameAssignment>,
+}
+
+impl RenameCandidateIndex {
+    pub fn new(source_count: usize, target_count: usize) -> Self {
+        Self {
+            source_count,
+            target_count,
+            candidates: Vec::new(),
+        }
+    }
+
+    /// Add a policy-qualified candidate.
+    ///
+    /// # Panics
+    ///
+    /// Panics when either index is outside the source/target sizes supplied to
+    /// [`Self::new`], or when `score` is not finite.
+    pub fn push(&mut self, source_index: usize, target_index: usize, score: f64) {
+        assert!(
+            source_index < self.source_count,
+            "source index out of bounds"
+        );
+        assert!(
+            target_index < self.target_count,
+            "target index out of bounds"
+        );
+        assert!(score.is_finite(), "candidate score must be finite");
+        self.candidates.push(RenameAssignment {
+            source_index,
+            target_index,
+            score,
+        });
+    }
+
+    /// Number of candidates retained by the caller's policy.
+    pub fn candidate_count(&self) -> usize {
+        self.candidates.len()
+    }
+
+    /// Greedily assign candidates in descending score order.
+    pub fn assign(mut self) -> Vec<RenameAssignment> {
+        self.candidates.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.source_index.cmp(&right.source_index))
+                .then_with(|| left.target_index.cmp(&right.target_index))
+        });
+
+        let mut used_sources = vec![false; self.source_count];
+        let mut used_targets = vec![false; self.target_count];
+        let mut assignments = Vec::with_capacity(self.source_count.min(self.target_count));
+        for candidate in self.candidates {
+            if used_sources[candidate.source_index] || used_targets[candidate.target_index] {
+                continue;
+            }
+            used_sources[candidate.source_index] = true;
+            used_targets[candidate.target_index] = true;
+            assignments.push(candidate);
+        }
+        assignments
+    }
+}
+
+#[cfg(test)]
+mod candidate_index_tests {
+    use super::RenameCandidateIndex;
+
+    #[test]
+    fn assignment_is_one_to_one_and_uses_stable_index_ties() {
+        let mut candidates = RenameCandidateIndex::new(3, 3);
+        candidates.push(2, 0, 0.9);
+        candidates.push(0, 2, 0.9);
+        candidates.push(0, 0, 0.9);
+        candidates.push(1, 1, 0.8);
+        candidates.push(2, 2, 0.7);
+
+        let assignments = candidates.assign();
+
+        assert_eq!(
+            assignments
+                .iter()
+                .map(|candidate| (candidate.source_index, candidate.target_index))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (1, 1), (2, 2)]
+        );
+    }
+
+    #[test]
+    fn candidate_count_exposes_policy_pruning_before_assignment() {
+        let mut candidates = RenameCandidateIndex::new(100, 100);
+        for index in 0..100 {
+            candidates.push(index, index, 1.0);
+        }
+
+        assert_eq!(candidates.candidate_count(), 100);
+        assert_eq!(candidates.assign().len(), 100);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RenameMatch {
     pub from_path: String,
@@ -230,14 +348,16 @@ pub(crate) fn detect_renames_with_stats(
     branch: &FlatTree,
     config: RenameMatcherConfig,
 ) -> Result<RenameDetection> {
-    let deleted: Vec<(&String, &FlatLeaf)> = base
+    let mut deleted: Vec<(&String, &FlatLeaf)> = base
         .iter()
         .filter(|(path, leaf)| leaf.entry_type == EntryType::Blob && !branch.contains_key(*path))
         .collect();
-    let added: Vec<(&String, &FlatLeaf)> = branch
+    let mut added: Vec<(&String, &FlatLeaf)> = branch
         .iter()
         .filter(|(path, leaf)| leaf.entry_type == EntryType::Blob && !base.contains_key(*path))
         .collect();
+    deleted.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    added.sort_unstable_by(|left, right| left.0.cmp(right.0));
 
     let mut stats = RenameMatcherStats {
         deleted_files: deleted.len(),
@@ -294,7 +414,7 @@ pub(crate) fn detect_renames_with_stats(
 
     let deleted_files = load_candidate_files(store, &remaining_deleted, use_content, &mut stats)?;
     let added_index = build_added_index(store, &remaining_added, use_content, &mut stats)?;
-    let mut candidates = Vec::new();
+    let mut candidates = RenameCandidateIndex::new(deleted.len(), added.len());
 
     for deleted_file in &deleted_files {
         for added_position in collect_candidate_positions(deleted_file, &added_index) {
@@ -325,19 +445,15 @@ pub(crate) fn detect_renames_with_stats(
             stats.scored_pairs += 1;
             if score >= config.threshold {
                 stats.threshold_matches += 1;
-                candidates.push((deleted_file.index, added_file.index, score));
+                candidates.push(deleted_file.index, added_file.index, score);
             }
         }
     }
 
-    candidates.sort_by(|left, right| {
-        right
-            .2
-            .partial_cmp(&left.2)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    for (deleted_index, added_index, score) in candidates {
+    for assignment in candidates.assign() {
+        let deleted_index = assignment.source_index;
+        let added_index = assignment.target_index;
+        let score = assignment.score;
         if used_deleted[deleted_index] || used_added[added_index] {
             continue;
         }

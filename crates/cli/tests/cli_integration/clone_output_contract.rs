@@ -122,9 +122,12 @@ mod fixture {
             repo::clone_intent::CloneIntent::path(&destination).is_file(),
             "a connected interrupted clone retains its durable recovery intent"
         );
+        let canonical_destination = destination
+            .canonicalize()
+            .expect("canonical interrupted clone destination");
         assert!(matches!(
             repo::Repository::open(&destination),
-            Err(repo::HeddleError::IncompleteClone(path)) if path == destination
+            Err(repo::HeddleError::IncompleteClone(path)) if path == canonical_destination
         ));
     }
 
@@ -392,6 +395,11 @@ mod fixture {
         tls: Arc<ServerConfig>,
         routes: Arc<Mutex<HashMap<String, VecDeque<Vec<u8>>>>>,
     ) {
+        // Accepted sockets inherit O_NONBLOCK from the listener on macOS, but
+        // this synchronous rustls fixture expects blocking handshakes.
+        stream
+            .set_nonblocking(false)
+            .expect("make endpoint descriptor connection blocking");
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("set endpoint descriptor read timeout");
@@ -430,9 +438,16 @@ mod fixture {
             "HTTP/1.1 {status}\r\nContent-Type: application/protobuf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
-        let _ = stream
+        let response_written = stream
             .write_all(response.as_bytes())
             .and_then(|_| stream.write_all(&body))
             .and_then(|_| stream.flush());
+        if response_written.is_ok() {
+            stream.conn.send_close_notify();
+            let _ = stream
+                .sock
+                .set_read_timeout(Some(Duration::from_millis(250)));
+            let _ = stream.conn.complete_io(&mut stream.sock);
+        }
     }
 }

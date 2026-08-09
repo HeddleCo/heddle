@@ -3,8 +3,8 @@
 #
 # The release pipeline is invoked only on `v*` tag pushes, so we can't
 # observe its artifacts in normal CI. Instead we statically verify that
-# `.github/workflows/release.yml` declares the contract every downstream
-# packaging channel (Homebrew, Scoop, apt) relies on:
+# `.github/workflows/release.yml` declares the contract that every active
+# downstream packaging channel (Homebrew and Scoop) relies on:
 #
 #   - tag-push trigger
 #   - all 5 target triples
@@ -226,12 +226,6 @@ else
   err "standalone macOS CLI and fsmonitor worker binaries must be Developer ID signed and notarized before tar packaging"
 fi
 
-if grep -F 'install -m 0755 "$WORK/$stage/heddle-fsmonitor-worker" "$root/usr/bin/heddle-fsmonitor-worker"' scripts/build-apt-pool.sh >/dev/null; then
-  ok "apt package installs the fsmonitor worker beside heddle"
-else
-  err "the apt package must install heddle-fsmonitor-worker beside heddle"
-fi
-
 if grep -F 'FSMONITOR_WORKER_PATH=' crates/mount/swift/HeddleHost/pkg/make-pkg.sh >/dev/null \
    && grep -F '"$PKGROOT/usr/local/bin/heddle-fsmonitor-worker"' crates/mount/swift/HeddleHost/pkg/make-pkg.sh >/dev/null \
    && grep -F 'heddle-fsmonitor-worker` in `/usr/local/bin/heddle-fsmonitor-worker' crates/mount/swift/HeddleHost/BUILD.md >/dev/null; then
@@ -340,32 +334,18 @@ else
   err "missing Scoop manifest publication wiring"
 fi
 
-# apt (Debian/Ubuntu) pool — parallel channel on the same substrate (#234).
-# scripts/build-apt-pool.sh builds the amd64 + arm64 .deb (and the
-# heddle-archive-keyring .deb) from the linux-gnu tarballs in SHA256SUMS, then
-# generates + GPG-signs the pool/Packages/Release index in an ephemeral
-# GNUPGHOME (Ed25519 subkey, #328 Decision 2). The pool is still built every
-# release.
-#
-# PUBLICATION IS DEFERRED until HeddleCo/apt-heddle exists: the "Publish apt
-# pool PR" step and the apt-heddle token scope were removed because scoping the
-# token / PRing to a nonexistent repo failed the whole publish-manifests job
-# and blocked the Homebrew + Scoop pushes. Contract for the deferred state:
-# apt pool is still built + signed, but apt-heddle must NOT be referenced by
-# the workflow (no target-repo, no token scope). Revive both when the repo
-# exists (and restore the apt-heddle assertions here).
-# Grep only for the ACTIVE wiring forms (a `target-repo:` mapping and a
-# `repositories:` token scope) so that revivable comments mentioning
-# apt-heddle don't count as live wiring.
+# apt publication remains fully deferred until HeddleCo/apt-heddle exists.
+# The release workflow must neither expose the signing key nor build unused
+# pool output while no publisher consumes it. The renderer remains in-tree for
+# a coordinated revival with the repository and secret provisioning.
 if [[ -x scripts/build-apt-pool.sh ]] \
-   && grep -F "scripts/build-apt-pool.sh" "$WF" >/dev/null \
-   && grep -F "HEDDLE_APT_GPG_PRIVATE_KEY" "$WF" >/dev/null \
-   && grep -F "actions/create-github-app-token" "$WF" >/dev/null \
+   && ! grep -E "^[[:space:]]+scripts/build-apt-pool\.sh" "$WF" >/dev/null \
+   && ! grep -E "^[[:space:]]+HEDDLE_APT_GPG_PRIVATE_KEY:" "$WF" >/dev/null \
    && ! grep -E "^[[:space:]]*target-repo: HeddleCo/apt-heddle" "$WF" >/dev/null \
    && ! grep -E "^[[:space:]]*repositories: .*apt-heddle" "$WF" >/dev/null; then
-  ok "apt pool built + signed; publication deferred (apt-heddle absent)"
+  ok "apt pool build, signing, and publication deferred (apt-heddle absent)"
 else
-  err "apt pool must be built+signed with publication deferred (no apt-heddle references) until HeddleCo/apt-heddle exists"
+  err "apt pool must remain fully deferred without live build/sign/publish wiring until HeddleCo/apt-heddle exists"
 fi
 
 if grep -F "if: needs.validate-tag.outputs.kind == 'stable'" "$WF" >/dev/null; then

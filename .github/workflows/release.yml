@@ -600,26 +600,6 @@ jobs:
         shell: bash
         run: scripts/render-scoop-manifest.sh "${{ steps.ver.outputs.tag }}" dist/SHA256SUMS rendered/heddle.json
 
-      - name: Build apt pool + signed index
-        shell: bash
-        env:
-          # Ed25519 signing subkey exported offline from the primary (#328
-          # Decision 2). Imported into an ephemeral GNUPGHOME that lives only
-          # for this step; apt-heddle never sees a secret.
-          HEDDLE_APT_GPG_PRIVATE_KEY: ${{ secrets.HEDDLE_APT_GPG_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          GNUPGHOME="$(mktemp -d)"
-          export GNUPGHOME
-          chmod 700 "$GNUPGHOME"
-          printf '%s' "$HEDDLE_APT_GPG_PRIVATE_KEY" | gpg --batch --import
-          # Sign with the first secret subkey/key id imported above.
-          key_id="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')"
-          HEDDLE_APT_GPG_KEY_ID="$key_id" \
-            scripts/build-apt-pool.sh "${{ steps.ver.outputs.tag }}" \
-              dist/SHA256SUMS dist rendered/apt
-          rm -rf "$GNUPGHOME"
-
       - name: Generate release publisher token
         id: app-token
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
@@ -658,5 +638,5 @@ jobs:
       # token / PRing to it failed the whole publish-manifests job, blocking the
       # Homebrew + Scoop pushes above. Revive this step (and re-add apt-heddle to
       # the token `repositories:` list) once HeddleCo/apt-heddle is created.
-      # The apt pool is still built by the "Build apt pool + signed index" step
-      # above; only the publish leg is deferred.
+      # Building and signing the apt pool is also deferred: without a publisher
+      # it creates unused output while unnecessarily exposing the signing key.

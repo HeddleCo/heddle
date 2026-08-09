@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::Result;
 use heddle_core::status::next_action::{NextActionInput, effective_next_action, non_empty_action};
-use heddle_git_projection::GitProjection;
 use repo::{GitImportGuidance, GitRemoteTrackingStatus, RepositoryOperationStatus};
 
 use super::{
@@ -13,7 +12,7 @@ use super::{
         OperatorEmission, SYNC_OPERATOR_EMISSION, abort_operator, fail_if_blocked_operator_status,
         open_operator_repo_from_path, recommend_next_action,
     },
-    remote::resolve_default_remote_name,
+    remote::{pull_current_git_overlay_authoritative, resolve_default_remote_name},
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
     workflow::cmd_sync,
     worktree_safety::ensure_worktree_clean,
@@ -92,8 +91,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
         if remote_decision.status == "remote_behind" {
             ensure_worktree_clean(&repo, "sync")?;
             let remote_name = resolve_default_remote_name(&repo, None)?;
-            let mut bridge = GitProjection::new(&repo);
-            let outcome = bridge.pull(&remote_name)?;
+            let outcome = pull_current_git_overlay_authoritative(&repo, &remote_name)?;
             let verification = build_repository_verification_state(&repo);
             if !verification.verified {
                 return emit(
@@ -114,7 +112,10 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                     action: OperatorAction::Sync,
                     message: format!(
                         "Synced branch '{}' with remote '{}' ({} commit(s) seen, {} state(s) imported)",
-                        remote.branch, remote_name, outcome.commits_seen, outcome.states_created,
+                        remote.branch,
+                        remote_name,
+                        outcome.commits_imported,
+                        outcome.states_created,
                     ),
                     blockers: Vec::new(),
                     warnings: Vec::new(),

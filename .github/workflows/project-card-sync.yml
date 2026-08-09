@@ -4,7 +4,7 @@ name: Project card sync
 #
 # - Issue opened   → added to project (defaults to Backlog).
 # - Issue reopened → reset Status to Backlog.
-# - PR opened/edited/synced/ready_for_review → linked issues move to "In review".
+# - PR opened/reopened/edited → linked issues move to "In review".
 # - PR merged into the *default branch* → CLOSING refs (closes/fixes/resolves) move to Done.
 #                                          TRACKING refs (refs/part of/tracked by) move to In review.
 # - PR closed without merge → CLOSING refs move back to Backlog.
@@ -25,7 +25,7 @@ on:
   issues:
     types: [opened, reopened]
   pull_request_target:
-    types: [opened, reopened, edited, synchronize, ready_for_review, closed]
+    types: [opened, reopened, edited, closed]
 
 permissions:
   contents: read
@@ -143,7 +143,7 @@ jobs:
             # still be in flight via other PRs).
             for ref in "${CLOSING[@]}"; do [ -n "$ref" ] && set_target "$ref" "Backlog"; done
           else
-            # PR open / edited / synced / ready_for_review → all linked refs to In review.
+            # PR opened / reopened / edited → all linked refs to In review.
             for ref in "${CLOSING[@]}"; do [ -n "$ref" ] && set_target "$ref" "In review"; done
             for ref in "${TRACKING[@]}"; do [ -n "$ref" ] && set_target "$ref" "In review"; done
           fi

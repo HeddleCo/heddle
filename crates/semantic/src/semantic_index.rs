@@ -22,7 +22,7 @@ use objects::object::{
 
 use crate::{
     parser::{Language, ParsedFile, walk_non_comment_leaves},
-    symbol_resolver::{DefinitionKind, visit_definitions},
+    symbol_resolver::visit_definitions,
 };
 
 /// Version of the extraction logic itself. Bump when the taxonomy, container
@@ -39,7 +39,12 @@ use crate::{
 /// *present* in the parent's map, so a pre-Zig index (no `"zig"` entry) would
 /// otherwise carry `.zig` files forward as `Opaque` indefinitely. The bump
 /// forces those to recompute so imported Zig repos gain granularity.
-pub const EXTRACTOR_VERSION: u32 = 3;
+///
+/// v4: JavaScript and TypeScript object-literal function properties are
+/// extracted from `pair` nodes. The added symbols and covered ranges alter
+/// both the symbol list and scaffold hash for unchanged source, so v3 nodes
+/// must not be reused.
+pub const EXTRACTOR_VERSION: u32 = 4;
 
 /// Stable lowercase language name recorded in file nodes and the root's
 /// grammar map.
@@ -94,21 +99,6 @@ pub fn grammar_version_by_name(name: &str) -> Option<&'static str> {
     Some(grammar_version(language))
 }
 
-fn map_kind(kind: DefinitionKind) -> SymbolKindTag {
-    match kind {
-        DefinitionKind::Function => SymbolKindTag::Function,
-        DefinitionKind::Type => SymbolKindTag::Type,
-        DefinitionKind::Trait => SymbolKindTag::Trait,
-        DefinitionKind::Class => SymbolKindTag::Class,
-        DefinitionKind::Interface => SymbolKindTag::Interface,
-        DefinitionKind::TypeAlias => SymbolKindTag::TypeAlias,
-        DefinitionKind::EnumDef => SymbolKindTag::Enum,
-        DefinitionKind::ConstDecl => SymbolKindTag::Const,
-        DefinitionKind::Module => SymbolKindTag::Module,
-        DefinitionKind::Other => SymbolKindTag::Other,
-    }
-}
-
 /// The symbols extracted from one source file, plus the file scaffold hash,
 /// ready to be assembled into a
 /// [`SemanticFileNode`](objects::object::SemanticFileNode).
@@ -138,7 +128,7 @@ pub fn extract_semantic_file(source: &[u8], language: Language) -> Option<Extrac
     // residual scaffold (everything NOT covered by a symbol).
     let mut covered: Vec<(usize, usize)> = Vec::new();
     visit_definitions(parsed.root_node(), source, &mut |site| {
-        let kind = map_kind(site.kind);
+        let kind = site.kind;
         let semantic_hash = symbol_semantic_hash(site.node, source, kind);
         let container_path = site.parent_name.map(|p| vec![p]).unwrap_or_default();
         let range = site.node.byte_range();
@@ -347,6 +337,21 @@ mod tests {
     #[test]
     fn unsupported_language_is_none() {
         assert!(extract_semantic_file(b"whatever", Language::Unknown).is_none());
+    }
+
+    #[cfg(feature = "lang-javascript")]
+    #[test]
+    fn javascript_object_function_property_is_part_of_v4_index() {
+        let src = b"const handlers = { save: async (value) => value };\n";
+        let extracted = extract_semantic_file(src, Language::JavaScript).expect("javascript parse");
+        assert_eq!(EXTRACTOR_VERSION, 4);
+        assert!(
+            extracted
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "save" && symbol.kind == SymbolKindTag::Function),
+            "v4 must index object-literal function properties"
+        );
     }
 
     // ── Zig (heddle#1068) ────────────────────────────────────────────────

@@ -1118,6 +1118,12 @@ fn incomplete_land_recovery_start(
     }
 
     match &cli.command {
+        // Oplog recovery must be able to run before ordinary repository open;
+        // the recovery-only command path performs its own non-validating
+        // repository discovery and cannot inspect the land journal safely yet.
+        Commands::Oplog {
+            command: cli::cli::OplogCommands::Recover,
+        } => Ok(None),
         // Positional init resolves conflicts/canonicalization in cmd_init and
         // recovers the selected existing target there. Opening cwd here would
         // violate destination isolation.

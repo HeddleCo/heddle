@@ -41,13 +41,13 @@ pub trait OpLogBackend: Send + Sync {
     /// Each element of `groups` becomes its own logical batch — its own
     /// `batch_id`, its own scope, its own undo/redo granularity — exactly as
     /// if it had been passed to [`record_batch_scoped`] on its own. The only
-    /// difference is durability cost: the file-backed `OpLog` rewrites the
-    /// whole log once per *call* (see TODO #423 write-amplification in
-    /// `packed_oplog::append_entries`), so N separate `record_batch_scoped`
-    /// calls are O(N²) total while one `record_batches_scoped` of N groups is
-    /// O(N). This is the importer's path: a reflog with N entries emits N
-    /// per-event batches that must stay independently undoable but must not
-    /// pay N full-log rewrites.
+    /// difference is durability cost: the file-backed `OpLog` publishes one
+    /// complete derived index tail per *call*. The immutable entry prefix is
+    /// reused with a CoW clone where supported, but N separate
+    /// `record_batch_scoped` calls still rebuild a growing index N times while
+    /// one `record_batches_scoped` call publishes it once. This is the
+    /// importer's path: a reflog with N entries emits N per-event batches that
+    /// must stay independently undoable without paying N index publications.
     ///
     /// Returns one id-vector per input group, in order; empty groups yield an
     /// empty id-vector and consume no batch id. The default implementation is

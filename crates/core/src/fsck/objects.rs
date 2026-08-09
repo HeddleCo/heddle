@@ -53,6 +53,14 @@ pub(crate) fn check_tree_objects(
             Ok(())
         }
         TreeIntegrityEvent::TreeRef { .. } => Ok(()),
+        TreeIntegrityEvent::MissingTree { hash, path, .. } => {
+            errors.push(make_error(
+                "missing_tree",
+                &format!("Tree path '{}' references missing tree", path),
+                Some(hash.short()),
+            ));
+            Ok(())
+        }
     })?;
 
     for blob_hash in blob_hashes {

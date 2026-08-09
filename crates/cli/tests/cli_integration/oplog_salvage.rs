@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
+use std::path::PathBuf;
 
 const V4_HEADER_LEN: usize = 8 + 4 + 4 + 8 + 8;
 const FOOTER_LEN: usize = 8 + 4 + 4 + (13 * 8);
@@ -9,9 +10,9 @@ const ENTRY_OFFSET_RECORD_LEN: usize = 16;
 fn truncated_packed_oplog_salvages_prefix_quarantines_tail_and_keeps_repo_usable() {
     for case_name in ["entry-header", "mid-record", "last-record"] {
         let temp = TempDir::new().unwrap();
-        seed_native_repo_with_three_captures(temp.path());
+        seed_native_repo_with_four_captures(temp.path());
 
-        let oplog_path = temp.path().join(".heddle/oplog/oplog.bin");
+        let oplog_path = largest_selected_segment(temp.path());
         let original = std::fs::read(&oplog_path).expect("read packed oplog");
         let (entry_offsets, entry_data_end) = current_entry_offsets(&original);
         assert!(
@@ -24,33 +25,43 @@ fn truncated_packed_oplog_salvages_prefix_quarantines_tail_and_keeps_repo_usable
         truncated.truncate(case.truncate_at);
         std::fs::write(&oplog_path, truncated).expect("write truncated packed oplog");
 
-        let output = heddle_output(&["log", "--output", "json"], Some(temp.path()))
-            .expect("heddle log should run");
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let refused = heddle_output(&["log", "--output", "json"], Some(temp.path()))
+            .expect("heddle log should report damaged oplog");
         assert!(
-            output.status.success(),
-            "{}: log should succeed after salvage; stdout={} stderr={}",
-            case.name,
-            String::from_utf8_lossy(&output.stdout),
-            stderr
-        );
-        assert!(
-            stderr.contains("kind=state_corrupted")
-                && stderr.contains("Packed oplog was truncated")
-                && stderr.contains(&format!("recovered_records={}", case.expected_recovered))
-                && stderr.contains(&format!("lost_records={}", case.expected_lost))
-                && stderr.contains("damaged_byte_range="),
-            "{}: recovery advice-shaped warning should describe loss: {stderr}",
+            !refused.status.success(),
+            "{}: normal repository open must refuse structural damage",
             case.name
         );
         assert!(
-            temp.path().join(".heddle/oplog/oplog.bin.corrupt").exists(),
+            String::from_utf8_lossy(&refused.stderr).contains("heddle oplog recover"),
+            "{}: refusal should direct the operator to explicit recovery: {}",
+            case.name,
+            String::from_utf8_lossy(&refused.stderr)
+        );
+
+        let recovery = heddle_output(&["oplog", "recover"], Some(temp.path()))
+            .expect("explicit oplog recovery should remain reachable");
+        let recovery_out = String::from_utf8_lossy(&recovery.stdout);
+        assert!(
+            recovery.status.success()
+                && recovery_out
+                    .contains(&format!("Records recovered: {}", case.expected_recovered))
+                && recovery_out.contains(&format!("Records lost: {}", case.expected_lost)),
+            "{}: explicit recovery should describe loss; stdout={recovery_out} stderr={}",
+            case.name,
+            String::from_utf8_lossy(&recovery.stderr)
+        );
+        assert!(
+            std::path::PathBuf::from(format!("{}.corrupt", oplog_path.display())).exists(),
             "{}: damaged packed oplog should be quarantined",
             case.name
         );
 
-        let parsed: Value =
-            serde_json::from_slice(&output.stdout).expect("log should emit JSON on stdout");
+        let output = heddle_output(&["log", "--output", "json"], Some(temp.path()))
+            .expect("heddle log should run after explicit recovery");
+        assert!(output.status.success());
+        let parsed: Value = serde_json::from_slice(&output.stdout)
+            .expect("log should emit JSON after explicit recovery");
         assert!(
             !parsed["states"].as_array().unwrap().is_empty(),
             "{}: salvaged log should retain at least one complete state",
@@ -78,23 +89,26 @@ fn truncated_packed_oplog_salvages_prefix_quarantines_tail_and_keeps_repo_usable
 fn oplog_recover_subcommand_reports_salvage_in_text_and_json() {
     // Mid-record truncation: the footer is destroyed, so this exercises the
     // forward-greedy path through the explicit operator entrypoint. The CLI's
-    // repo open auto-recovers the oplog before the handler runs, so the
-    // operator sees the salvage reported from the durable `.oplog.recovery`
-    // sidecar — the report is meaningful regardless of WHO triggered the
-    // salvage (auto-fallback or operator).
+    // recovery-only repository discovery must bypass the normal structural
+    // open gate, then the operator command performs and reports the salvage.
     let temp = TempDir::new().unwrap();
-    seed_native_repo_with_three_captures(temp.path());
+    seed_native_repo_with_four_captures(temp.path());
 
-    let oplog_path = temp.path().join(".heddle/oplog/oplog.bin");
+    let oplog_path = largest_selected_segment(temp.path());
     let original = std::fs::read(&oplog_path).expect("read packed oplog");
-    let (entry_offsets, _entry_data_end) = current_entry_offsets(&original);
-    let recovered = 3usize;
+    let (entry_offsets, entry_data_end) = current_entry_offsets(&original);
+    let recovered = entry_offsets.len() - 1;
     let lost = entry_offsets.len() - recovered;
-    let truncate_at = entry_offsets[3] + ((entry_offsets[4] - entry_offsets[3]) / 2);
+    let last = *entry_offsets.last().unwrap();
+    let truncate_at = last + ((entry_data_end - last) / 2);
 
     let mut truncated = original.clone();
     truncated.truncate(truncate_at);
     std::fs::write(&oplog_path, truncated).expect("write truncated packed oplog");
+    assert!(
+        Repository::open(temp.path()).is_err(),
+        "ordinary repository open must not silently repair oplog damage"
+    );
 
     // Text mode: human-readable report naming the salvage detail.
     let text =
@@ -114,13 +128,11 @@ fn oplog_recover_subcommand_reports_salvage_in_text_and_json() {
 
     // The damaged file was quarantined and a sidecar was written.
     assert!(
-        temp.path().join(".heddle/oplog/oplog.bin.corrupt").exists(),
+        std::path::PathBuf::from(format!("{}.corrupt", oplog_path.display())).exists(),
         "damaged oplog must be quarantined"
     );
     assert!(
-        temp.path()
-            .join(".heddle/oplog/oplog.bin.oplog.recovery")
-            .exists(),
+        std::path::PathBuf::from(format!("{}.oplog.recovery", oplog_path.display())).exists(),
         "recovery sidecar must be written"
     );
 
@@ -145,10 +157,12 @@ fn oplog_recover_subcommand_reports_salvage_in_text_and_json() {
         lost as u64,
         "{parsed}"
     );
+    assert_eq!(parsed["suffix_segments_discarded"], 0, "{parsed}");
+    assert_eq!(parsed["suffix_entries_discarded"], 0, "{parsed}");
     assert!(
         parsed["sidecar_path"]
             .as_str()
-            .is_some_and(|p| p.ends_with("oplog.bin.oplog.recovery")),
+            .is_some_and(|p| p.ends_with(".oplog.recovery")),
         "report surfaces the recovery sidecar path: {parsed}"
     );
 }
@@ -158,9 +172,9 @@ fn oplog_recover_subcommand_json_reports_footer_guided_strategy() {
     // Trailing bytes torn off after an intact footer: the standard parse fails
     // but the footer survives, so recovery is footer-guided and lossless.
     let temp = TempDir::new().unwrap();
-    seed_native_repo_with_three_captures(temp.path());
+    seed_native_repo_with_four_captures(temp.path());
 
-    let oplog_path = temp.path().join(".heddle/oplog/oplog.bin");
+    let oplog_path = largest_selected_segment(temp.path());
     let original = std::fs::read(&oplog_path).expect("read packed oplog");
     let (entry_offsets, entry_data_end) = current_entry_offsets(&original);
 
@@ -184,6 +198,8 @@ fn oplog_recover_subcommand_json_reports_footer_guided_strategy() {
         "footer-guided recovery is lossless: {parsed}"
     );
     assert_eq!(parsed["entries_lost"].as_u64().unwrap(), 0, "{parsed}");
+    assert_eq!(parsed["suffix_segments_discarded"], 0, "{parsed}");
+    assert_eq!(parsed["suffix_entries_discarded"], 0, "{parsed}");
     assert_eq!(
         parsed["damaged_byte_start"].as_u64().unwrap(),
         entry_data_end as u64,
@@ -194,6 +210,16 @@ fn oplog_recover_subcommand_json_reports_footer_guided_strategy() {
         torn.len() as u64,
         "{parsed}"
     );
+}
+
+fn largest_selected_segment(repo_root: &Path) -> PathBuf {
+    std::fs::read_dir(repo_root.join(".heddle/oplog/oplog.segments"))
+        .expect("read segmented oplog directory")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "bin"))
+        .max_by_key(|path| std::fs::metadata(path).map_or(0, |metadata| metadata.len()))
+        .expect("at least one manifest-selected append segment")
 }
 
 struct TruncationCase {
@@ -223,7 +249,7 @@ impl TruncationCase {
     }
 }
 
-fn seed_native_repo_with_three_captures(path: &std::path::Path) {
+fn seed_native_repo_with_four_captures(path: &std::path::Path) {
     let init = heddle_output(&["init", "--no-harness-install"], Some(path)).expect("init runs");
     assert!(
         init.status.success(),
@@ -231,7 +257,7 @@ fn seed_native_repo_with_three_captures(path: &std::path::Path) {
         String::from_utf8_lossy(&init.stdout),
         String::from_utf8_lossy(&init.stderr)
     );
-    for index in 1..=3 {
+    for index in 1..=4 {
         std::fs::write(path.join("file.txt"), format!("snapshot {index}\n"))
             .expect("write snapshot file");
         let capture = heddle_output(&["capture", "-m", &format!("snapshot {index}")], Some(path))

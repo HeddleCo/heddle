@@ -506,6 +506,9 @@ fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Output,
     seed_default_test_user_config(&config_path, &dir)?;
     cmd.env("HEDDLE_CONFIG", config_path);
     cmd.env("HOME", default_test_home_path(&dir));
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
 
     cmd.output().map_err(|e| e.to_string())
 }

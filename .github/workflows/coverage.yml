@@ -1,0 +1,109 @@
+name: Rust coverage
+
+on:
+  schedule:
+    # Weekly coverage gate: Sundays 06:00 UTC.
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "false"
+
+jobs:
+  coverage:
+    name: Coverage
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    timeout-minutes: 60
+    env:
+      HAVE_CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN != '' }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage-${{ runner.os }}
+          cache-on-failure: true
+
+      # `--all-features` would enable `heddle-cli/weft-client`, which from
+      # OSS resolves to the reservation stub and won't compile. Cover the OSS
+      # feature set instead.
+      - name: Generate coverage report
+        run: cargo llvm-cov --locked --workspace --features git-overlay,native,semantic,zstd --lcov --output-path lcov.info
+
+      - name: Generate coverage summary
+        run: cargo llvm-cov report --summary-only | tee coverage-summary.txt
+
+      - name: Generate HTML coverage report
+        run: cargo llvm-cov report --html
+
+      - name: Coverage gate (per crate)
+        run: |
+          cargo run -p heddle-devtools --quiet -- \
+            audit-coverage lcov.info \
+              --gate objects=80 \
+              --gate refs=80 \
+              --gate repo=85 \
+              --gate cli=75 \
+              --gate mount=68 \
+              --gate semantic=80 \
+              --gate oplog=78 \
+              --gate wire=80 \
+              --gate state_review=80 \
+              --gate crypto=80 \
+              --gate daemon=80 \
+              --gate ingest=80
+
+      - name: Upload coverage to Codecov
+        if: ${{ env.HAVE_CODECOV_TOKEN == 'true' }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          flags: rust
+          name: rust-coverage
+          fail_ci_if_error: true
+          verbose: true
+
+      - name: Publish coverage summary
+        run: |
+          echo '## Coverage' >> "$GITHUB_STEP_SUMMARY"
+          cat coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload LCOV report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+
+      - name: Upload HTML coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: target/llvm-cov/html
+          if-no-files-found: error
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats

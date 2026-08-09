@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
+use merge::RenameCandidateIndex;
 use objects::{
     HeddleError, RecoveryDetails,
     object::{
@@ -1920,6 +1921,8 @@ fn detect_clear_renames(
 struct RenameDetectionStats {
     blob_reads: usize,
     lcs_comparisons: usize,
+    total_possible_pairs: usize,
+    qualifying_candidate_pairs: usize,
 }
 
 struct PreparedRenameBlob {
@@ -1943,19 +1946,22 @@ fn detect_clear_renames_with_stats(
     unified: usize,
     stats: &mut RenameDetectionStats,
 ) -> Result<Vec<FileChange>> {
-    let deleted = changes
+    let mut deleted = changes
         .iter()
         .filter(|change| change.kind == "deleted")
         .map(|change| change.path.as_str())
         .collect::<Vec<_>>();
-    let added = changes
+    let mut added = changes
         .iter()
         .filter(|change| change.kind == "added")
         .map(|change| change.path.as_str())
         .collect::<Vec<_>>();
+    deleted.sort_unstable();
+    added.sort_unstable();
     if deleted.is_empty() || added.is_empty() {
         return Ok(changes);
     }
+    stats.total_possible_pairs = deleted.len().saturating_mul(added.len());
 
     // Snapshot each side's git mode so a candidate can be rejected when the
     // deleted and added sides differ in git *type class* (regular vs
@@ -1985,14 +1991,14 @@ fn detect_clear_renames_with_stats(
         }
     }
 
-    let mut candidates = Vec::new();
-    for old_path in &deleted {
+    let mut candidates = RenameCandidateIndex::new(deleted.len(), added.len());
+    for (old_index, old_path) in deleted.iter().enumerate() {
         stats.blob_reads += 1;
         let Some(old_blob) = blob_from_tree(repo, from_tree, old_path)? else {
             continue;
         };
         let old_blob = prepare_rename_blob(old_blob);
-        for new_path in &added {
+        for (new_index, new_path) in added.iter().enumerate() {
             // A delete + add at the *same* path is a type change
             // (regular ↔ symlink), not a rename — `expand_type_changes`
             // emits both halves and collapsing them back into a
@@ -2017,27 +2023,23 @@ fn detect_clear_renames_with_stats(
             };
             let score = rename_similarity(&old_blob, new_blob, stats);
             if score >= RENAME_SIMILARITY_THRESHOLD {
-                candidates.push((score, (*old_path).to_string(), (*new_path).to_string()));
+                candidates.push(old_index, new_index, score);
             }
         }
     }
+    stats.qualifying_candidate_pairs = candidates.candidate_count();
 
-    candidates.sort_by(|left, right| {
-        right
-            .0
-            .total_cmp(&left.0)
-            .then_with(|| left.1.cmp(&right.1))
-            .then_with(|| left.2.cmp(&right.2))
-    });
-
-    let mut used_old = BTreeSet::new();
-    let mut used_new = BTreeSet::new();
-    let mut renames: Vec<(String, String, f64)> = Vec::new();
-    for (score, old_path, new_path) in candidates {
-        if used_old.insert(old_path.clone()) && used_new.insert(new_path.clone()) {
-            renames.push((old_path, new_path, score));
-        }
-    }
+    let renames = candidates
+        .assign()
+        .into_iter()
+        .map(|assignment| {
+            (
+                deleted[assignment.source_index].to_string(),
+                added[assignment.target_index].to_string(),
+                assignment.score,
+            )
+        })
+        .collect::<Vec<_>>();
     if renames.is_empty() {
         return Ok(changes);
     }
@@ -2759,6 +2761,12 @@ mod tests {
             stats.lcs_comparisons, FILE_COUNT,
             "only the one plausible modified target per deleted file should reach LCS"
         );
+        assert_eq!(stats.total_possible_pairs, FILE_COUNT * FILE_COUNT);
+        assert_eq!(
+            stats.qualifying_candidate_pairs, FILE_COUNT,
+            "only threshold-qualified pairs should enter deterministic assignment"
+        );
+        assert!(stats.qualifying_candidate_pairs < stats.total_possible_pairs);
     }
 
     #[test]

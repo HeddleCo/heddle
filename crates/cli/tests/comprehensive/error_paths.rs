@@ -30,8 +30,11 @@ fn test_init_in_nested_directory() {
     let nested = temp.path().join("nested");
     fs::create_dir(&nested).unwrap();
 
-    let result = heddle(&["init"], Some(&nested));
-    assert!(result.is_ok() || result.unwrap_err().contains("already"));
+    heddle(&["init"], Some(&nested)).expect("an explicit nested path owns its own repository");
+    assert!(
+        nested.join(".heddle").is_dir(),
+        "nested init must create repository state at the requested path"
+    );
 }
 
 #[test]
@@ -67,7 +70,12 @@ fn test_track_create_duplicate() {
 
     heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
 
-    let _result = heddle(&["thread", "create", "feature"], Some(temp.path()));
+    let error = heddle(&["thread", "create", "feature"], Some(temp.path()))
+        .expect_err("creating an existing thread must fail");
+    assert!(
+        error.contains("conflict") && error.contains("expected missing") && error.contains("found"),
+        "duplicate thread refusal should expose the failed create precondition: {error}"
+    );
 }
 
 #[test]
@@ -112,8 +120,11 @@ fn test_diff_binary_files() {
     modified[50] = 0xFF;
     fs::write(temp.path().join("data.bin"), &modified).unwrap();
 
-    let result = heddle(&["diff"], Some(temp.path()));
-    assert!(result.is_ok() || result.unwrap_err().contains("binary"));
+    let output = heddle(&["diff"], Some(temp.path())).expect("binary diff should succeed");
+    assert!(
+        output.contains("Binary file changed: data.bin"),
+        "binary diff should emit its explicit summary: {output:?}"
+    );
 }
 
 #[test]
@@ -176,7 +187,12 @@ fn test_empty_commit_message() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "content");
 
-    let _result = heddle(&["capture", "-m", ""], Some(temp.path()));
+    let error = heddle(&["capture", "-m", ""], Some(temp.path()))
+        .expect_err("a capture without intent must be rejected");
+    assert!(
+        error.contains("refusing to capture without an intent"),
+        "empty-message refusal should explain the missing intent: {error}"
+    );
 }
 
 #[test]

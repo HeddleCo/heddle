@@ -142,6 +142,12 @@ const GIT_CHECKPOINT_INTENT_FILE: &str = "git-checkpoint-intent.json";
 const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
 const HEDDLE_REPOSITORY_MEMBERS: &[&str] = &["HEAD", "objects", "objectstore", "oplog", "refs"];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepositoryOpenMode {
+    Normal,
+    OplogRecovery,
+}
+
 fn git_discovery_across_filesystem() -> bool {
     std::env::var("GIT_DISCOVERY_ACROSS_FILESYSTEM")
         .is_ok_and(|value| !matches!(value.as_str(), "" | "0" | "false" | "no" | "off"))
@@ -679,6 +685,7 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
         store: S,
         config: RepoConfig,
         refs: RefManager,
+        mode: RepositoryOpenMode,
     ) -> Result<Self> {
         let actor = config
             .principal
@@ -686,8 +693,15 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
             .map(|p| objects::object::Principal::new(&p.name, &p.email))
             .unwrap_or_else(|| objects::object::Principal::new("<unknown>", ""));
         let oplog = OpLog::new(&heddle_dir, actor.clone());
-        oplog.validate_current_format()?;
+        if mode == RepositoryOpenMode::Normal {
+            oplog.validate_structural_health()?;
+        }
         let shallow = ShallowInfo::load(&heddle_dir)?;
+        if mode == RepositoryOpenMode::OplogRecovery {
+            return Ok(Self::from_parts(
+                root, heddle_dir, store, refs, oplog, config, shallow,
+            ));
+        }
         // Inject the oplog-backed read + write chokepoints (heddle#330 §2.2):
         // every logical read reconciles against the committed oplog tail, and
         // `commit_and_publish` appends a ref-carrying record before publishing.
@@ -773,6 +787,19 @@ impl Repository {
     /// materialized views were lost before they reached stable storage.
     fn recover_snapshot_artifact_views(&self) -> Result<()> {
         let mut pending = self.store.snapshot_commit_descriptors()?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        // Classify every artifact against one fresh, validated transaction
+        // index. Reopening the complete packed oplog once per descriptor made
+        // repository open O(snapshot artifacts × oplog bytes). Exact-once
+        // recovery below remains the serialized authority if another process
+        // commits after this snapshot was taken.
+        let mut committed_transactions = self.oplog.committed_transaction_ids(
+            pending
+                .iter()
+                .map(|descriptor| descriptor.artifact.transaction_id.as_str()),
+        )?;
         pending.sort_by(|left, right| {
             left.artifact
                 .base_oplog_head_id
@@ -785,11 +812,7 @@ impl Repository {
             let mut remaining = Vec::new();
             for descriptor in pending {
                 let artifact = &descriptor.artifact;
-                if !self
-                    .oplog
-                    .committed_batch_records(&artifact.transaction_id)?
-                    .is_empty()
-                {
+                if committed_transactions.contains(&artifact.transaction_id) {
                     progressed = true;
                     continue;
                 }
@@ -823,7 +846,10 @@ impl Repository {
                 )?;
                 match outcome {
                     ConditionalCommitOutcome::Committed(_)
-                    | ConditionalCommitOutcome::AlreadyCommitted(_) => progressed = true,
+                    | ConditionalCommitOutcome::AlreadyCommitted(_) => {
+                        committed_transactions.insert(artifact.transaction_id.clone());
+                        progressed = true;
+                    }
                     ConditionalCommitOutcome::IsolationConflict { .. } => {
                         unreachable!("empty recovery isolation set cannot produce a conflict")
                     }
@@ -1103,8 +1129,22 @@ impl Repository {
     ///   authority), `.heddle/HEAD` (per-checkout), `.heddle/state/`
     ///   (per-checkout cached state).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_mode(path.as_ref(), RepositoryOpenMode::Normal)
+    }
+
+    /// Open only enough repository state to run explicit oplog recovery.
+    ///
+    /// This deliberately bypasses oplog validation, open hooks, ref-tail
+    /// reconciliation, and Git-overlay synchronization so an operator can
+    /// authorize salvage even when normal repository open correctly refuses a
+    /// damaged or non-contiguous generation.
+    pub fn open_for_oplog_recovery(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_mode(path.as_ref(), RepositoryOpenMode::OplogRecovery)
+    }
+
+    fn open_with_mode(path: &Path, mode: RepositoryOpenMode) -> Result<Self> {
         heddle_perf_contract::record_repository_open();
-        let requested_path = path.as_ref();
+        let requested_path = path;
         let start_path = requested_path.canonicalize().map_err(|error| {
             HeddleError::Io(enrich_fs_error(
                 requested_path,
@@ -1155,9 +1195,12 @@ impl Repository {
                     && git_root.starts_with(dir)
                     && !git_root.join(".heddle").exists()
                 {
+                    if mode == RepositoryOpenMode::OplogRecovery {
+                        return Err(HeddleError::RepositoryNotFound(git_root.clone()));
+                    }
                     ensure_git_overlay_exclude(git_root)?;
                     Self::bootstrap_git_overlay(git_root)?;
-                    return Self::open(git_root);
+                    return Self::open_with_mode(git_root, mode);
                 }
 
                 if pointer_path.is_file() {
@@ -1221,9 +1264,17 @@ impl Repository {
                     )?;
                     let local_head_path = heddle_path.join("HEAD");
                     let refs = RefManager::new(&shared_galeed_dir).with_local_head(local_head_path);
-                    let repo =
-                        Self::open_raw(dir.to_path_buf(), shared_galeed_dir, store, config, refs)?;
-                    repo.run_open_hooks()?;
+                    let repo = Self::open_raw(
+                        dir.to_path_buf(),
+                        shared_galeed_dir,
+                        store,
+                        config,
+                        refs,
+                        mode,
+                    )?;
+                    if mode == RepositoryOpenMode::Normal {
+                        repo.run_open_hooks()?;
+                    }
                     return Ok(repo);
                 }
 
@@ -1234,8 +1285,14 @@ impl Repository {
                     ensure_supported_repo_format(&config_path, &config)?;
                     let store = Self::build_store(&config, dir, &heddle_path, None)?;
                     let refs = RefManager::new(&heddle_path);
-                    let repo = Self::open_raw(dir.to_path_buf(), heddle_path, store, config, refs)?;
-                    repo.run_open_hooks()?;
+                    let repo =
+                        Self::open_raw(dir.to_path_buf(), heddle_path, store, config, refs, mode)?;
+                    if mode == RepositoryOpenMode::Normal {
+                        repo.run_open_hooks()?;
+                    }
+                    if mode == RepositoryOpenMode::OplogRecovery {
+                        return Ok(repo);
+                    }
                     if repo.capability() == RepositoryCapability::GitOverlay {
                         match detect_git_head_state(dir) {
                             Ok(Some(GitHeadState::Attached(thread))) => {
@@ -1270,7 +1327,7 @@ impl Repository {
                                     (Err(_), _) => true,
                                 };
                                 if stale {
-                                    repo.refs.write_head(&git_head)?;
+                                    repo.write_head_recorded(&git_head)?;
                                 }
                             }
                             Ok(Some(GitHeadState::Detached(git_oid))) => {
@@ -1283,7 +1340,7 @@ impl Repository {
                                         Err(_) => true,
                                     };
                                     if stale {
-                                        repo.refs.write_head(&git_head)?;
+                                        repo.write_head_recorded(&git_head)?;
                                     }
                                 }
                             }
@@ -1300,13 +1357,15 @@ impl Repository {
         // Observe-only commands (status/verify/doctor) must NOT call open on
         // plain Git — they take the plain-Git probe path so they never create
         // `.heddle`. See `verify_execution_context_from_cli`.
-        if let Some(git_root) = discovered_git_root {
+        if mode == RepositoryOpenMode::Normal
+            && let Some(git_root) = discovered_git_root
+        {
             ensure_git_overlay_exclude(&git_root)?;
             Self::bootstrap_git_overlay(&git_root)?;
-            return Self::open(git_root);
+            return Self::open_with_mode(&git_root, mode);
         }
 
-        Err(HeddleError::RepositoryNotFound(path.as_ref().to_path_buf()))
+        Err(HeddleError::RepositoryNotFound(path.to_path_buf()))
     }
 
     pub fn root(&self) -> &Path {

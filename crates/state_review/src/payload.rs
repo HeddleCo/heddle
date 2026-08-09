@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Server-side `ReviewPayload` builder.
+//! Review reading-order builder.
 //!
 //! Pure function that classifies the changed symbols on a state into
 //! the three reading-order partitions:
@@ -14,10 +14,8 @@
 //!   doc/spec extension. Read last; treat as confirmation rather than
 //!   load-bearing logic.
 //!
-//! The partition is computed **server-side** (this module). The CLI's
-//! `heddle review show --json` and the web `+page.svelte` both consume
-//! the same partitioning so a client never re-classifies. That's the
-//! property the grep-asserted test in this module guards.
+//! This module owns the partitioning policy. Local review and hosted
+//! boundaries consume the same domain result rather than re-classifying it.
 
 use std::path::Path;
 
@@ -32,46 +30,24 @@ pub struct PathSymbol {
     pub kind: SymbolKind,
 }
 
-/// Coarse symbol-kind taxonomy. Mirrors what tree-sitter surfaces; the
-/// tree-sitter mapping for each language is implemented elsewhere — this
-/// crate just consumes a pre-classified list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SymbolKind {
-    Type,
-    Trait,
-    Class,
-    Interface,
-    FunctionSignatureOnly,
-    TypeAlias,
-    EnumDef,
-    ConstDecl,
-    Module,
-    /// Function body (the "consequence" tier).
-    Function,
-    /// Anything we couldn't classify — falls through to consequence.
-    Other,
+/// Durable symbol taxonomy shared with semantic indexes.
+pub use objects::object::SymbolKindTag as SymbolKind;
+
+fn is_structural(kind: SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Type
+            | SymbolKind::Trait
+            | SymbolKind::Class
+            | SymbolKind::Interface
+            | SymbolKind::TypeAlias
+            | SymbolKind::Enum
+            | SymbolKind::Const
+            | SymbolKind::Module
+    )
 }
 
-impl SymbolKind {
-    fn is_structural(self) -> bool {
-        matches!(
-            self,
-            SymbolKind::Type
-                | SymbolKind::Trait
-                | SymbolKind::Class
-                | SymbolKind::Interface
-                | SymbolKind::FunctionSignatureOnly
-                | SymbolKind::TypeAlias
-                | SymbolKind::EnumDef
-                | SymbolKind::ConstDecl
-                | SymbolKind::Module
-        )
-    }
-}
-
-/// Reading-order classification for a set of changed symbols. Field
-/// order matches the proto's `ReadingOrderPartition` message —
-/// callers serialise this directly, no further re-mapping.
+/// Reading-order classification for a set of changed symbols.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReadingOrderPartition {
     pub structural: Vec<PathSymbol>,
@@ -82,11 +58,7 @@ pub struct ReadingOrderPartition {
 /// Build the partition. Symbols arrive in source order; the function
 /// preserves order within each partition so the client gets a stable
 /// rendering.
-pub fn build_review_payload_partition(symbols: &[PathSymbol]) -> ReadingOrderPartition {
-    build_review_payload_partition_owned(symbols.to_vec())
-}
-
-pub fn build_review_payload_partition_owned(symbols: Vec<PathSymbol>) -> ReadingOrderPartition {
+pub fn build_review_payload_partition(symbols: Vec<PathSymbol>) -> ReadingOrderPartition {
     let mut structural = Vec::new();
     let mut consequence = Vec::new();
     let mut tests_and_docs = Vec::new();
@@ -94,7 +66,7 @@ pub fn build_review_payload_partition_owned(symbols: Vec<PathSymbol>) -> Reading
     for sym in symbols {
         if is_test_or_docs_path(&sym.file) {
             tests_and_docs.push(sym);
-        } else if sym.kind.is_structural() {
+        } else if is_structural(sym.kind) {
             structural.push(sym);
         } else {
             consequence.push(sym);
@@ -170,9 +142,9 @@ mod tests {
         let symbols = vec![
             ps("src/lib.rs", "Foo", SymbolKind::Type),
             ps("src/lib.rs", "Bar", SymbolKind::Trait),
-            ps("src/lib.rs", "Color", SymbolKind::EnumDef),
+            ps("src/lib.rs", "Color", SymbolKind::Enum),
         ];
-        let part = build_review_payload_partition(&symbols);
+        let part = build_review_payload_partition(symbols);
         assert_eq!(part.structural.len(), 3);
         assert!(part.consequence.is_empty());
         assert!(part.tests_and_docs.is_empty());
@@ -181,7 +153,7 @@ mod tests {
     #[test]
     fn function_body_lands_in_consequence_partition() {
         let symbols = vec![ps("src/lib.rs", "compute", SymbolKind::Function)];
-        let part = build_review_payload_partition(&symbols);
+        let part = build_review_payload_partition(symbols);
         assert_eq!(part.consequence.len(), 1);
         assert!(part.structural.is_empty());
     }
@@ -190,7 +162,7 @@ mod tests {
     fn test_paths_outweigh_symbol_kind() {
         // A `Type` definition in a test file is still tests_and_docs.
         let symbols = vec![ps("crates/foo/tests/it.rs", "Sample", SymbolKind::Type)];
-        let part = build_review_payload_partition(&symbols);
+        let part = build_review_payload_partition(symbols);
         assert_eq!(part.tests_and_docs.len(), 1);
         assert!(part.structural.is_empty());
     }
@@ -198,7 +170,7 @@ mod tests {
     #[test]
     fn go_test_file_naming_convention_recognized() {
         let symbols = vec![ps("pkg/foo_test.go", "TestFoo", SymbolKind::Function)];
-        let part = build_review_payload_partition(&symbols);
+        let part = build_review_payload_partition(symbols);
         assert_eq!(part.tests_and_docs.len(), 1);
     }
 
@@ -209,7 +181,7 @@ mod tests {
             ps("docs/intro.rst", "Intro", SymbolKind::Other),
             ps("notes.txt", "Note", SymbolKind::Other),
         ];
-        let part = build_review_payload_partition(&symbols);
+        let part = build_review_payload_partition(symbols);
         assert_eq!(part.tests_and_docs.len(), 3);
     }
 
@@ -223,14 +195,14 @@ mod tests {
             ),
             ps("web/src/bar.spec.tsx", "render_test", SymbolKind::Function),
         ];
-        let part = build_review_payload_partition(&symbols);
+        let part = build_review_payload_partition(symbols);
         assert_eq!(part.tests_and_docs.len(), 2);
     }
 
     #[test]
     fn unknown_kind_falls_through_to_consequence() {
         let symbols = vec![ps("src/lib.rs", "mystery", SymbolKind::Other)];
-        let part = build_review_payload_partition(&symbols);
+        let part = build_review_payload_partition(symbols);
         assert_eq!(part.consequence.len(), 1);
     }
 
@@ -241,7 +213,7 @@ mod tests {
             ps("src/b.rs", "B", SymbolKind::Type),
             ps("src/c.rs", "C", SymbolKind::Type),
         ];
-        let part = build_review_payload_partition(&symbols);
+        let part = build_review_payload_partition(symbols);
         assert_eq!(
             part.structural
                 .iter()

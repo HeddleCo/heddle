@@ -10,9 +10,10 @@ cargo build --release    # Release build
 ## Test
 
 ```bash
-cargo test                    # All tests
-cargo test -- --nocapture     # Show println output
-cargo test <test_name>        # Run specific test
+cargo test --workspace                # All non-ignored, default-feature workspace tests
+cargo test -p heddle-cli              # CLI package tests only
+cargo test --workspace -- --nocapture # Show println output for all workspace tests
+cargo test -p heddle-cli <test_name>  # Run a specific CLI test
 ```
 
 ## Lint

@@ -38,15 +38,11 @@ use sley_transport::{HttpClient, UreqHttpClient};
 
 use super::{
     credential::EmbeddingSafeCredentialProvider,
-    git_export::{
-        ExportStateOptions, commit_is_byte_faithful, export_all, export_current_thread,
-        export_state,
-    },
-    git_ingest::import_git_history,
+    git_export::{ExportStateOptions, commit_is_byte_faithful, export_all, export_state},
     git_notes,
     git_reconstruct::{commit_object_id, reconstruct_commit_bytes, write_commit_object},
     git_residual::{ResidualStore, resolve_lossy_object},
-    git_util::{FailedRefExportReason, ImportStats},
+    git_util::FailedRefExportReason,
 };
 
 /// Errors specific to Git Projection and Bridge Mirror operations.
@@ -344,53 +340,6 @@ fn heddle_mirror_fetch_refspecs() -> GitProjectionResult<[String; 2]> {
 pub enum GitPushScope {
     CurrentThread,
     AllThreads,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct GitPullOutcome {
-    pub changed: bool,
-    pub states_created: usize,
-    pub commits_seen: usize,
-    pub materialized_checkout: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PullPreflight {
-    UpToDate,
-    ImportRequired,
-}
-
-fn pull_outcome(stats: &ImportStats, materialized_checkout: bool) -> GitPullOutcome {
-    GitPullOutcome {
-        changed: materialized_checkout || stats.states_created > 0,
-        states_created: stats.states_created,
-        commits_seen: stats.commits_imported,
-        materialized_checkout,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GitFetchScope {
-    BranchesAndNotes,
-    AllRefs,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RefreshCheckoutAfterFetch {
-    Yes,
-    No,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RemoteDirection {
-    Fetch,
-    Push,
-}
-
-#[derive(Debug, Clone)]
-enum ResolvedRemote {
-    Local(PathBuf),
-    Url(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -959,97 +908,6 @@ impl<'a> GitProjection<'a> {
         }
     }
 
-    /// Push to a Git remote. Returns the full names of the refs written
-    /// at the destination this invocation (see [`Self::push_with_scope_force`]).
-    pub fn push(&mut self, remote_name: &str) -> GitProjectionResult<Vec<String>> {
-        self.push_with_scope(remote_name, GitPushScope::AllThreads)
-    }
-
-    /// Push to a Git remote with an explicit ref scope. Returns the full
-    /// names of the refs written at the destination this invocation.
-    pub fn push_with_scope(
-        &mut self,
-        remote_name: &str,
-        scope: GitPushScope,
-    ) -> GitProjectionResult<Vec<String>> {
-        self.push_with_scope_force(remote_name, scope, false)
-    }
-
-    /// Push to a Git remote with an explicit ref scope and optional
-    /// non-fast-forward ref movement.
-    ///
-    /// Returns the full names (e.g. `refs/heads/<thread>`,
-    /// `refs/notes/heddle`, `refs/tags/<tag>`) of the refs WRITTEN at the
-    /// destination this invocation — creations, fast-forwards, and forced
-    /// rewinds — sorted for deterministic output. A no-op push returns an
-    /// empty list. Retraction deletes are not included.
-    pub fn push_with_scope_force(
-        &mut self,
-        remote_name: &str,
-        scope: GitPushScope,
-        force: bool,
-    ) -> GitProjectionResult<Vec<String>> {
-        self.init_mirror()?;
-        let current_branch = match scope {
-            GitPushScope::CurrentThread => Some(self.current_attached_thread_for_push()?),
-            GitPushScope::AllThreads => None,
-        };
-        match scope {
-            GitPushScope::CurrentThread => {
-                export_current_thread(self, current_branch.as_deref().expect("current branch"))?;
-            }
-            GitPushScope::AllThreads => {
-                self.export()?;
-                self.mirror_checkout_tags_for_push()?;
-            }
-        }
-        self.write_current_checkout_from_existing_mirror()?;
-
-        // The export step above (scoped or all-thread) has already reconciled the
-        // mirror to the served frontier, so a scoped export materialized only the
-        // requested thread yet still RECONCILED every out-of-scope sibling (rewound
-        // an embargoed one). Both destination paths therefore reconcile against the
-        // WHOLE-MIRROR served frontier — `collect_ref_updates(mirror)`, computed
-        // inside each path — never a scope-filtered subset; the scope lives in the
-        // mirror state, not in a second destination filter (heddle#316 r16).
-        let log_message = format!("heddle: push from {}", self.heddle_repo.root().display());
-        match self.resolve_remote(remote_name, RemoteDirection::Push)? {
-            ResolvedRemote::Local(target_path) => self.copy_mirror_to_path(
-                &target_path,
-                &log_message,
-                /* init_if_missing */ false,
-                scope,
-                current_branch.as_deref(),
-                force,
-            ),
-            ResolvedRemote::Url(url) => {
-                let mirror_repo = self.open_git_repo()?;
-                push_network_remote(
-                    &mirror_repo,
-                    self.heddle_repo.heddle_dir(),
-                    &url,
-                    scope,
-                    current_branch.as_deref(),
-                    force,
-                )
-            }
-        }
-    }
-
-    fn current_attached_thread_for_push(&self) -> GitProjectionResult<String> {
-        let Head::Attached { thread } = self.heddle_repo.head_ref()? else {
-            return Err(GitProjectionError::Git(
-                "cannot push the current Git-overlay branch from a detached Heddle HEAD; use --all-threads to push all exported refs".to_string(),
-            ));
-        };
-        if self.heddle_repo.refs().get_thread(&thread)?.is_none() {
-            return Err(GitProjectionError::Git(format!(
-                "attached thread '{thread}' has no state to push"
-            )));
-        }
-        Ok(thread.to_string())
-    }
-
     /// Export current Heddle state into the internal mirror, then write it out
     /// as a bare git repository at `target_path`. Auto-initializes
     /// `target_path` as a bare repo if it does not already exist.
@@ -1062,58 +920,31 @@ impl<'a> GitProjection<'a> {
         self.copy_mirror_to_path(
             target_path,
             &format!("heddle: export from {}", self.heddle_repo.root().display()),
-            /* init_if_missing */ true,
-            GitPushScope::AllThreads,
-            /* current_branch */ None,
-            /* force */ false,
         )?;
         Ok(stats)
     }
 
     /// Shared helper: copy every reachable object from the internal mirror to
     /// `target_path`, then reconcile its branch/tag/note refs to the WHOLE-MIRROR
-    /// served frontier. When `init_if_missing` is true, the destination is created
-    /// as a bare repo when it does not exist. `scope`/`current_branch` gate only
-    /// MATERIALIZATION (a scoped push never publishes a brand-new sibling); `force`
-    /// authorizes retracting an out-of-band destination tip and forcing a true fork.
-    ///
-    /// Returns the sorted full names of the refs written at the destination.
+    /// served frontier. The destination is created as a bare repo when it does not
+    /// exist. Explicit export never overwrites or deletes an out-of-band destination
+    /// tip that Heddle does not own.
     fn copy_mirror_to_path(
         &mut self,
         target_path: &Path,
         log_message: &str,
-        init_if_missing: bool,
-        scope: GitPushScope,
-        current_branch: Option<&str>,
-        force: bool,
-    ) -> GitProjectionResult<Vec<String>> {
+    ) -> GitProjectionResult<()> {
         let mirror_repo = self.open_git_repo()?;
         let target_repo = if target_path.exists() {
             open_repo(target_path)?
-        } else if init_if_missing {
+        } else {
             fs::create_dir_all(target_path)?;
             SleyRepository::init_bare(target_path).map_err(git_err)?;
             open_repo(target_path)?
-        } else {
-            return Err(GitProjectionError::Git(format!(
-                "destination '{}' does not exist",
-                target_path.display()
-            )));
         };
 
-        // The WHOLE-MIRROR served frontier — the SAME projection the mirror
-        // reconcile materialized (heddle#316 r14/r16). It drives BOTH the object
-        // transfer AND the destination ref reconcile, so a scoped push reconciles
-        // the destination against the whole served frontier rather than a
-        // scope-filtered subset: an out-of-scope ref the mirror rewound for
-        // embargo propagates to the destination by construction, never kept at its
-        // old (embargoed) tip.
-        //
-        // Sourced from the MANAGED-filtered ref set (heddle#316): a foreign
-        // branch/tag heddle never wrote — even one at a heddle-minted commit —
-        // must NOT enter the served frontier nor the destination's desired set.
-        // Ownership is name-keyed via the mirror's managed-refs record, the
-        // mirror-side analog of the destination's exported-refs record.
+        // Export only the mirror's managed frontier. A foreign branch or tag
+        // Heddle never wrote must not enter the destination's desired set.
         let managed_record = read_mirror_managed_refs(&mirror_repo)?;
         let served_frontier = collect_managed_ref_updates(&mirror_repo, &managed_record)?;
         copy_reachable_objects(
@@ -1122,23 +953,17 @@ impl<'a> GitProjection<'a> {
             served_frontier.iter().map(|update| update.target),
         )?;
 
-        // The ONE served-frontier reconciliation, shared with the URL/network
-        // push path (heddle#316 r11). It writes survivors — FORCING a deliberate
-        // embargo rewind past the FF guard (a prior tip lagged down to its served
-        // ancestor) while still rejecting a true fork — AND deletes the refs
-        // heddle previously exported here that the served mirror no longer
-        // carries (retraction), leaving foreign refs heddle never exported
-        // untouched.
-        let creatable = creatable_ref_names(&served_frontier, scope, current_branch);
+        // Reconcile refs Heddle previously exported while leaving foreign refs
+        // untouched. Embargo rewinds are represented in the managed frontier.
         let old_at_destination = read_destination_ref_map(&target_repo)?;
         let previously_exported = read_exported_refs(&target_repo)?;
         let plan = plan_destination_reconcile(
             &mirror_repo,
             &served_frontier,
-            creatable.as_ref(),
+            None,
             &old_at_destination,
             &previously_exported,
-            force,
+            false,
         )?;
         for write in &plan.writes {
             let constraint = match write.old {
@@ -1157,97 +982,6 @@ impl<'a> GitProjection<'a> {
             delete_reference_matching(&target_repo, &delete.full_name, delete.old)?;
         }
         write_exported_refs(&target_repo, &plan.new_manifest)?;
-        Ok(planned_write_names(&plan))
-    }
-
-    /// Fetch Git refs and objects into the internal mirror without moving
-    /// Heddle thread refs or the current worktree.
-    pub fn fetch(&mut self, remote_name: &str) -> GitProjectionResult<()> {
-        self.fetch_with_scope(
-            remote_name,
-            GitFetchScope::BranchesAndNotes,
-            RefreshCheckoutAfterFetch::Yes,
-        )
-    }
-
-    fn fetch_with_scope(
-        &mut self,
-        remote_name: &str,
-        scope: GitFetchScope,
-        refresh_checkout: RefreshCheckoutAfterFetch,
-    ) -> GitProjectionResult<()> {
-        reject_reserved_git_remote_name(remote_name)?;
-        self.init_mirror()?;
-        let current_branch = self.heddle_repo.git_overlay_current_branch()?;
-        let tracking_remote = checkout_tracking_remote_name(self.heddle_repo.root(), remote_name)?
-            .or_else(|| {
-                (!looks_like_remote_location(remote_name)).then(|| remote_name.to_string())
-            });
-        // A URL/path remote can still resolve onto a configured remote literally
-        // named `git`; reject that here too so the constructed tracking refs
-        // never land under the reserved namespace.
-        if let Some(tracking_remote) = tracking_remote.as_deref() {
-            reject_reserved_git_remote_name(tracking_remote)?;
-        }
-
-        let mirror_repo = self.open_git_repo()?;
-        match self.resolve_remote(remote_name, RemoteDirection::Fetch)? {
-            ResolvedRemote::Local(path) => {
-                let remote_repo = open_repo(&path)?;
-                let updates = collect_ref_updates_for_fetch(&remote_repo, scope)?;
-                tracing::debug!(
-                    remote = remote_name,
-                    path = %path.display(),
-                    refs = updates.len(),
-                    notes = updates
-                        .iter()
-                        .filter(|update| update.namespace == RefNamespace::Note)
-                        .count(),
-                    "fetching Git refs from local remote"
-                );
-                copy_reachable_objects(
-                    &remote_repo,
-                    &mirror_repo,
-                    updates.iter().map(|update| update.target),
-                )?;
-                apply_ref_updates(
-                    &mirror_repo,
-                    &updates,
-                    &format!("heddle: fetch from {remote_name}"),
-                )?;
-                if let Some(tracking_remote) = tracking_remote.as_deref() {
-                    apply_remote_tracking_ref_updates(
-                        &mirror_repo,
-                        tracking_remote,
-                        &updates,
-                        &format!("heddle: fetch from {remote_name}"),
-                    )?;
-                }
-            }
-            ResolvedRemote::Url(url) => {
-                fetch_network_remote(&mirror_repo, remote_name, &url, scope)?;
-                let updates = collect_ref_updates_for_fetch(&mirror_repo, scope)?;
-                if let Some(tracking_remote) = tracking_remote.as_deref() {
-                    apply_remote_tracking_ref_updates(
-                        &mirror_repo,
-                        tracking_remote,
-                        &updates,
-                        &format!("heddle: fetch from {remote_name}"),
-                    )?;
-                }
-            }
-        }
-
-        self.git_repo_path = Some(self.mirror_path());
-        if matches!(refresh_checkout, RefreshCheckoutAfterFetch::Yes) {
-            if let Some(tracking_remote) = tracking_remote.as_deref() {
-                self.refresh_checkout_remote_tracking_refs(tracking_remote)?;
-            }
-            if let Some(branch) = current_branch {
-                self.refresh_checkout_remote_tracking_ref(remote_name, &branch)?;
-            }
-            self.refresh_checkout_note_refs_from_mirror()?;
-        }
         Ok(())
     }
 
@@ -1300,149 +1034,6 @@ impl<'a> GitProjection<'a> {
         }
 
         false
-    }
-
-    /// Pull from a Git remote.
-    pub fn pull(&mut self, remote_name: &str) -> GitProjectionResult<GitPullOutcome> {
-        let head_before = self.heddle_repo.refs().read_head()?;
-        let attached_before = match &head_before {
-            Head::Attached { thread } => self
-                .heddle_repo
-                .refs()
-                .get_thread(thread)?
-                .map(|state| (thread.to_string(), state)),
-            Head::Detached { .. } => None,
-        };
-        let attached_thread = attached_before.as_ref().map(|(thread, _)| thread.clone());
-
-        self.fetch_with_scope(
-            remote_name,
-            GitFetchScope::AllRefs,
-            RefreshCheckoutAfterFetch::No,
-        )?;
-        if self.preflight_attached_pull_fast_forward(remote_name, attached_before.as_ref())?
-            == PullPreflight::UpToDate
-        {
-            if let Some(thread) = attached_thread {
-                self.refresh_checkout_remote_tracking_ref(remote_name, &thread)?;
-            }
-            self.refresh_checkout_note_refs_from_mirror()?;
-            return Ok(GitPullOutcome::default());
-        }
-        let mirror_path = self.mirror_path();
-        let stats = import_git_history(self, Some(&mirror_path), &[], Default::default(), None)?;
-
-        let mut materialized_attached_thread = false;
-        if let Some((thread, old_state)) = attached_before
-            && let Some(new_state) = self
-                .heddle_repo
-                .refs()
-                .get_thread(&ThreadName::new(&thread))?
-            && new_state != old_state
-        {
-            self.heddle_repo
-                .refs()
-                .set_thread(&ThreadName::new(&thread), &old_state)?;
-            self.heddle_repo.refs().write_head(&Head::Attached {
-                thread: ThreadName::new(&thread),
-            })?;
-            self.heddle_repo
-                .goto_verified_clean_without_record(&new_state)?;
-            self.heddle_repo
-                .refs()
-                .set_thread(&ThreadName::new(&thread), &new_state)?;
-            self.heddle_repo.refs().write_head(&Head::Attached {
-                thread: ThreadName::new(&thread),
-            })?;
-            materialized_attached_thread = true;
-        }
-
-        if materialized_attached_thread {
-            self.write_current_checkout_from_existing_mirror()?;
-        }
-        if let Some(thread) = attached_thread {
-            self.refresh_checkout_remote_tracking_ref(remote_name, &thread)?;
-        }
-        self.refresh_checkout_note_refs_from_mirror()?;
-        Ok(pull_outcome(&stats, materialized_attached_thread))
-    }
-
-    fn preflight_attached_pull_fast_forward(
-        &mut self,
-        remote_name: &str,
-        attached_before: Option<&(String, StateId)>,
-    ) -> GitProjectionResult<PullPreflight> {
-        let Some((thread, state_id)) = attached_before else {
-            return Ok(PullPreflight::ImportRequired);
-        };
-        self.build_existing_mapping(None)?;
-        let Some(local_git_oid) = self.mapping.get_git(state_id) else {
-            return Ok(PullPreflight::ImportRequired);
-        };
-        let mirror_repo = self.open_git_repo()?;
-        let branch_ref = format!("refs/heads/{thread}");
-        let Some(reference) = mirror_repo.find_reference(&branch_ref).map_err(git_err)? else {
-            return Ok(PullPreflight::ImportRequired);
-        };
-        let Some(remote_git_oid) = reference.peeled_oid(&mirror_repo).map_err(git_err)? else {
-            return Ok(PullPreflight::ImportRequired);
-        };
-        if remote_git_oid == local_git_oid {
-            return Ok(PullPreflight::UpToDate);
-        }
-        if commit_is_descendant_of(&mirror_repo, remote_git_oid, local_git_oid)? {
-            return Ok(PullPreflight::ImportRequired);
-        }
-        Err(GitProjectionError::RemoteDiverged {
-            branch: thread.clone(),
-            upstream: format!("{remote_name}/{thread}"),
-            local: local_git_oid,
-            remote: remote_git_oid,
-        })
-    }
-
-    fn mirror_checkout_tags_for_push(&self) -> GitProjectionResult<()> {
-        if !self.heddle_repo.root().join(".git").exists() {
-            return Ok(());
-        }
-
-        let mirror_repo = self.open_git_repo()?;
-        let checkout_repo = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
-        if checkout_repo.git_dir() == mirror_repo.git_dir() {
-            return Ok(());
-        }
-        let object_repo = common_repo_for_worktree(&checkout_repo)?;
-        let tag_updates = collect_ref_updates(&object_repo)?
-            .into_iter()
-            .filter(|update| update.namespace == RefNamespace::Tag)
-            .collect::<Vec<_>>();
-        if tag_updates.is_empty() {
-            return Ok(());
-        }
-
-        copy_reachable_objects(
-            &object_repo,
-            &mirror_repo,
-            tag_updates.iter().map(|u| u.target),
-        )?;
-        apply_ref_updates(
-            &mirror_repo,
-            &tag_updates,
-            "heddle: mirror checkout tags before push",
-        )?;
-        // Claim the raw checkout tags as heddle-managed in the mirror record so
-        // the managed-filtered push frontier includes them — an all-threads push
-        // publishes the user's checkout tags on their behalf. This runs AFTER the
-        // export reconcile (which has no marker for a raw checkout tag and would
-        // drop it), so each push re-applies + re-claims them; the net effect
-        // matches the pre-record behavior where the push copied every mirror ref
-        // (heddle#316).
-        let mut record = read_mirror_managed_refs(&mirror_repo)?;
-        for update in &tag_updates {
-            record.insert(full_ref_name(update), update.target);
-        }
-        write_mirror_managed_refs(&mirror_repo, &record)?;
-        Ok(())
     }
 
     pub fn seed_git_checkpoint_mappings_from_checkout(
@@ -1991,211 +1582,6 @@ impl<'a> GitProjection<'a> {
         checkout.publish(git_oid)?;
         Ok(WriteThroughOutcome::Wrote(git_oid))
     }
-
-    fn refresh_checkout_remote_tracking_ref(
-        &self,
-        remote_name: &str,
-        branch: &str,
-    ) -> GitProjectionResult<()> {
-        if !self.heddle_repo.root().join(".git").exists() {
-            return Ok(());
-        }
-        let Some(tracking_remote) =
-            checkout_tracking_remote_name(self.heddle_repo.root(), remote_name)?
-        else {
-            return Ok(());
-        };
-        reject_reserved_git_remote_name(&tracking_remote)?;
-
-        let mirror_repo = self.open_git_repo()?;
-        let branch_ref = format!("refs/heads/{branch}");
-        let Some(reference) = mirror_repo.find_reference(&branch_ref).map_err(git_err)? else {
-            return Ok(());
-        };
-        let Some(target) = reference.peeled_oid(&mirror_repo).map_err(git_err)? else {
-            return Ok(());
-        };
-
-        let checkout_repo = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
-        if checkout_repo.git_dir() == mirror_repo.git_dir() {
-            return Ok(());
-        }
-        let object_repo = common_repo_for_worktree(&checkout_repo)?;
-        copy_reachable_objects(&mirror_repo, &object_repo, [target])?;
-        set_reference(
-            &object_repo,
-            &format!("refs/remotes/{tracking_remote}/{branch}"),
-            target,
-            RefPrecondition::Any,
-            "heddle: refresh remote-tracking branch after pull",
-        )?;
-        Ok(())
-    }
-
-    fn refresh_checkout_remote_tracking_refs(&self, remote_name: &str) -> GitProjectionResult<()> {
-        if !self.heddle_repo.root().join(".git").exists() {
-            return Ok(());
-        }
-        let Some(tracking_remote) =
-            checkout_tracking_remote_name(self.heddle_repo.root(), remote_name)?
-        else {
-            return Ok(());
-        };
-        reject_reserved_git_remote_name(&tracking_remote)?;
-
-        let mirror_repo = self.open_git_repo()?;
-        let checkout_repo = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
-        if checkout_repo.git_dir() == mirror_repo.git_dir() {
-            return Ok(());
-        }
-        let object_repo = common_repo_for_worktree(&checkout_repo)?;
-        let prefix = format!("refs/remotes/{remote_name}/");
-        for reference in mirror_repo.references().list_refs().map_err(git_err)? {
-            if !reference.name.starts_with(&prefix) {
-                continue;
-            }
-            let ReferenceTarget::Direct(target) = reference.target else {
-                continue;
-            };
-            let full = reference.name;
-            let Some(branch) = full.strip_prefix(&prefix) else {
-                continue;
-            };
-            if branch.ends_with("/HEAD") {
-                continue;
-            }
-            copy_reachable_objects(&mirror_repo, &object_repo, [target])?;
-            set_reference(
-                &object_repo,
-                &format!("refs/remotes/{tracking_remote}/{branch}"),
-                target,
-                RefPrecondition::Any,
-                "heddle: refresh remote-tracking branch after fetch",
-            )?;
-        }
-        Ok(())
-    }
-
-    fn refresh_checkout_note_refs_from_mirror(&self) -> GitProjectionResult<()> {
-        if !self.heddle_repo.root().join(".git").exists() {
-            return Ok(());
-        }
-
-        let mirror_repo = self.open_git_repo()?;
-        let checkout_repo = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
-        if checkout_repo.git_dir() == mirror_repo.git_dir() {
-            return Ok(());
-        }
-        let object_repo = common_repo_for_worktree(&checkout_repo)?;
-        let note_updates = collect_ref_updates(&mirror_repo)?
-            .into_iter()
-            .filter(|update| update.namespace == RefNamespace::Note)
-            .collect::<Vec<_>>();
-        if note_updates.is_empty() {
-            return Ok(());
-        }
-
-        copy_reachable_objects(
-            &mirror_repo,
-            &object_repo,
-            note_updates.iter().map(|u| u.target),
-        )?;
-        apply_ref_updates(
-            &object_repo,
-            &note_updates,
-            "heddle: refresh Heddle note refs",
-        )?;
-        Ok(())
-    }
-
-    fn resolve_remote(
-        &self,
-        remote_name: &str,
-        direction: RemoteDirection,
-    ) -> GitProjectionResult<ResolvedRemote> {
-        let repo = self.open_git_repo()?;
-        let url = match remote_url_from_repo(&repo, remote_name, direction)? {
-            Some(url) => Some(url),
-            None => self.checkout_remote_url(remote_name, direction)?,
-        };
-
-        let base = repo_relative_base(&repo);
-        let url = match url {
-            Some(url) => url,
-            None => parse_configured_remote_url(remote_name, &base)?,
-        };
-
-        if let Some(path) = local_path_from_url(&url)? {
-            Ok(ResolvedRemote::Local(path))
-        } else {
-            Ok(ResolvedRemote::Url(url))
-        }
-    }
-
-    fn checkout_remote_url(
-        &self,
-        remote_name: &str,
-        direction: RemoteDirection,
-    ) -> GitProjectionResult<Option<String>> {
-        if direction == RemoteDirection::Fetch
-            && let Some(url) =
-                remote_fetch_url_from_checkout_config(self.heddle_repo.root(), remote_name)?
-        {
-            return Ok(Some(url));
-        }
-        let Ok(repo) = SleyRepository::discover(self.heddle_repo.root()) else {
-            return Ok(None);
-        };
-        remote_url_from_repo(&repo, remote_name, direction)
-    }
-}
-
-fn remote_url_from_repo(
-    repo: &SleyRepository,
-    remote_name: &str,
-    direction: RemoteDirection,
-) -> GitProjectionResult<Option<String>> {
-    let config = repo.config_snapshot().map_err(git_err)?;
-    let push = direction == RemoteDirection::Push;
-    let value = if push {
-        config
-            .get("remote", Some(remote_name), "pushurl")
-            .or_else(|| config.get("remote", Some(remote_name), "url"))
-    } else {
-        config.get("remote", Some(remote_name), "url")
-    };
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let rewritten =
-        sley::plumbing::sley_config::remotes::rewrite_url_with_config(&config, value, push);
-    parse_configured_remote_url(&rewritten, &repo_relative_base(repo)).map(Some)
-}
-
-fn checkout_tracking_remote_name(
-    root: &Path,
-    requested: &str,
-) -> GitProjectionResult<Option<String>> {
-    let remotes = checkout_remote_url_items(root)?;
-    if remotes.is_empty() {
-        return Ok(None);
-    }
-    if let Some((name, _)) = remotes.iter().find(|(name, _)| name == requested) {
-        return Ok(Some(name.clone()));
-    }
-    if let Some((name, _)) = remotes
-        .iter()
-        .find(|(_, url)| configured_remote_values_match(url, requested))
-    {
-        return Ok(Some(name.clone()));
-    }
-    if looks_like_remote_location(requested) && remotes.len() == 1 {
-        return Ok(Some(remotes[0].0.clone()));
-    }
-    if !looks_like_remote_location(requested) {
-        return Ok(Some(requested.to_string()));
-    }
-    Ok(None)
 }
 
 fn checkout_remote_url_items(root: &Path) -> GitProjectionResult<Vec<(String, String)>> {
@@ -2384,18 +1770,6 @@ fn parse_remote_url_items_from_config(
     Ok(())
 }
 
-fn configured_remote_values_match(left: &str, right: &str) -> bool {
-    if left == right {
-        return true;
-    }
-    let left_path = Path::new(left);
-    let right_path = Path::new(right);
-    if let (Ok(left), Ok(right)) = (left_path.canonicalize(), right_path.canonicalize()) {
-        return left == right;
-    }
-    false
-}
-
 fn materialize_active_checkout_closure(
     heddle_repo: &HeddleRepository,
     mapping: &SyncMapping,
@@ -2458,15 +1832,6 @@ fn materialize_active_checkout_closure(
         }
     }
     Ok(())
-}
-
-fn looks_like_remote_location(value: &str) -> bool {
-    value.starts_with('/')
-        || value.starts_with("./")
-        || value.starts_with("../")
-        || value.starts_with("~/")
-        || value.contains("://")
-        || value.contains('\\')
 }
 
 fn remote_fetch_url_from_checkout_config(
@@ -3073,33 +2438,10 @@ fn git_projection_signature() -> Vec<u8> {
     format!("Heddle <heddle@local> {seconds} +0000").into_bytes()
 }
 
-fn repo_relative_base(repo: &SleyRepository) -> PathBuf {
-    repo.workdir().unwrap_or_else(|| {
-        if repo
-            .git_dir()
-            .file_name()
-            .is_some_and(|name| name == ".git")
-        {
-            repo.git_dir()
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| repo.git_dir().to_path_buf())
-        } else {
-            repo.git_dir().to_path_buf()
-        }
-    })
-}
-
 fn local_path_from_url(url: &str) -> GitProjectionResult<Option<PathBuf>> {
-    // Defense in depth (push-routing no-op): the git-overlay exporter speaks
-    // only the local/git network transports. A `heddle://` hosted URL must
-    // NEVER reach this classifier — the hosted-sync path
-    // (`HostedClient`) is the only thing that can push to it. If routing
-    // upstream is correct this is unreachable; making it a hard error here
-    // means a `heddle://` slipping into the git exporter can never again be a
-    // silent success (it would otherwise fall through as a generic network
-    // URL, "reconcile" locally, and report success without contacting the
-    // server).
+    // Hosted URLs belong to native hosted sync, never a local/Git transport
+    // classifier. Rejecting the scheme here keeps note hydration and explicit
+    // Git maintenance paths from accidentally treating it as an ordinary URL.
     if url.starts_with("heddle://") {
         return Err(GitProjectionError::Git(format!(
             "remote '{url}' uses the hosted heddle:// scheme, which cannot be pushed via the git-overlay exporter; hosted pushes must go through the native hosted-sync path"
@@ -3207,20 +2549,6 @@ pub fn count_exported_commits(
         }
     }
     Ok(counts)
-}
-
-fn collect_ref_updates_for_fetch(
-    repo: &SleyRepository,
-    scope: GitFetchScope,
-) -> GitProjectionResult<Vec<RefUpdate>> {
-    let updates = collect_ref_updates(repo)?;
-    match scope {
-        GitFetchScope::AllRefs => Ok(updates),
-        GitFetchScope::BranchesAndNotes => Ok(updates
-            .into_iter()
-            .filter(|update| matches!(update.namespace, RefNamespace::Branch | RefNamespace::Note))
-            .collect()),
-    }
 }
 
 pub fn collect_import_source_ref_updates(
@@ -3509,8 +2837,8 @@ pub fn read_or_seed_mirror_managed_refs(
 /// MUST source from this rather than the raw [`collect_ref_updates`] so a foreign
 /// branch/tag heddle never wrote — even one pointing at a heddle-minted commit —
 /// never enters the served frontier nor the destination's desired set (heddle#316).
-/// The FETCH path keeps using [`collect_ref_updates`]/[`collect_ref_updates_for_fetch`]
-/// (it must see every ref); only the export/push frontier is managed-filtered.
+/// Fetch/import paths keep using [`collect_ref_updates`] because they must see
+/// every ref; only the export/push frontier is managed-filtered.
 pub fn collect_managed_ref_updates(
     repo: &SleyRepository,
     record: &HashMap<String, ObjectId>,
@@ -3971,28 +3299,6 @@ pub fn apply_ref_updates(
     Ok(())
 }
 
-fn apply_remote_tracking_ref_updates(
-    repo: &SleyRepository,
-    remote_name: &str,
-    updates: &[RefUpdate],
-    log_message: &str,
-) -> GitProjectionResult<()> {
-    reject_reserved_git_remote_name(remote_name)?;
-    for update in updates
-        .iter()
-        .filter(|update| update.namespace == RefNamespace::Branch)
-    {
-        set_reference(
-            repo,
-            &format!("refs/remotes/{remote_name}/{}", update.name),
-            update.target,
-            RefPrecondition::Any,
-            log_message,
-        )?;
-    }
-    Ok(())
-}
-
 /// Copy a local Git repository into a bare repository without invoking Git
 /// transport helpers. This is the local-path clone fast path used by the OSS
 /// Git-overlay workflow when the user does not have `git` installed.
@@ -4042,9 +3348,8 @@ pub fn copy_local_repo_to_bare(source_path: &Path, dest: &Path) -> GitProjection
 }
 
 /// Clone a remote git URL into `dest` as a bare repository, fetching all
-/// branches and tags. Mirrors the sley remote fetch path used by
-/// `fetch_network_remote` but starts from an empty `init_bare` rather than an
-/// existing repo.
+/// branches and tags. This starts from an empty `init_bare` rather than an
+/// existing repository.
 ///
 /// Used by `import git --path <URL>` (Phase F): we clone into a
 /// scratch directory under the heddle repo's `.heddle/tmp/` and feed the
@@ -4561,197 +3866,6 @@ pub fn copy_reachable_objects_excluding(
     Ok(())
 }
 
-fn fetch_network_remote(
-    mirror_repo: &SleyRepository,
-    remote_name: &str,
-    url: &str,
-    scope: GitFetchScope,
-) -> GitProjectionResult<()> {
-    let mut credentials = NoCredentials;
-    let mut progress = SilentProgress;
-    mirror_repo
-        .fetch_with_http_client(
-            url,
-            &heddle_mirror_fetch_refspecs()?,
-            FetchOptions {
-                // sley 0.5.0 additions — heddle uses git defaults (no CLI override).
-                filter_auto: false,
-                progress: None,
-                upload_pack_command: None,
-                negotiation_include: None,
-                negotiation_restrict: None,
-                reject_shallow: false,
-                negotiate_only: false,
-                quiet: true,
-                auto_follow_tags: matches!(scope, GitFetchScope::AllRefs),
-                fetch_all_tags: matches!(scope, GitFetchScope::AllRefs),
-                prune: false,
-                dry_run: false,
-                append: false,
-                write_fetch_head: true,
-                force: false,
-                tag_option_explicit: true,
-                prune_option_explicit: true,
-                prune_tags: false,
-                prune_tags_option_explicit: false,
-                refmap: None,
-                refetch: false,
-                record_promisor_refs: false,
-                update_head_ok: false,
-                ssh_options: None,
-                atomic: false,
-                depth: None,
-                merge_srcs: Vec::new(),
-                filter: None,
-                cloning: false,
-                update_shallow: false,
-                deepen_relative: false,
-                deepen_since: None,
-                deepen_not: Vec::new(),
-            },
-            &mut credentials,
-            &mut progress,
-            configured_https_client(),
-        )
-        .map_err(|err| {
-            GitProjectionError::Git(git_transport_error_message(format!(
-                "failed to fetch from {url}: {err}"
-            )))
-        })?;
-    let _ = remote_name;
-    Ok(())
-}
-
-/// Push the served frontier to a URL/network remote. Returns the sorted
-/// full names of the refs written on the wire (see [`planned_write_names`]).
-fn push_network_remote(
-    mirror_repo: &SleyRepository,
-    heddle_dir: &Path,
-    url: &str,
-    scope: GitPushScope,
-    current_branch: Option<&str>,
-    force: bool,
-) -> GitProjectionResult<Vec<String>> {
-    // The network destination's exported-refs record lives in heddle's own dir,
-    // keyed by the remote URL (the remote has no local git dir to host the
-    // sidecar). Read it BEFORE the empty-frontier fast-path: a retraction lands
-    // here with an EMPTY served set yet a non-empty record, so the delete-set —
-    // not the served set — is what must still propagate (heddle#316 r11).
-    let manifest_path = network_exported_refs_path(heddle_dir, url);
-    let previously_exported = read_exported_refs_at(&manifest_path)?;
-    // The WHOLE-MIRROR served frontier — the SAME projection the local-path
-    // destination reconciles against and the mirror reconcile materialized
-    // (heddle#316 r16). A scoped push reconciles the destination against this
-    // whole frontier, so an out-of-scope ref the mirror rewound for embargo
-    // propagates to the wire by construction, never a scope-filtered subset.
-    //
-    // Managed-filtered (heddle#316): the same foreign-ref exclusion the
-    // local-path push applies — a foreign branch/tag heddle never wrote is kept
-    // off the wire, sourced from the mirror's name-keyed managed-refs record.
-    let managed_record = read_mirror_managed_refs(mirror_repo)?;
-    let served_frontier = collect_managed_ref_updates(mirror_repo, &managed_record)?;
-    if served_frontier.is_empty() && previously_exported.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut credentials = NoCredentials;
-    let records = mirror_repo
-        .ls_remote_with_http_client(
-            url,
-            LsRemoteFilter {
-                heads: false,
-                tags: false,
-                refs_only: true,
-            },
-            &|_| true,
-            &mut credentials,
-            configured_https_client(),
-        )
-        .map_err(|err| {
-            GitProjectionError::Git(git_transport_error_message(format!(
-                "failed to list refs from {url}: {err}"
-            )))
-        })?;
-    let remote_refs = records
-        .into_iter()
-        .filter(|record| GitRefName::new(&record.name).content_namespace().is_some())
-        .map(|record| (record.name, record.oid))
-        .collect::<HashMap<_, _>>();
-
-    // The SAME served-frontier plan the local-path destination runs: writes
-    // (forcing embargo rewinds, rejecting forks), the retraction delete-set
-    // (scoped to heddle-owned refs — never foreign), and the new record to
-    // persist — all derived from the whole-mirror `served_frontier` above.
-    let creatable = creatable_ref_names(&served_frontier, scope, current_branch);
-    let plan = plan_destination_reconcile(
-        mirror_repo,
-        &served_frontier,
-        creatable.as_ref(),
-        &remote_refs,
-        &previously_exported,
-        force,
-    )?;
-
-    if plan.writes.is_empty() && plan.deletes.is_empty() {
-        // Nothing to move on the wire, but the record may still need to drop a
-        // ref that was already absent at the remote.
-        write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
-        return Ok(Vec::new());
-    }
-
-    let mut commands = Vec::with_capacity(plan.writes.len() + plan.deletes.len());
-    let mut pack_objects = Vec::with_capacity(plan.writes.len());
-    let force_transport_checks = plan.writes.iter().any(|write| write.force);
-    for write in &plan.writes {
-        commands.push(PushCommand {
-            src: Some(write.new),
-            dst: write.full_name.clone(),
-            expected_old: write.old,
-            force: write.force,
-        });
-        pack_objects.push(write.new);
-    }
-    for delete in &plan.deletes {
-        commands.push(PushCommand {
-            src: None,
-            dst: delete.full_name.clone(),
-            expected_old: Some(delete.old),
-            force: false,
-        });
-    }
-
-    let mut credentials = NoCredentials;
-    let mut progress = SilentProgress;
-    mirror_repo
-        .push_actions_with_http_client(
-            url,
-            PushActionPlan {
-                commands,
-                pack_objects,
-                options: PushOptions {
-                    // sley 0.5.0 additions — heddle uses git defaults.
-                    atomic: false,
-                    push_options: Vec::new(),
-                    quiet: true,
-                    force: force || force_transport_checks,
-                    thin: sley::remote::PushThinMode::Auto,
-                },
-            },
-            &mut credentials,
-            &mut progress,
-            configured_https_client(),
-        )
-        .map_err(|err| {
-            GitProjectionError::Git(git_transport_error_message(format!(
-                "push failed for {url}: {err}"
-            )))
-        })?;
-    // Only persist the record once the remote has acknowledged every command, so
-    // a failed push never leaves a ref recorded as exported that did not land.
-    write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
-    Ok(planned_write_names(&plan))
-}
-
 /// Push the authoritative checkout's Git refs directly through Sley.
 ///
 /// Local branches and tags are intentional inputs because `.git` is authoritative
@@ -4950,13 +4064,8 @@ mod tests {
 
     #[test]
     fn local_path_from_url_rejects_hosted_heddle_scheme() {
-        // Regression (push-routing no-op): a `heddle://` hosted remote that
-        // reaches the git-overlay exporter must be a HARD ERROR, never a
-        // silent no-op success. The git network pusher cannot speak the
-        // hosted protocol, so classifying a `heddle://` URL here must fail
-        // loudly rather than fall through to `ResolvedRemote::Url` (which
-        // would "reconcile" locally and report success without ever
-        // contacting the server).
+        // A `heddle://` hosted remote that reaches local/Git transport
+        // classification must fail loudly; only native hosted sync speaks it.
         let err = local_path_from_url("heddle://weft.local:8421/org/repo")
             .expect_err("heddle:// must be rejected by the git exporter classifier");
         let msg = err.to_string();

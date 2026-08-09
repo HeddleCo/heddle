@@ -127,7 +127,7 @@ Examples:
 
     /// Stream live oplog activity.
     ///
-    /// Tails the repository's append-only oplog file like `tail -f`,
+    /// Tails the repository's manifest-selected oplog generation,
     /// emitting snapshots, merges, and thread events as they happen.
     /// Exits on Ctrl-C.
     Watch(WatchArgs),

@@ -2,28 +2,12 @@
 use objects::object::ContentHash;
 use serde::{Deserialize, Serialize};
 
-use crate::{ObjectId, ObjectInfo, ObjectType};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WantObjects {
-    pub wants: Vec<ObjectRequest>,
-}
+use crate::{ObjectId, ObjectType};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectRequest {
     pub id: ObjectId,
     pub have_base: Option<ContentHash>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HaveObjects {
-    pub haves: Vec<ObjectId>,
-    pub missing: Vec<ObjectId>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SendObjects {
-    pub objects: Vec<ObjectInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -102,6 +102,38 @@ pub struct CommitGraphIndex<'source, S: ObjectSource + ?Sized = AnyStore> {
     persistence_dirty: bool,
 }
 
+/// A single history query over a graph whose complete ancestry has already
+/// been resolved.
+///
+/// Bloom mutations stay in memory for the lifetime of the session and are
+/// persisted together by [`Self::finish`]. This keeps a history walk from
+/// repeatedly traversing the same parent closure or rewriting the complete
+/// cache for every visited state.
+pub(crate) struct CommitGraphHistorySession<'graph, 'source, S: ObjectSource + ?Sized = AnyStore> {
+    graph: &'graph mut CommitGraphIndex<'source, S>,
+}
+
+impl<'graph, 'source, S> CommitGraphHistorySession<'graph, 'source, S>
+where
+    S: ObjectSource + ?Sized,
+{
+    pub(crate) fn node_metadata(&self, id: &StateId) -> Option<CachedNodeMetadata> {
+        self.graph.node_metadata(id)
+    }
+
+    pub(crate) fn ensure_bloom_populated(&mut self, id: StateId) -> Result<()> {
+        self.graph.ensure_bloom_populated_from_loaded(id)
+    }
+
+    pub(crate) fn node_bloom(&self, id: &StateId) -> Option<&[u8; 256]> {
+        self.graph.node_bloom(id)
+    }
+
+    pub(crate) fn finish(self) {
+        self.graph.persist_if_dirty();
+    }
+}
+
 impl<'source, S> CommitGraphIndex<'source, S>
 where
     S: ObjectStore + ObjectSource,
@@ -153,6 +185,16 @@ where
             cache: Box::new(cache),
             persistence_dirty,
         }
+    }
+
+    /// Resolve the complete ancestry for one history query and defer all cache
+    /// persistence until the returned session is finished.
+    pub(crate) fn history_session<'graph>(
+        &'graph mut self,
+        start: StateId,
+    ) -> Result<CommitGraphHistorySession<'graph, 'source, S>> {
+        self.ensure_loaded_in_memory(start)?;
+        Ok(CommitGraphHistorySession { graph: self })
     }
 
     /// Return cached metadata for a node if it has been loaded.
@@ -215,6 +257,13 @@ where
     }
 
     pub fn ensure_loaded(&mut self, state_id: StateId) -> Result<()> {
+        self.ensure_loaded_in_memory(state_id)?;
+        self.persist_if_dirty();
+
+        Ok(())
+    }
+
+    fn ensure_loaded_in_memory(&mut self, state_id: StateId) -> Result<()> {
         // Walk the complete cached parent closure even when the requested
         // node itself is already cached. A lazy Git descriptor can name
         // unavailable parents; later adoption must discover those parents
@@ -279,8 +328,6 @@ where
                 stack.push((parent, false));
             }
         }
-        self.persist_if_dirty();
-
         Ok(())
     }
 
@@ -295,7 +342,22 @@ where
             return Ok(());
         }
 
-        self.ensure_loaded(id)?;
+        self.ensure_loaded_in_memory(id)?;
+        self.ensure_bloom_populated_from_loaded(id)?;
+        self.persist_if_dirty();
+        Ok(())
+    }
+
+    fn ensure_bloom_populated_from_loaded(&mut self, id: StateId) -> Result<()> {
+        if self
+            .nodes
+            .get(&id)
+            .map(|node| node.bloom.is_some())
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
         let Some(node) = self.nodes.get(&id) else {
             return Ok(());
         };
@@ -303,7 +365,6 @@ where
         let parent_id = node.parents.first().copied();
 
         let parent_tree = if let Some(pid) = parent_id {
-            self.ensure_loaded(pid)?;
             self.nodes
                 .get(&pid)
                 .map(|n| n.tree_hash)
@@ -320,7 +381,6 @@ where
         }
         self.nodes.get_mut(&id).unwrap().bloom = Some(bloom);
         self.persistence_dirty = true;
-        self.persist_if_dirty();
         Ok(())
     }
 

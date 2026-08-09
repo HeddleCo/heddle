@@ -34,7 +34,9 @@ mod full_feature {
         const MIN_GENERATED_VERBS: usize = 75;
         let generated: serde_json::Value =
             serde_json::from_str(generated_json).expect("generated schema JSON should parse");
-        let discovered_verbs = generated["verbs"].as_object().map_or(0, serde_json::Map::len);
+        let discovered_verbs = generated["verbs"]
+            .as_object()
+            .map_or(0, serde_json::Map::len);
         assert!(
             discovered_verbs >= MIN_GENERATED_VERBS,
             "ts_types_in_sync discovered only {discovered_verbs} generated verbs (floor \

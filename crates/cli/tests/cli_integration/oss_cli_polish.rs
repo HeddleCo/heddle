@@ -8905,8 +8905,16 @@ fn text_surfaces_tolerate_closed_downstream_pipes() {
 fn tty_auto_mode_renders_text_and_explicit_json_stays_json() {
     let probe = std::process::Command::new("script")
         .arg("--version")
-        .output()
-        .expect("util-linux script must be installed for the TTY transcript test");
+        .output();
+    let has_util_linux_script = probe.as_ref().is_ok_and(|probe| {
+        probe.status.success() && String::from_utf8_lossy(&probe.stdout).contains("util-linux")
+    });
+    if !has_util_linux_script && !cfg!(target_os = "linux") {
+        eprintln!("skipping TTY transcript test: util-linux script is unavailable");
+        return;
+    }
+
+    let probe = probe.expect("util-linux script must be installed for the TTY transcript test");
     let probe_stdout = String::from_utf8_lossy(&probe.stdout);
     assert!(
         probe.status.success() && probe_stdout.contains("util-linux"),

@@ -12,31 +12,11 @@ use serde_json::Value;
 use serial_test::serial;
 use tempfile::TempDir;
 
+#[path = "support/mod.rs"]
+mod cli_test_support;
+
 fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(args);
-    cmd.env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
-        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev");
-
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-
-    let output = cmd.output().map_err(|e| e.to_string())?;
-
-    let stdout = str::from_utf8(&output.stdout).unwrap_or("").to_string();
-    let stderr = str::from_utf8(&output.stderr).unwrap_or("").to_string();
-
-    if output.status.success() {
-        Ok(stdout)
-    } else {
-        Err(format!(
-            "Exit code: {:?}\nstdout: {}\nstderr: {}",
-            output.status.code(),
-            stdout,
-            stderr
-        ))
-    }
+    cli_test_support::heddle(args, cwd, &[])
 }
 
 fn heddle_with_env(
@@ -44,30 +24,7 @@ fn heddle_with_env(
     cwd: Option<&std::path::Path>,
     envs: &[(&str, &str)],
 ) -> Result<String, String> {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(args);
-
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-    for (key, value) in envs {
-        cmd.env(key, value);
-    }
-
-    let output = cmd.output().map_err(|e| e.to_string())?;
-    let stdout = str::from_utf8(&output.stdout).unwrap_or("").to_string();
-    let stderr = str::from_utf8(&output.stderr).unwrap_or("").to_string();
-
-    if output.status.success() {
-        Ok(stdout)
-    } else {
-        Err(format!(
-            "Exit code: {:?}\nstdout: {}\nstderr: {}",
-            output.status.code(),
-            stdout,
-            stderr
-        ))
-    }
+    cli_test_support::heddle(args, cwd, envs)
 }
 
 fn status_json(path: &std::path::Path) -> Value {
@@ -569,19 +526,14 @@ mod fsck {
         }
         assert!(corrupted, "should have found a pack file to corrupt");
 
-        let result = heddle(&["fsck", "--full"], Some(temp.path()));
-        // fsck should detect the corruption — either via exit code or output
-        if let Ok(output) = &result {
-            assert!(
-                output.contains("error")
-                    || output.contains("mismatch")
-                    || output.contains("invalid")
-                    || output.contains("corrupt"),
-                "fsck should report corruption: {}",
-                output
-            );
-        }
-        // An error exit code is also acceptable
+        let error = heddle(&["fsck", "--full"], Some(temp.path()))
+            .expect_err("full fsck must fail when a source-object pack is corrupt");
+        assert!(
+            ["error", "mismatch", "invalid", "corrupt"]
+                .iter()
+                .any(|needle| error.to_ascii_lowercase().contains(needle)),
+            "fsck should identify the corrupted pack: {error}"
+        );
     }
 
     #[test]
@@ -687,53 +639,6 @@ mod fsck {
             "fsck after merge should pass: {:?}",
             result.err()
         );
-    }
-
-    #[test]
-    fn test_fsck_detects_broken_parent() {
-        let temp = TempDir::new().unwrap();
-        heddle(&["init"], Some(temp.path())).unwrap();
-
-        // Snapshot A
-        fs::write(temp.path().join("file.txt"), "v1").unwrap();
-        heddle(&["capture", "-m", "State A"], Some(temp.path())).unwrap();
-
-        // Snapshot B (child of A)
-        fs::write(temp.path().join("file.txt"), "v2").unwrap();
-        heddle(&["capture", "-m", "State B"], Some(temp.path())).unwrap();
-
-        // Find state A's file and delete it
-        let states_dir = temp.path().join(".heddle/objects/states");
-        if states_dir.exists() {
-            let state_files: Vec<_> = fs::read_dir(&states_dir)
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("state"))
-                .collect();
-
-            // Delete the first state file (A), keeping B
-            if state_files.len() >= 2 {
-                // Sort by name to get consistent ordering
-                let mut paths: Vec<_> = state_files.iter().map(|e| e.path()).collect();
-                paths.sort();
-                fs::remove_file(&paths[0]).unwrap();
-
-                let result = heddle(&["fsck", "--thorough"], Some(temp.path()));
-                // fsck should either report errors in stdout or fail
-                if let Ok(output) = &result {
-                    assert!(
-                        output.contains("error")
-                            || output.contains("missing")
-                            || output.contains("broken")
-                            || output.contains("invalid")
-                            || output.to_lowercase().contains("parent"),
-                        "fsck should report missing parent: {}",
-                        output
-                    );
-                }
-                // Failing is also acceptable — means fsck detected corruption
-            }
-        }
     }
 }
 
@@ -1376,11 +1281,15 @@ mod force_with_lease {
         )
         .unwrap();
 
-        let _result = heddle(
+        let error = heddle(
             &["push", "origin", "--force-with-lease"],
             Some(local.path()),
+        )
+        .expect_err("force-with-lease requires an established tracking state");
+        assert!(
+            error.contains("lease") || error.contains("tracking") || error.contains("expected"),
+            "missing tracking state should produce a lease diagnostic: {error}"
         );
-        // May fail if no tracking info exists
     }
 }
 

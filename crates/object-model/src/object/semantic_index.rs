@@ -31,10 +31,9 @@ use serde::{Deserialize, Serialize};
 
 use super::ContentHash;
 
-/// Coarse symbol classification carried by the index. Mirrors the
-/// `semantic::symbol_resolver::DefinitionKind` taxonomy so types, traits,
-/// enums, modules and the rest are first-class in the index — not just
-/// functions.
+/// Durable symbol classification shared by semantic extraction, indexes, and
+/// review payloads so types, traits, enums, modules and the rest remain
+/// first-class without conversion tables.
 ///
 /// The `snake_case` serde spelling is the durable wire form; the [`tag_byte`]
 /// value is the durable *hashing* form and must never be renumbered (doing so

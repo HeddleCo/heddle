@@ -1713,8 +1713,8 @@ pub struct WatchArgs {
     #[arg(long, value_name = "KINDS")]
     pub filter: Option<String>,
 
-    /// Internal helper for tests: stop after the oplog file produces
-    /// this many modify events (still drains pending entries first).
+    /// Internal helper for tests: stop after the oplog generation produces
+    /// this many relevant events (still drains pending entries first).
     #[arg(long, hide = true)]
     pub max_iterations: Option<usize>,
 
