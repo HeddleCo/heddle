@@ -26966,6 +26966,23 @@
       "title": "SchemasListSchema",
       "type": "object"
     },
+    "semantic diff": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "output_kind": {
+          "enum": [
+            "semantic_diff"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind"
+      ],
+      "title": "GenericJsonObjectSchema",
+      "type": "object"
+    },
     "semantic hot": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": true,

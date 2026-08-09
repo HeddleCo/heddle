@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Parse-free symbol diff rendering for `heddle semantic diff`.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use objects::object::{SymbolAnchor, SymbolKindTag};
 use repo::SymbolDelta;
 use serde::Serialize;
 
+use super::history_target::resolve_state_id;
 use crate::cli::{Cli, should_output_json};
 
 #[derive(Debug, Serialize)]
@@ -45,12 +46,8 @@ impl From<SymbolDelta> for SymbolDeltaOutput {
 
 pub(super) fn cmd_semantic_diff(cli: &Cli, a: String, b: String) -> Result<()> {
     let repo = cli.open_repo()?;
-    let a = repo
-        .resolve_state(&a)?
-        .ok_or_else(|| anyhow!("could not resolve state {a:?}"))?;
-    let b = repo
-        .resolve_state(&b)?
-        .ok_or_else(|| anyhow!("could not resolve state {b:?}"))?;
+    let a = resolve_state_id(&repo, &a)?;
+    let b = resolve_state_id(&repo, &b)?;
     let deltas = repo
         .semantic_diff_symbols(&a, &b)
         .context("querying attached semantic indexes")?
@@ -65,17 +62,22 @@ pub(super) fn cmd_semantic_diff(cli: &Cli, a: String, b: String) -> Result<()> {
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{}",
-            serde_json::to_string(&output).context("serializing semantic diff output")?
-        );
+        write_json(&output)?;
     } else {
-        print_human(&output);
+        render_human(&output);
     }
     Ok(())
 }
 
-fn print_human(output: &SemanticDiffOutput) {
+fn write_json(output: &SemanticDiffOutput) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string(output).context("serializing semantic diff output")?
+    );
+    Ok(())
+}
+
+fn render_human(output: &SemanticDiffOutput) {
     if output.deltas.is_empty() {
         println!(
             "No symbol changes between {} and {}.",

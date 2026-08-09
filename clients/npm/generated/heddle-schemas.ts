@@ -2147,6 +2147,11 @@ export interface SemanticChangeEntry {
   to_path?: string | null;
 }
 
+export interface SemanticDiffSchema {
+  output_kind: "semantic_diff";
+  [key: string]: unknown;
+}
+
 export type SemanticHotSchema = Record<string, unknown>;
 
 export interface SessionEntrySchema {
@@ -3407,6 +3412,7 @@ export interface HeddleVerbOutputs {
   "review show": ReviewShowSchema;
   "review sign": ReviewSignSchema;
   schemas: SchemasListSchema;
+  "semantic diff": SemanticDiffSchema;
   "semantic hot": SemanticHotSchema;
   show: ShowSchema;
   start: StartSchema;
@@ -3569,6 +3575,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "review show",
   "review sign",
   "schemas",
+  "semantic diff",
   "semantic hot",
   "show",
   "start",
