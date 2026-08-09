@@ -33,6 +33,9 @@ pub fn has_object(store: &impl ObjectStore, info: &ObjectInfo) -> Result<bool> {
         // semantics. Like Redaction, conservatively refetch and let the
         // repository boundary validate + dedupe.
         (ObjectId::StateId(_), ObjectType::StateVisibility) => Ok(false),
+        // Hosted registries are materialized snapshots with a liveness overlay;
+        // let the receiver validate and deduplicate the complete payload.
+        (ObjectId::Hash(_), ObjectType::KeyBinding) => Ok(false),
         _ => Ok(false),
     }
 }

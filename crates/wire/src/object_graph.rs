@@ -69,6 +69,11 @@ pub enum ObjectType {
     /// and ships via the per-object transfer path, not the pack.
     StateVisibility,
     StateAttachment,
+    /// A content-addressed `KeyBindingRegistry` together with each binding's
+    /// revocation/liveness overlay. Hosted materializers append this object to
+    /// a closure and carry it out of pack because the native pack format has no
+    /// key-binding record kind.
+    KeyBinding,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -80,6 +85,7 @@ pub enum ObjectTypeBucket {
     Redaction,
     StateVisibility,
     StateAttachment,
+    KeyBinding,
 }
 
 impl ObjectType {
@@ -92,6 +98,7 @@ impl ObjectType {
             ObjectType::Redaction => "redaction",
             ObjectType::StateVisibility => "state_visibility",
             ObjectType::StateAttachment => "state_attachment",
+            ObjectType::KeyBinding => "key_binding",
         }
     }
 
@@ -104,6 +111,7 @@ impl ObjectType {
             "redaction" => Ok(ObjectType::Redaction),
             "state_visibility" => Ok(ObjectType::StateVisibility),
             "state_attachment" => Ok(ObjectType::StateAttachment),
+            "key_binding" => Ok(ObjectType::KeyBinding),
             _ => Err(ProtocolError::InvalidState(format!(
                 "unknown object type: {value}"
             ))),
@@ -121,7 +129,10 @@ impl ObjectType {
     /// method retains the pull/general semantics so pack construction,
     /// have-set, and local-copy planners are unchanged.
     pub fn packable(self) -> bool {
-        !matches!(self, ObjectType::Redaction | ObjectType::StateVisibility)
+        !matches!(
+            self,
+            ObjectType::Redaction | ObjectType::StateVisibility | ObjectType::KeyBinding
+        )
     }
 
     /// Whether this object type may ride the client→server **push** pack.
@@ -162,6 +173,10 @@ impl ObjectType {
                 "StateVisibility sidecar records cannot be packed into the content-addressed object pack"
                     .to_string(),
             )),
+            ObjectType::KeyBinding => Err(ProtocolError::InvalidState(
+                "KeyBinding registry objects cannot be packed into the content-addressed object pack"
+                    .to_string(),
+            )),
         }
     }
 
@@ -174,6 +189,7 @@ impl ObjectType {
             ObjectType::Redaction => ObjectTypeBucket::Redaction,
             ObjectType::StateVisibility => ObjectTypeBucket::StateVisibility,
             ObjectType::StateAttachment => ObjectTypeBucket::StateAttachment,
+            ObjectType::KeyBinding => ObjectTypeBucket::KeyBinding,
         }
     }
 }
@@ -1858,7 +1874,11 @@ mod tests {
     #[test]
     fn packable_predicates_split_state_attachment_by_direction() {
         // Sidecar records are never packable in either direction.
-        for sidecar in [ObjectType::Redaction, ObjectType::StateVisibility] {
+        for sidecar in [
+            ObjectType::Redaction,
+            ObjectType::StateVisibility,
+            ObjectType::KeyBinding,
+        ] {
             assert!(!sidecar.packable_for_push(), "{sidecar:?} push");
             assert!(!sidecar.packable_for_pull(), "{sidecar:?} pull");
         }

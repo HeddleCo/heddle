@@ -167,15 +167,24 @@ pub(super) fn parse_object_id(
                 kind,
             })
         }
-        ObjectType::Blob | ObjectType::Tree | ObjectType::Action | ObjectType::Redaction => {
-            Ok(ObjectId::Hash(ContentHash::from_hex(value).map_err(
-                |err| ProtocolError::InvalidState(err.to_string()),
-            )?))
-        }
+        ObjectType::Blob
+        | ObjectType::Tree
+        | ObjectType::Action
+        | ObjectType::Redaction
+        | ObjectType::KeyBinding => Ok(ObjectId::Hash(
+            ContentHash::from_hex(value)
+                .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
+        )),
     }
 }
 
 pub(super) fn parse_object_type(value: i32) -> Result<ObjectType, ProtocolError> {
+    // heddle-api 0.3 predates the key-binding closure object. Prost preserves
+    // unknown enum discriminants in the i32 field, so recognize the reserved
+    // next value before asking the generated enum to decode it.
+    if value == HOSTED_OBJECT_TYPE_KEY_BINDING {
+        return Ok(ObjectType::KeyBinding);
+    }
     match HostedObjectType::try_from(value).unwrap_or_default() {
         HostedObjectType::Blob => Ok(ObjectType::Blob),
         HostedObjectType::Tree => Ok(ObjectType::Tree),
@@ -190,15 +199,18 @@ pub(super) fn parse_object_type(value: i32) -> Result<ObjectType, ProtocolError>
     }
 }
 
-fn object_type_to_proto(obj_type: ObjectType) -> HostedObjectType {
+const HOSTED_OBJECT_TYPE_KEY_BINDING: i32 = 8;
+
+fn object_type_to_proto(obj_type: ObjectType) -> i32 {
     match obj_type {
-        ObjectType::Blob => HostedObjectType::Blob,
-        ObjectType::Tree => HostedObjectType::Tree,
-        ObjectType::State => HostedObjectType::State,
-        ObjectType::Action => HostedObjectType::Action,
-        ObjectType::Redaction => HostedObjectType::Redaction,
-        ObjectType::StateVisibility => HostedObjectType::StateVisibility,
-        ObjectType::StateAttachment => HostedObjectType::StateAttachment,
+        ObjectType::Blob => HostedObjectType::Blob as i32,
+        ObjectType::Tree => HostedObjectType::Tree as i32,
+        ObjectType::State => HostedObjectType::State as i32,
+        ObjectType::Action => HostedObjectType::Action as i32,
+        ObjectType::Redaction => HostedObjectType::Redaction as i32,
+        ObjectType::StateVisibility => HostedObjectType::StateVisibility as i32,
+        ObjectType::StateAttachment => HostedObjectType::StateAttachment as i32,
+        ObjectType::KeyBinding => HOSTED_OBJECT_TYPE_KEY_BINDING,
     }
 }
 
@@ -226,7 +238,7 @@ pub(super) fn object_descriptor_with_status(
                 format!("{}:{}", state.to_string_full(), id.as_hash().to_hex())
             }
         },
-        object_type: object_type_to_proto(info.obj_type) as i32,
+        object_type: object_type_to_proto(info.obj_type),
         availability_status: availability_status as i32,
         availability_note: availability_note.into(),
         attachment_kind: attachment_kind as i32,
@@ -255,7 +267,7 @@ pub(super) fn descriptor_id_from_info(info: &ObjectInfo) -> (String, i32) {
             format!("{}:{}", state.to_string_full(), id.as_hash().to_hex())
         }
     };
-    (id, object_type_to_proto(info.obj_type) as i32)
+    (id, object_type_to_proto(info.obj_type))
 }
 
 pub(super) fn hosted_to_protocol_error(error: HostedError) -> ProtocolError {
@@ -516,6 +528,24 @@ mod tests {
             error: None,
         });
         assert!(matches!(error, ProtocolError::AuthorizationFailed(_)));
+    }
+
+    #[test]
+    fn key_binding_descriptor_roundtrips_through_the_forward_proto_discriminant() {
+        let hash = ContentHash::from_bytes([0x61; 32]);
+        let info = ObjectInfo {
+            id: ObjectId::Hash(hash),
+            obj_type: ObjectType::KeyBinding,
+            size: 0,
+            delta_base: None,
+        };
+
+        let descriptor = to_proto_object_info(&info);
+        assert_eq!(descriptor.object_type, HOSTED_OBJECT_TYPE_KEY_BINDING);
+        let parsed = parse_descriptor_to_info(descriptor).expect("parse key-binding descriptor");
+
+        assert_eq!(parsed.id, ObjectId::Hash(hash));
+        assert_eq!(parsed.obj_type, ObjectType::KeyBinding);
     }
 
     #[test]

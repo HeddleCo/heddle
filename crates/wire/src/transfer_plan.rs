@@ -54,6 +54,7 @@ pub struct TransferPlanStats {
     pub redactions: usize,
     pub state_visibilities: usize,
     pub state_attachments: usize,
+    pub key_bindings: usize,
 }
 
 impl RepositoryTransferPlan<PlannedObject> {
@@ -139,6 +140,7 @@ impl TransferPlanStats {
             ObjectTypeBucket::Redaction => self.redactions += 1,
             ObjectTypeBucket::StateVisibility => self.state_visibilities += 1,
             ObjectTypeBucket::StateAttachment => self.state_attachments += 1,
+            ObjectTypeBucket::KeyBinding => self.key_bindings += 1,
         }
     }
 }
@@ -208,19 +210,24 @@ mod tests {
                     id: ObjectId::StateId(state),
                     obj_type: ObjectType::StateVisibility,
                 },
+                PlannedObject {
+                    id: ObjectId::Hash(hash(3)),
+                    obj_type: ObjectType::KeyBinding,
+                },
             ],
             GitLaneTransferIntent::HeddleObjectsOnly,
         );
 
         assert_eq!(plan.partitions.packable_objects.len(), 2);
-        assert_eq!(plan.partitions.sidecar_objects.len(), 2);
-        assert_eq!(plan.stats.total_objects, 4);
+        assert_eq!(plan.partitions.sidecar_objects.len(), 3);
+        assert_eq!(plan.stats.total_objects, 5);
         assert_eq!(plan.stats.packable_objects, 2);
-        assert_eq!(plan.stats.sidecar_objects, 2);
+        assert_eq!(plan.stats.sidecar_objects, 3);
         assert_eq!(plan.stats.blobs, 1);
         assert_eq!(plan.stats.trees, 1);
         assert_eq!(plan.stats.redactions, 1);
         assert_eq!(plan.stats.state_visibilities, 1);
+        assert_eq!(plan.stats.key_bindings, 1);
         assert!(plan.requires_native_pack(false));
     }
 
