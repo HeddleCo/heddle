@@ -101,6 +101,9 @@ impl HeddleExitCode {
             "remote_not_configured" | "remote_not_found" | "repository_not_found" => {
                 Some(Self::Config)
             }
+            // A Heddle global option after `try --` is a malformed
+            // invocation, not a child-command argument.
+            "try_global_option_after_separator" => Some(Self::Usage),
             // Well-formed input the command semantically rejects:
             // - nothing staged / no changes to capture
             // - a reconcile that needs a `--prefer` side
@@ -110,8 +113,7 @@ impl HeddleExitCode {
             //   that output contract (the invocation parses fine; the
             //   command rejects the requested projection)
             "nothing_to_capture"
-            | "try_global_option_after_separator" => Some(Self::Usage),
-            "commit_requires_git_overlay"
+            | "commit_requires_git_overlay"
             | "commit_capture_required"
             | "git_repair_requires_adoption"
             | "git_repair_requires_import"
