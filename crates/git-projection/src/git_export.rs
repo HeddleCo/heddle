@@ -89,6 +89,16 @@ pub fn commit_is_byte_faithful(state: &State) -> bool {
             .unwrap_or(true)
 }
 
+/// Whether an imported state's mapped Git commit must be backed by residual
+/// bytes instead of reconstruction from native state.
+///
+/// Native Heddle states have no captured original (`raw_message` is absent),
+/// so their mapped projection commit can be minted normally and must not be
+/// mistaken for a lossy import by fsck.
+pub fn commit_requires_residual(state: &State) -> bool {
+    has_git_fidelity(state) && !commit_is_byte_faithful(state)
+}
+
 pub struct ExportStateOptions<'a> {
     pub identity: Option<&'a LocalGitIdentity>,
     pub message_override: Option<&'a str>,
@@ -309,6 +319,30 @@ pub fn export_current_thread(
     bridge.with_mapping_rollback(|bridge| export_scoped(bridge, Some(thread)))
 }
 
+fn seed_exportable_ingest_identities(
+    bridge: &mut GitProjection<'_>,
+    residuals: &ResidualStore,
+) -> GitProjectionResult<()> {
+    for (git_sha, state_id) in bridge.heddle_repo.git_overlay_ingest_commit_mapping()? {
+        let state_id = StateId::parse(&state_id)?;
+        let Some(state) = bridge.heddle_repo.store().get_state(&state_id)? else {
+            continue;
+        };
+        if bridge.mapping.has_heddle(&state_id) {
+            continue;
+        }
+        let git_oid = git_sha
+            .parse::<ObjectId>()
+            .map_err(|error| GitProjectionError::InvalidMapping(error.to_string()))?;
+        let can_materialize = commit_is_byte_faithful(&state)
+            || residuals.has_residual(git_oid.format(), &git_oid)?;
+        if can_materialize && !bridge.mapping.has_git(git_oid) {
+            bridge.mapping.insert(state_id, git_oid);
+        }
+    }
+    Ok(())
+}
+
 fn export_scoped(
     bridge: &mut GitProjection,
     thread: Option<&str>,
@@ -333,6 +367,8 @@ fn export_scoped(
     let mut stats = ExportStats::default();
 
     bridge.build_existing_mapping(None)?;
+    let residual_store = ResidualStore::open(bridge.heddle_repo.heddle_dir());
+    seed_exportable_ingest_identities(bridge, &residual_store)?;
     let identity = git_config_identity_with_global_fallback(bridge.heddle_repo.root())?;
 
     // Git projection export publishes the public projection — the export audience is
@@ -347,6 +383,33 @@ fn export_scoped(
     // boundary (absent from both).
     let reachable: HashSet<StateId> = sorted_states.iter().copied().collect();
     let repo = bridge.open_git_repo()?;
+    residual_store.install_tag_residuals_into(&repo)?;
+    for state_id in &sorted_states {
+        let Some(mapped_oid) = bridge.mapping.get_git(state_id) else {
+            continue;
+        };
+        let Some(state) = bridge.heddle_repo.store().get_state(state_id)? else {
+            continue;
+        };
+        if commit_requires_residual(&state) {
+            let installed = residual_store.install_commit_closure_into(&repo, &mapped_oid)?;
+            if !installed && repo.read_object(&mapped_oid).is_err() {
+                return Err(GitProjectionError::Git(format!(
+                    "mapped non-reconstructable Git object {mapped_oid} for state {state_id} has no Raw Git Object Residual and is unavailable from the Bridge Mirror"
+                )));
+            }
+        } else if commit_is_byte_faithful(&state) && repo.read_object(&mapped_oid).is_err() {
+            let content =
+                reconstruct_commit_bytes(bridge.heddle_repo, &repo, &bridge.mapping, &state)?;
+            let reconstructed = commit_object_id(&content);
+            if reconstructed != mapped_oid {
+                return Err(GitProjectionError::Git(format!(
+                    "fresh export reconstruction OID mismatch for state {state_id}: reconstructed {reconstructed}, expected mapped {mapped_oid}"
+                )));
+            }
+            write_commit_object(&repo, &content)?;
+        }
+    }
     bridge.mapping.retain_git_objects(&repo);
     bridge.seed_git_checkpoint_mappings_from_checkout(&repo)?;
     bridge.seed_ingest_identity_mappings_from_repo(&repo)?;
@@ -489,10 +552,6 @@ fn export_scoped(
                 if mapped.is_some_and(|oid| repo.read_object(&oid).is_ok()) {
                     continue;
                 }
-                // mirror still required for non-byte-faithful commits (non-UTF8
-                // identities, --lossy); #568 mirror elimination must account for
-                // these, and full de-lossy needs byte-preserving identities (#564
-                // follow-up).
                 // Fidelity guard (#567): regenerate from state ONLY when the
                 // state is fully byte-faithful to the original import. A
                 // non-byte-faithful commit (non-UTF8 identity, or a `--lossy`
@@ -518,12 +577,17 @@ fn export_scoped(
                         write_commit_object(&repo, &content)?;
                     }
                 } else if let Some(mapped_oid) = mapped {
-                    // Lossy path: prefer residual, else leave mirror bytes as the
-                    // served object (pre-#567). Foundation: install residual when
-                    // present so export no longer *requires* the mirror for that
-                    // root when residual capture has already run.
-                    let residual_store = ResidualStore::open(bridge.heddle_repo.heddle_dir());
-                    let _ = residual_store.install_into(&repo, &mapped_oid)?;
+                    // Lossy path: install the commit plus its exact tree/blob
+                    // closure. Import capture guarantees this is complete, so a
+                    // fresh projection no longer needs the Bridge Mirror as an
+                    // object warehouse.
+                    let installed =
+                        residual_store.install_commit_closure_into(&repo, &mapped_oid)?;
+                    if !installed && repo.read_object(&mapped_oid).is_err() {
+                        return Err(GitProjectionError::Git(format!(
+                            "mapped non-reconstructable Git object {mapped_oid} for state {state_id} has no Raw Git Object Residual and is unavailable from the Bridge Mirror"
+                        )));
+                    }
                 }
             }
             continue;
@@ -664,6 +728,27 @@ fn export_scoped(
         .filter(|oid| !served_note_oids.contains(oid))
         .collect();
     git_notes::remove_notes(&repo, &notes_to_retract)?;
+
+    // A native marker remembers the peeled StateId, while this residual
+    // sidecar remembers the original annotated wrapper OID. Restore a wrapper
+    // only when it still peels to the marker's current mapped commit; a moved
+    // marker must become an ordinary projected tag instead of resurrecting an
+    // obsolete annotation.
+    for tag_ref in residual_store.list_tag_refs(repo.object_format())? {
+        let Some(state_id) = bridge
+            .heddle_repo
+            .refs()
+            .get_marker(&MarkerName::new(tag_ref.name.as_str()))?
+        else {
+            continue;
+        };
+        let Some(mapped_oid) = bridge.mapping.get_git(&state_id) else {
+            continue;
+        };
+        if peel_to_commit_oid(&repo, tag_ref.oid) == Some(mapped_oid) {
+            sync_marker_to_tag(&repo, &tag_ref.name, tag_ref.oid)?;
+        }
+    }
 
     // THE PROJECTION (heddle#316 r13): the desired heddle-owned ref-set for this
     // audience — heads lagged to the served frontier, tags at served markers — as

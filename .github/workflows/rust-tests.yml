@@ -298,6 +298,11 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::cargo test"
+          current_fd_limit=$(ulimit -n)
+          if [ "$current_fd_limit" != "unlimited" ] && [ "$current_fd_limit" -lt 65536 ]; then
+            ulimit -n 65536
+          fi
+          echo "Open-file limit: $(ulimit -n)"
           cargo test --locked "${package_args[@]}"
           echo "::endgroup::"
 
@@ -362,6 +367,11 @@ jobs:
           cargo build --locked -p heddle-cli --features telemetry --tests --bin heddle
           cargo clippy --locked -p heddle-cli -p heddle-cli-shared \
             --features heddle-cli/telemetry --lib --bins --tests --examples -- -D warnings
+          current_fd_limit=$(ulimit -n)
+          if [ "$current_fd_limit" != "unlimited" ] && [ "$current_fd_limit" -lt 65536 ]; then
+            ulimit -n 65536
+          fi
+          echo "Open-file limit: $(ulimit -n)"
           cargo test --locked -p heddle-cli -p heddle-cli-shared \
             --features heddle-cli/telemetry
 

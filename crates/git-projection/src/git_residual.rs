@@ -39,11 +39,13 @@
 //! `docs/VERIFICATION_CLEANUP_PLAN.md`.
 
 use std::{
+    collections::{BTreeMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
 
 use objects::fs_atomic::write_file_atomic;
+use serde::{Deserialize, Serialize};
 use sley::{
     GitObjectType, ObjectFormat, ObjectId, Repository as SleyRepository,
     plumbing::sley_object::EncodedObject,
@@ -55,6 +57,18 @@ use crate::git_core::{GitProjectionError, GitProjectionResult, git_err};
 pub const RESIDUALS_DIR_NAME: &str = "git-residuals";
 
 const RESIDUAL_MAGIC: &[u8; 4] = b"HR01";
+const TAG_REFS_FILE_NAME: &str = "tag-refs.json";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidualTagRef {
+    pub name: String,
+    pub oid: ObjectId,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct TagRefFile {
+    refs: BTreeMap<String, String>,
+}
 
 /// On-disk Raw Git Object Residual record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,6 +261,139 @@ impl ResidualStore {
         Ok(true)
     }
 
+    /// Capture a non-reconstructable commit and its complete file closure.
+    ///
+    /// Parent commits are deliberately not traversed: each imported commit is
+    /// classified independently, so reconstructable parents remain backed by
+    /// native state while non-reconstructable parents are captured as their own
+    /// roots. Trees and blobs are captured recursively because the verbatim
+    /// commit points at the original tree, not the lossy native translation.
+    pub fn capture_commit_closure_from_git_repo(
+        &self,
+        source: &SleyRepository,
+        commit_oid: &ObjectId,
+    ) -> GitProjectionResult<()> {
+        let format = source.object_format();
+        let mut stack = vec![*commit_oid];
+        let mut seen = HashSet::new();
+        while let Some(oid) = stack.pop() {
+            if !seen.insert(oid) {
+                continue;
+            }
+            let object = source.read_object(&oid).map_err(git_err)?;
+            self.put_residual_verified(oid, format, object.object_type, object.body.clone())?;
+            match object.object_type {
+                GitObjectType::Commit => {
+                    if oid != *commit_oid {
+                        return Err(GitProjectionError::Git(format!(
+                            "unexpected commit {oid} inside tree closure for {commit_oid}"
+                        )));
+                    }
+                    let commit =
+                        sley::CommitObject::parse_ref(format, &object.body).map_err(git_err)?;
+                    stack.push(commit.tree);
+                }
+                GitObjectType::Tree => {
+                    let tree = sley::TreeObject::parse(format, &object.body).map_err(git_err)?;
+                    stack.extend(
+                        tree.entries
+                            .into_iter()
+                            .filter(|entry| !entry.is_gitlink())
+                            .map(|entry| entry.oid),
+                    );
+                }
+                GitObjectType::Blob => {}
+                GitObjectType::Tag => {
+                    return Err(GitProjectionError::Git(format!(
+                        "unexpected tag {oid} inside tree closure for {commit_oid}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Capture an annotated tag wrapper and any tag-of-tag wrappers beneath it.
+    ///
+    /// The eventual commit/tree/blob target is captured by its own import
+    /// classification. This method preserves only the tag objects that native
+    /// markers cannot reconstruct.
+    pub fn capture_tag_chain_from_git_repo(
+        &self,
+        source: &SleyRepository,
+        tag_oid: &ObjectId,
+    ) -> GitProjectionResult<()> {
+        let format = source.object_format();
+        let mut oid = *tag_oid;
+        let mut seen = HashSet::new();
+        loop {
+            if !seen.insert(oid) {
+                return Err(GitProjectionError::Git(format!(
+                    "annotated tag cycle while capturing {tag_oid}"
+                )));
+            }
+            let object = source.read_object(&oid).map_err(git_err)?;
+            if object.object_type != GitObjectType::Tag {
+                return Ok(());
+            }
+            self.put_residual_verified(oid, format, GitObjectType::Tag, object.body.clone())?;
+            oid = sley::TagObject::parse(format, &object.body)
+                .map_err(git_err)?
+                .object;
+        }
+    }
+
+    /// Persist the raw annotated-tag object targeted by an imported tag ref.
+    /// Native markers retain the peeled state identity; this sidecar retains the
+    /// wrapper identity needed to recreate an annotated ref in a fresh projection.
+    pub fn record_tag_ref(&self, name: &str, oid: ObjectId) -> GitProjectionResult<()> {
+        let path = self.residuals_dir().join(TAG_REFS_FILE_NAME);
+        let mut file = match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<TagRefFile>(&bytes).map_err(|error| {
+                GitProjectionError::Git(format!(
+                    "invalid Raw Git Object Residual tag-ref mapping: {error}"
+                ))
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => TagRefFile::default(),
+            Err(error) => return Err(error.into()),
+        };
+        file.refs.insert(name.to_string(), oid.to_string());
+        let bytes = serde_json::to_vec_pretty(&file).map_err(|error| {
+            GitProjectionError::Git(format!(
+                "serialize Raw Git Object Residual tag-ref mapping: {error}"
+            ))
+        })?;
+        write_file_atomic(&path, &bytes)?;
+        Ok(())
+    }
+
+    /// Read the durable imported annotated-tag ref identities.
+    pub fn list_tag_refs(&self, format: ObjectFormat) -> GitProjectionResult<Vec<ResidualTagRef>> {
+        let path = self.residuals_dir().join(TAG_REFS_FILE_NAME);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let file = serde_json::from_slice::<TagRefFile>(&bytes).map_err(|error| {
+            GitProjectionError::Git(format!(
+                "invalid Raw Git Object Residual tag-ref mapping: {error}"
+            ))
+        })?;
+        file.refs
+            .into_iter()
+            .map(|(name, oid)| {
+                ObjectId::from_hex(format, &oid)
+                    .map(|oid| ResidualTagRef { name, oid })
+                    .map_err(|error| {
+                        GitProjectionError::Git(format!(
+                            "invalid annotated-tag residual oid {oid}: {error}"
+                        ))
+                    })
+            })
+            .collect()
+    }
+
     /// Install a residual into a target Git object database.
     ///
     /// Prefer this over reading residual bytes and re-framing in call sites.
@@ -268,6 +415,153 @@ impl ResidualStore {
             )));
         }
         Ok(true)
+    }
+
+    /// Install a captured non-reconstructable commit and its tree/blob closure.
+    /// Returns `false` only when the root residual is absent; a missing dependent
+    /// is a hard fidelity error.
+    pub fn install_commit_closure_into(
+        &self,
+        target: &SleyRepository,
+        commit_oid: &ObjectId,
+    ) -> GitProjectionResult<bool> {
+        let format = target.object_format();
+        if self.get_residual(format, commit_oid)?.is_none() {
+            return Ok(false);
+        }
+        let mut stack = vec![*commit_oid];
+        let mut seen = HashSet::new();
+        while let Some(oid) = stack.pop() {
+            if !seen.insert(oid) {
+                continue;
+            }
+            let residual = self.get_residual(format, &oid)?.ok_or_else(|| {
+                GitProjectionError::Git(format!(
+                    "Raw Git Object Residual closure for {commit_oid} is missing reachable object {oid}"
+                ))
+            })?;
+            let written = target
+                .write_object(EncodedObject::new(
+                    residual.object_type,
+                    residual.body.clone(),
+                ))
+                .map_err(git_err)?;
+            if written != oid {
+                return Err(GitProjectionError::Git(format!(
+                    "installing Raw Git Object Residual wrote {written}, expected {oid}"
+                )));
+            }
+            match residual.object_type {
+                GitObjectType::Commit => {
+                    if oid != *commit_oid {
+                        return Err(GitProjectionError::Git(format!(
+                            "unexpected commit {oid} inside residual closure for {commit_oid}"
+                        )));
+                    }
+                    let commit =
+                        sley::CommitObject::parse_ref(format, &residual.body).map_err(git_err)?;
+                    stack.push(commit.tree);
+                }
+                GitObjectType::Tree => {
+                    let tree = sley::TreeObject::parse(format, &residual.body).map_err(git_err)?;
+                    stack.extend(
+                        tree.entries
+                            .into_iter()
+                            .filter(|entry| !entry.is_gitlink())
+                            .map(|entry| entry.oid),
+                    );
+                }
+                GitObjectType::Blob => {}
+                GitObjectType::Tag => {
+                    return Err(GitProjectionError::Git(format!(
+                        "unexpected tag {oid} inside residual closure for {commit_oid}"
+                    )));
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Validate a captured commit/tree/blob closure without materializing it.
+    /// Returns `false` only when the mapped root residual is absent. Missing or
+    /// corrupt dependents are reported as integrity errors.
+    pub fn validate_commit_closure(
+        &self,
+        format: ObjectFormat,
+        commit_oid: &ObjectId,
+    ) -> GitProjectionResult<bool> {
+        if self.get_residual(format, commit_oid)?.is_none() {
+            return Ok(false);
+        }
+        let mut stack = vec![*commit_oid];
+        let mut seen = HashSet::new();
+        while let Some(oid) = stack.pop() {
+            if !seen.insert(oid) {
+                continue;
+            }
+            let residual = self.get_residual(format, &oid)?.ok_or_else(|| {
+                GitProjectionError::Git(format!(
+                    "Raw Git Object Residual closure for {commit_oid} is missing reachable object {oid}"
+                ))
+            })?;
+            match residual.object_type {
+                GitObjectType::Commit => {
+                    if oid != *commit_oid {
+                        return Err(GitProjectionError::Git(format!(
+                            "unexpected commit {oid} inside residual closure for {commit_oid}"
+                        )));
+                    }
+                    let commit =
+                        sley::CommitObject::parse_ref(format, &residual.body).map_err(git_err)?;
+                    stack.push(commit.tree);
+                }
+                GitObjectType::Tree => {
+                    let tree = sley::TreeObject::parse(format, &residual.body).map_err(git_err)?;
+                    stack.extend(
+                        tree.entries
+                            .into_iter()
+                            .filter(|entry| !entry.is_gitlink())
+                            .map(|entry| entry.oid),
+                    );
+                }
+                GitObjectType::Blob => {}
+                GitObjectType::Tag => {
+                    return Err(GitProjectionError::Git(format!(
+                        "unexpected tag {oid} inside residual closure for {commit_oid}"
+                    )));
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Install every captured annotated-tag object into a Git object database.
+    /// Ref reconciliation remains name/ownership based; this only replaces the
+    /// Bridge Mirror's former role as the tag byte warehouse.
+    pub fn install_tag_residuals_into(
+        &self,
+        target: &SleyRepository,
+    ) -> GitProjectionResult<usize> {
+        let format = target.object_format();
+        let mut installed = 0;
+        for oid in self.list_residual_oids(format)? {
+            let Some(residual) = self.get_residual(format, &oid)? else {
+                continue;
+            };
+            if residual.object_type != GitObjectType::Tag {
+                continue;
+            }
+            let written = target
+                .write_object(EncodedObject::new(residual.object_type, residual.body))
+                .map_err(git_err)?;
+            if written != oid {
+                return Err(GitProjectionError::Git(format!(
+                    "installing annotated-tag residual wrote {written}, expected {oid}"
+                )));
+            }
+            installed += 1;
+        }
+        Ok(installed)
     }
 
     fn residual_path(&self, object_format: ObjectFormat, oid: &ObjectId) -> PathBuf {
