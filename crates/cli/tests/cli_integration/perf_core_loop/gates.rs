@@ -6,6 +6,8 @@ use serde::Deserialize;
 
 use super::measurement::{CaseKind, CaseResult, NegativeControl};
 
+const WARM_CLEAN_STATUS_100K_P95_MS: f64 = 50.0;
+
 #[derive(Deserialize)]
 struct BaselineFile {
     profiles: Vec<BaselineProfile>,
@@ -134,6 +136,17 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
         enforce_scale(results, kind, &baseline, &mut failures);
     }
     if let Some(clean_100k) = find(results, CaseKind::StatusClean, 100_000) {
+        let wall = clean_100k.metric(|sample| sample.wall_ms);
+        println!(
+            "TARGET case=status_clean paths=100000 budget_p95_ms={WARM_CLEAN_STATUS_100K_P95_MS:.3} observed_p95_ms={:.3}",
+            wall.p95
+        );
+        if wall.p95 > WARM_CLEAN_STATUS_100K_P95_MS {
+            failures.push(format!(
+                "instant target gate: clean status @ 100k paths p95 {:.3} ms > {WARM_CLEAN_STATUS_100K_P95_MS:.3} ms",
+                wall.p95
+            ));
+        }
         let dirs = clean_100k.counter(|counters| counters.directories_scanned);
         let hashes = clean_100k.counter(|counters| counters.files_hashed);
         if dirs.p95 > 10.0 || hashes.max > 0.0 {
@@ -142,6 +155,8 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
                 dirs.p95, hashes.max
             ));
         }
+    } else {
+        failures.push("instant target gate: missing clean status @ 100k paths".to_string());
     }
     if let Some(dirty_100k) = find(results, CaseKind::StatusDirty, 100_000) {
         let dirs = dirty_100k.counter(|counters| counters.directories_scanned);

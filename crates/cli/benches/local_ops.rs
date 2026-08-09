@@ -2,7 +2,7 @@
 use std::{env, hint::black_box, path::Path};
 
 use cli::bench::{detect_renames_for_bench, find_merge_base_for_bench, three_way_merge_for_bench};
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group};
 use objects::{
     object::{Blob, MarkerName, StateId, ThreadName, Tree, TreeEntry},
     store::{InMemoryStore, ObjectStore},
@@ -138,6 +138,41 @@ fn setup_repo_with_files(count: usize) -> (TempDir, Repository) {
     (temp, repo)
 }
 
+fn setup_warm_native_repo(count: usize) -> (TempDir, Repository, Tree) {
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp.path())
+        .unwrap()
+        .without_fsmonitor();
+    write_files(temp.path(), count, "tracked");
+    let state = repo.snapshot(Some("base".to_string()), None).unwrap();
+    let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
+    let mut config = repo.config().clone();
+    config.worktree.fsmonitor.mode = FsMonitorMode::Native;
+    config.save(&repo.heddle_dir().join("config.toml")).unwrap();
+    drop(repo);
+
+    let monitor_root = temp.path().to_path_buf();
+    std::thread::spawn(move || {
+        let _ = run_local_monitor_helper(&monitor_root);
+    });
+    let repo = Repository::open(temp.path()).unwrap();
+    let options = WorktreeStatusOptions {
+        fsmonitor: FsMonitorSettings {
+            mode: FsMonitorMode::Native,
+        },
+    };
+    for _ in 0..100 {
+        let (_, profile) = repo
+            .compare_worktree_cached_profiled_with_options(&tree, &options)
+            .unwrap();
+        if profile.scan_mode == "changed_paths" {
+            return (temp, repo, tree);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("native monitor did not become usable for benchmark fixture");
+}
+
 fn setup_flat_repo_with_files(count: usize) -> (TempDir, Repository) {
     let temp = TempDir::new().unwrap();
     let repo = Repository::init_default(temp.path()).unwrap();
@@ -175,6 +210,10 @@ fn setup_repo_with_many_untracked_dirs(
 
 fn ref_scale_counts() -> [usize; 4] {
     [1_000, 10_000, 50_000, 100_000]
+}
+
+fn tracked_path_scale_counts() -> [usize; 3] {
+    [100, 1_000, 100_000]
 }
 
 fn setup_ref_manager() -> (TempDir, RefManager) {
@@ -285,20 +324,19 @@ fn bench_build_tree_cold_shapes(c: &mut Criterion) {
 
 fn bench_compare_worktree(c: &mut Criterion) {
     let mut group = c.benchmark_group("compare_worktree");
-    for &file_count in &[100usize, 1_000] {
-        let (_temp, repo) = setup_repo_with_files(file_count);
-        let state = repo.snapshot(Some("base".to_string()), None).unwrap();
-        let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
-        std::fs::write(
-            repo.root().join("tracked/dir-00/file-00000.txt"),
-            "modified\n",
-        )
-        .unwrap();
-
+    for file_count in tracked_path_scale_counts() {
         group.bench_with_input(
             BenchmarkId::from_parameter(file_count),
             &file_count,
             |b, _| {
+                let (_temp, repo, tree) = setup_warm_native_repo(file_count);
+                std::fs::write(
+                    repo.root().join("tracked/dir-00/file-00000.txt"),
+                    "modified\n",
+                )
+                .unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                black_box(repo.compare_worktree_cached(&tree).unwrap());
                 b.iter(|| {
                     let status = repo.compare_worktree_cached(&tree).unwrap();
                     black_box(status.change_count());
@@ -306,6 +344,41 @@ fn bench_compare_worktree(c: &mut Criterion) {
             },
         );
     }
+    group.finish();
+}
+
+fn bench_capture_one_path(c: &mut Criterion) {
+    let mut group = c.benchmark_group("capture_one_path");
+    group.sample_size(10);
+    let file_count = 100_000usize;
+    group.bench_with_input(
+        BenchmarkId::from_parameter(file_count),
+        &file_count,
+        |b, _| {
+            let (_temp, repo, _tree) = setup_warm_native_repo(file_count);
+            let attribution = repo.get_attribution().unwrap();
+            let dirty_path = repo.root().join("tracked/dir-00/file-00000.txt");
+            let mut generation = 0usize;
+            b.iter_batched(
+                || {
+                    generation += 1;
+                    std::fs::write(&dirty_path, format!("capture generation {generation}\n"))
+                        .unwrap();
+                },
+                |()| {
+                    let execution = repo
+                        .snapshot_with_attribution_profiled(
+                            Some("bench".to_string()),
+                            None,
+                            attribution.clone(),
+                        )
+                        .unwrap();
+                    black_box(execution.state.state_id);
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
     group.finish();
 }
 
@@ -609,15 +682,12 @@ fn bench_compare_worktree_symlink_heavy(c: &mut Criterion) {
 
 fn bench_worktree_clean(c: &mut Criterion) {
     let mut group = c.benchmark_group("worktree_is_clean");
-    for &file_count in &[100usize, 1_000] {
-        let (_temp, repo) = setup_repo_with_files(file_count);
-        let state = repo.snapshot(Some("base".to_string()), None).unwrap();
-        let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
-
+    for file_count in tracked_path_scale_counts() {
         group.bench_with_input(
             BenchmarkId::from_parameter(file_count),
             &file_count,
             |b, _| {
+                let (_temp, repo, tree) = setup_warm_native_repo(file_count);
                 b.iter(|| {
                     let clean = repo.worktree_is_clean_cached(&tree).unwrap();
                     black_box(clean);
@@ -1153,7 +1223,6 @@ criterion_group!(
     bench_build_tree,
     bench_build_tree_cold_shapes,
     bench_snapshot_profile_flat_repo,
-    bench_compare_worktree,
     bench_compare_worktree_many_added_files,
     bench_compare_worktree_untracked_dirs_with_tracked_changes,
     bench_compare_worktree_untracked_dirs_second_run,
@@ -1164,7 +1233,6 @@ criterion_group!(
     bench_refs_update_marker_rebuild_summary,
     bench_refs_update_remote_thread_rebuild_summary,
     bench_worktree_is_clean_untracked_dirs_second_run,
-    bench_worktree_clean,
     bench_worktree_clean_modes,
     bench_worktree_clean_native_profile,
     bench_goto_same_tree,
@@ -1183,11 +1251,22 @@ criterion_group!(
     bench_semantic_parse_cache_cold
 );
 
+criterion_group!(
+    tracked_path_ops,
+    bench_compare_worktree,
+    bench_capture_one_path,
+    bench_worktree_clean
+);
+
 #[cfg(unix)]
 criterion_group!(unix_status_ops, bench_compare_worktree_symlink_heavy);
 
-#[cfg(unix)]
-criterion_main!(local_ops, unix_status_ops);
-
-#[cfg(not(unix))]
-criterion_main!(local_ops);
+fn main() {
+    tracked_path_ops();
+    if env::var_os("HEDDLE_BENCH_TRACKED_PATHS_ONLY").is_none() {
+        local_ops();
+        #[cfg(unix)]
+        unix_status_ops();
+    }
+    Criterion::default().configure_from_args().final_summary();
+}

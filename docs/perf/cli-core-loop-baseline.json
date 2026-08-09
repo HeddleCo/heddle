@@ -1,6 +1,6 @@
 {
   "schema": "heddle-cli-core-loop-baseline/v2",
-  "recorded_at": "2026-08-04",
+  "recorded_at": "2026-08-09",
   "sample_count": 20,
   "profiles": [
     {
@@ -28,8 +28,8 @@
           "paths": 100000,
           "target_p95_ms": 50.0,
           "measured_p95_ms": 337.419,
-          "gate_p95_ms": 372.0,
-          "disposition": "controlled-runner baseline + 10% noise; 287.419 ms above target"
+          "gate_p95_ms": 50.0,
+          "disposition": "target; clean hot status does not replay the full worktree journal"
         },
         {
           "case": "status_one_dirty",
@@ -69,7 +69,7 @@
     },
     {
       "name": "local-calibration",
-      "runner_fingerprint": "linux/x86_64; Linux 7.0.0-22-generic; AMD Ryzen 7 7700 8-Core Processor; 16 logical cores; rustc 1.97.0 (2d8144b78 2026-07-07); release binary 58037072 bytes",
+      "runner_fingerprint": "linux/x86_64; Linux 7.0.0-22-generic; AMD Ryzen 7 7700 8-Core Processor; 16 logical cores; rustc 1.97.0 (2d8144b78 2026-07-07); release binary 57338320 bytes",
       "cases": [
         {
           "case": "version",
@@ -91,9 +91,9 @@
           "case": "status_clean",
           "paths": 100000,
           "target_p95_ms": 50.0,
-          "measured_p95_ms": 73.271,
-          "gate_p95_ms": 81.0,
-          "disposition": "local lazy-pack baseline + 10% noise; 23.271 ms above target"
+          "measured_p95_ms": 11.703,
+          "gate_p95_ms": 50.0,
+          "disposition": "target; clean hot status does not replay the full worktree journal"
         },
         {
           "case": "status_one_dirty",

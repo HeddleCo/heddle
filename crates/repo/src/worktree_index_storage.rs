@@ -166,11 +166,11 @@ pub(crate) fn load_hot_profiled_for_directories(
     stats.snapshot_load_ms = load_start.elapsed().as_millis();
 
     let journal_path = journal_path(path);
-    if journal_path.exists() {
-        stats.journal_bytes = journal_path
-            .metadata()
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
+    stats.journal_bytes = journal_path
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if directory_keys.iter().any(|key| !key.is_empty()) && journal_path.exists() {
         let replay_start = Instant::now();
         stats.journal_ops = apply_journal(&mut index, &journal_path)?;
         stats.journal_replay_ms = replay_start.elapsed().as_millis();
@@ -2041,7 +2041,7 @@ mod tests {
         );
         save_snapshot_profiled(&index, &path).unwrap();
 
-        let (hot, _) =
+        let (mut hot, _) =
             load_hot_profiled_for_directories(&path, &BTreeSet::from([String::new()])).unwrap();
         assert_eq!(hot.len(), 0);
         assert_eq!(hot.directory_len(), 1);
@@ -2055,6 +2055,29 @@ mod tests {
         assert_eq!(full.len(), 2);
         assert_eq!(full.directory_len(), 2);
         assert!(!full.is_hot_loaded());
+
+        hot.insert(
+            "journal-only.txt".to_string(),
+            sample_file_entry("journal-only.txt"),
+        );
+        save_profiled(&hot, &path).unwrap();
+        let (hot_after_journal, hot_stats) =
+            load_hot_profiled_for_directories(&path, &BTreeSet::from([String::new()])).unwrap();
+        assert!(hot_stats.journal_bytes > 0);
+        assert_eq!(hot_stats.journal_ops, 0);
+        assert_eq!(hot_stats.journal_replay_ms, 0);
+        assert!(hot_after_journal.get("journal-only.txt").is_none());
+        assert!(hot_after_journal.get_directory("").is_some());
+        let (targeted_after_journal, targeted_stats) = load_hot_profiled_for_directories(
+            &path,
+            &BTreeSet::from([String::new(), "journal-only.txt".to_string()]),
+        )
+        .unwrap();
+        assert!(targeted_stats.journal_ops > 0);
+        assert!(targeted_after_journal.get("journal-only.txt").is_some());
+        let (full_after_journal, full_stats) = load_profiled(&path).unwrap();
+        assert!(full_stats.journal_ops > 0);
+        assert!(full_after_journal.get("journal-only.txt").is_some());
 
         fs::write(hot_directory_record_path(&path, ""), b"corrupt").unwrap();
         let (self_healed, _) =

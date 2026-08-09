@@ -69,9 +69,10 @@ Blacksmith profile with `HEDDLE_PERF_BASELINE`; local runs use the recorded
 local calibration profile.
 
 The ignored marker keeps the harness out of debug and ordinary unit-test runs;
-the dedicated release workflow runs it on a controlled runner. Absolute bands
-already met use the product target. Missed bands use a baseline ratchet and keep
-the target gap explicit.
+the dedicated release workflow runs it on a controlled runner. Warm clean
+status at 100k paths has an explicit 50 ms p95 assertion independent of the
+runner baseline. Other absolute bands already met use the product target;
+missed bands use a baseline ratchet and keep the target gap explicit.
 
 The repeatable negative controls are:
 
@@ -91,16 +92,16 @@ repository open inside each sample. Each invocation must fail with `PERF GATE
 RED`. The eager-index control is pinned by the warm repository-open p95 gate
 (2 ms), not only by the aggregate wall-time band.
 
-## 2026-08-04 local calibration
+## 2026-08-09 local calibration
 
-The 20-sample local release run after lazy pack lookup measured the following
-100k-path p95 values. The previous column is the prior recorded local
-calibration; the gate column is the new baseline plus roughly 10% noise and is
-strictly tighter than the previous gate.
+The 100k clean-status path now consumes its root hot sidecar without replaying
+the full file journal. Changed-path operations still replay the file entries
+they need. The release contract pins clean status p95 directly to the product
+target; one-path status and capture retain their existing ratchets.
 
-| Case | Previous p95 | Lazy-pack p95 | New gate | Product target |
+| Case | Previous p95 | Recorded p95 | Gate | Product target |
 |---|---:|---:|---:|---:|
-| Clean status | 218.697 ms | 73.271 ms | 81 ms | 50 ms |
+| Clean status | 73.271 ms | 11.703 ms | 50 ms | 50 ms |
 | One-path status | 415.569 ms | 78.619 ms | 87 ms | 75 ms |
 | One-path capture | 2436.937 ms | 971.053 ms | 1069 ms | 100 ms |
 
