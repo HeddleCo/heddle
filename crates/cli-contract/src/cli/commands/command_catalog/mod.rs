@@ -2493,6 +2493,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(&["semantic"], category(GROUP, "states")),
     entry(
+        &["semantic", "diff"],
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["semantic diff"]),
+            &[json_discriminator(
+                Some("semantic diff"),
+                "output_kind",
+                "semantic_diff",
+            )],
+        ),
+    ),
+    entry(
         &["semantic", "hot"],
         opaque_schemas(READ_JSON, &["semantic hot"]),
     ),
@@ -4643,6 +4654,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => match command {
+            SemanticCommands::Diff { .. } => vec!["semantic", "diff"],
             SemanticCommands::Hot { .. } => vec!["semantic", "hot"],
             SemanticCommands::Index { .. } => vec!["semantic", "index"],
         },

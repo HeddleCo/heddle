@@ -358,6 +358,8 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["run"], &["run", "true"]),
     sample(&["schemas"], &["schemas"]),
     #[cfg(feature = "semantic")]
+    sample(&["semantic", "diff"], &["semantic", "diff", "HEAD", "HEAD"]),
+    #[cfg(feature = "semantic")]
     sample(&["semantic", "hot"], &["semantic", "hot"]),
     sample(&["semantic", "index"], &["semantic", "index"]),
     sample(
@@ -1714,6 +1716,9 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "review next",
             "review health",
             "schemas",
+            // heddle#1271 exposes the stored symbol-index comparison through
+            // a stable `semantic_diff` machine envelope.
+            "semantic diff",
             // `land` advertises the single-peer and `--threads` batch
             // envelope discriminators.
             "land",

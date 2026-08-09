@@ -150,7 +150,6 @@ impl Repository {
 
     /// Never-compute `semantic_diff_symbols`: merkle-walk the two states'
     /// ATTACHED indexes, descending only into differing digests.
-    #[cfg(not(feature = "tree-sitter-symbols"))]
     pub(crate) fn semantic_diff_symbols_readonly(
         &self,
         a: &StateId,
@@ -350,10 +349,9 @@ impl Repository {
     }
 }
 
-/// Never-compute public read methods, compiled when the parser is absent — the
-/// parse-free consumer's (weft's) surface. When `tree-sitter-symbols` is on,
-/// `repository_semantic_index` supplies get-or-compute + self-heal variants of
-/// these same names instead.
+/// Never-compute public reads whose parser-enabled builds retain legacy
+/// get-or-compute behaviour. The always-never-compute symbol diff is exposed
+/// separately below so every feature combination uses this module's query.
 #[cfg(not(feature = "tree-sitter-symbols"))]
 impl Repository {
     /// Resolve a symbol anchor to its entry in a state's ATTACHED index.
@@ -370,8 +368,13 @@ impl Repository {
     pub fn semantic_changed(&self, a: &StateId, b: &StateId, path_prefix: &str) -> Result<bool> {
         self.semantic_changed_readonly(a, b, path_prefix)
     }
+}
 
+impl Repository {
     /// Symbol-level delta between two states' ATTACHED indexes.
+    ///
+    /// This is always a never-compute query, including in builds that also
+    /// contain the tree-sitter-backed index builder.
     pub fn semantic_diff_symbols(&self, a: &StateId, b: &StateId) -> Result<Vec<SymbolDelta>> {
         self.semantic_diff_symbols_readonly(a, b)
     }
@@ -481,7 +484,7 @@ mod tests {
 
     use chrono::Utc;
     use objects::object::{
-        Attribution, Blob, Principal, State, StateAttachment, StateAttachmentBody,
+        Attribution, Blob, Principal, State, StateAttachment, StateAttachmentBody, Tree, TreeEntry,
     };
     use tempfile::TempDir;
 
@@ -590,5 +593,26 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn semantic_diff_symbols_never_computes_missing_indexes() {
+        let (_temp, repo) = repo();
+        let put_state = |source: &str| {
+            let blob = Blob::new(source.as_bytes().to_vec());
+            let blob_hash = repo.store().put_blob(&blob).unwrap();
+            let tree =
+                Tree::from_entries(vec![TreeEntry::file("lib.rs", blob_hash, false).unwrap()]);
+            let tree_hash = repo.store().put_tree(&tree).unwrap();
+            let state = State::new(tree_hash, vec![], author());
+            repo.store().put_state(&state).unwrap();
+            state.id()
+        };
+        let a = put_state("fn answer() -> i32 { 1 }\n");
+        let b = put_state("fn answer() -> i32 { 2 }\n");
+
+        assert!(repo.semantic_diff_symbols(&a, &b).unwrap().is_empty());
+        assert!(repo.attached_semantic_index(&a).unwrap().is_none());
+        assert!(repo.attached_semantic_index(&b).unwrap().is_none());
     }
 }

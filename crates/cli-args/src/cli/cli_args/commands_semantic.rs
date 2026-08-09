@@ -5,6 +5,13 @@ use clap::{Subcommand, ValueEnum};
 
 #[derive(Subcommand, Clone)]
 pub enum SemanticCommands {
+    /// Compare the symbols stored in two states' attached semantic indexes.
+    Diff {
+        /// Earlier state or revision.
+        a: String,
+        /// Later state or revision.
+        b: String,
+    },
     /// Aggregate semantic-change events across recent history and
     /// surface the files or functions with the most activity.
     ///

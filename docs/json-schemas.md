@@ -3075,7 +3075,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact trust remove",
       "redact purge apply"
     ],
-    "accepted_opaque_schema_verbs_total": 39,
+    "accepted_opaque_schema_verbs_total": 40,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
@@ -3087,14 +3087,14 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact trust remove",
       "redact purge apply"
     ],
-    "advanced_scope_json_commands_total": 108,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
+    "advanced_scope_json_commands_total": 109,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 40,
     "advanced_scope_mutating_commands_total": 62,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 22,
-    "catalog_commands_total": 186,
+    "catalog_commands_total": 187,
     "catalog_mutating_commands_total": 90,
-    "json_commands_total": 148,
-    "json_commands_with_accepted_opaque_schema": 39,
+    "json_commands_total": 149,
+    "json_commands_with_accepted_opaque_schema": 40,
     "json_commands_with_schema": 109,
     "json_commands_without_schema": 0,
     "json_mutating_commands_total": 86,
@@ -3104,9 +3104,9 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "mutating_commands_with_accepted_opaque_schema": 22,
     "mutating_commands_with_schema": 64,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 39,
+    "opaque_schema_verbs_total": 40,
     "status": "available",
-    "summary": "186 command(s), 148 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+    "summary": "187 command(s), 149 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 40 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3144,7 +3144,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "186 command(s), 148 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+  "summary": "187 command(s), 149 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 40 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -3516,6 +3516,13 @@ no record exists — public-by-absence):
 
 ```json
 {"hotspots": [{"path": "src/lib.rs", "score": 0.87, "reasons": ["changed often"]}]}
+```
+
+`heddle semantic diff --output json` emits the attached-index symbol deltas
+for its two state arguments without parsing source:
+
+```json
+{"output_kind": "semantic_diff", "from_state": "hs-0000000000000000000000000000000000000000000000000000", "to_state": "hs-1111111111111111111111111111111111111111111111111111", "deltas": [{"change": "modified", "anchor": {"file": "src/lib.rs", "symbol": "calculate"}, "kind": "function", "old_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "new_hash": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}
 ```
 
 ## Other verbs

@@ -59,6 +59,8 @@ mod review;
 mod run_cmd;
 #[cfg(feature = "semantic")]
 mod semantic_cmd;
+#[cfg(feature = "semantic")]
+mod semantic_diff_cmd;
 mod shell;
 mod show;
 pub(crate) mod snapshot;
