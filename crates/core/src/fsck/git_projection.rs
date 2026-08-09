@@ -15,6 +15,8 @@ use repo::Repository;
 use serde::Deserialize;
 use sley::{ObjectFormat, ObjectId, Repository as SleyRepository};
 
+use heddle_git_projection::{ResidualStore, git_export::commit_requires_residual};
+
 use super::{FsckError, invalid_fsck_config, make_error};
 
 const NOTES_REF: &str = "refs/notes/heddle";
@@ -25,56 +27,75 @@ pub(crate) fn check_git_projection(
     warnings: &mut Vec<String>,
     objects_checked: &mut usize,
 ) -> Result<()> {
-    if !mirror_path(repo).exists() {
+    let mirror = if mirror_path(repo).exists() {
+        Some(open_git_repo(&mirror_path(repo)).map_err(|err| {
+            invalid_fsck_config(format!("legacy Bridge Mirror open failed: {err}"))
+        })?)
+    } else {
         warnings.push(
-            "legacy Bridge Mirror is absent; mirror-backed Git projection checks were skipped"
+            "legacy Bridge Mirror is absent; Git projection mapping and residual checks continued"
                 .to_string(),
         );
-        return Ok(());
-    }
-
-    let mirror = open_git_repo(&mirror_path(repo))
-        .map_err(|err| invalid_fsck_config(format!("legacy Bridge Mirror open failed: {err}")))?;
-    let mapping = build_existing_mapping(repo, &mirror).map_err(|err| {
+        None
+    };
+    let mapping = build_existing_mapping(repo, mirror.as_ref()).map_err(|err| {
         invalid_fsck_config(format!("Git Projection Mapping check failed: {err}"))
     })?;
+    let residuals = ResidualStore::open(repo.heddle_dir());
 
     for (state_id, git_oid) in mapping.iter() {
         *objects_checked += 1;
-        if mirror.read_object(git_oid).is_err() {
-            errors.push(make_error(
-                "git-projection-mapping",
-                &format!("mapped Git object {git_oid} is missing from the legacy Bridge Mirror"),
-                Some(state_id.to_string()),
-            ));
-        }
-        if repo.store().get_state(state_id)?.is_none() {
+        let Some(state) = repo.store().get_state(state_id)? else {
             errors.push(make_error(
                 "git-projection-mapping",
                 &format!("mapped Heddle state {state_id} is missing from the store"),
                 Some(git_oid.to_string()),
             ));
+            continue;
+        };
+        if commit_requires_residual(&state) {
+            match residuals.validate_commit_closure(git_oid.format(), git_oid) {
+                Ok(true) => {}
+                Ok(false) => errors.push(make_error(
+                    "git-projection-residual",
+                    &format!(
+                        "mapped non-reconstructable Git object {git_oid} is missing Raw Git Object Residual bytes"
+                    ),
+                    Some(state_id.to_string()),
+                )),
+                Err(error) => errors.push(make_error(
+                    "git-projection-residual",
+                    &format!(
+                        "mapped non-reconstructable Git object {git_oid} has an invalid Raw Git Object Residual: {error}"
+                    ),
+                    Some(state_id.to_string()),
+                )),
+            }
         }
     }
 
-    for (git_oid, note) in read_all_notes(&mirror)
-        .map_err(|err| invalid_fsck_config(format!("Git projection notes check failed: {err}")))?
-    {
-        *objects_checked += 1;
-        let Ok(state_id) = StateId::parse(&note.state_id) else {
-            errors.push(make_error(
-                "git-projection-notes",
-                &format!("note for {git_oid} contains an invalid Heddle change id"),
-                Some(note.state_id),
-            ));
-            continue;
-        };
-        if mapping.get_git(&state_id) != Some(git_oid) {
-            errors.push(make_error(
-                "git-projection-notes",
-                &format!("note for {git_oid} does not round-trip through Git Projection Mapping"),
-                Some(state_id.to_string()),
-            ));
+    if let Some(mirror) = &mirror {
+        for (git_oid, note) in read_all_notes(mirror).map_err(|err| {
+            invalid_fsck_config(format!("Git projection notes check failed: {err}"))
+        })? {
+            *objects_checked += 1;
+            let Ok(state_id) = StateId::parse(&note.state_id) else {
+                errors.push(make_error(
+                    "git-projection-notes",
+                    &format!("note for {git_oid} contains an invalid Heddle change id"),
+                    Some(note.state_id),
+                ));
+                continue;
+            };
+            if mapping.get_git(&state_id) != Some(git_oid) {
+                errors.push(make_error(
+                    "git-projection-notes",
+                    &format!(
+                        "note for {git_oid} does not round-trip through Git Projection Mapping"
+                    ),
+                    Some(state_id.to_string()),
+                ));
+            }
         }
     }
 
@@ -158,10 +179,13 @@ fn open_git_repo(path: &Path) -> std::result::Result<SleyRepository, String> {
 
 fn build_existing_mapping(
     repo: &Repository,
-    mirror: &SleyRepository,
+    mirror: Option<&SleyRepository>,
 ) -> std::result::Result<SyncMapping, String> {
     let cache = read_mapping_cache_from_disk(repo)?;
-    let mut index = GitIdentityIndex::from_notes(mirror)?;
+    let mut index = match mirror {
+        Some(mirror) => GitIdentityIndex::from_notes(mirror)?,
+        None => GitIdentityIndex::default(),
+    };
     index.fill_gaps_from_cache(&cache);
     Ok(index.into_mapping())
 }
@@ -463,6 +487,45 @@ mod tests {
         assert_eq!(
             objects_checked, expected_objects_checked,
             "expected mapping + valid note + one check per thread to be counted, got {objects_checked}",
+        );
+    }
+
+    /// Negative control for #1279: removing residual validation must make this
+    /// test fail, because the mapped lossy commit is intentionally left without
+    /// its HR01 bytes.
+    #[test]
+    fn mapped_non_reconstructable_commit_without_residual_fails_fsck() {
+        let temp = TempDir::new().expect("create temp dir");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        let tree = repo.store().put_tree(&Tree::new()).expect("write tree");
+        let state = State::new(
+            tree,
+            Vec::new(),
+            Attribution::human(Principal::new("Test User", "test@example.com")),
+        )
+        .with_raw_message("lossy import\n")
+        .with_git_lossy(true);
+        let state_id = state.state_id.to_string_full();
+        repo.store().put_state(&state).expect("store state");
+        let git_oid: sley::ObjectId = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+            .parse()
+            .expect("parse mapped oid");
+        write_projection_mapping(&repo, &state_id, &git_oid);
+
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+        let mut objects_checked = 0;
+        check_git_projection(&repo, &mut errors, &mut warnings, &mut objects_checked)
+            .expect("run Git projection check");
+
+        assert!(
+            errors.iter().any(|error| {
+                error.kind == "git-projection-residual"
+                    && error
+                        .message
+                        .contains("missing Raw Git Object Residual bytes")
+            }),
+            "fsck must fail the mapped non-reconstructable oid when residual bytes are missing: {errors:?}",
         );
     }
 }
